@@ -67,6 +67,38 @@ run_one() {  # <label> <argv...>
   fi
 }
 
+check_eq() {  # <label> <want> <got>
+  if [[ "$3" == "$2" ]]; then
+    printf "  ok   %-10s %s\n" "nubr" "$1"
+  else
+    printf "  FAIL %-10s %s\n       want: %s\n       got:  %s\n" \
+      "nubr" "$1" "$2" "${3//$'\n'/\\n}"
+    fail=1
+  fi
+}
+
+# Command-surface behavior the fixture table cannot express, each pinned to the
+# exact string npm or node produces. All three of these regressed once.
+nubr_command_checks() {
+  local nubr="./node_modules/.bin/nubr"
+
+  # Forwarded arguments must survive the script shell as literals. A raw join
+  # splits "a b", runs `y` out of `x;y`, and expands $HOME.
+  check_eq "args-literal" '["a b","x;y","$HOME",""]' \
+    "$(cd "$work" && "$nubr" args -- "a b" 'x;y' '$HOME' "" 2>&1)"
+
+  # Node's split-value option form. Enumerating which options take a value is
+  # what got this wrong: `--conditions development` swallowed the entrypoint.
+  check_eq "opt-split" "hello world red 42" \
+    "$(cd "$work" && "$nubr" --conditions development main.ts 2>&1)"
+  check_eq "opt-equals" "hello world red 42" \
+    "$(cd "$work" && "$nubr" --conditions=development main.ts 2>&1)"
+
+  # The manifest-derived lifecycle environment npm guarantees a script.
+  check_eq "lifecycle-env" "nub-run-fixture 9.9.9 json lifecycle" \
+    "$(cd "$work" && "$nubr" lifecycle 2>&1)"
+}
+
 run_version() {
   echo "== node $(node --version)"
   for f in main.ts paths.ts req.cts using.ts worker-main.ts clobber.ts; do
@@ -87,6 +119,7 @@ run_version() {
   for f in main.ts paths.ts req.cts using.ts worker-main.ts clobber.ts greet; do
     run_one "nubr" ./node_modules/.bin/nubr "$f"
   done
+  nubr_command_checks
   if [[ "${TSX:-0}" == "1" ]]; then
     # paths.ts is excluded: its YAML import is a Nub feature tsx does not have.
     for f in main.ts req.cts using.ts worker-main.ts; do

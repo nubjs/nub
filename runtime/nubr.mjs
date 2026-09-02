@@ -70,16 +70,43 @@ function binPath(from) {
   return dirs;
 }
 
+// A forwarded argument reaches the script through a shell command line, so it
+// has to survive that shell as ONE literal token. A raw join loses argv
+// boundaries and lets the shell run its own substitutions: `nubr s -- "a b"
+// 'x;y' '$HOME'` reached the script as three mangled words, ran `y`, and
+// expanded $HOME, where npm delivers the three literals untouched.
+function shellQuote(arg) {
+  if (process.platform === "win32") {
+    // cmd.exe: double quotes delimit, and a literal `"` doubles. `%` cannot be
+    // escaped inside quotes at all, which is a cmd limitation npm shares.
+    return `"${String(arg).replace(/"/g, '""')}"`;
+  }
+  return `'${String(arg).replace(/'/g, `'\\''`)}'`;
+}
+
 // The hooks reach a script's child processes through NODE_OPTIONS, which Node
 // inherits down the whole tree. Append rather than replace: a caller's own
-// NODE_OPTIONS is theirs to keep.
-function childEnv(cwd) {
+// NODE_OPTIONS is theirs to keep. The npm_* values are the documented script
+// environment; without them a script reading `npm_package_version` gets
+// undefined unless an outer npm happened to launch us.
+function childEnv(cwd, manifest, manifestPath) {
   const existing = process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : "";
   const pathKey = Object.keys(process.env).find((k) => k.toLowerCase() === "path") ?? "PATH";
+  const pkgConfig = {};
+  for (const [k, v] of Object.entries(manifest.config ?? {})) {
+    pkgConfig[`npm_package_config_${k}`] = String(v);
+  }
   return {
     ...process.env,
     NODE_OPTIONS: `${existing}--import ${REGISTER_URL}`,
     [pathKey]: [...binPath(cwd), process.env[pathKey] ?? ""].join(path.delimiter),
+    npm_package_name: manifest.name ?? "",
+    npm_package_version: manifest.version ?? "",
+    npm_package_json: manifestPath,
+    npm_node_execpath: process.execPath,
+    npm_execpath: fileURLToPath(import.meta.url),
+    npm_command: "run-script",
+    ...pkgConfig,
   };
 }
 
@@ -91,14 +118,15 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
   // npm's pre/post convention. Skipping it silently drops a `prebuild` the
   // author expects to run, which is the kind of wrong answer nobody notices.
   const phases = [`pre${name}`, name, `post${name}`].filter((p) => scripts[p]);
-  const env = childEnv(cwd);
+  const env = childEnv(cwd, manifest, path.join(cwd, "package.json"));
 
   const step = (i) => {
     if (i >= phases.length) return;
     const phase = phases[i];
     // Extra args go to the named script only, never to its pre/post hooks —
     // matching npm, where `npm run build -- --watch` leaves `prebuild` alone.
-    const suffix = phase === name && extraArgs.length ? ` ${extraArgs.join(" ")}` : "";
+    const suffix =
+      phase === name && extraArgs.length ? ` ${extraArgs.map(shellQuote).join(" ")}` : "";
     // `shell: true` is `sh -c` on POSIX and ComSpec on Windows — npm's own
     // script shell on both, so a script written for npm runs unchanged.
     const child = spawn(`${scripts[phase]}${suffix}`, {
@@ -120,12 +148,13 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
   step(0);
 }
 
-function runFile(file, rest, nodeFlags) {
-  const child = spawn(
-    process.execPath,
-    [...nodeFlags, "--import", REGISTER_URL, file, ...rest],
-    { stdio: "inherit" },
-  );
+// `args` is already a Node command line: either [file, ...rest] that we
+// classified ourselves, or the caller's verbatim argv when it opened with a
+// flag. Only the preload is inserted.
+function runFile(args) {
+  const child = spawn(process.execPath, ["--import", REGISTER_URL, ...args], {
+    stdio: "inherit",
+  });
   child.on("exit", (code, signal) => {
     if (signal) process.kill(process.pid, signal);
     else process.exit(code ?? 1);
@@ -143,26 +172,28 @@ async function main() {
     process.exit(1);
   }
 
-  const nodeFlags = [];
-  let i = 0;
-  for (; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--") {
-      i++;
-      break;
-    }
-    if (!arg.startsWith("-")) break;
-    if (arg === "-h" || arg === "--help") {
-      process.stdout.write(USAGE);
-      return;
-    }
-    if (arg === "-v" || arg === "--version") {
-      const self = readManifest(HERE) ?? readManifest(path.join(HERE, ".."));
-      process.stdout.write(`${self?.version ?? "unknown"}\n`);
-      return;
-    }
-    nodeFlags.push(arg);
+  if (argv[0] === "-h" || argv[0] === "--help") {
+    process.stdout.write(USAGE);
+    return;
   }
+  if (argv[0] === "-v" || argv[0] === "--version") {
+    const self = readManifest(HERE) ?? readManifest(path.join(HERE, ".."));
+    process.stdout.write(`${self?.version ?? "unknown"}\n`);
+    return;
+  }
+
+  // A leading flag means a file run under Node options, and Node is the only
+  // thing that knows which of its options take a separate value — enumerating
+  // them here would silently mis-split `--conditions development app.ts`,
+  // treating the value as the target. So hand the whole argv to Node verbatim
+  // and let it find its own entry point. Only a first token that is NOT a flag
+  // has to be classified as file-or-script, and that case has no ambiguity.
+  let i = 0;
+  if (argv[0].startsWith("-") && argv[0] !== "--") {
+    runFile(argv);
+    return;
+  }
+  if (argv[0] === "--") i = 1;
 
   const target = argv[i];
   const rest = argv.slice(i + 1);
@@ -174,18 +205,12 @@ async function main() {
   const cwd = process.cwd();
   const asFile = path.resolve(cwd, target);
   if (existsSync(asFile)) {
-    runFile(asFile, rest, nodeFlags);
+    runFile([asFile, ...rest]);
     return;
   }
 
   const manifest = readManifest(cwd);
   if (manifest?.scripts?.[target]) {
-    if (nodeFlags.length > 0) {
-      process.stderr.write(
-        `nubr: Node flags apply to a file run, not to the script "${target}"\n`,
-      );
-      process.exit(1);
-    }
     runScript(target, manifest, rest, cwd);
     return;
   }

@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "greet": "nubr main.ts"
-  }
+    "greet": "nubr main.ts",
+    "args": "node argv-echo.cjs",
+    "lifecycle": "node env-echo.cjs"
+  },
+  "version": "9.9.9"
 }
