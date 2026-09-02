@@ -184,18 +184,48 @@ fn the_listing_never_names_the_engine() {
     );
 }
 
+/// Every setting nub's embedder profile declares it does not consume, with a
+/// substring the refusal has to name so the user has somewhere to go.
+///
+/// One row per REASON the setting is inert under nub, not per setting name —
+/// the shared machinery is the same for all of them, and a row that only
+/// re-exercises it is the test bloat AGENTS.md warns about. What each row does
+/// buy is the advice check: an entry whose advice pointed at something that does
+/// not exist would still refuse, and refuse looking correct.
+const NOT_CONSUMED: &[(&str, &str)] = &[
+    // The engine's pre-run auto-install gate (nub runs scripts itself).
+    ("aubeNoAutoInstall", "verify"),
+    ("optimisticRepeatInstall", "verify"),
+    // Its script runner (nub's own frontend always runs pre/post).
+    ("enablePrePostScripts", "--ignore-scripts"),
+    // Its self-update notifier (`self_update_enabled: false`).
+    ("updateNotifier", "nub upgrade"),
+    // Its Node provisioning (`runtime_switching: false`).
+    ("runtimeInstaller", "nub node install"),
+    // Its package-manager-version guard, built only by its own CLI dispatcher.
+    ("managePackageManagerVersions", "nub pm pin"),
+    // Its npm shell-out dispatcher (every nub verb runs in-process).
+    ("npmPath", "in-process"),
+    // A verb nub stubs out.
+    ("deployAllFiles", "deploy"),
+    // A parity no-op in the engine itself, wired to nothing.
+    ("useBetaCli", "beta-gated"),
+    // Read as the `CI` environment variable, never as a config key.
+    ("ci", "CI"),
+];
+
 /// `config set` refuses a setting nub does not consume, and writes nothing.
 ///
 /// Refusing is the load-bearing half. Making the setting absent from the table
 /// is not enough on its own: an unrecognized key is legal config, so the write
-/// would fall through to the free-form path and land verbatim — nub putting the
-/// engine's brand into the user's own `.npmrc` for a value nub never reads.
+/// would fall through to the free-form path and land verbatim — nub reporting a
+/// successful write of a value nothing will ever read back.
 #[test]
 fn config_set_refuses_a_setting_nub_does_not_consume() {
-    // Both spellings, and both SCOPES. `--global` matters on its own: it takes
-    // a different branch that never reaches the project write router, so a
-    // guard on the router alone left it writing straight to `~/.npmrc`.
-    for key in ["aubeNoAutoInstall", "aube-no-auto-install"] {
+    // Both SCOPES for every row. `--global` matters on its own: it takes a
+    // different branch that never reaches the project write router, so a guard
+    // on the router alone left it writing straight to `~/.npmrc`.
+    for (key, advice) in NOT_CONSUMED {
         for scope in [&[][..], &["--global"][..]] {
             let mut argv = vec!["set", key, "true"];
             argv.extend_from_slice(scope);
@@ -205,11 +235,76 @@ fn config_set_refuses_a_setting_nub_does_not_consume() {
                 "`config set {key} {scope:?}` must fail: {stdout}{stderr}"
             );
             assert!(
-                stderr.contains("verifyDeps") || stderr.contains("verify-deps-before-run"),
-                "the refusal must name what to use instead: {stderr}"
+                stderr.contains(advice),
+                "the refusal for {key} must name what to use instead ({advice}): {stderr}"
             );
             // Neither scope's file may appear. The fixture pins HOME, so the
             // global target is inside it and a stray write is visible here.
+            assert!(
+                !project.join(".npmrc").exists(),
+                "`config set {key} {scope:?}` wrote a project .npmrc it had refused"
+            );
+            let home = project.parent().unwrap().join("home").join(".npmrc");
+            assert!(
+                !home.exists(),
+                "`config set {key} {scope:?}` wrote a user .npmrc it had refused"
+            );
+        }
+    }
+    // The alias surface too: the profile hangs its advice on the canonical name,
+    // and the lookup has to reach it from an `.npmrc` spelling as well.
+    let (_, stderr, code, _) = config(&["set", "aube-no-auto-install", "true"]);
+    assert_ne!(code, 0, "the kebab alias must refuse too: {stderr}");
+    assert!(stderr.contains("verify"), "{stderr}");
+}
+
+/// A setting nub does not consume is absent from `config list --all` too.
+///
+/// The write guard and the listing are separate code paths off one declaration,
+/// and only the listing answers "what can I set here?". Advertising a row that
+/// `set` then refuses is a worse surface than either failure alone.
+#[test]
+fn the_listing_never_offers_a_setting_nub_does_not_consume() {
+    let listing = list_all("not-consumed");
+    for (key, _) in NOT_CONSUMED {
+        let named = format!("{key}=");
+        assert!(
+            !listing.lines().any(|line| line.starts_with(&named)),
+            "`config list --all` still offers {key}:\n{listing}"
+        );
+    }
+    // Positive control, same shape as the brand row above: the listing really
+    // was populated, so every absence is a sweep rather than an empty read.
+    assert!(
+        listing.lines().count() > 50,
+        "expected a full `--all` listing, got:\n{listing}"
+    );
+}
+
+/// `config set` refuses a real setting that has no `.npmrc` home.
+///
+/// A distinct hole from the one above: these ARE consumed — just never from
+/// `.npmrc`, which has no key for them. The writer's alias plan falls back to
+/// the key verbatim, so the line landed, `config set` reported success, and
+/// every reader looked at the command line or the workspace yaml instead.
+#[test]
+fn config_set_refuses_a_setting_npmrc_cannot_hold() {
+    for (key, advice) in [
+        ("pnpmfilePath", "--pnpmfile"),
+        ("globalPnpmfile", "--global-pnpmfile"),
+    ] {
+        for scope in [&[][..], &["--global"][..]] {
+            let mut argv = vec!["set", key, "./hooks.cjs"];
+            argv.extend_from_slice(scope);
+            let (stdout, stderr, code, project) = config(&argv);
+            assert_ne!(
+                code, 0,
+                "`config set {key} {scope:?}` must fail: {stdout}{stderr}"
+            );
+            assert!(
+                stderr.contains(advice),
+                "the refusal for {key} must name a surface that is read ({advice}): {stderr}"
+            );
             assert!(
                 !project.join(".npmrc").exists(),
                 "`config set {key} {scope:?}` wrote a project .npmrc it had refused"
