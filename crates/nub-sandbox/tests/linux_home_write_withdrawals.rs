@@ -66,6 +66,34 @@
 //! egress gate was not enforcing. The shared assertion below still guards against a re-bake dropping
 //! egress, which is what it is for; it just is not evidence about these seven cells.
 //!
+//! ⛔ A THIRD SHAPE, AND IT IS KEPT SEPARATE FOR THE SAME REASON THE SECOND IS. `WITHDRAWN_DESCENT`
+//! is the CORPUS DESCENT re-run on a real Linux host: each cell's ladder was walked until the
+//! narrowest grant that still reproduces the package's artefacts, and the harness reported that
+//! grant as a VERIFIED minimum. It is neither the five-arm ladder nor the two-binary differential,
+//! and writing its rows into either list would put a claim on them they did not earn.
+//!
+//! ⛔ WHAT MAKES A DESCENT ROW CITABLE IS A RED ARM, AND THAT GATE IS WHY THIS LIST IS FOUR ROWS AND
+//! NOT TWENTY-NINE. The same batch returned a clean-looking verdict for cells whose every arm came
+//! back green -- which means the venue produced NO SIGNAL, not that the package needs nothing, and
+//! `@depot/cli`, `keccak`, `purescript` and `ursa-optional` therefore keep their grants and stay in
+//! `repaired_home_write_grants.rs`. Every row below had at least one arm go red on an ARTEFACT
+//! divergence rather than an exit code: `@netlify/esbuild` reproduces 1836 of 1851 artefacts with
+//! `network` dropped against 1851 of 1851 with it retained, and none of the four is an early-exit
+//! artefact -- each spec recorded real work, 6 to 62 writes and 2 network peers.
+//!
+//! ⛔ WHERE A BAND HAD SEVERAL MEASURED VERSIONS THE ROW IS THE UNION, NOT THE LAST ONE MEASURED.
+//! `esbuild <0.17.19` is the case that matters: `0.16.17` verified an EMPTY grant, but it produced
+//! no red arm at all, while `0.11.23` produced one and verified `network` plus both promotions. The
+//! band ships `0.11.23`'s answer, because an under-grant is the direction that breaks a real
+//! install. `mbt <1.2.49` is the same shape one notch smaller -- `1.2.7` verified `network` alone
+//! and `0.0.9` verified `network` plus `.config/configstore`, so the band carries the promotion.
+//!
+//! ⛔ THE WITHDRAWN HOME REACH IS REPLACED BY A PROMOTION, WHICH IS THE WHOLE POINT AND IS NOT
+//! ASSERTED HERE. Each of the four gains `.config/configstore` on Linux, and the two esbuild cells
+//! keep the `.cache/esbuild` promotion they already had. `Scope` cannot express a promotion, so the
+//! assertion below covers the write scopes and egress only; the promotions live in the catalog's
+//! per-OS `writePaths` and are what the verified minimum actually named.
+//!
 //! Reads the shipped bytes through `include_str!` rather than the runtime lookup, which consults a
 //! dev override and an on-disk update tier first; the subject here is the file in this repository.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
@@ -141,6 +169,24 @@ const WITHDRAWN_BANDS: &[(&str, &str, &str, &[Scope], bool)] = &[
     ("playwright-chromium",         "0.15.0",  "<0.16.0", &[Scope::Deps],   false),
 ];
 
+/// The cells the corpus DESCENT narrowed on a real Linux host, same tuple shape as [`WITHDRAWN`]
+/// and a third body of evidence: a verified minimum backed by a red arm, per the module doc.
+///
+/// The version in each row is one the descent ACTUALLY RAN, and it resolves to the named band
+/// through `Entry::grant_for`'s narrowest-bound rule -- `0.4.3` lands on `<1.5.4`, not `<10.7.1`.
+///
+/// All four keep no write at all. `mbt`'s outer `write.project` goes with the home reach on this OS
+/// because neither of its verified arms carried a write scope, which is what macOS had already
+/// settled for that band. `react-native-purchases` is narrowed on `<1.5.4` ONLY: its wider
+/// `<10.7.1` band keeps `write:"disk"`, because `2.4.1` passed no state there even at that width.
+#[rustfmt::skip]
+const WITHDRAWN_DESCENT: &[(&str, &str, &str, &[Scope], bool)] = &[
+    ("@netlify/esbuild",            "0.13.6",  "<0.14.39", &[],             true),
+    ("esbuild",                     "0.11.23", "<0.17.19", &[],             true),
+    ("mbt",                         "0.0.9",   "<1.2.49",  &[],             false),
+    ("react-native-purchases",      "0.4.3",   "<1.5.4",   &[],             false),
+];
+
 /// The Linux home write is gone, and neither egress nor the retained write scopes went with it.
 ///
 /// Egress is asserted alongside the withdrawal because a re-bake that dropped BOTH would satisfy a
@@ -154,7 +200,11 @@ fn a_withdrawn_cell_grants_no_linux_home_write_and_keeps_what_its_arms_needed() 
     // restoration it is, and costs a rebuild per cell to enumerate.
     let mut wrong: Vec<String> = Vec::new();
 
-    for (pkg, version, band, keeps_write, _) in WITHDRAWN.iter().chain(WITHDRAWN_BANDS) {
+    for (pkg, version, band, keeps_write, _) in WITHDRAWN
+        .iter()
+        .chain(WITHDRAWN_BANDS)
+        .chain(WITHDRAWN_DESCENT)
+    {
         let entry = catalog
             .packages
             .get(*pkg)
@@ -183,10 +233,11 @@ fn a_withdrawn_cell_grants_no_linux_home_write_and_keeps_what_its_arms_needed() 
 
     assert!(
         wrong.is_empty(),
-        "{} Linux cell(s) no longer match what their arms measured. Each ran a five-arm ladder \
-         with a jail-off positive control and an empty-grant red arm: the home write bought \
-         nothing observable and everything else was proved necessary, so neither may move without \
-         a new measurement:\n  {}",
+        "{} Linux cell(s) no longer match what their arms measured. Each ran one of the three \
+         measurements this file documents -- a five-arm ladder, a two-binary \
+         `materialize_tool_leaf` differential, or a corpus descent to a verified minimum backed by \
+         a red arm: the home write bought nothing observable and what was kept was proved \
+         necessary, so neither may move without a new measurement:\n  {}",
         wrong.len(),
         wrong.join("\n  ")
     );
@@ -197,12 +248,17 @@ fn a_withdrawn_cell_grants_no_linux_home_write_and_keeps_what_its_arms_needed() 
 #[test]
 fn every_measured_linux_withdrawal_is_still_enumerated() {
     assert_eq!(
-        (WITHDRAWN.len(), WITHDRAWN_BANDS.len()),
-        (10, 7),
+        (
+            WITHDRAWN.len(),
+            WITHDRAWN_BANDS.len(),
+            WITHDRAWN_DESCENT.len()
+        ),
+        (10, 7, 4),
         "a withdrawal list changed size; a row may only leave it alongside a measurement that \
-         restores the grant in the catalog. The two are counted SEPARATELY because they rest on \
-         different evidence -- a five-arm ladder and a two-binary `materialize_tool_leaf` \
-         differential -- and a row may not migrate between them either"
+         restores the grant in the catalog. The three are counted SEPARATELY because they rest on \
+         different evidence -- a five-arm ladder, a two-binary `materialize_tool_leaf` \
+         differential, and a corpus descent to a verified minimum backed by a red arm -- and a row \
+         may not migrate between them either"
     );
 }
 
@@ -221,7 +277,11 @@ fn windows_matches_its_own_measurement_and_the_held_siblings_keep_their_grants()
     let catalog = shipped();
     let mut lost: Vec<String> = Vec::new();
 
-    for (pkg, version, band, _, win_keeps_home_write) in WITHDRAWN.iter().chain(WITHDRAWN_BANDS) {
+    for (pkg, version, band, _, win_keeps_home_write) in WITHDRAWN
+        .iter()
+        .chain(WITHDRAWN_BANDS)
+        .chain(WITHDRAWN_DESCENT)
+    {
         let on_win = catalog
             .packages
             .get(*pkg)
