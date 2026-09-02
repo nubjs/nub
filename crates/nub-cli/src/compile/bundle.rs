@@ -3600,9 +3600,45 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
                  \x20\x20--define 'API_URL=\"https://example.com\"'"
             )
         })?;
+        if is_unquoted_url(&v) {
+            bail!(
+                "--define value for `{k}` is an unquoted URL: {v}\n\
+                 \x20\x20A define value is a JavaScript EXPRESSION, and JavaScript reads that one\n\
+                 \x20\x20as the identifier `{scheme}` followed by a `//` line comment. Accepted, it\n\
+                 \x20\x20would build cleanly and the compiled binary would fail at run time with\n\
+                 \x20\x20`ReferenceError: {scheme} is not defined`.\n\
+                 \x20\x20Quote it to make it a string:\n\
+                 \x20\x20--define '{k}=\"{v}\"'",
+                scheme = v.split(':').next().unwrap_or_default()
+            );
+        }
         map.insert(k, v);
     }
     Ok(map)
+}
+
+/// A `--define` value like `https://example.com`, which is a valid JS expression and
+/// therefore invisible to every other stage of the build.
+///
+/// It parses as the bare identifier `https` followed by a `//` line comment, so oxc
+/// accepts it, the define key validates, the bundle emits `console.log(https)`, and the
+/// only symptom is a `ReferenceError` in the shipped executable — after distribution,
+/// potentially long after. A correctly quoted value (`API="https://x"`) starts with a
+/// quote and never reaches this test, so matching `<ident>://` costs nothing legitimate:
+/// there is no reason to write an identifier followed immediately by a comment.
+fn is_unquoted_url(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once(':') else {
+        return false;
+    };
+    if !rest.starts_with("//") {
+        return false;
+    }
+    let mut chars = scheme.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 /// Rolldown's `ResolveOptions::alias` shape: a specifier maps to an ordered list
@@ -4990,6 +5026,64 @@ mod tests {
             err.to_string().contains("KEY=VALUE"),
             "the error must name the expected shape, got: {err}"
         );
+    }
+
+    /// A bare URL as a define value used to build clean and ship a binary that died at
+    /// run time. Reproduced end to end before this guard existed: `--define
+    /// API=https://example.com` compiled with no diagnostic, emitted
+    /// `console.log(https)`, and exited 1 with `ReferenceError: https is not defined`
+    /// the first time the program touched the value. It is invisible to every other
+    /// stage because it is VALID JavaScript — identifier plus a `//` line comment — so
+    /// the define key validates and oxc parses it happily.
+    #[test]
+    fn define_rejects_an_unquoted_url_before_it_can_ship() {
+        let mut o = opts();
+        o.define = vec!["API=https://example.com".into()];
+        let err = defines(&o).expect_err("an unquoted URL define must be rejected at build time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ReferenceError: https is not defined"),
+            "the error must name the run-time failure it prevents, so the fix is obvious \
+             without shipping the binary first, got: {msg}"
+        );
+        assert!(
+            msg.contains(r#"--define 'API="https://example.com"'"#),
+            "the error must show the corrected command verbatim, got: {msg}"
+        );
+    }
+
+    /// The guard must not fire on the CORRECT spelling, or it would reject the very
+    /// form the error message tells people to use. `--help` documents this shape.
+    #[test]
+    fn define_accepts_a_quoted_url() {
+        let mut o = opts();
+        o.define = vec![r#"API="https://example.com""#.into()];
+        let map = defines(&o).expect("a quoted URL is a valid string expression");
+        assert_eq!(
+            map.get("API").map(String::as_str),
+            Some(r#""https://example.com""#)
+        );
+    }
+
+    /// `<ident>://` is the whole signature, so ordinary expressions that merely contain
+    /// a colon or a slash must pass through untouched.
+    #[test]
+    fn define_url_guard_ignores_expressions_that_merely_look_similar() {
+        for value in [
+            "a?b:c",         // conditional
+            "1/2//3",        // division, then a real comment
+            r#""http://x""#, // already a string
+            "http:/single",  // one slash — not a URL shape
+            "2://x",         // scheme cannot start with a digit
+            "obj.http://x",  // not a bare identifier
+        ] {
+            let mut o = opts();
+            o.define = vec![format!("K={value}")];
+            assert!(
+                defines(&o).is_ok(),
+                "the URL guard must not fire on {value:?}"
+            );
+        }
     }
 
     #[test]
