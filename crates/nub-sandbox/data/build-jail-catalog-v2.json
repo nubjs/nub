@@ -1304,7 +1304,16 @@
   },
   "@tensorflow/tfjs-backend-wasm": {
    "default": {
-    "notes": "latest measured 4.22.0"
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "network": true,
+    "notes": "latest measured 4.22.0. Carries the <4.22.0 band's measured grant, per-OS block included, because every version that lands HERE and executes anything is a prerelease. 1.4.0-alpha1 and 1.4.0-alpha2 are the only 2 of 88 published versions declaring a lifecycle hook (preinstall 'cd ../tfjs-core && yarn && yarn build'), agreed by the full packument's scripts and the abbreviated one's hasInstallScript, and no version sets gypfile, so there is no implicit node-gyp path either. A prerelease never matches a <X bound, so those two resolve to default, and the notes-only default they used to land on grants no egress and no write at all, which is strictly tighter than having no entry (an absent package still takes baseline_caps plus BASELINE_WRITE_PATHS). The grant restored here is the one measured AT 1.4.0-alpha2, which is where the /proc/self/stat residual behind the linux write:disk was observed. 4.22.0 and every other real release execute nothing, so the jail compiles no grant for them and this widening cannot reach them.",
+    "linux": {
+     "write": "disk"
+    }
    },
    "versions": {
     "<4.22.0": {
@@ -1376,7 +1385,22 @@
   },
   "angularx-qrcode": {
    "default": {
-    "notes": "latest measured 22.0.1"
+    "write": {
+     "userHome": true
+    },
+    "writePaths": [
+     ".config/configstore"
+    ],
+    "notes": "latest measured 22.0.1. Carries the <22.0.1 band's measured grant, per-OS blocks included, because every version that lands HERE and executes anything is a prerelease. 1.7.0-beta.1, 1.7.0-beta.3 and 1.7.0-beta.5 are the only 3 of 122 published versions declaring a lifecycle hook (postinstall patch-package), agreed by the full packument's scripts and the abbreviated one's hasInstallScript, and no version sets gypfile. A prerelease never matches a <X bound, so those three resolve to default, and the notes-only default they used to land on grants no egress, no write and no promotion at all, which is strictly tighter than having no entry. The grant restored here is the one measured AT 1.7.0-beta.5: write is userHome on win only, macOS and Linux take the configstore promotion alone, and no egress was measured because patch-package applies local patches. That leaves macOS and Linux below the baseline on egress and write.deps, which is the measurement and not an oversight. 22.0.1 and every other real release execute nothing, so this widening cannot reach them.",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "writePaths": null
+    }
    },
    "versions": {
     "<22.0.1": {

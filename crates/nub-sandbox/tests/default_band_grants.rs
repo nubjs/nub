@@ -154,3 +154,71 @@ fn no_repaired_entry_denies_on_an_os_its_measured_band_grants() {
         denied.join(", ")
     );
 }
+
+/// The same defect where a `<X` band can NEVER be the answer, because every version that executes
+/// anything is a PRERELEASE.
+///
+/// ⛔ WHY THESE TWO ARE NOT THE CASE ABOVE. The entries in `REPAIRED` were caught by "the current
+/// release still runs an install script". Neither of these does, and that is exactly what makes them
+/// worse rather than better: `@tensorflow/tfjs-backend-wasm` declares a lifecycle hook on 2 of its 88
+/// published versions and `angularx-qrcode` on 3 of its 122, and all five are prereleases
+/// (`1.4.0-alpha1`/`-alpha2`, `1.7.0-beta.1`/`-beta.3`/`-beta.5`). Neither package sets `gypfile` on
+/// any version, so there is no implicit node-gyp path either. `version_scope::applies` cannot admit a
+/// prerelease to a plain `<X` bound at all, so those five resolve to `default` and the band is
+/// unreachable for every version that actually runs. A notes-only `default` therefore made the ONLY
+/// executing versions of both packages resolve to a grant that denies more than having no entry at
+/// all -- an under-grant with no version left anywhere in the entry to correct it.
+#[test]
+fn a_prerelease_only_hook_bearing_entry_grants_on_the_band_its_versions_actually_reach() {
+    let catalog = shipped();
+
+    // (package, a prerelease that declares a lifecycle hook, a release INSIDE the `<X` band)
+    const SUBJECTS: &[(&str, &str, &str)] = &[
+        ("@tensorflow/tfjs-backend-wasm", "1.4.0-alpha2", "3.0.0"),
+        ("angularx-qrcode", "1.7.0-beta.5", "13.0.0"),
+    ];
+
+    let mut denied: Vec<String> = Vec::new();
+
+    for (name, prerelease, in_band) in SUBJECTS {
+        let entry = catalog
+            .packages
+            .get(*name)
+            .unwrap_or_else(|| panic!("{name} has a catalog entry"));
+
+        // CONTROL ON THE ROUTING, not on the grant. If a prerelease ever started matching a `<X`
+        // bound, every assertion below would silently be about the band instead of `default`, and
+        // this test would keep passing while testing something else. The two grants are distinct
+        // here, so the equality is a real observation rather than a tautology.
+        assert_eq!(
+            entry.grant_for(Some(prerelease)),
+            &entry.default,
+            "{name}@{prerelease} no longer falls through to `default`, so this test is no longer \
+             exercising the prerelease fallthrough it is named for"
+        );
+        assert_ne!(
+            entry.grant_for(Some(in_band)),
+            &entry.default,
+            "control failed: {name}'s band and `default` now grant the same thing, so the \
+             fallthrough assertion above cannot distinguish them"
+        );
+
+        for platform in [Platform::Macos, Platform::Linux, Platform::Windows] {
+            if entry
+                .grant_for(Some(prerelease))
+                .on(platform)
+                .widens_nothing()
+            {
+                denied.push(format!("{name}@{prerelease} on {}", platform.key()));
+            }
+        }
+    }
+
+    assert!(
+        denied.is_empty(),
+        "{} cell(s) deny everything to the only versions of their package that execute anything, \
+         which is strictly tighter than having no catalog entry: {}",
+        denied.len(),
+        denied.join(", ")
+    );
+}
