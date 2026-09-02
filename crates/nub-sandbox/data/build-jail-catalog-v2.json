@@ -1613,7 +1613,8 @@
      "writePaths": null
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": null
     }
    }
   },
