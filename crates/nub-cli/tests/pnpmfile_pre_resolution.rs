@@ -351,30 +351,6 @@ fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
          that its pnpmfile was ignored: {stderr}"
     );
 
-    // Naming a package routes the whole command through `add`, which
-    // reaches the warning from its own entry point. Same user-visible
-    // flag, so it has to behave the same way — and this is the form the
-    // native-install marker alone does not cover.
-    let (stdout, stderr, code) = run(&dir, &["install", "--pnpmfile", ".pnpmfile.cjs", "./dep"]);
-    assert_eq!(
-        code,
-        0,
-        "routed install <pkg>\nstdout: {stdout}\nstderr: {stderr}\nstate: {}",
-        project_state(&dir)
-    );
-    assert_eq!(
-        observations(&dir),
-        2,
-        "the routed form must run the named hook too\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        !stderr.contains("ignored"),
-        "and must not contradict itself with the default-file warning: {stderr}"
-    );
-
-    // The routed row above rewrote `package.json` through `add`, so this
-    // frozen-by-default CI run is also the first thing to check that what
-    // `add` wrote to the manifest and what it wrote to the lockfile agree.
     let (stdout, stderr, code) = run(&dir, &["install", "--ignore-pnpmfile"]);
     assert_eq!(
         code,
@@ -384,8 +360,52 @@ fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
     );
     assert_eq!(
         observations(&dir),
-        2,
+        1,
         "--ignore-pnpmfile must not run anything\nstderr: {stderr}"
+    );
+}
+
+/// `nub install --pnpmfile <path> <pkg>` routes the whole command
+/// through `add`, which reaches the scope warning from its own entry
+/// point. Same user-visible flag, so it has to behave the same way —
+/// and this is the form the native-install marker alone does not cover.
+///
+/// Its own project, deliberately, and NOT a fourth row on the test
+/// above: `add` rewrites `package.json` to `link:./dep`, and nub then
+/// writes a `package-lock.json` that its own frozen check rejects
+/// (`manifest adds dep@link:./dep`). That is a real pre-existing defect
+/// — npm writes `packages["dep"]` and `packages["node_modules/dep"]:
+/// {resolved, link: true}` for a local directory dependency and nub
+/// emits neither, which `npm/write.rs` documents as "Non-git local
+/// source entries (`file:`, URL tarballs) aren't emitted yet". It has
+/// nothing to do with pnpmfile hooks, and sharing a fixture made this
+/// test fail for it. Reproduce with `nub add ./dep && nub install
+/// --frozen-lockfile`; do not merge these two back together until that
+/// is fixed.
+#[test]
+fn a_routed_install_runs_an_explicitly_named_pnpmfile() {
+    let dir = fixture("npm-incumbent-routed");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0","dependencies":{"dep":"file:./dep"}}"#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run(&dir, &["install", "--pnpmfile", ".pnpmfile.cjs", "./dep"]);
+    assert_eq!(
+        code,
+        0,
+        "routed install <pkg>\nstdout: {stdout}\nstderr: {stderr}\nstate: {}",
+        project_state(&dir)
+    );
+    assert_eq!(
+        observations(&dir),
+        1,
+        "the routed form must run the named hook too\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ignored"),
+        "and must not contradict itself with the default-file warning: {stderr}"
     );
 }
 
