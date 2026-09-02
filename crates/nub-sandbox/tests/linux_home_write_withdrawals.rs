@@ -91,9 +91,9 @@ fn shipped() -> Catalog {
 /// what keeps them under the same guard.
 ///
 /// ⛔ THIS FIELD ONCE MEANT "the withdrawal is Linux-only, so Windows must not move in EITHER
-/// direction", AND THAT IS NO LONGER TRUE OF THREE ROWS. `@playwright/browser-chromium`,
-/// `playwright-chromium` and `electron-chromedriver` are `false` on their OWN Windows measurement
-/// rather than by inheriting this one, and the Windows home write they used to carry was never a
+/// direction", AND THAT IS NO LONGER TRUE OF SIX ROWS. `@playwright/browser-{chromium,firefox,webkit}`,
+/// `playwright-{chromium,webkit}` and `electron-chromedriver` are `false` on their OWN Windows
+/// measurement rather than by inheriting this one, and the Windows home write they used to carry was never a
 /// capability need. The `$cache/nub/pm/tools/{ms-playwright,electron-cache}` leaf these packages are
 /// redirected into is granted read-write as `FsOrigin::Speculative`, and `derive_grants`
 /// (`backend/windows.rs`) DROPS such a rule when its path is absent -- so on any machine that had
@@ -102,20 +102,23 @@ fn shipped() -> Catalog {
 /// `46b623e352` materializes the leaves during the compile. Re-measured on a `windows-latest` runner
 /// that PROVED the three leaves absent before every arm: the `{network}` arm puts 606 files and a
 /// 297,987,584-byte `chrome-win64/chrome.dll` into the free leaf with no home grant at all, while
-/// the empty arm collapses it to 1 file. The other seven rows keep `true` because nothing has
-/// measured them on Windows.
+/// the empty arm collapses it to 1 file. The `browser-firefox` / `browser-webkit` /
+/// `playwright-webkit` rows followed on the same ladder in a later batch, scored against the
+/// jail-off product rather than a file count: their empty arms reach only 0.123 / 0.025 / 0.028 and
+/// their `network` arms reproduce it exactly at rc=0. The remaining two rows keep `true` because
+/// nothing has measured them on Windows.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, &[Scope], bool)] = &[
     ("@mui/x-telemetry",            "9.10.0",  "default", &[Scope::Deps, Scope::Project], true),
     ("@pact-foundation/pact-node",  "10.18.0", "default", &[Scope::Deps, Scope::Project], false),
     ("@pdftron/pdfnet-node",        "12.0.0",  "default", &[],                            false),
     ("@playwright/browser-chromium","1.62.1",  "default", &[],                            false),
-    ("@playwright/browser-firefox", "1.62.1",  "default", &[],                            true),
-    ("@playwright/browser-webkit",  "1.62.1",  "default", &[],                            true),
+    ("@playwright/browser-firefox", "1.62.1",  "default", &[],                            false),
+    ("@playwright/browser-webkit",  "1.62.1",  "default", &[],                            false),
     ("@shoelace-style/shoelace",    "2.13.1",  "default", &[],                            true),
     ("electron-chromedriver",       "43.2.0",  "default", &[],                            false),
     ("playwright-chromium",         "1.62.1",  "default", &[],                            false),
-    ("playwright-webkit",           "1.62.1",  "default", &[],                            true),
+    ("playwright-webkit",           "1.62.1",  "default", &[],                            false),
 ];
 
 /// The Linux tool-cache-leaf cells, same tuple shape as [`WITHDRAWN`] but a different measurement:
@@ -206,7 +209,7 @@ fn every_measured_linux_withdrawal_is_still_enumerated() {
 /// The control, and without it the test above passes on a catalog that granted nothing anywhere.
 ///
 /// Two independent halves, because they fail for different reasons. WINDOWS: every withdrawn cell
-/// holds exactly the `write.userHome` its OWN Windows measurement settled on -- seven of the ten
+/// holds exactly the `write.userHome` its OWN Windows measurement settled on -- two of the ten
 /// still grant it, and a blanket removal would satisfy the assertion above while silently widening
 /// the change to cells nothing measured on that platform. LINUX: two
 /// siblings must STILL grant the home there, which is what proves the Linux accessor reports one

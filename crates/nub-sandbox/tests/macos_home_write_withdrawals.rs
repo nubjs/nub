@@ -92,9 +92,9 @@ fn shipped() -> Catalog {
 /// under the same guard.
 ///
 /// ⛔ THIS FIELD ONCE MEANT "the withdrawal is macOS-only, so eleven of these twelve must STILL
-/// grant on Windows", AND THAT IS NO LONGER TRUE OF THREE ROWS. The `default` bands of
-/// `electron-chromedriver`, `@playwright/browser-chromium` and `playwright-chromium` are now `false`
-/// on their own Windows measurement. The reasoning at the head of this file — that what an unjailed
+/// grant on Windows", AND THAT IS NO LONGER TRUE OF SEVEN ROWS. The `default` bands of
+/// `electron-chromedriver`, the four `@playwright/browser-*` rows and the two `playwright-*` rows
+/// are now `false` on their own Windows measurement. The reasoning at the head of this file — that what an unjailed
 /// observation writes to the vendor default a JAILED run writes to the free tool-cache leaf — holds
 /// on Windows too, because `redirect_electron_cache` / `redirect_playwright_browsers` are plain
 /// env-var writes with no per-OS branch. What made Windows look different was a Windows-only defect:
@@ -106,18 +106,18 @@ fn shipped() -> Catalog {
 /// 606 files and a 297,987,584-byte `chrome-win64/chrome.dll` for the playwright rows, the
 /// `electron-cache` leaf for `electron-chromedriver` — while the empty arm loses it. The three
 /// version-banded siblings below keep `true`: `latest` resolves to `default`, so nothing measured
-/// them.
+/// them, and so does `appium-uiautomator2-driver`.
 #[rustfmt::skip]
 const WITHDRAWN: &[(&str, &str, &str, bool)] = &[
     ("electron-chromedriver",       "43.2.0", "default", false),
     ("electron-chromedriver",       "42.8.0", "<43.2.0", true),
     ("electron-chromedriver",       "31.7.7", "<32.3.3", true),
-    ("@playwright/browser-webkit",  "1.62.1", "default", true),
-    ("@playwright/browser-firefox", "1.62.1", "default", true),
+    ("@playwright/browser-webkit",  "1.62.1", "default", false),
+    ("@playwright/browser-firefox", "1.62.1", "default", false),
     ("@playwright/browser-chromium","1.62.1", "default", false),
     ("@playwright/browser-chromium","1.61.1", "<1.62.1", true),
     ("playwright-chromium",         "1.62.1", "default", false),
-    ("playwright-webkit",           "1.62.1", "default", true),
+    ("playwright-webkit",           "1.62.1", "default", false),
     ("appium-uiautomator2-driver",  "0.11.0", "<8.4.0",  true),
     ("azure-streamanalytics-cicd",  "4.0.0",  "default", false),
     ("@shoelace-style/shoelace",    "2.13.1", "default", true),
@@ -180,7 +180,7 @@ fn every_measured_withdrawal_is_still_enumerated() {
 /// The control, and without it the test above passes on a catalog that granted nothing anywhere.
 ///
 /// Two independent halves, because they fail for different reasons. WINDOWS: every withdrawn cell
-/// carries exactly the `write.userHome` its OWN Windows measurement settled on -- nine of the twelve
+/// carries exactly the `write.userHome` its OWN Windows measurement settled on -- five of the twelve
 /// still grant it, and a blanket removal would satisfy the assertion above while silently widening
 /// the change to bands and packages nothing measured. macOS: `playwright@<1.62.1` is the sibling
 /// whose refusal STANDS (its primary CDN is retired, so every arm including jail-off extracts the

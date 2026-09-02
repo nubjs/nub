@@ -787,6 +787,9 @@
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": null
     }
    }
   },
@@ -803,6 +806,9 @@
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
@@ -879,6 +885,9 @@
       "write": null
      },
      "linux": {
+      "write": null
+     },
+     "win": {
       "write": null
      }
     }
@@ -1527,7 +1536,8 @@
      "write": null
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": null
     }
    }
   },
@@ -2039,6 +2049,9 @@
       "write": null
      },
      "linux": {
+      "write": null
+     },
+     "win": {
       "write": null
      }
     }
@@ -2867,6 +2880,11 @@
        "project": true
       },
       "network": null
+     },
+     "win": {
+      "write": {
+       "project": true
+      }
      }
     }
    }
@@ -3600,6 +3618,9 @@
      "write": null
     },
     "linux": {
+     "write": null
+    },
+    "win": {
      "write": null
     }
    }
