@@ -73,4 +73,14 @@ a byte-identical 404 for `duckdb-v1.4.4-node-v147-linux-x64.tar.gz`, as did npm.
 `confined-spawns=` where the other 85 read `scripts-ran=`. Both mean the same thing for every
 verdict in the file.
 
-Windows is unmeasured: no runner in this branch accepts a free-form script on that platform.
+Windows covers the 87-package population as it stood before the extension, measured on a Server 2022
+box. It is the only platform with JAIL-CAUSED rows: eight of 87, against zero in 360 measurements
+across macOS and Linux on the same instrument.
+
+Those eight are not one defect. Five die in gyp configure, two fail to run a downloaded binary and
+fall back to autotools, and puppeteer hangs after its confined process has already exited 0. A probe
+run on the same box, in a real confined lifecycle script, found the cause of the first family:
+spawning the system Python returns EPERM under the jail and succeeds with it off. gyp is Python, so a
+jail that cannot execute the interpreter cannot configure a native build. The same probe read every
+file under the package own deps subtree successfully, including through a path carrying a parent
+component, which rules out the file-access explanations those failure messages invite.
