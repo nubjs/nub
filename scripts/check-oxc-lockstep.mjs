@@ -80,7 +80,7 @@ if (smRoot && smNative && smRoot !== smNative) {
 // release as the transformer compiled into nub-native — a floating range here
 // would let the helpers drift from the emit that imports them, and the pin
 // doubles as the A12 transpile-cache-key proxy.
-// The standalone loader package declares the same helpers as a real dependency
+// The standalone runner package declares the same helpers as a real dependency
 // (its emitted code imports them, and a published tarball cannot carry a nested
 // node_modules), so it is held to the same pin.
 for (const manifest of ["package.json", "npm/run/package.json"]) {

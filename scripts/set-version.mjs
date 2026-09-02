@@ -54,7 +54,7 @@ const pkgs = [
   "npm/nub-linux-arm64-musl/package.json",
   "npm/nub-win32-x64/package.json",
   "npm/nub-win32-arm64/package.json",
-  // The standalone loader and its per-platform addon packages track the binary's
+  // The standalone runner and its per-platform addon packages track the binary's
   // version in lockstep: the addon bakes the version into the transpile-cache key.
   "npm/run/package.json",
   "npm/run-darwin-arm64/package.json",
