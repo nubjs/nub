@@ -516,7 +516,21 @@ jobs:
           # Cold, isolated cache so the FIRST run is forced to extract (proves the
           # DLL write + dlopen). cache_dir() honors XDG_CACHE_HOME on every platform,
           # so the extracted dir is <XDG_CACHE_HOME>\nub\runtime-<key>.
-          $cache = Join-Path $env:RUNNER_TEMP "nub-embed-cache"
+          # NOT under RUNNER_TEMP, which is on D: — and about one windows-latest
+          # image in six gives D:\a\_temp an EFFECTIVE
+          # `Authenticated Users: Modify` ACE. `Modify` contains DELETE, which is in
+          # the runtime cache's non-leaf dangerous mask, so nub correctly refuses the
+          # ancestor, relocates the cache, and leaves no runtime-* dir where the
+          # assertions below look for one. That is nub behaving as designed on a
+          # volume where any authenticated user could delete the cache; only an
+          # ancestor nub owns is repairable, and this one belongs to the runner.
+          #
+          # Measured, not guessed: a 12-shard probe walking the real predicate found
+          # RUNNER_TEMP unusable on 1 shard while USERPROFILE, LOCALAPPDATA and TEMP
+          # were usable on all 12 — including that shard. USERPROFILE is on the system
+          # volume and carries no such grant. (`TEMP` also works but is an 8.3 short
+          # path here, which is a poor thing to compare against.)
+          $cache = Join-Path $env:USERPROFILE "nub-embed-cache"
           if (Test-Path $cache) { Remove-Item -Recurse -Force $cache }
           $env:XDG_CACHE_HOME = $cache
           $nubRoot = Join-Path $cache "nub"
