@@ -89,18 +89,18 @@ Time to first output, measured warm — after the one-time extraction on first r
   label="hello world · warm start"
   accent="acid"
   unit="ms"
-  max={53.7}
-  caption="hyperfine, macOS arm64, median of three 60-run passes. nub 0.9, bun 1.3.14, deno 2.8.1, node 26.7.0."
+  max={46.3}
+  caption="hyperfine, macOS arm64, median of three 150-run passes. nub 0.9, bun 1.3.14, deno 2.8.1, node 26.7.0."
   rows={[
-    { cmd: 'bun build --compile', ms: 13.6 },
-    { cmd: 'deno compile', ms: 24.2 },
-    { cmd: 'node hello.js', ms: 34.3 },
-    { cmd: 'nub compile', ms: 45.6, us: true },
-    { cmd: 'nub compile --smol', ms: 53.7, us: true },
+    { cmd: 'bun build --compile', ms: 12.9 },
+    { cmd: 'deno compile', ms: 23.2 },
+    { cmd: 'node hello.js', ms: 33.7 },
+    { cmd: 'nub compile', ms: 45.3, us: true },
+    { cmd: 'nub compile --smol', ms: 46.3, us: true },
   ]}
 />
 
-Nub is slowest in this chart. A stock `node` takes 34 ms on this machine before any user code runs, and the launcher adds about 11 ms: decoding the payload, then an integrity check over the extracted tree that runs on every start. It hands off by replacing itself with Node, so the binary you launched is the process you end up with.
+Nub is slowest in this chart. A stock `node` takes 34 ms on this machine before any user code runs, and a compiled binary adds about 12 ms on top. The launcher's own share is under 2 ms: it decodes the payload, checks the extracted tree, and replaces itself with Node, so the binary you launched is the process you end up with. The rest is Node loading Nub's bootstrap, the preload that wires up the runtime augmentations, before the app.
 
 ### Assets
 
@@ -348,6 +348,23 @@ nub compile cli.ts --smol --target lts --install-message "Setting up acme (one t
 ```
 
 A machine with no Node and no network access exits with an error that points to the default build.
+
+## Comparisons
+
+Node apps were being packaged into executables long before SEA existed, and the tools divide on one question: whether to modify Node.
+
+| Tool | Approach | Status |
+| --- | --- | --- |
+| [pkg](https://github.com/vercel/pkg) | A patched Node, with the app compiled to V8 bytecode and served from an in-memory `/snapshot/` filesystem. Native addons are extracted to a temp directory at run time. | Archived. Deprecated in January 2024, with 5.8.1 (March 2023) as the last release; the notice points at the forks and at Node SEA. The newest runtime it patched is Node 19.8.1. |
+| [@yao-pkg/pkg](https://github.com/yao-pkg/pkg) | The maintained fork. Keeps the patched-Node mode and adds a mode on stock Node through SEA, with a virtual-filesystem library in place of the patches. | Active, on Node 26. [Its docs](https://yao-pkg.github.io/pkg/guide/sea-vs-standard) put the patched mode at 600–850 lines of patches per Node release, name that the project's primary maintenance cost, and set the goal of dropping it. |
+| [nexe](https://github.com/nexe/nexe) | A patched Node with a zip of the app appended and read through an in-memory filesystem. Native addons ship alongside the binary. | Last stable release 3.3.7, June 2020. Prebuilt runtimes stop at Node 14; anything newer means building Node from source. |
+| [caxa](https://github.com/leafac/caxa) | Stock Node and the project directory in a tarball behind a Go stub, extracted to a temp directory on first run. No patches, no cross-compilation. | Archived; last commit November 2023. |
+| [boxednode](https://github.com/mongodb-js/boxednode) | Builds Node from source with a single JS file linked in as a builtin. No patches, no extraction. | Active, on Node 26. Takes one file, builds Node per target, no cross-compilation. |
+| [Node SEA](https://nodejs.org/api/single-executable-applications.html) | Stock Node with an injected blob, via `node --build-sea` since 25.5.0. One bundled file; native addons are written out and loaded with `process.dlopen` by hand. | Stability 1.1. [postject](https://github.com/nodejs/postject), the injector the docs prescribed before 25.5, is at 1.0.0-alpha.6 from May 2023. |
+
+Two things recur. Every project that patched Node has moved to stop: pkg's deprecation notice points at SEA, its fork documents the patch cost and is migrating to stock Node, and nexe's prebuilt runtimes froze at Node 14. And every virtual filesystem still writes native addons to disk, because `dlopen` takes a path: pkg under `os.tmpdir()`, its fork under `~/.cache/pkg-native`, and SEA through a code sample in its own docs. Nub starts from both facts. It runs stock Node and extracts everything, and the work went into making extraction cheap: a content-keyed cache directory instead of a temp directory, one shared copy of the runtime, a lock around first-run publication, and a byte check on every start.
+
+caxa made the same choice in 2021, and its author's successor, [@radically-straightforward/package](https://www.npmjs.com/package/@radically-straightforward/package), dropped the single file and ships an archive with a shim instead. Its README lists the reasons: first-run extraction is extra, race-prone work; a temp directory can be cleaned while the app is running; and a payload appended past the end of an executable triggers antivirus software and complicates signing. The cache directory and the lock answer the first two. For the third, Nub's payload is not appended: it goes into a Mach-O section, an ELF note, or a PE resource, and the macOS binary is re-signed after injection.
 
 ## Get started
 
