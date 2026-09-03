@@ -25,7 +25,7 @@ The executable runs on a machine with no Node installed. Bun and Deno have had t
 
 ## Prior art
 
-Deno went first, shipping [`deno compile`](https://deno.com/blog/v1.6) in December 2020. Bun followed with `bun build --compile` in [Bun 1.0](https://bun.sh/blog/bun-v1.0), on the same principle: staple your bundled code onto a copy of the runtime, so the file is mostly runtime.
+Deno shipped [`deno compile`](https://deno.com/blog/v1.6) in December 2020. Bun added `bun build --compile` in [Bun 1.0](https://bun.sh/blog/bun-v1.0). Both work the same way: the bundled code is stapled onto a copy of the runtime, so the file is mostly runtime.
 
 Node's own take, [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html), landed as an experiment in 19.7.0 and is still marked **Stability 1.1, "Active development"** today. The ergonomics have improved — Node 25.5.0 collapsed the multi-step injection flow into a single `node --build-sea` command — but SEA still doesn't bundle, and the work around it moves only when a volunteer picks it up: [cross-platform generation](https://github.com/nodejs/single-executable/issues/94) has been an open request since April 2024, the [virtual-filesystem hooks](https://github.com/nodejs/node/issues/60021) that packagers ask for went stale this July, and the [SEA team's repo](https://github.com/nodejs/single-executable) has not changed since mid-2025.
 
