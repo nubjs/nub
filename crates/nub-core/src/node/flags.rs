@@ -273,13 +273,17 @@ pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 /// Value shape: `<node-version> <flag> [<flag>…]`, built by
 /// [`runtime_v8_flags_env_value`].
 ///
-/// The version stamp is the safety: the preload acts only when `process.versions.node`
-/// matches, so a descendant on a different Node — an inherited-`NODE_OPTIONS`
-/// grandchild running an older binary — ignores a set computed for another one and
-/// keeps that Node's bare behavior. The preload deliberately does NOT delete the var
-/// (unlike [`ARGV_ONLY_FLAGS_ENV`]): a same-Node descendant, a `Worker`, and the
-/// `module.register` loader worker all inherit it and get the feature. Plumbing, not
-/// a user-facing option.
+/// Every Nub launch decision SETS or REMOVES it, never leaves an ancestor's value in
+/// place: a child that re-enters Nub carries exactly its own decision, so a `--no-…`
+/// polarity on its argv empties the set instead of being overridden by the parent's
+/// signal. The preload does not delete it either (unlike [`ARGV_ONLY_FLAGS_ENV`]), so
+/// a process that makes no Nub launch decision inherits it — a `Worker`, the
+/// `module.register` loader worker, a child spawned by absolute path — and gets the
+/// feature; the preload skips a flag whose polarity already sits on its own
+/// `process.execArgv`. The version stamp covers the remaining case: a descendant on a
+/// different Node — an inherited-`NODE_OPTIONS` grandchild running an older binary —
+/// ignores a set computed for another one and keeps that Node's bare behavior.
+/// Plumbing, not a user-facing option.
 pub const RUNTIME_V8_FLAGS_ENV: &str = "__NUB_RUNTIME_V8_FLAGS";
 
 /// The [`RUNTIME_V8_FLAGS_ENV`] value for `flags` computed against `node_version`.

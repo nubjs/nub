@@ -804,11 +804,15 @@ export function maybeSweepCache() {
 // the internals loaded after it. The flag also never appears in `process.execArgv`,
 // where forwarding it into a Worker once killed a Next.js 16 + Turbopack build.
 //
-// The version stamp is the safety: a descendant on a different Node (an inherited-
-// NODE_OPTIONS grandchild) ignores a set computed for another binary, because a flag
-// V8 does not know is an "Error: unrecognized flag" on stderr. The var is NOT deleted
-// from process.env on purpose: a same-Node child, a Worker, and the `module.register`
-// loader worker each start from a copy of this env and get the feature too.
+// Every Nub launch sets or removes the var, so a child that re-enters Nub carries its
+// own decision; it is NOT deleted here, so a process that makes no such decision — a
+// Worker, the `module.register` loader worker, a child spawned by absolute path —
+// starts from a copy of this env and gets the feature too. Two guards close the gaps
+// inheritance leaves: a polarity already on this process's own `process.execArgv`
+// wins, either sign (V8 has the flag, or the user negated it, and the parent's signal
+// must not override that); and the version stamp makes a descendant on a different
+// Node (an inherited-NODE_OPTIONS grandchild) ignore a set computed for another
+// binary, because a flag V8 does not know is an "Error: unrecognized flag" on stderr.
 // `v8_flags` is process-global, so one flip from any thread serves every isolate.
 // Node documents a post-init flag change as unsupported; for a flag the parser reads
 // as one bool at the `import` token, the exposure is a benign race with a worker
@@ -896,12 +900,15 @@ export function noteRuntimeV8FlagSource(result) {
   const raw = process.env.__NUB_RUNTIME_V8_FLAGS;
   if (raw) {
     const [stampedVersion, ...flags] = raw.split(" ").filter(Boolean);
+    const execArgv = Array.isArray(process.execArgv) ? process.execArgv : [];
     const armed = stampedVersion === process.versions.node
-      ? flags.filter((flag) => Object.hasOwn(RUNTIME_V8_FLAG_DETECTORS, flag))
+      ? flags.filter((flag) =>
+          Object.hasOwn(RUNTIME_V8_FLAG_DETECTORS, flag) &&
+          !execArgv.includes(flag) && !execArgv.includes(`--no-${flag.slice(2)}`))
       : [];
     if (armed.length > 0) {
       pendingRuntimeV8Flags = new Set(armed);
-      const evalSource = evalSourceFromExecArgv(process.execArgv);
+      const evalSource = evalSourceFromExecArgv(execArgv);
       if (evalSource !== null) noteRuntimeV8FlagSource({ format: "module", source: evalSource });
     }
   }

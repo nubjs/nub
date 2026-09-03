@@ -380,8 +380,12 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         cmd.env(flags::ARGV_ONLY_FLAGS_ENV, argv_only.join(" "));
     }
     // The runtime V8 rows never touch argv: the compile bootstrap's preload turns
-    // them on inside the process, on first use. See `flags::RUNTIME_V8_FLAGS_ENV`.
-    if !runtime_v8.is_empty() {
+    // them on inside the process, on first use. Set or REMOVED, never inherited — a
+    // sealed artifact launched from an armed Nub process must not carry its parent's
+    // signal. See `flags::RUNTIME_V8_FLAGS_ENV`.
+    if runtime_v8.is_empty() {
+        cmd.env_remove(flags::RUNTIME_V8_FLAGS_ENV);
+    } else {
         cmd.env(
             flags::RUNTIME_V8_FLAGS_ENV,
             flags::runtime_v8_flags_env_value(&version, &runtime_v8),

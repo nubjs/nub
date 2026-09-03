@@ -684,7 +684,7 @@ console.log(memory.readFileSync("/data/message.txt", "utf8"));
 The [`import defer`](https://github.com/tc39/proposal-defer-import-eval) form resolves and links a module without running it. Evaluation happens on the first property access of the namespace.
 
 <Callout title="Delivery">
-Version-gated V8 feature available on Node 26.4+. Nub turns on V8's `--js-defer-import-eval` flag inside the process the first time it loads a module that uses the syntax, so a program that never uses it runs with V8's default flags. A subprocess launched as `node` gets the same treatment through Nub's shim; one launched by absolute executable path does not.
+Version-gated V8 feature available on Node 26.4+. Nub turns on V8's `--js-defer-import-eval` flag inside the process the first time it loads a module that uses the syntax, so a program that never uses it runs with V8's default flags. A subprocess running the same Node inherits it, whether launched as `node` or by absolute executable path.
 </Callout>
 
 ```ts

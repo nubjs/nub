@@ -784,6 +784,43 @@ fn import_defer_flag_stays_off_for_a_program_that_never_uses_it() {
     );
 }
 
+/// A child that opts out on its own argv must not be re-armed by the signal it inherits.
+///
+/// The parent runs on 26.5 with the flag armed for its preload and spawns
+/// `--no-js-defer-import-eval nested-child.mjs` twice: as `node` through the PATH it
+/// was started with, and by `process.execPath`. Each path has its own guard. The PATH
+/// child re-enters nub, whose launch decision must replace or remove the inherited
+/// signal rather than leave it in place; the absolute-path child makes no nub launch
+/// decision and inherits the env verbatim, so the preload itself must skip a flag
+/// whose polarity already sits on its own `process.execArgv`. Either gap turns the
+/// user's opt-out into a working `import defer`.
+#[test]
+fn import_defer_user_negation_survives_an_inherited_signal() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "nested-negation.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "the parent must run: stdout={stdout:?} stderr={stderr}"
+    );
+    for path in ["path", "abs"] {
+        assert!(
+            stdout.contains(&format!("{path}:nested:error=SyntaxError")),
+            "a child ({path}) negating the flag on its own argv must keep bare Node's \
+             SyntaxError, not inherit the parent's armed signal: stdout={stdout:?} \
+             stderr={stderr}"
+        );
+        assert!(
+            !stdout.contains(&format!("{path}:nested:deferred")),
+            "the inherited signal re-armed the flag over the child's ({path}) explicit \
+             opt-out: stdout={stdout:?}"
+        );
+    }
+}
+
 /// Deferral must work inside a Worker that received the parent's `process.execArgv`,
 /// and nothing nub leaves in that array may be a flag Node refuses back.
 ///

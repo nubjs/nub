@@ -7081,7 +7081,10 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             argv_only_flags.join(" "),
         );
     }
-    if !matrix_runtime_v8_flags.is_empty() {
+    // Set or removed, never inherited from an ancestor — see `flags::RUNTIME_V8_FLAGS_ENV`.
+    if matrix_runtime_v8_flags.is_empty() {
+        cmd.env_remove(nub_core::node::flags::RUNTIME_V8_FLAGS_ENV);
+    } else {
         cmd.env(
             nub_core::node::flags::RUNTIME_V8_FLAGS_ENV,
             nub_core::node::flags::runtime_v8_flags_env_value(
