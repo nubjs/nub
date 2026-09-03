@@ -19,6 +19,7 @@ on:
       - 'tests/compile-native-islands/**'
       - 'tests/compile-augmentation/**'
       - 'tests/compile-corpus/**'
+      - 'tests/compile-metadata/**'
       - '.github/workflows/compile-native.yml'
   pull_request:
     branches: [main]
@@ -35,6 +36,7 @@ on:
       - 'tests/compile-native-islands/**'
       - 'tests/compile-augmentation/**'
       - 'tests/compile-corpus/**'
+      - 'tests/compile-metadata/**'
       - '.github/workflows/compile-native.yml'
   workflow_dispatch:
 
