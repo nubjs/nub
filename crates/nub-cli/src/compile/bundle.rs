@@ -5716,8 +5716,13 @@ mod tests {
         let mut o = opts();
         o.minify = false;
         o.drop_console = true;
-        let err = bundle_module_graph_with("drop-no-minify", "entry.ts", DROP_FIXTURE, &o)
-            .expect_err("--drop with --no-minify must fail the build");
+        // Matched rather than `expect_err`, which would need `BundleResult: Debug`
+        // — and giving it that means deriving Debug across every field type it
+        // holds, for a message no passing run ever prints.
+        let err = match bundle_module_graph_with("drop-no-minify", "entry.ts", DROP_FIXTURE, &o) {
+            Ok(_) => panic!("--drop with --no-minify must fail the build"),
+            Err(err) => err,
+        };
         let message = err.to_string();
         assert!(
             message.contains("--drop") && message.contains("--no-minify"),
@@ -5748,6 +5753,11 @@ mod tests {
         let mut o = opts();
         o.minify = false;
         o.metafile = true;
+        // An output's `bytes` is the finished FILE, so the default inline
+        // sourcemap would put a base64 map bigger than the code inside the number
+        // the sum below is compared against, and the ratio would say nothing about
+        // attribution. Turned off here so the comparison measures what it claims.
+        o.sourcemap = SourcemapMode::None;
         let result = bundle_module_graph_with("metafile", "entry.ts", files, &o)
             .expect("the fixture bundles");
         let report = result.metafile.expect("--metafile collects a report");

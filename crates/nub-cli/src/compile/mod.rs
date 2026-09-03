@@ -2971,6 +2971,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let layout = assets::Layout {
             entry_prefix: String::new(),
@@ -3040,6 +3041,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let layout = assets::Layout {
             entry_prefix: "dist/bun".into(),
@@ -3090,6 +3092,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let files = assemble_app(
             &bundled,
@@ -3152,6 +3155,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
 
         let err = assemble_app(
@@ -3194,6 +3198,7 @@ mod tests {
                 entry: "worker-a.mjs".into(),
                 chunk: "worker-a-code.mjs".into(),
             }],
+            metafile: None,
         };
         let wrappers = external::worker_wrappers(&bundled.worker_roots, true, "").unwrap();
         let files = assemble_app(
@@ -3237,6 +3242,7 @@ mod tests {
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),
                 worker_roots: Vec::new(),
+                metafile: None,
             },
             assets::Layout {
                 entry_prefix: String::new(),
