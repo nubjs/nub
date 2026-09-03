@@ -18,6 +18,7 @@ mod env_owner;
 mod init;
 mod install_engine;
 mod jsonc;
+mod llm;
 mod nubx_consent;
 mod phantom_scan;
 mod pm_engine;

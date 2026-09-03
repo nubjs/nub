@@ -7,6 +7,7 @@
 
 pub mod compile;
 pub mod config_cache;
+pub mod llm;
 pub mod node;
 pub mod pm;
 pub mod pnp;

@@ -1310,6 +1310,17 @@ pub enum Command {
         command: NodeCommand,
     },
 
+    /// Run local AI models (experimental).
+    ///
+    /// Provisions a pinned llama.cpp engine build (Metal / Vulkan / OpenCL —
+    /// the thin, OS-accelerated variant for this platform) and a GGUF model on
+    /// demand, cached like Node versions, then serves the OpenAI-compatible
+    /// API on localhost. Nothing is added to the nub binary itself.
+    Llm {
+        #[command(subcommand)]
+        command: LlmCommand,
+    },
+
     /// Install dependencies from package.json via the embedded engine.
     ///
     /// Respects the project's existing lockfile (pnpm-lock.yaml,
@@ -1497,6 +1508,51 @@ pub enum NodeCommand {
         /// Version / alias to record (`22`, `lts`, `22.13.0`).
         version: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LlmCommand {
+    /// Serve the OpenAI-compatible API for a local model on 127.0.0.1.
+    Serve {
+        /// Model: Hugging Face `owner/repo[:file|:quant]`, a local `.gguf`
+        /// path, or omitted for the default (Qwen3 4B, Q4_K_M).
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Port to listen on (localhost only).
+        #[arg(long, default_value_t = 8012)]
+        port: u16,
+
+        /// Context window in tokens (the engine's default when omitted).
+        #[arg(long)]
+        ctx: Option<u32>,
+    },
+    /// One-shot prompt: spin up an ephemeral local server, stream the reply.
+    Run {
+        /// The prompt text (quoted, or bare words joined by spaces).
+        prompt: Vec<String>,
+
+        /// Model: Hugging Face `owner/repo[:file|:quant]`, a local `.gguf`
+        /// path, or omitted for the default (Qwen3 4B, Q4_K_M).
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Context window in tokens (the engine's default when omitted).
+        #[arg(long)]
+        ctx: Option<u32>,
+
+        /// Backend: `engine` (the provisioned llama.cpp build) or `os`
+        /// (the operating system's own on-device model — macOS 26+ on
+        /// Apple Silicon; needs no engine and no model download).
+        #[arg(long, value_enum, default_value_t = LlmProvider::Engine)]
+        provider: LlmProvider,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LlmProvider {
+    Engine,
+    Os,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -3213,6 +3269,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             dry_run,
             yes,
         }) => run_upgrade(version.as_deref(), canary, stable, dry_run, yes),
+        Some(Command::Llm { command }) => crate::llm::run_llm(command),
         Some(Command::Help { command }) => {
             // `nub help <cmd>` routes to that command's help; `nub help` alone →
             // the curated top-level page. Same router as `nub <cmd> -h`.

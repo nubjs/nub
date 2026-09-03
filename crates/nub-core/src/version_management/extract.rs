@@ -167,6 +167,29 @@ fn extract_tar_xz_reader_capped(
     // `extract_zip`). File data, exec bits, symlink targets, and the `..`/absolute
     // traversal guard are all preserved by `unpack_in`.
     let decoder = CappedReader::new(liblzma::read::XzDecoder::new(reader), decompressed_cap);
+    unpack_capped_tar(decoder, archive, dest_parent, max_entries)
+}
+
+/// Decode a `.tar.gz` and unpack it under `dest_parent`, returning the single
+/// top-level directory it created. Same caps and traversal guard as the `.tar.xz`
+/// path; only the decoder differs (llama.cpp engine archives ship gzip, not xz).
+fn extract_tar_gz(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
+    let file =
+        std::fs::File::open(archive).with_context(|| format!("open {}", archive.display()))?;
+    let decoder = CappedReader::new(
+        flate2::read::GzDecoder::new(file),
+        MAX_ARCHIVE_DECOMPRESSED_BYTES,
+    );
+    unpack_capped_tar(decoder, archive, dest_parent, MAX_ARCHIVE_ENTRIES)
+}
+
+/// The shared tar-unpack loop over an already-decompressing (and capped) reader.
+fn unpack_capped_tar(
+    decoder: impl Read,
+    archive: &Path,
+    dest_parent: &Path,
+    max_entries: usize,
+) -> Result<PathBuf> {
     let mut tar = tar::Archive::new(decoder);
     std::fs::create_dir_all(dest_parent)
         .with_context(|| format!("create {}", dest_parent.display()))?;
@@ -299,10 +322,11 @@ fn extract_zip_capped(
     single_top_dir(dest_parent, archive)
 }
 
-/// Extract `archive` by type: `.tar.xz` (macOS/Linux) or `.zip` (Windows). Both
-/// paths verify the archive against its published SHA-256 before this call (see
-/// `provision_node`) and unpack in-process — no `tar`/`xz`/`Expand-Archive`
-/// shell-out — so the same verify-then-extract guarantee holds on every host.
+/// Extract `archive` by type: `.tar.xz` / `.tar.gz` (macOS/Linux) or `.zip`
+/// (Windows). Every caller verifies the archive against its published SHA-256
+/// before this call (see `provision_node`) and unpacks in-process — no
+/// `tar`/`xz`/`Expand-Archive` shell-out — so the same verify-then-extract
+/// guarantee holds on every host.
 pub(crate) fn extract_archive(archive: &Path, dest_parent: &Path) -> Result<PathBuf> {
     let name = archive
         .file_name()
@@ -310,10 +334,12 @@ pub(crate) fn extract_archive(archive: &Path, dest_parent: &Path) -> Result<Path
         .unwrap_or_default();
     if name.ends_with(".tar.xz") {
         extract_tar_xz(archive, dest_parent)
+    } else if name.ends_with(".tar.gz") {
+        extract_tar_gz(archive, dest_parent)
     } else if name.ends_with(".zip") {
         extract_zip(archive, dest_parent)
     } else {
-        bail!("unrecognized Node archive format: {name}")
+        bail!("unrecognized archive format: {name}")
     }
 }
 
