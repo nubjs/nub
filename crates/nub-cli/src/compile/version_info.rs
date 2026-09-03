@@ -163,7 +163,7 @@ impl VersionInfo {
             0, // dwFileDateLS
         ];
         let mut out = [0u8; 52];
-        for (slot, word) in out.chunks_exact_mut(4).zip(words) {
+        for (slot, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
             slot.copy_from_slice(&word.to_le_bytes());
         }
         out
@@ -387,8 +387,8 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<ParsedVersionInfo> {
             }
             "VarFileInfo" => {
                 for var in child.children {
-                    for word in var.value.chunks_exact(4) {
-                        let v = u32::from_le_bytes(word.try_into().expect("4 bytes"));
+                    for word in var.value.as_chunks::<4>().0 {
+                        let v = u32::from_le_bytes(*word);
                         out.translations
                             .push(((v & 0xFFFF) as u16, (v >> 16) as u16));
                     }
@@ -484,8 +484,10 @@ fn align4(cursor: usize) -> usize {
 
 fn decode_utf16(bytes: &[u8]) -> Result<String> {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes(c.try_into().expect("2 bytes")))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     Ok(String::from_utf16(&units)?)
 }
