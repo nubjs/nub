@@ -72,6 +72,30 @@ fn main() {
 
     println!("linkage={linkage} base={base} iterations={iterations}");
 
+    // ARM 3: which base is usable on EVERY runner image?
+    //
+    // `RUNNER_TEMP` is the control and must fail on a bad image — if it passes there,
+    // the reproduction is broken and no other row here means anything. The rest are
+    // candidates for where the CI job should put its cold cache instead. A candidate
+    // is only useful if it is stable on every shard, so the interesting output is the
+    // shard that fails the control.
+    for (name, var) in [
+        ("RUNNER_TEMP(control)", "RUNNER_TEMP"),
+        ("USERPROFILE", "USERPROFILE"),
+        ("LOCALAPPDATA", "LOCALAPPDATA"),
+        ("TEMP", "TEMP"),
+    ] {
+        let Ok(root) = std::env::var(var) else {
+            println!("BASE {name} linkage={linkage} unset");
+            continue;
+        };
+        let chain = PathBuf::from(&root).join("nub-base-probe").join("nub");
+        let _ = std::fs::remove_dir_all(PathBuf::from(&root).join("nub-base-probe"));
+        let ok = walk(&chain, true, &format!("[base {name}]"));
+        println!("BASE {name} linkage={linkage} root={root} usable={ok}");
+        let _ = std::fs::remove_dir_all(PathBuf::from(&root).join("nub-base-probe"));
+    }
+
     // ARM 2: the chain created the way `spawn::default_compile_cache_dir` creates
     // it — a bare `create_dir_all`, which takes the parent's INHERITED ACEs instead
     // of the private DACL `create_private_directory` installs. That call site takes
