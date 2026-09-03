@@ -1090,8 +1090,8 @@ pub(super) mod launch {
         GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
         OpenProcess, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION,
-        PROCESS_QUERY_LIMITED_INFORMATION, ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES,
-        STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+        PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, ReleaseMutex, ResumeThread,
+        STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     // Generic access rights (avoid a Storage_FileSystem feature dep for FILE_GENERIC_*).
@@ -2884,7 +2884,7 @@ pub(super) mod launch {
         // lifecycle script's process count; anything beyond it is simply not tracked.
         const MAX_TRACKED: usize = 64;
 
-        let mut tracked: Vec<HANDLE> = Vec::new();
+        let mut tracked: Vec<(HANDLE, u32, String)> = Vec::new();
         let mut seen: Vec<u32> = Vec::new();
         let start = std::time::Instant::now();
         loop {
@@ -2926,7 +2926,20 @@ pub(super) mod launch {
                         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid)
                     };
                     if !h.is_null() {
-                        tracked.push(h);
+                        // The name has to be read HERE, while the member is alive: by the time the
+                        // ordering loop below reads its exit code the process is gone and only the
+                        // handle remains. Diagnostic only — it is never consulted by the rule.
+                        let mut nbuf = [0u16; 260];
+                        let mut nlen = nbuf.len() as u32;
+                        let name = if unsafe {
+                            QueryFullProcessImageNameW(h, 0, nbuf.as_mut_ptr(), &mut nlen)
+                        } != 0
+                        {
+                            String::from_utf16_lossy(&nbuf[..nlen as usize])
+                        } else {
+                            String::from("<unknown>")
+                        };
+                        tracked.push((h, pid, name));
                     }
                 }
             }
@@ -2963,16 +2976,19 @@ pub(super) mod launch {
         // real work has already completed. Polling the handles each round is what the drain loop is
         // already doing for the job accounting, so this costs one wait per member per round.
         let mut last_exit: Option<u32> = None;
-        let mut pending: Vec<HANDLE> = tracked.clone();
+        let mut pending: Vec<(HANDLE, u32, String)> = tracked.clone();
         let order_deadline = std::time::Instant::now() + CAP;
         while !pending.is_empty() && std::time::Instant::now() < order_deadline {
             let mut still = Vec::with_capacity(pending.len());
-            for h in pending {
+            for (h, pid, name) in pending {
                 if unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0 {
                     let mut code: u32 = 0;
                     if unsafe { GetExitCodeProcess(h, &mut code) } != 0 {
                         if std::env::var_os("NUB_JAIL_DUMP_POLICY").is_some() {
-                            eprintln!("JAILDUMP drain exited code={code}");
+                            eprintln!(
+                                "JAILDUMP drain exited code={code} pid={pid} direct={} image={name}",
+                                pid == direct_child_pid
+                            );
                         }
                         // ⛔⛔ STATUS_BREAKPOINT IS TEARDOWN NOISE, NOT AN OUTCOME, AND LETTING IT WIN
                         // MADE THE HIGHEST-WEIGHT PACKAGE ON WINDOWS FAIL AT RANDOM. Measured on
@@ -2998,7 +3014,7 @@ pub(super) mod launch {
                         }
                     }
                 } else {
-                    still.push(h);
+                    still.push((h, pid, name));
                 }
             }
             pending = still;
