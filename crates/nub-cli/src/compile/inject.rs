@@ -484,6 +484,45 @@ fn pe_header_offset(image: &[u8]) -> Result<usize> {
     Ok(pe)
 }
 
+/// Flip a PE's subsystem to GUI, so Windows opens no console beside the app.
+///
+/// `Subsystem` sits at optional-header offset 68 in BOTH PE32 and PE32+. The two
+/// layouts differ earlier — PE32 carries an extra `BaseOfData`, and an `ImageBase`
+/// four bytes narrower than PE32+'s — and those differences cancel exactly, so the
+/// field lands at the same offset either way and no magic-dependent arithmetic is
+/// needed. Deno computes it as `standard_fields_size + 68`, which is correct only
+/// because Deno ships 64-bit alone; on a PE32 image that expression points four
+/// bytes past the field, into `DllCharacteristics`. Worth not copying.
+///
+/// Applied to the FINISHED artifact rather than the template: libsui rebuilds the
+/// headers while rewriting the resource directory, so a flip made beforehand is
+/// discarded — the same reason the icon is set inside the builder chain.
+///
+/// This is only HALF of hiding the console. nub's launcher spawns Node as a
+/// child, and a GUI-subsystem parent starting a console-subsystem child still
+/// gets a console allocated for that child, so the launcher must also pass
+/// `CREATE_NO_WINDOW`. Bun and Deno need this half alone because each one IS the
+/// process it is hiding.
+fn set_pe_subsystem_gui(image: &mut [u8]) -> Result<()> {
+    const IMAGE_SUBSYSTEM_WINDOWS_GUI: u16 = 2;
+    let pe = pe_header_offset(image)?;
+    let optional_header = pe + 24;
+    // Checked rather than assumed: a ROM image (0x107) lays its optional header
+    // out differently, so writing at +68 would land in an unrelated field and
+    // produce a corrupt executable that still passes every other check here.
+    match u16le(image, optional_header) {
+        Some(0x20b) | Some(0x10b) => {}
+        Some(other) => bail!("unexpected PE optional-header magic {other:#x}"),
+        None => bail!("truncated PE optional header"),
+    }
+    let at = optional_header + 68;
+    let slot = image
+        .get_mut(at..at + 2)
+        .context("truncated PE optional header")?;
+    slot.copy_from_slice(&IMAGE_SUBSYSTEM_WINDOWS_GUI.to_le_bytes());
+    Ok(())
+}
+
 /// `(virtual_address, virtual_size, raw_offset, raw_size)` per section.
 fn pe_sections(image: &[u8], pe: usize) -> Result<Vec<(u32, u32, u32, u32)>> {
     let count = u16le(image, pe + 6).context("truncated COFF header")? as usize;
@@ -820,6 +859,48 @@ mod tests {
         assert!(msg.contains("unsupported or unreadable"), "{msg}");
         assert!(msg.contains("Mach-O (macOS)"), "{msg}");
         assert!(msg.contains("darwin-x64"), "{msg}");
+    }
+
+    /// The subsystem flip, asserted against the byte Windows actually reads.
+    ///
+    /// The fixture ships `3` (`WINDOWS_CUI`), so the starting state is a real
+    /// console executable rather than a zeroed field that would pass whatever this
+    /// wrote. The offset is the whole claim — a flip four bytes wide of it lands in
+    /// `DllCharacteristics` and silently changes ASLR or DEP instead — so the test
+    /// reads it back at `pe + 24 + 68` computed independently of the function, and
+    /// checks that its neighbours on both sides are untouched.
+    #[test]
+    fn the_subsystem_flip_writes_gui_at_the_offset_windows_reads() {
+        let mut image = fixtures::pe();
+        let opt = 0x80 + 24;
+        assert_eq!(
+            u16le(&image, opt + 68),
+            Some(3),
+            "fixture should start as a console executable, or this proves nothing"
+        );
+        let before = (u16le(&image, opt + 66), u16le(&image, opt + 70));
+
+        set_pe_subsystem_gui(&mut image).unwrap();
+
+        assert_eq!(u16le(&image, opt + 68), Some(2), "subsystem must be GUI");
+        assert_eq!(
+            (u16le(&image, opt + 66), u16le(&image, opt + 70)),
+            before,
+            "the write must not touch MinorSubsystemVersion or DllCharacteristics"
+        );
+    }
+
+    /// A magic this function does not understand must refuse rather than write.
+    ///
+    /// A ROM image lays the optional header out differently, so a blind write at
+    /// +68 would corrupt an unrelated field and still leave every structural check
+    /// in this module passing.
+    #[test]
+    fn the_subsystem_flip_refuses_an_optional_header_it_cannot_place() {
+        let mut rom = fixtures::pe();
+        rom[0x98..0x9a].copy_from_slice(&0x107u16.to_le_bytes());
+        let err = set_pe_subsystem_gui(&mut rom).unwrap_err();
+        assert!(format!("{err:#}").contains("0x107"), "{err:#}");
     }
 
     #[test]
