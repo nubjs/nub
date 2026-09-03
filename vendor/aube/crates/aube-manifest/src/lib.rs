@@ -303,7 +303,14 @@ pub enum Workspaces {
         // includes `packages`, so this doesn't lock out the catalog use
         // case.
         packages: Vec<String>,
-        #[serde(default)]
+        // Skipped when empty so serializing this value back out
+        // reproduces what was read. npm copies a manifest's `workspaces`
+        // verbatim into `packages[""]` of `package-lock.json`, and an
+        // object form authored without `nohoist` comes back without it
+        // (measured, npm 11.19.0) — emitting `"nohoist": []` would be a
+        // key npm never wrote. An absent list and an empty one mean the
+        // same thing, so nothing is lost.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         nohoist: Vec<String>,
         /// Bun-style default catalog nested under `workspaces.catalog`.
         /// Aube reads it in addition to `pnpm-workspace.yaml`'s `catalog:`

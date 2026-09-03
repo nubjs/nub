@@ -57,6 +57,15 @@ struct WriteNpmPackage<'a> {
     os: Vec<String>,
     cpu: Vec<String>,
     libc: Vec<String>,
+    /// Root importer only. npm mirrors the manifest's `workspaces` into
+    /// `packages[""]` and copies it VERBATIM rather than normalizing it,
+    /// so this borrows the parsed value instead of flattening to
+    /// `patterns()`: an array stays an array and bun's object form stays
+    /// an object, which is what npm writes back (measured, npm 11.19.0).
+    /// The third form aube parses, a bare `"workspaces": "packages/*"`,
+    /// has no npm spelling to match — npm rejects that manifest outright
+    /// (`npm install` exits 1), so nothing it produces can diverge.
+    workspaces: Option<&'a aube_manifest::Workspaces>,
     funding: Option<WriteNpmFunding<'a>>,
     link: bool,
     dev: bool,
@@ -159,6 +168,22 @@ impl Serialize for WriteNpmPackage<'_> {
         if !self.os.is_empty() {
             map.serialize_entry("os", &self.os)?;
         }
+        // `workspaces` is the one key whose BUCKET depends on its value,
+        // because `json-stringify-nice` sorts on the runtime type and npm
+        // copies this field through verbatim. The usual array form is a
+        // non-object, so it sorts here, last among the scalars after `os`
+        // — npm writes `name, version, license, workspaces, dependencies`.
+        // Bun's object form sorts with the object keys instead, last
+        // again: npm writes `… dependencies, engines, workspaces`. Both
+        // measured, npm 11.19.0. A bare string has no npm spelling to
+        // match (npm rejects that manifest), and is a non-object, so it
+        // rides with the array.
+        if let Some(
+            v @ (aube_manifest::Workspaces::Array(_) | aube_manifest::Workspaces::String(_)),
+        ) = self.workspaces
+        {
+            map.serialize_entry("workspaces", v)?;
+        }
 
         // --- object keys ---
         // preferred (swKeyOrder): dependencies
@@ -188,6 +213,11 @@ impl Serialize for WriteNpmPackage<'_> {
         }
         if !self.peer_dependencies_meta.is_empty() {
             map.serialize_entry("peerDependenciesMeta", &self.peer_dependencies_meta)?;
+        }
+        // The object half of the split described above — `workspaces`
+        // sorts alphabetically among the object keys, i.e. last.
+        if let Some(v @ aube_manifest::Workspaces::Object { .. }) = self.workspaces {
+            map.serialize_entry("workspaces", v)?;
         }
 
         map.end()
@@ -372,6 +402,7 @@ pub fn write(
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect(),
+            workspaces: manifest.workspaces.as_ref(),
             ..Default::default()
         },
     );

@@ -3744,6 +3744,70 @@ fn test_write_npm_root_entry_mirrors_manifest_metadata() {
     );
 }
 
+/// npm mirrors the root manifest's `workspaces` into `packages[""]` too, and
+/// copies it VERBATIM — so the key's BUCKET follows the value's runtime type,
+/// which is the only field in the entry that moves. `json-stringify-nice`
+/// sorts non-objects first, and a JSON array counts as a non-object, so the
+/// ordinary array form lands last among the scalars while bun's object form
+/// lands last among the objects. Both measured, npm 11.19.0, on these exact
+/// manifests:
+///
+///     array  → name, version, license, workspaces, dependencies
+///     object → name, version, license, dependencies, engines, workspaces
+///
+/// Omitting the field entirely was the only divergence left between nub's
+/// root entry and npm's, so a workspace project churned its lockfile on every
+/// alternating install.
+#[test]
+fn test_write_npm_root_entry_mirrors_workspaces_in_npms_key_order() {
+    let write_root = |manifest_json: &str| {
+        let manifest: aube_manifest::PackageJson = serde_json::from_str(manifest_json).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        write(tmp.path(), &LockfileGraph::default(), &manifest).unwrap();
+        std::fs::read_to_string(tmp.path()).unwrap()
+    };
+
+    let array = write_root(
+        r#"{
+            "name": "root", "version": "1.0.0", "license": "MIT",
+            "workspaces": ["packages/*"],
+            "dependencies": { "is-number": "7.0.0" }
+        }"#,
+    );
+    let doc: serde_json::Value = serde_json::from_str(&array).unwrap();
+    assert_eq!(
+        doc["packages"][""]["workspaces"],
+        serde_json::json!(["packages/*"]),
+        "the array form is copied through unchanged, got {array}"
+    );
+    let at = |hay: &str, key: &str| hay.find(key).unwrap_or_else(|| panic!("missing {key}"));
+    assert!(
+        at(&array, "\"license\"") < at(&array, "\"workspaces\"")
+            && at(&array, "\"workspaces\"") < at(&array, "\"dependencies\""),
+        "an array `workspaces` sorts with the scalars, before every object key:\n{array}"
+    );
+
+    // Bun's object form: same field, other bucket. npm accepts this manifest
+    // and writes the object back as authored — including NOT inventing a
+    // `nohoist` key, which is why the manifest type skips an empty one.
+    let object = write_root(
+        r#"{
+            "name": "root", "version": "1.0.0", "license": "MIT",
+            "workspaces": { "packages": ["packages/*"] },
+            "dependencies": { "is-number": "7.0.0" },
+            "engines": { "node": ">=18" }
+        }"#,
+    );
+    assert!(
+        !object.contains("nohoist"),
+        "an object form authored without `nohoist` must not grow one:\n{object}"
+    );
+    assert!(
+        at(&object, "\"engines\"") < at(&object, "\"workspaces\""),
+        "an object `workspaces` sorts with the objects, last:\n{object}"
+    );
+}
+
 /// npm strips the leading `./` off every bin path — and strips it repeatedly,
 /// so `././d.js` lands as `d.js`. Leaving the prefix on churns the lockfile
 /// against npm's own output on every alternating install. Expectations
