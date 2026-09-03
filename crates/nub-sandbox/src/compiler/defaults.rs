@@ -908,16 +908,47 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// breath (run 30460192608, re-measured with attribution in 30513204884 — both images, every
 /// path shape tried, including one whose whole ancestor chain is AAP-granted bar `C:\`).
 ///
-/// The REASON stated here was wrong, and the corrected one matters because it closes a route
-/// rather than leaving one open. It said `GetFinalPathNameByHandleW` needs more than the leaf
-/// handle the jail allows; the documented per-component sensitivity of that call is scoped to
-/// SMB, which on local NTFS would have left it available. The refusal is EARLIER: libuv's
-/// `fs__realpath` opens with `dwShareMode=0`, so if its `CreateFileW` had succeeded, holding
-/// the file open elsewhere would turn the retry into ERROR_SHARING_VIOLATION — libuv's `EBUSY`.
-/// Held, it is still `EPERM`, i.e. ERROR_ACCESS_DENIED, so the OPEN is what the LowBox check
-/// refuses and the normalized-name query is never reached. `fs.openSync` on the same leaf
-/// succeeds in the same arm, which is what makes that a statement about libuv's call shape
-/// rather than about the file.
+/// ⛔ THE MECHANISM RECORDED HERE HAS NOW BEEN WRONG TWICE, IN THE SAME DIRECTION BOTH TIMES —
+/// each version blamed an EARLIER step than the real one. The OBSERVATION is unchanged and still
+/// holds: `fs.realpathSync.native` really is refused `EPERM` on a granted path. Only the cause
+/// below is corrected, and it matters because the previous cause CLOSED a route that is in fact
+/// OPEN.
+///
+/// It first said `GetFinalPathNameByHandleW` needs more than the leaf handle the jail allows;
+/// that call's documented per-component sensitivity is scoped to SMB, which on local NTFS would
+/// have left it available. It then said the refusal is EARLIER still — that libuv's `fs__realpath`
+/// opens with `dwShareMode=0`, so a successful `CreateFileW` would have surfaced as
+/// ERROR_SHARING_VIOLATION when the file was held open elsewhere, and since it stayed `EPERM` the
+/// OPEN itself must be refused.
+///
+/// THAT INFERENCE CANNOT HOLD, AND THE CODE IS WHY: `fs__realpath` reports the failed open and the
+/// failed name query through the SAME `SET_REQ_WIN32_ERROR(req, GetLastError())`, so both arrive as
+/// one indistinguishable errno. `EPERM` was therefore never evidence about WHICH call failed.
+///
+/// MEASURED DIRECTLY IN A LIVE LOWBOX (`TokenIsAppContainer` read from the token as the control),
+/// calling `CreateFileW` at libuv's exact shape — `dwDesiredAccess=0`, `dwShareMode=0`,
+/// `FILE_FLAG_BACKUP_SEMANTICS`: THE OPEN SUCCEEDS. Across 48 cells there were no
+/// jail-attributable open refusals at all; the only `err=5` rows were directory opens WITHOUT
+/// backup semantics, which fail identically unjailed because that is the Win32 rule. What is
+/// refused is the NAME QUERY, and only its DOS/GUID volume forms: `VOLUME_NAME_DOS` and
+/// `VOLUME_NAME_GUID` fail `err=5` while `VOLUME_NAME_NT`, `VOLUME_NAME_NONE` and
+/// `GetFileInformationByHandleEx(FileNameInfo)` all SUCCEED on the very same handle. The root
+/// cause is that `QueryDosDeviceW("C:")` is refused in the container, so the `\??\C:`
+/// object-manager symlink cannot be resolved — exactly what the DOS and GUID forms need and the NT
+/// form does not. A widest-possible ACL changes nothing either way, which is what shows this is not
+/// an ACL question at any level.
+///
+/// ⛔ SO THIS ROUTE IS REOPENED, NOT CLOSED. libuv hardcodes `VOLUME_NAME_DOS` (`fs.c`, the
+/// `GetFinalPathNameByHandleW` calls in `fs__realpath_handle`), so Node cannot take the NT route
+/// unpatched — but the NT path round-trips: `\\?\GLOBALROOT\Device\HarddiskVolumeN\...` OPENS
+/// from inside the jail, and a device-to-letter map can be computed OUTSIDE the container at launch,
+/// where `QueryDosDeviceW` still works. `--preserve-symlinks` below remains the shipped mitigation
+/// because it is measured and cheap, not because the native twin is unreachable.
+///
+/// ⛔ ONE SUB-EXPERIMENT IS UNRECONCILED AND WAS NOT RE-RUN: the earlier held-open arm reported
+/// `EPERM` where a share-mode-0 open against a live handle should give ERROR_SHARING_VIOLATION.
+/// A sharing violation IS distinguishable in the container — one cell returned `err=32` — so that
+/// arm needs re-measuring before anyone leans on it.
 ///
 /// WHAT IT WOULD DO. `--preserve-symlinks-main` clears the realpath in `resolveMainPath`
 /// (`internal/modules/run_main.js`) and `--preserve-symlinks` clears the ones in `_findPath`
