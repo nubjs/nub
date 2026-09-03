@@ -20,6 +20,10 @@
 param(
   [Parameter(Mandatory = $true)][string]$Hidden,
   [Parameter(Mandatory = $true)][string]$Shown,
+  # The fixture must write this file and then exit 7. Standard output has nowhere
+  # to go when there is no console, so a file is the only channel that proves the
+  # program actually ran rather than dying on its own invalid handles.
+  [string]$Marker = "$env:TEMP\nub-hidden-probe.txt",
   [int]$SettleMs = 2000
 )
 $ErrorActionPreference = 'Stop'
@@ -70,25 +74,39 @@ function Measure-Launch([string]$exe, [string]$label) {
   # ShellExecute, which is what a double-click in Explorer does. Unlike a direct
   # spawn it hands the child no console of ours to inherit, so a console-subsystem
   # program gets a brand new one.
+  Remove-Item -Force -ErrorAction SilentlyContinue $script:Marker
   $proc = Start-Process -FilePath $exe -PassThru
   Start-Sleep -Milliseconds $SettleMs
   $after  = [Win]::Consoles()
   $hosts1 = @(Get-Process -Name conhost, OpenConsole -ErrorAction SilentlyContinue).Count
-  try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+  # Let it finish rather than killing it. The exit code and the marker are the only
+  # evidence that a GUI-subsystem launcher, whose standard handles are invalid,
+  # actually ran the program instead of dying on them.
+  $exited = $proc.WaitForExit(20000)
+  $code = if ($exited) { $proc.ExitCode } else { try { $proc.Kill() } catch { }; 'TIMEOUT' }
+  $ran = Test-Path $script:Marker
   $windows = @($after | Where-Object { $before -notcontains $_ }).Count
   $hosts = $hosts1 - $hosts0
-  Write-Host ("  {0}: {1} new console host(s), {2} new console window(s)" -f $label, $hosts, $windows)
-  return $hosts
+  Write-Host ("  {0}: {1} new console host(s), {2} new console window(s), exit {3}, marker {4}" `
+    -f $label, $hosts, $windows, $code, $ran)
+  return [pscustomobject]@{ Hosts = $hosts; Windows = $windows; Code = $code; Ran = $ran }
 }
 
 $fail = 0
+$script:Marker = $Marker
 
 # The control runs FIRST and on purpose. If an ordinary compiled binary allocates
 # no console either, this host cannot show one and the hidden result below proves
 # nothing - which is a different answer from "the feature works".
 Write-Host "== control: a binary built WITHOUT --hide-console =="
-$shownHosts = Measure-Launch $Shown 'shown.exe'
-if ($shownHosts -lt 1) {
+$control = Measure-Launch $Shown 'shown.exe'
+if (-not $control.Ran) {
+  Write-Host "  FAIL: the control never wrote its marker, so the fixture is wrong and"
+  Write-Host "        nothing below can be believed."
+  Write-Host "RESULT: 1 check(s) failed"
+  exit 1
+}
+if ($control.Hosts -lt 1) {
   Write-Host "  INCONCLUSIVE: the control allocated no console either, so this host"
   Write-Host "                cannot show one and the arm below would be vacuous."
   Write-Host "RESULT: inconclusive on this host"
@@ -97,11 +115,22 @@ if ($shownHosts -lt 1) {
 Write-Host "  ok: the control allocates a console, so this host can"
 
 Write-Host "== the claim: --hide-console allocates none =="
-$hiddenHosts = Measure-Launch $Hidden 'hidden.exe'
-if ($hiddenHosts -eq 0) {
+$hidden = Measure-Launch $Hidden 'hidden.exe'
+if ($hidden.Hosts -eq 0) {
   Write-Host "  ok: no console was allocated"
 } else {
-  Write-Host ("  FAIL: {0} console host(s) started, so a window would appear" -f $hiddenHosts)
+  Write-Host ("  FAIL: {0} console host(s) started, so a window would appear" -f $hidden.Hosts)
+  $fail = 1
+}
+
+# Hiding a console the program needed is not a success. With no console its
+# standard handles are invalid, and this is where a launcher that mishandles them
+# shows up: no marker, or a nonzero exit.
+Write-Host "== and it still runs, with no valid standard handles =="
+if ($hidden.Ran -and $hidden.Code -eq 7) {
+  Write-Host "  ok: the program ran to completion and returned its own exit code"
+} else {
+  Write-Host ("  FAIL: marker {0}, exit {1} (expected marker True, exit 7)" -f $hidden.Ran, $hidden.Code)
   $fail = 1
 }
 

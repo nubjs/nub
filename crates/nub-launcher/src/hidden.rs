@@ -4,8 +4,8 @@
 //! Deno's equivalent flags stop — they ARE the process they hide, so a subsystem
 //! bit is the whole fix. This launcher is not: it spawns Node, and Windows
 //! allocates a console for a console-subsystem child whose parent has none. Left
-//! alone, the flash simply moves from the launcher to Node, and a first run moves
-//! it again to `curl`, `icacls`, and the `node --version` probe.
+//! alone, the flash simply moves from the launcher to Node, and on a `--smol`
+//! first run to `curl`/`wget` and the `node --version` probe as well.
 //!
 //! So the suppression is process-wide rather than threaded through each call, and
 //! it is recorded ONCE from the payload manifest before anything spawns.
@@ -68,7 +68,9 @@ pub fn state() -> &'static str {
         }
     }
     #[cfg(not(windows))]
-    "not applicable off Windows"
+    {
+        "not applicable off Windows"
+    }
 }
 
 /// Start `cmd` without a console window, on a hidden launch. A no-op everywhere
@@ -77,8 +79,8 @@ pub fn apply(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     if SUPPRESS.load(Ordering::Relaxed) {
         use std::os::windows::process::CommandExt;
-        /// `CREATE_NO_WINDOW`: run a console application with no console window,
-        /// and do not give it the parent's console either.
+        // `CREATE_NO_WINDOW`: run a console application with no console window, and
+        // do not hand it the parent's console either.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }

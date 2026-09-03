@@ -31,6 +31,8 @@ The subsystem is read back by `read-subsystem.mjs`, which shares no code with nu
 
 `observe-console.ps1` asks the question directly: launch the artifact through ShellExecute — what a double-click in Explorer does — and count the console windows that appear, with a build made without the flag as the control.
 
+The fixture it needs must write a marker file and exit 7. Standard output has nowhere to go when there is no console, so a file is the only channel that can prove the program ran rather than dying on its own invalid handles — which is the failure this flag could plausibly introduce and nothing else here would catch.
+
 It is deliberately **not** wired into CI. A hosted runner has no interactive desktop, so a console window may be un-creatable there and every assertion would pass without meaning anything. The script detects that itself: if the control opens no console either, it reports inconclusive rather than claiming a pass. Run it on a real Windows desktop or the local Windows VM (`windows-vm-test`):
 
 ```powershell
