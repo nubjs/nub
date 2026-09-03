@@ -1,16 +1,19 @@
 {
-  "name": "@nubjs/loader-darwin-x64",
+  "name": "@nubjs/runner-linux-x64-musl",
   "version": "0.8.3",
-  "description": "Nub loader native addon for macOS x64 (Intel)",
+  "description": "Nub standalone-runner native addon for Linux x64 (musl)",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
   "os": [
-    "darwin"
+    "linux"
   ],
   "cpu": [
     "x64"
   ],
   "files": [
     "nub-native.node"
+  ],
+  "libc": [
+    "musl"
   ]
 }

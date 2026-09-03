@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# One-time, maintainer-run: create the standalone-loader packages on npm and
+# One-time, maintainer-run: create the standalone-runner packages on npm and
 # configure their trusted publishers, BEFORE the first release that ships them.
 #
 # Why this exists: npm's OIDC trusted publishing cannot perform a package's
 # FIRST publish — the package must exist before a trusted publisher can be
 # configured (npm/cli#8544) — so without this step, release.yml's publish jobs
-# fail on all nine loader packages (their preflight step checks exactly this).
+# fail on all nine runner packages (their preflight step checks exactly this).
 # This script publishes a 0.0.0 placeholder for each missing package (0.0.0
 # sorts below every real release) and then points its trusted publisher at
 # release.yml in nubjs/nub, matching how the existing @nubjs packages are
@@ -15,10 +15,10 @@
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-root_name="$(node -p "require('$repo_root/npm/loader/package.json').name")"
+root_name="$(node -p "require('$repo_root/npm/runner/package.json').name")"
 packages=("$root_name")
 for p in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
-  packages+=("@nubjs/loader-$p")
+  packages+=("@nubjs/runner-$p")
 done
 
 # `npm trust` shipped in npm 11.10; refuse older npm up front rather than

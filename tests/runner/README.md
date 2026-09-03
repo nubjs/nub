@@ -1,0 +1,38 @@
+# Standalone runner harness
+
+End-to-end checks for the standalone runner package (`npm/runner`): the packed tarballs are installed into a throwaway project and each fixture runs three ways — under `node --import <pkg>`, under `--require <pkg>` where the Node has `require(esm)`, and through the package's own `nubr` command — with stdout compared to `fixtures/expected.txt`. Install-from-tarball is the point — the addon discovery, the `@oxc-project/runtime` dependency, the flat package layout, and the `node_modules/.bin` shim are only exercised through a real install, never from the dev tree (where a sibling `runtime/addons/` masks addon-resolution bugs; one shipped that way in the first cut).
+
+```sh
+make addon-fast                                         # or any built runtime/addons/nub-native.node
+tests/runner/run-matrix.sh                              # host node
+NODE_VERSIONS="18.19.0 22.14.0 22.15.0 26.7.0" tests/runner/run-matrix.sh   # nvm-installed versions
+TSX=1 tests/runner/run-matrix.sh                        # differential: same fixtures under tsx
+```
+
+## Fixtures
+
+| Fixture | Exercises |
+| --- | --- |
+| `main.ts` | non-erasable TS (`enum`) and a type-only import — fails under plain `node`, so a pass proves the loader transpiled |
+| `paths.ts` | tsconfig `paths`, an extensionless import, a YAML data import |
+| `req.cts` | CommonJS `require()` of a CommonJS-content `.cts` with an `enum` |
+| `using.ts` | `using` lowering — resolves the `@oxc-project/runtime` helpers from the package's real dependency |
+| `worker-main.ts` | a worker thread inheriting the preload and transpiling its own `.ts` entry |
+| `clobber.ts` | a real installed `@js-temporal/polyfill` must load, not the CLI's synthetic global re-export — covers the clear on both tiers |
+| `greet` | `nubr` column only: a `package.json` script whose body is `nubr main.ts`, so it also proves the command is on a script's own `PATH` |
+
+The fixture project is `"type": "module"`, so `.ts` files with `import`/`export` are ES modules; `.cts` content must be CommonJS (`module.exports`) because the loader transpiles syntax without converting module formats.
+
+## The `nubr` column
+
+Four extra assertions run once per Node version, after the fixture sweep, because they compare exact strings rather than fixture stdout: `args-literal` (forwarded arguments survive the shell as literals), `opt-split` and `opt-equals` (a leading Node option in either `--x y` or `--x=y` form reaches Node instead of being mistaken for the target), and `lifecycle-env` (a script sees the manifest-derived `npm_package_*` values).
+
+That column is what catches an entry-dispatch regression: because the fixture project is `"type": "module"`, a `.ts` entry is an ES module, and routing it through `Module.runMain` would fail on Node below 22.15 while passing everywhere else.
+
+`nubr-script.test.mjs` beside this file covers the same ground WITHOUT an install or an addon — argument fidelity, the npm environment, and the full dispatch order, where a script outranks both a directory and an installed bin of the same name — which is what lets CI run it on Windows and macOS as well as Linux (`node --test tests/runner/nubr-script.test.mjs`). The cmd.exe escape path and the Windows bin-shim lookup run nowhere else — including the configuration no POSIX host can reach at all: a Windows `ComSpec` that is not cmd, where Node hands the command to that shell with `-c` and only npm's extensionless `#!/bin/sh` shim is runnable. That case installs all three shims npm writes for one bin and drives it through cmd.exe, Git Bash and PowerShell in turn, asserting which shim each picked — cmd and Git Bash run their own, and PowerShell refuses rather than take the `.ps1` it could execute but not under npm's quoting. It goes red if that choice is ever taken from the platform again.
+
+## Tiers
+
+The `--import` column is expected green on every supported Node (18.19+): 22.15+ arms sync `module.registerHooks`, older versions the `module.register` loader worker (`preload-async-hooks.mjs`). The `--require` delivery loads the arming logic through `require(esm)` and is skipped below 20.19 / 22.12.
+
+Known, inherited from the CLI: `require()` of an ESM-syntax `.ts` from a `.cts` crashes on 22.15–22.17 inside Node's translator (`cjsCache.get(...)`, fixed upstream in Node #60380); the CLI fails identically, so the fixtures avoid that shape.

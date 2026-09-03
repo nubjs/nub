@@ -4,3 +4,4 @@ req.cts=cjs: 14 a
 using.ts=in scope\ndisposed
 worker-main.ts=from worker: hello thread blue
 clobber.ts=number
+greet=hello world red 42

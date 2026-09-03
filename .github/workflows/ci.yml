@@ -1439,10 +1439,39 @@ jobs:
           persist-credentials: false
       - run: tests/target-gc/run.sh
 
+  # `nubr`'s npm-compatibility contracts for a package script — which target a
+  # name resolves to, and what the script receives as arguments and environment.
+  # The argument half escapes with a port of npm's algorithm whose cmd.exe branch
+  # runs nowhere else: the runner harness under tests/runner/ is a local-only
+  # Node-version matrix, and test:scripts is one Ubuntu leg. The check is a
+  # checkout plus Node — no cargo, no npm install, no native addon (the preload
+  # warns and passes source through when the platform package is absent) — so a
+  # real three-OS run costs almost nothing.
+  nubr-script:
+    name: Runner script contract (${{ matrix.os }})
+    needs: matrix-plan
+    if: needs.matrix-plan.outputs.run_rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      - run: node --test tests/runner/nubr-script.test.mjs
+
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots]
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots, nubr-script]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed

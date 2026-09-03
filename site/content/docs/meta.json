@@ -3,7 +3,7 @@
   "pages": [
     "index",
     "runtime",
-    "loader",
+    "standalone",
     "watch",
     "runner",
     "init",
