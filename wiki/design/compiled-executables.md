@@ -393,16 +393,16 @@ One caveat belongs here, because it is a real way to make a binary fail to start
 
 Compare a compiled artifact against running the same bundle on an installed Node, rather than against an empty script: an empty script measures Node's floor and charges Nub for work the application would pay under any bundler.
 
-Measured on a hello-world program, warm, taking the minimum of forty runs and subtracting the harness floor:
+Measured on a hello-world program, warm, taking the minimum of 120 runs:
 
 | | |
 | --- | --- |
-| `node -e 0` | 27.0 ms |
-| a neutral bundle on installed Node | 29.8 ms |
-| the same program's bundle on installed Node | 35.0 ms |
-| the compiled artifact | 41.6 ms |
+| `node -e 0` | 31.3 ms |
+| a neutral bundle on installed Node | 33.3 ms |
+| the same program's bundle on installed Node | 38.0 ms |
+| the compiled artifact | 45.3 ms |
 
-The artifact costs 11.8 ms more than bundling the program and running it on an installed Node, of which 6.6 ms is the launcher and the second process it starts. Node's own startup accounts for most of the remainder and is not something Nub can reduce: the artifact runs stock Node.
+The artifact costs 12.0 ms more than bundling the program and running it on an installed Node, of which about 7 ms is the launcher's own cache verification plus loading the Node image it hands control to. Two costs that used to sit in that gap are gone: on Unix the launcher replaces itself with Node via `exec` instead of starting a second process and forwarding signals to it, and an artifact whose module graph is fully bundled — no `--external`, no retained computed `import()` — skips the argv-only V8 syntax flags, whose presence forfeits Node's startup-snapshot fast path. Node's own startup accounts for most of the remainder and is not something Nub can reduce: the artifact runs stock Node.
 
 That overhead is close to fixed, so hello-world is the worst case for it. The 122-package application starts in about 88 ms, where the extra work is the application's own modules rather than anything the launcher adds. Read the table as a floor the artifact pays once, not as a proportional cost.
 
