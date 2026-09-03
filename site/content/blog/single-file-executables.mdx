@@ -14,28 +14,28 @@ Nub 0.9 adds `nub compile`, which bundles a TypeScript or JavaScript entrypoint 
 ```console
 $ nub compile cli.ts
 Bundling cli.ts …
-Stripped + ad-hoc re-signed the embedded Node
+Signing embedded Node.js
 Compiled cli — embed shape, Node 26.8.1, darwin-arm64, 29.5 MB
 
 $ ./cli --name nub
 ✔ hello, nub
 ```
 
-The executable runs on a machine with no Node installed. Bun and Deno have had this for years. Node has been circling it since 19.7.0 — SEA is still experimental, and it leaves the bundling to you. Nub builds on stock Node instead. A hello world compiles to 29.5 MB on my MacBook; the same file under Bun is 63 MB.
+The executable runs on a machine with no Node installed. Bun and Deno have had this for years. Node's version has been experimental since 19.7.0, and it leaves the bundling to you. Nub builds on stock Node instead. A hello world compiles to 29.5 MB on my MacBook; the same file under Bun is 63 MB.
 
 ## Prior art
 
 Deno shipped [`deno compile`](https://deno.com/blog/v1.6) in December 2020. Bun added `bun build --compile` in [Bun 1.0](https://bun.sh/blog/bun-v1.0). Both work the same way: the bundled code is stapled onto a copy of the runtime, so the file is mostly runtime.
 
-Node's own take, [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html), landed as an experiment in 19.7.0 and is still marked **Stability 1.1, "Active development"** today. The ergonomics have improved — Node 25.5.0 collapsed the multi-step injection flow into a single `node --build-sea` command — but SEA still doesn't bundle, and the work around it moves only when a volunteer picks it up: [cross-platform generation](https://github.com/nodejs/single-executable/issues/94) has been an open request since April 2024, the [virtual-filesystem hooks](https://github.com/nodejs/node/issues/60021) that packagers ask for went stale this July, and the [SEA team's repo](https://github.com/nodejs/single-executable) has not changed since mid-2025.
+Node's equivalent, [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html), landed as an experiment in 19.7.0 and is still marked **Stability 1.1, "Active development"** today. The ergonomics have improved — Node 25.5.0 collapsed the multi-step injection flow into a single `node --build-sea` command — but SEA still doesn't bundle, and progress depends on contributor interest: [cross-platform generation](https://github.com/nodejs/single-executable/issues/94) has been an open request since April 2024, the [virtual-filesystem hooks](https://github.com/nodejs/node/issues/60021) that packagers ask for went stale this July, and the [SEA team's repo](https://github.com/nodejs/single-executable) has not changed since mid-2025.
 
 [![A Node core team member on SEA's status: no one is setting any priority, deadline, or resource contention for SEA — features happen when a contributor steps up, or not at all.](/blog/sea-status-comment.png)](https://github.com/nodejs/single-executable/issues/94#issuecomment-2171819433)
 
-Nub staples the same way Bun and Deno do. What it staples on is a stock Node from nodejs.org plus a small Rust launcher.
+Nub uses the same stapling. The runtime is a stock Node from nodejs.org, driven by a small Rust launcher.
 
 ## `nub compile`
 
-Nub's augmentations — transpiler-level support for TypeScript, JSX and non-erasable syntax, YAML/TOML/JSONC imports, polyfilled globals like `Temporal` and the browser-style `Worker` — all happen during compilation. Nub is totally _erasable_; it compiles your inputs to something that can run against vanilla Node.js. The output carries no `node_modules` and needs no toolchain on the target machine. The Node it builds against comes from the project's existing pin — a `.node-version` file, or `engines.node` in `package.json`. An import the bundler can't resolve fails the build with the file and line.
+Nub's augmentations — transpiler-level support for TypeScript, JSX and non-erasable syntax, YAML/TOML/JSONC imports, polyfilled globals like `Temporal` and the browser-style `Worker` — all happen during compilation. Nub is fully _erasable_; it compiles your inputs to something that can run against vanilla Node.js. The output carries no `node_modules` and needs no toolchain on the target machine. The Node it builds against comes from the project's existing pin — a `.node-version` file, or `engines.node` in `package.json`. An import the bundler can't resolve fails the build with the file and line.
 
 The default shape embeds a full Node. A stock `node` binary is 139 MB on darwin-arm64; stripped and recompressed with zstd at level 19, it fits with your app in a 29.5 MB file:
 
@@ -52,7 +52,7 @@ The default shape embeds a full Node. A stock `node` binary is 139 MB on darwin-
   ]}
 />
 
-Compression flips the ordering. That zstd payload leaves `gzip -9` almost nothing to squeeze, while Bun's uncompressed runtime drops from 63 MB to 24 on the wire:
+Compression flips the ordering. The zstd payload is already dense, so `gzip -9` removes little, while Bun's uncompressed runtime drops from 63 MB to 24 on the wire:
 
 <Bench
   label="hello world · compiled executable · on the wire (gzip -9)"
@@ -67,32 +67,32 @@ Compression flips the ordering. That zstd payload leaves `gzip -9` almost nothin
   ]}
 />
 
-## Imports that aren't code
+## Assets
 
-Programs import things that aren't modules, and the compiler resolves those at build time too:
+Imports of non-module files resolve at build time too:
 
 ```ts
 import prompt from "./prompt.md";     // the text, as a string
 import model from "./model.wasm";     // an absolute path to a real extracted file
 
-// the ordinary ESM way to name a file beside your module also just works
+// a file named relative to the module resolves too
 const table = readFileSync(new URL("./table.bin", import.meta.url));
 ```
 
 Text formats import as their contents; binary formats import as an absolute path, and every filesystem API works on that path. A literal `new URL(..., import.meta.url)` embeds the file it names, and the reference is rewritten to resolve at run time from any directory. The resolution is per module; a helper in a subdirectory keeps naming its own siblings. Files nothing imports — templates, migrations, a data directory — ship with `--include`.
 
-A CommonJS dependency bundled into the output keeps `__dirname` and `__filename`. Do watch any path your own code computes from `import.meta.dirname`, though: bundling moves every module to the entry's location, so compute asset paths as the entry sees them.
+A CommonJS dependency bundled into the output keeps `__dirname` and `__filename`. Paths your own code computes from `import.meta.dirname` are the exception: bundling moves every module to the entry's location, so compute asset paths as the entry sees them.
 
 ## Native addons
 
-Addons are where bundler-based tools historically gave up. A `.node` file is machine code, `dlopen` loads it, and `dlopen` wants a file on disk. The compiler follows an addon's static import and packs it into the executable:
+Native addons are the hard case for a bundler: a `.node` file is machine code, and `dlopen` loads it from a path on disk. The compiler follows an addon's static import and packs it into the executable:
 
 ```console
 $ nub compile app.ts
 Bundling app.ts …
 Shipping 1 package unbundled, in its own installed layout:
   @napi-rs/nice — it declares 16 per-platform binary packages (napi-rs layout)
-Stripped + ad-hoc re-signed the embedded Node
+Signing embedded Node.js
 Compiled app — embed shape, Node 26.8.1, darwin-arm64, 29.6 MB
 ```
 
@@ -114,9 +114,9 @@ Error: this native addon is built for macOS, but the binary targets linux-x64: n
 
 A compiled Nub binary has no virtual filesystem. On first run it unpacks its application files into a cache directory and runs from there, so `dlopen` and every `fs` call get ordinary files on an ordinary disk.
 
-We didn't invent extraction. Deno compiles to an in-memory virtual filesystem by default, but its own docs recommend the [`--self-extracting` flag](https://docs.deno.com/runtime/reference/cli/compile/) for code that "needs real files on disk, such as native addons." Bun extracts too, quietly, [copying each embedded `.node` file out to disk before loading it](https://bun.com/blog/bun-v1.2.13) — [Claude Code ships as a Bun executable](https://x.com/jarredsumner/status/1943492457506697482), and if you run `strings` on it you'll find `audio-capture.node` and friends sitting under a `bunfs/root/` prefix, waiting to be written out. [opencode](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/script/build.ts) is the same.
+Extraction is established practice. Deno compiles to an in-memory virtual filesystem by default, but its docs recommend the [`--self-extracting` flag](https://docs.deno.com/runtime/reference/cli/compile/) for code that "needs real files on disk, such as native addons." Bun also extracts, [copying each embedded `.node` file to disk before loading it](https://bun.com/blog/bun-v1.2.13). [Claude Code ships as a Bun executable](https://x.com/jarredsumner/status/1943492457506697482), and its binary carries `audio-capture.node` and its siblings under a `bunfs/root/` prefix for exactly that. [opencode](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/script/build.ts) does the same.
 
-Here is what a compiled [`sharp`](https://www.npmjs.com/package/sharp) app extracts:
+A compiled [`sharp`](https://www.npmjs.com/package/sharp) app extracts this tree:
 
 ```
 ~/.cache/nub/compile-app/701130c84e2481d4
@@ -142,11 +142,11 @@ ENV XDG_CACHE_HOME=/opt/cache
 RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
 ```
 
-After that the binary writes nothing at run time, so a `readOnlyRootFilesystem` pod is fine. (Lambda needs no ceremony at all — the launcher uses the writable temp directory there.)
+After that the binary writes nothing at run time, so a `readOnlyRootFilesystem` pod is fine. On Lambda the launcher uses the writable temp directory, so no warm-up step is needed.
 
 ## What the bundler does with the hard parts
 
-Flattening a module graph into one file breaks three things that work fine under `node`: lazy dynamic imports, relative asset references, and workers.
+Flattening a module graph into one file breaks three things that work under plain `node`: lazy dynamic imports, relative asset references, and workers.
 
 A dynamic `import()` with a literal specifier stays lazy. It becomes its own chunk in the binary, loaded the first time that code path runs:
 
@@ -173,11 +173,11 @@ Shipping 1 package unbundled, in its own installed layout:
 Compiled app — smol shape, Node 26.0.0, darwin-arm64, 2.8 MB
 ```
 
-For that jsdom program, npm writes 1,834 files to `node_modules` and the compiled binary extracts 1,006. The package that needed its own files keeps all 657 of them. The clean packages around it collapse: parse5 goes from 33 files to 2, whatwg-url from 19 to 3, mdn-data from 25 to 4. The launcher byte-verifies the whole extracted tree before every run, so those 828 missing files were integrity checks on every start of your program.
+For that jsdom program, npm writes 1,834 files to `node_modules` and the compiled binary extracts 1,006. The package that needed its own files keeps all 657 of them. The clean packages around it collapse: parse5 goes from 33 files to 2, whatwg-url from 19 to 3, mdn-data from 25 to 4. The launcher byte-verifies the whole extracted tree before every run, so each of those 828 files would otherwise be an integrity check on every start.
 
 ## The app is the small part
 
-Here is a CLI built on `commander`, `chalk`, `ora` and `zod`:
+A CLI built on `commander`, `chalk`, `ora` and `zod`:
 
 ```console
 $ du -sh node_modules
@@ -214,11 +214,11 @@ Time to first output, measured warm — after the one-time extraction on first r
   ]}
 />
 
-We come last in this chart. Starting a stock `node` costs what it costs — 34 ms on this machine before any of our code runs — and the launcher adds about 11 ms on top: decoding the payload, then an integrity check over the extracted tree that runs on every start. It hands off by replacing itself with Node, so the binary you launched is the process you end up with.
+Nub is slowest in this chart. A stock `node` takes 34 ms on this machine before any user code runs, and the launcher adds about 11 ms: decoding the payload, then an integrity check over the extracted tree that runs on every start. It hands off by replacing itself with Node, so the binary you launched is the process you end up with.
 
 ## The flag tour
 
-Everything above is the default behavior of one command. The dials, when a build needs them:
+Everything above is the default behavior of one command. The flags:
 
 ```bash
 nub compile cli.ts --out dist/cli               # name the output
@@ -270,7 +270,7 @@ $ nub compile app.ts --platform win32-x64 --icon icon.ico                    # �
 Compiled app.exe — embed shape, Node 26.8.1, win32-x64, 30.0 MB
 ```
 
-The produced PE carries real `RT_ICON` and `RT_GROUP_ICON` resources, verified on Windows against an icon-less control. Nub decodes the `.ico` you supply and regenerates the standard set of sizes from it, so supply artwork that survives being rescaled.
+The produced PE carries real `RT_ICON` and `RT_GROUP_ICON` resources, verified on Windows against an icon-less control. Nub decodes the `.ico` you supply and regenerates the standard set of sizes from it, so the source artwork should scale cleanly.
 
 ## The same source compiles to the same bytes
 
@@ -288,7 +288,7 @@ The checksum in your release notes is reproducible by anyone who checks out the 
 
 ## `--smol`
 
-Most machines that run developer tools already have a Node on them, so `--smol` skips the embedded runtime and finds one at startup instead. It checks Nub's own Node store, then version-manager installs, then `PATH`, and only provisions from nodejs.org when nothing on the machine satisfies the target.
+Most machines that run developer tools already have Node installed, so `--smol` skips the embedded runtime and finds one at startup instead. It checks Nub's own Node store, then version-manager installs, then `PATH`, and only provisions from nodejs.org when nothing on the machine satisfies the target.
 
 <Bench
   label="hello world · compiled executable · on the wire (gzip -9)"
@@ -306,7 +306,7 @@ Most machines that run developer tools already have a Node on them, so `--smol` 
 
 That's 0.94 MB on disk, 504 KB gzipped.
 
-Nub won't guess a version for a binary like this. In a project with no pin, compiling stops:
+Nub does not infer a Node version for this shape. With no pin in the project, compiling stops:
 
 ```console
 $ nub compile cli.ts --smol
@@ -320,20 +320,20 @@ $ nub compile cli.ts --smol --target lts                                      # 
 Compiled cli — smol shape, Node 24.20.0, darwin-arm64, 0.9 MB
 ```
 
-A range is worth using when you can, because it lets the binary adopt whatever qualifying Node the machine already has instead of downloading another one.
+A range lets the binary use any qualifying Node already on the machine instead of downloading one:
 
 ```bash
 nub compile cli.ts --smol --target ">=22 <23"   # accept a host Node in the range
 nub compile cli.ts --smol --target 26.0.0       # use or provision exactly 26.0.0
 ```
 
-First runs that do end up downloading a Node show a progress box in the terminal while it happens; `--install-message` replaces the default text:
+A first run that downloads Node shows a progress box; `--install-message` replaces the default text:
 
 ```bash
 nub compile cli.ts --smol --target lts --install-message "Setting up acme (one time, ~10s)"
 ```
 
-A machine that has no Node and can't reach the network gets a clear error telling the user to grab the default build instead.
+A machine with no Node and no network access exits with an error that points to the default build.
 
 ## A real app, compiled
 
