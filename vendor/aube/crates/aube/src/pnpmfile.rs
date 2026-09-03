@@ -33,6 +33,7 @@ use aube_registry::VersionMetadata;
 use aube_resolver::ReadPackageHook;
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
@@ -202,117 +203,140 @@ pub fn ordered_paths(global: Option<&Path>, local: Option<&Path>) -> Vec<PathBuf
     paths
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct LockfileWire {
-    importers: BTreeMap<String, Vec<DirectDepWire>>,
-    packages: BTreeMap<String, PackageWire>,
+/// The object at `root[key]`, or an empty one, so the walks below stay
+/// flat for fields pnpm legitimately omits (a lockfile with no packages
+/// carries no `packages` key at all).
+fn json_object<'a>(root: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
+    static EMPTY: std::sync::OnceLock<serde_json::Map<String, Value>> = std::sync::OnceLock::new();
+    root.get(key)
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| EMPTY.get_or_init(serde_json::Map::new))
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct DirectDepWire {
-    name: String,
-    version: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
-struct PackageWire {
-    name: String,
-    version: String,
-    #[serde(default)]
-    dependencies: BTreeMap<String, String>,
-    #[serde(default, rename = "peerDependencies")]
-    peer_dependencies: BTreeMap<String, String>,
-}
-
-fn to_wire(graph: &LockfileGraph) -> LockfileWire {
-    let importers = graph
-        .importers
+/// A `name -> string` block (`dependencies`, `peerDependencies`) off one
+/// package entry. A non-string value is dropped rather than guessed at:
+/// pnpm's own blocks are always strings, so anything else is a hook
+/// writing something the graph has no field to hold.
+fn string_block(entry: &Value, key: &str) -> BTreeMap<String, String> {
+    json_object(entry, key)
         .iter()
-        .map(|(path, deps)| {
-            let wire = deps
-                .iter()
-                .map(|d| DirectDepWire {
-                    name: d.name.clone(),
-                    version: d.dep_path.clone(),
-                })
-                .collect();
-            (path.clone(), wire)
-        })
-        .collect();
-    let packages = graph
-        .packages
-        .iter()
-        .map(|(key, pkg)| {
-            (
-                key.clone(),
-                PackageWire {
-                    name: pkg.name.clone(),
-                    version: pkg.version.clone(),
-                    dependencies: pkg.dependencies.clone(),
-                    peer_dependencies: pkg.peer_dependencies.clone(),
-                },
-            )
-        })
-        .collect();
-    LockfileWire {
-        importers,
-        packages,
+        .filter_map(|(name, value)| value.as_str().map(|s| (name.clone(), s.to_string())))
+        .collect()
+}
+
+/// Fold a hook's edits to one `name -> version` block into `current`.
+///
+/// `current` is in the GRAPH's spelling while `sent` and `returned` are
+/// both in pnpm's, so this applies the hook's DELTA rather than adopting
+/// the returned map wholesale: a value the hook left alone keeps the
+/// graph's spelling, one it changed or added is taken verbatim, and one it
+/// deleted is removed.
+///
+/// A name `current` holds that never appeared in the projection at all is
+/// left untouched, which is how an optional dependency survives — the
+/// writer strips those out of a snapshot's `dependencies` block while the
+/// graph keeps them in both, so adopting the returned map wholesale would
+/// silently delete every one of them.
+fn fold_block_edits(
+    current: &mut BTreeMap<String, String>,
+    sent: &BTreeMap<String, String>,
+    returned: &BTreeMap<String, String>,
+) {
+    for name in sent.keys() {
+        if !returned.contains_key(name) {
+            current.remove(name);
+        }
+    }
+    for (name, value) in returned {
+        if sent.get(name) != Some(value) {
+            current.insert(name.clone(), value.clone());
+        }
     }
 }
 
-fn apply(wire: LockfileWire, graph: &mut LockfileGraph) {
-    // Only packages[].dependencies and packages[].peerDependencies
-    // are honored. Mutations to importers or to a package's
-    // name/version are ignored because they would require re-running
-    // the resolver to stay consistent; warn about them so the
-    // pnpmfile author knows the edit was a no-op.
-    for (path, wire_deps) in &wire.importers {
-        if let Some(graph_deps) = graph.importers.get(path) {
-            let same = graph_deps.len() == wire_deps.len()
-                && graph_deps
-                    .iter()
-                    .zip(wire_deps.iter())
-                    .all(|(g, w)| g.name == w.name && g.dep_path == w.version);
-            if !same {
-                tracing::warn!(
-                    code = aube_codes::warnings::WARN_AUBE_HOOK_IMPORTER_MUTATED,
-                    "[pnpmfile] afterAllResolved mutated importers[{path}]; \
-                     aube ignores importer edits because they would require \
-                     re-running the resolver",
-                );
-            }
-        } else {
-            tracing::warn!(
+/// Apply an `afterAllResolved` result back onto the graph.
+///
+/// `sent` is the projection the hook was handed, `returned` is what it
+/// gave back, and `snapshot_keys` maps a projected `packages` key to the
+/// graph `dep_path` it came from.
+///
+/// Only `packages[].dependencies` and `packages[].peerDependencies` are
+/// honored. Everything else would need the resolver re-run to stay
+/// consistent, so it is warned about instead — pnpm writes whatever the
+/// hook returns, so an edit aube drops silently is one the author has no
+/// way to notice.
+fn apply_hook_result(
+    sent: &Value,
+    returned: &Value,
+    snapshot_keys: &BTreeMap<String, String>,
+    graph: &mut LockfileGraph,
+) {
+    let sent_importers = json_object(sent, "importers");
+    for (path, block) in json_object(returned, "importers") {
+        match sent_importers.get(path) {
+            Some(before) if before == block => {}
+            Some(_) => tracing::warn!(
+                code = aube_codes::warnings::WARN_AUBE_HOOK_IMPORTER_MUTATED,
+                "[pnpmfile] afterAllResolved mutated importers[{path}]; \
+                 aube ignores importer edits because they would require \
+                 re-running the resolver",
+            ),
+            None => tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_HOOK_IMPORTER_ADDED,
                 "[pnpmfile] afterAllResolved added importers[{path}]; \
                  aube ignores new importer entries",
-            );
+            ),
         }
     }
-    for (key, pkg) in wire.packages {
-        if let Some(locked) = graph.packages.get_mut(&key) {
-            if pkg.name != locked.name || pkg.version != locked.version {
-                tracing::warn!(
-                    code = aube_codes::warnings::WARN_AUBE_HOOK_IDENTITY_REWRITTEN,
-                    "[pnpmfile] afterAllResolved rewrote name/version for {key} \
-                     (to {}@{}); aube ignores identity edits on existing packages",
-                    pkg.name,
-                    pkg.version,
-                );
-            }
-            if locked.dependencies != pkg.dependencies {
-                locked.dependencies = pkg.dependencies;
-            }
-            if locked.peer_dependencies != pkg.peer_dependencies {
-                locked.peer_dependencies = pkg.peer_dependencies;
-            }
-        } else {
+
+    // Everything except the two blocks that can be applied. Compared as
+    // whole objects because pnpm's entry carries `resolution`, `engines`
+    // and friends, none of which the graph can take from a hook.
+    let ignored_fields = |value: &Value| {
+        let mut map = value.as_object().cloned().unwrap_or_default();
+        map.remove("dependencies");
+        map.remove("peerDependencies");
+        map
+    };
+
+    let sent_packages = json_object(sent, "packages");
+    for (view_key, entry) in json_object(returned, "packages") {
+        let Some(dep_path) = snapshot_keys.get(view_key) else {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_HOOK_PACKAGE_ADDED,
-                "[pnpmfile] afterAllResolved added a new package entry {key}; \
+                "[pnpmfile] afterAllResolved added a new package entry {view_key}; \
                  aube ignores newly-introduced packages from the hook",
             );
+            continue;
+        };
+        let Some(locked) = graph.packages.get_mut(dep_path) else {
+            continue;
+        };
+        let sent_entry = sent_packages.get(view_key);
+        if let Some(before) = sent_entry
+            && ignored_fields(before) != ignored_fields(entry)
+        {
+            tracing::warn!(
+                code = aube_codes::warnings::WARN_AUBE_HOOK_IDENTITY_REWRITTEN,
+                "[pnpmfile] afterAllResolved edited a field of {view_key} that is \
+                 fixed by resolution (resolution, engines, identity); aube applies \
+                 only dependencies and peerDependencies",
+            );
         }
+        fold_block_edits(
+            &mut locked.dependencies,
+            &sent_entry
+                .map(|e| string_block(e, "dependencies"))
+                .unwrap_or_default(),
+            &string_block(entry, "dependencies"),
+        );
+        fold_block_edits(
+            &mut locked.peer_dependencies,
+            &sent_entry
+                .map(|e| string_block(e, "peerDependencies"))
+                .unwrap_or_default(),
+            &string_block(entry, "peerDependencies"),
+        );
     }
 }
 
@@ -588,20 +612,33 @@ async fn run_one_shot_hook(
 /// are applied in place. All other fields are round-tripped but
 /// ignored on the way back. `prefix` is the project root used to enrich
 /// `ctx.log` records under `--reporter=ndjson`.
+///
+/// The hook is handed pnpm's in-memory `LockfileObject`
+/// ([`aube_lockfile::pnpm::hook_view`]) — the same projection
+/// `preResolution` gets, and the one every pnpmfile in the wild is written
+/// against. It used to receive a narrow aube-shaped object instead
+/// (`{importers: {".": [{name, version}]}, packages: {k: {name, version,
+/// dependencies, peerDependencies}}}`), which has no `resolution`, no
+/// `engines`, no `specifiers`, and renders each importer as an ARRAY where
+/// pnpm's is an object. A hook doing `lockfile.packages[k].resolution
+/// .integrity` — the shape pnpm's own docs show — threw on it.
 pub async fn run_after_all_resolved(
     pnpmfile: &Path,
     prefix: &Path,
+    manifest: &aube_manifest::PackageJson,
     graph: &mut LockfileGraph,
 ) -> Result<()> {
-    let input = to_wire(graph);
-    let input_json = serde_json::to_vec(&input)
+    let (sent, snapshot_keys) =
+        aube_lockfile::pnpm::hook_view::lockfile_object_with_keys(prefix, graph, manifest)
+            .map_err(|e| miette!("failed to project the lockfile for afterAllResolved: {e}"))?;
+    let input_json = serde_json::to_vec(&sent)
         .into_diagnostic()
         .wrap_err("failed to serialize lockfile for pnpmfile hook")?;
     let stdout = run_one_shot_hook(pnpmfile, prefix, "afterAllResolved", &input_json).await?;
-    let wire: LockfileWire = serde_json::from_slice(&stdout)
+    let returned: Value = serde_json::from_slice(&stdout)
         .into_diagnostic()
         .wrap_err("pnpmfile hook returned invalid JSON from afterAllResolved")?;
-    apply(wire, graph);
+    apply_hook_result(&sent, &returned, &snapshot_keys, graph);
     Ok(())
 }
 
@@ -613,10 +650,11 @@ pub async fn run_after_all_resolved(
 pub async fn run_after_all_resolved_chain(
     paths: &[PathBuf],
     prefix: &Path,
+    manifest: &aube_manifest::PackageJson,
     graph: &mut LockfileGraph,
 ) -> Result<()> {
     for p in paths {
-        run_after_all_resolved(p, prefix, graph)
+        run_after_all_resolved(p, prefix, manifest, graph)
             .await
             .wrap_err_with(|| format!("pnpmfile afterAllResolved hook failed ({})", p.display()))?;
     }
@@ -702,11 +740,8 @@ impl<'a> PreResolutionContext<'a> {
         };
         let lockfile = match existing {
             Some(graph) => {
-                match aube_lockfile::pnpm::hook_view::lockfile_object(
-                    lockfile_dir,
-                    graph,
-                    manifest,
-                ) {
+                match aube_lockfile::pnpm::hook_view::lockfile_object(lockfile_dir, graph, manifest)
+                {
                     Ok(value) => value,
                     Err(e) => {
                         tracing::warn!(
@@ -1543,5 +1578,92 @@ mod tests {
         )
         .unwrap();
         assert!(exports_hooks(&p).await.unwrap());
+    }
+
+    fn block(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The hook sees pnpm's spelling of a dependency value; the graph
+    /// stores its own. Anything the hook did not touch has to come back
+    /// carrying the GRAPH's spelling, or the round-trip rewrites every
+    /// non-registry dep into a form the linker cannot resolve.
+    #[test]
+    fn untouched_dependency_values_keep_the_graphs_spelling() {
+        let mut current = block(&[("is-obj", "is-obj@url+f5ca9b17a622e185")]);
+        let sent = block(&[("is-obj", "is-obj@https://codeload.example/tar.gz/abc")]);
+        fold_block_edits(&mut current, &sent, &sent.clone());
+        assert_eq!(
+            current,
+            block(&[("is-obj", "is-obj@url+f5ca9b17a622e185")]),
+            "a value the hook left alone must not be rewritten into pnpm's spelling"
+        );
+    }
+
+    /// An optional dependency is in the graph's `dependencies` map but is
+    /// stripped out of the projected snapshot block, so it never reaches
+    /// the hook. Adopting the returned map wholesale would delete it —
+    /// silently, and only for packages that have one.
+    #[test]
+    fn a_dependency_absent_from_the_projection_survives() {
+        let mut current = block(&[("left-pad", "1.0.0"), ("fsevents", "2.3.3")]);
+        let sent = block(&[("left-pad", "1.0.0")]);
+        fold_block_edits(&mut current, &sent, &sent.clone());
+        assert_eq!(
+            current,
+            block(&[("left-pad", "1.0.0"), ("fsevents", "2.3.3")]),
+            "an optional dep the projection never showed the hook must be left alone"
+        );
+    }
+
+    #[test]
+    fn hook_edits_are_applied_and_deletions_honored() {
+        let mut current = block(&[("left-pad", "1.0.0"), ("dropped", "1.0.0")]);
+        let sent = block(&[("left-pad", "1.0.0"), ("dropped", "1.0.0")]);
+        let returned = block(&[("left-pad", "2.0.0"), ("added", "3.0.0")]);
+        fold_block_edits(&mut current, &sent, &returned);
+        assert_eq!(
+            current,
+            block(&[("left-pad", "2.0.0"), ("added", "3.0.0")]),
+            "a changed value is taken verbatim, an added one inserted, a removed one dropped"
+        );
+    }
+
+    /// The hook is keyed by pnpm's dep path; the graph is keyed by its own
+    /// hashed one. Without the correspondence the edit lands nowhere and
+    /// is reported as a phantom "added package" instead.
+    #[test]
+    fn package_edits_map_back_through_the_snapshot_keys() {
+        let pnpm_key = "is-obj@https://codeload.example/tar.gz/abc";
+        let graph_key = "is-obj@url+f5ca9b17a622e185";
+
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.packages.insert(
+            graph_key.to_string(),
+            aube_lockfile::LockedPackage {
+                name: "is-obj".to_string(),
+                version: "2.0.0".to_string(),
+                dependencies: block(&[("left-pad", "1.0.0")]),
+                ..Default::default()
+            },
+        );
+
+        let sent = serde_json::json!({
+            "packages": { pnpm_key: { "dependencies": { "left-pad": "1.0.0" } } }
+        });
+        let returned = serde_json::json!({
+            "packages": { pnpm_key: { "dependencies": { "left-pad": "2.0.0" } } }
+        });
+        let keys = BTreeMap::from([(pnpm_key.to_string(), graph_key.to_string())]);
+
+        apply_hook_result(&sent, &returned, &keys, &mut graph);
+        assert_eq!(
+            graph.packages[graph_key].dependencies,
+            block(&[("left-pad", "2.0.0")]),
+            "the hook's edit under pnpm's key must reach the graph's own entry"
+        );
     }
 }

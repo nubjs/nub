@@ -194,7 +194,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: WARN_AUBE_HOOK_IDENTITY_REWRITTEN,
         category: category::PNPMFILE_HOOKS,
-        description: "A pnpmfile hook rewrote a package's `(name, version)` identity; aube reverted the edit.",
+        description: "A pnpmfile hook edited a package field that is fixed by resolution (`resolution`, `engines`, identity); aube applies only `dependencies` and `peerDependencies` and reverted the rest.",
         exit_code: None,
     },
     CodeMeta {

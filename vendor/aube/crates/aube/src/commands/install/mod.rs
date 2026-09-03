@@ -1212,21 +1212,19 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // been parsed yet. Under `lockfile=false` there is deliberately no
     // lockfile to show, and pnpm passes an empty one there too.
     {
-        let hook_lockfile = if pre_resolution_hook_declared
-            && lockfile_enabled
-            && lockfile_pre_parse.is_none()
-        {
-            parse_lockfile_dir_remapped_with_kind_and_options(
-                &lockfile_dir,
-                &lockfile_importer_key,
-                &manifest,
-                lockfile_parse_options,
-            )
-            .ok()
-            .map(|(g, _)| g)
-        } else {
-            None
-        };
+        let hook_lockfile =
+            if pre_resolution_hook_declared && lockfile_enabled && lockfile_pre_parse.is_none() {
+                parse_lockfile_dir_remapped_with_kind_and_options(
+                    &lockfile_dir,
+                    &lockfile_importer_key,
+                    &manifest,
+                    lockfile_parse_options,
+                )
+                .ok()
+                .map(|(g, _)| g)
+            } else {
+                None
+            };
         let pnpmfile_paths = if opts.ignore_pnpmfile || opts.pre_resolution_hook_already_ran {
             Vec::new()
         } else {
@@ -2494,8 +2492,13 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // logs in the ndjson stream.
             drop(resolver);
             crate::pnpmfile::ReadPackageHostChain::drain_forwarders(read_package_forwarders).await;
-            crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, &cwd, &mut graph)
-                .await?;
+            crate::pnpmfile::run_after_all_resolved_chain(
+                &pnpmfile_paths,
+                &cwd,
+                &manifest,
+                &mut graph,
+            )
+            .await?;
             // Record the project's patch configuration (manifest /
             // workspace-yaml `patchedDependencies` + sha256 of each
             // patch file) on the graph before anything downstream

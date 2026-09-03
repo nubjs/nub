@@ -18,6 +18,8 @@
 //! `pnpm-lock.yaml` — a hook that rewrites a resolution URL is looking
 //! at the URL the lockfile will actually carry.
 
+use std::collections::BTreeMap;
+
 use aube_manifest::PackageJson;
 use serde_json::{Map, Value};
 
@@ -38,16 +40,39 @@ pub fn lockfile_object(
     graph: &LockfileGraph,
     manifest: &PackageJson,
 ) -> Result<Value, Error> {
-    let writable = super::write::build(&lockfile_dir.join("pnpm-lock.yaml"), graph, manifest)?;
-    let mut value = serde_json::to_value(&writable)
+    lockfile_object_with_keys(lockfile_dir, graph, manifest).map(|(value, _)| value)
+}
+
+/// [`lockfile_object`], plus the map from a projected `packages` key back
+/// to the graph `dep_path` it was derived from.
+///
+/// Only a hook whose result is applied BACK to the graph needs this, and
+/// `afterAllResolved` is that hook. It is handed pnpm's spelling of every
+/// key, so without the correspondence an edit to
+/// `packages["is-obj@https://codeload…/tar.gz/<sha>"]` cannot be matched
+/// against the graph's `is-obj@url+f5ca9b17a622e185`. A registry package
+/// spells the two identically, which is exactly why a map reconstructed
+/// by guesswork looks right until the first git or remote-tarball
+/// dependency arrives.
+///
+/// The keys are SNAPSHOT keys because that is what the merge below keys
+/// the projected `packages` map by; a `packages:` entry no snapshot
+/// references drops out of the view entirely and has nothing to map.
+pub fn lockfile_object_with_keys(
+    lockfile_dir: &std::path::Path,
+    graph: &LockfileGraph,
+    manifest: &PackageJson,
+) -> Result<(Value, BTreeMap<String, String>), Error> {
+    let built = super::write::build(&lockfile_dir.join("pnpm-lock.yaml"), graph, manifest)?;
+    let mut value = serde_json::to_value(&built.lockfile)
         .map_err(|e| Error::parse(lockfile_dir, format!("failed to project lockfile: {e}")))?;
     let Some(root) = value.as_object_mut() else {
-        return Ok(value);
+        return Ok((value, built.snapshot_keys));
     };
     merge_snapshots_into_packages(root);
     flatten_patched_dependencies(root);
     revert_importers(root);
-    Ok(value)
+    Ok((value, built.snapshot_keys))
 }
 
 /// The object pnpm synthesizes when there is no lockfile on disk
@@ -278,7 +303,10 @@ mod tests {
             "pnpm's createLockfileObject stamps the effective cap; a hook \
              reading it must not get undefined"
         );
-        assert_eq!(root["importers"]["."]["specifiers"], Value::Object(Map::new()));
+        assert_eq!(
+            root["importers"]["."]["specifiers"],
+            Value::Object(Map::new())
+        );
         assert_eq!(
             root["importers"]["."]["dependencies"],
             Value::Object(Map::new())
