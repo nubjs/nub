@@ -35,6 +35,8 @@ use rolldown::plugin::{
     PluginContextResolveOptions,
 };
 use rolldown_common::{ExportsKind, ImportKind, ModuleInfo, NormalModule, OutputChunk};
+
+use super::bundle::ExternalImport;
 use serde::Serialize;
 
 /// esbuild's import-kind vocabulary, narrowed to the edges Rolldown reports.
@@ -45,9 +47,9 @@ use serde::Serialize;
 /// carry one, and the two cannot be zipped.
 ///
 /// This is the FALLBACK. The real kind comes from the resolver hook, which is the
-/// only place Rolldown offers it — see [`Collector::resolve_id`] — and reaches
-/// here through `Collector::require_edges`. The format is consulted only for an
-/// edge that hook never observed: a synthetic module, or a resolve that failed.
+/// only place Rolldown offers it — see [`EdgeWatcher::resolve_id`] — and reaches
+/// here as the [`EdgeKinds`] set. The format is consulted only for an edge that
+/// hook never observed: a synthetic module, or a resolve that failed.
 ///
 /// It has to be a fallback rather than the answer, because the format is wrong for
 /// a module that is not wholly one thing. An ESM module containing an unbound
@@ -146,6 +148,90 @@ struct Module {
     dynamic_imports: Vec<String>,
 }
 
+/// Every static source edge the resolver hook saw, as
+/// `(importer id, resolved target id, esbuild kind)`.
+///
+/// A SET of triples rather than a map, because one importer can reach one target
+/// by two different edges — `import './dep.js'` beside `require('./dep.js')` — and
+/// esbuild's schema reports both. Rolldown's `imported_ids` deduplicates by
+/// target, so it can never express that; the observations can.
+pub type EdgeKinds = Arc<Mutex<BTreeSet<(String, String, &'static str)>>>;
+
+/// Watches resolution to learn each edge's kind, and nothing else.
+///
+/// Split from [`Collector`] because the two need OPPOSITE plugin positions. The
+/// collector must run LAST so the source length it records is what the bundler
+/// parsed; this must run FIRST, because a resolver plugin ahead of it can claim
+/// an edge and return before it is ever asked — which is exactly how an
+/// `--external` require came to be reported as an import statement.
+///
+/// It never influences resolution: `resolve_id` always returns `Ok(None)`.
+#[derive(Debug)]
+pub struct EdgeWatcher {
+    edges: EdgeKinds,
+}
+
+impl EdgeWatcher {
+    pub fn new(edges: EdgeKinds) -> Self {
+        Self { edges }
+    }
+}
+
+impl Plugin for EdgeWatcher {
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed("nub:metafile-edges")
+    }
+
+    /// Observe the import kind, which no later hook reports.
+    ///
+    /// To learn where the edge lands it re-runs the same resolver chain through
+    /// `ctx.resolve` with that edge's own kind, so the answer is the build's
+    /// rather than a second opinion. `skip_self` defaults to true, so the call
+    /// cannot re-enter this hook.
+    fn resolve_id(
+        &self,
+        ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        let importer = args.importer.map(str::to_string);
+        let specifier = args.specifier.to_string();
+        let kind = args.kind;
+        async move {
+            if let Some(importer) = importer
+                && let Some(rendered) = esbuild_kind(kind)
+            {
+                let options = PluginContextResolveOptions {
+                    import_kind: kind,
+                    ..Default::default()
+                };
+                if let Ok(Ok(resolved)) = ctx
+                    .resolve(&specifier, Some(&importer), Some(options))
+                    .await
+                    && let Ok(mut edges) = self.edges.lock()
+                {
+                    edges.insert((importer, resolved.id.to_string(), rendered));
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId
+    }
+}
+
+/// Rolldown's kind in esbuild's vocabulary. `None` for an edge esbuild's schema
+/// has no static name for — a dynamic import is reported from its own list, and
+/// the CSS and `new URL` kinds never reach a nub compile graph.
+fn esbuild_kind(kind: ImportKind) -> Option<&'static str> {
+    match kind {
+        ImportKind::Import => Some(IMPORT_STATEMENT),
+        ImportKind::Require => Some(REQUIRE_CALL),
+        _ => None,
+    }
+}
+
 /// Records every module the bundler parses.
 ///
 /// `module_parsed` is the only hook that reports a module's import edges and its
@@ -155,13 +241,6 @@ struct Module {
 #[derive(Debug, Default)]
 pub struct Collector {
     modules: Mutex<Vec<Module>>,
-    /// `(importer id, resolved target id)` for every edge that was a `require()`.
-    ///
-    /// The per-edge kind exists ONLY in the resolver hook: `ModuleInfo` does not
-    /// carry it, and `NormalModule`'s import records — which do — are still empty
-    /// at `module_parsed` time because they are filled during linking. So the kind
-    /// is captured where it is offered and joined back by resolved id here.
-    require_edges: Mutex<BTreeSet<(String, String)>>,
 }
 
 impl Plugin for Collector {
@@ -198,44 +277,8 @@ impl Plugin for Collector {
         }
     }
 
-    /// Observe the import kind, which no later hook reports.
-    ///
-    /// Resolution is NOT influenced: this always returns `Ok(None)`, so the real
-    /// resolver chain decides as it would have. To learn where a `require()`
-    /// actually lands it re-runs that same chain through `ctx.resolve` with the
-    /// edge's own kind, which is why the answer matches the build's rather than
-    /// being a second opinion — `skip_self` defaults to true, so the call cannot
-    /// re-enter this hook.
-    fn resolve_id(
-        &self,
-        ctx: &PluginContext,
-        args: &HookResolveIdArgs<'_>,
-    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
-        let require_from = (args.kind == ImportKind::Require)
-            .then(|| args.importer.map(str::to_string))
-            .flatten();
-        let specifier = args.specifier.to_string();
-        let kind = args.kind;
-        async move {
-            if let Some(importer) = require_from {
-                let options = PluginContextResolveOptions {
-                    import_kind: kind,
-                    ..Default::default()
-                };
-                if let Ok(Ok(resolved)) = ctx
-                    .resolve(&specifier, Some(&importer), Some(options))
-                    .await
-                    && let Ok(mut edges) = self.require_edges.lock()
-                {
-                    edges.insert((importer, resolved.id.to_string()));
-                }
-            }
-            Ok(None)
-        }
-    }
-
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::ModuleParsed | HookUsage::ResolveId
+        HookUsage::ModuleParsed
     }
 }
 
@@ -316,12 +359,23 @@ impl Report {
     /// but dropped later never reaches the report. A file with no chunk metadata
     /// — an emitted asset — gets the empty relations esbuild uses for a file it
     /// copied rather than compiled.
-    pub fn finish(self, emitted: &[(&str, usize)], modules: &Collector) -> Metafile {
-        let require_edges = modules
-            .require_edges
-            .lock()
-            .map(|edges| edges.clone())
-            .unwrap_or_default();
+    /// `externals` renames the edges that leave the bundle. An `--external`
+    /// request is rewritten to a synthetic id so Rolldown keeps each importer's
+    /// copy distinct, and that id is an internal compiler identity — esbuild
+    /// reports the SPECIFIER the runtime will resolve, so the report translates
+    /// back rather than publishing nub's hash.
+    pub fn finish(
+        self,
+        emitted: &[(&str, usize)],
+        modules: &Collector,
+        edge_kinds: &EdgeKinds,
+        externals: &[ExternalImport],
+    ) -> Metafile {
+        let observed = edge_kinds.lock().map(|e| e.clone()).unwrap_or_default();
+        let external_specifiers: BTreeMap<&str, &str> = externals
+            .iter()
+            .map(|e| (e.id.as_str(), e.specifier.as_str()))
+            .collect();
         let collected = modules
             .modules
             .lock()
@@ -351,28 +405,39 @@ impl Report {
             .iter()
             .map(
                 |(path, (bytes, format, imports, dynamic_imports, raw_id))| {
+                    // One entry per SOURCE edge, which is esbuild's model and not
+                    // Rolldown's: `imported_ids` is deduplicated by target, so a
+                    // module that both imports and requires the same file has one
+                    // entry there and two here. The observations supply the
+                    // multiplicity and the kinds; `imported_ids` stays the floor, so
+                    // a target the resolver hook never saw still appears, with the
+                    // format as its kind.
                     let edges = imports
                         .iter()
-                        .map(|id| {
-                            // The resolver hook saw this edge's real kind; the format
-                            // is only the fallback for an edge it never observed (a
-                            // synthetic module, or a resolve that failed).
-                            let kind = if require_edges.contains(&(raw_id.clone(), id.clone())) {
-                                REQUIRE_CALL
+                        .flat_map(|id| {
+                            let seen: Vec<&'static str> = observed
+                                .iter()
+                                .filter(|(from, to, _)| from == raw_id && to == id)
+                                .map(|(_, _, kind)| *kind)
+                                .collect();
+                            if seen.is_empty() {
+                                vec![(id, static_kind(*format))]
                             } else {
-                                static_kind(*format)
-                            };
-                            (id, kind)
+                                seen.into_iter().map(|kind| (id, kind)).collect()
+                            }
                         })
                         .chain(dynamic_imports.iter().map(|id| (id, DYNAMIC_IMPORT)))
                         .map(|(id, kind)| {
                             let rendered = render_id(id, self.base.as_deref());
+                            // A target the bundler never parsed is one it never
+                            // pulled in: an `--external` package, or a `node:`
+                            // builtin. That is exactly esbuild's `external`.
+                            let external = !collected.contains_key(&rendered);
                             Import {
-                                // A target the bundler never parsed is one it never
-                                // pulled in: an `--external` package, or a `node:`
-                                // builtin. That is exactly esbuild's `external`.
-                                external: !collected.contains_key(&rendered),
-                                path: rendered,
+                                external,
+                                path: external_specifiers
+                                    .get(id.as_str())
+                                    .map_or(rendered, |specifier| (*specifier).to_string()),
                                 kind,
                             }
                         })
@@ -508,7 +573,7 @@ mod tests {
             dynamic_imports: Vec::new(),
         });
         let report = Report::new(Some("/proj".into()));
-        let metafile = report.finish(&[("app.mjs", 9)], &collector);
+        let metafile = report.finish(&[("app.mjs", 9)], &collector, &EdgeKinds::default(), &[]);
 
         let app = &metafile.inputs["app.ts"];
         assert_eq!(app.bytes, 12);
@@ -542,7 +607,12 @@ mod tests {
                 entry_point: None,
             },
         );
-        let metafile = report.finish(&[("kept.mjs", 3)], &Collector::default());
+        let metafile = report.finish(
+            &[("kept.mjs", 3)],
+            &Collector::default(),
+            &EdgeKinds::default(),
+            &[],
+        );
         assert!(
             !metafile.outputs.contains_key("gone.mjs"),
             "a chunk nub dropped after bundling must not be reported as shipped"

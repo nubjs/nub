@@ -398,6 +398,16 @@ fn bundle_inner(
     // `__dirname`/`__filename` from the virtual `\0nub-path-globals` module), and its
     // rewrite blanks bytes in place without moving any position.
     let mut plugins: Vec<SharedPluginable> = Vec::new();
+    // FIRST, ahead of every resolver: a plugin that claims an edge returns before
+    // the ones behind it are asked, so an observer placed later never sees what
+    // `ExternalImports` or `NativeAddons` resolved. It rewrites nothing and always
+    // declines, so nothing downstream changes.
+    let edge_kinds: metafile::EdgeKinds = Arc::default();
+    if opts.metafile {
+        plugins.push(
+            Arc::new(metafile::EdgeWatcher::new(Arc::clone(&edge_kinds))) as SharedPluginable,
+        );
+    }
     if let Some(plugin) = &external_plugin {
         // Claim raw package requests before aliases and resolver plugins.
         plugins.push(Arc::clone(plugin) as SharedPluginable);
@@ -660,13 +670,17 @@ fn bundle_inner(
     // of installed packages and the support files are generated rather than
     // bundled, so neither has inputs to attribute and both would read as bundle
     // output that isn't. The docs name what the report therefore excludes.
+    // Drained before the report rather than in the result below, because the
+    // report has to rename external edges and `take` empties the plugin.
+    let external_imports = external_plugin.map_or_else(Vec::new, |p| p.take());
+
     let metafile = report.map(|report| {
         let emitted: Vec<(&str, usize)> = files
             .iter()
             .chain(assets.iter())
             .map(|file| (file.name.as_str(), file.bytes.len()))
             .collect();
-        report.finish(&emitted, &modules)
+        report.finish(&emitted, &modules, &edge_kinds, &external_imports)
     });
 
     Ok(BundleResult {
@@ -679,7 +693,7 @@ fn bundle_inner(
         root_support_files: prelude.root_support_files().collect(),
         dynamic_import_sites,
         native_addons,
-        external_imports: external_plugin.map_or_else(Vec::new, |p| p.take()),
+        external_imports,
         worker_roots: new_urls.worker_roots(),
         metafile,
     })
@@ -5948,6 +5962,33 @@ mod tests {
         result
     }
 
+    /// The same fixture shape, bundled the way `nub compile` does.
+    ///
+    /// The difference is `launch_root`, and it is not cosmetic: without one,
+    /// `bundle_inner` hands `--external` to Rolldown's own matcher, which is
+    /// evaluated BEFORE plugins, so no `resolve_id` hook ever sees the edge. With
+    /// one, the request goes through [`ExternalImports`] instead — the path a
+    /// compiled artifact actually takes, and the only one where plugin ORDER can
+    /// decide what the report says.
+    fn bundle_compile_graph_with(
+        tag: &str,
+        entry: &str,
+        files: &[(&str, &str)],
+        o: &BundleOptions,
+    ) -> Result<BundleResult> {
+        let dir = fixture_dir(tag);
+        for (name, source) in files {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, source).unwrap();
+        }
+        let result = bundle_for_compile(&dir.join(entry), o, &dir);
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+
     /// A fixture with all three shapes `--drop` has to distinguish: a bare
     /// `console` call, one whose value is READ, and a `debugger`.
     const DROP_FIXTURE: &[(&str, &str)] = &[(
@@ -6310,6 +6351,105 @@ mod tests {
         assert_eq!(
             esm_edge.kind, "import-statement",
             "the real import in the same module must stay a statement"
+        );
+    }
+
+    /// esbuild reports one entry per SOURCE edge. Rolldown's `imported_ids` is
+    /// deduplicated by target, so a module that both imports and requires the same
+    /// file has one entry there — and the report has to have two, with different
+    /// kinds. This is what the observation set exists to supply.
+    #[test]
+    fn one_target_imported_and_required_reports_both_edges() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import d from './dep.cjs';\n\
+                 const r = require('./dep.cjs');\n\
+                 globalThis.OUT = [d, r];\n",
+            ),
+            ("dep.cjs", "module.exports = 7;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_module_graph_with("metafile-dual-edge", "entry.ts", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let mut kinds: Vec<&str> = report
+            .inputs
+            .iter()
+            .find(|(path, _)| path.ends_with("entry.ts"))
+            .expect("the entry is an input")
+            .1
+            .imports
+            .iter()
+            .filter(|i| i.path.ends_with("dep.cjs"))
+            .map(|i| i.kind)
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            vec!["import-statement", "require-call"],
+            "both source edges to the same target must survive, with their own kinds"
+        );
+    }
+
+    /// A resolver plugin that claims an edge returns before the ones behind it are
+    /// asked, so an observer placed after `ExternalImports` never sees an external
+    /// `require()` and the report falls back to the importer's ESM format. That is
+    /// why the watcher is registered FIRST; this is the regression for it.
+    ///
+    /// It bundles through [`bundle_compile_graph_with`] deliberately: the plain
+    /// helper supplies no launch root, which sends `--external` to Rolldown's own
+    /// pre-plugin matcher and leaves nothing for plugin order to get wrong.
+    #[test]
+    fn an_external_require_from_an_esm_module_keeps_its_kind() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import { A } from './esm-dep.mjs';\n\
+                 const ext = require('peer');\n\
+                 globalThis.OUT = [A, ext];\n",
+            ),
+            ("esm-dep.mjs", "export const A = 1;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        o.external = vec!["peer".into()];
+        let result = bundle_compile_graph_with("metafile-external-require", "entry.ts", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let entry = report
+            .inputs
+            .iter()
+            .find(|(path, _)| path.ends_with("entry.ts"))
+            .expect("the entry is an input")
+            .1;
+        let external = entry
+            .imports
+            .iter()
+            .find(|i| i.external)
+            .expect("the external edge is in the graph");
+        assert_eq!(
+            external.kind, "require-call",
+            "an external resolved by an earlier plugin must still report its kind"
+        );
+        assert_eq!(
+            external.path, "peer",
+            "an external edge is reported by the specifier the runtime resolves, \
+             not by nub's synthetic id"
+        );
+        assert!(
+            entry
+                .imports
+                .iter()
+                .any(|i| i.path.ends_with("esm-dep.mjs") && i.kind == "import-statement"),
+            "the ordinary import in the same module must stay a statement"
         );
     }
 
