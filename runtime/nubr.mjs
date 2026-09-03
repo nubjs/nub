@@ -33,7 +33,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { effectiveShell, spliceArgs } from "./nubr-escape.mjs";
+import { commandLine, effectiveShell, spliceArgs } from "./nubr-escape.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Absolute, because a bare specifier never resolves out of a global install and
@@ -156,18 +156,22 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
   step(0);
 }
 
-// A bin from the `node_modules/.bin` chain, run ad hoc. Deliberately executed
-// the same way a script body is — through the shell, with the same environment
-// — rather than spawned directly: `childEnv` already puts every
-// `node_modules/.bin` on PATH, so the shell performs the lookup, including
-// PATHEXT on Windows, where the runnable entry is a `.cmd`/`.exe` shim and the
-// extensionless file npm also drops is a Bash stub Windows cannot execute.
-// Reusing the shell path means the argument escaping is the same code the
-// three-OS leg already exercises, instead of a second spawn implementation.
-function runBin(name, rawExtraArgs, manifest, cwd) {
+// A bin from the `node_modules/.bin` chain, run ad hoc. It goes through the
+// shell — the same one, with the same environment, a script body gets — so the
+// argument escaping is the code the three-OS leg already exercises rather than a
+// second spawn implementation.
+//
+// What is passed to that shell is the RESOLVED PATH, never the bare name.
+// Handing back the name reintroduces the shell's own lookup, which does not
+// agree with ours: `sh -c "test …"` runs the BUILTIN, not
+// `node_modules/.bin/test`, and reports exit 1 with no output — the user sees a
+// plausible failure and never learns their bin did not run (reproduced). Naming
+// the path also makes the Windows `.cmd` shim visible to the batch-file test, so
+// forwarded arguments get the second caret pass cmd.exe's re-parse needs.
+function runBin(name, binPathAbs, rawExtraArgs, manifest, cwd) {
   const extraArgs = rawExtraArgs[0] === "--" ? rawExtraArgs.slice(1) : rawExtraArgs;
   const shell = effectiveShell();
-  const child = spawn(spliceArgs(name, extraArgs, shell), {
+  const child = spawn(commandLine(binPathAbs, extraArgs, shell), {
     shell,
     cwd,
     stdio: "inherit",
@@ -187,8 +191,10 @@ function runBin(name, rawExtraArgs, manifest, cwd) {
 
 // Windows runs the shim, never the extensionless Bash stub npm drops beside it;
 // an empty extension covers the POSIX symlink. Mirrors the resolution the full
-// CLI's `nubx` performs.
-const BIN_EXTS = process.platform === "win32" ? [".cmd", ".exe", ".bat", ".ps1"] : [""];
+// CLI's `nubx` performs. `.ps1` is deliberately absent: npm always writes a
+// `.cmd` next to it, and cmd.exe cannot execute a PowerShell script, so listing
+// it could only ever pick a file the shell then fails to run.
+const BIN_EXTS = process.platform === "win32" ? [".cmd", ".exe", ".bat"] : [""];
 
 function findBin(name, cwd) {
   // A name with a separator is a path, not a bin — it was already given its
@@ -196,7 +202,8 @@ function findBin(name, cwd) {
   if (name.includes("/") || name.includes("\\")) return null;
   for (const dir of binPath(cwd)) {
     for (const ext of BIN_EXTS) {
-      if (statKind(path.join(dir, name + ext)) === "file") return name;
+      const candidate = path.join(dir, name + ext);
+      if (statKind(candidate) === "file") return candidate;
     }
   }
   return null;
@@ -279,8 +286,9 @@ async function main() {
   // A dependency's bin, run ad hoc — the thing a standalone install otherwise
   // cannot do without editing package.json first. A script of the same name
   // still wins, matching npm, where a script shadows the bin it usually wraps.
-  if (findBin(target, cwd)) {
-    runBin(target, rest, manifest, cwd);
+  const bin = findBin(target, cwd);
+  if (bin) {
+    runBin(target, bin, rest, manifest, cwd);
     return;
   }
 

@@ -74,6 +74,8 @@ function installBin(name, body) {
 }
 installBin("faketool", "console.log(JSON.stringify(process.argv.slice(2)))");
 installBin("shadowed", "console.log('bin')");
+// `test` is a shell builtin on POSIX and a real package-bin name in the wild.
+installBin("test", "console.log('the installed bin')");
 
 // stdout only, last non-empty line: the preload writes an addon warning to
 // stderr whenever no platform package is installed, which is the normal state
@@ -113,6 +115,13 @@ test("an installed bin runs, and forwarded arguments reach it as literals", () =
   // without editing package.json first. It executes through the shell with
   // node_modules/.bin on PATH, so this also covers the Windows shim lookup.
   assert.deepEqual(JSON.parse(run("faketool", "--", "a b", "x;y")), ["a b", "x;y"]);
+});
+
+test("a bin whose name is a shell builtin still runs the bin", () => {
+  // Passing the bare name to the shell ran `sh`'s `test` builtin instead: no
+  // output, exit 1, and nothing to tell the user their bin never ran. The fix
+  // is to hand the shell the resolved path, so its own lookup never applies.
+  assert.equal(run("test"), "the installed bin");
 });
 
 test("a script wins over an installed bin of the same name", () => {

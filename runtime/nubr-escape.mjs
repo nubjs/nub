@@ -51,13 +51,20 @@ export function cmdEscape(input, doubleEscape) {
   return doubleEscape ? caret(result) : result;
 }
 
+// Does this path name a batch file? cmd.exe re-parses a `.cmd`/`.bat` command
+// line a second time, which is what the second caret pass defends against.
+export function isBatchFile(p) {
+  const lower = String(p).toLowerCase();
+  return lower.endsWith(".cmd") || lower.endsWith(".bat");
+}
+
 // Best-effort: does the script body invoke a batch file? LIMITATION, shared with
 // the Rust port — npm resolves the token through PATH/PATHEXT, so a body like
 // `eslint .` whose `eslint` resolves to `eslint.cmd` is treated as non-batch and
-// single-escaped here.
+// single-escaped here. `commandLine` below does not inherit the limitation,
+// because there the target is already resolved.
 export function bodyTargetsBatchFile(body) {
-  const first = body.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-  return first.endsWith(".cmd") || first.endsWith(".bat");
+  return isBatchFile(body.trim().split(/\s+/)[0] ?? "");
 }
 
 // The shell Node will actually use for `spawn(..., { shell })`: ComSpec on
@@ -86,4 +93,22 @@ export function spliceArgs(body, args, shell = effectiveShell()) {
     useCmd ? cmdEscape(String(a), doubleEscape) : shEscape(String(a)),
   );
   return `${body} ${escaped.join(" ")}`;
+}
+
+// A command line for an ALREADY-RESOLVED executable, as opposed to a script body
+// the author wrote. Two things follow from knowing the real target, and both are
+// bugs when a bare name is passed to the shell instead:
+//
+//   - The NAME is not the program. `sh -c "test …"` runs the shell's `test`
+//     builtin, not `node_modules/.bin/test`, and reports exit 1 with no output —
+//     a silent wrong answer. Escaping the absolute path removes the shell's
+//     lookup from the picture entirely (and survives spaces in the path).
+//   - The batch test runs against the PATH, so a Windows `.cmd` shim gets the
+//     second caret pass it needs. Deriving it from the body could not: the first
+//     whitespace token of `C:\My Project\...\vitest.cmd` is `C:\My`.
+export function commandLine(commandPath, args, shell = effectiveShell()) {
+  const useCmd = isCmdShell(shell);
+  const doubleEscape = useCmd && isBatchFile(commandPath);
+  const esc = (s, dbl) => (useCmd ? cmdEscape(String(s), dbl) : shEscape(String(s)));
+  return [esc(commandPath, false), ...args.map((a) => esc(a, doubleEscape))].join(" ");
 }

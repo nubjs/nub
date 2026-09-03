@@ -12,6 +12,7 @@ import {
   shEscape,
   cmdEscape,
   bodyTargetsBatchFile,
+  commandLine,
   isCmdShell,
   spliceArgs,
 } from "../runtime/nubr-escape.mjs";
@@ -69,6 +70,23 @@ test("only a real cmd shell selects cmd escaping", () => {
 
 test("splicing returns the body untouched when there are no arguments", () => {
   assert.equal(spliceArgs("jest --ci", [], "/bin/sh"), "jest --ci");
+});
+
+test("a resolved .cmd target gets the second caret pass a script body cannot", () => {
+  // The whole point of resolving the bin before building the command line: npm
+  // double-escapes when the target re-parses, and a bare `vitest` in a script
+  // body cannot be known to be `vitest.cmd`. `a&b` single-escaped is `a^&b`.
+  const shim = "C:\\proj\\node_modules\\.bin\\vitest.cmd";
+  assert.match(commandLine(shim, ["a&b"], "cmd.exe"), /a\^\^\^&b$/);
+  // A non-batch target on the same shell stays single-escaped.
+  assert.match(commandLine("C:\\proj\\node_modules\\.bin\\tool.exe", ["a&b"], "cmd.exe"), /a\^&b$/);
+});
+
+test("a resolved command path is escaped, so a space in it cannot split", () => {
+  assert.equal(
+    commandLine("/My Project/node_modules/.bin/tool", ["--flag"], "/bin/sh"),
+    "'/My Project/node_modules/.bin/tool' --flag",
+  );
 });
 
 test("splicing escapes for the shell it is given, not for the platform", () => {
