@@ -555,12 +555,31 @@ fn format_undated_help(d: &UndatedDetails) -> String {
 }
 
 pub(crate) fn format_registry_help(name: &str, msg: &str) -> String {
+    format_registry_help_for(name, msg, aube_util::agent_sandbox::detect())
+}
+
+/// `sandbox` is the coding agent's sandbox around this process, injected so
+/// tests can pin the help without touching the environment. It changes ONE
+/// arm: a request the registry client classified as a network deny names the
+/// sandbox as the cause, because "check auth" is advice an agent may act on
+/// by poking at credentials. Every other failure inside a sandbox — auth,
+/// integrity, a 5xx from an allowlisted registry — keeps its own help;
+/// sandbox presence alone says nothing about why a request failed.
+pub(crate) fn format_registry_help_for(
+    name: &str,
+    msg: &str,
+    sandbox: Option<aube_util::agent_sandbox::AgentSandbox>,
+) -> String {
     let kind = classify_registry_error(msg);
     let mut s = String::new();
     if !name.is_empty() && name != "(resolver)" {
         s.push_str(&format!("package: {name}\n"));
     }
-    s.push_str(match kind {
+    let help: &str = match kind {
+        RegistryErrorKind::NetworkDenied => {
+            s.push_str(&aube_util::agent_sandbox::network_denied_help_for(sandbox));
+            return s;
+        }
         RegistryErrorKind::Tarball => {
             "tarball download or integrity check failed — try `aube store prune` to clear the cache; if the lockfile references a tarball that moved, delete the lockfile entry for this package and re-resolve"
         }
@@ -582,7 +601,8 @@ pub(crate) fn format_registry_help(name: &str, msg: &str) -> String {
         RegistryErrorKind::Generic => {
             "registry operation failed — see the message above for the underlying cause"
         }
-    });
+    };
+    s.push_str(help);
     s
 }
 
@@ -691,6 +711,9 @@ fn suggest_similar<'a>(needle: &str, choices: &'a [String]) -> Option<&'a str> {
 }
 
 pub(crate) enum RegistryErrorKind {
+    /// The registry client's own verdict (`aube_registry::Error::NetworkDenied`):
+    /// the socket was refused by policy, so no retry and no credential fixes it.
+    NetworkDenied,
     Tarball,
     Fetch,
     Git,
@@ -721,6 +744,10 @@ pub(crate) fn classify_registry_error(msg: &str) -> RegistryErrorKind {
         RegistryErrorKind::Hook
     } else if lower.starts_with("unparseable local specifier") || lower.contains("workspace:") {
         RegistryErrorKind::LocalSpec
+    } else if lower.contains("network access denied") {
+        // Before the tarball/fetch arms: a denied tarball download embeds
+        // the word "tarball" and the URL, and both would steal it.
+        RegistryErrorKind::NetworkDenied
     } else if lower.contains("tarball") || lower.contains("integrity") {
         RegistryErrorKind::Tarball
     } else if lower.starts_with("fetch ") || lower.contains("packument") || lower.contains("http") {

@@ -1244,6 +1244,7 @@ fn acquire_smol_node(
     external_smol: Option<(PathBuf, NodeVersion)>,
 ) -> Result<(PathBuf, NodeVersion, NodeOrigin)> {
     let target = smol_target(m)?;
+    let probes = cache::ProbeStore::resolve();
 
     // 1. nub's Node store, then every version manager's install root. nub's store
     //    is checked first (it is the one nub itself provisioned into), but WITHIN
@@ -1259,7 +1260,7 @@ fn acquire_smol_node(
             return Ok((path, ver, NodeOrigin::Discovered));
         }
         for (path, _) in candidates {
-            if let Some(actual) = probe_node_version(&path) {
+            if let Some(actual) = probe_node_version(&probes, &path) {
                 if smol_candidate_matches(&actual, &target) {
                     return Ok((path, actual, NodeOrigin::Discovered));
                 }
@@ -1419,11 +1420,17 @@ fn discover_external_smol_node(m: &Manifest) -> Result<Option<(PathBuf, NodeVers
         return Ok(trusted);
     }
     ranked.sort_by(|(_, left), (_, right)| right.cmp(left));
+    // Gate-checked once for the whole pass rather than once per candidate: this
+    // loop runs to the END of the ranked list whenever no external Node satisfies
+    // the payload (an exact `--target` the user has not installed is the ordinary
+    // way to hit that), so the per-lookup cost is multiplied by every Node on the
+    // machine.
+    let probes = cache::ProbeStore::resolve();
     let verified = ranked.into_iter().find_map(|(path, _)| {
-        let actual = probe_node_version(&path)?;
+        let actual = probe_node_version(&probes, &path)?;
         smol_candidate_matches(&actual, &target).then_some((path, actual))
     });
-    Ok(verified.or_else(|| probe_path_node(&target)))
+    Ok(verified.or_else(|| probe_path_node(&probes, &target)))
 }
 
 /// Node stores to READ, nearest first: the probed cache base, then the location
@@ -1731,9 +1738,12 @@ fn select_path_node(
 
 /// Resolve `node` on PATH to its path + version, or `None` if absent, unparseable,
 /// or unsuitable for this payload.
-fn probe_path_node(target: &SmolTarget) -> Option<(PathBuf, NodeVersion)> {
+fn probe_path_node(
+    probes: &cache::ProbeStore,
+    target: &SmolTarget,
+) -> Option<(PathBuf, NodeVersion)> {
     let path = which_on_path(node_exe_name())?;
-    let ver = probe_node_version(&path)?;
+    let ver = probe_node_version(probes, &path)?;
     select_path_node((path, ver), target)
 }
 
@@ -1749,10 +1759,10 @@ fn probe_path_node(target: &SmolTarget) -> Option<(PathBuf, NodeVersion)> {
 ///
 /// A stale or untrusted entry simply means another exec, so every failure path here
 /// is the slow answer rather than a wrong one.
-fn probe_node_version(path: &Path) -> Option<NodeVersion> {
+fn probe_node_version(probes: &cache::ProbeStore, path: &Path) -> Option<NodeVersion> {
     let stamp = node_binary_stamp(path);
     if let Some(stamp) = &stamp {
-        if let Some(version) = cache::read_node_version(path, stamp) {
+        if let Some(version) = probes.read_node_version(path, stamp) {
             if let Ok(parsed) = version.parse() {
                 phase_with(|| format!("  probe cache HIT: {}", path.display()));
                 return Some(parsed);
@@ -3060,7 +3070,7 @@ mod tests {
         let (owned, candidates) = best_node_in(dir, target, triple);
         owned.or_else(|| {
             candidates.into_iter().find_map(|(path, _)| {
-                let actual = probe_node_version(&path)?;
+                let actual = probe_node_version(&cache::ProbeStore::resolve(), &path)?;
                 smol_candidate_matches(&actual, target).then_some((path, actual))
             })
         })
@@ -4580,7 +4590,7 @@ mod tests {
         // And the control for the claim above: these fixtures really are unprobeable,
         // so the assertions cannot be passing because probing happens to succeed.
         assert!(
-            probe_node_version(&ranked[0].0).is_none(),
+            probe_node_version(&cache::ProbeStore::resolve(), &ranked[0].0).is_none(),
             "the fixture must be unprobeable, otherwise this test proves nothing"
         );
         let _ = fs::remove_dir_all(&base);

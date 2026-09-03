@@ -484,6 +484,11 @@ fn wire_global_bin_path(code: i32) {
 
 fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::add::AddArgs) = parse_or_return!(typed, args);
+    // Before `engine_session`, for the reason `run_install` does it — and
+    // this is also the path `nub install <pkg> --pnpmfile <p>` lands on.
+    if verb.pnpmfile.is_some() || verb.global_pnpmfile.is_some() || verb.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
+    }
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
@@ -546,6 +551,10 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             "warn: --depth {depth} is ignored; nub only refreshes direct deps. \
              For a full refresh, delete the lockfile and run `nub install`."
         ));
+    }
+    // Same ordering requirement as `run_install` / `run_add`.
+    if verb.pnpmfile.is_some() || verb.global_pnpmfile.is_some() || verb.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
     }
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {
@@ -1172,6 +1181,13 @@ pub struct InstallFlags {
     pub prod: bool,
     pub dev: bool,
     pub ignore_scripts: bool,
+    /// `--pnpmfile` / `--global-pnpmfile` / `--ignore-pnpmfile`. An explicitly
+    /// named path is the documented way to run hooks in a project whose
+    /// incumbent is not pnpm — the scope warning in `pm_engine::mod` tells the
+    /// user exactly that, so the flags have to exist for the advice to hold.
+    pub pnpmfile: Option<std::path::PathBuf>,
+    pub global_pnpmfile: Option<std::path::PathBuf>,
+    pub ignore_pnpmfile: bool,
     pub no_optional: bool,
     pub offline: bool,
     pub prefer_offline: bool,
@@ -1238,6 +1254,12 @@ impl WorkspaceFilterFlags {
 
 /// `nub install` — route through the embedded aube install engine.
 pub fn run_install(flags: InstallFlags) -> Result<i32> {
+    // Before `engine_session`, which drives the brand preflight that emits the
+    // "pnpmfile ignored" scope warning: an invocation that named its own
+    // pnpmfile has already answered the question that warning asks.
+    if flags.pnpmfile.is_some() || flags.global_pnpmfile.is_some() || flags.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
+    }
     let session = super::engine_session(flags.dir.as_deref())?;
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
@@ -1267,6 +1289,13 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     args.prod = flags.prod || config.dep_selection.prod;
     args.dev = flags.dev || config.dep_selection.dev;
     args.ignore_scripts = flags.ignore_scripts;
+    // An explicitly named pnpmfile loads whatever the project's incumbent is
+    // — `detect`'s `pnpmfile_default_enabled` gate only ever suppresses the
+    // cwd DEFAULT. That is the remedy the non-pnpm-incumbent scope warning
+    // offers, so these three ride straight through to the engine.
+    args.pnpmfile = flags.pnpmfile.clone();
+    args.global_pnpmfile = flags.global_pnpmfile.clone();
+    args.ignore_pnpmfile = flags.ignore_pnpmfile;
     args.no_optional = flags.no_optional || config.dep_selection.no_optional;
     args.offline = flags.offline || config.offline;
     args.prefer_offline = flags.prefer_offline;

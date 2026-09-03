@@ -1667,7 +1667,7 @@ impl CompilePreamble {
     /// on the source path and retains its current layout.
     fn worker_root(&self, source: &Path) -> Result<String> {
         let source = canonicalize_for_bundler(source);
-        let hash = format!("{:x}", Sha256::digest(source.to_string_lossy().as_bytes()));
+        let hash = hex::encode(Sha256::digest(source.to_string_lossy().as_bytes()));
         let id = format!("\0nub:compile-worker-{hash}");
         let mut roots = self
             .roots
@@ -2525,7 +2525,7 @@ fn worker_output_name(project_root: &Path, source: &Path, stem: &str) -> String 
         .unwrap_or_else(|| source.to_path_buf())
         .to_string_lossy()
         .replace('\\', "/");
-    let hash = format!("{:x}", Sha256::digest(logical.as_bytes()));
+    let hash = hex::encode(Sha256::digest(logical.as_bytes()));
     worker_output_name_with_hash(stem, &hash)
 }
 
@@ -4031,7 +4031,7 @@ impl ExternalImports {
             hash.update((part.len() as u64).to_le_bytes());
             hash.update(part.as_bytes());
         }
-        let id = format!("\0nub:compile-external:{:x}", hash.finalize());
+        let id = format!("\0nub:compile-external:{}", hex::encode(hash.finalize()));
         Some(ExternalImport {
             id,
             specifier: specifier.to_string(),

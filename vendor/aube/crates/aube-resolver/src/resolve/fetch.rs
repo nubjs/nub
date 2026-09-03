@@ -1,4 +1,4 @@
-use crate::{Error, FxHashSet, Resolver};
+use crate::{Error, FxHashMap, FxHashSet, Resolver};
 use aube_registry::Packument;
 use aube_registry::client::RegistryClient;
 use aube_util::adaptive::AdaptiveLimit;
@@ -20,9 +20,9 @@ use tokio::task::JoinSet;
 /// keeping it compatible with the BFS loop's `&mut self.resolver.cache`
 /// access pattern.
 pub(super) struct FetchScheduler {
-    in_flight: JoinSet<Result<(String, Packument, bool), Error>>,
+    in_flight: JoinSet<Result<Fetched, Error>>,
     in_flight_names: FxHashSet<String>,
-    primer_seeded_names: FxHashSet<String>,
+    primer_seeded_names: FxHashMap<String, PrimerSeed>,
     sem: Arc<AdaptiveLimit>,
     client: Arc<RegistryClient>,
     cache_dir: Option<PathBuf>,
@@ -31,15 +31,28 @@ pub(super) struct FetchScheduler {
     needs_time: bool,
 }
 
-pub(super) type FetchOutcome =
-    Option<Result<Result<(String, Packument, bool), Error>, tokio::task::JoinError>>;
+/// What the fetch task knows about a packument it served from the primer.
+#[derive(Clone, Copy)]
+pub(super) struct PrimerSeed {
+    /// The seed was age-pruned (`Seed::sparse`): old versions that are
+    /// neither the highest of their `major.minor` line nor a dist-tag
+    /// target are missing, so a pick from it can sit below a version the
+    /// registry holds (`semver_util::sparse_pick_needs_refetch`).
+    pub(super) sparse: bool,
+}
+
+/// A landed packument: `(name, packument, primer_seed)`, the last `Some`
+/// when the bundled primer served it.
+pub(super) type Fetched = (String, Packument, Option<PrimerSeed>);
+
+pub(super) type FetchOutcome = Option<Result<Result<Fetched, Error>, tokio::task::JoinError>>;
 
 impl FetchScheduler {
     pub(super) fn new(resolver: &Resolver, sem: Arc<AdaptiveLimit>, needs_time: bool) -> Self {
         Self {
             in_flight: JoinSet::new(),
             in_flight_names: FxHashSet::default(),
-            primer_seeded_names: FxHashSet::default(),
+            primer_seeded_names: FxHashMap::default(),
             sem,
             client: resolver.client.clone(),
             cache_dir: resolver.packument_cache_dir.clone(),
@@ -98,13 +111,13 @@ impl FetchScheduler {
         self.in_flight_names.remove(name);
     }
 
-    pub(super) fn note_primer_seeded(&mut self, name: String) {
-        self.primer_seeded_names.insert(name);
+    pub(super) fn note_primer_seeded(&mut self, name: String, seed: PrimerSeed) {
+        self.primer_seeded_names.insert(name, seed);
     }
 
     /// Returns true if `name` was marked as primer-seeded, removing it.
     pub(super) fn take_primer_seeded(&mut self, name: &str) -> bool {
-        self.primer_seeded_names.remove(name)
+        self.primer_seeded_names.remove(name).is_some()
     }
 
     /// Non-consuming peek: is `name` currently flagged as primer-seeded?
@@ -112,7 +125,15 @@ impl FetchScheduler {
     /// before deciding whether to consume the flag and refetch (frozen
     /// picks are accepted as-is, so they must not eagerly clear it).
     pub(super) fn is_primer_seeded(&self, name: &str) -> bool {
-        self.primer_seeded_names.contains(name)
+        self.primer_seeded_names.contains_key(name)
+    }
+
+    /// Non-consuming peek: was `name` seeded from an age-pruned primer
+    /// entry? False for a dense seed and for a name not primer-seeded.
+    pub(super) fn primer_seed_is_sparse(&self, name: &str) -> bool {
+        self.primer_seeded_names
+            .get(name)
+            .is_some_and(|seed| seed.sparse)
     }
 
     pub(super) async fn drain(&mut self) {
@@ -145,12 +166,12 @@ struct FetchInputs {
 
 /// Body of the per-packument fetch task spawned by the resolver.
 ///
-/// Returns `(name, packument, from_primer)` — `from_primer` is true
+/// Returns `(name, packument, primer_seed)` — `primer_seed` is `Some`
 /// when the result came from the bundled metadata primer (only its
 /// capped slice of high-traffic histories), so the caller knows a
 /// range miss must trigger a live registry refetch before reporting
 /// `ERR_AUBE_NO_MATCHING_VERSION`.
-async fn fetch_one_packument(inputs: FetchInputs) -> Result<(String, Packument, bool), Error> {
+async fn fetch_one_packument(inputs: FetchInputs) -> Result<Fetched, Error> {
     let FetchInputs {
         name,
         client,
@@ -195,7 +216,7 @@ async fn fetch_one_packument(inputs: FetchInputs) -> Result<(String, Packument, 
             || format!(r#"{{"name":{}}}"#, aube_util::diag::jstr(&name)),
         );
         permit.record_cancelled();
-        return Ok((name, packument, false));
+        return Ok((name, packument, None));
     }
     let use_metadata_primer = (force_metadata_primer
         || client.uses_default_npm_registry_for(&name))
@@ -246,7 +267,13 @@ async fn fetch_one_packument(inputs: FetchInputs) -> Result<(String, Packument, 
             || format!(r#"{{"name":{}}}"#, aube_util::diag::jstr(&name)),
         );
         permit.record_cancelled();
-        return Ok((name, packument, true));
+        return Ok((
+            name,
+            packument,
+            Some(PrimerSeed {
+                sparse: seed.sparse,
+            }),
+        ));
     }
     let fetch_outcome = if needs_time {
         match full_cache_dir.as_ref() {
@@ -288,5 +315,5 @@ async fn fetch_one_packument(inputs: FetchInputs) -> Result<(String, Packument, 
         "packument_network_hit",
         || format!(r#"{{"name":{}}}"#, aube_util::diag::jstr(&name)),
     );
-    Ok((name, packument, false))
+    Ok((name, packument, None))
 }

@@ -54,12 +54,12 @@ dotenvy = "0.15"
 # question, and takes CMake out of the cross-compile path as a bonus.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 glob-match = "0.2"
+hex = "0.4"
 getrandom = "0.3"
 liblzma = { version = "0.4", features = ["static"] }
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
-    "rustls-tls",
-    "rustls-tls-native-roots",
+    "rustls",
     "socks",
     "gzip",
 ] }
@@ -81,8 +81,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # sha1 (ancient PM publishes carry only a sha1 dist.shasum) sits alongside sha2.
 # Pinned 0.10 to share `digest` 0.10 with sha2 — a single Digest trait, no second
 # major. sha512 is preferred; sha1 is the fail-closed fallback only.
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = "0.11"
+sha2 = "0.11"
 tar = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 thiserror = "2"
@@ -112,7 +112,7 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 tar = { version = "0.4", optional = true }
 zstd = { version = "0.13", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 # Bakes the R2 per-entrypoint BLAKE3 digests (the runtime side decodes with the
 # `blake3` dep above). build-deps never reach the shipped binary.
 blake3 = { version = "1", optional = true }

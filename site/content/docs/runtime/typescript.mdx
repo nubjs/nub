@@ -36,7 +36,7 @@ Nub reads the nearest `tsconfig.json` for the [resolution](/docs/runtime/resolut
 }
 ```
 
-A config Nub cannot read in full stops the run. Since `extends` is where a project usually keeps `strict`, `target` and its path aliases, continuing would run your code under options you never wrote.
+A config Nub cannot read in full stops the run.
 
 ```console
 $ nub main.ts
@@ -45,7 +45,7 @@ Error: the project's tsconfig.json could not be read in full (see above).
 Fix the config, or use --node to run without Nub's TypeScript features, path aliases included.
 ```
 
-Compat mode turns off every config-derived behavior, so `--node` gets past the error but does not restore what the config was setting up. Fixing the config is the way to keep path aliases and decorator flags working.
+Compat mode turns off every config-derived behavior, so `--node` gets past the error but loses what the config was setting up — path aliases and decorator flags included.
 
 <Callout>
 Read the [full docs](https://www.typescriptlang.org/tsconfig/) for `tsconfig.json` on typescriptlang.org.
@@ -73,20 +73,20 @@ JSX and decorators each have their own page: see [JSX](/docs/runtime/jsx) for th
 
 ## Plain JavaScript
 
-Your project's plain JavaScript — `.js`, `.mjs`, and `.cjs` — goes through the same pipeline. Modern syntax that Nub's Node floor can't parse natively is lowered exactly as it is in a `.ts` file, so identical source behaves the same whatever extension it carries: `using` / `await using`, a `v`-flag (unicode-sets) RegExp like `/\p{Letter}/v`, and decorators all run.
+Your project's plain JavaScript — `.js`, `.mjs`, and `.cjs` — goes through the same pipeline. Modern syntax that Nub's Node floor can't parse natively is lowered as it is in a `.ts` file, so identical source behaves the same whatever extension it carries: `using` / `await using`, a `v`-flag (unicode-sets) RegExp like `/\p{Letter}/v`, and decorators all run.
 
 ```js title="app.js"
 using handle = openHandle();
 const letters = /\p{Letter}/v;
 ```
 
-A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer. Files inside `node_modules` are never transpiled; they load as the package shipped them, on every tier.
+A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer. Files inside `node_modules` are never transpiled, on any tier.
 
 JSX in a `.js` file is out of scope — use `.jsx`. Nub parses `.js` as JavaScript, not JSX, so a `<` is a comparison, not an element.
 
 ## Explicit resource management
 
-Explicit Resource Management — the `using` and `await using` declarations — runs on Nub's entire Node floor. Older Node (Node 22's V8) cannot parse `using` natively — it's a hard `SyntaxError` — so Nub's transpiler lowers it to the helper-based form before Node ever sees it.
+Explicit Resource Management — the `using` and `await using` declarations — runs on Nub's entire Node floor. Node 22's V8 cannot parse `using`, so Nub's transpiler lowers it to the helper-based form.
 
 ```ts
 class Handle {
@@ -107,7 +107,7 @@ disposed
 after scope
 ```
 
-The lowering targets `es2022` — the highest target that still rewrites `using` while leaving everything Node 22 already supports (top-level await, class fields, private methods) untouched. The disposal helper resolves through Nub's vendored runtime; you don't install anything.
+The lowering targets `es2022` — the highest target that still rewrites `using` while leaving everything Node 22 already supports (top-level await, class fields, private methods) untouched. The disposal helper resolves through Nub's vendored runtime.
 
 <Callout>
 Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/using) for `using` on developer.mozilla.org.
@@ -128,6 +128,6 @@ Error: kaboom
     at Object.<anonymous> (/path/to/app.ts:4:1)
 ```
 
-The stack frame reports `app.ts:2:8` — the line in your source, not the transpiled output. To turn it off, pass `--no-enable-source-maps`.
+To turn it off, pass `--no-enable-source-maps`.
 
 Source maps are injected on every supported Node version except **26.0 through 26.7**, where a Node regression ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)) makes a no-message `assert(false)` throw a `TypeError` instead of an `AssertionError` when source maps are on. Nub withholds the flag across that band, so stack traces are not remapped there. Every other version gets source maps: 18.19 through 25.x, and 26.8 onward, where the upstream fix ships.

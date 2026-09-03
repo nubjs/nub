@@ -456,7 +456,23 @@ impl Store {
             );
         }
 
-        let store_path = self.file_path_from_hex(&hex_hash);
+        // Content the read-only fallback store already holds is shared from
+        // there: no bytes, and no `-exec` marker (a prune-time hint the
+        // index does not need), are ever written toward that store.
+        if let Some(shared) = self.fallback_file_with_len(&hex_hash, content.len() as u64) {
+            if aube_util::diag::enabled() {
+                aube_util::diag::instant_lazy(aube_util::diag::Category::Store, "cas_hit", || {
+                    format!(r#"{{"size":{}}}"#, content.len())
+                });
+            }
+            return Ok(StoredFile {
+                hex_hash,
+                store_path: shared,
+                executable,
+                size: Some(content.len() as u64),
+            });
+        }
+        let store_path = self.write_path_from_hex(&hex_hash);
         let _diag_write =
             aube_util::diag::Span::new(aube_util::diag::Category::Store, "import_bytes_write")
                 .with_meta_fn(|| format!(r#"{{"size":{}}}"#, content.len()));
@@ -634,7 +650,20 @@ impl Store {
                 || format!(r#"{{"size":{}}}"#, stored_bytes.len()),
             );
         }
-        let store_path = self.file_path_from_hex(&hex_hash);
+        if let Some(shared) = self.fallback_file_with_len(&hex_hash, stored_bytes.len() as u64) {
+            if aube_util::diag::enabled() {
+                aube_util::diag::instant_lazy(aube_util::diag::Category::Store, "cas_hit", || {
+                    format!(r#"{{"size":{}}}"#, stored_bytes.len())
+                });
+            }
+            return Ok(StoredFile {
+                hex_hash,
+                store_path: shared,
+                executable,
+                size: Some(stored_bytes.len() as u64),
+            });
+        }
+        let store_path = self.write_path_from_hex(&hex_hash);
 
         // If a prior import already committed this content, reuse it —
         // the file is already stored (compressed or not) and the kernel

@@ -2350,7 +2350,7 @@ fn sha256_of_app(files: &[AppFile<Vec<u8>>]) -> String {
         h.update(&file.bytes);
         h.update([u8::from(file.executable)]);
     }
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// The source file's Unix mode, or `None` where the platform has none — see

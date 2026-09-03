@@ -118,6 +118,12 @@ pub struct RegisteredProject {
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    /// A second CAS root consulted, read-only, when `root` lacks a file or
+    /// package index. Set when `root` is a project-local fallback standing
+    /// in for a global store this process may read but not write (a coding
+    /// agent's sandbox), so a warm global store still serves the install
+    /// and only NEW content lands in the fallback.
+    read_fallback: Option<PathBuf>,
     cache_dir: PathBuf,
     /// Root of the global virtual store. Defaults to
     /// `<cache_dir>/virtual-store` and is overridden wholesale by the
@@ -174,6 +180,7 @@ impl Store {
     pub fn with_dirs(root: PathBuf, cache_dir: PathBuf) -> Self {
         let store = Self {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
@@ -191,6 +198,35 @@ impl Store {
         self
     }
 
+    /// Read through to a second CAS root (`<store>/v1/files`) when this
+    /// store lacks a file or index. Nothing is ever written there.
+    #[must_use]
+    pub fn with_read_fallback(mut self, root: PathBuf) -> Self {
+        self.read_fallback = Some(root);
+        self
+    }
+
+    /// Prefer `primary` if it exists; else the same relative location under
+    /// the read fallback if THAT exists; else `primary`, so a miss writes to
+    /// this store. `rel` is the path relative to the CAS root's parent
+    /// (`v1/`), which covers both `files/<shard>/<rest>` and `index/...`.
+    fn read_through(&self, primary: PathBuf, rel: &Path) -> PathBuf {
+        if primary.exists() {
+            return primary;
+        }
+        match &self.read_fallback {
+            Some(fallback) => {
+                let candidate = fallback.parent().unwrap_or(fallback).join(rel);
+                if candidate.exists() {
+                    candidate
+                } else {
+                    primary
+                }
+            }
+            None => primary,
+        }
+    }
+
     /// Open the store at a specific path (cache dir derived from store root).
     /// Used by tests that need a fully isolated layout; production code
     /// should prefer `with_dirs`.
@@ -198,6 +234,7 @@ impl Store {
         let cache_dir = root.parent().unwrap_or(&root).join(CACHE_DIR_NAME);
         Self {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
@@ -570,10 +607,55 @@ impl Store {
         Some(self.file_path_from_hex(&hex_hash))
     }
 
-    /// Get the path to a file in the store by its hex hash.
+    /// Get the path to a file in the store by its hex hash. A READ path: it
+    /// resolves to the read fallback when only that holds the file. Writers
+    /// use [`Self::write_path_from_hex`], which never leaves this store.
     pub fn file_path_from_hex(&self, hex_hash: &str) -> PathBuf {
+        let primary = self.write_path_from_hex(hex_hash);
+        if self.read_fallback.is_none() {
+            return primary;
+        }
+        let (shard, rest) = hex_hash.split_at(2);
+        let files_leaf = self.root.file_name().map(PathBuf::from).unwrap_or_default();
+        self.read_through(primary, &files_leaf.join(shard).join(rest))
+    }
+
+    /// Where a NEW CAS entry for `hex_hash` is created: always under this
+    /// store's own root. The read fallback is a store this process may not
+    /// write, so no create, temp file, or marker may ever be aimed at it.
+    pub(crate) fn write_path_from_hex(&self, hex_hash: &str) -> PathBuf {
         let (shard, rest) = hex_hash.split_at(2);
         self.root.join(shard).join(rest)
+    }
+
+    /// The read fallback's copy of `hex_hash` when it holds exactly `len`
+    /// bytes, so an import can share it instead of duplicating the bytes
+    /// into this store. `None` without a fallback or on a miss.
+    pub(crate) fn fallback_file_with_len(&self, hex_hash: &str, len: u64) -> Option<PathBuf> {
+        let fallback = self.read_fallback.as_ref()?;
+        let (shard, rest) = hex_hash.split_at(2);
+        let candidate = fallback.join(shard).join(rest);
+        cas::cas_file_matches_len(&candidate, len).then_some(candidate)
+    }
+}
+
+/// `Error::Io`'s message. A permission denial on a store path is almost
+/// always the store location, not the file — a sandbox or a store on a
+/// read-only mount — so it names the remedy (`store-dir`) and, when a coding
+/// agent's sandbox is detected, the sandbox; a bare "Operation not permitted"
+/// on a CAS temp path sent users hunting in the wrong place.
+fn io_error_message(path: &Path, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => {
+            let sandbox = aube_util::agent_sandbox::detect()
+                .map(|s| format!(", or rerun the command outside the {} sandbox", s.label()))
+                .unwrap_or_default();
+            format!(
+                "store is not writable at {}: {e} — set `store-dir` in .npmrc to a writable location{sandbox}",
+                path.display()
+            )
+        }
+        _ => format!("I/O error at {}: {e}", path.display()),
     }
 }
 
@@ -583,7 +665,7 @@ pub enum Error {
     #[error("HOME environment variable not set")]
     #[diagnostic(code(ERR_AUBE_NO_HOME))]
     NoHome,
-    #[error("I/O error at {0}: {1}")]
+    #[error("{}", io_error_message(.0, .1))]
     Io(PathBuf, std::io::Error),
     #[error("file error: {0}")]
     Xx(String),
@@ -613,6 +695,7 @@ mod tests {
     fn store_for_migration_test(root: PathBuf, cache_dir: PathBuf) -> Store {
         Store {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
@@ -771,6 +854,135 @@ mod tests {
     fn test_integrity_to_hex_sha256() {
         let hex = integrity_to_hex("sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=").unwrap();
         assert_eq!(hex.len(), 64);
+    }
+
+    #[test]
+    fn read_fallback_serves_files_and_indexes_the_primary_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let hex = "abcdef1234567890abcdef1234567890";
+        let (shard, rest) = hex.split_at(2);
+        std::fs::create_dir_all(global.join(shard)).unwrap();
+        std::fs::write(global.join(shard).join(rest), b"warm").unwrap();
+        let index_rel = PathBuf::from(INDEX_SUBDIR).join("dep@1.0.0.json");
+        std::fs::create_dir_all(global.parent().unwrap().join(INDEX_SUBDIR)).unwrap();
+        std::fs::write(global.parent().unwrap().join(&index_rel), b"{}").unwrap();
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        // A file only the fallback holds resolves there; a miss everywhere
+        // resolves to the primary, so a write lands in the local store.
+        assert_eq!(store.file_path_from_hex(hex), global.join(shard).join(rest));
+        assert!(store.file_path_from_hex("ffff0000").starts_with(&local));
+        assert_eq!(
+            store.index_path("dep", "1.0.0", None).unwrap(),
+            global.parent().unwrap().join(&index_rel)
+        );
+        // Once the primary has its own copy, it wins.
+        std::fs::create_dir_all(local.join(shard)).unwrap();
+        std::fs::write(local.join(shard).join(rest), b"new").unwrap();
+        assert_eq!(store.file_path_from_hex(hex), local.join(shard).join(rest));
+    }
+
+    #[test]
+    fn import_shares_fallback_content_and_never_writes_toward_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let warm = b"bytes the global store already holds";
+        let seeded = Store::at(global.clone()).import_bytes(warm, false).unwrap();
+        let shard_dir = seeded.store_path.parent().unwrap().to_path_buf();
+        // Lock the global shard the way a sandbox would: any create, temp
+        // file, or marker aimed at it fails, so a write there cannot hide.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shard_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        let shared = store.import_bytes(warm, false).unwrap();
+        assert_eq!(
+            shared.store_path, seeded.store_path,
+            "warm content is shared, not copied"
+        );
+        assert!(
+            !store.write_path_from_hex(&shared.hex_hash).exists(),
+            "no duplicate lands in the local store"
+        );
+        // An executable import of the same content still shares it; the
+        // `-exec` marker is a prune hint, never written toward the fallback.
+        let shared_exec = store.import_bytes(warm, true).unwrap();
+        assert_eq!(shared_exec.store_path, seeded.store_path);
+        assert!(shared_exec.executable);
+        assert!(!local.exists(), "sharing writes nothing at all locally");
+        // New executable content lands in the local store, marker beside it.
+        let fresh = store.import_bytes(b"fresh executable", true).unwrap();
+        assert!(
+            fresh.store_path.starts_with(&local),
+            "{}",
+            fresh.store_path.display()
+        );
+        assert!(PathBuf::from(format!("{}-exec", fresh.store_path.display())).exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shard_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn stale_fallback_index_is_a_miss_left_in_place_and_shadowed_by_a_fresh_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let global_store = Store::at(global.clone());
+        // A global index whose CAS file is gone.
+        let mut stale = PackageIndex::default();
+        stale.insert(
+            "index.js".to_string(),
+            StoredFile {
+                hex_hash: "00ff".to_string(),
+                store_path: global.join("00").join("ff"),
+                executable: false,
+                size: Some(3),
+            },
+        );
+        global_store
+            .save_index("dep", "1.0.0", None, &stale)
+            .unwrap();
+        let global_index = global_store.index_dir().join("dep@1.0.0.json");
+        assert!(global_index.exists());
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        assert!(
+            store.load_index("dep", "1.0.0", None).is_none(),
+            "stale entry is a miss"
+        );
+        assert!(
+            global_index.exists(),
+            "a fallback entry is never deleted on staleness"
+        );
+        assert!(!store.invalidate_cached_index("dep", "1.0.0", None).unwrap());
+        assert!(
+            global_index.exists(),
+            "invalidation touches only the primary"
+        );
+
+        // The re-fetch this miss triggers saves into the local store, which
+        // then shadows the stale copy on every later read.
+        let fresh_file = store.import_bytes(b"abc", false).unwrap();
+        let mut fresh = PackageIndex::default();
+        fresh.insert("index.js".to_string(), fresh_file);
+        store.save_index("dep", "1.0.0", None, &fresh).unwrap();
+        assert!(store.index_dir().join("dep@1.0.0.json").exists());
+        let loaded = store
+            .load_index("dep", "1.0.0", None)
+            .expect("fresh index served");
+        assert!(loaded["index.js"].store_path.starts_with(&local));
+        assert!(store.invalidate_cached_index("dep", "1.0.0", None).unwrap());
+        assert!(global_index.exists());
     }
 
     #[test]

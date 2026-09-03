@@ -65,6 +65,30 @@ mod tests {
 
 /// Write a LockfileGraph as pnpm-lock.yaml v9 format.
 pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Result<(), Error> {
+    let lockfile = build(path, graph, manifest)?;
+    let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
+    let yaml = reformat_for_pnpm_parity(&yaml);
+    // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
+    // quarantine during the write used to leave the user with a
+    // truncated pnpm-lock.yaml on disk, next install failed to
+    // parse and the user thought their lockfile was gone. See
+    // atomic_write_lockfile for full rationale.
+    crate::atomic_write_lockfile(path, yaml.as_bytes())?;
+    Ok(())
+}
+
+/// Project a `LockfileGraph` onto pnpm's v9 lockfile schema without
+/// serializing it. Split out of [`write`] so the pnpmfile hook view
+/// ([`super::hook_view`]) hands hooks the exact same projection the
+/// writer puts on disk — dep-path translation, patch-hash suffixes,
+/// alias recovery and all — instead of a second, drifting one.
+/// `path` decides `pnpm-lock.yaml`-only behavior (native alias
+/// encoding) and roots the workspace-member manifest reads.
+pub(super) fn build(
+    path: &Path,
+    graph: &LockfileGraph,
+    manifest: &PackageJson,
+) -> Result<WritablePnpmLockfile, Error> {
     let native_pnpm_aliases = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -953,15 +977,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
         snapshots,
     };
 
-    let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
-    let yaml = reformat_for_pnpm_parity(&yaml);
-    // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
-    // quarantine during the write used to leave the user with a
-    // truncated pnpm-lock.yaml on disk, next install failed to
-    // parse and the user thought their lockfile was gone. See
-    // atomic_write_lockfile for full rationale.
-    crate::atomic_write_lockfile(path, yaml.as_bytes())?;
-    Ok(())
+    Ok(lockfile)
 }
 
 fn registry_tarball_url_is_not_derivable(
@@ -1036,7 +1052,7 @@ fn pruned_time_entries(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WritablePnpmLockfile {
+pub(super) struct WritablePnpmLockfile {
     lockfile_version: String,
     settings: WritableSettings,
     /// pnpm v9 emits a top-level `catalogs:` map immediately after

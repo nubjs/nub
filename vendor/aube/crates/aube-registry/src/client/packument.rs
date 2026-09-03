@@ -319,7 +319,7 @@ impl RegistryClient {
                         Err(err) => return Err(err),
                     }
                 }
-                Err(err) if !is_last => {
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
                     let is_timeout = retry_policy::is_timeout_error(&err);
                     let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
                         retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
@@ -554,7 +554,7 @@ impl RegistryClient {
                         Err(err) => return Err(err),
                     }
                 }
-                Err(err) if !is_last => {
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
                     let is_timeout = retry_policy::is_timeout_error(&err);
                     let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
                         retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
@@ -681,7 +681,7 @@ impl RegistryClient {
                         Err(err) => return Err(err),
                     }
                 }
-                Err(err) if !is_last => {
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
                     let is_timeout = retry_policy::is_timeout_error(&err);
                     let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
                         retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
@@ -906,7 +906,7 @@ impl RegistryClient {
                         Err(err) => return Err(err),
                     }
                 }
-                Err(err) if !is_last => {
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
                     let is_timeout = retry_policy::is_timeout_error(&err);
                     let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
                         retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());

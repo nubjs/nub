@@ -781,7 +781,7 @@ fn digest_files(files: &BTreeMap<String, Body>) -> String {
         hash.update(&body.bytes);
         hash.update([u8::from(body.executable)]);
     }
-    format!("{:x}", hash.finalize())
+    hex::encode(hash.finalize())
 }
 
 /// The source file's Unix mode, or `None` on a host that has none. Windows
@@ -800,7 +800,7 @@ fn source_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Island size for the build report, in the decimal units the rest of `compile`

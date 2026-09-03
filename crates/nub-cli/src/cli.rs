@@ -1373,6 +1373,20 @@ pub enum Command {
         #[arg(long)]
         ignore_scripts: bool,
 
+        /// Run this pnpmfile instead of the project's own one. Relative
+        /// paths resolve against the project root. Naming a path this way
+        /// is what loads hooks in a project whose incumbent is not pnpm.
+        #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+        pnpmfile: Option<PathBuf>,
+
+        /// Run this pnpmfile before the project's own one.
+        #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+        global_pnpmfile: Option<PathBuf>,
+
+        /// Skip `.pnpmfile.cjs` / `.pnpmfile.mjs` hooks for this install.
+        #[arg(long)]
+        ignore_pnpmfile: bool,
+
         /// Skip optionalDependencies.
         #[arg(long)]
         no_optional: bool,
@@ -1869,6 +1883,11 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
             "--os",
             "--cpu",
             "--libc",
+            // Same shape again: `nub install --pnpmfile hooks.cjs` would read
+            // the path as a package spec. Caught by `cli_grammar_parity` the
+            // day these two landed, exactly as the note above predicts.
+            "--pnpmfile",
+            "--global-pnpmfile",
         ];
         let mut i = 0;
         while i < body.len() {
@@ -3277,6 +3296,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             prod,
             dev,
             ignore_scripts,
+            pnpmfile,
+            global_pnpmfile,
+            ignore_pnpmfile,
             no_optional,
             offline,
             prefer_offline,
@@ -3303,6 +3325,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 prod,
                 dev,
                 ignore_scripts,
+                pnpmfile,
+                global_pnpmfile,
+                ignore_pnpmfile,
                 no_optional,
                 offline,
                 prefer_offline,
@@ -12090,6 +12115,16 @@ mod tests {
             Some(args(&["add", "--os", "linux", "react"])),
             "--os linux with a package routes to add, the os value is not mis-forwarded"
         );
+        // The pnpmfile path flags are the same shape once more, and shipped
+        // with exactly this bug: `--pnpmfile=h.cjs` parsed while
+        // `--pnpmfile h.cjs` read the path as a package spec.
+        for flag in ["--pnpmfile", "--global-pnpmfile"] {
+            assert_eq!(
+                install_to_add_args(&args(&["install", flag, "hooks.cjs"])),
+                None,
+                "nub install {flag} hooks.cjs stays on the native install path"
+            );
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,6 +50,41 @@ const FLOWS = [
     name: "install-file-dep",
     fixture: "install-file-dep",
     runs: [[NUB, "install"]], // no registry needed; exercises store + linker under the sandbox
+  },
+  {
+    name: "install-registry-warm",
+    fixture: "install-registry-warm",
+    // Lockfile-pinned registry dep. `none` runs first and warms the host store,
+    // so the sandboxed cells measure the warm path: can an install link from a
+    // store it may read but not write? Cell order is load-bearing.
+    runs: [[NUB, "install"]],
+  },
+  {
+    name: "install-registry-warm-nointegrity",
+    fixture: "install-registry-warm-nointegrity",
+    // Same warm dep, but the lockfile carries no integrity, so the warm read
+    // key is the URL→sha512 binding the `none` run wrote into the host store.
+    // The sandboxed cells must read that binding through from the store they
+    // cannot write, or they re-fetch and hit the network deny.
+    runs: [[NUB, "install"]],
+  },
+  {
+    name: "install-phantom-eject",
+    fixture: "install-phantom-eject",
+    // `@firebase/database` imports `@firebase/app` without declaring it, so
+    // the linker must EJECT it (real files in the project) instead of
+    // symlinking it into the sealed store. A fresh, empty data home makes
+    // every cell cold: a sandboxed cell that can reach the registry extracts
+    // these packages into the project-local store, so the eject decision has
+    // to read THAT store, not the global one. The probe reports which path was
+    // materialized, not just the exit code. Cells with no registry access fail
+    // at resolution; that is the pinned fact for them.
+    freshDataHome: true,
+    env: (ws) => ({ NUB_CACHE_DIR: join(ws, ".nub-cache") }),
+    runs: [
+      [NUB, "install"],
+      [NUB, "probe.cjs"],
+    ],
   },
   {
     name: "nubx-registry",
@@ -90,15 +125,22 @@ const SANDBOXES = [
       return { CODEX_HOME: codexHome };
     },
   },
-  {
-    name: "claude-srt",
+  srtSandbox("claude-srt", []),
+  // Claude Code with the npm registry allowlisted — the usual "let the agent
+  // install packages" configuration. Requests go through srt's local proxy.
+  srtSandbox("claude-srt-registry", ["registry.npmjs.org"]),
+];
+
+function srtSandbox(name, allowedDomains) {
+  return {
+    name,
     wrap: (argv, ws) => [join(BIN, "srt"), "-s", join(ws, "srt-settings.json"), "--", ...argv],
     env: (ws) => {
       writeFileSync(
         join(ws, "srt-settings.json"),
         JSON.stringify(
           {
-            network: { allowedDomains: [], deniedDomains: [] },
+            network: { allowedDomains, deniedDomains: [] },
             filesystem: {
               denyRead: [],
               allowRead: [],
@@ -112,29 +154,62 @@ const SANDBOXES = [
       );
       return {};
     },
-  },
-];
+  };
+}
 
 // ── normalization ───────────────────────────────────────────────────
 // Snapshots must be stable across machines, users, versions, and runs.
-function normalize(text, ws) {
+
+// miette wraps at 80 columns without a tty (COLUMNS is ignored), splitting long
+// paths and URLs mid-token; rejoin its `│ ` continuation lines so the path
+// placeholders can match. textwrap consumes the space at a word-boundary break,
+// breaks after a hyphen with nothing consumed, and force-splits an over-long
+// path/URL token exactly at the width — so the separator to put back is a
+// space unless the wrapped line ended in a hyphen, or ran the full 80 columns
+// while ending inside a path-shaped token.
+const MIETTE_WIDTH = 80;
+function dewrap(text) {
+  const out = [];
+  for (const line of text.split("\n")) {
+    const m = /^\s*│ (.*)$/.exec(line);
+    if (m && out.length > 0) {
+      const prev = out[out.length - 1];
+      const lastToken = prev.slice(prev.lastIndexOf(" ") + 1);
+      // a force-split token is cut mid-word, so it never ends at closing punctuation
+      const midToken = lastToken.includes("/") && !/[):;,]$/.test(lastToken);
+      const glued = prev.endsWith("-") || (prev.length >= MIETTE_WIDTH && midToken);
+      out[out.length - 1] = prev + (glued ? "" : " ") + m[1];
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
+
+function normalize(text, ws, dataHome) {
   const home = process.env.HOME ?? "";
+  // ANSI first, so the de-wrap sees visible widths; the fresh data home (when the
+  // flow has one) before HOME, since it lives under HOME
+  const plain = dewrap(text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, ""));
   return (
-    text
-      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "") // ANSI
-      // miette wraps at 80 columns without a tty (COLUMNS is ignored), splitting
-      // paths mid-token; rejoin its `│ ` continuation lines so the path
-      // placeholders below can match
-      .replace(/\n\s*│ /g, "")
+    (dataHome ? plain.replaceAll(dataHome, "<DATA>") : plain)
       .replaceAll(resolve(ws), "<WS>")
       .replaceAll(ws, "<WS>")
       .replace(/\/private<WS>/g, "<WS>")
       .replaceAll(home, "<HOME>")
       .replace(/\/private\/var\/folders\/[^\s"']+/g, "<TMP>")
       .replace(/\/var\/folders\/[^\s"']+/g, "<TMP>")
+      .replace(/\/tmp\/claude\/[^\s"']+/g, "<TMP>") // srt points TMPDIR here
       .replace(/nub \d+\.\d+\.\d+(-[A-Z]+)?/g, "nub <VERSION>")
       .replace(/\bv\d+\.\d+\.\d+\b/g, "v<VERSION>")
       .replace(/in \d+(\.\d+)?(ms|s)\b/g, "in <T>")
+      // tarballs fetch concurrently, so WHICH one a denied network fails on
+      // first is arbitrary; keep the deny, drop the coordinate and its chain
+      .replace(
+        /failed to fetch \S+: network access denied: error sending request for url \(\S+\)/g,
+        "failed to fetch <PKG>: network access denied: error sending request for url (<URL>)",
+      )
+      .replace(/\s*chain: \S+( > \S+)*/g, "")
       .replace(/\b[0-9a-f]{16,64}\b/g, "<HASH>")
       .replace(/\.nub-cas-\S+/g, ".nub-cas-<RAND>")
       .replace(/~?\d+(\.\d+)? ?[kMG]?B\b/g, "<SIZE>")
@@ -147,7 +222,11 @@ function normalize(text, ws) {
           !/^[⠁-⣿\s]*$/.test(l) &&
           !l.includes("█") &&
           // pure pacing noise: how many print depends on wall-clock timing
-          !l.includes("WARN_NUB_SLOW_METADATA"),
+          !l.includes("WARN_NUB_SLOW_METADATA") &&
+          // the install summary line's shape (one line or two, with or without
+          // resolve counts) depends on timing; the `+ pkg@version` lines carry the facts
+          !/^nub <VERSION>( · ✓ installed .*)?$/.test(l) &&
+          !l.startsWith("✓ resolved "),
       )
       .join("\n")
   );
@@ -157,7 +236,14 @@ function normalize(text, ws) {
 function runCell(sandbox, flow) {
   const ws = mkdtempSync(join(tmpdir(), `nub-asb-${sandbox.name}-${flow.name}-`));
   cpSync(join(HERE, "fixtures", flow.fixture), ws, { recursive: true });
-  const extraEnv = { ...sandbox.env(ws), ...(flow.env ? flow.env(ws) : {}) };
+  // A fresh data home lives under HOME, so it is empty AND — inside a
+  // sandbox — unwritable, exactly like the real one on a cold machine.
+  const dataHome = flow.freshDataHome ? mkdtempSync(join(homedir(), ".cache", "nub-asb-data-")) : undefined;
+  const extraEnv = {
+    ...sandbox.env(ws),
+    ...(flow.env ? flow.env(ws) : {}),
+    ...(dataHome ? { XDG_DATA_HOME: dataHome } : {}),
+  };
   const lines = [];
   for (const [i, argv] of flow.runs.entries()) {
     const wrapped = sandbox.wrap(argv, ws);
@@ -169,11 +255,12 @@ function runCell(sandbox, flow) {
       encoding: "utf8",
       timeout: 120_000,
     });
-    const out = normalize(`${r.stdout ?? ""}${r.stderr ?? ""}`, ws);
+    const out = normalize(`${r.stdout ?? ""}${r.stderr ?? ""}`, ws, dataHome);
     lines.push(`### run ${i + 1}: \`${argv.map((a) => (a === NUB ? "nub" : a)).join(" ")}\``);
     lines.push("", "```text", out || "(no output)", "```", "", `exit: ${r.status ?? `signal ${r.signal}`}`, "");
   }
   rmSync(ws, { recursive: true, force: true });
+  if (dataHome) rmSync(dataHome, { recursive: true, force: true });
   return lines.join("\n");
 }
 

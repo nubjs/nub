@@ -268,6 +268,17 @@ pub struct AddArgs {
         value_parser = parse_deny_build_value,
     )]
     pub deny_build: Vec<String>,
+    /// Add a global pnpmfile that runs before the local one.
+    ///
+    /// Mirrors pnpm's `--global-pnpmfile <path>`, which `pnpm add`
+    /// documents alongside `install`. `add` chains an install, and it is
+    /// that install which runs the hooks, so these three exist to steer
+    /// it rather than to do anything here.
+    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    pub global_pnpmfile: Option<std::path::PathBuf>,
+    /// Skip running `.pnpmfile.mjs` / `.pnpmfile.cjs` hooks for this add.
+    #[arg(long)]
+    pub ignore_pnpmfile: bool,
     /// Skip lifecycle scripts (no-op; aube already skips by default).
     #[arg(long, hide = true)]
     pub ignore_scripts: bool,
@@ -306,6 +317,13 @@ pub struct AddArgs {
     /// `package.json`. Mirrors `pnpm add --no-save-workspace-protocol`.
     #[arg(long, overrides_with = "save_workspace_protocol")]
     pub no_save_workspace_protocol: bool,
+    /// Run this pnpmfile instead of the project's own one.
+    ///
+    /// Mirrors pnpm's `--pnpmfile <path>`; relative paths resolve
+    /// against the project root. Like the two flags above it, this
+    /// steers the install `add` chains rather than acting here.
+    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    pub pnpmfile: Option<std::path::PathBuf>,
     /// Save the new dependency into the workspace's default catalog.
     ///
     /// Writes `catalog:` into `package.json` and seeds/upserts the
@@ -399,6 +417,9 @@ pub async fn run(
         save_workspace_protocol,
         no_save_workspace_protocol,
         workspace,
+        global_pnpmfile,
+        ignore_pnpmfile,
+        pnpmfile,
         ignore_scripts: _,
         no_save,
         ignore_workspace_root_check,
@@ -427,6 +448,32 @@ pub async fn run(
     reject_conflicting_build_flags(&allow_build, &deny_build)?;
 
     if global {
+        // Resolve the pnpmfile paths against the CALLER's cwd before
+        // handing them over: the global path chdirs into a throwaway
+        // install dir, and a relative path resolved after that hop would
+        // name a file inside the temporary directory.
+        //
+        // A deliberate divergence, not an oversight. pnpm resolves every
+        // pnpmfile path against the project PREFIX — `pathAbsolute(path,
+        // prefix)` in 11, and measured identical on 10.15.1, where `pnpm
+        // -C proj install --pnpmfile hooks.cjs` fails with `pnpmfile at
+        // "proj/hooks.cjs" is not found` for a file sitting in the cwd.
+        // Copying that would make the flag dead here rather than
+        // compatible: pnpm's global prefix is a stable `$PNPM_HOME/global`
+        // a user can drop a file into, while ours is `<pkg_dir>/<pid>-<ts>`
+        // (`global.rs`), created and removed per invocation, so no
+        // relative path could ever resolve inside it.
+        //
+        // A cwd this process cannot read is a failure the install itself
+        // would hit moments later, so leaving the path relative there is
+        // no worse and keeps this from being the error the user sees.
+        let caller_cwd = crate::dirs::cwd().ok();
+        let absolutise = |p: std::path::PathBuf| -> std::path::PathBuf {
+            match &caller_cwd {
+                Some(dir) if !p.is_absolute() => dir.join(p),
+                _ => p,
+            }
+        };
         return global::run_global(
             packages,
             global::GlobalAddOptions {
@@ -434,6 +481,9 @@ pub async fn run(
                 allow_low_downloads,
                 dangerously_allow_all_builds,
                 deny_build,
+                pnpmfile: pnpmfile.map(absolutise),
+                global_pnpmfile: global_pnpmfile.map(absolutise),
+                ignore_pnpmfile,
             },
             lockfile,
             network,
@@ -607,6 +657,11 @@ pub async fn run(
     // `--lockfile-only`: the resolver still runs and the lockfile +
     // manifest are written, but the linker never touches `node_modules`.
     install_opts.lockfile_only = lockfile_only;
+    // The chained install is what actually runs the hooks, so `add`'s
+    // pnpmfile flags only mean anything once they land here.
+    install_opts.pnpmfile = pnpmfile;
+    install_opts.global_pnpmfile = global_pnpmfile;
+    install_opts.ignore_pnpmfile = ignore_pnpmfile;
     let pipeline_result: miette::Result<()> =
         install::run_with_project_lock(install_opts, &lock).await;
 
