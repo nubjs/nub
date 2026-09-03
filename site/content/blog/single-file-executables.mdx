@@ -1,7 +1,7 @@
 ---
 title: "Introducing `nub compile` — single-file executables for Node.js"
 hnTitle: "Introducing `nub compile` — single-file executables for Node.js"
-description: Nub compiles a TypeScript entry into one executable for any of eight targets, from any one of them. The small shape embeds no runtime at all — 0.94 MB on disk, 504 KB on the wire.
+description: Single-file self-extracting executables for Node.js with support for all major operating systems, Node addons, and a runtime-free build that ships under a megabyte.
 author: Colin
 # PLACEHOLDER — set this to the v0.9 release date before merging. The post announces
 # `nub compile`, which is undocumented on the site until this PR lands, so the date is
@@ -9,50 +9,33 @@ author: Colin
 date: 2026-09-02
 ---
 
-Nub 0.9 adds `nub compile`, which turns a TypeScript or JavaScript entry point into a single executable that runs on machines with no Node installed.
+Nub 0.9 adds `nub compile`, which bundles a TypeScript or JavaScript entrypoint into a single-file executable.
 
-Bun and Deno have had this for years. Node has been circling it since 19.7.0 — SEA is still experimental, and it makes you bring your own bundler and inject the blob into a copied binary yourself. Nub builds on stock Node instead. A hello world compiles to 29.5 MB on my MacBook — the same file under Bun is 63 MB — or to 0.94 MB with `--smol`, which skips the embedded runtime entirely.
+```console
+$ nub compile cli.ts
+Bundling cli.ts …
+Stripped + ad-hoc re-signed the embedded Node
+Compiled cli — embed shape, Node 26.8.1, darwin-arm64, 29.5 MB
 
-## How a single-file executable works
-
-The recipe is the same in every tool: bundle the JavaScript entry into one file, then attach a runtime. Attaching is the fiddly half, because each operating system has its own executable container:
-
-- **macOS** — the payload goes into a new Mach-O section. Adding a section invalidates the code signature, so Nub's injector re-signs the file afterward, ad-hoc, in pure Rust.
-- **Linux** — an ELF note section. No signing involved.
-- **Windows** — a PE resource, the same mechanism that stores an executable's icon. Authenticode signing is up to whoever distributes the binary.
-
-Nub's injector writes all three formats from any host, which is what makes the cross-compiling later in this post possible.
-
-## Three runtimes, three answers
-
-Deno went first, shipping [`deno compile`](https://deno.com/blog/v1.6) in December 2020. Bun followed with `bun build --compile` in [Bun 1.0](https://bun.sh/blog/bun-v1.0) in September 2023, then made it cross-compile in [1.1.5](https://bun.sh/blog/bun-v1.1.5). Both do the natural thing when you own the runtime: append the user's code to a copy of yourself, so the file is mostly runtime.
-
-Node can't do that, because there is no single Node binary to copy — there are dozens, one per version per platform. [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html) are still marked **Stability 1.1, "Active development"** today. The flow is deliberately low-level:
-
-```bash
-# SEA does not bundle. You bring an already-bundled script.
-echo '{ "main": "bundled.js", "output": "sea-prep.blob" }' > sea-config.json
-node --experimental-sea-config sea-config.json
-cp "$(command -v node)" myapp                  # your own copy of the runtime
-npx postject myapp NODE_SEA_BLOB sea-prep.blob \
-  --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
-codesign --sign - myapp                        # injection invalidates the signature
+$ ./cli --name nub
+✔ hello, nub
 ```
 
-Node 25.5.0 folded most of that into a built-in `node --build-sea sea-config.json`, a real improvement. One constraint remains that no polish can remove: `useCodeCache` and `useSnapshot`, the two options that buy startup time, are **ignored when you generate for another platform**. A V8 code cache only loads on the platform and version that produced it.
+The executable runs on a machine with no Node installed. Bun and Deno have had this for years. Node has been circling it since 19.7.0 — SEA is still experimental, and it leaves the bundling to you. Nub builds on stock Node instead. A hello world compiles to 29.5 MB on my MacBook — the same file under Bun is 63 MB — or to 0.94 MB with `--smol`, which skips the embedded runtime entirely.
 
-Nub is in the same position as Node here — no runtime of its own to copy. Everything below is assembled out of official nodejs.org binaries plus a small Rust launcher.
+## Prior art
 
-## Compile it
+Deno went first, shipping [`deno compile`](https://deno.com/blog/v1.6) in December 2020. Bun followed with `bun build --compile` in [Bun 1.0](https://bun.sh/blog/bun-v1.0), on the same principle: staple your bundled code onto a copy of the runtime, so the file is mostly runtime.
 
-The compiler takes an entry file — JavaScript or TypeScript — and produces one executable for one target platform:
+Node's own take, [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html), landed as an experiment in 19.7.0 and is still marked **Stability 1.1, "Active development"** today. The ergonomics have improved — Node 25.5.0 collapsed the multi-step injection flow into a single `node --build-sea` command — but SEA still doesn't bundle, and the work around it moves only when a volunteer picks it up: [cross-platform generation](https://github.com/nodejs/single-executable/issues/94) has been an open request since April 2024, the [virtual-filesystem hooks](https://github.com/nodejs/node/issues/60021) that packagers ask for went stale this July, and the [SEA team's repo](https://github.com/nodejs/single-executable) has not changed since mid-2025.
 
-```bash
-nub compile cli.ts       # → ./cli
-./cli                    # runs on a machine with no Node installed
-```
+{/* todo(agent): screenshot of the core-team status comment goes here — https://github.com/nodejs/single-executable/issues/94#issuecomment-2171819433 */}
 
-TypeScript, JSX and non-erasable syntax are transpiled and bundled at compile time; the output carries no `node_modules` and needs no toolchain on the target machine. The Node it builds against comes from the project's existing pin — a `.node-version` file, or `engines.node` in `package.json`. An import the bundler can't resolve fails the build with the file and line.
+Nub staples the same way Bun and Deno do. What it staples on is a stock Node from nodejs.org plus a small Rust launcher.
+
+## `nub compile`
+
+Nub's augmentations — transpiler-level support for TypeScript, JSX and non-erasable syntax, YAML/TOML/JSONC imports, polyfilled globals like `Temporal` and the browser-style `Worker` — all happen during compilation. Nub is totally _erasable_; it compiles your inputs to something that can run against vanilla Node.js. The output carries no `node_modules` and needs no toolchain on the target machine. The Node it builds against comes from the project's existing pin — a `.node-version` file, or `engines.node` in `package.json`. An import the bundler can't resolve fails the build with the file and line.
 
 The default shape embeds a full Node. A stock `node` binary is 139 MB on darwin-arm64; stripped and recompressed with zstd at level 19, it fits with your app in a 29.5 MB file:
 
@@ -353,6 +336,10 @@ nub compile cli.ts --smol --target lts --install-message "Setting up acme (one t
 ```
 
 A machine that has no Node and can't reach the network gets a clear error telling the user to grab the default build instead.
+
+## A real app, compiled
+
+The examples above are small on purpose. For a full-size build, see [our Node fork of opencode](https://github.com/nubjs/opencode/tree/nub-compile): upstream ships the coding agent as a Bun executable, and the `nub-compile` branch builds the same app as a `nub compile` binary on stock Node — the flag-for-flag mapping from `Bun.build` lives in [`build-nub.mjs`](https://github.com/nubjs/opencode/blob/nub-compile/packages/opencode/script/build-nub.mjs).
 
 ## Get started
 
