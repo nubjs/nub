@@ -131,8 +131,7 @@ pub fn ensure_engine() -> Result<PathBuf> {
         asset.backend
     );
     let staging = root.join("staging");
-    std::fs::create_dir_all(&staging)
-        .with_context(|| format!("create {}", staging.display()))?;
+    std::fs::create_dir_all(&staging).with_context(|| format!("create {}", staging.display()))?;
     let archive = staging.join(asset.asset);
     let got = download_with_progress(&url, &archive, "engine")?;
     if got != asset.sha256 {
@@ -185,9 +184,7 @@ pub fn ensure_model(spec: Option<&str>) -> Result<PathBuf> {
             DEFAULT_MODEL_FILE,
             Some(DEFAULT_MODEL_SHA256),
         ),
-        Some(s) if s.ends_with(".gguf") && Path::new(s).is_file() => {
-            Ok(PathBuf::from(s))
-        }
+        Some(s) if s.ends_with(".gguf") && Path::new(s).is_file() => Ok(PathBuf::from(s)),
         Some(s) => {
             let (repo, file_hint) = match s.split_once(':') {
                 Some((r, f)) => (r, Some(f)),
@@ -238,10 +235,7 @@ fn hf_tree(repo: &str) -> Result<Vec<HfFile>> {
 /// Pick the GGUF file a bare `owner/repo` (or `owner/repo:QUANT`) means.
 fn resolve_hf_file(repo: &str, hint: Option<&str>) -> Result<String> {
     let files = hf_tree(repo)?;
-    let ggufs: Vec<&HfFile> = files
-        .iter()
-        .filter(|f| f.path.ends_with(".gguf"))
-        .collect();
+    let ggufs: Vec<&HfFile> = files.iter().filter(|f| f.path.ends_with(".gguf")).collect();
     if ggufs.is_empty() {
         bail!("{repo} holds no .gguf files");
     }
@@ -288,19 +282,16 @@ fn list_names(files: &[&HfFile]) -> String {
 
 /// Download `repo/file` into the model cache (or reuse it), verifying SHA-256.
 /// `pinned` overrides the API-published digest for the built-in default.
-fn fetch_hf_model(
-    root: &Path,
-    repo: &str,
-    file: &str,
-    pinned: Option<&str>,
-) -> Result<PathBuf> {
+fn fetch_hf_model(root: &Path, repo: &str, file: &str, pinned: Option<&str>) -> Result<PathBuf> {
     let dir = root.join("models").join(repo.replace('/', "--"));
     let dest = dir.join(file);
     if dest.is_file() {
         return Ok(dest);
     }
     if file.contains("-of-") {
-        bail!("multi-part GGUF files ({file}) are not supported yet — pick a single-file quantization");
+        bail!(
+            "multi-part GGUF files ({file}) are not supported yet — pick a single-file quantization"
+        );
     }
     let expected = match pinned {
         Some(sha) => sha.to_string(),
@@ -311,7 +302,9 @@ fn fetch_hf_model(
                 .find(|f| f.path == file)
                 .with_context(|| format!("{file} not found in {repo}"))?;
             row.sha256.clone().with_context(|| {
-                format!("{repo}/{file} has no LFS digest in the Hugging Face listing — cannot verify it")
+                format!(
+                    "{repo}/{file} has no LFS digest in the Hugging Face listing — cannot verify it"
+                )
             })?
         }
     };

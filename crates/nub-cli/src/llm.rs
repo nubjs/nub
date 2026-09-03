@@ -30,7 +30,12 @@ pub fn run_llm(command: LlmCommand) -> Result<i32> {
     }
 }
 
-fn engine_args(server: &std::path::Path, model: &std::path::Path, port: u16, ctx: Option<u32>) -> ProcCommand {
+fn engine_args(
+    server: &std::path::Path,
+    model: &std::path::Path,
+    port: u16,
+    ctx: Option<u32>,
+) -> ProcCommand {
     let mut cmd = ProcCommand::new(server);
     cmd.arg("-m")
         .arg(model)
