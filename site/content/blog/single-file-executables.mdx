@@ -29,7 +29,7 @@ Deno went first, shipping [`deno compile`](https://deno.com/blog/v1.6) in Decemb
 
 Node's own take, [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html), landed as an experiment in 19.7.0 and is still marked **Stability 1.1, "Active development"** today. The ergonomics have improved — Node 25.5.0 collapsed the multi-step injection flow into a single `node --build-sea` command — but SEA still doesn't bundle, and the work around it moves only when a volunteer picks it up: [cross-platform generation](https://github.com/nodejs/single-executable/issues/94) has been an open request since April 2024, the [virtual-filesystem hooks](https://github.com/nodejs/node/issues/60021) that packagers ask for went stale this July, and the [SEA team's repo](https://github.com/nodejs/single-executable) has not changed since mid-2025.
 
-{/* todo(agent): screenshot of the core-team status comment goes here — https://github.com/nodejs/single-executable/issues/94#issuecomment-2171819433 */}
+[![A Node core team member on SEA's status: no one is setting any priority, deadline, or resource contention for SEA — features happen when a contributor steps up, or not at all.](/blog/sea-status-comment.png)](https://github.com/nodejs/single-executable/issues/94#issuecomment-2171819433)
 
 Nub staples the same way Bun and Deno do. What it staples on is a stock Node from nodejs.org plus a small Rust launcher.
 
