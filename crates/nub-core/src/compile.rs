@@ -170,6 +170,18 @@ pub struct Manifest {
     /// the launcher falls back to the digest then, so old artifacts keep working.
     #[serde(default)]
     pub node_size: u64,
+    /// The locales `--icu` kept in the embedded Node, comma-joined. Empty means the
+    /// Node is the official one, untrimmed — which is the default, and what every
+    /// manifest written before this field existed describes.
+    ///
+    /// Load-bearing at RUNTIME, not just informational: it is what forbids the
+    /// launcher's official-Node dedup. That dedup rests on the embedded and the
+    /// provisioned Node running identically, which a trim falsifies — so without
+    /// this gate one artifact would format through full ICU on a machine that has
+    /// Node in nub's store and through the trimmed data on a machine that does not,
+    /// and the publisher would be unable to reproduce their own user's bug.
+    #[serde(default)]
+    pub node_icu: String,
     /// Whether each app file's bytes are individually zstd-compressed.
     ///
     /// Per FILE, not per region: this module is a pure container (see the header —
@@ -882,6 +894,7 @@ mod tests {
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "def456".into(),
             minify: false,
@@ -912,6 +925,7 @@ mod tests {
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "def456".into(),
             minify: true,
@@ -967,6 +981,7 @@ mod tests {
             node_sha256: String::new(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "aa".into(),
             minify: false,

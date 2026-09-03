@@ -12,6 +12,8 @@ Normal Nub execution augments the user's Node through preloads, module hooks, an
 
 The runtime is still more than a bare script spawn. The launcher starts official, unpatched Node with a fixed internal CommonJS bootstrap as its first CLI argument, followed by version-appropriate flags and the extracted bundled entry. The bootstrap captures fixed-root builtin access before user hooks run, and the bundle's preamble restores the runtime globals the compiled program needs.
 
+"Unpatched" describes the default and the source, not an invariant of the byte stream: the build already strips the binary and re-signs it on macOS, and `--icu` additionally rewrites its ICU data package in place. Node's own code is never altered.
+
 The preamble is injected into the main root and each supported static worker root. It installs feature-detected polyfills, including the supported Web Storage surface for `sessionStorage`. That storage is process-local and does not add browser-origin sharing or unsupported Web Storage APIs.
 
 Static workers must use a file-backed `new Worker(new URL("./worker.js", import.meta.url))` shape through the global `Worker` or a named ESM import from `node:worker_threads`. Statically recognized data URLs, blob URLs, `{ eval: true }`, and CommonJS `require("node:worker_threads")` worker bindings are refused because the compiler cannot turn them into preamble-bearing roots.
@@ -24,6 +26,16 @@ The default shape embeds a Node; `--smol` does not, and finds one at startup ins
 | --- | --- | --- | --- |
 | default (embed) | ~26 MB | launcher + manifest + bundled JS + assets + a stripped, zstd-19 Node | inside the binary |
 | `--smol` | ~0.6 MB | launcher + manifest + bundled JS + assets | discovered locally, else provisioned |
+
+### Trimming ICU out of the embedded Node
+
+`--icu=en,de,fr` rewrites the embedded Node's ICU data package in place to hold only the named languages. The default keeps every locale, because a dropped one falls back silently rather than failing.
+
+An official Node is built `--with-intl=full-icu`, so one linked-in package covering ~700 locales accounts for 31.6 MiB of the ~102 MiB stripped binary and 31.7% of the compressed blob. The rewrite zero-fills what it vacates, and that padding survives zstd at under a kilobyte. Measured on Node 26 for darwin-arm64, English alone takes a hello-world artifact from 29.5 MB to 24.4 MB.
+
+Three properties make the rewrite safe to do after linking. ICU reaches the package through a bare pointer and navigates it by its own table of contents, so nothing records the length a smaller package would contradict. The package announces itself with a magic and a `CmnD` format tag that occur exactly once per binary in all three container formats, so locating it needs no symbol table — which matters because `strip` removes the ELF symbol that would otherwise name it. And only locale-shaped resources are dropped, so the charset converters, break iterators, normalization tables and supplemental resources all remain: no API changes behavior, and a dropped language falls back through ICU's normal chain to `root`.
+
+That fallback is silent, which is why the default keeps every locale and why the trim is never inferred. Two consequences follow the artifact. A trimmed payload never dedups against an official Node in Nub's store — the dedup assumes the embedded and provisioned binaries run identically, and a trim falsifies exactly that — and a trimmed macOS Node must be re-signed, so `--icu` requires `codesign` rather than degrading to an unsigned binary. Because a broken ICU package still answers `--version` before aborting at the first format call, a host-target trim is verified by formatting a date and segmenting a string, not by launching.
 
 The `--smol` launcher downloads through curl or wget, verifies the selected archive against `SHASUMS256.txt`, and extracts it through Nub core's capped archive reader. Unix hosts use the published `.tar.xz`; Windows hosts use the published `.zip`. The verified tree is staged and atomically published under the ordinary Node store before discovery can return it.
 

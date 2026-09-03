@@ -655,6 +655,7 @@ mod tests {
             node_sha256: String::new(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "aa".into(),
             minify: true,

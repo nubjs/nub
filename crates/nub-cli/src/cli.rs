@@ -1105,6 +1105,21 @@ pub enum Command {
         #[arg(long = "no-minify")]
         no_minify: bool,
 
+        /// Languages to keep in the embedded Node's ICU data, comma-separated:
+        /// `--icu=en,de,fr`. Default is every locale, which formats exactly like
+        /// the user's own `node`. Written `--icu=<LOCALES>`; bare `--icu` is
+        /// `full`. A region is accepted and narrows nothing (`en-US` keeps `en`),
+        /// and `root` is always retained. Dropped languages fall back silently,
+        /// so name every one the app formats for. No effect under `--smol`.
+        #[arg(
+            long,
+            value_name = "LOCALES",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "full"
+        )]
+        icu: Option<String>,
+
         /// Where the source map goes: `none` (default), `linked`, `inline`, or
         /// `external`. Written `--sourcemap=<MODE>`; bare `--sourcemap` is inline.
         #[arg(
@@ -3197,6 +3212,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             target,
             platform,
             no_minify,
+            icu,
             sourcemap,
             define,
             define_file,
@@ -3235,6 +3251,10 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             icon,
             metadata,
             hide_console,
+            icu: match icu.as_deref() {
+                Some(value) => crate::compile::parse_icu_locales(value)?,
+                None => None,
+            },
             metafile: metafile.as_deref().map(PathBuf::from),
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,

@@ -1499,6 +1499,14 @@ fn node_stores(base: &Path) -> Vec<NodeDir> {
 }
 
 fn official_node_for_manifest(base: &Path, manifest: &Manifest) -> Option<PathBuf> {
+    // The dedup's whole premise is that the embedded Node and an official one of
+    // the same version run identically — true of a strip, false of an `--icu` trim.
+    // Reusing a store Node here would make the artifact format through whichever
+    // ICU the MACHINE happened to have, so a trimmed payload never dedups: it is
+    // the one case where the embedded bytes are the point.
+    if !manifest.node_icu.is_empty() {
+        return None;
+    }
     node_stores(base).into_iter().find_map(|store| {
         cache::revalidate(&store.root).ok()?;
         let version_dir = store.root.join(&manifest.node_version);
@@ -3186,6 +3194,7 @@ mod tests {
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
             node_blake3: String::new(),
             node_size: b"node".len() as u64,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "app-cache-key".to_string(),
             minify: false,
@@ -3903,6 +3912,39 @@ mod tests {
         assert!(
             !node_cache_dir(&base, &view.manifest).exists(),
             "the official store is the Node artifact; no extracted duplicate is needed"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// An ICU-trimmed payload must extract its OWN Node even when an official one of
+    /// the same version is sitting in the store, ready and free.
+    ///
+    /// The dedup exists because a stripped Node and an official one run identically.
+    /// A trim breaks that, and the resulting bug is the nastiest shape available: the
+    /// artifact would format through full ICU on a developer's machine (which has
+    /// Node) and through English-only data on an end user's (which does not), so the
+    /// publisher could never reproduce the report. This is the assertion that stops
+    /// it, and it is exactly the previous test with one field set.
+    #[test]
+    fn a_trimmed_payload_refuses_an_official_store_node() {
+        let base = fresh_cache_dir("trimmed-refuses-official");
+        let mut view = test_view();
+        view.manifest.node_icu = "en".into();
+
+        let official = node_in_version_dir(&base.join("node").join(&view.manifest.node_version));
+        create_staging_subdirs(&base, official.parent().unwrap()).unwrap();
+        write_file(&official, b"official node").unwrap();
+        set_executable(&official).unwrap();
+        materialize_test_app(&view, &base);
+
+        assert!(
+            official_node_for_manifest(&base, &view.manifest).is_none(),
+            "a trimmed payload must never adopt the official Node — its ICU data is \
+             the whole reason it carries its own"
+        );
+        assert!(
+            verify_warm_cache(&view, &base).is_none(),
+            "and no warm verdict may rest on that official Node either"
         );
         let _ = fs::remove_dir_all(&base);
     }

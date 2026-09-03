@@ -35,6 +35,7 @@ mod assets;
 pub mod bundle;
 mod closure;
 mod external;
+mod icu;
 mod inject;
 mod launcher;
 mod loaders;
@@ -45,6 +46,7 @@ mod unbundlable;
 mod version_info;
 
 pub use bundle::{BundleOptions, SourcemapMode};
+pub use icu::parse_locales as parse_icu_locales;
 
 /// Shown while a first run unpacks the embedded Node (or provisions one under
 /// `--smol`). Deliberately generic: the launcher has no app name of its own, and
@@ -75,6 +77,11 @@ pub struct CompileOptions {
     /// `--node-options`: NODE_OPTIONS-style strings the compiled binary starts its
     /// Node with, applied before whatever the end user sets at run time.
     pub node_options: Vec<String>,
+    /// `--icu=<locales>`: the languages to keep in the embedded Node's ICU data.
+    /// `None` — no flag, or a bare `--icu`, or `--icu=full` — keeps all ~700, which
+    /// is the only setting that formats identically to the user's own `node`.
+    /// Ignored under `--smol`, which embeds no Node to trim.
+    pub icu: Option<Vec<String>>,
     /// `--icon`: a Windows `.ico` to show on the executable. Windows-only because
     /// it is the only target whose format carries the icon in the file itself —
     /// macOS reads one from the surrounding `.app` bundle and Linux from a
@@ -113,6 +120,17 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let entry_path = Path::new(&opts.entry);
     if !entry_path.is_file() {
         bail!("entry file not found: {}", opts.entry);
+    }
+
+    // Refused rather than ignored, matching `--icon` and `--metadata`: `--smol`
+    // embeds no Node, so there is no ICU data to trim and the artifact would run on
+    // whatever the host supplies. Accepting the flag would report a saving the
+    // build never made.
+    if opts.smol && opts.icu.is_some() {
+        bail!(
+            "--icu trims the ICU data out of the EMBEDDED Node, and --smol embeds none.\n\
+             \x20\x20A --smol artifact uses whichever Node it finds or provisions at startup."
+        );
     }
 
     // Read here for the same reason the entry is stat'd here: a mistyped path is
@@ -306,7 +324,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let exact =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
-        let node = build_node_blob(&exact, &target, &cache_root, &source)?;
+        let node = build_node_blob(&exact, &target, &cache_root, &source, opts.icu.as_deref())?;
         let summary = RuntimeSummary {
             fact: format!("Node {exact}, embedded"),
             provenance: source.to_string(),
@@ -363,6 +381,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_sha256: node.sha256,
         node_blake3: node.blake3,
         node_size: node.size,
+        node_icu: node.icu,
         app_compressed: true,
         app_sha256: app_sha,
         minify: opts.bundle.minify,
@@ -1891,6 +1910,9 @@ struct EmbeddedNode {
     size: u64,
     /// zstd-19 compressed Node LICENSE.
     license: Vec<u8>,
+    /// The locales `--icu` kept, comma-joined, or empty for an untrimmed Node.
+    /// Reaches the manifest, where it gates the launcher's official-Node dedup.
+    icu: String,
 }
 
 fn build_node_blob(
@@ -1898,6 +1920,7 @@ fn build_node_blob(
     target: &TargetPlatform,
     cache_root: &Path,
     resolved_from: &str,
+    icu: Option<&[String]>,
 ) -> Result<EmbeddedNode> {
     let (os, arch, musl) = dist_platform(target);
     // Provisioning prints the `Using Node.js <v> (resolved from <source>)` line +
@@ -1919,7 +1942,7 @@ fn build_node_blob(
         );
     }
 
-    let bytes = prepare_node_bytes(&node_bin, target)?;
+    let bytes = prepare_node_bytes(&node_bin, target, icu)?;
     let sha = crate::cli::sha256_hex(&bytes);
     // Retained as manifest format headroom; `sha` stays the cache key. Both are
     // over the same decompressed bytes.
@@ -1961,6 +1984,7 @@ fn build_node_blob(
         blake3: b3,
         size: bytes.len() as u64,
         license,
+        icu: icu.map(|l| l.join(",")).unwrap_or_default(),
     })
 }
 
@@ -2005,12 +2029,27 @@ fn node_binary_in(version_dir: &Path, target: &TargetPlatform) -> PathBuf {
 ///   binary cannot be run, so the check degrades to "is it still a well-formed
 ///   image of the expected format". Execution alone is NOT sufficient — see
 ///   `retains_node_api_exports`.
-fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8>> {
+fn prepare_node_bytes(
+    node_bin: &Path,
+    target: &TargetPlatform,
+    icu: Option<&[String]>,
+) -> Result<Vec<u8>> {
     let original = fs::read(node_bin).with_context(|| format!("reading {}", node_bin.display()))?;
     let format = target.format();
 
+    // Every fallback below ships the ORIGINAL Node, which is correct but larger.
+    // That trade is fine for a strip nobody asked for and wrong for an explicit
+    // `--icu`: silently shipping ~700 locales when the caller asked for two is the
+    // build lying about what it produced. So a requested trim turns each fallback
+    // into an error instead.
     let needs_resign = format == ContainerFormat::MachO;
     if needs_resign && which_first(&["codesign"]).is_none() {
+        if icu.is_some() {
+            bail!(
+                "--icu needs codesign on PATH: trimming rewrites the Node binary, and macOS will \
+                 not launch one whose signature no longer matches"
+            );
+        }
         warn(
             "no codesign on PATH, so the embedded Node is not stripped",
             &["A stripped macOS Node could not be re-signed, and an unsigned one cannot launch."],
@@ -2026,7 +2065,11 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
     } else {
         &["llvm-strip"]
     };
-    let Some(strip) = which_first(candidates) else {
+    // Optional, because an ICU trim is worth staging for on its own: a cross-format
+    // target needs llvm-strip specifically, so a Mac compiling for Windows routinely
+    // has no usable stripper and must still be able to honour `--icu`.
+    let strip = which_first(candidates);
+    if strip.is_none() && icu.is_none() {
         warn(
             &format!(
                 "no {} on PATH, so the embedded Node is not stripped",
@@ -2035,11 +2078,29 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
             &["The artifact is larger than it needs to be; installing the tool shrinks it."],
         );
         return Ok(original);
+    }
+
+    // The trim lands on the STAGED copy, never on `original`, so every fallback path
+    // below still has pristine bytes to return.
+    let staged = match icu {
+        Some(locales) => {
+            let mut bytes = original.clone();
+            let report = icu::trim(&mut bytes, locales)?;
+            note(&format!(
+                "Trimmed ICU to {} ({} of {} resources, −{:.0} MB before compression)",
+                locales.join(", "),
+                report.kept,
+                report.total,
+                report.freed() as f64 / 1_000_000.0
+            ));
+            bytes
+        }
+        None => original.clone(),
     };
 
     let tmp = std::env::temp_dir().join(format!("nub-compile-node-{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
-    fs::write(&tmp, &original).with_context(|| format!("staging Node at {}", tmp.display()))?;
+    fs::write(&tmp, &staged).with_context(|| format!("staging Node at {}", tmp.display()))?;
     // fs::write lands 0644; the post-strip `--version` verification must be able to
     // EXEC the staged binary, so restore the executable bit before strip/verify.
     set_executable(&tmp)?;
@@ -2066,9 +2127,16 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         && fs::metadata(&entitlements).is_ok_and(|m| m.len() > 0);
     let _ent_guard = FileGuard(entitlements.clone());
 
-    let mut argv: Vec<&std::ffi::OsStr> = strip_flags(format).iter().map(AsRef::as_ref).collect();
-    argv.push(tmp.as_os_str());
-    let mut ok = run_ok(&strip, &argv);
+    let mut ok = match &strip {
+        Some(strip) => {
+            let mut argv: Vec<&std::ffi::OsStr> =
+                strip_flags(format).iter().map(AsRef::as_ref).collect();
+            argv.push(tmp.as_os_str());
+            run_ok(strip, &argv)
+        }
+        // Nothing to strip with, but a trim still has to be signed and verified.
+        None => true,
+    };
     if ok && needs_resign {
         // `-i node` is load-bearing, not cosmetic. Without it `codesign` derives the
         // CodeDirectory identifier from the file's BASENAME, and this file is staged
@@ -2130,10 +2198,19 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         Some("the stripped Node failed verification")
     } else if !retains_node_api_exports(&original, &stripped) {
         Some("stripping dropped the Node-API exports that native addons resolve against")
+    } else if icu.is_some() && target.is_host() && !node_formats_dates(&tmp) {
+        // `node_runs` is a `--version` check, and a broken ICU package passes it:
+        // a package whose per-tree indexes no longer resolve boots fine and then
+        // FATAL-aborts inside the first `Intl.DateTimeFormat`. So a trim earns a
+        // probe that actually reaches ICU.
+        Some("the trimmed Node could not format a date through Intl")
     } else {
         None
     };
     if let Some(why) = reject {
+        if icu.is_some() {
+            bail!("--icu could not produce a working Node: {why}");
+        }
         // The same class as the two missing-tool warnings above: the artifact is
         // correct but larger than it should be, and the reader can act on why.
         warn(
@@ -2143,10 +2220,29 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         return Ok(original);
     }
 
-    if !needs_resign {
+    if !needs_resign && strip.is_some() {
         note("Stripped the embedded Node");
     }
     Ok(stripped)
+}
+
+/// Can this Node reach its ICU data and format through it?
+///
+/// Constructs an `Intl.DateTimeFormat` and a segmenter and formats with both, which
+/// is what separates a package that merely PARSES from one ICU can navigate. Host
+/// targets only, for the same reason `node_runs` is: a foreign binary cannot run
+/// here. A non-zero exit or a crash is a failure; the OUTPUT is deliberately not
+/// asserted on, because a trimmed Node is expected to answer in a fallback locale.
+fn node_formats_dates(node: &Path) -> bool {
+    run_ok(
+        node.to_string_lossy().as_ref(),
+        &[
+            "-e".as_ref(),
+            "new Intl.DateTimeFormat('en',{dateStyle:'full'}).format(0);\
+             [...new Intl.Segmenter('en',{granularity:'word'}).segment('a b')];"
+                .as_ref(),
+        ],
+    )
 }
 
 /// Flags this format's stripper needs to leave a usable Node behind.
@@ -3600,6 +3696,7 @@ mod tests {
             node_sha256: "node".into(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "app".into(),
             minify: false,
@@ -3622,6 +3719,7 @@ mod tests {
             node_sha256: String::new(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             ..manifest
         };
