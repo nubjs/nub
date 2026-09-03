@@ -210,6 +210,31 @@ pub struct Manifest {
     /// Node is not present to ask, so a flag it rejects fails loudly at startup.
     #[serde(default)]
     pub node_flags: Vec<String>,
+    /// Whether every module this artifact can execute was already parsed by the
+    /// bundler — no `--external` packages, no retained computed `import()`, and
+    /// no verbatim payload file at all (an `--include`, an emitted asset copy, a
+    /// native island), so nothing the artifact ships resolves through the real
+    /// module loader at runtime. Presence, not extension: the CJS loader parses
+    /// an exact-path `require()` of any unknown extension as JS.
+    ///
+    /// What it buys: the launcher skips the feature matrix's `UnflagArgv` rows
+    /// (today `--js-defer-import-eval`). Those flags exist to enable in-progress
+    /// JS syntax in files Node parses at runtime, which `nub run` must assume
+    /// anywhere in the graph — but a sealed bundle has no such files, and the
+    /// bundler already lowered the graph it emitted (Rolldown evaluates
+    /// `import defer` eagerly, so the syntax never survives into the payload).
+    /// Measured on Node 26.7: the V8 flag alone costs ~6 ms of warm start,
+    /// because a non-default V8 flag invalidates the snapshot fast path.
+    ///
+    /// Residual channels a sealed graph still has — `createRequire()` on a
+    /// computed path — behave exactly as they do under bare `node app.js`,
+    /// which carries none of these flags either, so skipping them cannot make
+    /// the artifact diverge from the plain-Node baseline.
+    ///
+    /// Absent in legacy manifests; `false` preserves their launcher behavior
+    /// (always inject) exactly.
+    #[serde(default)]
+    pub sealed_module_graph: bool,
 }
 
 /// One logical file in the payload. `B` is `Vec<u8>` on the writing side and
@@ -845,6 +870,7 @@ mod tests {
             minify: false,
             install_message: None,
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         }
     }
 
@@ -875,6 +901,7 @@ mod tests {
             // Non-empty on purpose: an empty vec round-trips through almost any
             // encoding bug, so it would fix the build without covering the field.
             node_flags: vec!["--max-old-space-size=256".into(), "--no-warnings".into()],
+            sealed_module_graph: false,
         };
         let app = vec![
             AppFile::plain("main.js", b"import './c.js'\n".to_vec()),
@@ -920,6 +947,7 @@ mod tests {
             install_message: None,
             // Empty here, so the pair covers both ends of the field.
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         };
         let app = vec![AppFile::plain("main.js", b"console.log(1)".to_vec())];
         let blob = encode_with_license(&manifest, &app, &[], &[]);

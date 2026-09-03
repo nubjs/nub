@@ -589,6 +589,7 @@ mod tests {
             minify: true,
             install_message: None,
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         };
         nub_core::compile::encode(
             &manifest,

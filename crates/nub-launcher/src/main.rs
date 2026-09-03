@@ -312,11 +312,21 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // Skip the probe for a Node nub provisioned or embedded itself, matching why
     // `accepted_env_flags` is skipped above: its accepted flags follow from its version,
     // and the launcher is the hot path.
-    let argv_probe_path = match origin {
-        NodeOrigin::Managed => None,
-        NodeOrigin::Discovered => Some(node_path.as_path()),
+    //
+    // A sealed graph skips these rows entirely. They enable in-progress JS
+    // syntax in files Node PARSES at runtime; a payload with no `--external`
+    // and no retained computed `import()` has no such files, and a non-default
+    // V8 flag costs ~6 ms of warm start by invalidating the snapshot fast path
+    // (see `Manifest::sealed_module_graph`).
+    let argv_only = if view.manifest.sealed_module_graph {
+        Vec::new()
+    } else {
+        let argv_probe_path = match origin {
+            NodeOrigin::Managed => None,
+            NodeOrigin::Discovered => Some(node_path.as_path()),
+        };
+        flags::argv_inject_flags(argv_probe_path, &version, &[])
     };
-    let argv_only = flags::argv_inject_flags(argv_probe_path, &version, &[]);
     inject.extend(argv_only.iter().copied());
 
     let mut cmd = Command::new(node_path.as_os_str());
@@ -370,9 +380,6 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
 
-    // Own process group + terminating/diagnostic-signal forwarding + TTY
-    // foreground handoff + macOS SIGKILL backstop — the same faithful spawn
-    // `nub run`'s file path uses. NODE_OPTIONS is inherited untouched (honored).
     phase_with(|| {
         let args: Vec<String> = cmd
             .get_args()
@@ -395,10 +402,32 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
             envs.join(" ")
         )
     });
-    let status = spawn::status_forwarding_signals(&mut cmd)
-        .map_err(|error| node_spawn_error(&node_path, &base, error));
-    phase("node exited");
-    status
+    // Unix: REPLACE this process with Node rather than spawning it as a child.
+    // Everything the spawn-and-wait shape needed machinery for — terminating- and
+    // diagnostic-signal forwarding, the TTY foreground handoff, Linux's pdeathsig,
+    // the macOS SIGKILL-backstop watcher process (#480), exit-status relay — exists
+    // to keep TWO processes behaving as one. With one process image it is all
+    // native: the terminal delivers signals straight to Node, killing the artifact
+    // IS killing Node, and the exit status is Node's own. It is also the warm-start
+    // win: no second (macOS: third) process is created or torn down per run.
+    // Launcher work that must follow Node's exit does not exist on this path —
+    // every cache write, marker, and notice completes before this line.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Returns only on failure; success never comes back.
+        let error = cmd.exec();
+        Err(node_spawn_error(&node_path, &base, error))
+    }
+    // Windows has no exec(2): CreateProcess always makes a child, so the faithful
+    // spawn — job-object grouping, signal relay, status forwarding — stays.
+    #[cfg(not(unix))]
+    {
+        let status = spawn::status_forwarding_signals(&mut cmd)
+            .map_err(|error| node_spawn_error(&node_path, &base, error));
+        phase("node exited");
+        status
+    }
 }
 
 fn node_spawn_error(node_path: &Path, base: &Path, error: std::io::Error) -> anyhow::Error {
@@ -3010,6 +3039,7 @@ mod tests {
             minify: false,
             install_message: None,
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         }
     }
 

@@ -299,6 +299,14 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Node blob already uses, and it lets the launcher decode only the files it
     // actually extracts. Level 19 matches the Node blob; the app region is small
     // enough that the time is not noticeable next to the ~107 MB one.
+    // Computed before `app_files` is consumed below. Only the VERBATIM payload
+    // sets can carry a file Node parses that the bundler did not: emitted asset
+    // copies, native-island contents, and `--include`s. Their PRESENCE is the
+    // predicate, not their extensions — the CJS loader parses an exact-path
+    // `require()` of any unknown or absent extension with its `.js` handler, so
+    // no name-based allowlist can prove a shipped file is not runtime JS.
+    let carries_verbatim_files =
+        bundled.assets.len() + bundled.native_files.len() + layout.assets.len() > 0;
     let app_files: Vec<_> = app_files
         .into_iter()
         .map(|file| {
@@ -338,6 +346,16 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
         node_flags: node_flags(&opts)?,
+        // Sealed only when Node can parse no module the bundler did not. Two
+        // channels can hand runtime Node a file it never saw: the shim plan
+        // (`--external` packages, surviving computed `import()`) and ANY
+        // verbatim payload file — reachable through the real `createRequire`
+        // every CJS chunk carries, and parsed as JS by the CJS loader whatever
+        // its extension. Generated chunks and wrappers are exempt by
+        // construction: the bundler parsed them. Computed require of a path
+        // OUTSIDE the artifact stays out of the predicate on the
+        // plain-Node-baseline argument in the Manifest field's doc comment.
+        sealed_module_graph: !shim_plan.needed() && !carries_verbatim_files,
     };
     let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
 
@@ -2922,6 +2940,7 @@ mod tests {
             minify: false,
             install_message: None,
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         };
         let app = vec![AppFile::plain("main.js", b"app".to_vec())];
         let missing = nub_core::compile::encode_with_license(&manifest, &app, b"node", &[]);
