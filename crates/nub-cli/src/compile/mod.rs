@@ -435,20 +435,27 @@ fn report_resolved_build(
     let color = crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
     eprintln!();
     for (label, spans) in resolved_build_rows(out_path, size, runtime_summary, target) {
-        // The gutter is computed from the VISIBLE label and the escapes added
-        // afterwards. Padding an already-styled string counts its escape bytes
-        // toward the field width, so every styled label silently loses the column
-        // the block exists to give it.
-        let mut line = format!(
-            "  {}{}",
-            paint(label, Ink::Muted, color),
-            " ".repeat(LABEL_WIDTH.saturating_sub(label.len()))
-        );
-        for (text, ink) in spans {
-            line.push_str(&paint(&text, ink, color));
-        }
-        eprintln!("{line}");
+        eprintln!("{}", render_row(label, &spans, color));
     }
+}
+
+/// One row: the label in its gutter, then each span in its own ink.
+///
+/// Split out so a test can assert on the line this actually prints. The gutter
+/// is computed from the VISIBLE label and the escapes added afterwards — pad an
+/// already-painted string instead and its escape bytes count toward the field
+/// width, so every styled label silently loses the column the block exists to
+/// give it, and only once color is on.
+fn render_row(label: &str, spans: &[(String, Ink)], color: bool) -> String {
+    let mut line = format!(
+        "  {}{}",
+        paint(label, Ink::Muted, color),
+        " ".repeat(LABEL_WIDTH.saturating_sub(label.len()))
+    );
+    for (text, ink) in spans {
+        line.push_str(&paint(text, *ink, color));
+    }
+    line
 }
 
 /// The label column, wide enough for the longest label plus a separating space.
@@ -3526,23 +3533,48 @@ mod tests {
         );
     }
 
-    /// The gutter is computed from the VISIBLE label, so a styled label keeps its
-    /// column. Padding the painted string instead counts the escape bytes toward
-    /// the field width and collapses the alignment the block exists to give —
-    /// silently, and only once color is on.
+    /// A colored row must occupy exactly the columns its plain twin does.
+    ///
+    /// Asserted through [`render_row`] — the function that prints — rather than a
+    /// copy of its arithmetic, or the test would pass while production padded the
+    /// painted label and collapsed the very column this guards. Verified by
+    /// breaking it: padding the painted string turns the color-on `output` row
+    /// into `  outputdist/cli`, and this goes red.
     #[test]
-    fn a_styled_label_keeps_the_same_gutter_as_a_plain_one() {
-        let visible = |label: &str, color: bool| {
-            let painted = paint(label, Ink::Muted, color);
-            format!(
-                "  {painted}{}",
-                " ".repeat(LABEL_WIDTH.saturating_sub(label.len()))
-            )
-            .replace("\x1b[2m", "")
-            .replace("\x1b[22m", "")
-        };
-        assert_eq!(visible("output", true), visible("output", false));
-        assert_eq!(visible("runtime", true), "  runtime  ");
+    fn a_styled_row_occupies_the_same_columns_as_a_plain_one() {
+        let spans = vec![
+            ("dist/cli".to_string(), Ink::Accent),
+            ("  (29.5 MB)".to_string(), Ink::Muted),
+        ];
+        for label in ["output", "runtime", "target"] {
+            assert_eq!(
+                strip_sgr(&render_row(label, &spans, true)),
+                render_row(label, &spans, false),
+                "the {label} row must not lose its gutter to escape bytes"
+            );
+        }
+        assert_eq!(
+            render_row("runtime", &spans, false),
+            "  runtime  dist/cli  (29.5 MB)",
+            "the label column is the block's whole structure — pin it literally"
+        );
+    }
+
+    /// Drop every SGR sequence, so a painted row can be compared against a plain
+    /// one column for column. Written generically rather than as a list of the
+    /// codes [`paint`] emits today, so a fourth [`Ink`] cannot slip past it.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(start) = rest.find('\x1b') {
+            out.push_str(&rest[..start]);
+            let Some(end) = rest[start..].find('m') else {
+                return out;
+            };
+            rest = &rest[start + end + 1..];
+        }
+        out.push_str(rest);
+        out
     }
 
     /// A cross target must never be provisioned into the host's Node store — the
