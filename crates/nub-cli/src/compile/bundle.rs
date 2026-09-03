@@ -3665,7 +3665,18 @@ fn strip_js_trivia(s: &str) -> &str {
     loop {
         s = s.trim_start();
         if let Some(rest) = s.strip_prefix("//") {
-            s = rest.find('\n').map_or("", |i| &rest[i + 1..]);
+            // All FOUR ECMAScript line terminators end a `//` comment, not just `\n`:
+            // carriage return and the two Unicode separators do as well. Missing them
+            // made this function swallow the rest of the value as trivia, so a real
+            // truncation read as "nothing was dropped" and shipped silently — the exact
+            // failure the guard exists to prevent. `len_utf8` rather than `+ 1` because
+            // U+2028 and U+2029 are three bytes each, and slicing mid-character panics.
+            s = rest
+                .find(['\n', '\r', '\u{2028}', '\u{2029}'])
+                .map_or("", |i| {
+                    let width = rest[i..].chars().next().map_or(1, char::len_utf8);
+                    &rest[i + width..]
+                });
         } else if let Some(rest) = s.strip_prefix("/*") {
             // An unterminated block comment runs to the end, leaving nothing.
             s = rest.find("*/").map_or("", |i| &rest[i + 2..]);
@@ -5217,6 +5228,34 @@ mod tests {
     /// grounds that they "run" — but running is not the bar, since both silently
     /// substitute something the user plainly did not write. Neither raises
     /// `ReferenceError`, so the message must not promise one.
+    /// A `//` comment ends at any of the FOUR ECMAScript line terminators, so code after
+    /// a bare `\r`, U+2028 or U+2029 is live code that a truncated value drops. Only `\n`
+    /// was recognised at first, which made the trivia scan eat the remainder and report
+    /// "nothing dropped" — the guard went silent on exactly the values it exists to catch.
+    /// Measured against the built binary: `\n` fired, the other three shipped.
+    ///
+    /// The `\n` row is the positive control. It passed while the others were broken, so a
+    /// version of this test without it would have looked like coverage and proved nothing.
+    #[test]
+    fn define_guard_ends_a_line_comment_at_every_terminator() {
+        for terminator in ['\n', '\r', '\u{2028}', '\u{2029}'] {
+            let mut o = opts();
+            o.define = vec![format!("K=1//c{terminator}after")];
+            let err = defines(&o).err().unwrap_or_else(|| {
+                panic!(
+                    "U+{:04X} ends a line comment, so `after` is live code the value drops — \
+                     the guard must reject it",
+                    terminator as u32
+                )
+            });
+            assert!(
+                err.to_string().contains("keeps only `1`"),
+                "U+{:04X}: the error must name what survives, got: {err}",
+                terminator as u32
+            );
+        }
+    }
+
     #[test]
     fn define_guard_catches_what_the_url_shape_missed() {
         for (value, keeps, expect_reference_error) in [
