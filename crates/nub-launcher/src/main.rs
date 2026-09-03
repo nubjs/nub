@@ -1152,10 +1152,24 @@ fn acquire_embedded_node(
 /// what the user sees without this is the linker's own line, which names a
 /// filename and says nothing about nub, the binary they ran, or the fix.
 ///
-/// Only on the COLD path, where the ~107 MB decompression above already dominates,
-/// so the extra process is not measurable. It cannot be done on the warm path at
-/// all: the launcher execs Node with inherited stdio, so the child's failure text
-/// goes straight to the terminal and is never seen here.
+/// Only on the COLD path. It cannot be done on the warm path at all: the launcher
+/// execs Node with inherited stdio, so the child's failure text goes straight to
+/// the terminal and is never seen here.
+///
+/// This spawn is the LARGEST single phase of a cold embed start — measured at
+/// 1059-1276 ms on macOS, four to seven times the decompression above — and it is
+/// still nearly free, for a reason worth writing down because the raw number says
+/// the opposite. What it pays for is the FIRST execution of a newly written,
+/// ad-hoc-signed ~107 MB Mach-O, which macOS validates once and then caches: a
+/// standalone control on a freshly copied and re-signed 145 MB `node` measured
+/// 1.52 s on the first exec and 0.02 s on each of the next three. The launcher's
+/// own exec follows immediately and would pay that validation itself if this
+/// did not. So the net cost here is the second spawn, ~20 ms — not the second
+/// that a phase trace attributes to it.
+///
+/// An earlier version of this comment claimed the decompression dominates and the
+/// spawn "is not measurable". Both halves are false on macOS, and the sentence
+/// sent one investigation looking for a regression that was never here.
 fn explain_if_node_cannot_start(node_bin: &Path) -> Result<()> {
     let Ok(out) = Command::new(node_bin).arg("--version").output() else {
         // Could not run it at all — the caller's own spawn will produce a better
