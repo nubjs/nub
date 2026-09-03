@@ -39,3 +39,51 @@ failure was a fluke, only that this staging does not provoke it.
 A next iteration should stage 2 directly: several threads racing to create the same chain while the
 walk validates it. That is a sharper experiment than adding more single-threaded iterations, which run
 1 has already shown saturate at zero.
+
+## Run 2 — the bare-`create_dir_all` arm, six shards
+
+```
+5 shards: static 0/40, dynamic 0/40
+1 shard:  static 40/40, dynamic 40/40
+```
+
+The failing shard's UNSTABLE components were the **ancestors**, and its ACL dump names the cause:
+
+```
+PATH D:\a\_temp OWNER=BUILTIN\Administrators
+   ACE NT AUTHORITY\Authenticated Users  Modify, Synchronize  inherited=True  flags=None/None
+```
+
+`Modify` contains `DELETE`, which is in the non-leaf dangerous mask, and `Authenticated Users` is not
+trusted. The ACE is EFFECTIVE, so the inherit-only skip that rescued `C:\` does not apply. nub refuses
+the ancestor **correctly** and relocates; ancestors are deliberately unrepairable, because nub must not
+re-permission a directory it does not own.
+
+**The CRT-linkage hypothesis is dead.** The failing shard failed 40/40 in BOTH linkages and the clean
+shards passed 40/40 in both, so linkage is irrelevant. About 1 `windows-latest` image in 6 carries the
+ACE, which matches the 2-of-8 rate seen on the pull request.
+
+## Run 3 — candidate bases, six shards: INVALID
+
+All four bases reported usable on every shard, INCLUDING the `RUNNER_TEMP` control. Per the README rule
+a passing control invalidates the run: it drew six good images, so nothing may be concluded from the
+candidate rows. Recorded rather than deleted, because "we ran it and everything looked fine" is exactly
+the result that gets mistaken for evidence later.
+
+## Run 4 — candidate bases, twelve shards: VALID
+
+Widened to twelve because a third of six-shard runs draw no bad image at all.
+
+| base | usable |
+| --- | --- |
+| `RUNNER_TEMP` (D:, the control) | **false on 2 of 24** (1 shard x both linkages) |
+| `USERPROFILE` (C:) | true, 24/24 |
+| `LOCALAPPDATA` (C:) | true, 24/24 |
+| `TEMP` (C:) | true, 24/24 |
+
+The control failed, so the run is valid and the candidate rows mean something: every system-volume base
+was usable on the very shard where `RUNNER_TEMP` was refused.
+
+**Applied:** `ci.yml`'s Windows embedded-runtime round-trip now puts its cold cache under
+`USERPROFILE`. `TEMP` would also work but is an 8.3 short path on these runners, which is a poor thing
+to compare paths against.
