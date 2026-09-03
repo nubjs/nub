@@ -7000,6 +7000,13 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for flag in &argv_only_flags {
         node_args.push(flag.to_string());
     }
+    // The matrix's runtime V8 flags reach the preload through an env var (below),
+    // never argv — see `flags::RUNTIME_V8_FLAGS_ENV`.
+    let matrix_runtime_v8_flags = nub_core::node::flags::runtime_inject_flags(
+        Some(node.path.as_std_path()),
+        &node.version,
+        args,
+    );
     node_args.extend(runtime_v8_flags.iter().cloned());
     let sanitized_node_options = node_options.map(|existing| {
         nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)
@@ -7072,6 +7079,15 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         cmd.env(
             nub_core::node::flags::ARGV_ONLY_FLAGS_ENV,
             argv_only_flags.join(" "),
+        );
+    }
+    if !matrix_runtime_v8_flags.is_empty() {
+        cmd.env(
+            nub_core::node::flags::RUNTIME_V8_FLAGS_ENV,
+            nub_core::node::flags::runtime_v8_flags_env_value(
+                &node.version,
+                &matrix_runtime_v8_flags,
+            ),
         );
     }
     let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];

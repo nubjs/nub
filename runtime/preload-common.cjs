@@ -34,7 +34,10 @@ const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 // 16 + Turbopack build died on `--js-defer-import-eval`. V8 parses these flags at
 // startup, so dropping them here keeps the feature ON while restoring the execArgv a
 // plain-Node user would have seen. Only flags NUB injected are removed; a user's own
-// `v8Flags` stay visible, because those are the user's choice to reason about.
+// `v8Flags` stay visible, because those are the user's choice to reason about. (The
+// set is empty today — `--js-defer-import-eval` moved to a runtime flip, see
+// transform-core `noteRuntimeV8FlagSource` — but the hygiene stays for any future
+// argv-only row.)
 // The flags have to be hidden on two boundaries, and no single channel spans both.
 //
 // The ENV VAR crosses a PROCESS boundary: the Rust spawn layer sets it on a Node it
@@ -681,7 +684,15 @@ function makeHooks(core, watchReporting) {
     }
   }
 
+  // Every load result passes through the runtime-V8-flag scan BEFORE Node compiles
+  // it, whichever branch of loadInner produced it — see transform-core
+  // `noteRuntimeV8FlagSource`. A no-op (one null check) unless the spawn layer armed
+  // a flag for this Node.
   function load(url, context, nextLoad) {
+    return core.noteRuntimeV8FlagSource(loadInner(url, context, nextLoad));
+  }
+
+  function loadInner(url, context, nextLoad) {
     const ext = core.extname(url);
 
     // Watch mode: surface this file's nearest config files (tsconfig.json,

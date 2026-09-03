@@ -217,14 +217,16 @@ pub struct Manifest {
     /// module loader at runtime. Presence, not extension: the CJS loader parses
     /// an exact-path `require()` of any unknown extension as JS.
     ///
-    /// What it buys: the launcher skips the feature matrix's `UnflagArgv` rows
-    /// (today `--js-defer-import-eval`). Those flags exist to enable in-progress
-    /// JS syntax in files Node parses at runtime, which `nub run` must assume
-    /// anywhere in the graph — but a sealed bundle has no such files, and the
-    /// bundler already lowered the graph it emitted (Rolldown evaluates
-    /// `import defer` eagerly, so the syntax never survives into the payload).
-    /// Measured on Node 26.7: the V8 flag alone costs ~6 ms of warm start,
-    /// because a non-default V8 flag invalidates the snapshot fast path.
+    /// What it buys: the launcher skips the feature matrix's `UnflagArgv` and
+    /// `RuntimeV8Flag` rows (today `--js-defer-import-eval`, a runtime row). Those
+    /// flags exist to enable in-progress JS syntax in files Node parses at
+    /// runtime, which `nub run` must assume anywhere in the graph — but a sealed
+    /// bundle has no such files, and the bundler already lowered the graph it
+    /// emitted (Rolldown evaluates `import defer` eagerly, so the syntax never
+    /// survives into the payload). Measured on Node 26.7 when the flag still rode
+    /// argv: it alone cost ~6 ms of warm start, because a non-default V8 flag at
+    /// startup makes Node reject its embedded builtin code cache for every
+    /// internal compiled afterwards.
     ///
     /// Residual channels a sealed graph still has — `createRequire()` on a
     /// computed path — behave exactly as they do under bare `node app.js`,

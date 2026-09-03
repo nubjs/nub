@@ -313,19 +313,22 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // `accepted_env_flags` is skipped above: its accepted flags follow from its version,
     // and the launcher is the hot path.
     //
-    // A sealed graph skips these rows entirely. They enable in-progress JS
-    // syntax in files Node PARSES at runtime; a payload with no `--external`
-    // and no retained computed `import()` has no such files, and a non-default
-    // V8 flag costs ~6 ms of warm start by invalidating the snapshot fast path
-    // (see `Manifest::sealed_module_graph`).
-    let argv_only = if view.manifest.sealed_module_graph {
-        Vec::new()
+    // A sealed graph skips these rows entirely, and the runtime V8 rows with them.
+    // They enable in-progress JS syntax in files Node PARSES at runtime; a payload
+    // with no `--external` and no retained computed `import()` has no such files,
+    // and a non-default V8 flag costs ~6 ms of warm start by invalidating Node's
+    // embedded builtin code cache (see `Manifest::sealed_module_graph`).
+    let (argv_only, runtime_v8) = if view.manifest.sealed_module_graph {
+        (Vec::new(), Vec::new())
     } else {
         let argv_probe_path = match origin {
             NodeOrigin::Managed => None,
             NodeOrigin::Discovered => Some(node_path.as_path()),
         };
-        flags::argv_inject_flags(argv_probe_path, &version, &[])
+        (
+            flags::argv_inject_flags(argv_probe_path, &version, &[]),
+            flags::runtime_inject_flags(argv_probe_path, &version, &[]),
+        )
     };
     inject.extend(argv_only.iter().copied());
 
@@ -375,6 +378,14 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // refuses in NODE_OPTIONS. See `flags::ARGV_ONLY_FLAGS_ENV`.
     if !argv_only.is_empty() {
         cmd.env(flags::ARGV_ONLY_FLAGS_ENV, argv_only.join(" "));
+    }
+    // The runtime V8 rows never touch argv: the compile bootstrap's preload turns
+    // them on inside the process, on first use. See `flags::RUNTIME_V8_FLAGS_ENV`.
+    if !runtime_v8.is_empty() {
+        cmd.env(
+            flags::RUNTIME_V8_FLAGS_ENV,
+            flags::runtime_v8_flags_env_value(&version, &runtime_v8),
+        );
     }
     cmd.stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

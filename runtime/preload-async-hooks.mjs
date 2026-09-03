@@ -30,6 +30,7 @@ import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, CLOBBER_MAP, dataExtsFor,
   extname, isFileUrl, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
+  noteRuntimeV8FlagSource,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -92,7 +93,14 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 // ── Load hook ───────────────────────────────────────────────────────
+// Every result passes through the runtime-V8-flag scan before Node compiles it —
+// see transform-core `noteRuntimeV8FlagSource`. Awaited here because the
+// `nextLoad` branch of loadInner hands back a promise on this tier.
 export async function load(url, context, nextLoad) {
+  return noteRuntimeV8FlagSource(await loadInner(url, context, nextLoad));
+}
+
+async function loadInner(url, context, nextLoad) {
   // Import Text (attribute-keyed): honor `with { type: "text" }` on ANY extension,
   // checked BEFORE extension dispatch so `import s from "./c.yaml" with {type:"text"}`
   // returns the raw text, not parsed YAML. shortCircuits, so Node never runs its own

@@ -1437,6 +1437,21 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             cmd.env(flags::ARGV_ONLY_FLAGS_ENV, argv_only.join(" "));
         }
         cmd.args(&argv_only);
+        // The matrix's runtime V8 flags (`Mitigation::RuntimeV8Flag`) never touch
+        // argv: the preload turns them on inside the process, on first use. Same
+        // probe and user-polarity filters, delivered through an env var stamped with
+        // this Node's version — see `flags::RUNTIME_V8_FLAGS_ENV`.
+        let runtime_v8 = flags::runtime_inject_flags(
+            Some(config.node.path.as_std_path()),
+            &config.node.version,
+            config.user_args,
+        );
+        if !runtime_v8.is_empty() {
+            cmd.env(
+                flags::RUNTIME_V8_FLAGS_ENV,
+                flags::runtime_v8_flags_env_value(&config.node.version, &runtime_v8),
+            );
+        }
         cmd.args(config.runtime_v8_flags);
     }
 
