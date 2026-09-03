@@ -5182,10 +5182,12 @@ mod tests {
         // the emitted code — the marker appears in the CODE either way.
         let decode_map = |code: &str| -> String {
             use base64::Engine as _;
-            let tail = code
-                .rsplit("base64,")
-                .next()
-                .expect("an inline sourcemap comment");
+            // `rsplit(..).next()` yields the WHOLE string when the separator is
+            // absent, so its `expect` could never fire and a chunk with no inline
+            // map reached the base64 decoder instead of failing here.
+            let (_, tail) = code
+                .rsplit_once("base64,")
+                .expect("the chunk carries an inline sourcemap comment");
             let b64 = tail.trim();
             String::from_utf8(
                 base64::engine::general_purpose::STANDARD
