@@ -1617,7 +1617,8 @@ pub enum SourcemapArg {
 pub enum DropArg {
     /// Every `console.*()` call.
     Console,
-    /// Every `debugger` statement.
+    /// Every `debugger` statement. Minification already removes these, so this
+    /// pins the guarantee rather than changing what is emitted.
     Debugger,
 }
 

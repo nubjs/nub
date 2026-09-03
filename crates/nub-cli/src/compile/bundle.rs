@@ -3646,6 +3646,12 @@ fn treeshake_options(opts: &BundleOptions) -> TreeshakeOptions {
 /// there is no compress pass to carry the drop when minification is off, and the
 /// DCE-only path hard-overrides both flags back to false
 /// (`Minifier::build` replaces the options with `CompressOptions::dce()`).
+///
+/// A flag the user did NOT pass stays `None`, which is not the same as `false`:
+/// an unset field falls back to `CompressOptions::smallest()`, and that already
+/// has `drop_debugger` ON. Writing `Some(false)` for the flag the user left out
+/// would make `--drop console` start EMITTING `debugger` statements that plain
+/// minification removes — measured on a compiled artifact, not reasoned about.
 fn minify_options(opts: &BundleOptions) -> RawMinifyOptions {
     if !opts.drop_console && !opts.drop_debugger {
         return RawMinifyOptions::Bool(opts.minify);
@@ -3653,8 +3659,8 @@ fn minify_options(opts: &BundleOptions) -> RawMinifyOptions {
     RawMinifyOptions::Object(RawMinifyOptionsDetailed {
         mangle: Some(RawMangleOptions::default()),
         compress: Some(RawCompressOptions {
-            drop_console: Some(opts.drop_console),
-            drop_debugger: Some(opts.drop_debugger),
+            drop_console: opts.drop_console.then_some(true),
+            drop_debugger: opts.drop_debugger.then_some(true),
             ..RawCompressOptions::default()
         }),
         remove_whitespace: true,
@@ -5613,10 +5619,9 @@ mod tests {
     /// The control runs at the SAME minify setting, because minification is the
     /// mechanism `--drop` rides — a control with minify off would vary two things.
     #[test]
-    fn drop_removes_console_and_debugger_from_the_emitted_chunk() {
+    fn drop_removes_console_calls_from_the_emitted_chunk() {
         let mut dropped = opts();
         dropped.drop_console = true;
-        dropped.drop_debugger = true;
         let code = emitted_chunk_code(
             &bundle_module_graph_with("drop-on", "entry.ts", DROP_FIXTURE, &dropped)
                 .expect("the fixture bundles"),
@@ -5630,12 +5635,8 @@ mod tests {
             "a dropped call takes its arguments with it; got:\n{code}"
         );
         assert!(
-            !code.contains("debugger"),
-            "--drop debugger must remove the statement; got:\n{code}"
-        );
-        assert!(
             code.contains("STILL_HERE"),
-            "only console and debugger are dropped; got:\n{code}"
+            "only console calls are dropped; got:\n{code}"
         );
 
         let control = emitted_chunk_code(
@@ -5643,10 +5644,47 @@ mod tests {
                 .expect("the fixture bundles"),
         );
         assert!(
-            control.contains("console.log") && control.contains("debugger"),
-            "without --drop both must survive, or the assertions above prove nothing; \
-             got:\n{control}"
+            control.contains("console.log"),
+            "without --drop the calls must survive, or the assertions above prove \
+             nothing; got:\n{control}"
         );
+    }
+
+    /// The regression this exists for: `--drop console` must not turn OFF the
+    /// `debugger` removal minification already performs. Rolldown reads an unset
+    /// compress flag from `CompressOptions::smallest()`, where `drop_debugger` is
+    /// already true — so writing `Some(false)` for the flag the user did not pass
+    /// would make asking for less produce MORE debug code than asking for nothing.
+    #[test]
+    fn asking_to_drop_only_console_does_not_resurrect_debugger_statements() {
+        // Positive control first: the fixture really does carry a `debugger`, and
+        // it survives when nothing removes it. Without this the assertion below
+        // would pass against a fixture that never had one.
+        let mut unminified = opts();
+        unminified.minify = false;
+        let raw = emitted_chunk_code(
+            &bundle_module_graph_with("debugger-control", "entry.ts", DROP_FIXTURE, &unminified)
+                .expect("the fixture bundles"),
+        );
+        assert!(
+            raw.contains("debugger"),
+            "the fixture must contain a debugger statement for this test to mean \
+             anything; got:\n{raw}"
+        );
+
+        for (tag, drop_debugger) in [("console-only", false), ("both", true)] {
+            let mut o = opts();
+            o.drop_console = true;
+            o.drop_debugger = drop_debugger;
+            let code = emitted_chunk_code(
+                &bundle_module_graph_with(tag, "entry.ts", DROP_FIXTURE, &o)
+                    .expect("the fixture bundles"),
+            );
+            assert!(
+                !code.contains("debugger"),
+                "{tag}: no debugger statement may reach a minified chunk; got:\n{code}"
+            );
+        }
     }
 
     /// The value half, kept separate because it is the one a naive removal gets
