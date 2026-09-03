@@ -2419,6 +2419,80 @@ fn test_parse_npm_workspace_importers() {
     }));
 }
 
+/// A local directory dependency's target is NOT a workspace importer,
+/// even though npm records it with the same shape as one.
+///
+/// npm keys both a member (`packages/app`) and a `file:` target
+/// (`vendor/local`) as a bare path carrying `name`/`version`, and gives
+/// both a `link: true` record. Taking every link target as an importer
+/// registered `vendor/local` as a phantom workspace member, and the
+/// freshness check then rejected the lockfile — `workspace importer
+/// vendor/local is in the lockfile but not in the workspace` — on every
+/// `--frozen-lockfile`, INCLUDING against lockfiles npm itself wrote.
+///
+/// The root entry's own `workspaces` patterns are what separate them, so
+/// the fixture below is shaped exactly as npm writes it: a braced pattern
+/// and a negation, to pin that the reader shares the discovery walk's
+/// matching rather than doing something simpler.
+#[test]
+fn test_parse_npm_local_dep_target_is_not_a_workspace_importer() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "root",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "root",
+                    "version": "1.0.0",
+                    "workspaces": ["packages/*", "tools/{a,b}", "!packages/skipped"]
+                },
+                "node_modules/@w/app": { "resolved": "packages/app", "link": true },
+                "node_modules/@w/tool": { "resolved": "tools/b", "link": true },
+                "node_modules/@w/skipped": { "resolved": "packages/skipped", "link": true },
+                "packages/app": {
+                    "name": "@w/app",
+                    "version": "1.0.0",
+                    "dependencies": { "shared": "file:../../vendor/local" }
+                },
+                "packages/skipped": { "name": "@w/skipped", "version": "1.0.0" },
+                "tools/b": { "name": "@w/tool", "version": "1.0.0" },
+                "vendor/local": { "name": "shared", "version": "1.0.0" },
+                "packages/app/node_modules/shared": {
+                    "resolved": "vendor/local",
+                    "link": true
+                }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+
+    assert!(
+        graph.importers.contains_key("packages/app"),
+        "a globbed member stays an importer, got {:?}",
+        graph.importers.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        graph.importers.contains_key("tools/b"),
+        "a BRACED member stays an importer -- excluding one breaks its \
+         install, which is the expensive direction, got {:?}",
+        graph.importers.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !graph.importers.contains_key("vendor/local"),
+        "a local dep target must not be registered as a workspace \
+         importer, got {:?}",
+        graph.importers.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !graph.importers.contains_key("packages/skipped"),
+        "a negated pattern excludes the member, matching the discovery \
+         walk, got {:?}",
+        graph.importers.keys().collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn test_parse_npm_workspace_importer_keeps_nested_conflicting_direct_dep() {
     let tmp = tempfile::NamedTempFile::new().unwrap();

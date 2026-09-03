@@ -216,6 +216,69 @@ fn validate_workspace_pattern(
     Ok(())
 }
 
+/// Does `path` name a workspace member under `patterns`?
+///
+/// `path` is project-root-relative with `/` separators — the spelling an
+/// importer key already uses. Purely lexical: no filesystem access, so a
+/// caller holding only a lockfile and a manifest can ask the question.
+///
+/// This exists because a `package-lock.json` CANNOT answer it. npm keys
+/// both a workspace member (`packages/app`) and a local directory
+/// dependency (`vendor/local`) as a bare path carrying `name`/`version`,
+/// and either may hold a root `node_modules/<name>` link record — a root
+/// importer's own `file:./dep` is indistinguishable from a member by
+/// shape alone. The manifest's `workspaces` patterns are the only real
+/// source of truth, so the reader matches against them here rather than
+/// guessing from the lockfile.
+///
+/// Shares the discovery walk's semantics deliberately: braces expand
+/// first, a `!` prefix negates, and a match requires some positive
+/// pattern and no negative one. Getting that wrong in the exclusive
+/// direction is the expensive one — a real member judged a non-member
+/// loses its importer entry and its install breaks — so the `**`
+/// companion-matcher compensation below matters as much here as it does
+/// there.
+pub fn matches_member_patterns(path: &str, patterns: &[String]) -> bool {
+    let mut matched = false;
+    for raw in patterns {
+        let (negated, pattern) = raw
+            .strip_prefix('!')
+            .map_or((false, raw.as_str()), |p| (true, p));
+        for expanded in expand_braces(pattern) {
+            if !pattern_matches_path(&expanded, path) {
+                continue;
+            }
+            if negated {
+                // A later exclusion wins outright, matching the walk.
+                return false;
+            }
+            matched = true;
+        }
+    }
+    matched
+}
+
+/// One expanded (brace-free, sign-free) pattern against one path.
+///
+/// The `glob` crate requires `**` to consume at least one component,
+/// while the micromatch semantics pnpm and npm use let it match zero — so
+/// `packages/**` names the `packages` directory itself as well as its
+/// descendants. `expand_workspace_pattern` compensates with a companion
+/// matcher for the trailing `/**` form; do the same here so the two agree
+/// about which directories are members.
+fn pattern_matches_path(pattern: &str, path: &str) -> bool {
+    let Ok(matcher) = glob::Pattern::new(pattern) else {
+        return false;
+    };
+    if matcher.matches(path) {
+        return true;
+    }
+    pattern
+        .strip_suffix("/**")
+        .and_then(|self_form| glob::Pattern::new(self_form).ok())
+        .is_some_and(|m| m.matches(path))
+}
+
 fn expand_braces(pattern: &str) -> Vec<String> {
     let mut depth = 0;
     let mut open = None;

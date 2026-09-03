@@ -15,6 +15,12 @@ aube-codes = { workspace = true }
 aube-manifest = { workspace = true }
 aube-settings = { workspace = true }
 aube-util = { workspace = true }
+# For `matches_member_patterns`: the npm reader has to tell a workspace
+# member apart from a local directory dependency, and only the manifest's
+# `workspaces` patterns can say which is which. Sharing the walk's own
+# matcher keeps the two from drifting. aube-workspace does not depend on
+# aube-lockfile, so this edge is acyclic.
+aube-workspace = { workspace = true }
 base64 = { workspace = true }
 glob = { workspace = true }
 miette = { workspace = true }

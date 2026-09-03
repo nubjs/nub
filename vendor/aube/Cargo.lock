@@ -356,6 +356,7 @@ dependencies = [
  "aube-manifest",
  "aube-settings",
  "aube-util",
+ "aube-workspace",
  "base64",
  "blake3",
  "criterion",
