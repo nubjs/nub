@@ -38,6 +38,7 @@ mod external;
 mod inject;
 mod launcher;
 mod loaders;
+mod metafile;
 mod native;
 mod native_layout;
 mod unbundlable;
@@ -83,6 +84,8 @@ pub struct CompileOptions {
     /// the nearest `package.json` supplies. Windows-only for the same reason as
     /// [`CompileOptions::icon`] — no other container format carries them.
     pub metadata: Vec<String>,
+    /// `--metafile`: where to write the build report. `None` collects nothing.
+    pub metafile: Option<PathBuf>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
 }
@@ -182,6 +185,13 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     opts.bundle.native_target = Some(target);
     eprintln!("Bundling {} …", opts.entry);
     let bundled = bundle::bundle_for_compile(&entry_abs, &opts.bundle, &cwd)?;
+    // Written as soon as the bundle exists, not at the end: everything after this
+    // point can fail on the network or on the target's launcher, and a report of
+    // what the bundler produced is exactly what someone diagnosing a size problem
+    // wants to keep from a run that did not finish.
+    if let (Some(path), Some(report)) = (&opts.metafile, &bundled.metafile) {
+        write_metafile(path, report)?;
+    }
     // The runtime resolve hook is decided AFTER the bundle: `--external` always
     // needs it, but `--allow-dynamic-import` only earns it if a computed
     // `import()` actually survived — the flag is cheap to pass defensively and a
@@ -366,6 +376,15 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         size as f64 / 1_000_000.0
     );
     Ok(0)
+}
+
+/// Write the `--metafile` report, pretty-printed because it is read by people at
+/// least as often as by a tool.
+fn write_metafile(path: &Path, report: &metafile::Metafile) -> Result<()> {
+    let json = serde_json::to_string_pretty(report).context("serializing the build report")?;
+    fs::write(path, json).with_context(|| format!("writing {}", path.display()))?;
+    eprintln!("Wrote {}", path.display());
+    Ok(())
 }
 
 // ---- target platform ----------------------------------------------------------
@@ -2857,6 +2876,7 @@ mod tests {
             install_message: install_message.map(str::to_string),
             node_options: Vec::new(),
             define_file: Vec::new(),
+            metafile: None,
             bundle: BundleOptions {
                 minify: true,
                 keep_names: true,
@@ -2875,6 +2895,9 @@ mod tests {
                 tsconfig: None,
                 loaders: Vec::new(),
                 native_target: None,
+                drop_console: false,
+                drop_debugger: false,
+                metafile: false,
                 target_node: None,
             },
         }
@@ -3297,6 +3320,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let layout = assets::Layout {
             entry_prefix: String::new(),
@@ -3366,6 +3390,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let layout = assets::Layout {
             entry_prefix: "dist/bun".into(),
@@ -3416,6 +3441,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let files = assemble_app(
             &bundled,
@@ -3478,6 +3504,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
 
         let err = assemble_app(
@@ -3520,6 +3547,7 @@ mod tests {
                 entry: "worker-a.mjs".into(),
                 chunk: "worker-a-code.mjs".into(),
             }],
+            metafile: None,
         };
         let wrappers = external::worker_wrappers(&bundled.worker_roots, true, "").unwrap();
         let files = assemble_app(
@@ -3563,6 +3591,7 @@ mod tests {
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),
                 worker_roots: Vec::new(),
+                metafile: None,
             },
             assets::Layout {
                 entry_prefix: String::new(),
