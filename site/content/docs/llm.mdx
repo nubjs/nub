@@ -1,0 +1,82 @@
+---
+title: Local models
+description: Run an AI model on your own machine with nub llm — Nub fetches a GPU-accelerated engine and a model on first use and serves the standard OpenAI-compatible API on localhost.
+---
+
+<Callout title="Experimental">
+The `nub llm` command is new and its surface may change. It is available on macOS (Apple Silicon), Linux x64, and Windows.
+</Callout>
+
+Nub runs local language models the way it runs Node: nothing ships inside the `nub` binary, and the pieces are fetched on first use, verified, and cached. The engine is [llama.cpp](https://github.com/ggml-org/llama.cpp), in the build that uses your operating system's own GPU stack — Metal on macOS, Vulkan on Linux and Windows x64, OpenCL on Windows arm64 — so it stays small (11–35 MB) and needs no CUDA toolkit. Models are GGUF files from Hugging Face. Your code talks to a plain HTTP endpoint, so it runs unchanged against any other OpenAI-compatible provider.
+
+## One-shot prompt
+
+The first run downloads the engine and the default model (Qwen3 4B, about 2.5 GB); later runs start immediately.
+
+```console
+$ nub llm run "In one sentence, what is a tide pool?"
+Provisioning the local-model engine (llama.cpp b10767, Metal backend)…
+Downloading model ggml-org/Qwen3-4B-GGUF (Qwen3-4B-Q4_K_M.gguf)…
+Tide pools are bodies of seawater left behind in rocky coastal areas when the tide recedes, creating habitats for marine life.
+```
+
+## Serve the API
+
+Start a server on localhost and point any OpenAI-compatible client at it. The server stays in the foreground; Ctrl-C stops it.
+
+```console
+$ nub llm serve
+Serving Qwen3-4B-Q4_K_M.gguf at http://127.0.0.1:8012/v1 (OpenAI-compatible) — Ctrl-C stops it.
+```
+
+```ts
+const res = await fetch("http://127.0.0.1:8012/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    messages: [{ role: "user", content: "Name three tide-pool animals." }],
+  }),
+});
+const { choices } = await res.json();
+console.log(choices[0].message.content);
+```
+
+Change the port with `--port`. The server binds to `127.0.0.1` only.
+
+## Choosing a model
+
+Pass `--model` to either command. Nub accepts a Hugging Face repository, a repository plus a quantization or file name, or a local path:
+
+```sh
+nub llm run --model ggml-org/gemma-3-4b-it-GGUF "hello"     # the repo's Q4_K_M file
+nub llm run --model ggml-org/Qwen3-4B-GGUF:Q8_0 "hello"     # pick a quantization
+nub llm serve --model ./my-model.gguf                        # a file on disk
+```
+
+Every download from Hugging Face is checked against the SHA-256 the hub publishes for the file. Use `--ctx` to set the context window in tokens when the model's default is not what you want.
+
+## The operating system's model
+
+On macOS 26 and later with Apple Silicon, `--provider os` uses the on-device model that ships with Apple Intelligence. Nothing is downloaded: no engine, no weights.
+
+```console
+$ nub llm run --provider os "In one sentence, what is a tide pool?"
+A tide pool is a small, sheltered area along the shoreline that is exposed during low tide and submerged during high tide, providing a habitat for a variety of marine organisms.
+```
+
+This model is small and has a fixed 4,096-token context, so treat it as the quick path for short prompts; the default engine is the one for longer work. It requires Apple Intelligence to be turned on in System Settings, and the first use builds a tiny bridge with the Xcode Command Line Tools.
+
+## Platforms
+
+| Platform | Engine build | Needs |
+| --- | --- | --- |
+| macOS, Apple Silicon | Metal | macOS 13.3 or later |
+| Linux x64 (glibc) | Vulkan | a Vulkan-capable GPU driver |
+| Windows x64 | Vulkan | a Vulkan-capable GPU driver |
+| Windows arm64 | OpenCL | the Qualcomm Adreno driver |
+
+Nub does not provide an engine for macOS on Intel, Linux arm64, or musl-based Linux yet; `nub llm` says so and exits.
+
+## Cache
+
+Engines live under `~/.cache/nub/llm/engine` and models under `~/.cache/nub/llm/models`. Delete a model file to reclaim its disk; it is fetched again on the next use.
