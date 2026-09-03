@@ -541,26 +541,50 @@ fn render_row(
     let mut col = value_col;
     let mut at_line_start = true;
 
+    // Wrapping happens word by word, but PAINTING happens per run of one ink.
+    // `run` is the text accumulated since the ink last changed or the line last
+    // broke; it is flushed through `paint` once. Painting each word as it lands
+    // renders identically and is what shipped first — but it wraps every word in
+    // its own escape pair, so `(node 28.3 MB · app 24 KB · launcher 1.2 MB)`
+    // leaves the terminal as eleven separate dim spans and roughly ten times the
+    // bytes, which is what anyone piping the output to a file or a doc gets.
+    let mut run = String::new();
+    let mut run_ink = Ink::Plain;
+    macro_rules! flush {
+        () => {
+            if !run.is_empty() {
+                line.push_str(&paint(&run, run_ink, color));
+                run.clear();
+            }
+        };
+    }
+
     for (text, ink) in spans {
+        if *ink != run_ink {
+            flush!();
+            run_ink = *ink;
+        }
         for (lead, word) in words(text) {
             // The separator belongs to whichever line the word lands on, so a
             // wrapped word sheds it and no continuation opens with stray spaces.
             let needed = if at_line_start { 0 } else { lead } + word.chars().count();
             if !at_line_start && col + needed > limit {
+                flush!();
                 lines.push(std::mem::take(&mut line));
                 line = " ".repeat(value_col);
                 col = value_col;
                 at_line_start = true;
             }
             if !at_line_start {
-                line.push_str(&" ".repeat(lead));
+                run.push_str(&" ".repeat(lead));
                 col += lead;
             }
-            line.push_str(&paint(word, *ink, color));
+            run.push_str(word);
             col += word.chars().count();
             at_line_start = false;
         }
     }
+    flush!();
     lines.push(line);
     lines
 }
@@ -724,10 +748,21 @@ fn resolved_build_rows(
     rows
 }
 
-/// Bytes as the megabytes a reader compares against a disk quota — decimal, the
-/// unit every other size in this output and on the docs page already uses.
+/// Bytes as the size a reader compares against a disk quota — decimal, the unit
+/// convention every other size in this output and on the docs page already uses.
+///
+/// Under a megabyte it says kilobytes instead, because a fixed `{:.1} MB` prints
+/// `0.0 MB` for anything below 50 KB — and the app region of a small binary is
+/// exactly that. A component of a real artifact reported as `0.0 MB` reads as
+/// "nothing is there", which is both wrong and the opposite of what the split
+/// exists to tell someone trying to shrink their binary. Measured on a two-line
+/// program: `app 0.0 MB`, beside a 24 KB region.
 fn mb(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1_000.0)
+    }
 }
 
 // ---- the live line -------------------------------------------------------------
@@ -769,6 +804,31 @@ const PHASE_WIDTH: usize = 11;
 /// Only `run` writes it, once, and only through [`LiveLine::start`].
 static LIVE: std::sync::Mutex<Option<std::sync::Arc<clx::progress::ProgressJob>>> =
     std::sync::Mutex::new(None);
+
+/// Move the live line to a new phase, from anywhere in the compile path.
+///
+/// A free function for the same reason [`note`] is one: the code that knows a
+/// step has started is often deep — the Node stripper, the re-signer — and
+/// threading a reporter down through every signature in between to let one of
+/// them change a word buys nothing.
+///
+/// This is where a step that used to print a standalone sentence goes.
+/// `Signing embedded Node.js` was one: it is not a fact about the artifact and
+/// not something a reader can act on, so it does not belong in the scrollback
+/// the closing block is handed — but it IS the slowest part of an embed build,
+/// so saying nothing while it runs is worse. A phase says it and then takes it
+/// back, which is what a phase is for.
+///
+/// With no live line this is a no-op, deliberately: the redirected build already
+/// gets the warnings and the closing block, which is everything a log needs.
+pub(crate) fn phase(verb: &str, detail: &str) {
+    if let Ok(guard) = LIVE.lock()
+        && let Some(job) = guard.as_ref()
+    {
+        job.prop("phase", &LiveLine::phase_field(verb));
+        job.prop("detail", &detail.to_string());
+    }
+}
 
 /// Print a line without tearing an animated status line.
 ///
@@ -869,20 +929,69 @@ pub(crate) fn report_error(err: &anyhow::Error) -> i32 {
 /// Split out for the same reason [`render_row`] is: the decomposition is the
 /// part with judgment in it, and a test that rebuilt it would not be testing
 /// what ships.
+///
+/// The rule that matters: **everything after the first line is the author's, and
+/// is reproduced byte for byte.** A compile error is not a sentence, it is a
+/// formatted block — a `file:line`, the offending source nested one level under
+/// it, a blank line, then a paragraph hard-wrapped by whoever wrote it. Both
+/// obvious treatments destroy it, and both were tried: re-indenting to hang
+/// under the headline flattens the nesting, so the location and the source at it
+/// become two unrelated lines; re-wrapping breaks each authored line one word
+/// early, because the hanging indent pushes a 74-column line two columns past
+/// the terminal. The tier's job is to label the error, not to lay it out.
 fn error_lines(err: &anyhow::Error, cols: usize, color: bool) -> Vec<String> {
     let rendered = err.to_string();
     let mut source = rendered.lines();
     let headline = source.next().unwrap_or_default();
-    // The message's own continuation lines first, then the cause chain. Several
-    // of these errors are already written as a headline plus an indented
-    // explanation — the "no Node version could be inferred" one runs to four —
-    // so their shape is kept rather than reflowed. The indent they came with is
-    // stripped, so the hanging indent is the only one in play and a body line
-    // cannot end up indented twice.
-    let mut body: Vec<String> = source.map(|line| line.trim_start().to_string()).collect();
-    body.extend(err.chain().skip(1).map(|cause| cause.to_string()));
-    let body: Vec<&str> = body.iter().map(String::as_str).collect();
-    diagnostic_lines(Tier::Error, headline, &body, cols, color)
+
+    // The headline is one sentence with no structure of its own, and the tier
+    // put a label in front of it, so this is the part the tier owns and wraps.
+    let mut lines = headline_lines(Tier::Error, headline, cols, color);
+    lines.extend(source.map(|line| {
+        // An empty line stays empty rather than becoming a pair of escapes.
+        if line.is_empty() {
+            String::new()
+        } else {
+            paint(line, Ink::Muted, color)
+        }
+    }));
+
+    // A cause is the tier's own composition — anyhow gives it as a bare string
+    // with no formatting — so it does hang under the headline.
+    let indent = Tier::Error.label().len() + GAP;
+    lines.extend(err.chain().skip(1).map(|cause| {
+        format!(
+            "{}{}",
+            " ".repeat(indent),
+            paint(&cause.to_string(), Ink::Muted, color)
+        )
+    }));
+    lines
+}
+
+/// The label and its headline: the one part both tiers compose themselves, so
+/// the label is painted in exactly one place.
+fn headline_lines(tier: Tier, headline: &str, cols: usize, color: bool) -> Vec<String> {
+    let label = tier.label();
+    let painted = if color {
+        format!("{}\x1b[1m{label}\x1b[22m\x1b[39m", tier.sgr())
+    } else {
+        label.to_string()
+    };
+    let indent = label.len() + GAP;
+    wrapped(headline, indent, cols)
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            // The label sits on the first line only; the rest align under it.
+            let lead = if i == 0 {
+                format!("{painted}{}", " ".repeat(GAP))
+            } else {
+                " ".repeat(indent)
+            };
+            format!("{lead}{chunk}")
+        })
+        .collect()
 }
 
 /// The lines a diagnostic prints, split from the printing so a test can read
@@ -903,28 +1012,14 @@ fn diagnostic_lines(
     cols: usize,
     color: bool,
 ) -> Vec<String> {
-    let label = tier.label();
-    let painted = if color {
-        format!("{}\x1b[1m{label}\x1b[22m\x1b[39m", tier.sgr())
-    } else {
-        label.to_string()
-    };
     // Everything hangs under the headline rather than under the margin, so an
     // explanation reads as belonging to the thing it explains — and so does a
     // headline long enough to wrap, which is not rare: `unknown --platform …`
-    // enumerates all eight and runs to 155 columns.
-    let indent = label.len() + GAP;
-
-    let mut lines = Vec::new();
-    for (i, chunk) in wrapped(headline, indent, cols).into_iter().enumerate() {
-        // The label sits on the first line only; the rest align under it.
-        let lead = if i == 0 {
-            format!("{painted}{}", " ".repeat(GAP))
-        } else {
-            " ".repeat(indent)
-        };
-        lines.push(format!("{lead}{chunk}"));
-    }
+    // enumerates all eight supported triples and runs to 155 columns.
+    let indent = tier.label().len() + GAP;
+    let mut lines = headline_lines(tier, headline, cols, color);
+    // A `warn` body is written AT the call site FOR this indent — short
+    // fragments, no nesting — so unlike an error's, it is the tier's to lay out.
     for line in body {
         for chunk in wrapped(line, indent, cols) {
             lines.push(format!(
@@ -993,9 +1088,8 @@ impl LiveLine {
 
     /// Move to a phase, with an optional detail after it.
     fn phase(&self, verb: &str, detail: &str) {
-        if let Some(job) = &self.0 {
-            job.prop("phase", &Self::phase_field(verb));
-            job.prop("detail", &detail.to_string());
+        if self.0.is_some() {
+            phase(verb, detail);
         }
     }
 
@@ -2200,7 +2294,7 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         // Announced BEFORE the call, not after it. Signing a ~107 MB binary takes
         // real time, and a progress line printed once it finished left that whole
         // stretch labelled by the previous phase.
-        note("Signing embedded Node.js");
+        phase("signing", "embedded Node");
         ok = run_ok("codesign", &sign);
     }
 
@@ -4300,24 +4394,34 @@ mod tests {
         );
     }
 
-    /// An error keeps the shape it was written in, and picks up its causes.
+    /// An error's own formatting survives verbatim, and its causes hang.
     ///
-    /// Several compile errors are authored as a headline plus an indented
-    /// explanation, so the decomposition has to hand the explanation to the body
-    /// rather than let it wrap as part of the headline — and it has to strip the
-    /// indent those lines already carry, or they end up indented twice.
+    /// The verbatim half is the load-bearing one, and it is asserted with a
+    /// message shaped like the real ones: a `file:line`, the offending source
+    /// nested one level under it, a blank line, then a hard-wrapped paragraph.
+    /// Re-indenting it collapses the nesting so the location and the source at
+    /// it become two unrelated lines; re-wrapping breaks each authored line one
+    /// word early. Both shipped, briefly, and both are what this pins shut.
+    ///
+    /// The causes are different — anyhow hands those over as bare strings with
+    /// no formatting of their own, so the tier lays them out.
     #[test]
-    fn an_error_keeps_its_explanation_and_gains_its_causes() {
-        let multiline = anyhow::anyhow!(
-            "no Node version could be inferred for this project.\n  Pass --target <version>, or add a pin.\n  (nub compile does not fall back to \"latest\".)"
+    fn an_error_keeps_its_own_formatting_and_hangs_its_causes() {
+        let formatted = anyhow::anyhow!(
+            "1 import could not be resolved at build time:\n  /src/plugins.ts:6:22\n    import(pluginName)\n\n  A compiled binary carries no node_modules, so an unresolved import fails at\n  runtime on the machine you ship to."
         );
         assert_eq!(
-            error_lines(&multiline, 80, false),
+            error_lines(&formatted, 80, false),
             vec![
-                "error  no Node version could be inferred for this project.".to_string(),
-                "       Pass --target <version>, or add a pin.".to_string(),
-                "       (nub compile does not fall back to \"latest\".)".to_string(),
-            ]
+                "error  1 import could not be resolved at build time:".to_string(),
+                "  /src/plugins.ts:6:22".to_string(),
+                "    import(pluginName)".to_string(),
+                String::new(),
+                "  A compiled binary carries no node_modules, so an unresolved import fails at"
+                    .to_string(),
+                "  runtime on the machine you ship to.".to_string(),
+            ],
+            "only the first line is the tier's; the rest is the author's, byte for byte"
         );
 
         let chained = anyhow::anyhow!("no such file or directory")
