@@ -155,11 +155,11 @@ A command-line flag always wins over the file. See [nub.jsonc](/docs/config) for
 
 ## Compatibility mode
 
-Compatibility mode turns every augmentation off — the load hook, preloads, unflagging, and `.env` loading — and runs your code on plain Node, as `node <file>` would. It still runs the project's *pinned* Node; version provisioning stays on. (This is distinct from the compatibility *tier* in the [table above](#supported-versions-and-tiers), the startup path for Node lines without sync `registerHooks`, which only changes how augmentation is delivered.)
+Compatibility mode turns every augmentation off — the load hook, preloads, unflagging, and `.env` loading — and runs your code on plain Node. It still runs the project's *pinned* Node; version provisioning stays on. (This is distinct from the compatibility *tier* in the [table above](#supported-versions-and-tiers), the startup path for Node lines without sync `registerHooks`, which only changes how augmentation is delivered.)
 
 ### `--node`
 
-Pass `--node` to run a single invocation with zero augmentation. Your code runs on the project's *pinned* Node (from `.node-version` / `.nvmrc`, fetched if missing), vanilla.
+Pass `--node` to run a single invocation with zero augmentation. Your code runs on the project's *pinned* Node (from `.node-version` / `.nvmrc`, fetched if missing).
 
 ```bash
 nub --node script.js     # the project's pinned Node, vanilla
@@ -168,7 +168,7 @@ node script.js           # your shell's Node, unaugmented, unprovisioned
 
 ### `NODE_COMPAT`
 
-Setting a truthy `NODE_COMPAT` (`1`, `true`, or `yes`, case-insensitive) is the tree-wide form of `--node`: the same effect, inherited by every descendant `node` / `nub` in the tree:
+Setting a truthy `NODE_COMPAT` (`1`, `true`, or `yes`, case-insensitive) has the same effect as `--node` and is inherited by every descendant `node` / `nub` in the tree:
 
 ```bash
 export NODE_COMPAT=1     # every nub/node in this shell now runs vanilla
@@ -177,12 +177,12 @@ nub script.ts            # plain Node, still on the project's pinned version
 
 ### `nodeCompat`
 
-Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) is the project-wide form.
+Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) applies compatibility mode to every run in the project.
 
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "nodeCompat": true  // plain Node, version pinning kept
+  "nodeCompat": true  // compatibility mode for every run
 }
 ```
 

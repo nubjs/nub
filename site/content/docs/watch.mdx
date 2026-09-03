@@ -61,13 +61,13 @@ nub watch src/server.ts
 
 ## Plain Node `--watch`
 
-Nub's watch mode adds the banner, the preserve-output default, and the off-graph reporting on top of Node's. When you want vanilla Node `--watch` with no Nub-side glue at all, type `node --watch` directly in your shell.
+Nub's watch mode adds the banner, the preserve-output default, and the off-graph reporting on top of Node's. For vanilla `node --watch`, type it in your shell:
 
 ```bash
 node --watch script.js
 ```
 
-Nub's PATH shim only affects descendants of an active `nub` call, so the `node` in your shell is your real Node.
+Nub's PATH shim only affects descendants of an active `nub` call.
 
 <Callout>
 Read the [full docs](https://nodejs.org/api/cli.html#--watch) for Node's `--watch` flag on nodejs.org.

@@ -168,7 +168,7 @@ For restart-on-change, yes: `nub watch script.ts` (or `nub --watch script.ts`) r
 
 ## What about `dotenv-cli`?
 
-Not needed. Nub loads your env files automatically — with the Vite/Bun-style precedence rules — and injects them into the process environment *before* Node starts:
+Nub loads your env files automatically — with the Vite/Bun-style precedence rules — and injects them into the process environment *before* Node starts:
 
 ```text
 .env.[mode].local
@@ -193,9 +193,9 @@ Nub is a Rust CLI. When you type `nub script.ts`, the Rust binary:
 2. Reads your nearest `package.json`, `tsconfig.json`, and `.env*` files.
 3. Spawns that Node with `--import` pointing at Nub's preload bundle and `NODE_OPTIONS` set to whatever experimental flags are needed for that Node version.
 4. The preload bundle calls `module.registerHooks()` to install Nub's load hook (TS / JSX / YAML / TOML / JSON5 / JSONC transpile-and-parse path, backed by an N-API binding to `oxc`), installs polyfills (`Temporal`, `URLPattern`, `WebSocket`, `Worker`, WinterTC gap globals) where Node is behind, and hands control to your script.
-5. Subprocesses inherit the same augmentation recursively — `node hello.js` from inside a script, the Node process Vite or Next.js spawns for a dev server, the worker pool your test runner spins up, `child_process.spawn("node", …)` from your own code.
+5. Subprocesses inherit the same augmentation recursively — a `node hello.js` from inside a script, or the worker pool your test runner spins up.
 
-Every step rides on a public Node extension surface — see [What Node features does it rely on?](#what-node-features-does-it-rely-on) for the full inventory.
+See [What Node features does it rely on?](#what-node-features-does-it-rely-on) for the extension surfaces each step uses.
 
 ## What Node features does it rely on?
 

@@ -541,12 +541,12 @@ Asking for a package without naming a version resolves to the newest release tha
 
 ```console
 $ nub add some-tool
-+ some-tool@2.3.0  latest 2.4.0   # ✓ 2.4.0 is still inside the window
++ some-tool@2.3.0  latest 2.4.0   # 2.4.0 is still inside the window, so 2.3.0 installs
 ```
 
-The fallback stops at whatever the publisher currently tags `latest`; a version published and then untagged was withdrawn, and Nub never falls back to one. When `latest` is a prerelease the command fails outright, since the stable release below it belongs to a line the publisher has moved off.
+The fallback stops at whatever the publisher currently tags `latest`; a version published and then untagged was withdrawn. When `latest` is a prerelease the command fails outright, since the stable release below it belongs to a line the publisher has moved off.
 
-The report follows the same rule. Both version columns of `nub outdated` name what an install would land on, so a version inside the window is never offered:
+Both version columns of `nub outdated` follow the same rule: they name what an install would land on, so a version inside the window is never offered:
 
 ```console
 $ nub outdated
@@ -577,10 +577,10 @@ $ nub add some-tool --minimum-release-age-exclude='@internal/*' --minimum-releas
 ```
 
 <Callout title="The window is enforced, not advisory">
-When nothing satisfying the range is old enough, the install fails; Nub never quietly takes a version that missed the cutoff. Setting the window to `0` turns it off outright.
+When nothing satisfying the range is old enough, the install fails. Setting `minimumReleaseAge` to `0s` turns the window off entirely.
 </Callout>
 
-Publish dates come from the registry's `time` metadata. An age Nub cannot establish is a failure:
+Publish dates come from the registry's `time` metadata, and the outcome depends on what it supplies:
 
 | Registry metadata | Outcome |
 |---|---|

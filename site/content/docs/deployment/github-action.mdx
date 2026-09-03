@@ -37,7 +37,7 @@ The action installs the `nub` CLI, then provisions the project's pinned Node int
 4. `.tool-versions` (the asdf/mise file's `nodejs` or `node` line)
 5. `package.json#/engines/node`
 
-That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version — the same PATH guarantee setup-node gives. With no pin declared, the eager step skips and Nub provisions at runtime.
+That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version. With no pin declared, the eager step skips and Nub provisions at runtime.
 
 Because the pin lives in the repository, `actions/checkout` must run before this action.
 
@@ -58,7 +58,7 @@ Because the pin lives in the repository, `actions/checkout` must run before this
 | `always-auth` | `false` | Authenticate on every registry request. |
 | `token` | `github.token` | Token for GitHub-API rate-limit relief when resolving Nub's version range. |
 
-The setup-node inputs `check-latest`, `architecture`, `mirror`, and `mirror-token` are accepted and ignored, so a swap never errors. The `version` input is a deprecated alias for `nub-version` and emits a warning.
+The setup-node inputs `check-latest`, `architecture`, `mirror`, and `mirror-token` are accepted and ignored. The `version` input is a deprecated alias for `nub-version` and emits a warning.
 
 ### `nub-version`
 

@@ -11,7 +11,7 @@ Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storag
 
 ## `sessionStorage`
 
-The `sessionStorage` global is in-memory and per-process: it is created fresh each run and discarded when the process exits, never touching disk.
+The `sessionStorage` global is in-memory and per-process: it is created fresh each run and discarded when the process exits.
 
 ```ts
 sessionStorage.setItem("step", "1");
@@ -34,8 +34,6 @@ localStorage.key(0);                  // "token"
 localStorage.removeItem("token");
 localStorage.clear();
 ```
-
-Values survive between runs:
 
 ```console
 $ nub --localstorage-file=./app.db write.ts

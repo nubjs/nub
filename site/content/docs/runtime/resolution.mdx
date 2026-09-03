@@ -129,7 +129,7 @@ Nub's probe consults only `index`; a directory's own `package.json` `main` is le
 
 ## .js → .ts resolution
 
-With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension even though the file on disk is `.ts`. Nub reverses that at runtime.
+With `moduleResolution: "nodenext"`, `tsc` requires a `.js` extension even though the file on disk is `.ts`, so Nub maps the written `.js` back to the `.ts` on disk.
 
 ```ts
 // resolves ./handler.ts when no ./handler.js exists
@@ -156,7 +156,7 @@ Read the [full docs](https://nodejs.org/api/packages.html) for package entry poi
 
 ## Adding export conditions
 
-Node does the condition matching, but you choose which conditions are active. Add your own in a [nub.jsonc](/docs/config#conditions) and every run in the project resolves against them.
+Add your own in a [nub.jsonc](/docs/config#conditions) and every run in the project resolves against them.
 
 ```jsonc title="nub.jsonc"
 {
@@ -180,7 +180,7 @@ Every resolution in the project matches against them, a bare-specifier [preload]
 
 ## Yarn Plug'n'Play
 
-Nub enables Plug'n'Play automatically, with no flag and no setup. Walking up from the working directory, it detects a `.pnp.cjs` at the project root and injects it ahead of its own preload (`--require .pnp.cjs` on the fast tier, the `NODE_OPTIONS` equivalent on the compat tier), so PnP's resolver patches install first and Nub's TypeScript resolution layers on top.
+Nub enables Plug'n'Play automatically. Walking up from the working directory, it detects a `.pnp.cjs` at the project root and injects it ahead of its own preload (`--require .pnp.cjs` on the fast tier, the `NODE_OPTIONS` equivalent on the compat tier), so PnP's resolver patches install first and Nub's TypeScript resolution layers on top.
 
 ```bash
 nub index.ts        # .pnp.cjs is detected and loaded automatically
