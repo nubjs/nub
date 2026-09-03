@@ -52,7 +52,7 @@ Nub reports the off-graph files to Node's watcher over its `WATCH_REPORT_DEPENDE
 
 ## What doesn't trigger a restart
 
-Files that nothing in the run loads are not watched. A rebuild that emits `dist/foo.js` doesn't trigger a restart unless something in the run imported `dist/foo.js`.
+A rebuild that emits `dist/foo.js` doesn't trigger a restart unless something in the run imported `dist/foo.js`.
 
 ```bash
 nub watch src/server.ts
@@ -61,7 +61,7 @@ nub watch src/server.ts
 
 ## Plain Node `--watch`
 
-Nub's watch mode is not byte-for-byte Node — it adds the banner, the preserve-output default, and the off-graph reporting. When you want vanilla Node `--watch` with no Nub-side glue at all, type `node --watch` directly in your shell.
+Nub's watch mode adds the banner, the preserve-output default, and the off-graph reporting on top of Node's. When you want vanilla Node `--watch` with no Nub-side glue at all, type `node --watch` directly in your shell.
 
 ```bash
 node --watch script.js

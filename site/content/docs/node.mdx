@@ -191,7 +191,7 @@ removed /Users/you/.local/share/nub/node-shim
 
 ## Mirrors and proxies
 
-Node downloads use `HTTP(S)_PROXY` / `NO_PROXY` and the system trust store. To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both from a project or user-level file, with no Nub-specific config:
+Node downloads use `HTTP(S)_PROXY` / `NO_PROXY` and the system trust store. To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both from a project or user-level file:
 
 ```ini title=".npmrc"
 node-mirror:release=https://artifactory.corp.example/node/

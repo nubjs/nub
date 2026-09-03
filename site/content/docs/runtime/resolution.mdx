@@ -123,13 +123,13 @@ A subpath naming a directory resolves that directory's `index` file, the way a `
 import { parse } from "qs/lib";   // resolves qs/lib/index.js
 ```
 
-Nub's probe consults only `index`; a directory's own `package.json` `main` is left to Node's resolver, so `require` and `import` land on the same file.
+Nub's probe consults only `index`; a directory's own `package.json` `main` is left to Node's resolver.
 
-<Callout>A dependency that declares `exports` is never probed. Its map decides what is reachable, as on Node, so a subpath it withholds stays an error.</Callout>
+<Callout>A dependency that declares `exports` is never probed; its map alone decides what is reachable, as on Node.</Callout>
 
 ## .js → .ts resolution
 
-With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension even though the file on disk is `.ts`. Nub reverses that at runtime, so the same source runs before and after a build.
+With `moduleResolution: "nodenext"`, `tsc` wants a `.js` extension even though the file on disk is `.ts`. Nub reverses that at runtime.
 
 ```ts
 // resolves ./handler.ts when no ./handler.js exists
@@ -139,11 +139,11 @@ import { handler } from "./handler.js";
 import { createPrompt } from "@repo/lib/prompt.js";
 ```
 
-The swap only fires when the written extension points at a file that doesn't exist — a real on-disk `./handler.js` is used as-is. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`, and likewise a real `.cjs` beats a sibling `.cts`.
+The swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`, and likewise a real `.cjs` beats a sibling `.cts`.
 
 ## What falls through to Node
 
-Nub resolves only the TypeScript-aware cases. Node's own resolver handles everything else, unchanged:
+Node's own resolver handles everything else, unchanged:
 
 - package names
 - `exports` / `imports` maps

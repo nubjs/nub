@@ -74,7 +74,7 @@ The global file is read leniently, because it applies to every project on your m
 
 Four fields take paths: [`preload`](#preload), [`envFile`](#envfile), [`tsconfig`](#tsconfig), and [`nodeExecutable`](#nodeexecutable) in its path form. A relative path resolves against the directory of the file that set it — not your working directory.
 
-For a project `nub.jsonc` that is the directory the file sits in — in a monorepo, wherever the nearest one lives, which need not be the package you are running from. For the global file it is your config directory, which is where the rule starts to surprise people.
+For a project `nub.jsonc` that is the directory the file sits in — in a monorepo, wherever the nearest one lives, which need not be the package you are running from. For the global file it is your config directory.
 
 ```jsonc title="~/.config/nub/nub.jsonc"
 {
@@ -92,7 +92,7 @@ For a global path, write it absolute or lead with `~/`.
 }
 ```
 
-Project-relative paths belong in the project file; a global path cannot mean "each project's own directory".
+A global path cannot refer to each project's own directory; those paths go in the project file.
 
 ## JSON Schema
 
@@ -109,12 +109,12 @@ Schemas are served from `https://nubjs.com/schema/`:
 
 | URL | Role |
 | --- | --- |
-| [`latest.json`](https://nubjs.com/schema/latest.json) | Rolling — always matches the newest release; new fields show up in the schema as they ship |
-| `https://nubjs.com/schema/v0.7.json` | Pinned to the `0.7` minor series — use when you want the schema to stop drifting under a checkout |
+| [`latest.json`](https://nubjs.com/schema/latest.json) | Rolling — matches the newest release |
+| `https://nubjs.com/schema/v0.7.json` | Pinned to the `0.7` minor series |
 
 Each minor series gets one file (`v0.6.json`, `v0.7.json`, …). On every release bump Nub snapshots the rolling schema into that series' file; patch releases within `0.7.x` keep rewriting `v0.7.json` only when the published field surface changes. Older series stay published for long-lived branches. The [schema index](/schema) lists every file on disk.
 
-The `$schema` key is read by editors only, never by Nub.
+Only editors read the `$schema` key.
 
 ## Runtime
 

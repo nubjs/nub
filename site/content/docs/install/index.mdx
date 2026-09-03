@@ -535,7 +535,7 @@ The warning is emitted by the install that runs the build. A later install with 
 
 ### Cooling window
 
-A registry-resolved version must be older than `minimumReleaseAge` — 24 hours by default — before Nub will install it. The window covers the hours between a compromised publish going up and being caught.
+A registry-resolved version must be older than `minimumReleaseAge` — 24 hours by default — before Nub will install it.
 
 Asking for a package without naming a version resolves to the newest release that clears the window:
 
@@ -577,10 +577,10 @@ $ nub add some-tool --minimum-release-age-exclude='@internal/*' --minimum-releas
 ```
 
 <Callout title="The window is enforced, not advisory">
-When nothing satisfying the range is old enough, the install fails — Nub never quietly takes a version that missed the cutoff, and no flag relaxes that. Setting the window to `0` turns it off outright.
+When nothing satisfying the range is old enough, the install fails; Nub never quietly takes a version that missed the cutoff. Setting the window to `0` turns it off outright.
 </Callout>
 
-Publish dates come from the registry's `time` metadata, so the gate is only as strong as what the registry serves. An age Nub cannot establish counts as a failure rather than a pass:
+Publish dates come from the registry's `time` metadata. An age Nub cannot establish is a failure:
 
 | Registry metadata | Outcome |
 |---|---|
