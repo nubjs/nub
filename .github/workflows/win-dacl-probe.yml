@@ -1,0 +1,85 @@
+# Why a Windows runner sometimes refuses nub's runtime-cache root.
+#
+# nubjs/nub#830 failed 2 of 8 CI runs with "runtime cache path has an unsafe owner
+# or DACL" while main never failed — and the only difference in the tested binary is
+# that the PR links the MSVC CRT statically. Two explanations were live; this decides
+# between them without building nub:
+#
+#   * CRT linkage changes the verdict     -> the probe is built BOTH ways, same runner.
+#   * an ancestor's ACL varies by VM      -> the matrix samples several runners, and
+#                                            every component's verdict is printed.
+#
+# Build-free of nub: the probe is a single self-contained crate, so a run is minutes.
+name: Windows DACL probe
+
+on:
+  push:
+    branches: [win-dacl-probe]
+    paths:
+      - 'tests/win-dacl-probe/**'
+      - '.github/workflows/win-dacl-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each shard is a DIFFERENT runner VM, which is the only way to sample
+        # ancestor-ACL variation: the ACLs cannot change within one job.
+        shard: [1, 2, 3, 4, 5, 6]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ancestors as the runner left them
+        shell: pwsh
+        run: |
+          # Printed before anything is created, so a difference between shards is the
+          # image's, not something the probe did.
+          $p = $env:RUNNER_TEMP
+          while ($p) {
+            $acl = Get-Acl -LiteralPath $p -ErrorAction SilentlyContinue
+            if ($acl) {
+              Write-Host "PATH $p OWNER=$($acl.Owner)"
+              foreach ($a in $acl.Access) {
+                Write-Host "   ACE $($a.IdentityReference) $($a.FileSystemRights) inherited=$($a.IsInherited) flags=$($a.InheritanceFlags)/$($a.PropagationFlags)"
+              }
+            }
+            $parent = Split-Path $p -Parent
+            if ($parent -eq $p) { break }
+            $p = $parent
+          }
+
+      - name: Build the probe both ways
+        shell: bash
+        working-directory: tests/win-dacl-probe
+        run: |
+          set -euo pipefail
+          cargo build --release
+          mv target/release/win-dacl-probe.exe ../../probe-dynamic.exe
+          RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
+          mv target/release/win-dacl-probe.exe ../../probe-static.exe
+
+      - name: Dynamic CRT — the control
+        shell: bash
+        run: ./probe-dynamic.exe 40 | tee dynamic.log
+
+      - name: Static CRT — the variable under test
+        shell: bash
+        run: ./probe-static.exe 40 | tee static.log
+
+      - name: Verdict
+        shell: bash
+        run: |
+          set -uo pipefail
+          d=$(grep -o 'failures=[0-9]*' dynamic.log | tail -1)
+          s=$(grep -o 'failures=[0-9]*' static.log | tail -1)
+          echo "shard=${{ matrix.shard }} dynamic:$d static:$s"
+          # Never fails the job. A shard where BOTH are clean is a real result — it
+          # says this runner does not reproduce — and a red X on that would train
+          # everyone to ignore the probe.
+          echo "::notice::shard ${{ matrix.shard }} dynamic:$d static:$s"
