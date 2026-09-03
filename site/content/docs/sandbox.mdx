@@ -78,6 +78,26 @@ The kernel refuses a denied access inside the script's own process, and does not
 
 If a package installs cleanly but behaves as though its build step never ran, set `install.buildJail` to `false`, install again, and compare. If that fixes it, [open an issue](https://github.com/nubjs/nub/issues) naming the package and version — it will be measured and added.
 
+### Packages that cannot run confined on Windows
+
+Three packages in the measured set fail under the jail on Windows and cannot be fixed by widening the policy. Each needs the per-package exemption above.
+
+| Package | Why |
+| --- | --- |
+| `cpu-features` | Its compiler probe starts a Visual Studio COM server, which refuses a sandboxed process. An install still succeeds, because the package is an optional dependency of `ssh2` — the native acceleration is skipped, not the install. |
+| `jpegtran-bin` | Ships a prebuilt executable with no relocation table. Windows cannot load such an image into a sandboxed process. |
+| `mozjpeg` | Ships the same kind of prebuilt executable. |
+
+```json title="package.json"
+{
+  "allowBuilds": {
+    "cpu-features": "no-jail"
+  }
+}
+```
+
+No package in that set fails under the jail on macOS or Linux.
+
 ## Rule order
 
 A rule set is an array or an object; either way rules apply in order and the last match wins. (JSON preserves key order, so an object's keys are ordered too.)
