@@ -121,6 +121,22 @@ function run(...argv) {
   return runWith({}, ...argv);
 }
 
+// The output of a run that is EXPECTED to fail. `execFileSync` throws on a
+// non-zero exit and the thrown error carries the captured streams — but
+// `assert.throws` returns undefined rather than the error, so reading them off
+// its return value is a TypeError. That mistake was here, in a Windows-only
+// case, where no run on this machine could ever raise it. Hence a helper, used
+// by the platform-neutral miss test below as well, so the idiom is exercised
+// everywhere and cannot rot in a branch only CI reaches.
+function runExpectingFailure(env, ...argv) {
+  try {
+    runWith(env, ...argv);
+  } catch (err) {
+    return `${err.stdout ?? ""}${err.stderr ?? ""}`;
+  }
+  return assert.fail(`nubr ${argv.join(" ")} unexpectedly succeeded`);
+}
+
 // One case per class of thing a shell would otherwise act on. `%VAR%` is
 // deliberately absent: cmd.exe expands it before the caret pass can matter, and
 // npm does not defend against that either — asserting it would pin a divergence
@@ -160,6 +176,12 @@ test("a bin whose name is a shell builtin still runs the bin", () => {
   assert.equal(run("test"), "the installed bin");
 });
 
+test("a name that matches nothing fails, naming the scripts that exist", () => {
+  const out = runExpectingFailure({}, "definitely-not-a-target");
+  assert.match(out, /is not a file, a package.json script, or an installed bin/);
+  assert.match(out, /scripts: .*\bbuild\b/);
+});
+
 test(
   "a Windows ComSpec that is not cmd runs the shim that shell can execute",
   { skip: process.platform === "win32" ? false : "Windows only" },
@@ -189,11 +211,7 @@ test(
     // its escaping is a pinned port of npm's and npm has no PowerShell branch.
     // Selecting it anyway would fail AFTER appearing to resolve, so the contract
     // is a clean refusal that names the reason.
-    const err = assert.throws(() =>
-      runWith({ ComSpec: "powershell.exe" }, "whichshim"),
-    );
-    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-    assert.match(out, /is not a file, a package.json script, or an installed bin/);
+    const out = runExpectingFailure({ ComSpec: "powershell.exe" }, "whichshim");
     assert.match(out, /cannot run an installed bin through PowerShell/);
     // Nothing ran: no shim's output reached the caller.
     assert.doesNotMatch(out, /ps1 shim|cmd shim|sh shim/);
