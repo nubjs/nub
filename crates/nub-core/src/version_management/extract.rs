@@ -381,6 +381,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The gzip path (llama.cpp engine archives) routes through `extract_archive`
+    /// by suffix and lands the same single-top-dir shape as the xz path.
+    #[test]
+    fn extract_tar_gz_via_extract_archive_returns_the_single_top_dir() {
+        let dir = std::env::temp_dir().join(format!("nub-gz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("sample.tar.gz");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut builder = tar::Builder::new(enc);
+            let mut h = tar::Header::new_gnu();
+            let body = b"#!/bin/sh\n";
+            h.set_size(body.len() as u64);
+            h.set_mode(0o755);
+            h.set_cksum();
+            builder
+                .append_data(&mut h, "llama-b1/llama-server", &body[..])
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        let out = dir.join("extracted");
+        let top = extract_archive(&archive, &out).unwrap();
+        assert_eq!(top.file_name().unwrap(), "llama-b1");
+        assert!(top.join("llama-server").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The streamed variant must behave identically to the file one on the same
     /// bytes — build the archive in memory and feed it through a plain `Read`.
     #[test]
