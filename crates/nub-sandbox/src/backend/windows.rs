@@ -2971,9 +2971,30 @@ pub(super) mod launch {
                 if unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0 {
                     let mut code: u32 = 0;
                     if unsafe { GetExitCodeProcess(h, &mut code) } != 0 {
-                        last_exit = Some(code);
                         if std::env::var_os("NUB_JAIL_DUMP_POLICY").is_some() {
                             eprintln!("JAILDUMP drain exited code={code}");
+                        }
+                        // ⛔⛔ STATUS_BREAKPOINT IS TEARDOWN NOISE, NOT AN OUTCOME, AND LETTING IT WIN
+                        // MADE THE HIGHEST-WEIGHT PACKAGE ON WINDOWS FAIL AT RANDOM. Measured on
+                        // `puppeteer@25.8.0` (~11.9M installs/week) with two runs that differ in
+                        // nothing but scheduling. Its postinstall COMPLETES in both — chrome and
+                        // chrome-headless-shell are both downloaded — and `0x80000003` appears in
+                        // both drains. Only the ORDER differs:
+                        //
+                        //   failed: 0, 0, 0, 0, 2147483651   <- breakpoint exits LAST, so it wins
+                        //   passed: 0, 0, 0, 2147483651, 0   <- a member follows it, so it does not
+                        //
+                        // The exit-ORDER rule above is unchanged and still right; this only removes a
+                        // member that was never a candidate for "the outcome". A debug break is what a
+                        // process reports when it is broken into or torn down abnormally, so it says
+                        // nothing about whether the script's work succeeded — unlike `0xC0000142`
+                        // (loader init), which IS a real failure and must keep counting.
+                        //
+                        // Deliberately narrow. The two rules this loop already rejected both failed by
+                        // being general, and the note above records what each one broke.
+                        const STATUS_BREAKPOINT: u32 = 0x8000_0003;
+                        if code != STATUS_BREAKPOINT {
+                            last_exit = Some(code);
                         }
                     }
                 } else {
