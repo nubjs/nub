@@ -117,26 +117,26 @@ Report the PR URL. Do NOT merge your own PR.
 
 ## Step 5 — On merge, comment the resolution
 
-`Closes #N` auto-closes the issue silently, so add a brief factual comment:
+`Closes #N` auto-closes the issue silently, so add a brief factual comment. Extremely concise — don't re-explain what was done or the process of doing it; the PR carries that. Thank an external reporter:
 
 ```bash
-gh issue comment <n> --repo nubjs/nub --body "Fixed in #<pr> (merged to main). Will ship in the next release."
+gh issue comment <n> --repo nubjs/nub --body "Fixed in #<pr>, ships in the next release. Thanks for the report."
 ```
 
-If it did NOT auto-close (no closing keyword, or a non-fix resolution), close it explicitly with a comment — never silently:
+(Drop the thanks on an internal/self-filed issue.) If it did NOT auto-close (no closing keyword, or a non-fix resolution), close it explicitly with a comment — never silently:
 
 ```bash
-gh issue close <n> --repo nubjs/nub --comment "<what fixed it, or why no code fix is needed>"
+gh issue close <n> --repo nubjs/nub --comment "<one line: what resolved it, or why no code fix is needed>"
 ```
 
 ## Step 6 — On release, comment the version + release link (mandatory)
 
-A fix merged is not a fix shipped.
+A fix merged is not a fix shipped. Keep it to the version + link; on an external contributor's PR, add a brief thanks:
 
 ```bash
 REL="https://github.com/nubjs/nub/releases/tag/v<ver>"
 gh issue comment <n> --repo nubjs/nub --body "Shipped in v<ver>: $REL"
-gh pr comment   <pr> --repo nubjs/nub --body "Shipped in v<ver>: $REL"
+gh pr comment   <pr> --repo nubjs/nub --body "Shipped in v<ver>: $REL — thanks for the contribution."
 ```
 
 In practice the `release` skill's Step 5 executes this in bulk across the whole changeset; this documents the contract for a single issue.

@@ -376,6 +376,19 @@ pub(super) fn resolve_link_strategy(
     Ok(strategy)
 }
 
+/// What [`run_dep_lifecycle_scripts`] did.
+#[derive(Debug, Default)]
+pub(crate) struct DepLifecycleOutcome {
+    /// Lifecycle scripts actually executed.
+    pub ran: usize,
+    /// Spec keys of packages the policy ALLOWED to build whose build
+    /// could not be attempted, because the materialized directory or
+    /// its `package.json` was not on disk when the phase ran. Both are
+    /// environmental, not policy decisions, so the install must not
+    /// treat the resulting tree as complete (nubjs/nub#764).
+    pub unbuilt: Vec<String>,
+}
+
 /// Walk every linked dependency, check its `package.json` for
 /// lifecycle scripts, and run the ones the policy allows. Runs
 /// `preinstall` → `install` → `postinstall` per package in that order;
@@ -414,7 +427,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // gates which ones actually run. Match is by `pkg.name`, matching
     // pnpm's `pnpm rebuild <name>`.
     selected_names: Option<&std::collections::HashSet<String>>,
-) -> miette::Result<usize> {
+) -> miette::Result<DepLifecycleOutcome> {
     // Pass 1 (serial, cheap): walk the graph, keep only the packages
     // the policy allows AND that actually define at least one dep
     // lifecycle hook in their on-disk `package.json`. Filtering up front
@@ -437,6 +450,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
 
     let mut jobs: Vec<BuildJob> = Vec::new();
     let mut floor_trusted: Vec<String> = Vec::new();
+    let mut unbuilt: Vec<String> = Vec::new();
     for (dep_path, pkg) in &graph.packages {
         if let Some(selected) = selected_dep_paths
             && !selected.contains(dep_path)
@@ -492,11 +506,23 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             placements,
         );
         if !package_dir.exists() {
-            tracing::debug!(
-                "allowBuilds: skipping {} — {} not on disk",
+            // An ALLOWED build that cannot even be attempted. Nothing
+            // downstream would otherwise say so — no job means no
+            // `run_script` span, and the package is not unreviewed, so
+            // the ignored-builds warning skips it too. Left at `debug`
+            // this exited 0 with a materialized-but-unbuilt tree
+            // (nubjs/nub#764). `unbuilt` also carries it into the
+            // install state so the next install retries rather than
+            // reporting the tree up to date.
+            tracing::warn!(
+                code = aube_codes::warnings::WARN_AUBE_BUILD_NOT_ATTEMPTED,
+                package = pkg.name.as_str(),
+                path = %package_dir.display(),
+                "build scripts for {} did not run: {} is not on disk",
                 pkg.name,
                 package_dir.display()
             );
+            unbuilt.push(pkg.source_approval_key().unwrap_or_else(|| pkg.spec_key()));
             continue;
         }
         // Read the dep's `package.json` directly from its materialized
@@ -567,7 +593,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     }
 
     if jobs.is_empty() {
-        return Ok(0);
+        return Ok(DepLifecycleOutcome { ran: 0, unbuilt });
     }
 
     // A package reachable ONLY through `optionalDependencies` is one the
@@ -874,7 +900,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             Err(error) => return Err(error),
         }
     }
-    Ok(ran)
+    Ok(DepLifecycleOutcome { ran, unbuilt })
 }
 
 /// Persist a freshly imported package index under the store key(s) a
@@ -1375,6 +1401,22 @@ pub(in crate::commands::install) struct UnreviewedBuild {
     pub suspicions: Vec<aube_scripts::Suspicion>,
 }
 
+/// What one pass over the linked graph found in the way of dependency
+/// builds that did not run.
+#[derive(Debug, Default)]
+pub(in crate::commands::install) struct UnreviewedScan {
+    /// Packages with build scripts that no layer allowed. These are
+    /// denied *stably* — the user is warned, and leaving them unbuilt
+    /// is the correct steady state until they approve.
+    pub unreviewed: Vec<UnreviewedBuild>,
+    /// The subset of `unreviewed` that missed for a reason this run
+    /// invented rather than one the config decided — see
+    /// [`super::default_trust::DefaultTrustFloor::deferred_by_missing_vetting`].
+    /// Persisted so the next install retries them instead of reporting
+    /// a tree with an unrun build as up to date (nubjs/nub#764).
+    pub deferred: Vec<String>,
+}
+
 pub(super) fn unreviewed_dep_builds(
     aube_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
@@ -1382,8 +1424,9 @@ pub(super) fn unreviewed_dep_builds(
     floor: &super::default_trust::DefaultTrustFloor,
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
-) -> miette::Result<Vec<UnreviewedBuild>> {
+) -> miette::Result<UnreviewedScan> {
     let mut unreviewed = Vec::new();
+    let mut deferred = Vec::new();
     for (dep_path, pkg) in &graph.packages {
         // A package the `defaultTrust` floor vouches for is not
         // unreviewed — its scripts ran. Same decision seam as
@@ -1429,15 +1472,24 @@ pub(super) fn unreviewed_dep_builds(
                 )
             })?;
         if aube_scripts::has_dep_lifecycle_work(&package_dir, &dep_manifest) {
+            let spec_key = pkg.source_approval_key().unwrap_or_else(|| pkg.spec_key());
+            if floor.deferred_by_missing_vetting(pkg, &graph.times) {
+                deferred.push(spec_key.clone());
+            }
             unreviewed.push(UnreviewedBuild {
-                spec_key: pkg.source_approval_key().unwrap_or_else(|| pkg.spec_key()),
+                spec_key,
                 suspicions: aube_scripts::sniff_lifecycle(&dep_manifest),
             });
         }
     }
     unreviewed.sort_by(|a, b| a.spec_key.cmp(&b.spec_key));
     unreviewed.dedup_by(|a, b| a.spec_key == b.spec_key);
-    Ok(unreviewed)
+    deferred.sort();
+    deferred.dedup();
+    Ok(UnreviewedScan {
+        unreviewed,
+        deferred,
+    })
 }
 
 #[cfg(test)]

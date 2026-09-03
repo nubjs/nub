@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/loader-darwin-x64",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Nub loader native addon for macOS x64 (Intel)",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",

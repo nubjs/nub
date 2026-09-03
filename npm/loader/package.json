@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/loader",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Standalone TypeScript loader for Node.js from the Nub project — TypeScript, JSX, tsconfig paths, and data-format imports through a native transform, registered the way tsx and ts-node are",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
@@ -49,13 +49,13 @@
     "@oxc-project/runtime": "0.140.0"
   },
   "optionalDependencies": {
-    "@nubjs/loader-darwin-arm64": "0.8.2",
-    "@nubjs/loader-darwin-x64": "0.8.2",
-    "@nubjs/loader-linux-x64": "0.8.2",
-    "@nubjs/loader-linux-x64-musl": "0.8.2",
-    "@nubjs/loader-linux-arm64": "0.8.2",
-    "@nubjs/loader-linux-arm64-musl": "0.8.2",
-    "@nubjs/loader-win32-x64": "0.8.2",
-    "@nubjs/loader-win32-arm64": "0.8.2"
+    "@nubjs/loader-darwin-arm64": "0.8.3",
+    "@nubjs/loader-darwin-x64": "0.8.3",
+    "@nubjs/loader-linux-x64": "0.8.3",
+    "@nubjs/loader-linux-x64-musl": "0.8.3",
+    "@nubjs/loader-linux-arm64": "0.8.3",
+    "@nubjs/loader-linux-arm64-musl": "0.8.3",
+    "@nubjs/loader-win32-x64": "0.8.3",
+    "@nubjs/loader-win32-arm64": "0.8.3"
   }
 }

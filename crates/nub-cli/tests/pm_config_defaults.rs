@@ -365,3 +365,122 @@ fn a_stale_key_from_an_older_nub_can_still_be_deleted() {
         "the delete took the neighbouring setting with it: {after:?}"
     );
 }
+
+/// A setting the project's own `nub.jsonc` supplies is refused on the `.npmrc`
+/// route — and the SAME key is written normally when it does not.
+///
+/// The control is the whole point. `nub.jsonc` outranks `.npmrc`, so once
+/// `install.linker` is set an `.npmrc` `nodeLinker` line is read by nothing and
+/// writing it is the silent no-op this suite exists to catch. But a project
+/// with no `install` block reads that line exactly as before, so a refusal
+/// keyed on the KEY rather than on the project would break a configuration that
+/// is correct today. Both halves are asserted against one key so the difference
+/// can only be the project.
+#[test]
+fn config_set_refuses_a_setting_nub_jsonc_already_supplies() {
+    let shadowed = fixture("shadowed");
+    std::fs::write(
+        shadowed.join("nub.jsonc"),
+        r#"{ "install": { "linker": "hoisted" } }"#,
+    )
+    .unwrap();
+    let (_out, err, code, _) = spawn_in(&shadowed, &["set", "nodeLinker", "isolated"]);
+    assert_ne!(code, 0, "`config set nodeLinker` must fail: {err}");
+    assert!(
+        err.contains("install.linker"),
+        "the refusal must name the field that wins: {err}"
+    );
+    assert!(
+        !shadowed.join(".npmrc").exists(),
+        "a refused write must leave no .npmrc behind"
+    );
+
+    // Control: same key, same command, no `install` block. The `.npmrc` value
+    // is what gets read here, so the write has to land.
+    let plain = fixture("unshadowed");
+    let (_out, err, code, _) = spawn_in(&plain, &["set", "nodeLinker", "isolated"]);
+    assert_eq!(code, 0, "`config set nodeLinker` must succeed here: {err}");
+    let written = std::fs::read_to_string(plain.join(".npmrc")).expect("the write must land");
+    assert!(
+        written.contains("isolated"),
+        "the .npmrc must carry the value: {written:?}"
+    );
+}
+
+/// A transient overlay is not a `nub.jsonc` field, so it must not trigger the
+/// shadow refusal.
+///
+/// `effective_config().sources` records CLI and environment overlays alongside
+/// the two config files, so testing merely "not defaulted" classifies
+/// `NUB_VERIFY_DEPS` as a field this project sets. The write would then be
+/// refused — even though it is the persistent setting for every run WITHOUT
+/// that variable — and the advice would name a field that still loses to the
+/// environment. The refusal has to follow the FILES.
+#[test]
+fn an_env_overlay_does_not_count_as_a_nub_jsonc_field() {
+    let project = fixture("env-overlay");
+    let home = project.parent().unwrap().join("home");
+    let out = Command::new(nub_binary())
+        .args(["config", "set", "verifyDepsBeforeRun", "error"])
+        .current_dir(&project)
+        .env("NUB_SELF_SHIM", "0")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join("xdg-config"))
+        .env("XDG_DATA_HOME", home.join("xdg-data"))
+        .env("XDG_CACHE_HOME", home.join("xdg-cache"))
+        .env("NUB_VERIFY_DEPS", "error")
+        .output()
+        .expect("nub config set must run");
+    assert!(
+        out.status.success(),
+        "an env overlay must not be mistaken for a nub.jsonc field: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        project.join(".npmrc").exists(),
+        "the persistent write must still land"
+    );
+}
+
+/// The shadow set is computed with the REAL embedder defaults, so an injected
+/// dependency changes which settings count as supplied.
+///
+/// Under `linker: global-virtual-store` the lowering pushes
+/// `enableGlobalVirtualStore` only when the defaults do NOT already carry
+/// `hoist=true`. An injected dependency puts it there, the push is suppressed,
+/// and the engine takes that setting from `.npmrc` after all — so refusing the
+/// write would reject configuration the install honors. Computing the set with
+/// empty defaults inverts exactly this one case, which is why the two halves
+/// differ only by `dependenciesMeta`.
+#[test]
+fn an_injected_dependency_changes_what_counts_as_supplied() {
+    let gvs = r#"{ "install": { "linker": "global-virtual-store" } }"#;
+
+    let injected = fixture("injected");
+    std::fs::write(
+        injected.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","dependenciesMeta":{"dep":{"injected":true}}}"#,
+    )
+    .unwrap();
+    std::fs::write(injected.join("nub.jsonc"), gvs).unwrap();
+    let (_out, err, code, _) = spawn_in(&injected, &["set", "enableGlobalVirtualStore", "false"]);
+    assert_eq!(
+        code, 0,
+        "an injected dep suppresses the lowering's push, so .npmrc still answers: {err}"
+    );
+
+    // Control: identical but for `dependenciesMeta`. Here the lowering DOES
+    // push the setting, so the same write is genuinely unreadable.
+    let plain = fixture("not-injected");
+    std::fs::write(plain.join("nub.jsonc"), gvs).unwrap();
+    let (_out, err, code, _) = spawn_in(&plain, &["set", "enableGlobalVirtualStore", "false"]);
+    assert_ne!(
+        code, 0,
+        "without an injected dep this must be refused: {err}"
+    );
+    assert!(
+        err.contains("install.linker"),
+        "the refusal must name the field that wins: {err}"
+    );
+}

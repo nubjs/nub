@@ -309,9 +309,21 @@ wrapper_off=""
 printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s jobs=%s qos=%s sem=%s\n' \
   "$why" "$target" "${CARGO_BUILD_JOBS:-default}" "${qos:-none}" \
   "$([ -n "$wrapper_off" ] && echo bypassed || echo global)" >&2
+# Record the target this invocation actually chose, for a caller that must
+# locate the artifact AFTERWARDS. `--print-target` cannot serve that: it
+# re-resolves from source content, so a merge landing on the shared tree during
+# a long build moves the key and the caller aims at a bucket this build never
+# wrote to (measured: a 27-minute `make install-dev` racing a merge left
+# nub-dev a dangling symlink). Resolving BEFORE the build instead only inverts
+# the window — the caller would then get a stale-but-existing binary, which is
+# the silent staleness the keying exists to prevent. Writing it here, from the
+# one resolution the build uses, is what removes the race rather than moving it.
+if [ -n "${NUB_BUILD_TARGET_OUT:-}" ]; then
+  printf '%s\n' "$target" > "$NUB_BUILD_TARGET_OUT"
+fi
 # NUB_* vars are routing input for this wrapper, not part of the command's
 # environment. In particular, tests must not expose them to spawned user code.
-unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG
+unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG NUB_BUILD_TARGET_OUT
 # $qos and $wrapper_off word-split deliberately (each empty, or one assignment).
 # shellcheck disable=SC2086
 exec env CARGO_TARGET_DIR="$target" $wrapper_off $qos cargo "$@"

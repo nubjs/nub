@@ -35,6 +35,7 @@ pub(crate) const FILE_NAME: &str = "nub.jsonc";
 pub(crate) const ROOT_KEYS: &[&str] = &[
     "$schema",
     "nodeCompat",
+    "nodeExecutable",
     "preload",
     "nodeOptions",
     "v8Flags",
@@ -205,6 +206,11 @@ type Result<T> = std::result::Result<T, ConfigError>;
 pub struct ProjectConfig {
     // ── runtime top-levels (bunfig-style flat) ──
     pub node_compat: Option<bool>,
+    /// The `nodeExecutable` spec exactly as authored — a path, or a `$(command)`
+    /// whose stdout is the path. Stored RAW: both forms are resolved by
+    /// `nub_core::node::discovery`, lazily, so a command runs only on an
+    /// invocation that really needs a Node (see [`publish_node_executable`]).
+    pub node_executable: Option<String>,
     pub preload: Option<Vec<String>>,
     pub node_options: Option<Vec<String>>,
     pub v8_flags: Option<Vec<String>>,
@@ -417,6 +423,7 @@ pub struct LoadedConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigKey {
     NodeCompat,
+    NodeExecutable,
     Preload,
     NodeOptions,
     V8Flags,
@@ -723,6 +730,41 @@ pub(crate) fn declared_env_file_setting() -> Option<EnvFileSetting> {
         .flatten()
 }
 
+/// Hand the resolved `nodeExecutable` to discovery, which owns both of its forms
+/// (a path, or a `$(command)` it runs) and every route that resolves a Node —
+/// including the ones inside `nub-core` that no CLI parameter reaches.
+///
+/// Only a FILE-backed win is published. `NODE_EXECUTABLE` outranks the field and
+/// discovery reads that variable itself, so publishing an environment win would
+/// be a second copy of a precedence rule rather than a use of one — and the copy
+/// would lose the variable's non-UTF-8 paths, which cannot survive the overlay.
+///
+/// Nothing is resolved here: a `$(command)` runs on first use, so `nub config set
+/// nodeExecutable …` still works on the machine whose toolchain is what broke.
+pub(crate) fn publish_node_executable(effective: &EffectiveConfig) {
+    let Some(spec) = effective.values.node_executable.as_deref() else {
+        return;
+    };
+    let Some(source) = effective.sources.get(&ConfigKey::NodeExecutable) else {
+        return;
+    };
+    if !matches!(
+        source.kind,
+        ConfigSourceKind::Project | ConfigSourceKind::Global
+    ) {
+        return;
+    }
+    let Some(file) = source.path.clone() else {
+        return;
+    };
+    nub_core::node::discovery::set_node_executable(nub_core::node::discovery::NodeExecutable {
+        spec: spec.to_string(),
+        root: source.root.clone(),
+        cwd: effective.cwd.clone(),
+        file,
+    });
+}
+
 /// The resolved implicit-registry policy. A non-default snapshot value wins;
 /// falling back to the legacy reader preserves `exec.implicitDlx` even when an
 /// otherwise malformed global file could not become a typed layer.
@@ -986,6 +1028,7 @@ fn merge_layer(
     }
 
     merge!(node_compat, ConfigKey::NodeCompat);
+    merge!(node_executable, ConfigKey::NodeExecutable);
     merge!(preload, ConfigKey::Preload);
     merge!(node_options, ConfigKey::NodeOptions);
     merge!(v8_flags, ConfigKey::V8Flags);
@@ -1215,6 +1258,9 @@ fn validate_root(
     let mut cfg = ProjectConfig::default();
     if let Some(v) = obj.get("nodeCompat") {
         cfg.node_compat = Some(as_bool(v, "nodeCompat")?);
+    }
+    if let Some(v) = obj.get("nodeExecutable") {
+        cfg.node_executable = Some(as_nonempty_str(v, "nodeExecutable")?.to_string());
     }
     if let Some(v) = obj.get("preload") {
         cfg.preload = Some(as_string_array(v, "preload")?);
@@ -1682,6 +1728,33 @@ mod tests {
                 "{key}: {err}"
             );
         }
+    }
+
+    /// The field is stored RAW — both of its forms are one string to the parser,
+    /// which is what keeps the `$(command)` decision (and the shell it needs) out
+    /// of a reader that must never spawn anything.
+    #[test]
+    fn node_executable_is_a_non_empty_string_kept_verbatim() {
+        for spec in ["$(mise which node)", "/usr/local/bin/node", "./tools/node"] {
+            let cfg = parse_project_config(&format!(
+                r#"{{ "nodeExecutable": {} }}"#,
+                serde_json::json!(spec)
+            ))
+            .unwrap();
+            assert_eq!(cfg.node_executable.as_deref(), Some(spec));
+        }
+        // An empty value names no binary, so it is refused where it was written
+        // rather than at the point discovery cannot resolve it.
+        let err = parse_project_config(r#"{ "nodeExecutable": "" }"#).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Value { ref path, .. } if path == "nodeExecutable"),
+            "{err}"
+        );
+        let err = parse_project_config(r#"{ "nodeExecutable": ["/bin/node"] }"#).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Type { ref path, .. } if path == "nodeExecutable"),
+            "{err}"
+        );
     }
 
     #[test]

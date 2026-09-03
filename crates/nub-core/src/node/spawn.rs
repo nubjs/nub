@@ -2645,7 +2645,11 @@ impl ShimPathMatcher {
     }
 }
 
-fn is_path_shim_candidate(path: &Path) -> bool {
+/// Whether `path` names a per-invocation shim directory. `pub(crate)` because
+/// discovery filters the same directories out of PATH, and a second prefix
+/// matcher living there could disagree with this one about a Windows case
+/// variant — which is the whole reason the Windows arm below exists.
+pub(crate) fn is_path_shim_candidate(path: &Path) -> bool {
     let Some(file_name) = path.file_name() else {
         return false;
     };

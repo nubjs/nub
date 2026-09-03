@@ -1457,6 +1457,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // allowlist without a per-install OSV run — see
     // `wiki/commands/pm/supply-chain-posture.md` Decision 2.
     let lockfile_vetted;
+    // Per-package counterpart to `lockfile_vetted`, for the floor's
+    // cooling-window waiver. The boolean above is a whole-graph fact and
+    // the waiver is not — see `default_trust::InheritedPicks`.
+    let inherited_picks;
     // The cold-install lockfile write runs on a `spawn_blocking` task so it
     // overlaps `filter_graph` + the link phase (see
     // `lockfile_write_overlap`). The handle escapes the resolve match arm
@@ -1600,6 +1604,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // `defaultTrust` floor inherits it rather than requiring a
             // (correctly skipped) per-install OSV run.
             lockfile_vetted = true;
+            // Nothing was re-resolved, so every pick is inherited.
+            inherited_picks = default_trust::InheritedPicks::All;
 
             // Check index cache, fetch missing tarballs. Tarball client
             // is lazy because eager construction costs ~20ms even when
@@ -2451,6 +2457,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let prior_lockfile = lockfile_pre_parse.as_ref().map(|(g, _)| g);
             let fresh_resolution =
                 super::add_supply_chain::lockfile_has_new_picks(&cwd, prior_lockfile, &graph);
+            // Computed here, while `prior_lockfile` is still borrowed.
+            // `fresh_resolution` collapses this to one bit for the
+            // advisory gate; the cooling-window waiver needs the
+            // per-package answer, because an `aube add` graph is a
+            // mixture and the bit says only that a mixture exists.
+            inherited_picks = default_trust::InheritedPicks::from_prior(prior_lockfile);
             let osv_settings = resolve_osv_routing_settings(&cwd);
             // Fire the OSV gate as a concurrent task that overlaps the
             // tail of the in-flight tarball downloads (`fetch_handle`,
@@ -3092,6 +3104,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         opts.minimum_release_age_override,
         osv_gate_active,
         lockfile_vetted,
+        inherited_picks,
     );
     let link::LinkPhaseOutput {
         stats,
