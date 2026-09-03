@@ -1801,6 +1801,7 @@ const SUBCOMMANDS: &[&str] = &[
     "upgrade",
     "help",
     "node",
+    "llm",
     "pm",
     "agent",
     "global",

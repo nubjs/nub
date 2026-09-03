@@ -372,9 +372,11 @@ pub fn chat_stream(
         .timeout(None)
         .build()
         .context("building the chat HTTP client")?;
+    // Serialize by hand: nub-core's reqwest omits the `json` feature.
     let resp = client
         .post(format!("{base_url}/v1/chat/completions"))
-        .json(body)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
         .send()
         .context("sending the chat request")?;
     if !resp.status().is_success() {
