@@ -118,6 +118,12 @@ pub struct RegisteredProject {
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    /// A second CAS root consulted, read-only, when `root` lacks a file or
+    /// package index. Set when `root` is a project-local fallback standing
+    /// in for a global store this process may read but not write (a coding
+    /// agent's sandbox), so a warm global store still serves the install
+    /// and only NEW content lands in the fallback.
+    read_fallback: Option<PathBuf>,
     cache_dir: PathBuf,
     /// Root of the global virtual store. Defaults to
     /// `<cache_dir>/virtual-store` and is overridden wholesale by the
@@ -174,6 +180,7 @@ impl Store {
     pub fn with_dirs(root: PathBuf, cache_dir: PathBuf) -> Self {
         let store = Self {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
@@ -191,6 +198,35 @@ impl Store {
         self
     }
 
+    /// Read through to a second CAS root (`<store>/v1/files`) when this
+    /// store lacks a file or index. Nothing is ever written there.
+    #[must_use]
+    pub fn with_read_fallback(mut self, root: PathBuf) -> Self {
+        self.read_fallback = Some(root);
+        self
+    }
+
+    /// Prefer `primary` if it exists; else the same relative location under
+    /// the read fallback if THAT exists; else `primary`, so a miss writes to
+    /// this store. `rel` is the path relative to the CAS root's parent
+    /// (`v1/`), which covers both `files/<shard>/<rest>` and `index/...`.
+    fn read_through(&self, primary: PathBuf, rel: &Path) -> PathBuf {
+        if primary.exists() {
+            return primary;
+        }
+        match &self.read_fallback {
+            Some(fallback) => {
+                let candidate = fallback.parent().unwrap_or(fallback).join(rel);
+                if candidate.exists() {
+                    candidate
+                } else {
+                    primary
+                }
+            }
+            None => primary,
+        }
+    }
+
     /// Open the store at a specific path (cache dir derived from store root).
     /// Used by tests that need a fully isolated layout; production code
     /// should prefer `with_dirs`.
@@ -198,6 +234,7 @@ impl Store {
         let cache_dir = root.parent().unwrap_or(&root).join(CACHE_DIR_NAME);
         Self {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
@@ -573,7 +610,12 @@ impl Store {
     /// Get the path to a file in the store by its hex hash.
     pub fn file_path_from_hex(&self, hex_hash: &str) -> PathBuf {
         let (shard, rest) = hex_hash.split_at(2);
-        self.root.join(shard).join(rest)
+        let primary = self.root.join(shard).join(rest);
+        if self.read_fallback.is_none() {
+            return primary;
+        }
+        let files_leaf = self.root.file_name().map(PathBuf::from).unwrap_or_default();
+        self.read_through(primary, &files_leaf.join(shard).join(rest))
     }
 }
 
@@ -633,6 +675,7 @@ mod tests {
     fn store_for_migration_test(root: PathBuf, cache_dir: PathBuf) -> Store {
         Store {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
             fast_path: Arc::new(AtomicBool::new(false)),
@@ -791,6 +834,34 @@ mod tests {
     fn test_integrity_to_hex_sha256() {
         let hex = integrity_to_hex("sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=").unwrap();
         assert_eq!(hex.len(), 64);
+    }
+
+    #[test]
+    fn read_fallback_serves_files_and_indexes_the_primary_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let hex = "abcdef1234567890abcdef1234567890";
+        let (shard, rest) = hex.split_at(2);
+        std::fs::create_dir_all(global.join(shard)).unwrap();
+        std::fs::write(global.join(shard).join(rest), b"warm").unwrap();
+        let index_rel = PathBuf::from(INDEX_SUBDIR).join("dep@1.0.0.json");
+        std::fs::create_dir_all(global.parent().unwrap().join(INDEX_SUBDIR)).unwrap();
+        std::fs::write(global.parent().unwrap().join(&index_rel), b"{}").unwrap();
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        // A file only the fallback holds resolves there; a miss everywhere
+        // resolves to the primary, so a write lands in the local store.
+        assert_eq!(store.file_path_from_hex(hex), global.join(shard).join(rest));
+        assert!(store.file_path_from_hex("ffff0000").starts_with(&local));
+        assert_eq!(
+            store.index_path("dep", "1.0.0", None).unwrap(),
+            global.parent().unwrap().join(&index_rel)
+        );
+        // Once the primary has its own copy, it wins.
+        std::fs::create_dir_all(local.join(shard)).unwrap();
+        std::fs::write(local.join(shard).join(rest), b"new").unwrap();
+        assert_eq!(store.file_path_from_hex(hex), local.join(shard).join(rest));
     }
 
     #[test]

@@ -140,6 +140,7 @@ function normalize(text, ws) {
       .replaceAll(home, "<HOME>")
       .replace(/\/private\/var\/folders\/[^\s"']+/g, "<TMP>")
       .replace(/\/var\/folders\/[^\s"']+/g, "<TMP>")
+      .replace(/\/tmp\/claude\/[^\s"']+/g, "<TMP>") // srt points TMPDIR here
       .replace(/nub \d+\.\d+\.\d+(-[A-Z]+)?/g, "nub <VERSION>")
       .replace(/\bv\d+\.\d+\.\d+\b/g, "v<VERSION>")
       .replace(/in \d+(\.\d+)?(ms|s)\b/g, "in <T>")

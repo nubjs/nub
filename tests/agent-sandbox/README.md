@@ -32,8 +32,8 @@ The control run separates "the flow is broken" from "the sandbox broke it" — n
 ## What the snapshots pin today
 
 - The **runtime flows work sandboxed**: `nub <file>.ts` and `nub run` pass under both sandboxes. The transpile cache degrades silently when `~/.cache` is read-only (best-effort writes in `crates/nub-native/src/cache.rs`).
-- **`nub install` fails on the CAS store write**: `~/.local/share/nub/store` is outside both sandboxes' writable roots, so even a network-free `file:` install fails with `Operation not permitted`. `store-dir` relocates the store; `NUB_CACHE_DIR` does not.
-- **`nubx` with a cold cache fails on the network deny** (the cell forces a workspace-local `NUB_CACHE_DIR` so it never reuses the host cache); with a warm host cache the same command works sandboxed, because reuse is read-only.
+- **`nub install` works with an unwritable global store.** `~/.local/share/nub/store` is outside both sandboxes' writable roots, so nub warns (`WARN_NUB_STORE_FALLBACK`) and writes new packages to `node_modules/.nub-store`, reading through to the global store for anything it already holds. The `file:` install and the lockfile-pinned registry install (warm from the control run) both succeed.
+- **`nubx` with a cold cache fails fast on the network deny** (the cell forces a workspace-local `NUB_CACHE_DIR` so it never reuses the host cache): one attempt, no retry ladder, and the help names the sandbox instead of suggesting `npm login`. The two sandbox snapshots differ only in the sandbox's name.
 
 ## Regeneration notes
 

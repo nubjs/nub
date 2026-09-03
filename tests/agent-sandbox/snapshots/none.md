@@ -45,6 +45,18 @@ WARN ignored build scripts for 1 package(s): dep@file:./dep. Run `nub approve-bu
 
 exit: 0
 
+## install-registry-warm
+
+### run 1: `nub install`
+
+```text
+  linker  global-virtual-store
+dependencies:
++ is-odd@3.0.1
+```
+
+exit: 0
+
 ## nubx-registry
 
 ### run 1: `nub x cowsay@1.6.0 hi`
@@ -58,6 +70,8 @@ exit: 0
             (__)\       )\/\
                 ||----w |
                 ||     ||
+nub <VERSION>
+✓ resolved 33 · reused 33 in <T>
 dependencies:
 + cowsay@1.6.0
 ```

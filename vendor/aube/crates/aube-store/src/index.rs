@@ -211,8 +211,7 @@ impl Store {
             return None;
         }
         let filename = format!("{safe_name}@{version}.json");
-        let dir = self.index_dir();
-        match integrity {
+        let rel = match integrity {
             Some(i) => {
                 let hex = integrity_to_hex(i)?;
                 // 16 hex chars = 64 bits of tarball SHA-512 prefix.
@@ -222,9 +221,11 @@ impl Store {
                 // on fetch, so birthday-bound collisions aren't a
                 // correctness risk; 16 chars is plenty.
                 let short = &hex[..16.min(hex.len())];
-                Some(dir.join(short).join(filename))
+                PathBuf::from(short).join(filename)
             }
-            None => Some(dir.join(filename)),
-        }
+            None => PathBuf::from(filename),
+        };
+        let primary = self.index_dir().join(&rel);
+        Some(self.read_through(primary, &PathBuf::from(crate::INDEX_SUBDIR).join(rel)))
     }
 }

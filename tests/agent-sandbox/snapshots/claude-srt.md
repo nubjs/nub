@@ -37,24 +37,42 @@ exit: 0
 
 ```text
   linker  global-virtual-store
-  × failed to import file:./dep: I/O error at <HOME>/.local/share/nub/store/v1/files/64/<HASH>: Operationnot permitted (os error 1) at path "<HOME>/.local/share/nub/store/v1/files/64/.nub-cas-<RAND>
+WARN store <HOME>/.local/share/nub/store/v1/files is not writable (inside the Claude Code sandbox); new packages go to the project-local store <WS>/node_modules/.nub-store/v1/files for this run code=WARN_NUB_STORE_FALLBACK
+dependencies:
++ dep@1.0.0
+nub <VERSION> · ✓ installed 1 package in <T>
 ```
 
-exit: 1
+exit: 0
+
+## install-registry-warm
+
+### run 1: `nub install`
+
+```text
+  linker  global-virtual-store
+WARN store <HOME>/.local/share/nub/store/v1/files is not writable (inside the Claude Code sandbox); new packages go to the project-local store <WS>/node_modules/.nub-store/v1/files for this run code=WARN_NUB_STORE_FALLBACK
+dependencies:
++ is-odd@3.0.1
+```
+
+exit: 0
 
 ## nubx-registry
 
 ### run 1: `nub x cowsay@1.6.0 hi`
 
 ```text
+WARN store <HOME>/.local/share/nub/store/v1/files is not writable (inside the Claude Code sandbox); new packages go to the project-local store <TMP> for this run code=WARN_NUB_STORE_FALLBACK
 ERR_NUB_REGISTRY_ERROR
   × dlx install failed
   ├─▶ failed to resolve dependencies
   ╰─▶ registry error for cowsay: HTTP error: error sending request for url
       (https://registry.npmjs.org/cowsay)
   help: package: cowsay
-        packument fetch failed — verify the registry URL in .npmrc, check auth
-        (`npm login` / `NPM_TOKEN`), and confirm network connectivity
+        network access is blocked by the Claude Code sandbox — rerun the
+        command outside the sandbox, or use `--offline` to install from what
+        the store already holds
 ```
 
 exit: 1

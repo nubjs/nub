@@ -164,7 +164,7 @@ impl RegistryClient {
                     check_body_cap(&resp, self.fetch_policy.tarball_max_bytes, "tarball")?;
                     return Ok(resp);
                 }
-                Err(err) if !is_last => {
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
                     if err.is_timeout() {
                         if timeout_retries >= TIMEOUT_RETRY_CAP {
                             return Err(Error::Http(err));
