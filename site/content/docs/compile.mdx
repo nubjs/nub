@@ -742,6 +742,22 @@ A version like `2.5.1-rc.3` reaches the `FileVersion` string as typed. Windows a
 
 Like `--icon`, this works while cross-compiling — a Windows binary built on macOS gets its metadata like any other — and is refused for a non-Windows target, because no other executable format carries these fields.
 
+### `--hide-console`
+
+Start a Windows executable with no console window — what a GUI app, a tray icon, or a file-association handler needs:
+
+```bash
+nub compile app.ts --platform win32-x64 --hide-console
+```
+
+Launched from Explorer, an ordinary compiled binary opens a console window beside the application and keeps it there until the program exits. With this flag, nothing appears.
+
+The same binary run from a terminal still writes to it. Suppression applies only where there is no console to inherit, so a build made for double-clicking stays usable from `cmd.exe` and PowerShell — though `cmd.exe` returns to the prompt without waiting, as it does for any Windows GUI program.
+
+Nothing printed reaches a user who double-clicks, so a hidden binary cannot report a startup failure to the screen, and the first-run setup notice stays silent as well. Give the application a channel of its own — a log file, the event log, a message box — before shipping one.
+
+Like `--icon`, this works while cross-compiling and is refused for a non-Windows target. A console window is a Windows concept, and neither the macOS nor the Linux executable format carries anything that would suppress one.
+
 ### `--metafile`
 
 Write a report describing what went into the bundle:
