@@ -749,7 +749,7 @@ nub compile app.ts --metafile report.json
 
 The report is JSON in [esbuild's metafile schema](https://esbuild.github.io/api/#metafile), so it opens in the tools already written for that format — esbuild's own `analyzeMetafile`, esbuild-visualizer, bundle-buddy. It has two keys: `inputs`, every module the bundler read with its source length, module format and imports; and `outputs`, every file the bundler emitted with its size and how many bytes each input contributed to it.
 
-The per-input counts are measured before minification while an output's own `bytes` is the file after it, so with minification on the parts sum higher than the whole. Rank inputs against each other with them; do not expect them to account for the final size. They line up under `--no-minify`.
+The per-input counts are measured before minification while an output's own `bytes` is the file after it, so with minification on the parts sum higher than the whole. Rank inputs against each other with them; do not expect them to account for the final size. They line up under `--no-minify`, unless the output carries an inline source map — that map counts toward the file and belongs to no input, and it is usually larger than the code it describes.
 
 The report covers the bundled JavaScript and nothing else. It says nothing about the embedded Node runtime — usually the largest part of the binary, and what `--smol` leaves out — nor about files added with `--include`, nor about native addons carried unbundled.
 
