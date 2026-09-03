@@ -212,9 +212,10 @@ pub struct Manifest {
     pub node_flags: Vec<String>,
     /// Whether every module this artifact can execute was already parsed by the
     /// bundler — no `--external` packages, no retained computed `import()`, and
-    /// no verbatim payload file with a JS extension (an `--include`d script, an
-    /// emitted asset copy, a native island's wrapper), so nothing the artifact
-    /// ships resolves through the real module loader at runtime.
+    /// no verbatim payload file at all (an `--include`, an emitted asset copy, a
+    /// native island), so nothing the artifact ships resolves through the real
+    /// module loader at runtime. Presence, not extension: the CJS loader parses
+    /// an exact-path `require()` of any unknown extension as JS.
     ///
     /// What it buys: the launcher skips the feature matrix's `UnflagArgv` rows
     /// (today `--js-defer-import-eval`). Those flags exist to enable in-progress

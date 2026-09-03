@@ -280,18 +280,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // enough that the time is not noticeable next to the ~107 MB one.
     // Computed before `app_files` is consumed below. Only the VERBATIM payload
     // sets can carry a file Node parses that the bundler did not: emitted asset
-    // copies, native-island contents, and `--include`s. Node's runtime loaders
-    // parse `.js`/`.mjs`/`.cjs`; other extensions are data to it.
-    let carries_runtime_parseable_js = bundled
-        .assets
-        .iter()
-        .map(|f| f.name.as_str())
-        .chain(bundled.native_files.iter().map(|f| f.name.as_str()))
-        .chain(layout.assets.iter().map(|a| a.rel.as_str()))
-        .any(|name| {
-            let lower = name.to_ascii_lowercase();
-            lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs")
-        });
+    // copies, native-island contents, and `--include`s. Their PRESENCE is the
+    // predicate, not their extensions — the CJS loader parses an exact-path
+    // `require()` of any unknown or absent extension with its `.js` handler, so
+    // no name-based allowlist can prove a shipped file is not runtime JS.
+    let carries_verbatim_files =
+        bundled.assets.len() + bundled.native_files.len() + layout.assets.len() > 0;
     let app_files: Vec<_> = app_files
         .into_iter()
         .map(|file| {
@@ -333,15 +327,14 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_flags: node_flags(&opts)?,
         // Sealed only when Node can parse no module the bundler did not. Two
         // channels can hand runtime Node a file it never saw: the shim plan
-        // (`--external` packages, surviving computed `import()`) and a VERBATIM
-        // payload file with a JS extension — an `--include`d script, a
-        // bundler-emitted asset copy, a native island's wrapper `.js` — reachable
-        // through the real `createRequire` every CJS chunk carries. Generated
-        // chunks and wrappers are exempt by construction: the bundler parsed
-        // them. Computed require of a path OUTSIDE the artifact stays out of the
-        // predicate on the plain-Node-baseline argument in the Manifest field's
-        // doc comment.
-        sealed_module_graph: !shim_plan.needed() && !carries_runtime_parseable_js,
+        // (`--external` packages, surviving computed `import()`) and ANY
+        // verbatim payload file — reachable through the real `createRequire`
+        // every CJS chunk carries, and parsed as JS by the CJS loader whatever
+        // its extension. Generated chunks and wrappers are exempt by
+        // construction: the bundler parsed them. Computed require of a path
+        // OUTSIDE the artifact stays out of the predicate on the
+        // plain-Node-baseline argument in the Manifest field's doc comment.
+        sealed_module_graph: !shim_plan.needed() && !carries_verbatim_files,
     };
     let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
 
