@@ -242,6 +242,23 @@ jobs:
           COMPILE_FLAGS=--smol \
           NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
             tests/compile-augmentation/run.sh "${version#v}"
+      # Windows only, because the version resource is a PE structure and the
+      # launcher template this job built is the host's. `verify_artifact` already
+      # refuses a compile whose resource is unreachable, so what this adds is the
+      # VALUES: the package.json defaults, an override, a drop, and the negative
+      # control that an empty manifest earns no resource at all.
+      - name: Executable metadata reaches the PE
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub.exe"
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher.exe"
+          test -f "$nub"
+          test -f "$launcher"
+          version="$(node --version)"
+          NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
+            tests/compile-metadata/run.sh "${version#v}"
       - name: Upload native-island failure logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
