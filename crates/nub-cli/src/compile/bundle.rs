@@ -6211,17 +6211,15 @@ mod tests {
         );
     }
 
-    /// The premise `static_kind` rests on: an ESM module cannot hold a resolved
-    /// `require` edge, so the importer's format decides the edge kind exactly
-    /// rather than approximately.
+    /// A `require` bound to a local — a `createRequire` result, a UMD factory
+    /// parameter — is a call the bundler cannot rewrite, so the specifier stays
+    /// unresolved and compilation refuses the build.
     ///
-    /// It holds because a `require` bound to a local — a `createRequire` result,
-    /// a UMD factory parameter — is a call the bundler cannot rewrite, so the
-    /// specifier stays unresolved and compilation refuses the build before any
-    /// report exists. If that refusal is ever relaxed, the metafile needs the
-    /// per-edge kind and this test is what says so.
+    /// Worth pinning on its own, and it is NOT the whole story for the metafile:
+    /// an UNBOUND `require()` in the same module resolves fine. See
+    /// `an_unbound_require_in_an_esm_module_is_the_known_edge_kind_gap`.
     #[test]
-    fn an_esm_module_cannot_hold_a_require_edge_so_the_format_decides_the_kind() {
+    fn a_locally_bound_require_is_refused_rather_than_left_unresolved() {
         let files: &[(&str, &str)] = &[
             (
                 "entry.ts",
@@ -6251,6 +6249,63 @@ mod tests {
         assert!(
             err.contains("`require` is a local binding"),
             "the refusal must be the local-binding one, not another unresolved import: {err}"
+        );
+    }
+
+    /// The known gap in `static_kind`, asserted at its WRONG answer on purpose.
+    ///
+    /// An unbound `require()` inside an ESM module resolves and bundles, so the
+    /// module's format says ESM while one of its edges is really a require. The
+    /// kind comes from the format, so that edge is reported as a statement. This
+    /// shape is bundler-only — a bare `require` in an ESM file throws under plain
+    /// Node — but it compiles here, so the report can be wrong.
+    ///
+    /// Pinned rather than left in a comment so the gap cannot close silently: the
+    /// day a per-edge kind becomes reachable, this test fails and says what to
+    /// update. It cannot be closed today — `import_records`, which carry the kind,
+    /// are empty at `module_parsed` time because they are filled during linking.
+    #[test]
+    fn an_unbound_require_in_an_esm_module_is_the_known_edge_kind_gap() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import { A } from './esm-dep.mjs';\n\
+                 const cjs = require('./cjs-dep.cjs');\n\
+                 globalThis.OUT = [A, cjs];\n",
+            ),
+            ("esm-dep.mjs", "export const A = 1;\n"),
+            ("cjs-dep.cjs", "module.exports = 41;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_module_graph_with("esm-unbound-require", "entry.ts", files, &o)
+            .expect("an unbound require in an ESM module bundles — that is the premise");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let entry = report
+            .inputs
+            .iter()
+            .find(|(path, _)| path.ends_with("entry.ts"))
+            .expect("the entry is an input")
+            .1;
+        let cjs_edge = entry
+            .imports
+            .iter()
+            .find(|i| i.path.ends_with("cjs-dep.cjs"))
+            .expect("the require edge is in the graph");
+
+        assert_eq!(
+            entry.format,
+            Some("esm"),
+            "the fixture only means something if the importer is ESM"
+        );
+        assert_eq!(
+            cjs_edge.kind, "import-statement",
+            "KNOWN GAP: a require() edge from an ESM importer is reported as a \
+             statement. If this now reads require-call the gap is closed — update \
+             `static_kind`'s comment and delete this test"
         );
     }
 

@@ -41,16 +41,24 @@ use serde::Serialize;
 /// is neither ordered against nor the same length as the import records that do
 /// carry one, and the two cannot be zipped.
 ///
-/// That is EXACT here rather than an approximation, which is worth stating because
-/// it is not true of a bundler in general. A CommonJS module's static edges are
-/// `require()` calls by definition and an ESM module's are `import` statements, so
-/// the only counter-example would be an ESM module holding a `require` — and
-/// compilation cannot produce one: a `require` bound to a local (a `createRequire`
-/// result, a UMD factory parameter) is a call the bundler cannot rewrite, so it
-/// stays unresolved and the build is REFUSED before any report exists. `--external`
-/// does not bypass that. Pinned by
-/// `an_esm_module_cannot_hold_a_require_edge_so_the_format_decides_the_kind`; if
-/// that refusal is ever relaxed, this mapping needs the per-edge kind instead.
+/// It is right for a module that is wholly one format, which is every module in a
+/// normal graph, and WRONG for one that is not: an ESM module containing an
+/// unbound `require()` reports that edge as a statement. That shape is a
+/// bundler-only construct — a bare `require` in an ESM file throws under plain
+/// Node and survives only because the bundler rewrites it — but it compiles, so
+/// the report can carry the wrong kind. It is pinned by
+/// `an_unbound_require_in_an_esm_module_is_the_known_edge_kind_gap`, which asserts
+/// the wrong answer on purpose so that closing the gap fails the test rather than
+/// passing silently.
+///
+/// Closing it needs a per-edge kind that this hook cannot supply. The records that
+/// carry one live on `NormalModule::ecma_view::import_records`, and measuring
+/// rather than assuming is what settles it: at `module_parsed` time that vector is
+/// EMPTY for every module, including one with two static imports, because it is
+/// filled during linking. So there is nothing to join against, and the two other
+/// candidate sources do not help either — `imported_ids` is a `FxIndexSet`,
+/// matching neither the order nor the length of the records, and a raw
+/// `module_request` cannot be mapped back to a resolved path.
 const REQUIRE_CALL: &str = "require-call";
 const IMPORT_STATEMENT: &str = "import-statement";
 const DYNAMIC_IMPORT: &str = "dynamic-import";
