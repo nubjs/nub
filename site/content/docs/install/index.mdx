@@ -12,7 +12,7 @@ nub update --latest       # move ranges to the newest release
 nub dedupe                # collapse duplicate versions
 ```
 
-The lockfile is `nub.lock`. Every field Nub reads to build the graph is one pnpm, npm, Yarn, or Bun already reads — Nub adds no config field of its own, so there is no new syntax here to learn. Running Nub inside a repo that already belongs to one of those tools works too: see [lockfile compatibility](#lockfile-compatibility).
+The lockfile is `nub.lock`. Every field Nub reads to build the graph is one pnpm, npm, Yarn, or Bun already reads — Nub adds no config field of its own. Running Nub inside a repo that already belongs to one of those tools works too: see [lockfile compatibility](#lockfile-compatibility).
 
 ## Layout
 
@@ -449,7 +449,7 @@ cowsay hello
 nub remove -g cowsay
 ```
 
-Two directories are involved, and they are deliberately separate:
+Two directories are involved:
 
 | | Default | Purpose |
 | --- | --- | --- |
@@ -546,7 +546,7 @@ $ nub add some-tool
 
 The fallback stops at whatever the publisher currently tags `latest`. A higher version that was published and then untagged is a release they withdrew, so Nub never falls back to one. A prerelease `latest` fails outright for the same reason — the stable release below it belongs to a line the publisher has moved off.
 
-The report follows the same rule, and just as quietly. Both version columns of `nub outdated` name what an install would land on, so a version inside the window is never offered:
+The report follows the same rule. Both version columns of `nub outdated` name what an install would land on, so a version inside the window is never offered:
 
 ```console
 $ nub outdated
@@ -577,7 +577,7 @@ $ nub add some-tool --minimum-release-age-exclude='@internal/*' --minimum-releas
 ```
 
 <Callout title="The window is enforced, not advisory">
-When nothing satisfying the range is old enough, the install fails — Nub never quietly takes a version that missed the cutoff, and no flag relaxes that. Setting the window to `0` turns it off outright, which is the honest way to say you don't want one.
+When nothing satisfying the range is old enough, the install fails — Nub never quietly takes a version that missed the cutoff, and no flag relaxes that. Setting the window to `0` turns it off outright.
 </Callout>
 
 Publish dates come from the registry's `time` metadata, so the gate is only as strong as what the registry serves. An age Nub cannot establish counts as a failure rather than a pass:
@@ -591,7 +591,7 @@ Publish dates come from the registry's `time` metadata, so the gate is only as s
 
 Registries that publish no dates at all — some private mirrors, older Verdaccio — hit the last row. The refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, rather than the too-new one.
 
-This is the one case where the report cannot stay quiet. Staying silent would leave `nub outdated` reporting no work to do on a project where every install refuses, so it names the package on stderr and leaves stdout as data:
+This is the one case where `nub outdated` warns: staying silent would report no work to do on a project where every install refuses. The warning goes to stderr, leaving stdout as data:
 
 ```console
 $ nub outdated
@@ -606,7 +606,7 @@ minimumReleaseAgeExclude=internal-pkg   # exempt one package (comma-separated)
 minimumReleaseAge=0                     # turn the window off
 ```
 
-Setting pnpm's `minimumReleaseAgeStrict=false` also gets past both, and Nub reads it for compatibility — but it makes an undateable version count as *clearing* the gate, which is a window you still appear to have and no longer enforce. Prefer `minimumReleaseAge=0`, which says the same thing plainly.
+Setting pnpm's `minimumReleaseAgeStrict=false` also gets past both, and Nub reads it for compatibility — but it makes an undateable version count as *clearing* the gate, which is a window you still appear to have and no longer enforce. Prefer `minimumReleaseAge=0`.
 
 ### Default-trust floor
 
@@ -977,7 +977,7 @@ Set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/doc
 
 Running `nub pm use nub` moves a project onto Nub's own surface: it aligns the manifest and lockfile, migrates pnpm workspace config into the neutral `package.json` fields, and writes `nub.lock`. A fresh `nub install` in a project with no declaration and no lockfile does the same thing implicitly.
 
-Either way Nub records itself with a non-locking range rather than an exact pin. Tools that read `devEngines` by name see the signal, and the caret is a floor, so upgrading Nub just works.
+Either way Nub records itself with a non-locking range rather than an exact pin. Tools that read `devEngines` by name see the signal, and the caret is a floor rather than a pin.
 
 ```json title="package.json"
 {
@@ -985,7 +985,7 @@ Either way Nub records itself with a non-locking range rather than an exact pin.
     "packageManager": {
       "name": "nub",
       "version": "^0.7.1",   // a floor, not a pin
-      "onFail": "ignore"     // a signal to read, not a rule to enforce
+      "onFail": "ignore"     // nothing enforces it
     }
   }
 }
@@ -1030,5 +1030,5 @@ Error: ERR_NUB_LOCKFILE_DECLARATION_MISMATCH
 In a Nub-owned project, `nub.lock` beside a foreign lockfile is the same ambiguity error.
 
 <Callout title="Inference vs the pinned PM">
-This inference picks the *install engine's* incumbent — the format Nub reads and writes. It is separate from the version `nub pm` provisions: the meta-manager resolves a *pin* (`.yarnrc.yml` `yarnPath` → `packageManager` → `devEngines`) to fetch and run an exact PM binary. Same signals, different questions: "which format do I install in?" versus "which PM binary do I run?".
+This inference picks the *install engine's* incumbent — the format Nub reads and writes. It is separate from the version `nub pm` provisions: the meta-manager resolves a *pin* (`.yarnrc.yml` `yarnPath` → `packageManager` → `devEngines`) to fetch and run an exact PM binary. The two answer different questions: which format to install in, and which PM binary to run.
 </Callout>

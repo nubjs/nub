@@ -25,7 +25,7 @@ self.onmessage = (ev) => {
 };
 ```
 
-The worker entry is TypeScript for free — Nub transpiles it like any other file. A listening worker keeps the process alive, so the main thread calls `worker.terminate()` once it has its reply (or the worker can `self.close()` itself).
+The worker entry can be TypeScript — Nub transpiles it like any other file. A listening worker keeps the process alive, so the main thread calls `worker.terminate()` once it has its reply (or the worker can `self.close()` itself).
 
 <Callout>
 Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/API/Worker) for `Worker` on developer.mozilla.org.
@@ -158,7 +158,7 @@ Read the [full docs](https://nodejs.org/api/worker_threads.html#class-worker) fo
 
 ## TypeScript
 
-The main-thread `Worker` global and `WorkerOptions` are typed by `@nubjs/types` (a types-only devDependency). The declaration steps aside when `lib: ["dom"]` is in your `tsconfig.json` — the DOM's own `Worker` type wins there — so the two never collide.
+The main-thread `Worker` global and `WorkerOptions` are typed by `@nubjs/types` (a types-only devDependency). The declaration steps aside when `lib: ["dom"]` is in your `tsconfig.json` — the DOM's own `Worker` type wins there.
 
 Inside a worker file the global scope is the dedicated-worker scope, not the main thread's — `self`, `postMessage`, and `onmessage` live there, and neither `@types/node` nor `@nubjs/types` declares them. Set `lib: ["webworker"]` for the full worker-scope types, or drop a one-line shim at the top of the worker for the common handlers:
 
@@ -182,7 +182,7 @@ Nub's `Worker` runs a vendored slice of [web-platform-tests](https://github.com/
 
 ## Divergences
 
-Nub's `Worker` carries the browser's shape. Two differences are worth knowing:
+Nub's `Worker` carries the browser's shape, with two divergences:
 
 - **No `SharedWorker`** — it needs a browser document and origin model with no server-side equivalent. Use a single worker with message passing.
 - **Workers are real threads** — each is an OS thread with its own V8 isolate and module graph, heavier than a browser worker. Pool them for hot paths instead of spawning one per task.

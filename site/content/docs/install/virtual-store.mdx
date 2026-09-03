@@ -61,7 +61,7 @@ A warm install — store populated, frozen lockfile — is where the layout pays
   ]}
 />
 
-The two Nub rows isolate the layout's contribution. With `--node-linker hoisted`, Nub links Bun's exact flat layout with the same per-file hardlink syscall — 1.3× faster than Bun on the same work. The default row is the same install with the one-symlink-per-package relink: 4.2× faster than Nub's own hoisted mode, 5.5× faster than Bun. On a thinner 313-package tree the default's lead over Bun is 1.7× — the advantage grows with the tree.
+The two Nub rows isolate the layout's contribution. With `--node-linker hoisted`, Nub links Bun's exact flat layout with the same per-file hardlink syscall — 1.3× faster than Bun on the same work. The default row is the same install with the one-symlink-per-package relink. On a thinner 313-package tree the default's lead over Bun is 1.7×.
 
 ## The flat opt-out
 

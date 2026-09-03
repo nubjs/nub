@@ -110,7 +110,7 @@ nodejs 24.18.0
 nub {{NUB_VERSION}}
 ```
 
-A pinned version the image doesn't already carry is downloaded during the build, so the pin holds even when it differs from the image default. Nub reads the same file when resolving its own Node, which keeps the two in agreement from one place.
+A pinned version the image doesn't already carry is downloaded during the build, so the pin holds even when it differs from the image default. Nub reads the same file when resolving its own Node, so one file pins both.
 
 Adding `@nubjs/nub` as a devDependency also works, and is the option to reach for when the version belongs in the lockfile alongside the project's other dependencies.
 

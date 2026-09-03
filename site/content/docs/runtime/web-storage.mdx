@@ -1,9 +1,9 @@
 ---
 title: Web Storage
-description: Session storage works out of the box; persistent local storage turns on once you point it at a backing file.
+description: Session storage is in-memory and always available; persistent local storage turns on once you point it at a backing file.
 ---
 
-Web Storage works under Nub without a flag to remember. Node hides `sessionStorage` and `localStorage` behind `--experimental-webstorage` on the 22.4–24 band (native from 25), so Nub injects that flag for you on exactly that band — you never pass it. Below Node 22.4 the flag does not exist and Web Storage is unavailable.
+Node hides `sessionStorage` and `localStorage` behind `--experimental-webstorage` on the 22.4–24 band (native from 25); Nub injects that flag on exactly that band. Below Node 22.4 the flag does not exist and Web Storage is unavailable.
 
 <Callout>
 Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API) for Web Storage on developer.mozilla.org.
@@ -11,7 +11,7 @@ Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storag
 
 ## `sessionStorage`
 
-The `sessionStorage` global is in-memory and per-process: it is created fresh each run and discarded when the process exits, never touching disk. It works out of the box on Node 22.4+ — nothing to pass:
+The `sessionStorage` global is in-memory and per-process: it is created fresh each run and discarded when the process exits, never touching disk.
 
 ```ts
 sessionStorage.setItem("step", "1");
@@ -22,31 +22,9 @@ sessionStorage.removeItem("step");
 sessionStorage.clear();
 ```
 
-A short walkthrough of a multi-step flow within one run:
-
-```ts
-sessionStorage.setItem("cursor", "0");
-
-for (const page of pages) {
-  const seen = Number(sessionStorage.getItem("cursor"));
-  process(page, seen);
-  sessionStorage.setItem("cursor", String(seen + 1));
-}
-
-console.log(sessionStorage.getItem("cursor")); // pages.length
-```
-
-Captured from Nub on Node 22.15.0 (no flag, no file passed):
-
-```console
-$ nub session.ts
-1
-length 1
-```
-
 ## `localStorage`
 
-The `localStorage` global persists across runs, so it needs a file on disk to write to. Pass `--localstorage-file <path>` and Nub forwards it to Node verbatim. Until you do, `localStorage` is `undefined`, so `typeof localStorage === "undefined"` is a feature check. Name a backing file and the global comes alive:
+The `localStorage` global persists across runs, so it needs a file on disk to write to. Pass `--localstorage-file <path>` and Nub forwards it to Node verbatim; until then `localStorage` is `undefined`, so `typeof localStorage === "undefined"` is a feature check.
 
 ```ts
 localStorage.setItem("token", "abc123");
@@ -69,5 +47,5 @@ abc123
 The `--localstorage-file` flag is also honored when set in `NODE_OPTIONS`.
 
 <Callout title="Your explicit webstorage flag wins">
-If you pass `--experimental-webstorage` (or `--no-experimental-webstorage`) yourself, Nub respects it and injects nothing. The version band is encoded in `crates/nub-core/src/node/flags.rs`: the flag exists from Node 22.4.0, is required through 24.x, and is unflagged from 25.0.0 on.
+If you pass `--experimental-webstorage` (or `--no-experimental-webstorage`) yourself, Nub respects it and injects nothing. The flag exists from Node 22.4.0, is required through 24.x, and is unflagged from 25.0.0 on.
 </Callout>

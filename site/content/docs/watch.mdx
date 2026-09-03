@@ -1,6 +1,6 @@
 ---
 title: Watch mode
-description: Restart-on-change for files and scripts, driven by the resolved dependency graph plus your environment files, tsconfig, and package manifest — no glob hygiene required.
+description: Restart-on-change for files and scripts, driven by the resolved dependency graph plus your environment files, tsconfig, and package manifest — no glob list to maintain.
 ---
 
 Watch mode (`nub watch`) runs your entry point and restarts it whenever something it actually depends on changes.
@@ -52,15 +52,13 @@ This is why a plain `node --watch` silently goes stale on a tsconfig edit, and w
 
 ## What doesn't trigger a restart
 
-Because the watch set is the import graph rather than a directory glob, files that nothing in the run actually loads are simply not watched. A rebuild that emits `dist/foo.js` doesn't trigger a restart unless something in the run imported `dist/foo.js`.
+Because the watch set is the import graph rather than a directory glob, files that nothing in the run actually loads are not watched. A rebuild that emits `dist/foo.js` doesn't trigger a restart unless something in the run imported `dist/foo.js`.
 
 ```bash
 nub watch src/server.ts
 # editing dist/** or coverage/** does not restart —
 # they aren't in the loaded dependency graph
 ```
-
-There is no ignore list to maintain.
 
 ## Plain Node `--watch`
 

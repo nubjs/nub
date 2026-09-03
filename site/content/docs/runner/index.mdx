@@ -50,7 +50,7 @@ nubx -y cowsay "hi"
 
 ### `exec.implicitDlx`
 
-Answering **Never** turns the implicit fetch off for good. Nub records `exec.implicitDlx` in its global settings file (`~/.config/nub/nub.jsonc`), and from then on a local miss stops instead of offering a download. Explicit fetches are unaffected: [`nub dlx`](/docs/runner/dlx) and `nubx -y` keep working, because asking for them is itself the consent.
+Answering **Never** turns the implicit fetch off for good. Nub records `exec.implicitDlx` in its global settings file (`~/.config/nub/nub.jsonc`), and from then on a local miss stops instead of offering a download. Explicit fetches — [`nub dlx`](/docs/runner/dlx) and `nubx -y` — are unaffected, because asking for them is itself the consent.
 
 Restore the prompt at any time:
 
@@ -60,7 +60,7 @@ nub config set exec.implicitDlx prompt
 
 ## Pass arguments
 
-Everything after the tool name is forwarded to it untouched — there's no `--` separator to remember.
+Everything after the tool name is forwarded to it untouched — no `--` separator needed.
 
 ```bash
 nubx eslint . --fix --max-warnings 0

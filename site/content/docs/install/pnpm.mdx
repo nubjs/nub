@@ -129,7 +129,7 @@ namedRegistries:
 
 Nub reads `overrides`, `packageExtensions`, and `patchedDependencies` from either home pnpm accepts: the `pnpm.*` namespace in `package.json`, or the matching key in `pnpm-workspace.yaml`. The pnpm resolver prefers `pnpm.overrides`; top-level `resolutions` is still honored (pnpm supports it for Yarn compatibility), but top-level `overrides` is npm and Bun's field and is ignored under pnpm.
 
-Adopting Nub into an existing pnpm repo leaves the project pnpm-owned, so all of this keeps working untouched. Switching it to Nub's own identity with `nub pm use nub` migrates the pins to the top-level `overrides` and `patchedDependencies` fields in `package.json`.
+Adopting Nub into an existing pnpm repo leaves the project pnpm-owned. Switching it to Nub's own identity with `nub pm use nub` migrates the pins to the top-level `overrides` and `patchedDependencies` fields in `package.json`.
 
 None of this is read under an npm, Yarn, or Bun incumbent, or in a Nub-identity project. Under those three incumbents, a stray `.pnpmfile.cjs` is ignored with a warning rather than applied silently:
 

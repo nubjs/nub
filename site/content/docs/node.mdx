@@ -165,15 +165,6 @@ $ nub node which
 » resolved from .node-version ({{NODE_VERSION}})
 ```
 
-The stdout/stderr split means `nub node which` composes in a shell — capture the path and the explainer stays out of the variable:
-
-```console
-$ NODE=$(nub node which)
-» resolved from .node-version ({{NODE_VERSION}})
-$ echo "$NODE"
-/Users/you/.nvm/versions/node/v{{NODE_VERSION}}/bin/node
-```
-
 With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node` prints a status block instead — the version, path, and resolution source on separate lines.
 
 ## `nub node shim`

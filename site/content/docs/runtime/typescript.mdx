@@ -45,7 +45,7 @@ Error: the project's tsconfig.json could not be read in full (see above).
 Fix the config, or use --node to run without Nub's TypeScript features, path aliases included.
 ```
 
-Compat mode turns off every config-derived behavior, so `--node` gets past the error but does not restore what the config was setting up. Fixing the config is the way to keep path aliases and decorator flags working.
+Compat mode turns off every config-derived behavior, so `--node` gets past the error but loses what the config was setting up — path aliases and decorator flags included.
 
 <Callout>
 Read the [full docs](https://www.typescriptlang.org/tsconfig/) for `tsconfig.json` on typescriptlang.org.
@@ -80,7 +80,7 @@ using handle = openHandle();
 const letters = /\p{Letter}/v;
 ```
 
-A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer. Files inside `node_modules` are never transpiled; they load as the package shipped them, on every tier.
+A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer. Files inside `node_modules` are never transpiled, on any tier.
 
 JSX in a `.js` file is out of scope — use `.jsx`. Nub parses `.js` as JavaScript, not JSX, so a `<` is a comparison, not an element.
 
@@ -128,6 +128,6 @@ Error: kaboom
     at Object.<anonymous> (/path/to/app.ts:4:1)
 ```
 
-The stack frame reports `app.ts:2:8` — the line in your source, not the transpiled output. To turn it off, pass `--no-enable-source-maps`.
+To turn it off, pass `--no-enable-source-maps`.
 
 Source maps are injected on every supported Node version except **26.0 through 26.7**, where a Node regression ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)) makes a no-message `assert(false)` throw a `TypeError` instead of an `AssertionError` when source maps are on. Nub withholds the flag across that band, so stack traces are not remapped there. Every other version gets source maps: 18.19 through 25.x, and 26.8 onward, where the upstream fix ships.

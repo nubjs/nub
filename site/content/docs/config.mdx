@@ -305,7 +305,7 @@ Paths expand `${VAR}` and `$VAR` against the environment, which a config file ne
 APP_ENV=staging nub app.ts   # reads .env and .env.staging
 ```
 
-Setting `envFile` takes precedence over [Varlock](/docs/runtime/varlock). A `.env.schema` file is a signal Nub infers ownership from; an `envFile` value is a project stating what it wants, so the value wins and Varlock stays out of the chain. The `--env-file` and `--no-env-file` flags do the same.
+Setting `envFile` takes precedence over [Varlock](/docs/runtime/varlock): a `.env.schema` is an inferred signal, and an explicit `envFile` value outranks it, so Varlock stays out of the chain. The `--env-file` and `--no-env-file` flags do the same.
 
 This holds at every scope, your global config included. A `.env.schema` decides the environment only when nothing else does, so setting `envFile` globally reaches into schema projects too.
 

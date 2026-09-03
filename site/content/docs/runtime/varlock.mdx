@@ -33,7 +33,7 @@ nub run dev
 ```
 
 <Callout title="Monorepos">
-Nub looks for `.env.schema` at the package you're running, then walks up to the workspace root. The nearest one wins, so a package that ships its own schema keeps it. Nub then hands that directory to Varlock and stays out of the way.
+Nub looks for `.env.schema` at the package you're running, then walks up to the workspace root. The nearest one wins, so a package that ships its own schema keeps it. Nub hands that directory to Varlock.
 </Callout>
 
 Nub does not vendor Varlock — it uses the copy already on your machine, checking the local project first and falling back to `PATH`. Finding neither is an error:
@@ -47,7 +47,7 @@ Only the commands that launch your code are gated this way. Installing still wor
 
 ## Overriding the hand-over
 
-A `.env.schema` file is a signal Nub infers ownership from. Setting [`envFile`](/docs/config#envfile) is a project stating what it wants, so `envFile` takes precedence and Varlock stays out of the chain.
+A `.env.schema` file is a signal Nub infers ownership from; an explicit [`envFile`](/docs/config#envfile) setting wins, and Varlock stays out of the chain.
 
 ```jsonc title="nub.jsonc"
 {
@@ -73,7 +73,7 @@ Setting `"envFile": "varlock"` goes the other way and selects Varlock. That is h
 }
 ```
 
-One exception to all of this. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used the `.env.schema` name for its own incompatible format since 2016, so a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
+The exception is [dotenv-extended](https://www.npmjs.com/package/dotenv-extended), which has used the `.env.schema` name for its own incompatible format since 2016 — a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
 
 <Callout>
 Read the [full docs](https://varlock.dev) for Varlock on varlock.dev.

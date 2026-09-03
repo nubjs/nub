@@ -3,7 +3,7 @@ title: Debugging
 description: Attach the VS Code debugger to a program run through Nub, with breakpoints and stepping working while augmentation is on.
 ---
 
-VS Code's Node debugger launches your program with its own `node`, which skips Nub entirely. Point it at the `nub` binary instead and Nub launches the file for you — the inspector comes up and the debugger attaches with no extra setup.
+VS Code's Node debugger launches your program with its own `node`, which skips Nub entirely. Point it at the `nub` binary instead and Nub launches the file for you — the inspector comes up and the debugger attaches.
 
 ```json title=".vscode/launch.json"
 {
@@ -44,7 +44,7 @@ Breakpoints in `.ts` source land on the right line. Nub transpiles TypeScript wi
 
 ## Running without augmentation
 
-To debug on plain Node — every augmentation off, the project's pinned version still used — add `--node` through `runtimeArgs`. It answers the differential question: does the bug still reproduce with none of Nub's runtime changes?
+To debug on plain Node — every augmentation off, the project's pinned version still used — add `--node` through `runtimeArgs`.
 
 ```json title=".vscode/launch.json"
 {

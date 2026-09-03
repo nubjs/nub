@@ -112,7 +112,7 @@ It can. The `nub install` command is a full package manager — pnpm's CLI surfa
 
 ## Does it work with `pnpm` / `npm` / `yarn` / `bun`?
 
-Yes. All four keep working exactly as they do without Nub. Your lockfile stays in whatever format your package manager produces, and workspace topology (`pnpm-workspace.yaml`, `npm` workspaces, `yarn` workspaces) is honored by `nub run` and `nubx` directly. The sources of truth:
+Yes. Your lockfile stays in whatever format your package manager produces, and workspace topology (`pnpm-workspace.yaml`, `npm` workspaces, `yarn` workspaces) is honored by `nub run` and `nubx` directly. The sources of truth:
 
 - `nub run` reads `package.json` and its `"scripts"` field.
 - `nubx` reads `node_modules/.bin`.
@@ -301,17 +301,17 @@ Deno.env
 Deno.readTextFile
 ```
 
-Deno implements Node compatibility inside Deno. Nub runs on the actual Node binary you installed; if a package works on Node, it works on Nub, by construction.
+Deno implements Node compatibility inside Deno. Nub runs on the actual Node binary you installed; if a package works on Node, it works on Nub.
 
 ## How is it different from `node --run`?
 
-Node shipped a built-in script runner in 22.0 — `node --run` — and it's genuinely fast. But it's deliberately minimal, and the gaps are why projects still reach for `pnpm run`:
+Node shipped a built-in script runner in 22.0 — `node --run` — and it's fast. But it's deliberately minimal, and the gaps are why projects still reach for `pnpm run`:
 
 - No `pre` / `post` lifecycle hooks.
 - No workspaces — no recursive or filtered runs across a monorepo.
 - No `npm_*` environment variables (`npm_package_*`, `npm_config_*`, `npm_lifecycle_event`) that countless scripts read.
 
-The `nub run` command is just as fast in the [script-runner benchmark](https://github.com/nubjs/nub/tree/main/tests/bench/script-runner) and closes all three, so scripts written for `npm` or `pnpm` keep working unchanged.
+The `nub run` command is just as fast in the [script-runner benchmark](https://github.com/nubjs/nub/tree/main/tests/bench/script-runner) and closes all three.
 
 ## What if I want to stop using Nub?
 
@@ -421,12 +421,12 @@ No. Vite already owns this; `nub run dev` runs whatever your project's `dev` scr
 
 ## Does it have a test runner?
 
-No. Node's own `node:test` already owns this — and `vitest` and `jest` if you prefer those. Nub runs whichever you've chosen. Workers spawned by your test runner inherit Nub's augmentation, so TypeScript test files run directly.
+No. Node's own `node:test` covers it — and `vitest` and `jest` if you prefer those. Nub runs whichever you've chosen. Workers spawned by your test runner inherit Nub's augmentation, so TypeScript test files run directly.
 
 ## Does it have a bundler?
 
-No. The bundlers your project already uses (Vite / Rollup / Rolldown / esbuild / webpack / tsup) keep working. Nub's transpile path is for *execution*, not for shipping production artifacts.
+No. Use the bundler your project already has (Vite / Rollup / Rolldown / esbuild / webpack / tsup); Nub's transpile path is for *execution*, not for shipping production artifacts.
 
 ## What's the hot-reload story?
 
-Watch mode restarts the process when files change — the watch set is the resolved dependency graph plus your `.env*` files and `tsconfig.json`, so a TypeScript project needs no glob list. It does not preserve in-memory state or hot-swap modules in place; a restart is a restart. See [Watch mode](/docs/watch).
+Watch mode restarts the process when files change — the watch set is the resolved dependency graph plus your `.env*` files and `tsconfig.json`, so a TypeScript project needs no glob list. It does not preserve in-memory state or hot-swap modules in place. See [Watch mode](/docs/watch).

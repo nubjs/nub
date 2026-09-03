@@ -24,7 +24,7 @@ Nub reads your nearest `tsconfig.json` and applies its resolution settings at ru
 
 ### `paths`
 
-The `compilerOptions.paths` and `compilerOptions.baseUrl` mappings resolve `@/...`-style aliases with no extra tooling.
+The `compilerOptions.paths` and `compilerOptions.baseUrl` mappings resolve `@/...`-style aliases.
 
 ```json title="tsconfig.json"
 {
@@ -53,7 +53,7 @@ Path aliases work from any file, not just TypeScript ones — a `.js` file that 
 
 ### `baseUrl`
 
-With `baseUrl` set and no matching `paths` entry, a bare specifier resolves relative to the base directory. A `import "lib/config"` finds `baseUrl/lib/config.ts` on its own.
+With `baseUrl` set and no matching `paths` entry, a bare specifier resolves relative to the base directory.
 
 ```json title="tsconfig.json"
 { "compilerOptions": { "baseUrl": "." } }
@@ -73,7 +73,7 @@ Configs are read once per process. Edit your `tsconfig.json` and restart the pro
 
 ## Extensionless imports
 
-In TypeScript-family files, extensionless imports resolve the way `tsc` resolves them — `import "./foo"` finds `./foo.ts`. This is the conventional pattern most TypeScript codebases use.
+In TypeScript-family files, extensionless imports resolve the way `tsc` resolves them — `import "./foo"` finds `./foo.ts`.
 
 ```ts
 // from a .ts / .tsx / .mts / .cts file:
@@ -123,7 +123,7 @@ A subpath naming a directory resolves that directory's `index` file, the way a `
 import { parse } from "qs/lib";   // resolves qs/lib/index.js
 ```
 
-Only `index` is consulted. A directory's own `package.json` `main` is not read for a subpath — Node's `require` reads it, and deferring keeps both resolvers on the same answer. A trailing slash means what it says: `qs/lib/` is the directory, never a `qs/lib.js` beside it.
+Only `index` is consulted. A directory's own `package.json` `main` is not read for a subpath — Node's `require` reads it, and deferring keeps both resolvers on the same answer. A trailing slash names the directory: `qs/lib/` is the directory, never a `qs/lib.js` beside it.
 
 <Callout>A dependency that declares `exports` is never probed. Its map decides what is reachable, exactly as on Node, so a subpath it withholds stays an error.</Callout>
 
@@ -139,7 +139,7 @@ import { handler } from "./handler.js";
 import { createPrompt } from "@repo/lib/prompt.js";
 ```
 
-The literal extension always wins first: a real on-disk `./handler.js` is used as-is, and the swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts` — and likewise, a real `.cjs` beats a sibling `.cts`. This is the `tsc` emit convention.
+The swap only fires when the written extension points at a file that doesn't exist — a real on-disk `./handler.js` is used as-is. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`, and likewise a real `.cjs` beats a sibling `.cts`.
 
 ## What falls through to Node
 
@@ -180,7 +180,7 @@ Every resolution in the project matches against them, a bare-specifier [preload]
 
 ## Yarn Plug'n'Play
 
-A project Yarn installed in PnP mode just runs — Nub enables Plug'n'Play automatically, with no flag and no setup. Walking up from the working directory, Nub detects a `.pnp.cjs` at the project root and injects it ahead of its own preload (`--require .pnp.cjs` on the fast tier, the `NODE_OPTIONS` equivalent on the compat tier), so PnP's resolver patches install first and Nub's TypeScript resolution layers on top.
+Nub enables Plug'n'Play automatically, with no flag and no setup. Walking up from the working directory, it detects a `.pnp.cjs` at the project root and injects it ahead of its own preload (`--require .pnp.cjs` on the fast tier, the `NODE_OPTIONS` equivalent on the compat tier), so PnP's resolver patches install first and Nub's TypeScript resolution layers on top.
 
 ```bash
 nub index.ts        # .pnp.cjs is detected and loaded automatically
@@ -196,7 +196,7 @@ Both `require` and `import` resolve under PnP, by different paths:
 
 Nub doesn't register Yarn's `.pnp.loader.mjs` (its ESM resolver collides with the fast tier's `module.registerHooks`), so the same `pnpapi.resolveRequest` path serves both tiers.
 
-It works across the whole supported Node range (18.19+), on macOS, Linux, and Windows — including `import` of zip-stored packages and running a zip-stored binary through `nubx`. This is the runtime *running* a PnP project; Nub's installer does not itself produce a PnP install — that stays Yarn's job. Package `extends` chains resolve through the node_modules walk rather than the PnP API, which covers the npm and pnpm installs where that form appears.
+Zip-stored packages resolve too — `import` from a `.yarn/cache` zip, and `nubx` running a zip-stored binary. This is the runtime *running* a PnP project; producing the PnP install stays Yarn's job. Package `extends` chains resolve through the node_modules walk rather than the PnP API, which covers the npm and pnpm installs where that form appears.
 
 <Callout>
 Read the [full docs](https://yarnpkg.com/features/pnp) for Plug'n'Play on yarnpkg.com.

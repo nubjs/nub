@@ -1,6 +1,6 @@
 ---
 title: Yarn
-description: Yarn is supported read-only — Nub reads the Yarn lockfile (Classic v1 and Berry v2+) to install and run a project, but never writes it. Treat a Yarn project as something Nub consumes, not maintains.
+description: Yarn is supported read-only — Nub reads the Yarn lockfile (Classic v1 and Berry v2+) to install and run a project, but never writes it.
 ---
 
 Yarn is supported **read-only**. Install and run work; any command that would rewrite `yarn.lock` refuses before the engine touches anything:
@@ -154,7 +154,7 @@ Read the [full docs](https://yarnpkg.com/configuration/yarnrc#nodeLinker) on yar
 
 Plug'n'Play is the exception: it is refused, not ignored. A PnP project has no `node_modules` tree for Nub to install into, and Yarn Berry defaults to PnP when `nodeLinker` is absent, so both `nub install` and `nub ci` abort before mutation with `ERR_NUB_PNP_UNSUPPORTED`. Set `nodeLinker: node-modules` to install with Nub.
 
-**The Nub runtime fully supports Plug'n'Play.** If a project was *already* installed by Yarn in PnP mode, Nub can run it — `nub <file>`, `nub run`, and `nubx` honor `.pnp.cjs` across all supported Node versions. What Nub cannot do is *produce* a PnP install. So the supported workflow for a PnP project is: install with `yarn`, run with `nub`. See [Plug'n'Play resolution](/docs/runtime/resolution#yarn-plugnplay) for how Nub resolves a PnP project at runtime.
+**The Nub runtime runs Plug'n'Play projects.** If a project was *already* installed by Yarn in PnP mode, `nub <file>`, `nub run`, and `nubx` honor `.pnp.cjs`. What Nub cannot do is *produce* a PnP install, so the workflow for a PnP project is: install with `yarn`, run with `nub`. See [Plug'n'Play resolution](/docs/runtime/resolution#yarn-plugnplay) for how Nub resolves a PnP project at runtime.
 
 ## Gaps
 
