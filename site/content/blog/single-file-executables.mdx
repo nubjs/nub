@@ -121,7 +121,7 @@ import wasm from "./model.wasm";
 const { instance } = await WebAssembly.instantiate(readFileSync(wasm));
 ```
 
-#### Native addons
+### Native addons
 
 Native addons are the hard case for a bundler: a `.node` file is machine code, and `dlopen` loads it from a path on disk. The compiler follows an addon's static import and packs it into the executable:
 
