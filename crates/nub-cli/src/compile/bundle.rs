@@ -55,8 +55,8 @@ use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptio
 use rolldown_common::{
     CodeSplittingMode, EmittedChunk, InnerOptions, IsExternal, ManualCodeSplittingOptions,
     MatchGroup, MatchGroupName, ModuleType, Output, OutputFormat, Platform, RawCompressOptions,
-    RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed, ResolveOptions,
-    ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed, ResolveOptions, ResolvedExternal,
+    SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
@@ -5748,8 +5748,8 @@ mod tests {
         let mut o = opts();
         o.minify = false;
         o.metafile = true;
-        let result =
-            bundle_module_graph_with("metafile", "entry.ts", files, &o).expect("the fixture bundles");
+        let result = bundle_module_graph_with("metafile", "entry.ts", files, &o)
+            .expect("the fixture bundles");
         let report = result.metafile.expect("--metafile collects a report");
 
         let source_of = |name: &str| {
