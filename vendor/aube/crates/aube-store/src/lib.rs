@@ -577,13 +577,33 @@ impl Store {
     }
 }
 
+/// `Error::Io`'s message. A permission denial on a store path is almost
+/// always the store location, not the file — a sandbox or a store on a
+/// read-only mount — so it names the remedy (`store-dir`) and, when a coding
+/// agent's sandbox is detected, the sandbox; a bare "Operation not permitted"
+/// on a CAS temp path sent users hunting in the wrong place.
+fn io_error_message(path: &Path, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => {
+            let sandbox = aube_util::agent_sandbox::detect()
+                .map(|s| format!(", or rerun the command outside the {} sandbox", s.label()))
+                .unwrap_or_default();
+            format!(
+                "store is not writable at {}: {e} — set `store-dir` in .npmrc to a writable location{sandbox}",
+                path.display()
+            )
+        }
+        _ => format!("I/O error at {}: {e}", path.display()),
+    }
+}
+
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[non_exhaustive]
 pub enum Error {
     #[error("HOME environment variable not set")]
     #[diagnostic(code(ERR_AUBE_NO_HOME))]
     NoHome,
-    #[error("I/O error at {0}: {1}")]
+    #[error("{}", io_error_message(.0, .1))]
     Io(PathBuf, std::io::Error),
     #[error("file error: {0}")]
     Xx(String),

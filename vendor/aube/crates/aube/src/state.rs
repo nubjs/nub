@@ -1240,13 +1240,7 @@ struct NoIntegrityBinding {
 /// them straight from the store. Tracks a `storeDir` override so the binding
 /// moves with the store it indexes.
 pub fn no_integrity_dir(project_dir: &Path) -> PathBuf {
-    let store_v1 = match crate::commands::resolved_store_dir(project_dir) {
-        Some(custom) => custom.join("v1"),
-        None => aube_store::dirs::store_dir()
-            .and_then(|files| files.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store").join("v1")),
-    };
-    store_v1.join("no-integrity")
+    crate::commands::store_v1_dir(project_dir).join("no-integrity")
 }
 
 fn no_integrity_binding_file(dir: &Path, url: &str) -> PathBuf {

@@ -52,6 +52,14 @@ const FLOWS = [
     runs: [[NUB, "install"]], // no registry needed; exercises store + linker under the sandbox
   },
   {
+    name: "install-registry-warm",
+    fixture: "install-registry-warm",
+    // Lockfile-pinned registry dep. `none` runs first and warms the host store,
+    // so the sandboxed cells measure the warm path: can an install link from a
+    // store it may read but not write? Cell order is load-bearing.
+    runs: [[NUB, "install"]],
+  },
+  {
     name: "nubx-registry",
     fixture: "nubx", // carries an .npmrc with fetch-retries=0 so the denied-network cell fails fast
     // A workspace-local cache keeps this cell cold and machine-independent:

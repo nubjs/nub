@@ -560,6 +560,18 @@ pub(crate) fn format_registry_help(name: &str, msg: &str) -> String {
     if !name.is_empty() && name != "(resolver)" {
         s.push_str(&format!("package: {name}\n"));
     }
+    // Inside a coding agent's sandbox the likely cause of a failed fetch is
+    // the sandbox itself, and "check auth" is advice an agent may act on by
+    // poking at credentials. Name the sandbox and the two real remedies.
+    if matches!(kind, RegistryErrorKind::Fetch | RegistryErrorKind::Tarball)
+        && let Some(sandbox) = aube_util::agent_sandbox::detect()
+    {
+        s.push_str(&format!(
+            "network access is blocked by the {} sandbox — rerun the command outside the sandbox, or use `--offline` to install from what the store already holds",
+            sandbox.label()
+        ));
+        return s;
+    }
     s.push_str(match kind {
         RegistryErrorKind::Tarball => {
             "tarball download or integrity check failed — try `aube store prune` to clear the cache; if the lockfile references a tarball that moved, delete the lockfile entry for this package and re-resolve"

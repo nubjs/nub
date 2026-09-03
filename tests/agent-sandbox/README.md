@@ -23,7 +23,7 @@ node run.mjs --check   # regenerate to a tmp dir, diff against committed snapsho
 
 | | flows |
 | --- | --- |
-| `none` (unsandboxed control) | `nub main.ts` (twice — warm path), `nub run hello`, `nub install` with a `file:` dep, `nub x cowsay@1.6.0` |
+| `none` (unsandboxed control) | `nub main.ts` (twice — warm path), `nub run hello`, `nub install` with a `file:` dep, `nub install` of a lockfile-pinned registry dep the control run has already warmed into the host store, `nub x cowsay@1.6.0` with a cold workspace-local cache |
 | `codex` (`codex sandbox`, `sandbox_mode="workspace-write"`, hermetic `CODEX_HOME`) | same |
 | `claude-srt` (`srt` with a settings file shaped like Claude Code's defaults: workspace + temp writable, no network) | same |
 

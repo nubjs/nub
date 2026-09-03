@@ -255,20 +255,120 @@ pub(crate) fn ensure_registry_auth_for_package(
 /// across versions of aube and never collides with a pnpm store rooted
 /// at the same path.
 pub(crate) fn open_store(cwd: &std::path::Path) -> miette::Result<aube_store::Store> {
-    let root = match resolved_store_dir(cwd) {
-        // No configured `storeDir`: the aube-owned default under XDG/HOME, or a
-        // `$TMPDIR`-rooted store when neither is available. The store ctors used
-        // to resolve HOME themselves and hard-fail with `NoHome`, so an install
-        // with HOME stripped from the env (pnpm's own test harness, a minimal CI
-        // container) aborted even when a concrete `storeDir` was configured.
-        None => aube_store::dirs::store_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store/v1/files")),
-        Some(custom) => custom.join("v1").join("files"),
-    };
     // The virtual store is always passed explicitly so this and every read-side
     // caller resolve it through the same `global_virtual_store_dir` ladder.
-    Ok(aube_store::Store::with_dirs(root, resolved_cache_dir(cwd))
-        .with_virtual_store_dir(global_virtual_store_dir(cwd)))
+    Ok(
+        aube_store::Store::with_dirs(store_files_dir(cwd), resolved_cache_dir(cwd))
+            .with_virtual_store_dir(global_virtual_store_dir(cwd)),
+    )
+}
+
+/// The CAS root (`<store>/v1/files`) for `cwd`. A `storeDir` the USER set is
+/// used verbatim; an unset one, or one that merely restates the embedder
+/// profile's default (nub registers its data-dir store as a settings default,
+/// so under nub `storeDir` always resolves to *something*), is a default and
+/// gets [`default_store_root`]'s unwritable-fallback treatment.
+fn store_files_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+    match resolved_store_dir(cwd) {
+        Some(custom) if !is_embedder_default_store_dir(&custom, cwd) => {
+            custom.join("v1").join("files")
+        }
+        profile_default => {
+            default_store_root(cwd, profile_default.map(|d| d.join("v1").join("files")))
+        }
+    }
+}
+
+fn is_embedder_default_store_dir(resolved: &std::path::Path, cwd: &std::path::Path) -> bool {
+    aube_settings::embedder_defaults()
+        .iter()
+        .find(|(key, _)| key == "storeDir")
+        .and_then(|(_, raw)| expand_setting_path(raw, cwd))
+        .is_some_and(|default| default == resolved)
+}
+
+/// The store's `v1` directory for `cwd` — the parent of the CAS root
+/// [`open_store`] uses, so store-adjacent state (the no-integrity bindings)
+/// follows a configured `storeDir` AND the project-local fallback.
+pub(crate) fn store_v1_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+    let files = store_files_dir(cwd);
+    files
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or(files)
+}
+
+/// The CAS root when no `storeDir` is configured: `profile_default` (the
+/// embedder's) else the aube-owned default under XDG/HOME (a `$TMPDIR`-rooted
+/// store when neither is set — the store ctors used to hard-fail with
+/// `NoHome` and aborted installs in HOME-less CI), or, when that default is
+/// not writable, a project-local store under `node_modules`.
+///
+/// The unwritable default is a coding agent's command sandbox: Codex and
+/// Claude Code confine writes to the workspace and temp dirs, so the data
+/// home EPERMs and even a network-free `file:` install died on its first CAS
+/// write. A store inside `node_modules` sits on the writable side of that
+/// line — the linker skips dot-entries when it sweeps the root, so it
+/// survives an install, and `rm -rf node_modules` disposes of it like any
+/// cache. It starts empty, so a sandboxed install re-fetches what the global
+/// store already held; that is the price of not being able to write there.
+///
+/// Decided once per process so every open — install, the lifecycle runner's
+/// read-side handle, dlx — agrees on one store. Elsewhere the probe costs one
+/// temp-file create and unlink.
+fn default_store_root(
+    cwd: &std::path::Path,
+    profile_default: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    static DECISION: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DECISION
+        .get_or_init(|| {
+            let default = profile_default
+                .or_else(aube_store::dirs::store_dir)
+                .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store/v1/files"));
+            match probe_writable(&default) {
+                Ok(()) => default,
+                Err(e) if is_unwritable(&e) => {
+                    let fallback = cwd
+                        .join("node_modules")
+                        .join(format!(".{}-store", aube_util::prog()))
+                        .join("v1")
+                        .join("files");
+                    let sandbox = aube_util::agent_sandbox::detect()
+                        .map(|s| format!(" (inside the {} sandbox)", s.label()))
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_STORE_FALLBACK,
+                        "store {} is not writable{sandbox}; using project-local store {} for this run",
+                        default.display(),
+                        fallback.display()
+                    );
+                    fallback
+                }
+                // Anything else is reported by the first real write, with the
+                // path it failed on.
+                Err(_) => default,
+            }
+        })
+        .clone()
+}
+
+/// Can this process create files under `root`? Creates the directory chain
+/// if missing (an empty store dir is the normal first-run state anyway) and
+/// a temp file inside it that is unlinked on drop.
+fn probe_writable(root: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root)?;
+    tempfile::Builder::new()
+        .prefix(".write-probe-")
+        .tempfile_in(root)?;
+    Ok(())
+}
+
+fn is_unwritable(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
 }
 
 /// Resolve the configured `storeDir` for `cwd`, returning `None` if

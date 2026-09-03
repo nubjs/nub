@@ -155,7 +155,7 @@ pub(crate) use settings_context::{
     resolved_cache_dir, resolved_store_dir, run_pnpmfile_pre_resolution, set_fetch_cli_overrides,
     set_global_frozen_override, set_global_output_flags, set_global_virtual_store_flags,
     set_registry_override, set_skip_auto_install_on_package_manager_mismatch,
-    skip_auto_install_on_package_manager_mismatch, with_settings_ctx,
+    skip_auto_install_on_package_manager_mismatch, store_v1_dir, with_settings_ctx,
 };
 pub use settings_context::{load_global_config_yaml, resolved_project_store_dir};
 pub(crate) use workspace_helpers::{

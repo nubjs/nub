@@ -76,6 +76,9 @@ pub const WARN_AUBE_HTTP_RETRY_TRANSPORT: &str = "WARN_AUBE_HTTP_RETRY_TRANSPORT
 pub const WARN_AUBE_HTTP_RETRY_BODY_READ: &str = "WARN_AUBE_HTTP_RETRY_BODY_READ";
 pub const WARN_AUBE_HTTP_RETRY_BODY_DECODE: &str = "WARN_AUBE_HTTP_RETRY_BODY_DECODE";
 
+// ── store ───────────────────────────────────────────────────────────
+pub const WARN_AUBE_STORE_FALLBACK: &str = "WARN_AUBE_STORE_FALLBACK";
+
 // ── registry caching / perf ─────────────────────────────────────────
 pub const WARN_AUBE_PACKUMENT_CACHE_WRITE: &str = "WARN_AUBE_PACKUMENT_CACHE_WRITE";
 pub const WARN_AUBE_SLOW_METADATA: &str = "WARN_AUBE_SLOW_METADATA";
@@ -461,6 +464,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_HTTP_RETRY_TRANSPORT,
         category: category::HTTP_RETRIES,
         description: "Retrying after a transport / connection error.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_STORE_FALLBACK,
+        category: category::LINKER,
+        description: "The default store is not writable; using a project-local store under node_modules for this run.",
         exit_code: None,
     },
     CodeMeta {
