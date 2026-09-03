@@ -35,12 +35,15 @@ const VERSION_SURFACES = [
   "Cargo.toml",
   "crates/nub-native/Cargo.toml",
   "crates/nub-core/Cargo.toml",
-  // The two out-of-workspace locks. Asserted here rather than merely written in
-  // the fixture because they are consumed under `--locked`: a stamp that misses
-  // one leaves it unsatisfiable, which is a failed release build rather than a
-  // stale string.
+  // The three out-of-workspace locks. Asserted here rather than merely written
+  // in the fixture because they are consumed under `--locked`: a stamp that
+  // misses one leaves it unsatisfiable, which is a failed release build rather
+  // than a stale string. nub-phantom is the one that proves the point — nothing
+  // read it under `--locked` until 2026-09-02, so nothing stamped it either, and
+  // its lock sat at 0.6.0 while the tree shipped 0.8.x with every check green.
   "crates/nub-launcher/Cargo.lock",
   "crates/nub-native/Cargo.lock",
+  "crates/nub-phantom/Cargo.lock",
   "runtime/version.mjs",
 ];
 
@@ -60,9 +63,10 @@ function fixture({ latest = false, corruptLatest = false, crlfLocks = false } = 
   // the schema snapshot this file is testing.
   write(root, "crates/nub-core/Cargo.toml", '[package]\nversion = "0.0.0"\n');
   // Each out-of-workspace lock records the version of a crate stamped above —
-  // the launcher's records nub-core, the addon's records itself. A second
-  // [[package]] block is present so the test would catch a stamp that rewrote
-  // every version line in the file rather than the one entry it names.
+  // the launcher's records nub-core, the addon's records itself, and phantom's
+  // records BOTH root-workspace path deps it pulls in. A second [[package]]
+  // block is present so the test would catch a stamp that rewrote every version
+  // line in the file rather than the one entry it names.
   write(
     root,
     "crates/nub-launcher/Cargo.lock",
@@ -72,6 +76,15 @@ function fixture({ latest = false, corruptLatest = false, crlfLocks = false } = 
     root,
     "crates/nub-native/Cargo.lock",
     lock('[[package]]\nname = "anyhow"\nversion = "1.0.0"\n\n[[package]]\nname = "nub-native"\nversion = "0.0.0"\n'),
+  );
+  write(
+    root,
+    "crates/nub-phantom/Cargo.lock",
+    lock(
+      '[[package]]\nname = "anyhow"\nversion = "1.0.0"\n\n' +
+        '[[package]]\nname = "nub-phantom-core"\nversion = "0.0.0"\n\n' +
+        '[[package]]\nname = "nub-phantom-scan"\nversion = "0.0.0"\n',
+    ),
   );
   write(root, "runtime/version.mjs", 'export const NUB_VERSION = "0.0.0";\n');
   if (latest) {
@@ -101,7 +114,11 @@ test("stamps a pinned schema snapshot from latest", () => {
     // A lock is stamped ENTRY-WISE. Rewriting every version line in it would
     // repin unrelated dependencies and leave the lock unsatisfiable under
     // `--locked` — the same failed release build the stamp exists to prevent.
-    for (const lock of ["crates/nub-launcher/Cargo.lock", "crates/nub-native/Cargo.lock"]) {
+    for (const lock of [
+      "crates/nub-launcher/Cargo.lock",
+      "crates/nub-native/Cargo.lock",
+      "crates/nub-phantom/Cargo.lock",
+    ]) {
       const content = readFileSync(join(root, lock), "utf8");
       assert.match(content, /name = "anyhow"\nversion = "1\.0\.0"/, `${lock}: anyhow was repinned`);
     }
@@ -141,6 +158,11 @@ test("stamps CRLF lockfiles, as a Windows runner checks them out", () => {
     for (const [lock, crate] of [
       ["crates/nub-launcher/Cargo.lock", "nub-core"],
       ["crates/nub-native/Cargo.lock", "nub-native"],
+      // Two rows for one file, because that lock carries two stamped entries:
+      // stamping only one of them leaves it exactly as unsatisfiable as
+      // stamping neither, and a single row could not tell those apart.
+      ["crates/nub-phantom/Cargo.lock", "nub-phantom-core"],
+      ["crates/nub-phantom/Cargo.lock", "nub-phantom-scan"],
     ]) {
       const content = readFileSync(join(root, lock), "utf8");
       assert.match(
