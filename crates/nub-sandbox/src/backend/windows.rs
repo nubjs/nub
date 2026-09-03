@@ -1055,7 +1055,7 @@ pub(super) mod launch {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, MutexGuard};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
+        CloseHandle, FILETIME, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
         SetHandleInformation, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::NetworkManagement::WindowsFirewall::{
@@ -1087,11 +1087,12 @@ pub(super) mod launch {
     use windows_sys::Win32::System::Threading::{
         CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW,
         CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-        GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-        OpenProcess, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION,
-        PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, ReleaseMutex, ResumeThread,
-        STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+        GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, INFINITE,
+        InitializeProcThreadAttributeList, OpenProcess, OpenProcessToken,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+        PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
     // Generic access rights (avoid a Storage_FileSystem feature dep for FILE_GENERIC_*).
@@ -2975,7 +2976,8 @@ pub(super) mod launch {
         // therefore what finishes last. Where the tree is a fan of helpers, the helpers drain while the
         // real work has already completed. Polling the handles each round is what the drain loop is
         // already doing for the job accounting, so this costs one wait per member per round.
-        let mut last_exit: Option<u32> = None;
+        // (exit time in 100ns ticks, exit code) of the LATEST member to actually exit.
+        let mut last_exit: Option<(u64, u32)> = None;
         let mut pending: Vec<(HANDLE, u32, String)> = tracked.clone();
         let order_deadline = std::time::Instant::now() + CAP;
         while !pending.is_empty() && std::time::Instant::now() < order_deadline {
@@ -2984,9 +2986,28 @@ pub(super) mod launch {
                 if unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0 {
                     let mut code: u32 = 0;
                     if unsafe { GetExitCodeProcess(h, &mut code) } != 0 {
+                        // ⛔⛔ THE ORDER MUST COME FROM THE KERNEL, NOT FROM WHEN THIS LOOP NOTICED.
+                        // The poll is 50ms and a process tree tears down in far less, so several
+                        // members routinely land in ONE window and the loop then "orders" them by the
+                        // job's pid-list order — an arbitrary tiebreak the rule below reads as fact.
+                        // That is not a small effect: `puppeteer` produced OPPOSITE verdicts on two
+                        // runs whose work completed identically, and `nx`/`@mui/x-telemetry` reported
+                        // a dead git helper's 128 over a postinstall that had already exited 0.
+                        // `GetProcessTimes` gives the real exit instant at 100ns resolution.
+                        let exit_at = {
+                            let mut c: FILETIME = unsafe { std::mem::zeroed() };
+                            let mut e: FILETIME = unsafe { std::mem::zeroed() };
+                            let mut k: FILETIME = unsafe { std::mem::zeroed() };
+                            let mut u: FILETIME = unsafe { std::mem::zeroed() };
+                            if unsafe { GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) } != 0 {
+                                (u64::from(e.dwHighDateTime) << 32) | u64::from(e.dwLowDateTime)
+                            } else {
+                                0
+                            }
+                        };
                         if std::env::var_os("NUB_JAIL_DUMP_POLICY").is_some() {
                             eprintln!(
-                                "JAILDUMP drain exited code={code} pid={pid} direct={} image={name}",
+                                "JAILDUMP drain exited code={code} pid={pid} direct={} exit_at={exit_at} image={name}",
                                 pid == direct_child_pid
                             );
                         }
@@ -3009,8 +3030,12 @@ pub(super) mod launch {
                         // Deliberately narrow. The two rules this loop already rejected both failed by
                         // being general, and the note above records what each one broke.
                         const STATUS_BREAKPOINT: u32 = 0x8000_0003;
-                        if code != STATUS_BREAKPOINT {
-                            last_exit = Some(code);
+                        if code != STATUS_BREAKPOINT
+                            && last_exit.is_none_or(|(prev, _)| exit_at >= prev)
+                        {
+                            // `>=` keeps the previous observation-order tiebreak for the degenerate
+                            // case where the kernel time is unavailable (0) for every member.
+                            last_exit = Some((exit_at, code));
                         }
                     }
                 } else {
@@ -3025,7 +3050,7 @@ pub(super) mod launch {
         }
         // A member still running at the cap contributes nothing: it has no exit code, and inventing one
         // is the STILL_ACTIVE defect this path already paid for once.
-        let status = match last_exit {
+        let status = match last_exit.map(|(_, code)| code) {
             Some(0) | None => None,
             other => other,
         };
