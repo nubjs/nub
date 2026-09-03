@@ -1998,7 +1998,19 @@ pub(super) mod launch {
                     // known to write a file directly into the profile ROOT rather than under `AC`,
                     // so this lands as CONSISTENCY with the write-grant mask used elsewhere in this
                     // file, NOT as a claimed fix. Do not credit it with any metric movement.
-                    let _ = grant_leaf_ace(&dir, ac_sid, GENERIC_READ | GENERIC_WRITE | DELETE);
+                    //
+                    // ⛔ `GENERIC_EXECUTE` ADDED 2026-09-03, AND THIS ONE HAS A WITNESS. A package
+                    // that stages an executable under the container profile could write it, read it
+                    // and delete it, but not RUN it: measured jailed, `spawnSync` of a valid PE
+                    // copied into `AC\Temp` returned EPERM, while the identical file launched from
+                    // an ordinary write-granted directory. The mask now matches `self.write_grants`
+                    // below, which has always carried execute. Download-then-exec installers are a
+                    // large family, so an under-grant here is far worse than the over-grant.
+                    let _ = grant_leaf_ace(
+                        &dir,
+                        ac_sid,
+                        GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
+                    );
                     // ⛔ `AC` MUST EXIST TOO, AND CREATING THE PROFILE DIR ALONE DOES NOT MAKE IT.
                     // When Windows creates an AppContainer profile it also lays down the `AC`
                     // subtree, which is where it VIRTUALIZES the container's `%LOCALAPPDATA%`. We
@@ -2059,15 +2071,19 @@ pub(super) mod launch {
                     // GENERIC_READ|GENERIC_WRITE grants everything the download needs except removing
                     // it. The ordinary write-grant path already knew this — `self.write_grants` below
                     // uses `GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE` — and this leaf
-                    // grant simply did not match it.
+                    // grant did not match it. It does now: the missing `GENERIC_EXECUTE` was its own
+                    // defect, measured 2026-09-03, and the two masks are deliberately identical.
                     //
                     // Every download-then-move installer cleans up its staging file, so this blocks
                     // the same family `AC\Temp` itself did.
                     for leaf in ["AC", "AC/Temp"] {
                         let p = dir.join(leaf);
                         if std::fs::create_dir_all(&p).is_ok() {
-                            let _ =
-                                grant_leaf_ace(&p, ac_sid, GENERIC_READ | GENERIC_WRITE | DELETE);
+                            let _ = grant_leaf_ace(
+                                &p,
+                                ac_sid,
+                                GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
+                            );
                         }
                     }
                     Some(ChildProfileGuard { dir })
