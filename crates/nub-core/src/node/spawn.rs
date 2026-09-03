@@ -24,6 +24,26 @@ use super::discovery::ResolvedNode;
 use super::flags;
 use super::version::NodeVersion;
 
+/// Whether this process is attached to a console.
+///
+/// Only a compiled artifact built with `--hide-console` asks. Such a launcher
+/// carries the GUI subsystem, so Windows allocates it no console of its own — but
+/// a GUI process started FROM a console inherits that one, which is the difference
+/// between double-clicking the binary and running it from `cmd.exe`, and the
+/// difference decides whether suppressing the child's console loses the user's
+/// output or saves them a flashing window.
+///
+/// `GetConsoleWindow` is the question asked directly. Testing the standard handles
+/// instead answers a narrower one — `app.exe > out.txt` redirects stdout to a file
+/// while stderr stays on the console — and would suppress a console that is
+/// genuinely there.
+#[cfg(windows)]
+pub fn process_has_console() -> bool {
+    // SAFETY: no arguments, no out-params; returns the console's window handle or
+    // null, and is safe to call at any time from any thread.
+    !unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null()
+}
+
 #[cfg(windows)]
 #[derive(Debug)]
 struct FileHandle {

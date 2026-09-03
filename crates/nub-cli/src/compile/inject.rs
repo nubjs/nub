@@ -15,6 +15,7 @@
 //! not a re-read of whatever the writer happened to emit.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -33,6 +34,7 @@ pub fn inject(
     payload: &[u8],
     icon: Option<&[u8]>,
     version_info: Option<&[u8]>,
+    hide_console: bool,
     out: &Path,
 ) -> Result<()> {
     let format = target.format();
@@ -80,10 +82,23 @@ pub fn inject(
             if let Some(version_info) = version_info {
                 pe = pe.set_version_info(version_info.to_vec());
             }
+            // Built into memory rather than straight into the file, because the
+            // subsystem flip has to land on the FINISHED image. libsui rebuilds
+            // the PE headers while it rewrites the resource directory, so a
+            // subsystem set on the template is discarded here along with the
+            // template's own resources — the same reason the icon and the version
+            // resource are set inside this builder chain instead of baked in.
+            let mut image = Vec::with_capacity(template.len() + payload.len());
             pe.write_resource(nub_core::compile::SECTION_NAME, payload.to_vec())
                 .map_err(|e| anyhow!("injecting the payload resource: {e:?}"))?
-                .build(&mut file)
-                .map_err(|e| anyhow!("building the executable: {e:?}"))
+                .build(&mut image)
+                .map_err(|e| anyhow!("building the executable: {e:?}"))?;
+            if hide_console {
+                set_pe_subsystem_gui(&mut image)
+                    .context("hiding the console window (--hide-console)")?;
+            }
+            file.write_all(&image)
+                .with_context(|| format!("writing {}", out.display()))
         }
     }
 }
@@ -503,8 +518,25 @@ fn pe_header_offset(image: &[u8]) -> Result<usize> {
 /// gets a console allocated for that child, so the launcher must also pass
 /// `CREATE_NO_WINDOW`. Bun and Deno need this half alone because each one IS the
 /// process it is hiding.
+/// The PE `Subsystem` field, read back the way Windows' loader reads it.
+///
+/// Exists for the same reason the version-resource scanner does: a cross-compiled
+/// Windows binary cannot be run on this host, so reading the field back out of the
+/// finished file is the only evidence the flip survived libsui's header rebuild.
+/// `None` when the image is not a placeable PE.
+pub fn pe_subsystem(image: &[u8]) -> Option<u16> {
+    let pe = pe_header_offset(image).ok()?;
+    match u16le(image, pe + 24) {
+        Some(0x20b) | Some(0x10b) => u16le(image, pe + 24 + 68),
+        _ => None,
+    }
+}
+
+/// `IMAGE_SUBSYSTEM_WINDOWS_GUI` — the value that stops Windows allocating a
+/// console for the process it starts from this image.
+pub const SUBSYSTEM_WINDOWS_GUI: u16 = 2;
+
 fn set_pe_subsystem_gui(image: &mut [u8]) -> Result<()> {
-    const IMAGE_SUBSYSTEM_WINDOWS_GUI: u16 = 2;
     let pe = pe_header_offset(image)?;
     let optional_header = pe + 24;
     // Checked rather than assumed: a ROM image (0x107) lays its optional header
@@ -519,7 +551,7 @@ fn set_pe_subsystem_gui(image: &mut [u8]) -> Result<()> {
     let slot = image
         .get_mut(at..at + 2)
         .context("truncated PE optional header")?;
-    slot.copy_from_slice(&IMAGE_SUBSYSTEM_WINDOWS_GUI.to_le_bytes());
+    slot.copy_from_slice(&SUBSYSTEM_WINDOWS_GUI.to_le_bytes());
     Ok(())
 }
 
@@ -654,7 +686,7 @@ mod tests {
         let target = TargetPlatform::parse(triple).unwrap();
         let out = tmp(&format!("artifact-{triple}"));
         let payload = payload("main.js");
-        inject(&target, template, &payload, None, None, &out).expect("inject");
+        inject(&target, template, &payload, None, None, false, &out).expect("inject");
 
         let produced = fs::read(&out).unwrap();
         assert_eq!(
@@ -727,6 +759,7 @@ mod tests {
             &payload("main.js"),
             Some(&fixtures::png()),
             Some(&info.encode().expect("the fixture encodes")),
+            false,
             &out,
         )
         .expect("inject");
@@ -747,6 +780,71 @@ mod tests {
             "the payload must still be findable once RT_VERSION joins the table"
         );
         let _ = fs::remove_file(&out);
+    }
+
+    /// The flip has to survive the write, which is the whole reason it is applied
+    /// to the finished image instead of the template.
+    ///
+    /// libsui rebuilds the PE headers while it rewrites the resource directory, so
+    /// a subsystem set on the way in is discarded — silently, leaving a binary that
+    /// passes every other check here and still flashes a console on the user's
+    /// machine. The CUI assertion on the same build with the flag off is the
+    /// control: without it this would pass against a fixture that was never
+    /// console-subsystem to begin with.
+    #[test]
+    fn the_hidden_console_subsystem_survives_the_resource_rewrite() {
+        let target = TargetPlatform::parse("win32-x64").unwrap();
+        assert_eq!(
+            pe_subsystem(&fixtures::pe()),
+            Some(3),
+            "the fixture must start as CUI, or this test cannot fail"
+        );
+
+        let hidden = tmp("artifact-hidden");
+        inject(
+            &target,
+            &fixtures::pe(),
+            &payload("main.js"),
+            None,
+            None,
+            true,
+            &hidden,
+        )
+        .expect("inject");
+        let produced = fs::read(&hidden).unwrap();
+        assert_eq!(
+            pe_subsystem(&produced),
+            Some(SUBSYSTEM_WINDOWS_GUI),
+            "--hide-console must leave the produced artifact GUI-subsystem"
+        );
+        // The payload is what the flip is written next to, and a wrong offset would
+        // corrupt the header the scan walks, so assert both in one breath.
+        assert!(
+            find_payload(ContainerFormat::Pe, &produced)
+                .unwrap()
+                .is_some(),
+            "the payload must still be findable once the subsystem is flipped"
+        );
+
+        let plain = tmp("artifact-shown");
+        inject(
+            &target,
+            &fixtures::pe(),
+            &payload("main.js"),
+            None,
+            None,
+            false,
+            &plain,
+        )
+        .expect("inject");
+        assert_eq!(
+            pe_subsystem(&fs::read(&plain).unwrap()),
+            Some(3),
+            "without the flag the artifact must stay a console application"
+        );
+
+        let _ = fs::remove_file(&hidden);
+        let _ = fs::remove_file(&plain);
     }
 
     /// The negative control for the scan above: without one it must report none
@@ -779,6 +877,7 @@ mod tests {
             &payload("main.js"),
             None,
             None,
+            false,
             &tmp("wrong"),
         )
         .unwrap_err();
@@ -809,6 +908,7 @@ mod tests {
             &payload("main.js"),
             None,
             None,
+            false,
             &tmp("badarch"),
         )
         .unwrap_err();
@@ -825,6 +925,7 @@ mod tests {
                 &payload("main.js"),
                 None,
                 None,
+                false,
                 &tmp("okarch")
             )
             .is_ok(),
@@ -843,6 +944,7 @@ mod tests {
             &payload("main.js"),
             None,
             None,
+            false,
             &tmp("unknownarch"),
         )
         .unwrap_err();

@@ -235,6 +235,21 @@ pub struct Manifest {
     /// (always inject) exactly.
     #[serde(default)]
     pub sealed_module_graph: bool,
+    /// Whether `--hide-console` built this artifact, which the launcher needs to
+    /// know at RUN time and cannot infer from the image it is running as.
+    ///
+    /// The subsystem flip alone does not hide anything here. Bun and Deno ARE the
+    /// process they hide, so a GUI subsystem is their whole fix; nub's launcher
+    /// SPAWNS Node, and Windows allocates a console for a console-subsystem child
+    /// whose parent has none — so the flash simply moves from the launcher to
+    /// Node. Closing that means passing `CREATE_NO_WINDOW` on the spawn, and the
+    /// launcher has no other way to tell a hidden build from an ordinary one:
+    /// nothing readable at run time distinguishes them, and reading its own PE
+    /// header back would be both slower and a layering inversion.
+    ///
+    /// Absent in legacy manifests, where `false` is exactly what they were doing.
+    #[serde(default)]
+    pub hide_console: bool,
 }
 
 /// One logical file in the payload. `B` is `Vec<u8>` on the writing side and
@@ -871,6 +886,7 @@ mod tests {
             install_message: None,
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
         }
     }
 
@@ -902,6 +918,10 @@ mod tests {
             // encoding bug, so it would fix the build without covering the field.
             node_flags: vec!["--max-old-space-size=256".into(), "--no-warnings".into()],
             sealed_module_graph: false,
+            // True on purpose: `false` is this field's serde default, so a
+            // manifest carrying it would round-trip through an encoding bug that
+            // dropped the field entirely.
+            hide_console: true,
         };
         let app = vec![
             AppFile::plain("main.js", b"import './c.js'\n".to_vec()),
@@ -918,6 +938,10 @@ mod tests {
             view.manifest.node_flags,
             ["--max-old-space-size=256", "--no-warnings"],
             "flags baked into the binary must survive the round trip in order"
+        );
+        assert!(
+            view.manifest.hide_console,
+            "the hidden-console flag decides whether the launcher passes              CREATE_NO_WINDOW, so losing it in the payload un-hides the artifact"
         );
         assert_eq!(view.app_files.len(), 2);
         assert_eq!(view.app_files[0].name, "main.js");
@@ -948,6 +972,7 @@ mod tests {
             // Empty here, so the pair covers both ends of the field.
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
         };
         let app = vec![AppFile::plain("main.js", b"console.log(1)".to_vec())];
         let blob = encode_with_license(&manifest, &app, &[], &[]);

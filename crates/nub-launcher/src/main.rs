@@ -22,6 +22,7 @@
 #![allow(clippy::collapsible_if)]
 
 mod cache;
+mod hidden;
 mod ui;
 
 use std::borrow::Cow;
@@ -166,6 +167,11 @@ fn run() -> i32 {
         }
     };
     phase("payload decoded");
+    // Before the first spawn of any kind: `--hide-console` has to cover the
+    // first-run helpers (`curl`, `icacls`, the `node --version` probe) as well as
+    // Node itself, and they run from several modules.
+    hidden::arm(view.manifest.hide_console);
+    phase_with(|| format!("hidden console: {}", hidden::state()));
 
     let launcher_path =
         match std::env::current_exe().context("resolving the compiled executable path") {
@@ -379,6 +385,11 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     cmd.stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
+    // Inheriting is still right under `--hide-console`: from Explorer the handles
+    // are already invalid and Node treats them as it treats any closed stream,
+    // while from a terminal they are the console the user is watching and the
+    // suppression below does not apply.
+    hidden::apply(&mut cmd);
 
     phase_with(|| {
         let args: Vec<String> = cmd
@@ -1171,7 +1182,10 @@ fn acquire_embedded_node(
 /// spawn "is not measurable". Both halves are false on macOS, and the sentence
 /// sent one investigation looking for a regression that was never here.
 fn explain_if_node_cannot_start(node_bin: &Path) -> Result<()> {
-    let Ok(out) = Command::new(node_bin).arg("--version").output() else {
+    let mut probe = Command::new(node_bin);
+    probe.arg("--version");
+    hidden::apply(&mut probe);
+    let Ok(out) = probe.output() else {
         // Could not run it at all — the caller's own spawn will produce a better
         // error than a guess from here.
         return Ok(());
@@ -1811,7 +1825,10 @@ fn node_binary_stamp(path: &Path) -> Option<String> {
 }
 
 fn probe_node_version_inner(path: &Path) -> Option<NodeVersion> {
-    let out = Command::new(path).arg("--version").output().ok()?;
+    let mut probe = Command::new(path);
+    probe.arg("--version");
+    hidden::apply(&mut probe);
+    let out = probe.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1962,6 +1979,7 @@ fn download_via_commands(
 
     if let Some(curl) = curl {
         let mut cmd = Command::new(curl);
+        hidden::apply(&mut cmd);
         cmd.args(["-fSL", "--retry", "2"]);
         if muted {
             cmd.arg("-s");
@@ -1974,6 +1992,7 @@ fn download_via_commands(
     }
     if let Some(wget) = wget {
         let mut cmd = Command::new(wget);
+        hidden::apply(&mut cmd);
         if muted {
             cmd.arg("-q");
         }
@@ -3141,6 +3160,7 @@ mod tests {
             install_message: None,
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
         }
     }
 

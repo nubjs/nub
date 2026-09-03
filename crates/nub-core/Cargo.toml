@@ -104,6 +104,8 @@ blake3 = { version = "1", optional = true }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # `GetConsoleWindow`, for `spawn::process_has_console`.
+    "Win32_System_Console",
 ] }
 
 # Build-time only (embed-runtime): tar + zstd-compress the staged runtime tree

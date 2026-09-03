@@ -84,6 +84,11 @@ pub struct CompileOptions {
     /// the nearest `package.json` supplies. Windows-only for the same reason as
     /// [`CompileOptions::icon`] — no other container format carries them.
     pub metadata: Vec<String>,
+    /// `--hide-console`: give the Windows executable the GUI subsystem, and tell
+    /// its launcher to spawn Node with no console. Windows-only for the same
+    /// reason as [`CompileOptions::icon`] — the subsystem is a PE header field,
+    /// and neither Mach-O nor ELF has anything corresponding to it.
+    pub hide_console: bool,
     /// `--metafile`: where to write the build report. `None` collects nothing.
     pub metafile: Option<PathBuf>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
@@ -139,6 +144,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         &out_path,
         &target,
     )?;
+    reject_non_windows_hide_console(opts.hide_console, &target)?;
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -372,6 +378,10 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // OUTSIDE the artifact stays out of the predicate on the
         // plain-Node-baseline argument in the Manifest field's doc comment.
         sealed_module_graph: !shim_plan.needed() && !carries_verbatim_files,
+        // The launcher's half of `--hide-console`. The PE subsystem flip below
+        // only stops Windows giving the LAUNCHER a console; this is what stops it
+        // giving one to the Node it spawns.
+        hide_console: opts.hide_console,
     };
     let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
 
@@ -387,13 +397,19 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         &payload,
         icon.as_deref(),
         version_info.as_deref(),
+        opts.hide_console,
         staged.path(),
     )
     .with_context(|| format!("writing {}", staged.path().display()))?;
     set_executable(staged.path())?;
     sync_file(staged.path())?;
     live.phase("verifying", "");
-    verify_artifact(staged.path(), &target, version_info.as_deref())?;
+    verify_artifact(
+        staged.path(),
+        &target,
+        version_info.as_deref(),
+        opts.hide_console,
+    )?;
     staged.publish(&out_path)?;
 
     // Detached maps are optional debugging companions rather than part of the
@@ -1058,6 +1074,29 @@ fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<
         );
     }
     Ok(Some(bytes))
+}
+
+/// Refuse `--hide-console` for a target whose format has no subsystem field.
+///
+/// Refused rather than ignored, matching `--icon` and `--metadata`: the whole
+/// point of the flag is that nothing is shown, so accepting it on a target that
+/// cannot honor it would be indistinguishable from it working right up until
+/// someone ran the binary.
+///
+/// The HOST is not checked, only the target. Everything the flag does is byte
+/// editing plus one payload field, so a hidden Windows binary cross-compiles
+/// from macOS or Linux exactly like an icon does.
+fn reject_non_windows_hide_console(hide_console: bool, target: &TargetPlatform) -> Result<()> {
+    if hide_console && target.format() != ContainerFormat::Pe {
+        bail!(
+            "--hide-console applies to Windows executables, and this build targets {}.\n\
+             \x20\x20A console window is a Windows concept: macOS and Linux start a program \
+             from a terminal that already exists, and neither Mach-O nor ELF carries anything \
+             that would suppress one.",
+            target.triple()
+        );
+    }
+    Ok(())
 }
 
 /// Build the Windows version resource — the fields Explorer's Details tab shows
@@ -2305,7 +2344,12 @@ fn node_runs(node: &Path) -> bool {
 ///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
 ///    the scan but was never executed is a weaker guarantee, and the user should
 ///    know which one they got.
-fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u8]>) -> Result<()> {
+fn verify_artifact(
+    bin: &Path,
+    target: &TargetPlatform,
+    version_info: Option<&[u8]>,
+    hide_console: bool,
+) -> Result<()> {
     let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
     let payload = inject::find_payload(target.format(), &bytes)
         .with_context(|| format!("scanning {} for its payload", bin.display()))?
@@ -2321,6 +2365,24 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u
     // Explorer showing nothing and no error anywhere. The concrete way to lose it
     // is the resource directory's ascending-id rule (see `set_version_info` in
     // vendor/libsui), which takes the icon down with it.
+    // Same argument as the version resource below, and the same failure shape: a
+    // Windows artifact built on macOS is never executed here, so reading the
+    // subsystem back is the only thing standing between a silently un-hidden
+    // binary and the user discovering it on the target machine.
+    if hide_console {
+        let subsystem = inject::pe_subsystem(&bytes).context(
+            "the produced executable's PE optional header is unreadable, so \
+             --hide-console cannot be confirmed",
+        )?;
+        if subsystem != inject::SUBSYSTEM_WINDOWS_GUI {
+            bail!(
+                "the produced executable's subsystem is {subsystem}, not \
+                 {} (GUI) — --hide-console did not take",
+                inject::SUBSYSTEM_WINDOWS_GUI
+            );
+        }
+    }
+
     if let Some(encoded) = version_info {
         let found = inject::find_version_resource(&bytes)
             .with_context(|| format!("scanning {} for its version resource", bin.display()))?
@@ -2869,7 +2931,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The parent guard above passes when `--out` names a directory whose parent
     /// `--icon` is checked before anything expensive runs, and by CONTENT rather
     /// than by extension — a PNG saved under a `.ico` name is the ordinary mistake
     /// and would embed into a resource Windows silently declines to draw.
@@ -2903,6 +2964,38 @@ mod tests {
             "must name the target, got: {err}"
         );
         assert!(load_icon(None, &mac).unwrap().is_none());
+    }
+
+    /// `--hide-console` is refused on a target that cannot honor it, for the same
+    /// reason `--icon` is: the flag's whole promise is that nothing appears, so
+    /// accepting it and doing nothing looks identical to it working until someone
+    /// runs the binary. The HOST is deliberately not part of the gate — the flip
+    /// is byte editing, so a hidden Windows binary cross-compiles from anywhere.
+    #[test]
+    fn hide_console_is_refused_for_a_target_with_no_subsystem_field() {
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let linux = TargetPlatform {
+            os: TargetOs::Linux,
+            arch: TargetArch::Arm64,
+            musl: false,
+        };
+
+        reject_non_windows_hide_console(true, &win).expect("a Windows target accepts the flag");
+        let err = reject_non_windows_hide_console(true, &linux)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("linux-arm64"),
+            "must name the target, got: {err}"
+        );
+        // The control: the gate must key on the FLAG, not on the target alone, or
+        // it would break every ordinary Linux build.
+        reject_non_windows_hide_console(false, &linux)
+            .expect("a Linux build without the flag is untouched");
     }
 
     /// The defaults are the feature: a Windows build with no version resource is
@@ -3007,6 +3100,7 @@ mod tests {
         );
     }
 
+    /// The parent guard above passes when `--out` names a directory whose parent
     /// exists, so the build used to run to completion and die on the rename with
     /// `Is a directory (os error 21)` over an internal staging path.
     #[test]
@@ -3511,6 +3605,7 @@ mod tests {
             install_message: None,
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
         };
         let app = vec![AppFile::plain("main.js", b"app".to_vec())];
         let missing = nub_core::compile::encode_with_license(&manifest, &app, b"node", &[]);

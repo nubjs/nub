@@ -1179,6 +1179,14 @@ pub enum Command {
         )]
         metadata: Vec<String>,
 
+        /// Start a Windows executable without a console window, for a GUI app, a
+        /// tray icon, or a file-association handler. Launched from a terminal the
+        /// binary still writes to it; launched from Explorer it shows nothing.
+        /// Works when cross-compiling, and is refused for a non-Windows target
+        /// rather than ignored.
+        #[arg(long = "hide-console")]
+        hide_console: bool,
+
         /// Custom message the compiled binary shows on a terminal while it sets
         /// itself up on first run. Default: `Initializing...`.
         #[arg(long, value_name = "TEXT")]
@@ -3188,6 +3196,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             node_options,
             icon,
             metadata,
+            hide_console,
             no_keep_names,
             no_treeshake,
             ignore_annotations,
@@ -3213,6 +3222,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             node_options,
             icon,
             metadata,
+            hide_console,
             metafile: metafile.as_deref().map(PathBuf::from),
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
