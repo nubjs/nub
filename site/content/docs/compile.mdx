@@ -90,8 +90,7 @@ With nothing pinned up the tree and no `--target`, Nub refuses rather than guess
 
 ```console
 $ nub compile app.ts
-Bundling app.ts …
-Error: no Node version could be inferred for this project.
+error  no Node version could be inferred for this project.
   Pass --target <version> (e.g. --target 24, --target lts), or add a pin —
   a .node-version file, or package.json "engines": { "node": "…" }.
   (nub compile does not fall back to "latest": a compiled binary's Node
@@ -219,7 +218,7 @@ A pattern that matches nothing fails the build, since the alternative is discove
 
 ```console
 $ nub compile app.ts --include=data/missing.json
-Error: --include "data/missing.json" matched no files (the path does not exist)
+error  --include "data/missing.json" matched no files (the path does not exist)
 ```
 
 Embedded bytes are stored as they are, not compressed, so the executable grows by roughly the size of what you embed.
@@ -228,7 +227,7 @@ An embedded file that would land on top of compiled output is refused. On a targ
 
 ```console
 $ nub compile main.ts --include=Main.js
-Error: two files would collide in the compiled binary: "main.js" (compiled output) and "Main.js" (an embedded file), so one would overwrite the other where it is extracted.
+error  two files would collide in the compiled binary: "main.js" (compiled output) and "Main.js" (an embedded file), so one would overwrite the other where it is extracted.
   The names differ only in case, and darwin-arm64's filesystem does not distinguish them.
   Rename one of them, or drop it from --include.
 ```
@@ -330,7 +329,7 @@ A **dynamic** import carrying attributes is refused at build time, because it ca
 
 ```console
 $ nub compile app.ts
-Error: 1 import could not be resolved at build time:
+error  1 import could not be resolved at build time:
   app.ts:1:17
     import("./data.json", { with: { type: "json" } })
     resolves to "./data.json"
@@ -462,13 +461,13 @@ The build names what ships:
 
 ```console
 $ nub compile app.ts
-Bundling app.ts …
 Shipping 1 package unbundled, in its own installed layout:
   @napi-rs/nice — it declares 16 per-platform binary packages (napi-rs layout)
 
-  output   app  (29.6 MB)
-  runtime  Node 26.8.1, embedded  from package.json#engines.node
-  target   darwin-arm64  (this machine)
+    output  app  29.6 MB  (node 28.3 MB · app 168 KB · launcher 1.1 MB)
+   runtime  Node 26.8.1, embedded  (package.json#engines.node)
+  platform  darwin-arm64
+   elapsed  3.8s
 ```
 
 ### Cross-compiling
@@ -477,8 +476,7 @@ An addon is machine code for one platform, so `--platform` needs that platform's
 
 ```console
 $ nub compile app.ts --platform linux-x64
-Bundling app.ts …
-Error: the bundler failed:
+error  the bundler failed:
   app.ts:1:19
     Could not load node_modules/local-addon/addon.node (imported by app.ts) - plugin `nub:native-addons` threw an error.
 
@@ -580,8 +578,7 @@ A compiled binary carries no `node_modules`, so an import the bundler cannot res
 
 ```console
 $ nub compile app.ts
-Bundling app.ts …
-Error: 1 import could not be resolved at build time:
+error  1 import could not be resolved at build time:
   /src/plugins.ts:6:22
     import(pluginName)
 
@@ -611,8 +608,7 @@ A `require()` the bundler cannot rewrite fails the same way. The usual source is
 
 ```console
 $ nub compile app.ts
-Bundling app.ts …
-Error: 1 import could not be resolved at build time:
+error  1 import could not be resolved at build time:
   /app/node_modules/umdpkg/lib/main.js:8:18
     require("./helper")
 
@@ -634,8 +630,7 @@ Every emitted chunk is parsed before the binary is written. One that is not vali
 
 ```console
 $ nub compile app.ts
-Bundling app.ts …
-Error: the bundler emitted 1 chunk that is not valid JavaScript:
+error  the bundler emitted 1 chunk that is not valid JavaScript:
   app.js:1:16
     Unexpected JSX expression
 
