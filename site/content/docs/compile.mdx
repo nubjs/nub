@@ -854,6 +854,18 @@ That error keeps Node's own `ERR_MODULE_NOT_FOUND` code, so a plugin loader writ
 
 The flag excuses an `import()` and nothing else. A `require()` the bundler cannot rewrite still fails the build, because a resolve hook does not fix a UMD factory.
 
+#### Scoping it to one directory
+
+Bare, the flag excuses every computed import in the program. Give it a glob and it excuses only the ones written in files that glob names, so the rest of the program keeps failing the build:
+
+```bash
+nub compile app.ts --allow-dynamic-import 'src/plugins/**'
+```
+
+Repeat it for more than one directory. The glob is matched against the path of the file the `import()` is written in, relative to the directory you run the command from — the same anchor `--include` uses. A file outside that directory, a dependency in particular, matches no relative glob and stays refused.
+
+Scoping by the importing file rather than by the specifier is deliberate. A computed specifier has no shape to match on — that is what makes it computed, and what the flag is for — while the file it is written in is always known, and is the part you can vouch for.
+
 Like externals, this needs Node 22.15 or newer — but only when a computed import actually survives the bundle. A build that passes the flag and turns out not to need it carries no hook and no version floor.
 
 ### `--tsconfig`
