@@ -32,6 +32,7 @@ pub fn inject(
     template: &[u8],
     payload: &[u8],
     icon: Option<&[u8]>,
+    version_info: Option<&[u8]>,
     out: &Path,
 ) -> Result<()> {
     let format = target.format();
@@ -53,15 +54,31 @@ pub fn inject(
             .map_err(|e| anyhow!("appending the payload note: {e:?}")),
         ContainerFormat::Pe => {
             // libsui rebuilds the PE's resource directory from scratch, so any
-            // resource the template carried is dropped — which is why the icon is
-            // set HERE, in the same builder chain, rather than baked into the
-            // template where the payload write would discard it.
+            // resource the template carried is dropped — which is why the icon and
+            // the version resource are set HERE, in the same builder chain, rather
+            // than baked into the template where the payload write would discard
+            // them.
             let mut pe = libsui::PortableExecutable::from(template)
                 .map_err(|e| anyhow!("parsing the launcher template as PE: {e:?}"))?;
             if let Some(icon) = icon {
                 pe = pe
                     .set_icon(icon)
-                    .map_err(|e| anyhow!("setting the executable icon: {e:?}"))?;
+                    // The header check in `load_icon` proves the container is an
+                    // ICO, so a failure here is one of its IMAGES, and the raw
+                    // `image` error names a variant rather than an action. The
+                    // hint is the case that actually reaches users: a PNG-
+                    // compressed entry must be RGBA, and converters emit RGB.
+                    .map_err(|e| {
+                        anyhow!(
+                            "setting the executable icon: {e:?}\n\
+                             \x20\x20The container parsed, so one of the images inside it did \
+                             not. A PNG-compressed entry has to be RGBA — re-export the icon \
+                             with an alpha channel, or use one with uncompressed entries."
+                        )
+                    })?;
+            }
+            if let Some(version_info) = version_info {
+                pe = pe.set_version_info(version_info.to_vec());
             }
             pe.write_resource(nub_core::compile::SECTION_NAME, payload.to_vec())
                 .map_err(|e| anyhow!("injecting the payload resource: {e:?}"))?
@@ -202,6 +219,39 @@ pub fn find_payload(format: ContainerFormat, image: &[u8]) -> Result<Option<&[u8
         ContainerFormat::Elf => find_in_elf(image, name),
         ContainerFormat::Pe => find_in_pe(image, name),
     }
+}
+
+/// Find the `VS_VERSIONINFO` resource in a produced PE, walking the same
+/// `RT_VERSION` → name 1 → language path `GetFileVersionInfo` takes.
+///
+/// Same reason [`find_payload`] exists: a cross-compiled artifact cannot be run,
+/// so the check that the resource is really reachable has to be a parse of the
+/// finished file rather than a re-read of what the writer emitted. It is worth
+/// more here than for the payload — a version resource the loader cannot find
+/// fails silently, with Explorer simply showing nothing.
+pub fn find_version_resource(image: &[u8]) -> Result<Option<&[u8]>> {
+    /// `RT_VERSION`.
+    const RT_VERSION: u32 = 16;
+    /// `VS_VERSION_INFO` — the resource name the version APIs look up.
+    const VS_VERSION_INFO: u32 = 1;
+
+    let Some((base, sections)) = pe_resource_root(image)? else {
+        return Ok(None);
+    };
+    let Some(types) = resource_subdir(image, base, base, |e| e == ResourceKey::Id(RT_VERSION))?
+    else {
+        return Ok(None);
+    };
+    let Some(named) = resource_subdir(image, base, types, |e| {
+        e == ResourceKey::Id(VS_VERSION_INFO)
+    })?
+    else {
+        return Ok(None);
+    };
+    let Some(leaf) = resource_entries(image, named)?.first().copied() else {
+        return Ok(None);
+    };
+    resource_leaf_data(image, base, &sections, leaf).map(Some)
 }
 
 // ---- little-endian readers ----------------------------------------------------
@@ -361,6 +411,30 @@ const RT_RCDATA: u32 = 10;
 /// path `FindResourceA` takes at runtime. libsui upper-cases the resource name on
 /// both write and read, so the lookup does too.
 fn find_in_pe<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
+    let Some((base, sections)) = pe_resource_root(image)? else {
+        return Ok(None);
+    };
+    let name = name.to_uppercase();
+    let Some(types) = resource_subdir(image, base, base, |e| e == ResourceKey::Id(RT_RCDATA))?
+    else {
+        return Ok(None);
+    };
+    let Some(named) =
+        resource_subdir(image, base, types, |e| e == ResourceKey::Name(name.clone()))?
+    else {
+        return Ok(None);
+    };
+    // Language level: take the first entry, whatever its id.
+    let Some(leaf) = resource_entries(image, named)?.first().copied() else {
+        return Ok(None);
+    };
+    resource_leaf_data(image, base, &sections, leaf).map(Some)
+}
+
+/// `(file offset of the resource root table, section table)`, or `None` when the
+/// image carries no resource directory at all.
+#[allow(clippy::type_complexity)]
+fn pe_resource_root(image: &[u8]) -> Result<Option<(usize, Vec<(u32, u32, u32, u32)>)>> {
     let pe = pe_header_offset(image)?;
     let opt = pe + 24;
     // The data directory sits after the optional header's fixed fields — 112 bytes
@@ -378,30 +452,25 @@ fn find_in_pe<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
     let sections = pe_sections(image, pe)?;
     let base = rva_to_offset(&sections, rsrc_rva)
         .context("the PE resource directory RVA is outside every section")?;
+    Ok(Some((base, sections)))
+}
 
-    let name = name.to_uppercase();
-    let Some(types) = resource_subdir(image, base, base, |e| e == ResourceKey::Id(RT_RCDATA))?
-    else {
-        return Ok(None);
-    };
-    let Some(named) =
-        resource_subdir(image, base, types, |e| e == ResourceKey::Name(name.clone()))?
-    else {
-        return Ok(None);
-    };
-    // Language level: take the first entry, whatever its id.
-    let Some(leaf) = resource_entries(image, named)?.first().copied() else {
-        return Ok(None);
-    };
+/// The bytes a leaf resource entry points at.
+fn resource_leaf_data<'a>(
+    image: &'a [u8],
+    base: usize,
+    sections: &[(u32, u32, u32, u32)],
+    leaf: (u32, u32),
+) -> Result<&'a [u8]> {
     if leaf.1 & 0x8000_0000 != 0 {
-        bail!("the PE payload resource is a directory, not data");
+        bail!("the PE resource entry is a directory, not data");
     }
     let data_entry = base + leaf.1 as usize;
     let data_rva = u32le(image, data_entry).context("truncated PE resource data entry")?;
     let size = u32le(image, data_entry + 4).context("truncated PE resource data entry")?;
-    let offset = rva_to_offset(&sections, data_rva)
-        .context("the PE payload RVA is outside every section")?;
-    slice_at(image, offset as u64, u64::from(size)).map(Some)
+    let offset = rva_to_offset(sections, data_rva)
+        .context("the PE resource RVA is outside every section")?;
+    slice_at(image, offset as u64, u64::from(size))
 }
 
 fn pe_header_offset(image: &[u8]) -> Result<usize> {
@@ -499,6 +568,7 @@ fn resource_string(image: &[u8], at: usize) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::version_info;
     use nub_core::compile::{Manifest, Shape};
 
     fn payload(entry: &str) -> Vec<u8> {
@@ -544,7 +614,7 @@ mod tests {
         let target = TargetPlatform::parse(triple).unwrap();
         let out = tmp(&format!("artifact-{triple}"));
         let payload = payload("main.js");
-        inject(&target, template, &payload, None, &out).expect("inject");
+        inject(&target, template, &payload, None, None, &out).expect("inject");
 
         let produced = fs::read(&out).unwrap();
         assert_eq!(
@@ -586,6 +656,66 @@ mod tests {
         round_trip(&TargetPlatform::host().unwrap().triple(), &template);
     }
 
+    /// The version resource has to come back out of the FINISHED file by the
+    /// traversal `GetFileVersionInfo` walks. A cross-compiled artifact cannot be
+    /// executed, so this parse is the only thing standing between "the encoder is
+    /// right" and "Windows can find it" — and a resource the loader misses fails
+    /// silently, with Explorer simply showing nothing.
+    ///
+    /// The icon is the point here, not decoration. libsui emits the root table's
+    /// entries in INSERTION order while the PE format requires ascending ids
+    /// (`FindResource` binary-searches them), so an `RT_VERSION` (16) placed
+    /// before the `RT_GROUP_ICON` (14) that `build` writes last would lose BOTH
+    /// resources. Without an icon those ids ascend on their own and the hazard
+    /// cannot fire, so a version-only test would pass whether or not
+    /// `set_version_info` deferred its insertion.
+    #[test]
+    fn a_version_resource_stays_findable_beside_an_icon_and_the_payload() {
+        let target = TargetPlatform::parse("win32-x64").unwrap();
+        let out = tmp("artifact-versioninfo");
+        let info = version_info::VersionInfo {
+            file_version: [9, 8, 7, 6],
+            product_version: [9, 8, 0, 0],
+            strings: [("ProductName", "Round Trip"), ("FileVersion", "9.8.7-rc.6")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        };
+        inject(
+            &target,
+            &fixtures::pe(),
+            &payload("main.js"),
+            Some(&fixtures::png()),
+            Some(&info.encode()),
+            &out,
+        )
+        .expect("inject");
+
+        let produced = fs::read(&out).unwrap();
+        let found = find_version_resource(&produced)
+            .expect("scan")
+            .expect("no RT_VERSION resource in the produced artifact");
+        let parsed = version_info::parse(found).expect("the resource must parse");
+        assert_eq!(parsed.file_version, [9, 8, 7, 6]);
+        assert_eq!(parsed.strings, info.strings);
+        // The payload is the other half of an out-of-order root table, and it
+        // disappears just as quietly, so assert it in the same breath.
+        assert!(
+            find_payload(ContainerFormat::Pe, &produced)
+                .unwrap()
+                .is_some(),
+            "the payload must still be findable once RT_VERSION joins the table"
+        );
+        let _ = fs::remove_file(&out);
+    }
+
+    /// The negative control for the scan above: without one it must report none
+    /// rather than matching something else in the resource tree.
+    #[test]
+    fn a_pe_without_a_version_resource_reports_none() {
+        assert!(find_version_resource(&fixtures::pe()).unwrap().is_none());
+    }
+
     #[test]
     fn a_bare_template_reports_no_payload() {
         assert!(
@@ -607,6 +737,7 @@ mod tests {
             &target,
             &fixtures::pe(),
             &payload("main.js"),
+            None,
             None,
             &tmp("wrong"),
         )
@@ -632,7 +763,15 @@ mod tests {
         let mut arm = fixtures::elf();
         arm[18..20].copy_from_slice(&0xb7u16.to_le_bytes()); // EM_AARCH64
         let target = TargetPlatform::parse("linux-x64").unwrap();
-        let err = inject(&target, &arm, &payload("main.js"), None, &tmp("badarch")).unwrap_err();
+        let err = inject(
+            &target,
+            &arm,
+            &payload("main.js"),
+            None,
+            None,
+            &tmp("badarch"),
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("arm64"), "should name what it got: {msg}");
         assert!(msg.contains("x64"), "should name what it needs: {msg}");
@@ -644,6 +783,7 @@ mod tests {
                 &target,
                 &fixtures::elf(),
                 &payload("main.js"),
+                None,
                 None,
                 &tmp("okarch")
             )
@@ -661,6 +801,7 @@ mod tests {
             &target,
             &unknown,
             &payload("main.js"),
+            None,
             None,
             &tmp("unknownarch"),
         )
@@ -715,6 +856,19 @@ mod tests {
             m[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
             m[4..8].copy_from_slice(&cpu_type.to_le_bytes());
             m
+        }
+
+        /// A 1x1 truecolor PNG. `set_icon` hands it to the `image` crate and
+        /// resizes with Lanczos3, so a plausible-looking header is not enough —
+        /// the icon path only runs against an image that really decodes.
+        pub fn png() -> Vec<u8> {
+            vec![
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+                0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92,
+                0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+            ]
         }
 
         /// A 64-bit LE ELF executable with one `PT_LOAD` covering the file. Enough
