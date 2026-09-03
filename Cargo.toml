@@ -62,51 +62,6 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-# Size-optimize the COLD crates only. Whole-binary `opt-level = "z"` measured
-# −10.5 MB (48.6 → 38.1 MB, linux-x64, 2026-09-03) but de-optimizes the hot
-# paths, so the resolver, linker, lockfile, manifest, transpiler, JSON and TLS
-# crates keep `opt-level = 3` and only latency-irrelevant code takes "z": arg
-# parsing, prompts, templating, diagnostics, DNS config, and the
-# publish-provenance stack. `aube` (install orchestration) and `nub-cli`
-# (pm_engine glue, the phantom-closure walk) are NOT cold: with both at "z" a
-# warm resolve+link on the 84-dep bench fixture measured ~8% slower
-# (2.40 s → 2.59 s, same VM, interleaved runs). Add a crate here only after an
-# A/B on that fixture shows it costs nothing.
-[profile.release.package]
-clap = { opt-level = "z" }
-clap_builder = { opt-level = "z" }
-clx = { opt-level = "z" }
-demand = { opt-level = "z" }
-tera = { opt-level = "z" }
-miette = { opt-level = "z" }
-regex = { opt-level = "z" }
-regex-automata = { opt-level = "z" }
-regex-syntax = { opt-level = "z" }
-aho-corasick = { opt-level = "z" }
-hickory-resolver = { opt-level = "z" }
-hickory-proto = { opt-level = "z" }
-hickory-net = { opt-level = "z" }
-toml = { opt-level = "z" }
-sigstore-sign = { opt-level = "z" }
-sigstore-oidc = { opt-level = "z" }
-sigstore-fulcio = { opt-level = "z" }
-sigstore-rekor = { opt-level = "z" }
-sigstore-tsa = { opt-level = "z" }
-sigstore-tuf = { opt-level = "z" }
-sigstore-bundle = { opt-level = "z" }
-sigstore-crypto = { opt-level = "z" }
-sigstore-merkle = { opt-level = "z" }
-sigstore-trust-root = { opt-level = "z" }
-sigstore-types = { opt-level = "z" }
-ambient-id = { opt-level = "z" }
-x509-cert = { opt-level = "z" }
-x509-tsp = { opt-level = "z" }
-cms = { opt-level = "z" }
-cmpv2 = { opt-level = "z" }
-crmf = { opt-level = "z" }
-der = { opt-level = "z" }
-spki = { opt-level = "z" }
-
 # Fast local-iteration profile for `nub-dev` / `make install-dev`. NOT a ship
 # profile — the release block above is untouched. Inherits `dev` (debug
 # assertions + overflow checks stay on), but drops everything the release build
