@@ -695,10 +695,10 @@ fn non_link_roots(graph: &LockfileGraph, roots: &[DirectDep]) -> Vec<DirectDep> 
     roots
         .iter()
         .filter(|dep| {
-            // `Link` deps are pure symlinks (no virtual-store node), and
-            // `Directory`/`Tarball` `file:` deps are emitted out of band by
-            // `emit_file_dep_links` as npm's `link: true` pair — neither
-            // belongs in the hoisted `name@version` tree.
+            // All three are emitted out of band by `emit_file_dep_links`
+            // as npm's `link: true` pair, and `Link` additionally has no
+            // virtual-store node at all — so none of them belongs in the
+            // hoisted `name@version` tree.
             !graph.packages.get(&dep.dep_path).is_some_and(|pkg| {
                 matches!(
                     pkg.local_source,
@@ -724,10 +724,36 @@ fn non_link_roots(graph: &LockfileGraph, roots: &[DirectDep]) -> Vec<DirectDep> 
 /// prefix and a leading `./`, but keeps `../` parent climbs), carries
 /// only `name`/`version`, and is what `npm ci` validates the root
 /// `dependencies` entry against. The second is the `node_modules/<name>`
-/// symlink record pointing back at that path. `LocalSource::Link`
-/// (`link:` deps and workspace members) is handled separately — npm
-/// links those too but the importer/workspace machinery already emits
-/// their pair, so this only covers `file:` directory and tarball deps.
+/// symlink record pointing back at that path.
+///
+/// `LocalSource::Link` gets the SAME pair, with one exception. npm has no
+/// separate encoding for `link:` — a `file:` directory dependency is
+/// already written as a link record — so the two only differ inside aube,
+/// where `Link` skips the virtual store. The exception is a workspace
+/// MEMBER, which is also a `Link` but whose pair the importer/workspace
+/// pass below owns. A member is exactly a link whose TARGET is an
+/// importer, so ask `graph.importers` directly.
+///
+/// That guard is belt-and-braces, not load-bearing, and the comment says
+/// so rather than implying a correctness dependency that does not exist:
+/// this function runs BEFORE the workspace pass, which rewrites the same
+/// two keys and wins on ordering alone — deleting the guard leaves the
+/// whole crate's tests green (measured). It is here to state which pass
+/// owns a member instead of resting that on pass order.
+///
+/// Not `workspace_package_for_importer`: that asks "is there a package
+/// linking AT this path", which a plain `link:` dep answers about
+/// ITSELF — it is the package linking at its own target — so using it
+/// here silently skips every dep this function exists to emit.
+///
+/// This function used to take `Directory`/`Tarball` only, on the stated
+/// grounds that "the importer/workspace machinery already emits their
+/// pair" for every `Link`. That is true of a workspace member and false
+/// of a `link:` to a plain directory, which has no importer entry at all
+/// — so nothing emitted it, `non_link_roots` also kept it out of the
+/// hoist tree, and it vanished from the lockfile. nub's own freshness
+/// check then read the importer as having zero direct deps and failed
+/// every later `--frozen-lockfile` with `manifest adds <name>@link:…`.
 fn emit_file_dep_links<'a>(
     graph: &'a LockfileGraph,
     roots: &[DirectDep],
@@ -739,9 +765,15 @@ fn emit_file_dep_links<'a>(
             continue;
         };
         let resolved = match &pkg.local_source {
-            Some(local @ (LocalSource::Directory(_) | LocalSource::Tarball(_))) => {
-                npm_file_dep_path(importer_path, &local.path_posix())
+            Some(LocalSource::Link(path))
+                if graph.importers.contains_key(&*path.to_string_lossy()) =>
+            {
+                continue;
             }
+            Some(
+                local
+                @ (LocalSource::Directory(_) | LocalSource::Tarball(_) | LocalSource::Link(_)),
+            ) => npm_file_dep_path(importer_path, &local.path_posix()),
             _ => continue,
         };
         packages.insert(

@@ -588,6 +588,124 @@ fn test_write_emits_file_dir_dep_as_link_pair() {
     assert_eq!(packages["node_modules/local-utils"]["link"], true);
 }
 
+/// A `link:` dep to a plain directory gets the SAME pair. npm has no
+/// separate encoding for it — a `file:` directory dep is already written
+/// as a link record — so the two differ only inside aube, where `Link`
+/// skips the virtual store.
+///
+/// Emitting nothing (the prior behavior) did not merely lose bytes: the
+/// importer parsed back with zero direct deps, so nub's own freshness
+/// check read the manifest's dep as newly added and failed every later
+/// `--frozen-lockfile` with `manifest adds local-utils@link:./local-pkg`
+/// — on a project nub itself had just installed. Reproduce with
+/// `nub add ./dep && nub install --frozen-lockfile`.
+#[test]
+fn test_write_emits_link_dir_dep_as_link_pair() {
+    let local = LocalSource::Link(PathBuf::from("./local-pkg"));
+    let dep_path = local.dep_path("local-utils");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        dep_path.clone(),
+        LockedPackage {
+            name: "local-utils".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: dep_path.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "local-utils".to_string(),
+            dep_path,
+            dep_type: DepType::Production,
+            specifier: Some("link:./local-pkg".to_string()),
+        }],
+    );
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("test".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("local-utils".to_string(), "link:./local-pkg".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path()).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(packages["local-pkg"]["version"], "1.0.0");
+    assert_eq!(
+        packages["node_modules/local-utils"]["resolved"],
+        "local-pkg"
+    );
+    assert_eq!(packages["node_modules/local-utils"]["link"], true);
+}
+
+/// A workspace MEMBER is also reached as a `link:` — its target is an
+/// importer — so widening the link emitter must not change what a member
+/// serializes to. This pins that shape.
+///
+/// Honest about what it does NOT prove: the emitter's workspace guard is
+/// belt-and-braces rather than load-bearing. `emit_file_dep_links` runs
+/// BEFORE the workspace pass, which rewrites the same two keys and so
+/// wins regardless — with the guard deleted, this test and all 546 others
+/// in the crate still pass (measured). The guard states which pass owns a
+/// member instead of leaving it to that ordering, and this test gives a
+/// future reordering something to fail against.
+#[test]
+fn test_write_leaves_workspace_member_links_to_the_workspace_pass() {
+    let local = LocalSource::Link(PathBuf::from("packages/a"));
+    let dep_path = local.dep_path("@w/a");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        dep_path.clone(),
+        LockedPackage {
+            name: "@w/a".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: dep_path.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "@w/a".to_string(),
+            dep_path,
+            dep_type: DepType::Production,
+            specifier: Some("*".to_string()),
+        }],
+    );
+    graph.importers.insert("packages/a".to_string(), vec![]);
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("@w/a".to_string(), "*".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path()).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    // The member keeps the workspace pass's spelling — keyed by importer
+    // path — rather than a second, competing entry from the link emitter.
+    assert_eq!(packages["packages/a"]["name"], "@w/a");
+    assert_eq!(packages["node_modules/@w/a"]["resolved"], "packages/a");
+    assert_eq!(packages["node_modules/@w/a"]["link"], true);
+}
+
 #[test]
 fn test_parse_file_resolved_without_link() {
     // npm writes `resolved: "file:..."` without `link: true` for
