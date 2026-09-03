@@ -1,6 +1,6 @@
 ---
 title: Vercel
-description: Vercel ships no preinstalled Nub, but the install command is yours to replace — so one line puts the CLI on PATH for the rest of the build. The devDependency pattern works too.
+description: Vercel ships no preinstalled Nub, but the install command is yours to replace — so one line puts the CLI on PATH for the rest of the build.
 ---
 
 import { Steps, Step } from 'fumadocs-ui/components/steps';
@@ -117,7 +117,7 @@ Adding the CLI as a devDependency also works, and leaves `vercel.json` empty:
 }
 ```
 
-Vercel's auto-detected install links `nub` and `nubx` onto `node_modules/.bin`, and your scripts resolve them. Reach for it when you'd rather pin the version in the manifest than in build settings; see [Managed builders](/docs/deployment#managed-builders) for the full pattern.
+Vercel's auto-detected install links `nub` and `nubx` onto `node_modules/.bin`, and your scripts resolve them. Use it to pin the version in the manifest instead of build settings; see [Managed builders](/docs/deployment#managed-builders) for the full pattern.
 
 <Callout>
   Excluding development dependencies from the install drops the CLI along with them. Override the install command instead when a project builds without devDependencies.

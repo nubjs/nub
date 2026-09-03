@@ -36,7 +36,7 @@ Nub reads the nearest `tsconfig.json` for the [resolution](/docs/runtime/resolut
 }
 ```
 
-A config Nub cannot read in full stops the run. Since `extends` is where a project usually keeps `strict`, `target` and its path aliases, continuing would run your code under options you never wrote.
+A config Nub cannot read in full stops the run.
 
 ```console
 $ nub main.ts
@@ -86,7 +86,7 @@ JSX in a `.js` file is out of scope — use `.jsx`. Nub parses `.js` as JavaScri
 
 ## Explicit resource management
 
-Explicit Resource Management — the `using` and `await using` declarations — runs on Nub's entire Node floor. Older Node (Node 22's V8) cannot parse `using` natively — it's a hard `SyntaxError` — so Nub's transpiler lowers it to the helper-based form before Node ever sees it.
+Explicit Resource Management — the `using` and `await using` declarations — runs on Nub's entire Node floor. Node 22's V8 cannot parse `using`, so Nub's transpiler lowers it to the helper-based form.
 
 ```ts
 class Handle {
@@ -107,7 +107,7 @@ disposed
 after scope
 ```
 
-The lowering targets `es2022` — the highest target that still rewrites `using` while leaving everything Node 22 already supports (top-level await, class fields, private methods) untouched. The disposal helper resolves through Nub's vendored runtime; you don't install anything.
+The lowering targets `es2022` — the highest target that still rewrites `using` while leaving everything Node 22 already supports (top-level await, class fields, private methods) untouched. The disposal helper resolves through Nub's vendored runtime.
 
 <Callout>
 Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/using) for `using` on developer.mozilla.org.

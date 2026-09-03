@@ -7,7 +7,7 @@ description: A browser-style Worker global on stock Node — its constructor, me
 The browser-shape `Worker` global is typed by Nub's own types package — `@types/node` declares only `node:worker_threads`. Install `@nubjs/types` as a devDependency alongside `@types/node` 26.
 </TypesSetup>
 
-Browsers expose a `Worker` global; Node ships only `node:worker_threads.Worker`, a different class with a different API. Nub closes the gap with a polyfill preloaded on every supported Node (18.19+), so the browser constructor and messaging shape work unchanged.
+Browsers expose a `Worker` global; Node ships only `node:worker_threads.Worker`, a different class with a different API. Nub preloads a polyfill on every supported Node (18.19+), so the browser constructor and messaging shape work.
 
 ```ts
 const worker = new Worker(import.meta.resolve("./worker.ts"), { type: "module" });
@@ -36,15 +36,15 @@ Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/API/Worker) fo
 The constructor takes the WHATWG script-URL inputs — a file path or `URL` (including `file://`), a `data:` URL, or a `blob:` URL. For a path-based worker, default to `import.meta.resolve`:
 
 ```ts
-new Worker(import.meta.resolve("./worker.ts")); // module-relative, build-free, TypeScript and all
+new Worker(import.meta.resolve("./worker.ts")); // resolves relative to this module; a .ts entry is fine
 ```
 
 The `import.meta.resolve` call resolves a specifier against the current module — never `process.cwd()` — and returns its URL.
 
-Using a bundler? Vite, webpack, and esbuild trace the `new URL(...)` form — pulling the worker into its own chunk and rewriting its path — but they don't yet trace `import.meta.resolve`. Switch forms whenever a bundler is in the pipeline:
+Vite, webpack, and esbuild trace the `new URL(...)` form — pulling the worker into its own chunk and rewriting its path — but do not trace `import.meta.resolve`. Use that form when a bundler is in the pipeline:
 
 ```ts
-new Worker(new URL("./worker.ts", import.meta.url)); // bundler-traceable, and runtime-correct too
+new Worker(new URL("./worker.ts", import.meta.url)); // traced by bundlers; also correct at runtime
 ```
 
 A bare relative string resolves against `process.cwd()`, not the calling module — matching `node:worker_threads` and Bun. It works when the launch directory is fixed, but breaks for a nested file run from elsewhere:
@@ -150,7 +150,7 @@ worker.on("message", async (value) => {
 worker.postMessage(21);
 ```
 
-On the node channel, `message` listeners get the raw posted value and `error` listeners a bare `Error` — Node's shapes, not the `MessageEvent` / `ErrorEvent` the web channel keeps. Both channels live on one handle; reach for whichever fits the code.
+On the node channel, `message` listeners get the raw posted value and `error` listeners a bare `Error` — Node's shapes, not the `MessageEvent` / `ErrorEvent` the web channel keeps. Both channels are on one handle.
 
 <Callout>
 Read the [full docs](https://nodejs.org/api/worker_threads.html#class-worker) for `worker_threads` on nodejs.org.
@@ -158,7 +158,7 @@ Read the [full docs](https://nodejs.org/api/worker_threads.html#class-worker) fo
 
 ## TypeScript
 
-The main-thread `Worker` global and `WorkerOptions` are typed by `@nubjs/types` (a types-only devDependency). The declaration steps aside when `lib: ["dom"]` is in your `tsconfig.json` — the DOM's own `Worker` type wins there.
+The main-thread `Worker` global and `WorkerOptions` are typed by `@nubjs/types` (a types-only devDependency). The declaration yields when `lib: ["dom"]` is in your `tsconfig.json` — the DOM's own `Worker` type wins there.
 
 Inside a worker file the global scope is the dedicated-worker scope, not the main thread's — `self`, `postMessage`, and `onmessage` live there, and neither `@types/node` nor `@nubjs/types` declares them. Set `lib: ["webworker"]` for the full worker-scope types, or drop a one-line shim at the top of the worker for the common handlers:
 

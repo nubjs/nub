@@ -3,7 +3,7 @@ title: JSX
 description: How Nub runs JSX on stock Node — automatic-runtime defaults, tsconfig-driven configuration, and the per-file import-source pragma for mixing runtimes.
 ---
 
-Files ending in `.jsx` and `.tsx` execute through the same load hook. JSX is recognized in `.jsx` / `.tsx` only, never in plain `.js`. The defaults are the modern ones — automatic runtime, `react` as the import source — matching oxc-transformer, Vite's React plugins, Rolldown, and Bun, so a React project needs no setup.
+Files ending in `.jsx` and `.tsx` execute through the same load hook. JSX is recognized in `.jsx` / `.tsx` only, never in plain `.js`. The defaults are the modern ones — automatic runtime, `react` as the import source — matching oxc-transformer, Vite's React plugins, Rolldown, and Bun.
 
 ```bash
 nub render.tsx

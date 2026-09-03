@@ -28,13 +28,13 @@ The walk-up happens in Rust, with no Node bootstrap in front of the tool — the
   source="https://github.com/nubjs/nub/tree/main/tests/bench/bin-runner"
 />
 
-Yarn Plug'n'Play projects work too: `nub exec` finds PnP-registered bins that tools walking only `node_modules/.bin` miss. See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
+In a Yarn Plug'n'Play project, `nub exec` finds PnP-registered bins through `pnpapi`. See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
 
 <Callout>
 Read the [full docs](https://pnpm.io/cli/exec) for `pnpm exec` on pnpm.io.
 </Callout>
 
-## Pass arguments
+## Arguments
 
 Everything after the bin name is forwarded to it untouched — no `--` separator needed.
 

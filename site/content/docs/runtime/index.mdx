@@ -26,7 +26,7 @@ On top of stock Node, `nub <file>` adds a modern runtime:
 Nub is a drop-in for `node`: same argv shape, same flag set, and every flag reaches Node verbatim. Pass `--node` (or set `NODE_COMPAT=1`) to turn every augmentation off and run on plain Node.
 
 <Callout title="Supported Node versions">
-Nub runs your code on stock Node — it resolves which Node your project pins and fetches one if it's missing, but never ships a runtime of its own.
+Nub runs your code on stock Node: it resolves the Node your project pins and fetches it when missing.
 </Callout>
 
 ## Supported versions and tiers
@@ -34,9 +34,9 @@ Nub runs your code on stock Node — it resolves which Node your project pins an
 The hard floor is **Node 18.19** — below it no loader-hook API can carry Nub's augmentations, so Nub refuses to run. Above the floor, augmentation is delivered through one of two tiers:
 
 - **Fast tier** — sync `module.registerHooks()`, run in-thread via a `--require` CJS preload. No loader-worker, lower startup overhead.
-- **Compatibility tier** — async `module.register()`, run in a loader-worker thread via an `--import` ESM preload. Same augmentations, a little more startup cost.
+- **Compatibility tier** — async `module.register()`, run in a loader-worker thread via an `--import` ESM preload. Same augmentations, more startup cost.
 
-Nub selects the tier from your Node version. The fast tier needs sync `module.registerHooks()`, which Node added in v23.5.0 and backported to v22.15.0 — and never backported to the 20.x line. So the tier boundary lands differently per Node major:
+Nub selects the tier from your Node version. The fast tier needs sync `module.registerHooks()`, which Node added in v23.5.0 and backported to v22.15.0 — and never backported to the 20.x line. The tier boundary differs per Node major:
 
 | Node line | Minimum Nub supports | Fast-tier floor | Tier | Recommended |
 |---|---|---|---|---|
@@ -102,9 +102,9 @@ Hello world!
 
 A few details of the walk:
 
-- Discovery walks **up** the directory tree to the nearest pin, and **skips** pin files that live inside an installed dependency (under `node_modules`) — a dependency's own CI pin never drives your project.
+- Discovery walks **up** the directory tree to the nearest pin, and **skips** pin files inside an installed dependency (under `node_modules`) — a dependency's own CI pin never drives your project.
 - The `package.json` fields (`devEngines.runtime`, `engines.node`) are read from the **workspace root** manifest when one exists above you — a monorepo pins its Node once at the root.
-- Once a version is pinned, Nub finds a binary for it in order: the `node` on `PATH` (so `fnm` / `Volta` / `mise` auto-switching just works) → Nub's own download store (`~/.cache/nub/node/<version>/`) → an `nvm`-installed version → download the matching stock build from nodejs.org, SHA-256 verified and cached.
+- Once a version is pinned, Nub finds a binary for it in order: the `node` on `PATH` (so `fnm` / `Volta` / `mise` auto-switching is honored) → Nub's own download store (`~/.cache/nub/node/<version>/`) → an `nvm`-installed version → download the matching stock build from nodejs.org, SHA-256 verified and cached.
 
 For pinning, pre-installing, and the `nub node` subcommands, see [Managing Node versions](/docs/node).
 

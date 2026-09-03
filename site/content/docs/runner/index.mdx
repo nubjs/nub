@@ -11,11 +11,11 @@ nubx vitest run --coverage
 nubx cowsay "hi"           # not installed — offers to fetch it
 ```
 
-Resolution is local first. Nub walks the `node_modules/.bin` chain — the nearest `node_modules/.bin`, then up through parent directories to the workspace root — and execs the match directly, with no network and no Node process in the wrapper. Yarn Plug'n'Play projects work too: PnP-registered bins resolve through `pnpapi`, the way `yarn exec` does. See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
+Resolution is local first. Nub walks the `node_modules/.bin` chain — the nearest `node_modules/.bin`, then up through parent directories to the workspace root — and execs the match directly, with no network and no Node process in the wrapper. In a Yarn Plug'n'Play project, PnP-registered bins resolve through `pnpapi`, the way `yarn exec` does. See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
 
-Only a local miss reaches the registry — the shape `npx` has, with two differences. Dispatch happens in Rust rather than a Node bootstrap, so a local CLI starts in milliseconds instead of a couple hundred (see [the local bin runner](/docs/runner/exec) for the numbers), and a fetch is never silent.
+Only a local miss reaches the registry, as with `npx`, with two differences: dispatch happens in Rust rather than a Node bootstrap (see [the local bin runner](/docs/runner/exec) for timings), and a fetch is never silent.
 
-## Fetch from the registry
+## Registry fetches
 
 Where `npx` downloads without asking, `nubx` asks. The first fetch of a given tool prompts, runs it once you agree, and remembers the answer:
 
@@ -50,7 +50,7 @@ nubx -y cowsay "hi"
 
 ### `exec.implicitDlx`
 
-Answering **Never** turns the implicit fetch off for good. Nub records `exec.implicitDlx` in its global settings file (`~/.config/nub/nub.jsonc`), and from then on a local miss stops instead of offering a download. Explicit fetches — [`nub dlx`](/docs/runner/dlx) and `nubx -y` — are unaffected, because asking for them is itself the consent.
+Answering **Never** turns the implicit fetch off permanently. Nub records `exec.implicitDlx` in its global settings file (`~/.config/nub/nub.jsonc`), and from then on a local miss stops instead of offering a download. Explicit fetches — [`nub dlx`](/docs/runner/dlx) and `nubx -y` — are unaffected, because asking for them is itself the consent.
 
 Restore the prompt at any time:
 
@@ -58,7 +58,7 @@ Restore the prompt at any time:
 nub config set exec.implicitDlx prompt
 ```
 
-## Pass arguments
+## Arguments
 
 Everything after the tool name is forwarded to it untouched — no `--` separator needed.
 
@@ -69,7 +69,7 @@ nubx vitest run --coverage
 
 ## `--node`
 
-Pass `--node` to run the tool with runtime augmentation disabled — see [the runtime overview](/docs/runtime#--node) for the full contract. Resolution, the registry fetch, and `nubx`'s own machinery still run; only the augmentation is off.
+Pass `--node` to run the tool with runtime augmentation disabled — see [the runtime overview](/docs/runtime#--node) for the full contract. Resolution and the registry fetch still run; only the augmentation is off.
 
 ```bash
 nubx --node prisma generate

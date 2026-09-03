@@ -1,13 +1,13 @@
 ---
 title: Corepack-style shims
-description: An opt-in for muscle memory. Install the shims and a bare pnpm, npm, or yarn command routes through Nub to the package manager your project pins, with no extra Node process in front.
+description: Optional shims for bare package-manager commands. Install them and a bare pnpm, npm, or yarn command routes through Nub to the package manager your project pins, with no extra Node process in front.
 ---
 
-Default Nub usage needs no shims: `nub install`, `nub add`, and `nub run` already provision and run the pinned package manager. The shims are for when you'd rather type the manager directly — bare `pnpm install`, `npm ci`, `yarn add` — and still have it go through Nub. One command turns that on.
+Default Nub usage needs no shims: `nub install`, `nub add`, and `nub run` already provision and run the pinned package manager. The shims are for typing the manager directly — bare `pnpm install`, `npm ci`, `yarn add` — and still routing through Nub. One command turns that on.
 
 <ShimDemo />
 
-After `nub pm shim`, bare `pnpm` resolves to a shim — a hardlink to the Nub binary. The shims live in `$XDG_DATA_HOME/nub/shims` when that variable is set, `%LOCALAPPDATA%\nub\shims` on Windows, and `~/.local/share/nub/shims` otherwise. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so it never pollutes piped stdout.
+After `nub pm shim`, bare `pnpm` resolves to a shim — a hardlink to the Nub binary. The shims live in `$XDG_DATA_HOME/nub/shims` when that variable is set, `%LOCALAPPDATA%\nub\shims` on Windows, and `~/.local/share/nub/shims` otherwise. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so piped stdout stays clean.
 
 To remove the shims, `nub pm unshim` deletes the shim directory and strips the PATH block, restoring the previous `pnpm`.
 
@@ -25,11 +25,11 @@ With a pin set, `nub install` already runs the right pnpm. The shims are the sep
 
 ## Per-invocation overhead
 
-A shim sits in front of every command, so what matters is the time it adds. A corepack-style shim is a Node script (`#!/usr/bin/env node`), so invoking it boots the Node interpreter to read your pin and load the manager before any install work begins. The Nub shim is a hardlink to the native binary: the process that resolves the pin and dispatches is the one already running — no extra interpreter in front of the package manager.
+A shim runs before every command, so its overhead matters. A corepack-style shim is a Node script (`#!/usr/bin/env node`), so invoking it boots the Node interpreter to read your pin and load the manager before any install work begins. The Nub shim is a hardlink to the native binary: the process that resolves the pin and dispatches is the one already running — no extra interpreter in front of the package manager.
 
 ## Strict by default
 
-In a pinned project, a shim refuses to run a *different* package manager — a competing lockfile and `node_modules` are exactly what you don't want. Bare `yarn add react` in a pnpm-pinned project exits nonzero and names what to run instead:
+In a pinned project, a shim refuses to run a *different* package manager — which would produce a competing lockfile and `node_modules`. Bare `yarn add react` in a pnpm-pinned project exits nonzero and names what to run instead:
 
 ```console
 $ yarn add react   # ❌ wrong package manager for this project
@@ -46,6 +46,6 @@ and node_modules.
 
 Runner commands fall through to the system tool whatever the pin — `npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs — so `npm create vite` works in a pnpm project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.
 
-## No manager on PATH
+## Missing system manager
 
 An unpinned invocation falls through to the system manager. When there is none — a fresh machine, a minimal container — the shim runs a dynamic default instead of failing: the version family the committed lockfile implies, or the registry `latest` when there is no lockfile. It announces the choice on stderr and writes no pin. The `latest` resolution is remembered for 24 hours, so repeat invocations dispatch with no registry round-trip, and when the registry is unreachable the last resolved version keeps working.

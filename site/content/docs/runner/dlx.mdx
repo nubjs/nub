@@ -49,7 +49,7 @@ A fetched package's `preinstall`/`install`/`postinstall` scripts are skipped —
 
 ## Cooling window
 
-A fetch runs through Nub's normal install resolver, so the `minimumReleaseAge` cooling window applies: a resolved version must be older than the window (default 24 hours) before it's used. See [the cooling window](/docs/install#cooling-window) for the full posture, including what happens when a registry serves no publish dates.
+A fetch runs through Nub's normal install resolver, so the `minimumReleaseAge` cooling window applies: a resolved version must be older than the window (default 24 hours) before it's used. See [the cooling window](/docs/install#cooling-window) for the full rules, including what happens when a registry serves no publish dates.
 
 When the latest release is still inside the window, the tool runs at the newest release that clears it, and the substitution is reported — the scratch project is deleted when the tool exits, so this is the only record of which version ran:
 
@@ -83,4 +83,4 @@ Setting it to `never` turns off [`nubx`](/docs/runner)'s implicit fallthrough fe
 - [Runner](/docs/runner) — `nubx`, which fetches only on a local miss, and prompts first.
 - [Local bin runner](/docs/runner/exec) — `nub exec`, for a tool that's already installed.
 - [Script runner](/docs/runner/run) — `nub run`, the `package.json` script runner.
-- [Package manager](/docs/pm) — installing dependencies for real, not just running them.
+- [Package manager](/docs/pm) — installing dependencies into a project.

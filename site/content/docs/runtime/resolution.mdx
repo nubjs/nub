@@ -16,7 +16,7 @@ import { config } from "./config";
 import { handler } from "./handler.js";
 ```
 
-If your editor's Go-to-Definition works on an import and `tsc` accepts it, Nub resolves it the same way at runtime — no `tsconfig-paths` package, no build step. Nub owns exactly the cases Node has no opinion on: `tsconfig.json` path aliases, extensionless imports in TypeScript files, the `.js`→`.ts` emit-convention swap, and subpaths into dependencies that declare no `exports`. Everything else — package names, `exports` / `imports` maps, export conditions — falls through to Node unchanged.
+If your editor's Go-to-Definition works on an import and `tsc` accepts it, Nub resolves it the same way at runtime — no `tsconfig-paths` package, no build step. Nub handles only the cases Node does not define: `tsconfig.json` path aliases, extensionless imports in TypeScript files, the `.js`→`.ts` emit-convention swap, and subpaths into dependencies that declare no `exports`. Everything else — package names, `exports` / `imports` maps, export conditions — falls through to Node unchanged.
 
 ## `tsconfig.json`
 
@@ -69,7 +69,7 @@ A bare specifier with no `baseUrl`-relative file on disk falls through to Node's
 
 Nub walks up to the nearest `tsconfig.json` and follows `extends` chains, including array `extends` (later entries win) and package extends like `extends: "@tsconfig/node20/tsconfig.json"` resolved through node_modules. The TS 5.5 `${configDir}` template is interpolated against the consuming config's directory.
 
-Configs are read once per process. Edit your `tsconfig.json` and restart the process — or let [`nub watch`](/docs/watch) restart it for you.
+Configs are read once per process. Edit your `tsconfig.json` and restart the process, or run under [`nub watch`](/docs/watch), which restarts it.
 
 ## Extensionless imports
 
@@ -93,7 +93,7 @@ The probe order is extension-aware — it depends on the parent file's extension
 
 A directory import honors the directory's `package.json` `"main"` before falling back to probing `index.<ext>` in that same parent-aware order. Only `"main"` is consulted — `exports` is never read for a directory-path import, matching Node, which honors `exports` only for package-name resolution.
 
-This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts` / `.cts`) with a relative specifier. A plain `.js` file stays strict about relative extensions, like vanilla Node. Subpaths into a dependency are covered below and follow a different rule.
+This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts` / `.cts`) with a relative specifier. A plain `.js` file requires relative extensions, as under Node. Subpaths into a dependency are covered below and follow a different rule.
 
 ## Package subpaths
 
@@ -113,7 +113,7 @@ The order here is fixed, and unlike relative imports it does not vary with the i
 .js  .json  .ts  .tsx
 ```
 
-JavaScript sorts first because a published package's `.ts` is unshipped source that Nub does not transpile inside node_modules. A workspace package symlinked into node_modules ships no `.js`, so the order lands on its TypeScript.
+JavaScript sorts first because a published package's `.ts` is unshipped source that Nub does not transpile inside node_modules. A workspace package symlinked into node_modules ships no `.js`, so the probe reaches its TypeScript.
 
 Subpath probing applies from any importing file, `.js` included.
 
@@ -139,9 +139,9 @@ import { handler } from "./handler.js";
 import { createPrompt } from "@repo/lib/prompt.js";
 ```
 
-The swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`, and likewise a real `.cjs` beats a sibling `.cts`.
+The swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`, and likewise a real `.cjs` wins over a sibling `.cts`.
 
-## What falls through to Node
+## Node's resolver
 
 Node's own resolver handles everything else, unchanged:
 
@@ -196,7 +196,7 @@ Both `require` and `import` resolve under PnP, by different paths:
 
 Nub doesn't register Yarn's `.pnp.loader.mjs` (its ESM resolver collides with the fast tier's `module.registerHooks`), so the same `pnpapi.resolveRequest` path serves both tiers.
 
-Zip-stored packages resolve too — `import` from a `.yarn/cache` zip, and `nubx` running a zip-stored binary. This is the runtime *running* a PnP project; producing the PnP install stays Yarn's job. Package `extends` chains resolve through the node_modules walk rather than the PnP API, which covers the npm and pnpm installs where that form appears.
+Zip-stored packages resolve too — `import` from a `.yarn/cache` zip, and `nubx` running a zip-stored binary. This is the runtime *running* a PnP project; Nub does not produce a PnP install. Package `extends` chains resolve through the node_modules walk rather than the PnP API, which covers the npm and pnpm installs where that form appears.
 
 <Callout>
 Read the [full docs](https://yarnpkg.com/features/pnp) for Plug'n'Play on yarnpkg.com.

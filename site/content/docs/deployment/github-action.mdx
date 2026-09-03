@@ -94,7 +94,7 @@ Read a Node version from a file, then provision and front it on PATH. Accepts `.
 
 ### `cache`
 
-Caching is on by default — it auto-enables when the project looks installable, mirroring setup-node. The auto-detection triggers on a lockfile or a `package.json` that declares `packageManager` or `devEngines`. Set the input explicitly to override:
+Caching is on by default when the project has a lockfile or a `package.json` that declares `packageManager` or `devEngines`, mirroring setup-node. Set the input explicitly to override:
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -114,7 +114,7 @@ The cache key is derived from the project's lockfile and the Node pin, with the 
 
 ### `package-manager-cache`
 
-The disable knob for the automatic caching above. Set false to turn caching off without setting `cache`:
+Turns the automatic caching above off without setting `cache`:
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -194,7 +194,7 @@ Write `always-auth=true` into the `.npmrc` to authenticate on every registry req
 
 ### `token`
 
-Token for GitHub-API rate-limit relief when resolving Nub's version range (and Node downloads on GHES). Defaults to `github.token` on github.com — most workflows don't need to set this explicitly.
+Token for GitHub-API rate-limit relief when resolving Nub's version range (and Node downloads on GHES). Defaults to `github.token` on github.com.
 
 ## Outputs
 

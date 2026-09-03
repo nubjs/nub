@@ -3,7 +3,7 @@ title: Script runner
 description: A drop-in for pnpm run and npm run — every flag carries over with the same spelling and semantics, 24× faster on the cold path, with the full workspace and lifecycle-hook surface preserved.
 ---
 
-A drop-in for `pnpm run` and `npm run`, `nub run` carries every flag over with the same spelling and semantics, including the recursive and workspace-filter ones. Existing invocations work unchanged:
+A drop-in for `pnpm run` and `npm run`, `nub run` carries every flag over with the same spelling and semantics, including the recursive and workspace-filter ones:
 
 ```bash
 # resume an interrupted recursive run mid-graph
@@ -30,7 +30,7 @@ nub run dev
 nub run test
 ```
 
-Running a script is always `nub run <script>` — barewords like `nub dev` do not fall through to scripts. (If you type `nub build` and `build` is a real script, Nub's error tells you to type `nub run build`.) See [Running files](/docs/runtime) for how `nub <file>` works.
+Running a script is always `nub run <script>` — barewords like `nub dev` do not fall through to scripts. A `nub build` where `build` is a script fails with a hint to run `nub run build`. See [Running files](/docs/runtime) for how `nub <file>` works.
 
 Dispatch is handled in Rust with no Node bootstrap in the wrapper, so the runner adds only a few milliseconds before your script's first byte — faster than Node's own `node --run`:
 
@@ -47,7 +47,7 @@ Dispatch is handled in Rust with no Node bootstrap in the wrapper, so the runner
   source="https://github.com/nubjs/nub/tree/main/tests/bench/script-runner"
 />
 
-## Run several scripts at once
+## Multiple scripts
 
 A `/regex/` selector in place of a script name runs every script whose name matches, mirroring `pnpm run`. This is the in-package equivalent of `npm-run-all`'s `run-p` — without the extra dependency or the per-task PM re-spawn, since Nub spawns each script body directly.
 
@@ -64,7 +64,7 @@ nub run --workspace-concurrency 1 "/^build:/"
 
 The selector must be a slash-delimited regular expression literal (`/^build:/`); a plain `build:*` is treated as a literal script name, not a glob. Regex flags are not supported. An exact script name (no slashes) always runs that single script unchanged.
 
-Coming from `npm-run-all` / `npm-run-all2`:
+Equivalents for `npm-run-all` / `npm-run-all2`:
 
 | npm-run-all | Nub |
 |---|---|
@@ -78,7 +78,7 @@ Selecting an *arbitrary, unrelated* set of scripts (for example `build`, `lint`,
 Read the [full docs](https://pnpm.io/cli/run#running-multiple-scripts) for pnpm's regex selector on pnpm.io.
 </Callout>
 
-## Forward arguments
+## Argument forwarding
 
 Trailing arguments after the script name are passed straight through to the script. You do not need the `--` separator that `npm run` requires.
 
@@ -87,7 +87,7 @@ nub run test --watch          # forwards --watch to the test script
 nub run build --target=esnext # forwards --target=esnext
 ```
 
-This matches `bun run`. The explicit separator still works for muscle memory:
+This matches `bun run`. The explicit separator is also accepted:
 
 ```bash
 nub run test -- --watch       # identical result; the -- is optional
@@ -128,13 +128,13 @@ nub run --ignore-scripts build
 
 ## Dependency freshness
 
-Before a script runs, Nub checks the installed `node_modules` against your `package.json`. When a dependency is missing or its installed version has drifted out of the declared range — the usual "fresh clone, forgot to install" case — Nub warns and still runs, so a stale tree surfaces as a clear message instead of a raw `husky: command not found`:
+Before a script runs, Nub checks the installed `node_modules` against your `package.json`. When a dependency is missing or its installed version has drifted out of the declared range, Nub warns and still runs, so a stale tree surfaces as a clear message instead of a raw `husky: command not found`:
 
 ```
 nub: dependencies may be out of date (`chalk` is not installed). Run `nub install`.
 ```
 
-The check works whatever installed the tree — npm, pnpm, Yarn, Bun, or Nub itself. It errs toward silence: an ambiguous tree (Yarn PnP, an unparseable version, or a production-only install with devDependencies deliberately omitted) never warns.
+The check works whatever installed the tree — npm, pnpm, Yarn, Bun, or Nub itself. An ambiguous tree (Yarn PnP, an unparseable version, or a production-only install with devDependencies deliberately omitted) never warns.
 
 Set the behavior with the `verify-deps-before-run` key in `.npmrc`. The values are `warn` (the default — warn, then run), `error` (print the message and refuse to run), and `off` (skip the check):
 
@@ -158,15 +158,15 @@ nub run --no-check build
 NUB_VERIFY_DEPS=off nub run build
 ```
 
-Nub never installs on your behalf here — run `nub install` when you see the warning. pnpm's `install` and `prompt` values are read from `.npmrc` and treated as `warn`; in `nub.jsonc` they are rejected. The check also applies to `nub <file>`, `nub exec`, and `nubx`, and is skipped in [`--node` / compat mode](#--node) and inside an already-running script (so a script that spawns `node` doesn't re-check).
+Nub does not install here; run `nub install` when the warning appears. pnpm's `install` and `prompt` values are read from `.npmrc` and treated as `warn`; in `nub.jsonc` they are rejected. The check also applies to `nub <file>`, `nub exec`, and `nubx`, and is skipped in [`--node` / compat mode](#--node) and inside an already-running script (so a script that spawns `node` doesn't re-check).
 
-The one exception is a tree Nub installed for a different Node major than the one about to run it. Native addons are compiled against a specific Node ABI, so switching Node — bumping `.nvmrc` or `engines.node`, or moving between installed versions — leaves them unloadable, and the run would otherwise die with a raw `ERR_DLOPEN_FAILED … NODE_MODULE_VERSION` from deep inside a dependency. Nub records which engine built the tree, notices the mismatch, and reinstalls once before the run:
+The one exception is a tree Nub installed for a different Node major than the one about to run it. Native addons are compiled against a specific Node ABI, so switching Node — bumping `.nvmrc` or `engines.node`, or moving between installed versions — leaves them unloadable, and the run would otherwise fail with `ERR_DLOPEN_FAILED … NODE_MODULE_VERSION` inside a dependency. Nub records which engine built the tree, detects the mismatch, and reinstalls once before the run:
 
 ```
 nub: dependencies were installed for Node 22, this run uses Node 26. Reinstalling — native addons are built per Node major.
 ```
 
-Because Nub keeps a build per engine in its store, the reinstall is a fast re-link once you have run under that Node before; only an engine it has never built for pays a real rebuild. Setting `off` disables this repair along with the rest of the check.
+Because Nub keeps a build per engine in its store, the reinstall is a fast re-link once you have run under that Node before; only an engine it has never built for rebuilds. Setting `off` disables this repair along with the rest of the check.
 
 <Callout>
 Read the [full docs](https://pnpm.io/settings/build#verifydepsbeforerun) for pnpm's `verifyDepsBeforeRun` setting on pnpm.io.
@@ -174,13 +174,13 @@ Read the [full docs](https://pnpm.io/settings/build#verifydepsbeforerun) for pnp
 
 ## Undeclared dependencies
 
-Nub also flags a *phantom* dependency — a package your own source imports but never declares, that resolves today only because some dependency-of-a-dependency hoisted it into `node_modules`. It works under a flat npm or Yarn install and breaks the moment the tree is installed isolated, so Nub names the file and the fix before that happens:
+Nub also flags a *phantom* dependency — a package your own source imports but never declares, that resolves today only because some dependency-of-a-dependency hoisted it into `node_modules`. It works under a flat npm or Yarn install and breaks when the tree is installed isolated, so Nub names the file and the fix before that happens:
 
 ```
 nub: src/index.ts imports `ansi-styles`, which isn't in package.json. Run `nub add ansi-styles` (WARN_PHANTOM_DEP).
 ```
 
-The scan is conservative — it warns only on a package that is imported unguarded (a `try/catch` optional load is left alone), is absent from every dependency field, and is actually present in `node_modules`. It is warn-only and never changes the exit code.
+The scan is conservative — it warns only on a package that is imported unguarded (a `try/catch` optional load is left alone), is absent from every dependency field, and is present in `node_modules`. It is warn-only and never changes the exit code.
 
 Turn it off with the `phantom-check` key in `.npmrc`, or the `NUB_PHANTOM_CHECK` variable for one shell:
 
@@ -306,7 +306,7 @@ Read the [full docs](https://pnpm.io/filtering) for the filter grammar on pnpm.i
 
 ## `--parallel`, `--sequential`
 
-Across a workspace, Nub runs packages concurrently up to a cap (CPU count by default) while respecting topological order. Tune or override that.
+Across a workspace, Nub runs packages concurrently up to a cap (CPU count by default) while respecting topological order. Two flags adjust that.
 
 ```bash
 nub run -r --workspace-concurrency 4 build   # cap at 4 concurrent scripts
@@ -327,7 +327,7 @@ nub run -r --no-bail test     # run every package, report failures at the end
 
 ## `--resume-from`
 
-When a long topological run dies partway through, `--resume-from` skips the topological predecessors of a package so you restart where it broke instead of from the top.
+When a long topological run fails partway through, `--resume-from` skips the topological predecessors of a package to restart from the failing one.
 
 ```bash
 nub run -r --resume-from @org/api build
@@ -372,7 +372,7 @@ nub run --silent build
 
 ## `--color`
 
-Prefixing each line means piping the script's output, and a piped tool sees no terminal, so most of them switch their own color off. Ask for it back with `--color`, and the scripts keep their colors under prefixing:
+Prefixing each line means piping the script's output, and a piped tool sees no terminal, so most of them switch their own color off. Pass `--color` and the scripts keep their colors under prefixing:
 
 ```bash
 nub run -r --parallel --color=always dev  # scripts stay colored, prefixes too
@@ -386,7 +386,7 @@ NO_COLOR=1 nub run -r build      # off, whatever the terminal says
 FORCE_COLOR=1 nub run -r build   # on, even when the output is piped
 ```
 
-Setting both is contradictory, and the two variables disagree about which should win: Nub honors `NO_COLOR`, Node honors `FORCE_COLOR`. On a prefixed run Nub settles it for the scripts as well, so the labels and the lines they wrap can't end up disagreeing. A run that isn't prefixed passes both through untouched.
+Setting both is contradictory, and the two variables disagree about which should win: Nub honors `NO_COLOR`, Node honors `FORCE_COLOR`. On a prefixed run Nub applies its choice to the scripts as well, so the labels and the wrapped lines agree. A run that isn't prefixed passes both through untouched.
 
 ## `--node`
 
@@ -396,7 +396,7 @@ By default, the `nub` executable is aliased as `node` for the duration of a `nub
 nub run --node test
 ```
 
-What still happens under `--node`: script lookup, workspace walk-up, `--filter` evaluation, `npm_*` env injection, `node_modules/.bin` on `PATH`, and the `pre` / `post` lifecycle hooks. Reach for it when a script's `#!/usr/bin/env node` shebang chain expects plain Node, when bisecting a Nub bug, or when CI wants byte-exact Node runtime behavior with Nub's workspace selection.
+What still happens under `--node`: script lookup, workspace walk-up, `--filter` evaluation, `npm_*` env injection, `node_modules/.bin` on `PATH`, and the `pre` / `post` lifecycle hooks. Use it when a script's `#!/usr/bin/env node` shebang chain expects plain Node, when bisecting a Nub bug, or when CI needs byte-exact Node runtime behavior with Nub's workspace selection.
 
 ## Related
 

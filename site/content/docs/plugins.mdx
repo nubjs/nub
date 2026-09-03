@@ -26,7 +26,7 @@ The prefixed name is resolved in two places, in order:
 
 Only the prefixed `nub-<verb>` name is ever probed — never the bare verb.
 
-## Built-ins always win
+## Built-in precedence
 
 A plugin can never shadow a built-in verb. Native commands and package-manager verbs are matched before any plugin lookup, so `nub run`, `nub install`, `nub add`, and the rest always dispatch to Nub itself, even if a `nub-run` bin exists in `node_modules/.bin`. The fallthrough fires only for a verb Nub has no built-in for.
 
@@ -34,9 +34,9 @@ Script names take the same priority. A verb that names a script in the local `pa
 
 ## Writing a plugin
 
-A plugin is a runnable executable named `nub-<verb>` — a compiled JavaScript bin or a native binary, the same as any other `node_modules/.bin` entry or a `git`/`cargo` subcommand. There's no plugin-specific build target: author it in TypeScript and publish the compiled output, as you'd ship any other bin. Installed bins aren't transpiled, so the entry that actually runs has to be JavaScript or native.
+A plugin is a runnable executable named `nub-<verb>` — a compiled JavaScript bin or a native binary, the same as any other `node_modules/.bin` entry or a `git`/`cargo` subcommand. There's no plugin-specific build target: author it in TypeScript and publish the compiled output, as any other bin. Installed bins are not transpiled, so the entry that runs must be JavaScript or native.
 
-A JavaScript plugin runs under Nub's runtime augmentation, as `nub run` runs a script — the version-gated globals are present. A native executable just runs. The plugin's exit code is what Nub returns.
+A JavaScript plugin runs under Nub's runtime augmentation, as `nub run` runs a script — the version-gated globals are present. A native executable runs directly. The plugin's exit code is what Nub returns.
 
 ```js title="nub-changeset"
 #!/usr/bin/env node
