@@ -1,7 +1,7 @@
 ---
 title: "Introducing `nub compile` — single-file executables for Node.js"
 hnTitle: "Introducing `nub compile` — single-file executables for Node.js"
-description: Single-file self-extracting executables for Node.js with support for all major operating systems, Node addons, and a runtime-free build that ships under a megabyte.
+description: Single-file self-extracting executables for Node.js with support for all major operating systems, Node addons, and cross-compilation to every target from any machine.
 author: Colin
 # PLACEHOLDER — set this to the v0.9 release date before merging. The post announces
 # `nub compile`, which is undocumented on the site until this PR lands, so the date is
@@ -21,7 +21,7 @@ $ ./cli --name nub
 ✔ hello, nub
 ```
 
-The executable runs on a machine with no Node installed. Bun and Deno have had this for years. Node has been circling it since 19.7.0 — SEA is still experimental, and it leaves the bundling to you. Nub builds on stock Node instead. A hello world compiles to 29.5 MB on my MacBook — the same file under Bun is 63 MB — or to 0.94 MB with `--smol`, which skips the embedded runtime entirely.
+The executable runs on a machine with no Node installed. Bun and Deno have had this for years. Node has been circling it since 19.7.0 — SEA is still experimental, and it leaves the bundling to you. Nub builds on stock Node instead. A hello world compiles to 29.5 MB on my MacBook; the same file under Bun is 63 MB.
 
 ## Prior art
 
@@ -66,8 +66,6 @@ Compression flips the ordering. That zstd payload leaves `gzip -9` almost nothin
     { cmd: 'deno compile', ms: 30.3 },
   ]}
 />
-
-Both charts assume an embedded runtime. You don't have to embed one — the `--smol` shape at the end of this post compiles the same program to under a megabyte.
 
 ## Imports that aren't code
 
