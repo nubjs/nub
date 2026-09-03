@@ -110,7 +110,7 @@ Error: this native addon is built for macOS, but the binary targets linux-x64: n
   install has to put the target's own platform package on disk before you compile.
 ```
 
-## Real files, not a virtual filesystem
+## Self-extraction
 
 A compiled Nub binary has no virtual filesystem. On first run it unpacks its application files into a cache directory and runs from there, so `dlopen` and every `fs` call get ordinary files on an ordinary disk.
 
@@ -144,7 +144,7 @@ RUN ./app --version || true   # the exit code is irrelevant; the extraction is t
 
 After that the binary writes nothing at run time, so a `readOnlyRootFilesystem` pod is fine. On Lambda the launcher uses the writable temp directory, so no warm-up step is needed.
 
-## What the bundler does with the hard parts
+## Dynamic imports and workers
 
 Flattening a module graph into one file breaks three things that work under plain `node`: lazy dynamic imports, relative asset references, and workers.
 
@@ -161,7 +161,7 @@ _nub_commonjs-C_xMe9k8.mjs    main.mjs              worker-blob-url.cjs
 
 Chunks and assets land flat in one directory, which keeps a rewritten asset reference valid from every chunk. Workers compile the same way: a static `new Worker(new URL("./worker.ts", import.meta.url))` becomes a second bundled entry carrying the same runtime preamble as the program, and the thread sees the same `process.execPath` and the same globals.
 
-## Packages that ship as files don't drag their dependencies along
+## Unbundled packages
 
 Some packages can't be bundled at all, because they read files from paths they build at run time. The compiler detects those, ships them in their installed layout — and then bundles each of their *dependencies* individually, emitting one chunk per package at the exact `node_modules` path the parent resolves:
 
@@ -175,7 +175,7 @@ Compiled app — smol shape, Node 26.0.0, darwin-arm64, 2.8 MB
 
 For that jsdom program, npm writes 1,834 files to `node_modules` and the compiled binary extracts 1,006. The package that needed its own files keeps all 657 of them. The clean packages around it collapse: parse5 goes from 33 files to 2, whatwg-url from 19 to 3, mdn-data from 25 to 4. The launcher byte-verifies the whole extracted tree before every run, so each of those 828 files would otherwise be an integrity check on every start.
 
-## The app is the small part
+## App size
 
 A CLI built on `commander`, `chalk`, `ora` and `zod`:
 
@@ -216,7 +216,7 @@ Time to first output, measured warm — after the one-time extraction on first r
 
 Nub is slowest in this chart. A stock `node` takes 34 ms on this machine before any user code runs, and the launcher adds about 11 ms: decoding the payload, then an integrity check over the extracted tree that runs on every start. It hands off by replacing itself with Node, so the binary you launched is the process you end up with.
 
-## The flag tour
+## Flags
 
 Everything above is the default behavior of one command. The flags:
 
@@ -241,7 +241,7 @@ nub compile app.ts --node-options "--max-old-space-size=4096"  # bake in runtime
 
 Each of these has its own section in [the compile docs](/docs/compile).
 
-## Eight targets, one machine
+## Cross-compilation
 
 Every target builds from every host; a single CI runner can produce the whole release:
 
@@ -272,7 +272,7 @@ Compiled app.exe — embed shape, Node 26.8.1, win32-x64, 30.0 MB
 
 The produced PE carries real `RT_ICON` and `RT_GROUP_ICON` resources, verified on Windows against an icon-less control. Nub decodes the `.ico` you supply and regenerates the standard set of sizes from it, so the source artwork should scale cleanly.
 
-## The same source compiles to the same bytes
+## Reproducible builds
 
 Two compiles of an unchanged tree produce a byte-identical executable:
 
@@ -335,7 +335,7 @@ nub compile cli.ts --smol --target lts --install-message "Setting up acme (one t
 
 A machine with no Node and no network access exits with an error that points to the default build.
 
-## A real app, compiled
+## opencode
 
 The examples above are small on purpose. For a full-size build, see [our Node fork of opencode](https://github.com/nubjs/opencode/tree/nub-compile): upstream ships the coding agent as a Bun executable, and the `nub-compile` branch builds the same app as a `nub compile` binary on stock Node — the flag-for-flag mapping from `Bun.build` lives in [`build-nub.mjs`](https://github.com/nubjs/opencode/blob/nub-compile/packages/opencode/script/build-nub.mjs).
 
