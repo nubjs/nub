@@ -43,8 +43,17 @@ for f in a-*.mjs; do
   if ! "$NUB" compile "$WORK/$f" --out "$WORK/bin-$n" > "$WORK/log-$n" 2>&1; then
     printf '%-16s %-6s %s\n' "$n" FAIL "compile failed — see log-$n"; fail=$((fail+1)); continue
   fi
-  ejected=$(grep -A9 '^Shipping' "$WORK/log-$n" 2>/dev/null \
-    | grep -oE '^  [a-z@][a-z0-9@/._-]*' | tr -d ' ' | paste -sd, -)
+  # The list ENDS at the first line that is not one of its entries — not after a
+  # fixed number of lines. `grep -A9` swept in any later indented line, and the
+  # resolved-build block's `output` / `runtime` / `target` rows are exactly that
+  # shape, so every ejected list gained three phantom package names. This column
+  # is the one a reader trusts to spot over-ejection, so a parser that can invent
+  # entries is worse than no column.
+  ejected=$(awk '
+    /^Shipping/ { inlist = 1; next }
+    inlist && /^  [a-z@]/ { print $1; next }
+    inlist { exit }
+  ' "$WORK/log-$n" 2>/dev/null | paste -sd, -)
 
   mv node_modules .nm-hidden
   rm -rf "$WORK/c-$n"
