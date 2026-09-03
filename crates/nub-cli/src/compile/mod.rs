@@ -317,6 +317,11 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
         node_flags: node_flags(&opts)?,
+        // The shim plan is the complete inventory of runtime module resolution:
+        // `--external` packages and surviving computed `import()` sites. When it
+        // is empty, Node never parses a module the bundler did not, and the
+        // launcher can drop the argv-only syntax flags (see the Manifest field).
+        sealed_module_graph: !shim_plan.needed(),
     };
     let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
 
@@ -2585,6 +2590,7 @@ mod tests {
             minify: false,
             install_message: None,
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         };
         let app = vec![AppFile::plain("main.js", b"app".to_vec())];
         let missing = nub_core::compile::encode_with_license(&manifest, &app, b"node", &[]);
