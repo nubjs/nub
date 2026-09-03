@@ -16,6 +16,7 @@ import { TypesSetup } from '@/components/types-setup';
 import { NubIntro } from '@/components/nub-intro';
 import { GetStarted } from '@/components/get-started';
 import { SectionHeading } from '@/components/section-heading';
+import { Figure } from '@/components/figure';
 
 // Neutral info glyph (lucide "info" path) drawn with currentColor so it inherits a
 // muted tone — no loud accent. Inline SVG keeps us off a runtime icon dependency,
@@ -110,6 +111,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     TypesSetup,
     NubIntro,
     GetStarted,
+    Figure,
     ...components,
   };
 }
