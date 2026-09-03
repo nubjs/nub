@@ -214,11 +214,13 @@ fn yarn_offline_mirror_configured(root: &Path) -> bool {
 /// default (which lets GVS engage), it pushes an EXPLICIT `hoist=true` that
 /// vetoes GVS (per-project + hidden tree), rather than silently dropping the
 /// directive.
-pub(crate) fn injected_deps_present(root: &Path) -> bool {
+/// `workspace_members` is the caller's one-shot workspace discovery for `root`
+/// (see `nub_setting_defaults`), shared with the version gates that scan the
+/// same manifests.
+pub(crate) fn injected_deps_present(root: &Path, workspace_members: &[PathBuf]) -> bool {
     manifest_has_injected(&root.join("package.json"))
-        || aube_workspace::find_workspace_packages(root)
-            .into_iter()
-            .flatten()
+        || workspace_members
+            .iter()
             .any(|dir| manifest_has_injected(&dir.join("package.json")))
 }
 
@@ -820,7 +822,7 @@ mod tests {
             r#"{"name":"x","dependenciesMeta":{"foo":{"injected":true}}}"#,
         )
         .unwrap();
-        assert!(injected_deps_present(d.path()));
+        assert!(injected_deps_present(d.path(), &[]));
     }
 
     #[test]

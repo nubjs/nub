@@ -31,7 +31,7 @@
 //! `app.config.*` rather than `package.json`; that is an accepted, documented
 //! edge case.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The `expo` major at and above which the On-demand Filesystem makes a project
 /// GVS-compatible (Expo SDK 56).
@@ -43,8 +43,8 @@ const EXPO_GVS_FLOOR: u32 = 56;
 /// `>= EXPO_GVS_FLOOR`; `true` when any is below the floor OR can't be
 /// floor-parsed (eject-on-ambiguity). Matches the aube trigger's dependency
 /// scope (dependencies / devDependencies / optionalDependencies; peer excluded).
-pub(crate) fn expo_below_gvs_floor(root: &Path) -> bool {
-    declared_direct_ranges(root, "expo")
+pub(crate) fn expo_below_gvs_floor(root: &Path, workspace_members: &[PathBuf]) -> bool {
+    declared_direct_ranges(root, workspace_members, "expo")
         .iter()
         .any(|range| match major_floor(range) {
             Some(major) => major < EXPO_GVS_FLOOR,
@@ -53,19 +53,20 @@ pub(crate) fn expo_below_gvs_floor(root: &Path) -> bool {
 }
 
 /// Every declared range of direct dependency `name` across the root manifest
-/// and each workspace member's, in that order. The member walk mirrors
-/// [`super::unsupported_config::injected_deps_present`], which runs in the same
-/// defaults pass; the engine's own trigger scan checks every importer, so a
-/// version gate that read only the root would let a member-declared framework
-/// keep GVS. Uses the shared mtime-cached parse so the extra reads are free.
-/// Shared with the other version-gated ejects ([`super::remix_compat`]).
-pub(super) fn declared_direct_ranges(root: &Path, name: &str) -> Vec<String> {
-    std::iter::once(root.to_path_buf())
-        .chain(
-            aube_workspace::find_workspace_packages(root)
-                .into_iter()
-                .flatten(),
-        )
+/// and each workspace member's, in that order. `workspace_members` is the
+/// caller's one-shot discovery for `root` (`nub_setting_defaults` runs it once
+/// and shares it with the injected-deps check); the engine's own trigger scan
+/// checks every importer, so a version gate that read only the root would let
+/// a member-declared framework keep GVS. Uses the shared mtime-cached parse so
+/// the extra reads are free. Shared with the other version-gated ejects
+/// ([`super::remix_compat`]).
+pub(super) fn declared_direct_ranges(
+    root: &Path,
+    workspace_members: &[PathBuf],
+    name: &str,
+) -> Vec<String> {
+    std::iter::once(root)
+        .chain(workspace_members.iter().map(PathBuf::as_path))
         .filter_map(|dir| declared_direct_range(&dir.join("package.json"), name))
         .collect()
 }

@@ -25,7 +25,7 @@
 //! published, so a bare `>`/`>=` range is ambiguous here and ejects, while a
 //! caret/tilde/exact range is confined to its major and keeps GVS below 3.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::expo_compat::{declared_direct_ranges, major_floor};
 
@@ -38,9 +38,10 @@ const REMIX_ASSET_SERVER_FLOOR: u32 = 3;
 /// confined below the floor; `true` when any range reaches the floor OR is
 /// ambiguous (unfloorable, or an open lower bound). Same dependency scope as
 /// the aube trigger (dependencies / devDependencies / optionalDependencies;
-/// peer excluded), root and workspace members alike.
-pub(crate) fn remix_needs_project_local_store(root: &Path) -> bool {
-    declared_direct_ranges(root, "remix")
+/// peer excluded), root and workspace members alike. `workspace_members` is
+/// the caller's one-shot discovery for `root`.
+pub(crate) fn remix_needs_project_local_store(root: &Path, workspace_members: &[PathBuf]) -> bool {
+    declared_direct_ranges(root, workspace_members, "remix")
         .iter()
         .any(|range| range_may_select_asset_server(range))
 }
@@ -65,6 +66,12 @@ mod tests {
         dir
     }
 
+    /// What `nub_setting_defaults` hands the gate: the discovered members.
+    fn ejects(root: &Path) -> bool {
+        let members = aube_workspace::find_workspace_packages(root).unwrap_or_default();
+        remix_needs_project_local_store(root, &members)
+    }
+
     #[test]
     fn remix_3_and_ambiguous_ranges_eject_while_older_majors_keep_gvs() {
         for (deps, want) in [
@@ -80,18 +87,14 @@ mod tests {
             (r#"{}"#, false),
         ] {
             let dir = project_with(&format!(r#"{{"name":"app","dependencies":{deps}}}"#));
-            assert_eq!(
-                remix_needs_project_local_store(dir.path()),
-                want,
-                "dependencies={deps}"
-            );
+            assert_eq!(ejects(dir.path()), want, "dependencies={deps}");
         }
     }
 
     #[test]
     fn a_dev_dependency_counts_like_the_aube_trigger() {
         let dir = project_with(r#"{"name":"app","devDependencies":{"remix":"^3.0.0"}}"#);
-        assert!(remix_needs_project_local_store(dir.path()));
+        assert!(ejects(dir.path()));
     }
 
     /// The engine's trigger scan reads every workspace importer, so a member
@@ -107,6 +110,6 @@ mod tests {
             r#"{"name":"web","dependencies":{"remix":"^3.0.0"}}"#,
         )
         .expect("member manifest");
-        assert!(remix_needs_project_local_store(dir.path()));
+        assert!(ejects(dir.path()));
     }
 }
