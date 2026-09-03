@@ -113,7 +113,15 @@ write_fixture() {
       allowBuilds: { [pkg]: true },
     }));
   ' "$_dir/package.json" "$_pkg" "$_ver"
-  # ⛔ `minimumReleaseAge=0` IS LOAD-BEARING, NOT TIDINESS. nub's age gate refuses any version
+  # ⛔ TURNING THE AGE GATE OFF IS LOAD-BEARING, NOT TIDINESS — AND THE SPELLING IS THE WHOLE
+  # TRICK. The setting has TWO surfaces: `nub.jsonc` takes `install.minimumReleaseAge` (camelCase,
+  # and it REJECTS a bare integer), while the CLI and `.npmrc` take `minimum-release-age` as bare
+  # MINUTES. This file writes an `.npmrc`, so the camelCase spelling it used to write alone was the
+  # WRONG surface and nothing read it — an unknown npmrc key is silently ignored, so the line looked
+  # present and did nothing. The kebab form is pinned live by `install_engine.rs`, which writes
+  # `minimum-release-age=10069920` and asserts exit 21 with `ERR_NUB_NO_MATURE_MATCHING_VERSION`.
+  # Both spellings are written now: the extra one is inert wherever it is not the surface, so this
+  # cannot regress either way. nub's age gate refuses any version
   # published inside the last 1440 minutes (`ERR_NUB_NO_MATURE_MATCHING_VERSION`, exit 21), and the
   # population pins actively-released packages at `latest` — `workerd` publishes daily. Measured
   # 2026-09-02: SEVEN packages (`workerd`, `nx`, `@anthropic-ai/claude-code`, `@openrouter/sdk`,
@@ -123,7 +131,7 @@ write_fixture() {
   # sweep runs, not of the platform, and re-counting beats trusting this list. The gate is a supply-chain
   # default worth having; it is simply not what this sweep measures, and leaving it on silently
   # deletes packages from the population.
-  printf 'side-effects-cache=false\nminimumReleaseAge=0\n' > "$_dir/.npmrc"
+  printf 'side-effects-cache=false\nminimum-release-age=0\nminimumReleaseAge=0\n' > "$_dir/.npmrc"
   # ⛔ NODE, NOT PYTHON, AND THAT IS WHAT MAKES THIS RUNNABLE ON WINDOWS. `nub-win3` has no python3
   # and no `py`, so the heredoc that used to be here wrote no fixture at all and every Windows row read
   # NO-SCRIPT-RAN — 87 rows summarising as "0 jail-suspect failures" over installs that never happened.
