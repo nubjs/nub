@@ -647,6 +647,20 @@ Nearly always the cause is JSX under a tsconfig setting `"jsx": "preserve"`, whi
 
 The bundler knobs, grouped under their own heading in `nub compile --help`. Most builds never need one.
 
+### `--drop`
+
+Remove debugging calls at build time. Repeatable, one category per use:
+
+```bash
+nub compile app.ts --drop console --drop debugger
+```
+
+Two categories exist: `console` removes every `console.*()` call, `debugger` every `debugger` statement.
+
+A dropped call is not evaluated, so whatever you passed to it goes too — `console.log(buildReport())` takes `buildReport()` with it. Where a call's result is read, the call becomes `undefined`, which is what `console.log` returned anyway.
+
+Dropping rides the minifier, which is on by default. Asking for it alongside `--no-minify` is refused rather than quietly leaving every call in place.
+
 ### `--no-treeshake`
 
 Unreachable code is dropped by default. Turn tree-shaking off when a dependency claims to be side-effect-free and is not, so its module-level work survives:
@@ -708,6 +722,36 @@ nub compile app.ts --platform win32-x64 --icon ./app.ico
 It works while cross-compiling, so a Windows binary built on macOS or Linux gets its icon like any other. The file must be a real `.ico` — a PNG renamed to `.ico` embeds but never draws, so the build checks the contents and refuses one rather than shipping an executable with a blank icon.
 
 Windows is the only target that carries its icon inside the executable. macOS takes one from the surrounding `.app` bundle and Linux from a `.desktop` entry, neither of which is part of a single file, so the flag is refused for those targets instead of being accepted and ignored.
+
+### `--metadata`
+
+Set the fields Windows shows in an executable's Details tab, and that `(Get-Item app.exe).VersionInfo` reads:
+
+```bash
+nub compile app.ts --platform win32-x64 --metadata "CompanyName=Acme Inc." --metadata "LegalCopyright=Copyright 2026 Acme"
+```
+
+Most builds need no flag at all. Product name, description, version and company come from `name`, `description`, `version` and `author` in the nearest `package.json`, and the original filename comes from `--out`. The flag only overrides that, and `Key=` with an empty value drops a field rather than writing a blank one.
+
+Windows defines the field names, so nub accepts that set and no more: `Comments`, `CompanyName`, `FileDescription`, `FileVersion`, `InternalName`, `LegalCopyright`, `LegalTrademarks`, `OriginalFilename`, `PrivateBuild`, `ProductName`, `ProductVersion`, `SpecialBuild`. Anything else is refused at the start of the build — a name Windows does not know would encode fine and then show up nowhere, which costs a full build to notice.
+
+A version like `2.5.1-rc.3` reaches the `FileVersion` string as typed. Windows also keeps a separate numeric version of four 16-bit numbers, which has nowhere to put a prerelease tag, so that one reads `2.5.1.0`.
+
+Like `--icon`, this works while cross-compiling — a Windows binary built on macOS gets its metadata like any other — and is refused for a non-Windows target, because no other executable format carries these fields.
+
+### `--metafile`
+
+Write a report describing what went into the bundle:
+
+```bash
+nub compile app.ts --metafile report.json
+```
+
+The report is JSON in [esbuild's metafile schema](https://esbuild.github.io/api/#metafile), so it opens in the tools already written for that format — esbuild's own `analyzeMetafile`, esbuild-visualizer, bundle-buddy. It has two keys: `inputs`, every module the bundler read with its source length, module format and imports; and `outputs`, every file the bundler emitted with its size and how many bytes each input contributed to it.
+
+The per-input counts are measured before minification while an output's own `bytes` is the file after it, so with minification on the parts sum higher than the whole. Rank inputs against each other with them; do not expect them to account for the final size. They line up under `--no-minify`.
+
+The report covers the bundled JavaScript and nothing else. It says nothing about the embedded Node runtime — usually the largest part of the binary, and what `--smol` leaves out — nor about files added with `--include`, nor about native addons carried unbundled.
 
 ### `--conditions`
 
