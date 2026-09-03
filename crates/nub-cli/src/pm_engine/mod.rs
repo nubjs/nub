@@ -66,6 +66,7 @@ pub mod phantom_closure;
 pub mod platform_flags;
 pub mod present;
 pub mod publish_family;
+mod remix_compat;
 mod resource_limits;
 pub mod store_config_family;
 pub mod unsupported_config;
@@ -2740,13 +2741,20 @@ fn nub_setting_defaults(
     // Metro — can't reach the machine-global store at any version). `expo` is
     // version-gated: it gained store-awareness only in SDK 56 (On-demand
     // Filesystem), so a project declaring `expo` below the floor is ejected while
-    // 56+ keeps GVS. See [`expo_compat`]. The list stays curated and small
-    // because there is no manifest signal for "this tool canonicalizes
-    // symlinks"; it is unavoidably a behavioral-property list.
+    // 56+ keeps GVS. See [`expo_compat`]. `remix` is version-gated the other way
+    // round: Remix 3's unbundled asset server serves npm packages to the browser
+    // only from mounts relative to the project root, so a `remix` major ≥ 3 is
+    // ejected while the bundler-built earlier majors keep GVS. See
+    // [`remix_compat`]. The list stays curated and small because there is no
+    // manifest signal for "this tool canonicalizes symlinks"; it is unavoidably
+    // a behavioral-property list.
     let gvs_root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
     let mut gvs_off: Vec<&str> = vec!["next", "react-native"];
     if expo_compat::expo_below_gvs_floor(gvs_root) {
         gvs_off.push("expo");
+    }
+    if remix_compat::remix_needs_project_local_store(gvs_root) {
+        gvs_off.push("remix");
     }
     let store_dir = format!("node_modules/{PROJECT_VIRTUAL_STORE_LEAF}");
     let mut defaults = vec![

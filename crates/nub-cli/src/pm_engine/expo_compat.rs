@@ -39,24 +39,26 @@ const EXPO_GVS_FLOOR: u32 = 56;
 /// floor-parsed (eject-on-ambiguity). Matches the aube trigger's dependency
 /// scope (dependencies / devDependencies / optionalDependencies; peer excluded).
 pub(crate) fn expo_below_gvs_floor(root: &Path) -> bool {
-    let Some(range) = declared_expo_range(root) else {
+    let Some(range) = declared_direct_range(root, "expo") else {
         return false;
     };
-    match expo_major_floor(&range) {
+    match major_floor(&range) {
         Some(major) => major < EXPO_GVS_FLOOR,
         None => true,
     }
 }
 
-/// The declared `expo` range from the root manifest's direct-dependency fields,
-/// if any. Uses the shared mtime-cached parse so the extra read is free.
-fn declared_expo_range(root: &Path) -> Option<String> {
+/// The declared range of direct dependency `name` from the root manifest's
+/// direct-dependency fields, if any. Uses the shared mtime-cached parse so the
+/// extra read is free. Shared with the other version-gated ejects
+/// ([`super::remix_compat`]).
+pub(super) fn declared_direct_range(root: &Path, name: &str) -> Option<String> {
     let manifest = super::cached_aube_manifest(&root.join("package.json"))?;
     manifest
         .dependencies
-        .get("expo")
-        .or_else(|| manifest.dev_dependencies.get("expo"))
-        .or_else(|| manifest.optional_dependencies.get("expo"))
+        .get(name)
+        .or_else(|| manifest.dev_dependencies.get(name))
+        .or_else(|| manifest.optional_dependencies.get(name))
         .cloned()
 }
 
@@ -68,8 +70,8 @@ fn declared_expo_range(root: &Path) -> Option<String> {
 /// its major is the ceiling, not the floor: `<56` selects a below-floor version
 /// yet reads as major 56, so flooring it would wrongly KEEP GVS — treating it as
 /// ambiguous ejects instead (the safe direction). A `None` drives
-/// eject-on-ambiguity in [`expo_below_gvs_floor`].
-fn expo_major_floor(range: &str) -> Option<u32> {
+/// eject-on-ambiguity in [`expo_below_gvs_floor`] and its siblings.
+pub(super) fn major_floor(range: &str) -> Option<u32> {
     let r = range.trim();
     if r.is_empty() || r.contains([' ', ':', '|', '<']) {
         return None;
@@ -96,7 +98,7 @@ mod tests {
             ("52.0.0", Some(52)),
             ("^51.0.0", Some(51)),
         ] {
-            assert_eq!(expo_major_floor(range), want, "range={range}");
+            assert_eq!(major_floor(range), want, "range={range}");
         }
     }
 
@@ -116,7 +118,7 @@ mod tests {
             "<56",
             "<=56.0.0",
         ] {
-            assert_eq!(expo_major_floor(range), None, "range={range}");
+            assert_eq!(major_floor(range), None, "range={range}");
         }
     }
 }
