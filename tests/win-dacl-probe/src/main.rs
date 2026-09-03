@@ -71,6 +71,29 @@ fn main() {
     let base = std::env::var("RUNNER_TEMP").unwrap_or_else(|_| std::env::temp_dir().display().to_string());
 
     println!("linkage={linkage} base={base} iterations={iterations}");
+
+    // ARM 2: the chain created the way `spawn::default_compile_cache_dir` creates
+    // it — a bare `create_dir_all`, which takes the parent's INHERITED ACEs instead
+    // of the private DACL `create_private_directory` installs. That call site takes
+    // `<XDG_CACHE_HOME>/nub` and appends `v8-compile-cache`, so it materialises the
+    // cache root AND its parent before the validating walk ever sees them. If the
+    // walk then refuses either, this is the CI failure, and arm 1 missed it only
+    // because it created everything the safe way.
+    {
+        let poisoned = PathBuf::from(&base).join("nub-poisoned-probe").join("nub");
+        let _ = std::fs::remove_dir_all(PathBuf::from(&base).join("nub-poisoned-probe"));
+        match std::fs::create_dir_all(poisoned.join("v8-compile-cache")) {
+            Ok(()) => {
+                // create_missing=false: the question is whether the walk ACCEPTS what
+                // the bare call left behind, not whether it can repair it.
+                let ok = walk(&poisoned, false, &format!("[{linkage} poisoned]"));
+                println!("POISONED linkage={linkage} accepted={ok}");
+            }
+            Err(e) => println!("POISONED linkage={linkage} setup-failed {e}"),
+        }
+        let _ = std::fs::remove_dir_all(PathBuf::from(&base).join("nub-poisoned-probe"));
+    }
+
     let mut failures = 0usize;
     for i in 0..iterations {
         // A fresh leaf each time, under the same runner-created ancestors nub uses,
