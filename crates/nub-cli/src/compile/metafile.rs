@@ -155,6 +155,27 @@ struct Module {
 /// by two different edges — `import './dep.js'` beside `require('./dep.js')` — and
 /// esbuild's schema reports both. Rolldown's `imported_ids` deduplicates by
 /// target, so it can never express that; the observations can.
+///
+/// KNOWN DIVERGENCE, and the set is not what causes it. Two edges that share an
+/// importer, a target AND a kind — `import './dep.js'` written twice — are ONE
+/// entry here and two in esbuild (checked against esbuild 0.28.2). Deduplicating
+/// is not the reason: Rolldown memoizes resolution on (importer, specifier, kind),
+/// so `resolve_id` is called ONCE for the repeated pair and the second occurrence
+/// never reaches any plugin. Measured — one hook call for two identical imports,
+/// two for an import beside a require, which is why the mixed-kind case above
+/// works and this one cannot.
+///
+/// No other hook carries it either, so this is an API ceiling rather than a choice.
+/// `ModuleInfo` exposes only the deduplicated `imported_ids`;
+/// `NormalModule::ecma_view::import_records` is empty at `module_parsed`, being
+/// filled during linking; and `module_parsed` is the only hook handed a
+/// `NormalModule` at all. Rolldown does hold the true per-edge list right there —
+/// `module_task.rs` builds `raw_import_records` and passes it to
+/// `to_module_info`, which reads it only to add `"*"` export entries and then
+/// drops it. Closing the gap therefore means patching Rolldown or re-parsing every
+/// module to count edges the bundler already counted, so the report carries the
+/// right targets, kinds and bytes, and undercounts only a repeated identical
+/// import.
 pub type EdgeKinds = Arc<Mutex<BTreeSet<(String, String, &'static str)>>>;
 
 /// Watches resolution to learn each edge's kind, and nothing else.

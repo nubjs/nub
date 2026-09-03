@@ -6457,6 +6457,52 @@ mod tests {
         }
     }
 
+    /// Two edges that share an importer, a target AND a kind collapse to one.
+    ///
+    /// This asserts the WRONG answer deliberately. esbuild 0.28.2 emits two
+    /// entries for two identical `import` statements; nub emits one, because
+    /// Rolldown memoizes resolution on (importer, specifier, kind) and the second
+    /// occurrence never reaches a plugin — see [`metafile::EdgeKinds`] for why no
+    /// other hook carries it. Pinned rather than left silent so that a Rolldown
+    /// version which does expose per-edge records fails here and sends the next
+    /// reader to that comment instead of to a fresh investigation.
+    #[test]
+    fn two_identical_imports_to_one_target_are_reported_once_unlike_esbuild() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.mjs",
+                "import './dep.mjs';\nimport './dep.mjs';\nglobalThis.OUT = 1;\n",
+            ),
+            ("dep.mjs", "globalThis.D = 1;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_compile_graph_with("metafile-same-kind-repeat", "entry.mjs", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let entry = report
+            .inputs
+            .iter()
+            .find(|(path, _)| path.ends_with("entry.mjs"))
+            .expect("the entry is an input")
+            .1;
+        let to_dep: Vec<&str> = entry
+            .imports
+            .iter()
+            .filter(|i| i.path.ends_with("dep.mjs"))
+            .map(|i| i.kind)
+            .collect();
+        assert_eq!(
+            to_dep,
+            vec!["import-statement"],
+            "esbuild reports both occurrences; Rolldown resolves the pair once, so \
+             nub reports one. Update the divergence note if this ever changes."
+        );
+    }
+
     /// A resolver plugin that claims an edge returns before the ones behind it are
     /// asked, so an observer placed after `ExternalImports` never sees an external
     /// `require()` and the report falls back to the importer's ESM format. That is
