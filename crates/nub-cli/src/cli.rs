@@ -5491,6 +5491,46 @@ const NUB_SHELL_SUBDIR: &str = "nub-sh";
 /// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
 /// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
 /// it compiles everywhere.
+/// Re-bind, inside the script body, the lowercase environment names nub set.
+///
+/// busybox-w32's shell UP-CASES every name when it loads the Windows environment,
+/// so a script body sees `NPM_PACKAGE_NAME` and `$npm_package_name` expands to
+/// nothing — while npm, pnpm, yarn and bun all deliver the lowercase name on the
+/// same fixture. Upstream considers the up-casing correct and declined the
+/// preserve-casing patch (rmyorston/busybox-w32#125), so the restoration is nub's
+/// to do.
+///
+/// One `export` prologue fixes all three symptoms at once, because busybox's own
+/// variable lookup is case-SENSITIVE: `$npm_package_name` expands, the lowercase
+/// name is back in the environment every child inherits, and `Object.keys` sees
+/// it — for a consumer in any language, not only the Node children nub augments.
+///
+/// It re-binds NAMES, never values, so nothing needs quoting and a value carrying
+/// quotes or newlines cannot break the body. Derived from the command's own env
+/// rather than from a hand-kept list, so a variable added later is covered
+/// without anyone remembering this function.
+fn lowercase_env_prologue(command: &std::process::Command) -> String {
+    let mut names: Vec<&str> = command
+        .get_envs()
+        // A `None` value is a REMOVAL, and re-exporting one would put the name back.
+        .filter(|(_, value)| value.is_some())
+        .filter_map(|(name, _)| name.to_str())
+        .filter(|name| {
+            // An uppercase-only name is unaffected by the up-casing, and a name
+            // that is not a shell identifier cannot be exported at all.
+            name.contains(|c: char| c.is_ascii_lowercase())
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .iter()
+        .map(|name| format!("export {name}=\"${}\"; ", name.to_ascii_uppercase()))
+        .collect()
+}
+
 fn resolve_bundled_busybox() -> Result<String> {
     let to_utf8 = |p: PathBuf| -> Result<String> {
         p.to_str()
@@ -5643,6 +5683,9 @@ fn build_script_command(
         None if cfg!(windows) => (resolve_bundled_busybox()?, vec!["sh", "-c"]),
         None => ("sh".to_string(), vec!["-c"]),
     };
+    // Only the bundled busybox needs the casing prologue below: a `--script-shell`
+    // the user chose is theirs, and an explicit `cmd` is case-insensitive.
+    let uses_bundled_busybox = cfg!(windows) && custom_shell.is_none();
 
     // Append the user's extra args the way npm does (@npmcli/promise-spawn):
     // each arg is escaped for the target shell and spliced onto the UNescaped
@@ -5683,7 +5726,7 @@ fn build_script_command(
     // consumer — is gone; an explicit `script-shell=cmd` still takes this path
     // with cmd-escaped args (unchanged), it was never the verbatim default.
     let mut command = StdCommand::new(&shell);
-    command.args(&shell_args).arg(&full_cmd);
+    command.args(&shell_args);
     command.current_dir(&project.root);
 
     // PATH: shim dir (when augmenting) → `.bin` walk-up chain → system PATH.
@@ -5896,6 +5939,15 @@ fn build_script_command(
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
     }
+
+    // The script body goes on LAST, because on Windows its prologue is derived
+    // from every `command.env` call above.
+    let prologue = if uses_bundled_busybox {
+        lowercase_env_prologue(&command)
+    } else {
+        String::new()
+    };
+    command.arg(format!("{prologue}{full_cmd}"));
 
     Ok((command, full_cmd))
 }
@@ -13810,6 +13862,40 @@ mod tests {
             busybox_candidates(root).into_iter().find(|p| p.is_file()),
             Some(beside),
             "the packaged sibling layout must take precedence over the staged copy"
+        );
+    }
+
+    /// The prologue restores the lowercase names busybox-w32 up-cases, and the
+    /// filters are the whole contract: re-exporting the wrong thing is worse than
+    /// re-exporting nothing, because it puts a name back into the environment that
+    /// the caller had removed, or writes a line the shell refuses to parse.
+    #[test]
+    fn the_casing_prologue_rebinds_only_the_names_a_shell_can_export() {
+        let mut command = std::process::Command::new("sh");
+        command.env("npm_package_name", "acme");
+        command.env("npm_config_user_agent", "nub/0.9");
+        // Already uppercase: busybox leaves it alone, so re-binding it is noise.
+        command.env("NODE_OPTIONS", "--x");
+        // Not a shell identifier, and not exportable under any casing.
+        command.env("weird-name", "v");
+        command.env("2fast", "v");
+        // A REMOVAL. Re-exporting it would resurrect the name.
+        command.env_remove("npm_lifecycle_event");
+
+        let prologue = lowercase_env_prologue(&command);
+
+        assert_eq!(
+            prologue,
+            "export npm_config_user_agent=\"$NPM_CONFIG_USER_AGENT\"; \
+             export npm_package_name=\"$NPM_PACKAGE_NAME\"; ",
+            "only lowercase, exportable, still-set names belong in the prologue"
+        );
+
+        // A body prefixed with it is still one shell word away from the original.
+        let body = format!("{prologue}echo $npm_package_name");
+        assert!(
+            body.ends_with("; echo $npm_package_name"),
+            "the prologue must end in a separator so the body is a fresh command: {body}"
         );
     }
 
