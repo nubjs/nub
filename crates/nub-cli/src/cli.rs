@@ -5559,6 +5559,14 @@ const NUB_SHELL_SUBDIR: &str = "nub-sh";
 /// quotes or newlines cannot break the body. Derived from the command's own env
 /// rather than from a hand-kept list, so a variable added later is covered
 /// without anyone remembering this function.
+///
+/// Scope is deliberately what NUB set, not the whole inherited environment. busybox
+/// up-cases an inherited lowercase name too, but restoring those means re-exporting
+/// arbitrary host variables into every script body to undo a shell's documented
+/// behavior, which is a much larger claim than fixing the names nub is responsible
+/// for. It also keeps the prologue small: measured at 15 exportable names and 741
+/// bytes against a 32767-byte command line, and the real figure is lower because
+/// `get_envs` sees only what nub set rather than what it inherited.
 fn lowercase_env_prologue(command: &std::process::Command) -> String {
     let mut names: Vec<&str> = command
         .get_envs()
