@@ -6211,6 +6211,49 @@ mod tests {
         );
     }
 
+    /// The premise `static_kind` rests on: an ESM module cannot hold a resolved
+    /// `require` edge, so the importer's format decides the edge kind exactly
+    /// rather than approximately.
+    ///
+    /// It holds because a `require` bound to a local — a `createRequire` result,
+    /// a UMD factory parameter — is a call the bundler cannot rewrite, so the
+    /// specifier stays unresolved and compilation refuses the build before any
+    /// report exists. If that refusal is ever relaxed, the metafile needs the
+    /// per-edge kind and this test is what says so.
+    #[test]
+    fn an_esm_module_cannot_hold_a_require_edge_so_the_format_decides_the_kind() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import { createRequire } from 'node:module';\n\
+                 import { A } from './esm-dep.mjs';\n\
+                 const require = createRequire(import.meta.url);\n\
+                 globalThis.OUT = [A, require('./cjs-dep.cjs')];\n",
+            ),
+            ("esm-dep.mjs", "export const A = 1;\n"),
+            ("cjs-dep.cjs", "module.exports = 41;\n"),
+        ];
+        let mut o = opts();
+        o.metafile = true;
+        let err = match bundle_module_graph_with("esm-require", "entry.ts", files, &o) {
+            Ok(_) => panic!("an ESM module holding a require must not bundle"),
+            Err(err) => err.to_string(),
+        };
+        // Both halves matter. The site pins WHICH import was refused — a generic
+        // "could not be resolved" would also match an unrelated failure and the
+        // test would pass while proving nothing. The hint pins WHY: that the
+        // `require` was a local binding, which is the mechanism the exactness
+        // argument rests on.
+        assert!(
+            err.contains("require('./cjs-dep.cjs')"),
+            "the refusal must name the require site: {err}"
+        );
+        assert!(
+            err.contains("`require` is a local binding"),
+            "the refusal must be the local-binding one, not another unresolved import: {err}"
+        );
+    }
+
     #[test]
     fn no_report_is_collected_unless_asked_for() {
         let result = bundle_module_graph("metafile-off", "entry.ts", DROP_FIXTURE)

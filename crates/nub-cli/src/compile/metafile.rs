@@ -39,11 +39,18 @@ use serde::Serialize;
 /// The static kind is decided by the IMPORTER's module format, because
 /// `ModuleInfo` carries no per-edge kind: `imported_ids` is a `FxIndexSet`, so it
 /// is neither ordered against nor the same length as the import records that do
-/// carry one, and the two cannot be zipped. A CommonJS module's static edges are
-/// `require()` calls by definition, and an ESM module's are `import` statements,
-/// which is what makes the format a sound key rather than a guess. What it does
-/// not model is an ESM module reaching for `createRequire`; that edge is reported
-/// as a statement.
+/// carry one, and the two cannot be zipped.
+///
+/// That is EXACT here rather than an approximation, which is worth stating because
+/// it is not true of a bundler in general. A CommonJS module's static edges are
+/// `require()` calls by definition and an ESM module's are `import` statements, so
+/// the only counter-example would be an ESM module holding a `require` — and
+/// compilation cannot produce one: a `require` bound to a local (a `createRequire`
+/// result, a UMD factory parameter) is a call the bundler cannot rewrite, so it
+/// stays unresolved and the build is REFUSED before any report exists. `--external`
+/// does not bypass that. Pinned by
+/// `an_esm_module_cannot_hold_a_require_edge_so_the_format_decides_the_kind`; if
+/// that refusal is ever relaxed, this mapping needs the per-edge kind instead.
 const REQUIRE_CALL: &str = "require-call";
 const IMPORT_STATEMENT: &str = "import-statement";
 const DYNAMIC_IMPORT: &str = "dynamic-import";
