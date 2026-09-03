@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { blog } from '@/lib/source';
+import { renderInlineCode } from '@/lib/inline-code';
 
 const blogOgImage = `/og?${new URLSearchParams({ title: 'Blog', eyebrow: 'Blog' }).toString()}`;
 
@@ -69,7 +70,7 @@ export default function BlogIndex() {
               <span>{post.data.author}</span>
             </div>
             <h2 className="mt-3 font-display text-2xl font-medium leading-snug transition group-hover:text-ember md:text-3xl">
-              {post.data.title}
+              {renderInlineCode(post.data.title)}
             </h2>
             {post.data.description ? (
               <p className="mt-2 max-w-2xl text-fd-muted-foreground">
