@@ -385,7 +385,26 @@ pub fn write(
     // so the canonical-map lookup misses and the package would otherwise be
     // dropped entirely. `npm ci` then rejects the lockfile with
     // `Missing: <name>@<version> from lock file`. Emit the pair here.
-    emit_file_dep_links(graph, &roots, ".", &mut packages);
+    //
+    // Every name that will end up owning a root `node_modules/<name>`
+    // entry, gathered BEFORE anything is written: the root importer's own
+    // direct deps (which hoist there) and every workspace member (linked
+    // there by the member pass). A member's local link consults this to
+    // decide root-vs-nested, because the passes that claim those slots run
+    // after it and would otherwise overwrite the link silently.
+    let root_claimed: std::collections::BTreeSet<&str> = roots
+        .iter()
+        .map(|d| d.name.as_str())
+        .chain(
+            graph
+                .importers
+                .keys()
+                .filter(|p| p.as_str() != ".")
+                .filter_map(|p| workspace_package_for_importer(graph, p))
+                .map(|pkg| pkg.name.as_str()),
+        )
+        .collect();
+    emit_file_dep_links(graph, &roots, ".", &root_claimed, &mut packages);
 
     // Resolve each workspace member's identity (name/version/peers).
     // A `LocalSource::Link` package exists only when the graph was
@@ -465,7 +484,13 @@ pub fn write(
             },
         );
 
-        emit_file_dep_links(graph, importer_roots, importer_path, &mut packages);
+        emit_file_dep_links(
+            graph,
+            importer_roots,
+            importer_path,
+            &root_claimed,
+            &mut packages,
+        );
 
         let workspace_tree_roots = non_link_roots(graph, importer_roots);
         let workspace_tree = super::build_hoist_tree(&canonical, &workspace_tree_roots);
@@ -758,6 +783,7 @@ fn emit_file_dep_links<'a>(
     graph: &'a LockfileGraph,
     roots: &[DirectDep],
     importer_path: &str,
+    root_claimed: &std::collections::BTreeSet<&str>,
     packages: &mut BTreeMap<String, WriteNpmPackage<'a>>,
 ) {
     for dep in roots {
@@ -798,16 +824,29 @@ fn emit_file_dep_links<'a>(
         // writer win, so `a` silently resolved to `b`'s package — no error,
         // a wrong module. Take the root slot only if it is free or already
         // points at this exact target; otherwise nest.
+        //
+        // `packages` alone cannot answer that, because it is still being
+        // built: the hoist tree and the workspace pass both serialize AFTER
+        // this one and can claim the same root alias. A root registry dep
+        // aliased `shared` plus a member's `shared = file:…` hit exactly
+        // that — the link went to root while the slot looked free, the
+        // later hoist pass overwrote it, and the member's link vanished
+        // from the lockfile entirely rather than merely moving. Hence
+        // `root_claimed`, computed up front from every name that will own
+        // a root entry. Measured, npm 10:
+        //
+        //     "node_modules/shared":                 <the registry package>
+        //     "packages/app/node_modules/shared":    { resolved: "vendor/local" }
+        let is_root_importer = importer_path == "." || importer_path.is_empty();
         let root_key = format!("node_modules/{}", dep.name);
-        let key = match packages.get(&root_key) {
-            Some(existing) if existing.resolved.as_deref() != Some(resolved.as_str()) => {
-                if importer_path == "." || importer_path.is_empty() {
-                    root_key
-                } else {
-                    format!("{importer_path}/node_modules/{}", dep.name)
-                }
-            }
-            _ => root_key,
+        let taken_by_other = match packages.get(&root_key) {
+            Some(existing) => existing.resolved.as_deref() != Some(resolved.as_str()),
+            None => !is_root_importer && root_claimed.contains(dep.name.as_str()),
+        };
+        let key = if taken_by_other && !is_root_importer {
+            format!("{importer_path}/node_modules/{}", dep.name)
+        } else {
+            root_key
         };
         packages.insert(
             key,

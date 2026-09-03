@@ -842,6 +842,95 @@ fn test_write_nests_a_conflicting_member_local_dep() {
     );
 }
 
+/// A root dep and a member-local dep sharing an ALIAS. The root one wins
+/// `node_modules/<alias>` and the member's link nests, exactly as with two
+/// local targets — but the occupant here is written by a LATER pass, so
+/// the partially-built `packages` map cannot see it.
+///
+/// That is what `root_claimed` exists for. Without it the link was written
+/// to root while the slot still looked free, the hoist pass overwrote it,
+/// and the member's link vanished from the lockfile entirely — leaving the
+/// member resolving to the registry package. Measured, npm 10, root
+/// `shared = npm:is-number@7.0.0` + member `shared = file:../../vendor/local`:
+///
+///     "node_modules/shared":              <the registry package>
+///     "packages/app/node_modules/shared": { resolved: "vendor/local", link: true }
+#[test]
+fn test_write_nests_a_member_local_dep_under_a_root_registry_alias() {
+    let local = LocalSource::Directory(PathBuf::from("vendor/local"));
+    let local_dp = local.dep_path("shared");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        local_dp.clone(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: local_dp.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.packages.insert(
+        "shared@7.0.0".to_string(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "7.0.0".to_string(),
+            dep_path: "shared@7.0.0".to_string(),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "shared".to_string(),
+            dep_path: "shared@7.0.0".to_string(),
+            dep_type: DepType::Production,
+            specifier: Some("^7.0.0".to_string()),
+        }],
+    );
+    graph.importers.insert(
+        "packages/app".to_string(),
+        vec![DirectDep {
+            name: "shared".to_string(),
+            dep_path: local_dp,
+            dep_type: DepType::Production,
+            specifier: Some("file:../../vendor/local".to_string()),
+        }],
+    );
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("shared".to_string(), "^7.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
+    std::fs::write(
+        dir.path().join("packages/app/package.json"),
+        r#"{"name":"@w/app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(
+        packages["node_modules/shared"]["version"], "7.0.0",
+        "the root dep keeps the root alias, got {packages}"
+    );
+    assert_eq!(
+        packages["packages/app/node_modules/shared"]["resolved"], "vendor/local",
+        "the member's local link must survive the later hoist pass, nested \
+         under its own importer, got {packages}"
+    );
+}
+
 #[test]
 fn test_parse_file_resolved_without_link() {
     // npm writes `resolved: "file:..."` without `link: true` for
