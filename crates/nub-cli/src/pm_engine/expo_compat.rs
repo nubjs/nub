@@ -15,12 +15,17 @@
 //! which is Expo's own doctor predicate (`semver.satisfies(sdkVersion,
 //! '>=56.0.0')`), so the declared `expo` range is the signal.
 //!
-//! Defaults are computed before resolution, so only the DECLARED range in the
-//! root manifest is available (not a resolved version). A range whose major
-//! can't be read pre-resolution (`*`, `latest`, a compound `>=50 <60`, a
-//! `catalog:`/`workspace:` protocol spec) is treated as below-floor and EJECTS —
-//! the safe direction, matching `react-native`: the worst case is a redundant
-//! project-local install, never a broken one. The residual case the version
+//! Defaults are computed before resolution, so only the DECLARED range is
+//! available (not a resolved version) — read from the root manifest and every
+//! workspace member's, because the engine's own trigger scan covers every
+//! importer and a member-declared framework must reach the same verdict. A
+//! range whose major can't be read pre-resolution (`*`, `latest`, a compound
+//! `>=50 <60`, a `catalog:`/`workspace:` protocol spec) is treated as
+//! below-floor and EJECTS — the safe direction, matching `react-native`: the
+//! worst case is a redundant project-local install, never a broken one. A
+//! lower-bound comparator (`>=50`) floors correctly in THIS direction: it can
+//! only select at or above its major, so a floor under 56 ejects and a floor at
+//! or above it keeps GVS. The residual case the version
 //! gate can't see is a 56+ project that disables On-demand FS via
 //! `experiments.onDemandFilesystem: false`, which lives in `app.json`/
 //! `app.config.*` rather than `package.json`; that is an accepted, documented
@@ -32,28 +37,41 @@ use std::path::Path;
 /// GVS-compatible (Expo SDK 56).
 const EXPO_GVS_FLOOR: u32 = 56;
 
-/// Whether the project at `root` declares an `expo` dependency whose SDK is
-/// below the GVS floor — i.e. GVS must be ejected for it. `false` when `expo`
-/// is not a direct dependency (not an Expo project) or its declared major is
-/// `>= EXPO_GVS_FLOOR`; `true` when it is below the floor OR the range can't be
+/// Whether the workspace at `root` declares an `expo` dependency whose SDK is
+/// below the GVS floor — i.e. GVS must be ejected for it. `false` when no
+/// manifest declares `expo` (not an Expo project) or every declared major is
+/// `>= EXPO_GVS_FLOOR`; `true` when any is below the floor OR can't be
 /// floor-parsed (eject-on-ambiguity). Matches the aube trigger's dependency
 /// scope (dependencies / devDependencies / optionalDependencies; peer excluded).
 pub(crate) fn expo_below_gvs_floor(root: &Path) -> bool {
-    let Some(range) = declared_direct_range(root, "expo") else {
-        return false;
-    };
-    match major_floor(&range) {
-        Some(major) => major < EXPO_GVS_FLOOR,
-        None => true,
-    }
+    declared_direct_ranges(root, "expo")
+        .iter()
+        .any(|range| match major_floor(range) {
+            Some(major) => major < EXPO_GVS_FLOOR,
+            None => true,
+        })
 }
 
-/// The declared range of direct dependency `name` from the root manifest's
-/// direct-dependency fields, if any. Uses the shared mtime-cached parse so the
-/// extra read is free. Shared with the other version-gated ejects
-/// ([`super::remix_compat`]).
-pub(super) fn declared_direct_range(root: &Path, name: &str) -> Option<String> {
-    let manifest = super::cached_aube_manifest(&root.join("package.json"))?;
+/// Every declared range of direct dependency `name` across the root manifest
+/// and each workspace member's, in that order. The member walk mirrors
+/// [`super::unsupported_config::injected_deps_present`], which runs in the same
+/// defaults pass; the engine's own trigger scan checks every importer, so a
+/// version gate that read only the root would let a member-declared framework
+/// keep GVS. Uses the shared mtime-cached parse so the extra reads are free.
+/// Shared with the other version-gated ejects ([`super::remix_compat`]).
+pub(super) fn declared_direct_ranges(root: &Path, name: &str) -> Vec<String> {
+    std::iter::once(root.to_path_buf())
+        .chain(
+            aube_workspace::find_workspace_packages(root)
+                .into_iter()
+                .flatten(),
+        )
+        .filter_map(|dir| declared_direct_range(&dir.join("package.json"), name))
+        .collect()
+}
+
+fn declared_direct_range(manifest_path: &Path, name: &str) -> Option<String> {
+    let manifest = super::cached_aube_manifest(manifest_path)?;
     manifest
         .dependencies
         .get(name)
