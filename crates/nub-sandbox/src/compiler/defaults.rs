@@ -945,10 +945,17 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
 /// where `QueryDosDeviceW` still works. `--preserve-symlinks` below remains the shipped mitigation
 /// because it is measured and cheap, not because the native twin is unreachable.
 ///
-/// ⛔ ONE SUB-EXPERIMENT IS UNRECONCILED AND WAS NOT RE-RUN: the earlier held-open arm reported
-/// `EPERM` where a share-mode-0 open against a live handle should give ERROR_SHARING_VIOLATION.
-/// A sharing violation IS distinguishable in the container — one cell returned `err=32` — so that
-/// arm needs re-measuring before anyone leans on it.
+/// THE HELD-OPEN SUB-EXPERIMENT IS SETTLED, by a second 120-cell measurement on a separate host:
+/// the ERROR_SHARING_VIOLATION cell appears in the UNJAILED arm too, so it was never a container
+/// effect, and the earlier `EPERM` was the name query throughout. Nothing here rests on it now.
+///
+/// THE CHEAPEST REPAIR NEEDS NO INJECTED TABLE. Open the handle — which always succeeds — ask for
+/// `VOLUME_NAME_NONE`, and re-prefix the drive letter the CALLER already supplied. That touches
+/// none of the refused calls. The `VOLUME_NAME_NT` route works too but wants a device-to-letter
+/// map built outside the container, so it is strictly more machinery for the same answer. The
+/// refusal is scoped to the VOLUME DEVICE and was pinned three ways: jailed,
+/// `CreateFileW("\\\\.\\C:")`, `GetVolumeNameForVolumeMountPointW` and `QueryDosDeviceW` all
+/// fail 5, while `GetLogicalDriveStringsW` and `GetVolumePathNameW` succeed in BOTH arms.
 ///
 /// WHAT IT WOULD DO. `--preserve-symlinks-main` clears the realpath in `resolveMainPath`
 /// (`internal/modules/run_main.js`) and `--preserve-symlinks` clears the ones in `_findPath`
