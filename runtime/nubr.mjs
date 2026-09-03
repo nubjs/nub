@@ -37,6 +37,7 @@ import {
   binExts,
   commandLine,
   effectiveShell,
+  isCmdShell,
   isPowerShell,
   spliceArgs,
 } from "./nubr-escape.mjs";
@@ -128,6 +129,43 @@ function childEnv(cwd, manifest, manifestPath) {
   };
 }
 
+// A path we resolved, spelled the way the effective shell reads it. A POSIX-like
+// shell on Windows re-parses its own Windows command line with MSYS rules, where
+// a backslash is an ESCAPE rather than a separator — so Git Bash received a
+// correctly single-quoted `'C:\Users\...\whichshim'` and still reported
+// `C:UsersRUNNER~1AppData...: command not found`, every separator eaten
+// (measured on the Windows CI leg). Forward slashes are what that shell wants and
+// Windows accepts them everywhere, so only the SEPARATORS of a path we produced
+// are rewritten. A forwarded argument is the user's data and is never touched.
+function shellPath(p) {
+  if (process.platform !== "win32" || isCmdShell(SHELL)) return p;
+  return p.replace(/\\/g, "/");
+}
+
+// Hand a finished command line to the effective shell, the way npm hands one to
+// cmd.exe — NOT through Node's `shell` option.
+//
+// The difference is one pair of quotes and it is not cosmetic. Node wraps the
+// command (`args = ['/d', '/s', '/c', `"${command}"`]`, child_process.js), npm
+// passes the script bare (`realArgs.push('/d', '/s', '/c', script)`). The caret
+// escaping in nubr-escape.mjs is a byte-exact port of npm's, computed against
+// npm's assembly; pairing it with Node's gave cmd.exe a different parse, and the
+// real Windows leg silently DROPPED an argument — `nubr faketool -- "a b" "x;y"`
+// delivered only `x;y`. Matching npm's escaping while not matching its spawn was
+// half a port.
+//
+// `windowsVerbatimArguments` is the other half: without it libuv re-quotes the
+// string that cmd.exe is supposed to parse itself, mangling the carets.
+function shellSpawn(commandLine, opts) {
+  if (isCmdShell(SHELL)) {
+    return spawn(SHELL, ["/d", "/s", "/c", commandLine], {
+      ...opts,
+      windowsVerbatimArguments: true,
+    });
+  }
+  return spawn(SHELL, ["-c", commandLine], opts);
+}
+
 function runScript(name, manifest, rawExtraArgs, cwd) {
   const scripts = manifest.scripts ?? {};
   // `nubr build -- --watch` appends `--watch`, not `-- --watch`: npm consumes the
@@ -145,10 +183,7 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
     // matching npm, where `npm run build -- --watch` leaves `prebuild` alone.
     const body =
       phase === name ? spliceArgs(scripts[phase], extraArgs, SHELL) : scripts[phase];
-    // Name the shell explicitly instead of `shell: true`, so the shell that RUNS
-    // the script is the same value its arguments were escaped for.
-    const child = spawn(body, {
-      shell: SHELL,
+    const child = shellSpawn(body, {
       cwd,
       stdio: "inherit",
       env: { ...env, npm_lifecycle_event: phase, npm_lifecycle_script: scripts[phase] },
@@ -180,8 +215,7 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
 // forwarded arguments get the second caret pass cmd.exe's re-parse needs.
 function runBin(name, binPathAbs, rawExtraArgs, manifest, cwd) {
   const extraArgs = rawExtraArgs[0] === "--" ? rawExtraArgs.slice(1) : rawExtraArgs;
-  const child = spawn(commandLine(binPathAbs, extraArgs, SHELL), {
-    shell: SHELL,
+  const child = shellSpawn(commandLine(shellPath(binPathAbs), extraArgs, SHELL), {
     cwd,
     stdio: "inherit",
     // No npm_lifecycle_* here: nothing in package.json declared this run, so
