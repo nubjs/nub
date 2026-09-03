@@ -269,15 +269,20 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
                 .filter(|newest| {
                     provision_preference_is_usable(newest, &floor, shim_plan.needed())
                 });
-        let summary = format!(
-            "Node {}, not embedded — from {source}; {}{}",
-            non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string()),
-            smol_runtime_policy(&pin, &floor),
-            newest
-                .as_ref()
-                .map(|n| format!(", provisioning {n}"))
-                .unwrap_or_default()
-        );
+        let summary = RuntimeSummary {
+            fact: format!(
+                "Node {}, not embedded",
+                non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string())
+            ),
+            provenance: format!(
+                "from {source}; {}{}",
+                smol_runtime_policy(&pin, &floor),
+                newest
+                    .as_ref()
+                    .map(|n| format!(", provisioning {n}"))
+                    .unwrap_or_default()
+            ),
+        };
         (floor, newest, EmbeddedNode::default(), summary)
     } else {
         // Embed bakes ONE exact version — a range/major/alias collapses to the
@@ -289,7 +294,10 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
         let node = build_node_blob(&exact, &target, &cache_root, &source)?;
-        let summary = format!("Node {exact}, embedded — from {source}");
+        let summary = RuntimeSummary {
+            fact: format!("Node {exact}, embedded"),
+            provenance: format!("from {source}"),
+        };
         (exact, None, node, summary)
     };
 
@@ -390,6 +398,17 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     Ok(0)
 }
 
+/// The runtime row, split where its two tiers are.
+///
+/// `fact` is what was resolved; `provenance` is where the version came from and,
+/// for `--smol`, what the launcher will enforce at run time. Kept apart rather
+/// than joined with an em dash because the row is drawn in two weights — the
+/// provenance is why this row exists, but not what a reader checks first.
+struct RuntimeSummary {
+    fact: String,
+    provenance: String,
+}
+
 /// The build's resolved configuration, as a labelled block.
 ///
 /// It replaces a single comma-separated line, and the reason is not only that
@@ -410,40 +429,98 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
 fn report_resolved_build(
     out_path: &Path,
     size: u64,
-    runtime_summary: &str,
+    runtime_summary: &RuntimeSummary,
     target: &TargetPlatform,
 ) {
+    let color = crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
     eprintln!();
-    for (label, value) in resolved_build_rows(out_path, size, runtime_summary, target) {
-        eprintln!("  {label:<9}{value}");
+    for (label, spans) in resolved_build_rows(out_path, size, runtime_summary, target) {
+        // The gutter is computed from the VISIBLE label and the escapes added
+        // afterwards. Padding an already-styled string counts its escape bytes
+        // toward the field width, so every styled label silently loses the column
+        // the block exists to give it.
+        let mut line = format!(
+            "  {}{}",
+            paint(label, Ink::Muted, color),
+            " ".repeat(LABEL_WIDTH.saturating_sub(label.len()))
+        );
+        for (text, ink) in spans {
+            line.push_str(&paint(&text, ink, color));
+        }
+        eprintln!("{line}");
     }
 }
 
-/// The rows themselves, split from the printing so they can be asserted on.
+/// The label column, wide enough for the longest label plus a separating space.
+const LABEL_WIDTH: usize = 9;
+
+/// How one segment of the block is drawn.
+///
+/// Three tiers and no more, because the block only has three jobs: point at the
+/// artifact, state the facts, and say where they came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ink {
+    /// The facts themselves, at the terminal's own default weight.
+    Plain,
+    /// Secondary detail — a label, a size, a provenance, a parenthetical aside.
+    /// Present when wanted, out of the way when not.
+    Muted,
+    /// The one token the reader acts on next: the path they are about to run.
+    Accent,
+}
+
+/// Apply an [`Ink`], or return the text untouched when color is off.
+///
+/// Bright cyan is deliberate rather than free choice: it is what `nub run`
+/// already spends on a script name, so an artifact path drawn in it reuses a
+/// color the CLI has taught instead of introducing a second identifier color.
+fn paint(text: &str, ink: Ink, color: bool) -> String {
+    match ink {
+        _ if !color => text.to_string(),
+        Ink::Plain => text.to_string(),
+        Ink::Muted => format!("\x1b[2m{text}\x1b[22m"),
+        Ink::Accent => format!("\x1b[96m{text}\x1b[39m"),
+    }
+}
+
+/// The rows themselves, split from the printing so they can be asserted on
+/// without a terminal — including their styling, which is the half most likely
+/// to be wrong in a way no plain-text assertion would catch.
 fn resolved_build_rows(
     out_path: &Path,
     size: u64,
-    runtime_summary: &str,
+    runtime_summary: &RuntimeSummary,
     target: &TargetPlatform,
-) -> [(&'static str, String); 3] {
+) -> [(&'static str, Vec<(String, Ink)>); 3] {
     [
         (
             "output",
-            format!(
-                "{}  ({:.1} MB)",
-                out_path.display(),
-                size as f64 / 1_000_000.0
-            ),
+            vec![
+                (out_path.display().to_string(), Ink::Accent),
+                (
+                    format!("  ({:.1} MB)", size as f64 / 1_000_000.0),
+                    Ink::Muted,
+                ),
+            ],
         ),
-        ("runtime", runtime_summary.to_string()),
+        (
+            "runtime",
+            vec![
+                (runtime_summary.fact.clone(), Ink::Plain),
+                (format!("  {}", runtime_summary.provenance), Ink::Muted),
+            ],
+        ),
         (
             "target",
             if target.is_host() {
                 // Saying so is the difference between a reader checking a triple
                 // against their own machine and not having to.
-                format!("{} (this machine)", target.triple())
+                vec![
+                    (target.triple().to_string(), Ink::Plain),
+                    ("  (this machine)".to_string(), Ink::Muted),
+                ]
             } else {
-                target.triple().to_string()
+                vec![(target.triple().to_string(), Ink::Plain)]
             },
         ),
     ]
@@ -3348,23 +3425,25 @@ mod tests {
     #[test]
     fn the_resolved_build_block_labels_every_row_and_marks_a_host_target() {
         let host = TargetPlatform::host().unwrap();
-        let rendered = |rows: [(&'static str, String); 3]| {
-            rows.iter()
-                .map(|(label, value)| format!("{label}={value}"))
-                .collect::<Vec<_>>()
+        let summary = RuntimeSummary {
+            fact: "Node 26.8.1, embedded".to_string(),
+            provenance: "from package.json#engines.node".to_string(),
         };
 
         assert_eq!(
-            rendered(resolved_build_rows(
+            plain_rows(&resolved_build_rows(
                 Path::new("dist/cli"),
                 29_473_842,
-                "Node 26.8.1, embedded — from package.json#engines.node",
+                &summary,
                 &host,
             )),
             vec![
                 "output=dist/cli  (29.5 MB)".to_string(),
-                "runtime=Node 26.8.1, embedded — from package.json#engines.node".to_string(),
-                format!("target={} (this machine)", host.triple()),
+                "runtime=Node 26.8.1, embedded  from package.json#engines.node".to_string(),
+                // Two spaces before every aside, on all three rows: the gap is
+                // what separates the fact from its secondary tier now that a
+                // dash no longer does.
+                format!("target={}  (this machine)", host.triple()),
             ]
         );
 
@@ -3373,11 +3452,97 @@ mod tests {
             .map(|t| TargetPlatform::parse(t).unwrap())
             .find(|t| *t != host)
             .unwrap();
+        let cross = resolved_build_rows(Path::new("dist/cli"), 0, &summary, &foreign);
         assert_eq!(
-            resolved_build_rows(Path::new("dist/cli"), 0, "", &foreign)[2],
-            ("target", foreign.triple().to_string()),
+            plain_rows(&cross)[2],
+            format!("target={}", foreign.triple()),
             "a cross-compiled target must not claim to be this machine"
         );
+    }
+
+    /// Render the rows the way [`report_resolved_build`] does, minus the styling,
+    /// so a text assertion reads what a user without color sees.
+    fn plain_rows(rows: &[(&'static str, Vec<(String, Ink)>)]) -> Vec<String> {
+        rows.iter()
+            .map(|(label, spans)| {
+                let joined: String = spans.iter().map(|(text, _)| text.as_str()).collect();
+                format!("{label}={joined}")
+            })
+            .collect()
+    }
+
+    /// Which tier each segment is drawn in.
+    ///
+    /// Worth its own test because it is invisible to every text assertion above:
+    /// the block could lose all of its styling, or paint the whole line one color,
+    /// and the rendered text would be byte-identical.
+    ///
+    /// The accent is the claim being pinned. It belongs to the artifact path and
+    /// nothing else — it marks the one thing the reader runs next, so a second
+    /// accented token would spend the distinction it exists to make.
+    #[test]
+    fn only_the_artifact_path_is_accented_and_every_aside_is_muted() {
+        let host = TargetPlatform::host().unwrap();
+        let rows = resolved_build_rows(
+            Path::new("dist/cli"),
+            29_473_842,
+            &RuntimeSummary {
+                fact: "Node 26.8.1, embedded".to_string(),
+                provenance: "from package.json#engines.node".to_string(),
+            },
+            &host,
+        );
+        let inks: Vec<(&str, Vec<Ink>)> = rows
+            .iter()
+            .map(|(label, spans)| (*label, spans.iter().map(|(_, ink)| *ink).collect()))
+            .collect();
+
+        assert_eq!(
+            inks,
+            vec![
+                ("output", vec![Ink::Accent, Ink::Muted]),
+                ("runtime", vec![Ink::Plain, Ink::Muted]),
+                ("target", vec![Ink::Plain, Ink::Muted]),
+            ]
+        );
+    }
+
+    /// `NO_COLOR` and a redirected stream both reach [`paint`] as `color = false`,
+    /// and the block has to survive it on alignment alone — so nothing may depend
+    /// on an escape being present, and none may be emitted.
+    #[test]
+    fn paint_emits_no_escapes_when_color_is_off() {
+        for ink in [Ink::Plain, Ink::Muted, Ink::Accent] {
+            assert_eq!(paint("dist/cli", ink, false), "dist/cli");
+        }
+        assert_eq!(paint("dist/cli", Ink::Plain, true), "dist/cli");
+        assert_eq!(
+            paint("dist/cli", Ink::Muted, true),
+            "\x1b[2mdist/cli\x1b[22m"
+        );
+        assert_eq!(
+            paint("dist/cli", Ink::Accent, true),
+            "\x1b[96mdist/cli\x1b[39m"
+        );
+    }
+
+    /// The gutter is computed from the VISIBLE label, so a styled label keeps its
+    /// column. Padding the painted string instead counts the escape bytes toward
+    /// the field width and collapses the alignment the block exists to give —
+    /// silently, and only once color is on.
+    #[test]
+    fn a_styled_label_keeps_the_same_gutter_as_a_plain_one() {
+        let visible = |label: &str, color: bool| {
+            let painted = paint(label, Ink::Muted, color);
+            format!(
+                "  {painted}{}",
+                " ".repeat(LABEL_WIDTH.saturating_sub(label.len()))
+            )
+            .replace("\x1b[2m", "")
+            .replace("\x1b[22m", "")
+        };
+        assert_eq!(visible("output", true), visible("output", false));
+        assert_eq!(visible("runtime", true), "  runtime  ");
     }
 
     /// A cross target must never be provisioned into the host's Node store — the
