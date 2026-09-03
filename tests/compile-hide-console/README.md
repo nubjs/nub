@@ -23,7 +23,20 @@ Without that arm the harness would pass identically on a runner that owns a cons
 | 3 | The hidden artifact runs, prints through a redirect, and exits with the program's own status. |
 | 4 | The launcher reports that it suppressed its children's consoles — or says plainly that it did not, and why. |
 
+The arm that is missing from that list is the user-visible one, and it is missing on purpose — see below.
+
 The subsystem is read back by `read-subsystem.mjs`, which shares no code with nub. nub's own reader runs inside `verify_artifact` on every compile, so using it here would only prove it agrees with itself.
+
+## The claim itself needs a desktop
+
+`observe-console.ps1` asks the question directly: launch the artifact through ShellExecute — what a double-click in Explorer does — and count the console windows that appear, with a build made without the flag as the control.
+
+It is deliberately **not** wired into CI. A hosted runner has no interactive desktop, so a console window may be un-creatable there and every assertion would pass without meaning anything. The script detects that itself: if the control opens no console either, it reports inconclusive rather than claiming a pass. Run it on a real Windows desktop or the local Windows VM (`windows-vm-test`):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File observe-console.ps1 `
+  -Hidden .\hidden.exe -Shown .\shown.exe
+```
 
 ## Running it
 
