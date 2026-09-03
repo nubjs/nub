@@ -45,7 +45,10 @@ fn load_bunfig_file(path: &Path) -> Vec<(String, String)> {
 }
 
 fn parse_bunfig_file(path: &Path) -> Option<Value> {
-    let table = std::fs::read_to_string(path).ok()?.parse::<toml::Table>().ok()?;
+    let table = std::fs::read_to_string(path)
+        .ok()?
+        .parse::<toml::Table>()
+        .ok()?;
     Some(Value::Table(table))
 }
 
