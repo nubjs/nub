@@ -39,7 +39,6 @@ exit: 0
   linker  global-virtual-store
 dependencies:
 + dep@1.0.0
-nub <VERSION> · ✓ installed 1 package in <T>
 WARN ignored build scripts for 1 package(s): dep@file:./dep. Run `nub approve-builds` to review and enable them, or set `strictDepBuilds=true` to fail installs that have unreviewed builds. code=WARN_NUB_IGNORED_BUILD_SCRIPTS count=1 packages=["dep@file:./dep"]
 ```
 
@@ -57,6 +56,41 @@ dependencies:
 
 exit: 0
 
+## install-registry-warm-nointegrity
+
+### run 1: `nub install`
+
+```text
+  linker  global-virtual-store
+dependencies:
++ is-odd@3.0.1
+```
+
+exit: 0
+
+## install-phantom-eject
+
+### run 1: `nub install`
+
+```text
+  linker  global-virtual-store
+dependencies:
++ @firebase/app@0.10.13
++ @firebase/database@1.0.8
+  materialized  @firebase/database@1.0.8
+                run with --loglevel debug to see why
+```
+
+exit: 0
+
+### run 2: `nub probe.cjs`
+
+```text
+@firebase/database: ejected into the project; @firebase/app: linked out to the virtual store; require('@firebase/database') loaded
+```
+
+exit: 0
+
 ## nubx-registry
 
 ### run 1: `nub x cowsay@1.6.0 hi`
@@ -70,8 +104,6 @@ exit: 0
             (__)\       )\/\
                 ||----w |
                 ||     ||
-nub <VERSION>
-✓ resolved 33 · reused 33 in <T>
 dependencies:
 + cowsay@1.6.0
 ```

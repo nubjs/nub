@@ -1993,8 +1993,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 // resolves packages one at a time, so it reads each binding
                 // by its tarball URL on the fly rather than projecting a
                 // batch map (the frozen/warm batch path does the latter).
-                let fetch_no_integrity_dir = crate::state::no_integrity_dir(&fetch_project_root);
-                let fetch_no_integrity_present = fetch_no_integrity_dir.exists();
+                let fetch_no_integrity_dirs =
+                    crate::state::no_integrity_read_dirs(&fetch_project_root);
+                let fetch_no_integrity_present = !fetch_no_integrity_dirs.is_empty();
 
                 while let Some(pkg) = resolved_rx.recv().await {
                     if let Some(ref msg) = pkg.deprecated {
@@ -2132,8 +2133,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     // on demand for this one coordinate.
                     let no_integrity_key = (pkg.integrity.is_none() && fetch_no_integrity_present)
                         .then(|| {
-                            crate::state::read_no_integrity_binding(
-                                &fetch_no_integrity_dir,
+                            crate::state::read_no_integrity_binding_in(
+                                &fetch_no_integrity_dirs,
                                 &fetch_local_client.tarball_url(&pkg_registry_name, &pkg.version),
                             )
                         })
@@ -2253,11 +2254,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                                 .map_err(|e| {
                                     let throttled = e.is_throttle();
                                     (
-                                        miette!(
-                                            "failed to fetch {}@{}: {e}{}",
-                                            pkg.name,
-                                            pkg.version,
-                                            crate::dep_chain::format_chain_for(&pkg.name, &pkg.version)
+                                        fetch::fetch_failure(
+                                            &e,
+                                            format!(
+                                                "failed to fetch {}@{}: {e}{}",
+                                                pkg.name,
+                                                pkg.version,
+                                                crate::dep_chain::format_chain_for(&pkg.name, &pkg.version)
+                                            ),
                                         ),
                                         throttled,
                                     )
@@ -2266,11 +2270,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                             client.fetch_tarball_bytes(&url).await.map(|b| (b, None)).map_err(|e| {
                                 let throttled = e.is_throttle();
                                 (
-                                    miette!(
-                                        "failed to fetch {}@{}: {e}{}",
-                                        pkg.name,
-                                        pkg.version,
-                                        crate::dep_chain::format_chain_for(&pkg.name, &pkg.version)
+                                    fetch::fetch_failure(
+                                        &e,
+                                        format!(
+                                            "failed to fetch {}@{}: {e}{}",
+                                            pkg.name,
+                                            pkg.version,
+                                            crate::dep_chain::format_chain_for(&pkg.name, &pkg.version)
+                                        ),
                                     ),
                                     throttled,
                                 )

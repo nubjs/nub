@@ -532,7 +532,7 @@ impl RegistryClient {
                     );
                     tokio::time::sleep(wait).await;
                 }
-                Err(err) => return Err(Error::Http(err)),
+                Err(err) => return Err(err.into()),
             }
         }
         unreachable!("retry loop exited without returning; max_attempts was {max_attempts}")
@@ -614,7 +614,7 @@ impl RegistryClient {
                     );
                     tokio::time::sleep(wait).await;
                 }
-                Err(err) => return Err(Error::Http(err)),
+                Err(err) => return Err(err.into()),
             }
         }
         unreachable!("retry loop exited without returning; max_attempts was {max_attempts}")

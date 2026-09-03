@@ -300,15 +300,48 @@ fn is_embedder_default_store_dir(resolved: &std::path::Path, cwd: &std::path::Pa
         .is_some_and(|default| default == resolved)
 }
 
-/// The store's `v1` directory for `cwd` — the parent of the CAS root
-/// [`open_store`] uses, so store-adjacent state (the no-integrity bindings)
-/// follows a configured `storeDir` AND the project-local fallback.
-pub(crate) fn store_v1_dir(cwd: &std::path::Path) -> std::path::PathBuf {
-    let files = store_roots(cwd).files;
+/// The store's `v1` directories for `cwd`: `primary` is the parent of the CAS
+/// root [`open_store`] writes, and `read_fallback` is the read-only global
+/// `v1` still consulted for everything it holds when the default store is not
+/// writable. A tier layered on the store — the no-integrity bindings, nub's
+/// phantom sidecars — reads both, primary first, and writes only the
+/// primary, exactly as the CAS and index do.
+#[derive(Clone, Debug)]
+pub struct StoreV1Dirs {
+    pub primary: std::path::PathBuf,
+    pub read_fallback: Option<std::path::PathBuf>,
+}
+
+pub(crate) fn store_v1_dirs(cwd: &std::path::Path) -> StoreV1Dirs {
+    let roots = store_roots(cwd);
+    StoreV1Dirs {
+        primary: v1_of(roots.files),
+        read_fallback: roots.read_fallback.map(v1_of),
+    }
+}
+
+fn v1_of(files: std::path::PathBuf) -> std::path::PathBuf {
     files
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or(files)
+}
+
+/// The `v1` directory store-adjacent state is WRITTEN to for `cwd`. Reads
+/// that must also see the global store go through [`store_v1_dirs`].
+pub(crate) fn store_v1_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+    store_v1_dirs(cwd).primary
+}
+
+/// [`store_v1_dirs`] anchored the way [`resolved_project_store_dir`] is, for
+/// an embedder's store-adjacent tier. The same fallback decision the engine's
+/// own store handle made, so the embedder's producer and consumer key one
+/// store — and still read through to the global one for warm packages.
+pub fn resolved_project_store_v1_dirs() -> Option<StoreV1Dirs> {
+    let anchor = crate::dirs::workspace_or_project_root()
+        .or_else(|_| crate::dirs::cwd())
+        .ok()?;
+    Some(store_v1_dirs(&anchor))
 }
 
 /// The CAS root when no `storeDir` is configured: `profile_default` (the

@@ -53,6 +53,26 @@ pub fn network_disabled() -> bool {
     std::env::var_os("CODEX_SANDBOX_NETWORK_DISABLED").is_some_and(|v| v == "1")
 }
 
+/// Help for a request the registry client classified as a network deny.
+/// Names the agent sandbox when one is detected — "check auth" is advice an
+/// agent may act on by poking at credentials — and outside one still blames
+/// policy (a firewall, a network namespace), never the registry.
+pub fn network_denied_help() -> String {
+    network_denied_help_for(detect())
+}
+
+/// [`network_denied_help`] with the sandbox injected, for callers that pin it
+/// in tests without touching the environment.
+pub fn network_denied_help_for(sandbox: Option<AgentSandbox>) -> String {
+    match sandbox {
+        Some(sandbox) => format!(
+            "network access is blocked by the {} sandbox — rerun the command outside the sandbox, or use `--offline` to install from what the store already holds",
+            sandbox.label()
+        ),
+        None => "the connection was refused by policy, not by the registry — a sandbox, firewall, or network namespace is blocking it; allow the registry there, or use `--offline` to install from what the store already holds".to_string(),
+    }
+}
+
 /// Whether a transport error is a hard network deny that no retry can fix.
 ///
 /// Always hard: the sandbox said network is off, or the OS refused the socket

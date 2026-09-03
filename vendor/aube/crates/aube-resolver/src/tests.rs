@@ -197,6 +197,44 @@ fn classify_registry_error_prefers_hook_over_http_url() {
 }
 
 #[test]
+fn sandbox_help_fires_only_for_a_classified_network_deny() {
+    use crate::error::format_registry_help_for;
+    use aube_util::agent_sandbox::AgentSandbox;
+
+    let denied =
+        "network access denied: error sending request for url (https://registry.npmjs.org/cowsay)";
+    assert!(matches!(
+        classify_registry_error(denied),
+        RegistryErrorKind::NetworkDenied
+    ));
+    let help = format_registry_help_for("cowsay", denied, Some(AgentSandbox::Codex));
+    assert!(help.contains("blocked by the Codex sandbox"), "{help}");
+    assert!(!help.contains("npm login"), "{help}");
+    // The same deny outside a sandbox still names policy, not the registry.
+    let help = format_registry_help_for("cowsay", denied, None);
+    assert!(help.contains("refused by policy"), "{help}");
+    assert!(help.contains("--offline"), "{help}");
+
+    // Sandbox presence alone changes nothing: an auth failure, an integrity
+    // failure, and a plain transport error keep their own help.
+    for (msg, expected) in [
+        ("fetch https://reg.example: HTTP 401", "check auth"),
+        (
+            "tarball https://x/y.tgz: Integrity mismatch",
+            "integrity check failed",
+        ),
+        (
+            "HTTP error: error sending request for url (https://reg.example/x)",
+            "check auth",
+        ),
+    ] {
+        let help = format_registry_help_for("x", msg, Some(AgentSandbox::ClaudeCode));
+        assert!(help.contains(expected), "{msg}: {help}");
+        assert!(!help.contains("sandbox"), "{msg}: {help}");
+    }
+}
+
+#[test]
 fn unknown_catalog_entry_help_explains_chained_value() {
     // Chained-catalog case: the help path suggests a concrete semver
     // range instead of listing siblings (which would match the user's

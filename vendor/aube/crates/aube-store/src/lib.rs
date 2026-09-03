@@ -607,15 +607,35 @@ impl Store {
         Some(self.file_path_from_hex(&hex_hash))
     }
 
-    /// Get the path to a file in the store by its hex hash.
+    /// Get the path to a file in the store by its hex hash. A READ path: it
+    /// resolves to the read fallback when only that holds the file. Writers
+    /// use [`Self::write_path_from_hex`], which never leaves this store.
     pub fn file_path_from_hex(&self, hex_hash: &str) -> PathBuf {
-        let (shard, rest) = hex_hash.split_at(2);
-        let primary = self.root.join(shard).join(rest);
+        let primary = self.write_path_from_hex(hex_hash);
         if self.read_fallback.is_none() {
             return primary;
         }
+        let (shard, rest) = hex_hash.split_at(2);
         let files_leaf = self.root.file_name().map(PathBuf::from).unwrap_or_default();
         self.read_through(primary, &files_leaf.join(shard).join(rest))
+    }
+
+    /// Where a NEW CAS entry for `hex_hash` is created: always under this
+    /// store's own root. The read fallback is a store this process may not
+    /// write, so no create, temp file, or marker may ever be aimed at it.
+    pub(crate) fn write_path_from_hex(&self, hex_hash: &str) -> PathBuf {
+        let (shard, rest) = hex_hash.split_at(2);
+        self.root.join(shard).join(rest)
+    }
+
+    /// The read fallback's copy of `hex_hash` when it holds exactly `len`
+    /// bytes, so an import can share it instead of duplicating the bytes
+    /// into this store. `None` without a fallback or on a miss.
+    pub(crate) fn fallback_file_with_len(&self, hex_hash: &str, len: u64) -> Option<PathBuf> {
+        let fallback = self.read_fallback.as_ref()?;
+        let (shard, rest) = hex_hash.split_at(2);
+        let candidate = fallback.join(shard).join(rest);
+        cas::cas_file_matches_len(&candidate, len).then_some(candidate)
     }
 }
 
@@ -862,6 +882,107 @@ mod tests {
         std::fs::create_dir_all(local.join(shard)).unwrap();
         std::fs::write(local.join(shard).join(rest), b"new").unwrap();
         assert_eq!(store.file_path_from_hex(hex), local.join(shard).join(rest));
+    }
+
+    #[test]
+    fn import_shares_fallback_content_and_never_writes_toward_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let warm = b"bytes the global store already holds";
+        let seeded = Store::at(global.clone()).import_bytes(warm, false).unwrap();
+        let shard_dir = seeded.store_path.parent().unwrap().to_path_buf();
+        // Lock the global shard the way a sandbox would: any create, temp
+        // file, or marker aimed at it fails, so a write there cannot hide.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shard_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        let shared = store.import_bytes(warm, false).unwrap();
+        assert_eq!(
+            shared.store_path, seeded.store_path,
+            "warm content is shared, not copied"
+        );
+        assert!(
+            !store.write_path_from_hex(&shared.hex_hash).exists(),
+            "no duplicate lands in the local store"
+        );
+        // An executable import of the same content still shares it; the
+        // `-exec` marker is a prune hint, never written toward the fallback.
+        let shared_exec = store.import_bytes(warm, true).unwrap();
+        assert_eq!(shared_exec.store_path, seeded.store_path);
+        assert!(shared_exec.executable);
+        assert!(!local.exists(), "sharing writes nothing at all locally");
+        // New executable content lands in the local store, marker beside it.
+        let fresh = store.import_bytes(b"fresh executable", true).unwrap();
+        assert!(
+            fresh.store_path.starts_with(&local),
+            "{}",
+            fresh.store_path.display()
+        );
+        assert!(PathBuf::from(format!("{}-exec", fresh.store_path.display())).exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shard_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn stale_fallback_index_is_a_miss_left_in_place_and_shadowed_by_a_fresh_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let global_store = Store::at(global.clone());
+        // A global index whose CAS file is gone.
+        let mut stale = PackageIndex::default();
+        stale.insert(
+            "index.js".to_string(),
+            StoredFile {
+                hex_hash: "00ff".to_string(),
+                store_path: global.join("00").join("ff"),
+                executable: false,
+                size: Some(3),
+            },
+        );
+        global_store
+            .save_index("dep", "1.0.0", None, &stale)
+            .unwrap();
+        let global_index = global_store.index_dir().join("dep@1.0.0.json");
+        assert!(global_index.exists());
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        assert!(
+            store.load_index("dep", "1.0.0", None).is_none(),
+            "stale entry is a miss"
+        );
+        assert!(
+            global_index.exists(),
+            "a fallback entry is never deleted on staleness"
+        );
+        assert!(!store.invalidate_cached_index("dep", "1.0.0", None).unwrap());
+        assert!(
+            global_index.exists(),
+            "invalidation touches only the primary"
+        );
+
+        // The re-fetch this miss triggers saves into the local store, which
+        // then shadows the stale copy on every later read.
+        let fresh_file = store.import_bytes(b"abc", false).unwrap();
+        let mut fresh = PackageIndex::default();
+        fresh.insert("index.js".to_string(), fresh_file);
+        store.save_index("dep", "1.0.0", None, &fresh).unwrap();
+        assert!(store.index_dir().join("dep@1.0.0.json").exists());
+        let loaded = store
+            .load_index("dep", "1.0.0", None)
+            .expect("fresh index served");
+        assert!(loaded["index.js"].store_path.starts_with(&local));
+        assert!(store.invalidate_cached_index("dep", "1.0.0", None).unwrap());
+        assert!(global_index.exists());
     }
 
     #[test]

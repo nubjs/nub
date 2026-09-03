@@ -183,7 +183,7 @@ impl RegistryClient {
                     );
                     tokio::time::sleep(wait).await;
                 }
-                Err(err) => return Err(Error::Http(err)),
+                Err(err) => return Err(err.into()),
             }
         }
         // FetchPolicy::retries is `u32`, so `max_attempts =

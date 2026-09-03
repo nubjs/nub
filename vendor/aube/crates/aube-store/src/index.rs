@@ -129,7 +129,12 @@ impl Store {
         let index: PackageIndex = sonic_rs::from_slice(&buf).ok()?;
         if !index_files_match_metadata(&index, verify_files) {
             trace!("cache stale: {name}@{version}");
-            let _ = xx::file::remove_file(&index_path);
+            // A stale entry served by the read fallback is not ours to
+            // delete; the re-fetch this miss triggers saves a fresh index
+            // into this store, which then shadows it.
+            if index_path.starts_with(self.index_dir()) {
+                let _ = xx::file::remove_file(&index_path);
+            }
             return None;
         }
         trace!("cache hit: {name}@{version}");
@@ -145,13 +150,15 @@ impl Store {
     /// `Ok(true)` when an entry was removed; `Ok(false)` when there
     /// was nothing to remove (or the coordinate was invalid). Errors
     /// surface only on real I/O failure, not on the missing-file case.
+    /// Only this store's own entry is touched: a copy in the read
+    /// fallback is left alone and is shadowed by the next `save_index`.
     pub fn invalidate_cached_index(
         &self,
         name: &str,
         version: &str,
         integrity: Option<&str>,
     ) -> Result<bool, Error> {
-        let Some(index_path) = self.index_path(name, version, integrity) else {
+        let Some(index_path) = self.index_write_path(name, version, integrity) else {
             return Ok(false);
         };
         match std::fs::remove_file(&index_path) {
@@ -172,7 +179,7 @@ impl Store {
         integrity: Option<&str>,
         index: &PackageIndex,
     ) -> Result<(), Error> {
-        let index_path = self.index_path(name, version, integrity).ok_or_else(|| {
+        let index_path = self.index_write_path(name, version, integrity).ok_or_else(|| {
             Error::Tar(format!(
                 "refusing to cache: invalid coordinate {name:?}@{version:?} or integrity {integrity:?}"
             ))
@@ -206,6 +213,26 @@ impl Store {
         version: &str,
         integrity: Option<&str>,
     ) -> Option<PathBuf> {
+        let rel = self.index_rel(name, version, integrity)?;
+        let primary = self.index_dir().join(&rel);
+        Some(self.read_through(primary, &PathBuf::from(crate::INDEX_SUBDIR).join(rel)))
+    }
+
+    /// Where `save_index` writes and `invalidate_cached_index` deletes:
+    /// this store's own index dir, never the read fallback's.
+    fn index_write_path(
+        &self,
+        name: &str,
+        version: &str,
+        integrity: Option<&str>,
+    ) -> Option<PathBuf> {
+        Some(
+            self.index_dir()
+                .join(self.index_rel(name, version, integrity)?),
+        )
+    }
+
+    fn index_rel(&self, name: &str, version: &str, integrity: Option<&str>) -> Option<PathBuf> {
         let safe_name = validate_and_encode_name(name)?;
         if !validate_version(version) {
             return None;
@@ -225,7 +252,6 @@ impl Store {
             }
             None => PathBuf::from(filename),
         };
-        let primary = self.index_dir().join(&rel);
-        Some(self.read_through(primary, &PathBuf::from(crate::INDEX_SUBDIR).join(rel)))
+        Some(rel)
     }
 }
