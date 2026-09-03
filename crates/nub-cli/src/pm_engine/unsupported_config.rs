@@ -522,7 +522,7 @@ fn bunfig_install_bool(root: &Path, key: &str) -> Option<bool> {
     let mut value = None;
     for path in bunfig_paths(root) {
         if let Some(raw) = read_config_text(&path)
-            && let Ok(parsed) = raw.parse::<toml::Value>()
+            && let Ok(parsed) = raw.parse::<toml::Table>()
             && let Some(b) = parsed
                 .get("install")
                 .and_then(toml::Value::as_table)
