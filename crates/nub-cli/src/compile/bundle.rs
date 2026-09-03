@@ -48,7 +48,7 @@ use rolldown::plugin::{
     HookRenderChunkArgs, HookRenderChunkOutput, HookRenderChunkReturn, HookResolveIdArgs,
     HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs, HookTransformOutput,
     HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, PluginContext,
-    SharedLoadPluginContext, SharedTransformPluginContext,
+    PluginContextResolveOptions, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
@@ -1822,6 +1822,7 @@ impl Plugin for CompilePreamble {
     ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
         let root = self.has_root(args.specifier);
         let specifier = args.specifier.to_string();
+        let kind = args.kind;
         let prelude_path = self.runtime_dir.join("compile-preamble.mjs");
         let private_importers = Arc::clone(&self.private_importers);
         let private_import = args.importer.is_some_and(|importer| {
@@ -1850,8 +1851,16 @@ impl Plugin for CompilePreamble {
                 .lock()
                 .map_err(|_| anyhow!("the compile-prelude graph was poisoned by an earlier panic"))?
                 .insert(importer.clone());
+            // The edge's OWN kind, not the default. Re-resolving a `require()`
+            // as an import picks the `import` branch of a conditional `exports`
+            // map, which can be a different file — and it also fabricates an
+            // import edge for the metafile, which reports what the resolver saw.
+            let options = PluginContextResolveOptions {
+                import_kind: kind,
+                ..Default::default()
+            };
             let resolved = ctx
-                .resolve(&specifier, Some(&importer), None)
+                .resolve(&specifier, Some(&importer), Some(options))
                 .await
                 .context("resolving a compile-prelude dependency")?
                 .map_err(|err| {
@@ -6394,6 +6403,58 @@ mod tests {
             vec!["import-statement", "require-call"],
             "both source edges to the same target must survive, with their own kinds"
         );
+    }
+
+    /// A plugin's own `ctx.resolve` must not invent an edge kind.
+    ///
+    /// `CompilePreamble` re-enters the resolver to resolve its private graph from
+    /// the runtime directory. Passing no options there defaulted the import kind to
+    /// `Import`, and because the watcher sits ahead of every resolver it recorded
+    /// that fabricated edge alongside the real one — so each `require()` in nub's
+    /// own CJS runtime files was reported twice, once as an import statement.
+    ///
+    /// The fixture authors no `require()` at all, so no target in the whole graph
+    /// may carry two different kinds. It also covers the resolution itself, which
+    /// is the half that outlives the report: re-resolving a `require()` as an
+    /// import takes the `import` branch of a conditional `exports` map.
+    #[test]
+    fn a_plugins_internal_resolve_does_not_fabricate_an_edge_kind() {
+        let files: &[(&str, &str)] = &[("entry.mjs", "export const A = 1;\n")];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_compile_graph_with("metafile-nested-resolve", "entry.mjs", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        // The private prelude graph has to be in the report, or the assertion
+        // below passes by covering nothing.
+        assert!(
+            report
+                .inputs
+                .values()
+                .any(|input| input.imports.iter().any(|i| i.kind == "require-call")),
+            "the prelude's CommonJS runtime files should be in the graph"
+        );
+
+        for (path, input) in &report.inputs {
+            for edge in &input.imports {
+                let kinds: BTreeSet<&str> = input
+                    .imports
+                    .iter()
+                    .filter(|other| other.path == edge.path)
+                    .map(|other| other.kind)
+                    .collect();
+                assert_eq!(
+                    kinds.len(),
+                    1,
+                    "{path} reports {} with {kinds:?}, but the fixture writes no \
+                     module that both imports and requires one target",
+                    edge.path
+                );
+            }
+        }
     }
 
     /// A resolver plugin that claims an edge returns before the ones behind it are
