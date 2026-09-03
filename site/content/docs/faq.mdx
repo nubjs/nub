@@ -153,7 +153,7 @@ Yes — `nub script.ts` runs TypeScript directly, with the full TS surface (not 
 
 ## Why not just use Node's built-in TypeScript support?
 
-Node 22.18+ runs `.ts` files by default, but only strips types. Anything beyond erasable annotations fails:
+Node 22.18+ runs `.ts` files by default, but only strips types. Anything beyond erasable annotations is rejected or ignored:
 
 - `enum`, `namespace`, and parameter properties → syntax errors (Node 26 even removed `--experimental-transform-types`, the flag that used to handle them)
 - JSX and `emitDecoratorMetadata` → unsupported

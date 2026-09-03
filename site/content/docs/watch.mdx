@@ -67,7 +67,7 @@ Nub's watch mode adds the banner, the preserve-output default, and the off-graph
 node --watch script.js
 ```
 
-Nub's PATH shim only affects descendants of an active `nub` call.
+Nub's per-invocation PATH shim only affects descendants of an active `nub` call. A `node` installed by [`nub node shim`](/docs/node#nub-node-shim) resolves the pinned version and adds nothing else, so `node --watch` stays vanilla there too.
 
 <Callout>
 Read the [full docs](https://nodejs.org/api/cli.html#--watch) for Node's `--watch` flag on nodejs.org.
