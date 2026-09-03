@@ -205,7 +205,6 @@ pub fn ensure_model(spec: Option<&str>) -> Result<PathBuf> {
 struct HfFile {
     path: String,
     sha256: Option<String>,
-    size: u64,
 }
 
 fn hf_tree(repo: &str) -> Result<Vec<HfFile>> {
@@ -221,13 +220,12 @@ fn hf_tree(repo: &str) -> Result<Vec<HfFile>> {
         .iter()
         .filter_map(|r| {
             let path = r.get("path")?.as_str()?.to_string();
-            let size = r.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
             let sha256 = r
                 .get("lfs")
                 .and_then(|l| l.get("oid"))
                 .and_then(|o| o.as_str())
                 .map(str::to_string);
-            Some(HfFile { path, sha256, size })
+            Some(HfFile { path, sha256 })
         })
         .collect())
 }
