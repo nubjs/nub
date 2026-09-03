@@ -38,6 +38,8 @@ writeFileSync(
         env: "node env-echo.cjs",
         // Shadowed by a directory of the same name, created below.
         build: "node -e \"console.log('script')\"",
+        // Shadowed by an installed bin of the same name, created below.
+        shadowed: "node -e \"console.log('script')\"",
       },
     },
     null,
@@ -56,6 +58,22 @@ writeFileSync(
 }));\n`,
 );
 mkdirSync(join(fixture, "build"), { recursive: true });
+
+// A stand-in for an installed dependency's bin. Windows runs the `.cmd` shim
+// rather than the extensionless file — npm writes both, and the extensionless
+// one is a Bash stub Windows cannot execute — so the fixture writes whichever
+// form this platform's shell will actually resolve, exactly as npm would.
+const binDir = join(fixture, "node_modules", ".bin");
+mkdirSync(binDir, { recursive: true });
+function installBin(name, body) {
+  if (process.platform === "win32") {
+    writeFileSync(join(binDir, `${name}.cmd`), `@echo off\r\nnode -e "${body}" %*\r\n`);
+  } else {
+    writeFileSync(join(binDir, name), `#!/usr/bin/env node\n${body}\n`, { mode: 0o755 });
+  }
+}
+installBin("faketool", "console.log(JSON.stringify(process.argv.slice(2)))");
+installBin("shadowed", "console.log('bin')");
 
 // stdout only, last non-empty line: the preload writes an addon warning to
 // stderr whenever no platform package is installed, which is the normal state
@@ -88,6 +106,19 @@ test("a script wins over a directory of the same name", () => {
   // script. `build`, `dist`, `test` and `docs` are ordinary directory names and
   // ordinary script names at once, so this is the common case, not a corner.
   assert.equal(run("build"), "script");
+});
+
+test("an installed bin runs, and forwarded arguments reach it as literals", () => {
+  // The ad-hoc bin run is the thing a standalone install cannot otherwise do
+  // without editing package.json first. It executes through the shell with
+  // node_modules/.bin on PATH, so this also covers the Windows shim lookup.
+  assert.deepEqual(JSON.parse(run("faketool", "--", "a b", "x;y")), ["a b", "x;y"]);
+});
+
+test("a script wins over an installed bin of the same name", () => {
+  // npm's precedence: a script usually wraps the bin it is named after, so
+  // resolving to the bin would silently skip whatever the script adds.
+  assert.equal(run("shadowed"), "script");
 });
 
 test("a script receives the manifest-derived npm environment", () => {

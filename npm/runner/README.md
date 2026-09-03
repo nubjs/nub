@@ -1,6 +1,6 @@
 # @nubjs/runner
 
-Run TypeScript on Node.js, from the [Nub](https://nubjs.com) project. Install it, and `nubr` runs a TypeScript file or a `package.json` script — powered by the same native oxc-based transform the Nub CLI uses, in a package with no package manager, no registry client and no network code in it.
+Run TypeScript on Node.js, from the [Nub](https://nubjs.com) project. Install it, and `nubr` runs a TypeScript file, a `package.json` script, or an installed bin — powered by the same native oxc-based transform the Nub CLI uses, in a package with no package manager, no registry client and no network code in it.
 
 ```sh
 npm install --save-dev @nubjs/runner
@@ -23,7 +23,18 @@ nubr dev              # runs the "dev" script
 nubr build -- --watch # extra arguments reach the script
 ```
 
-A file that exists wins over a script of the same name. Scripts run through the same shell npm uses, with `node_modules/.bin` on the path and `pre`/`post` hooks honored, and every Node process a script starts inherits the TypeScript support.
+Scripts run through the same shell npm uses, with `node_modules/.bin` on the path and `pre`/`post` hooks honored, and every Node process a script starts inherits the TypeScript support.
+
+## Running installed bins
+
+A name that is neither a file nor a script resolves against `node_modules/.bin`:
+
+```sh
+nubr vitest run
+nubr tsc --noEmit
+```
+
+Nothing is fetched from the registry — the tool has to be installed already. Names resolve most-specific-first: a file, then a script, then a bin, so a script wins over the bin it is usually named after, matching npm.
 
 ## As a Node preload
 

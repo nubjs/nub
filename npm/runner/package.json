@@ -1,7 +1,7 @@
 {
   "name": "@nubjs/runner",
   "version": "0.8.2",
-  "description": "Run TypeScript on Node.js — TypeScript, JSX, tsconfig paths, and data-format imports through a native transform, as the `nubr` command or as a preload the way tsx and ts-node are registered",
+  "description": "Run TypeScript on Node.js — TypeScript, JSX, tsconfig paths, and data-format imports through a native transform, as the `nubr` runner for files, scripts and installed bins, or as a preload the way tsx and ts-node are registered",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
   "homepage": "https://nubjs.com",

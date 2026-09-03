@@ -1,13 +1,18 @@
 #!/usr/bin/env node
-// `nubr` — the standalone runner's command. Two jobs behind one name, matching
-// what `aubr` (→ `aube run`) and `vpr` (→ `vp run`) already mean, plus the file
-// run that `nub <file>` covers in the full CLI:
+// `nubr` — the standalone runner's command. One name over the three things the
+// full CLI splits across `nub <file>`, `nub run` and `nubx`, because a package
+// that ships a single bin has to unify them:
 //
-//   nubr app.ts        a FILE that exists  → run it with the hooks armed
-//   nubr build         a package.json key  → run that script
+//   nubr app.ts        a FILE that exists        → run it with the hooks armed
+//   nubr build         a package.json key        → run that script
+//   nubr vitest        a node_modules/.bin entry → run that bin
 //
-// File beats script when both could match, because a path is the more specific
-// intent and a script named after an existing file is vanishingly rare.
+// Resolution is most-specific-first, and each tier is rarer than the one above
+// it. A path beats a script because a script named after an existing file is
+// vanishingly rare; a script beats a bin because a script usually WRAPS the bin
+// it is named after, which is npm's own precedence. A directory comes last, so
+// that `build/` existing cannot shadow the `build` script — it did, and it died
+// inside Node's resolver.
 //
 // A file run RE-EXECS Node with `--import` rather than arming the hooks in this
 // process and calling `Module.runMain`. In-process is ~30 ms cheaper and was the
@@ -40,6 +45,7 @@ const USAGE = `nubr — run TypeScript on Node
 
   nubr <file>              run a file
   nubr <script> [args...]  run a script from package.json
+  nubr <bin> [args...]     run an installed bin from node_modules/.bin
   nubr [node flags] <file> run a file under Node flags (--inspect, ...)
 
   -h, --help     show this message
@@ -150,6 +156,52 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
   step(0);
 }
 
+// A bin from the `node_modules/.bin` chain, run ad hoc. Deliberately executed
+// the same way a script body is — through the shell, with the same environment
+// — rather than spawned directly: `childEnv` already puts every
+// `node_modules/.bin` on PATH, so the shell performs the lookup, including
+// PATHEXT on Windows, where the runnable entry is a `.cmd`/`.exe` shim and the
+// extensionless file npm also drops is a Bash stub Windows cannot execute.
+// Reusing the shell path means the argument escaping is the same code the
+// three-OS leg already exercises, instead of a second spawn implementation.
+function runBin(name, rawExtraArgs, manifest, cwd) {
+  const extraArgs = rawExtraArgs[0] === "--" ? rawExtraArgs.slice(1) : rawExtraArgs;
+  const shell = effectiveShell();
+  const child = spawn(spliceArgs(name, extraArgs, shell), {
+    shell,
+    cwd,
+    stdio: "inherit",
+    // No npm_lifecycle_* here: nothing in package.json declared this run, so
+    // reporting a lifecycle event would be a lie a tool could branch on.
+    env: { ...childEnv(cwd, manifest ?? {}, path.join(cwd, "package.json")), npm_command: "exec" },
+  });
+  child.on("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exit(code ?? 1);
+  });
+  child.on("error", (err) => {
+    process.stderr.write(`nubr: could not run "${name}": ${err.message}\n`);
+    process.exit(1);
+  });
+}
+
+// Windows runs the shim, never the extensionless Bash stub npm drops beside it;
+// an empty extension covers the POSIX symlink. Mirrors the resolution the full
+// CLI's `nubx` performs.
+const BIN_EXTS = process.platform === "win32" ? [".cmd", ".exe", ".bat", ".ps1"] : [""];
+
+function findBin(name, cwd) {
+  // A name with a separator is a path, not a bin — it was already given its
+  // chance as a file, and letting it match here would resolve `./x` off PATH.
+  if (name.includes("/") || name.includes("\\")) return null;
+  for (const dir of binPath(cwd)) {
+    for (const ext of BIN_EXTS) {
+      if (statKind(path.join(dir, name + ext)) === "file") return name;
+    }
+  }
+  return null;
+}
+
 // `args` is already a Node command line: either [file, ...rest] that we
 // classified ourselves, or the caller's verbatim argv when it opened with a
 // flag. Only the preload is inserted.
@@ -224,6 +276,14 @@ async function main() {
     return;
   }
 
+  // A dependency's bin, run ad hoc — the thing a standalone install otherwise
+  // cannot do without editing package.json first. A script of the same name
+  // still wins, matching npm, where a script shadows the bin it usually wraps.
+  if (findBin(target, cwd)) {
+    runBin(target, rest, manifest, cwd);
+    return;
+  }
+
   if (kind === "dir") {
     runFile([asPath, ...rest]);
     return;
@@ -231,7 +291,7 @@ async function main() {
 
   const names = Object.keys(manifest?.scripts ?? {});
   process.stderr.write(
-    `nubr: no file at "${target}" and no such script in package.json\n` +
+    `nubr: "${target}" is not a file, a package.json script, or an installed bin\n` +
       (names.length ? `  scripts: ${names.join(", ")}\n` : ""),
   );
   process.exit(1);

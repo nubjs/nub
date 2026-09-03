@@ -28,7 +28,21 @@ nubr dev              # runs the "dev" script
 nubr build -- --watch # extra arguments reach the script
 ```
 
-A file that exists wins over a script of the same name. Scripts run through the same shell npm uses, with `node_modules/.bin` on the path and `pre`/`post` hooks honored, and every Node process a script starts inherits the TypeScript support.
+Scripts run through the same shell npm uses, with `node_modules/.bin` on the path and `pre`/`post` hooks honored, and every Node process a script starts inherits the TypeScript support.
+
+## Running installed bins
+
+A name that is neither a file nor a script resolves against `node_modules/.bin`, so an installed tool runs with TypeScript support and no script to wrap it:
+
+```sh
+nubr vitest run
+nubr tsc --noEmit
+nubr prettier --write .
+```
+
+The bin gets the same environment a script does. Nothing is fetched from the registry — the tool has to be installed already.
+
+Names resolve most-specific-first: a file, then a script, then a bin. A script wins over a bin of the same name, matching npm, because a script usually wraps the bin it is named after.
 
 ## As a Node preload
 
