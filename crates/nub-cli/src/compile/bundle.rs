@@ -2679,13 +2679,14 @@ fn is_module_extension(path: &Path) -> bool {
 /// addresses is the absence of a build-time signal about that.
 fn warn_module_data_assets(sources: &[PathBuf]) {
     for source in sources {
-        eprintln!(
-            "note: {} is embedded as a data asset, not as code.\n\
-             \x20\x20It ships exactly as written — never transpiled — and its own imports would\n\
-             \x20\x20resolve against the extracted app dir, which has no node_modules. Reading\n\
-             \x20\x20its text works; executing it does not. A worker entry belongs in\n\
-             \x20\x20new Worker(new URL(…)), which is bundled as a real chunk instead.",
-            source.display()
+        super::warn(
+            &format!("{} ships as a data asset, not as code", source.display()),
+            &[
+                "It ships exactly as written — never transpiled — and its own imports would",
+                "resolve against the extracted app dir, which has no node_modules. Reading",
+                "its text works; executing it does not. A worker entry belongs in",
+                "new Worker(new URL(…)), which is bundled as a real chunk instead.",
+            ],
         );
     }
 }
@@ -4931,14 +4932,14 @@ fn report_unbundled_packages(packages: &[String]) {
     if unique.is_empty() {
         return;
     }
-    eprintln!(
+    super::note(&format!(
         "Shipping {} package{} unbundled, in {} own installed layout:",
         unique.len(),
         if unique.len() == 1 { "" } else { "s" },
         if unique.len() == 1 { "its" } else { "their" }
-    );
+    ));
     for package in unique {
-        eprintln!("  {package}");
+        super::note(&format!("  {package}"));
     }
 }
 
@@ -4964,13 +4965,13 @@ fn warn_deferred_imports(sites: &[&DynamicSite]) {
         } else {
             format!(" — resolves to {}", quoted_list(&site.resolves_to))
         };
-        eprintln!(
+        super::note(&format!(
             "note: {}:{}:{} {} is resolved where the binary runs, not at build time{resolved}",
             site.module, site.line, site.column, site.snippet
-        );
+        ));
     }
     if let Some(rest) = sites.len().checked_sub(MAX).filter(|n| *n > 0) {
-        eprintln!("note: … and {rest} more deferred import site(s)");
+        super::note(&format!("note: … and {rest} more deferred import site(s)"));
     }
 }
 

@@ -1131,13 +1131,16 @@ fn plan_closure(
 /// correct builds or letting the artifact die at `dlopen` on a user's machine.
 fn warn_dropped_edges(addon: &Path, dropped: &[DroppedEdge]) {
     for edge in dropped {
-        eprintln!(
-            "note: {} optionally depends on {}, which is not installed, so nothing\n\
-             \x20\x20from it is embedded. If this addon loads a companion shared library from\n\
-             \x20\x20that package, the compiled binary will fail at run time: {}",
-            edge.owner,
-            edge.name,
-            addon.display()
+        super::warn(
+            &format!(
+                "{} optionally depends on {}, which is not installed",
+                edge.owner, edge.name
+            ),
+            &[
+                "Nothing from it is embedded. If this addon loads a companion shared",
+                "library from that package, the compiled binary will fail at run time:",
+                &addon.display().to_string(),
+            ],
         );
     }
 }
