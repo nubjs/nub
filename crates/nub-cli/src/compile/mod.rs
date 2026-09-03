@@ -1515,7 +1515,7 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
     }
 
     if needs_resign {
-        eprintln!("Stripped + ad-hoc re-signed the embedded Node");
+        eprintln!("Signing embedded Node.js");
     } else {
         eprintln!("Stripped the embedded Node");
     }
