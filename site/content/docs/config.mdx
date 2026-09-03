@@ -72,7 +72,7 @@ The global file is read leniently, because it applies to every project on your m
 
 ### Relative paths
 
-Three fields take paths: [`preload`](#preload), [`envFile`](#envfile), and [`tsconfig`](#tsconfig). A relative path resolves against the directory of the file that set it — not your working directory.
+Four fields take paths: [`preload`](#preload), [`envFile`](#envfile), [`tsconfig`](#tsconfig), and [`nodeExecutable`](#nodeexecutable) in its path form. A relative path resolves against the directory of the file that set it — not your working directory.
 
 For a project `nub.jsonc` that is the directory the file sits in — in a monorepo, wherever the nearest one lives, which need not be the package you are running from. For the global file it is your config directory, which is where the rule starts to surprise people.
 
@@ -222,6 +222,33 @@ Use plain Node behavior while keeping Nub's Node version selection.
 ```
 
 This is the project-wide form of the `--node` escape hatch. Nub does not load its runtime hooks, environment files, preloads, custom loaders, or conditions.
+
+### `nodeExecutable`
+
+Name the Node binary to run, instead of letting Nub resolve a version.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  // a command in $(...) runs, and its output is the path
+  "nodeExecutable": "$(mise which node)"
+}
+```
+
+The command runs through the platform shell (`sh -c`, or `cmd /C` on Windows) in your working directory, so a directory-aware tool answers for the project you are actually in — mise, asdf, fnm, Volta, or a wrapper script of your own. A non-zero exit stops the run and reports that tool's error, rather than falling back to a download.
+
+To ignore the project's pins and take whatever Node comes first on `PATH`, ask the shell for it — `"$(which node)"`, or `"$(where node)"` on Windows. Only the first line of output is read, so a tool that lists every match still names one binary.
+
+A path works too, absolute or relative to the file:
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "nodeExecutable": "./tools/node"
+}
+```
+
+Either form bypasses the [pin sources](/docs/node#which-version-is-pinned), Nub's cache, and any download. The binary's version is still detected, so the [floor and tier selection](/docs/runtime#supported-versions-and-tiers) still apply, and Nub warns when that version contradicts a pin the project also declares. The `NODE_EXECUTABLE` environment variable is the per-shell form of the same setting and outranks this field.
 
 ### `envFile`
 
@@ -718,4 +745,24 @@ nub config get --local nodeCompat   # project file only
 nub config get preload --json       # ["./setup.ts","tsx/esm"]
 ```
 
-A key that is not a field of this file reads and writes `.npmrc`.
+A key that is not a field of this file reads and writes `.npmrc`, so the value stays visible to npm, Yarn, and pnpm. Nub picks whichever file will read the key back, so under a pnpm 11 project the settings pnpm moved out of `.npmrc` are written to `pnpm-workspace.yaml` instead. Registry and auth keys stay in `.npmrc` on every project.
+
+Nub refuses a key it would never read back rather than writing a line nothing consults, and names the surface that works instead. Two kinds hit this: a setting only the underlying engine's own CLI acts on, and a setting `.npmrc` has no spelling for.
+
+```text
+$ nub config set updateNotifier false
+Error: nub config set updateNotifier: `updateNotifier` is not a nub setting
+  nub does not check for its own updates while running a command. Run `nub upgrade` when you want a new version.
+```
+
+Those keys are absent from `nub config list --all` too, so the listing and the write agree on what this project can set.
+
+A field of this file also wins over the `.npmrc` spelling of the same setting. When the project sets one, writing the other spelling is refused rather than left to look like it worked:
+
+```text
+$ nub config set nodeLinker isolated
+Error: nub config set nodeLinker: this project sets `install.linker` in nub.jsonc, which outranks .npmrc, so the value written here would never be read
+  run `nub config set install.linker <value>` instead, or remove `install.linker` from nub.jsonc
+```
+
+This tracks what the project actually sets, not the key alone. `install.linker: "hoisted"` decides the linker and nothing else, so `hoist-pattern` still reads from `.npmrc`; giving `linker` a `hoist` list decides that too, and then it does not.

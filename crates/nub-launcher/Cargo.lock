@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "nub-core"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "camino",

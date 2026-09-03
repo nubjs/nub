@@ -18,7 +18,7 @@ metadata:
 
 # Cutting a Nub release
 
-A Nub release is tag-triggered and fully automated. Pushing a `v*` tag fires `.github/workflows/release.yml`, which builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates an immutable prerelease with 32 assets, publishes 10 npm packages via OIDC trusted publishing, and presents the stable GitHub Release. The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, push the tag, write good notes, close the loop on issues/PRs.
+A Nub release is tag-triggered and fully automated. Pushing a `v*` tag fires `.github/workflows/release.yml`, which builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates an immutable prerelease with 32 assets, publishes 10 npm packages via OIDC trusted publishing, and presents the stable GitHub Release — claiming the repository's **Latest** marker (`make_latest: "true"` on the promote step) and then asserting `releases/latest` actually serves the new tag. That marker IS the upgrade channel: `nub upgrade`, `install.sh`, and `install.ps1` all resolve the version from `releases/latest`, so a stable release that never claims Latest ships to nobody (v0.8.0–v0.8.2 sat unserved behind v0.7.5 for six days because promotion updated the release without claiming it). The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, push the tag, write good notes, close the loop on issues/PRs.
 
 **Guardrails (read first, non-negotiable):**
 
@@ -198,12 +198,12 @@ gh issue list --repo nubjs/nub --state closed --search "closed:<PREV-date>..<cut
 
 For each issue/PR in the union, check whether it ALREADY carries the comment before posting (`gh issue view <n> --repo nubjs/nub --json comments --jq '[.comments[].body|select(test("Shipped in v<ver>"))]|length'`) — skip a `NOT_PLANNED` issue with no shipped fix. **Re-run this pass for any issue closed AFTER the cut** — a late-closing issue does not appear in the first sweep.
 
-Then comment (short, factual — what fixed it + the version and release link, no fluff):
+Then comment (extremely concise — the version and release link, no recap of what was done or how; add a brief thanks when the reporter or PR author is external):
 
 ```bash
 REL="https://github.com/nubjs/nub/releases/tag/v<ver>"
 gh issue comment <n> --body "Fixed in v<ver> (now published): $REL"
-gh pr comment <n>    --body "Shipped in v<ver>: $REL"
+gh pr comment <n>    --body "Shipped in v<ver>: $REL — thanks for the contribution."
 ```
 
 Hit **every** issue and PR the mechanical union above surfaces — not just the headline fixes. This is non-optional; do not skip an issue because it was "minor," and do not fall back to the release thread's targeted-fix list as the source of truth (it under-counts). Do not comment on issues unrelated to the release.
@@ -213,6 +213,9 @@ Hit **every** issue and PR the mechanical union above surfaces — not just the 
 Confirm the automated publish actually landed:
 
 ```bash
+gh api repos/nubjs/nub/releases/latest --jq .tag_name   # MUST print v<ver> — this endpoint IS the
+                                             # upgrade channel (nub upgrade + both installers);
+                                             # anything else means users are served an old release
 npm view @nubjs/nub@<ver> version            # the root package is on the registry
 npm view @nubjs/nub@<ver> dist.tarball        # sanity: published artifact exists
 gh release view v<ver> --json assets --jq '.assets[].name' | sort
@@ -251,7 +254,7 @@ gh release view v<ver> --json assets --jq '.assets[].name' | sort
 # nub-launcher-win32-x64.exe.sha256
 ```
 
-A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the stable GitHub Release present, and all 32 assets attached. CI's `stable-immutable-release` job asserts the 32 assets before npm can publish, `github-release` promotes that same release after npm succeeds, and `test-install` smokes the published package. This step confirms that the workflow reached green.
+A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the stable GitHub Release present and marked **Latest**, and all 32 assets attached. CI's `stable-immutable-release` job asserts the 32 assets before npm can publish, `github-release` promotes that same release after npm succeeds, and `test-install` smokes the published package. This step confirms that the workflow reached green.
 
 The 8 `nub-launcher-*` assets are what `nub compile --platform <foreign>` fetches to cross-compile, so a release missing one silently disables cross-compiling to that platform for everyone on that version.
 
@@ -268,7 +271,7 @@ brew update && brew install nubjs/tap/nub && nub --version && nubx --help | head
 docker run --rm homebrew/brew brew install nubjs/tap/nub
 ```
 
-A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present, all 32 assets attached, and the tap formula bumped to `<ver>` and installable.
+A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present and marked **Latest**, all 32 assets attached, and the tap formula bumped to `<ver>` and installable.
 
 **If CI failed partway:** `publish-npm` and `github-release` are split + idempotent on purpose — re-run the failed job from the Actions UI (npm publish skips already-published packages; the release job re-uploads only missing assets). Never re-cut a version for a flaky asset upload. `bump-homebrew-tap` is re-runnable too, and failing it is the safe outcome: the tap keeps serving the previous version rather than a broken formula, so fix the generator on `main` and re-run the job — never hand-edit the tap as the fix, since the next release regenerates it.
 
@@ -286,6 +289,6 @@ A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-
 | Blog | `site/content/blog/nub-<x>-<y>-<z>.mdx` — back-dated to `publishedAt` (direct to `main`) |
 | Tap | automatic via `bump-homebrew-tap`; verify with `gh api repos/nubjs/homebrew-tap/contents/Formula/nub.rb --jq .content \| base64 -d \| head -5` |
 | Loop | `gh issue comment <n> --body "Fixed in v<ver>: <release URL>"` (every closed issue + merged PR) |
-| Verify | `npm view @nubjs/nub@<ver> version` · `gh release view v<ver> --json assets` |
+| Verify | `gh api repos/nubjs/nub/releases/latest --jq .tag_name` (= `v<ver>`) · `npm view @nubjs/nub@<ver> version` · `gh release view v<ver> --json assets` |
 
 Invoked via the Skill tool once a release thread's targeted fixes are all landed on `main` and CI-green.

@@ -412,7 +412,9 @@ fn bundle_inner(
             .with_options(options)
             .with_plugins(plugins)
             .build()
-            .map_err(|e| anyhow!("rolldown init:\n{}", render_diagnostics(&e)))?;
+            // Not "rolldown init" — a bad `--define` key lands here, and the
+            // vendored bundler's name is not a thing the user can act on.
+            .map_err(|e| anyhow!("preparing the bundler:\n{}", render_diagnostics(&e)))?;
         bundler
             .generate()
             .await
@@ -4774,6 +4776,169 @@ mod tests {
             native_target: None,
             target_node: None,
         }
+    }
+
+    /// Whether the bundle emits `value` as a string literal. Quote-agnostic on
+    /// purpose: the source may write `'x'` and the emitted chunk `"x"`, and which
+    /// quote the bundler chose is never what these tests are asserting.
+    fn emits_literal(code: &str, value: &str) -> bool {
+        code.contains(&format!("\"{value}\"")) || code.contains(&format!("'{value}'"))
+    }
+
+    /// Bundle an entry that imports a package, with that package laid out under a
+    /// real `node_modules` so resolution — `exports` conditions included — runs for
+    /// real rather than through a stub.
+    fn bundle_with_package(
+        entry_src: &str,
+        pkg_name: &str,
+        pkg_json: &str,
+        files: &[(&str, &str)],
+        o: &BundleOptions,
+    ) -> String {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nub-bundle-pkg-{}-{seq}", std::process::id()));
+        let pkg = dir.join("node_modules").join(pkg_name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), pkg_json).unwrap();
+        for (name, body) in files {
+            std::fs::write(pkg.join(name), body).unwrap();
+        }
+        // The project's own manifest, without which the entry has no package
+        // boundary and the dependency resolves to nothing — verified against the
+        // real binary, which resolves the same fixture correctly once it is here.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{ "name": "fixture", "type": "module" }"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("entry.ts"), entry_src).unwrap();
+        let res = bundle(&dir.join("entry.ts"), o).expect("bundle succeeds");
+        // Every chunk, not just the entry: a package's code routinely lands in a
+        // split chunk, and which chunk it lands in is not what these tests are about.
+        let code = emitted_chunk_code(&res);
+        let _ = std::fs::remove_dir_all(&dir);
+        code
+    }
+
+    /// `--conditions` claims to ADD to the default condition set rather than
+    /// replace it, which is a claim about the vendored resolver's behavior, not
+    /// nub's. Nothing pinned it, so a resolver bump could silently turn an
+    /// additive flag into a replacing one and quietly change which `exports`
+    /// branch every compiled binary resolves.
+    ///
+    /// Both halves are asserted deliberately: the custom branch is selected when
+    /// asked for, and `import` still resolves when it is — the second is what
+    /// catches "replaced" masquerading as "added".
+    #[test]
+    fn a_custom_condition_is_added_to_the_defaults_not_substituted_for_them() {
+        const PKG: &str = r#"{
+            "name": "conditional",
+            "exports": {
+                ".": { "custom": "./custom.js", "import": "./import.js" },
+                "./plain": { "import": "./plain.js" }
+            }
+        }"#;
+        const FILES: &[(&str, &str)] = &[
+            ("custom.js", "export const WHICH = 'custom';\n"),
+            ("import.js", "export const WHICH = 'import';\n"),
+            ("plain.js", "export const PLAIN = 'plain';\n"),
+        ];
+        const SRC: &str = "import { WHICH } from 'conditional';\n\
+                           import { PLAIN } from 'conditional/plain';\n\
+                           globalThis.OUT = WHICH + PLAIN;\n";
+
+        let mut with = opts();
+        with.minify = false;
+        with.conditions = vec!["custom".to_string()];
+        let selected = bundle_with_package(SRC, "conditional", PKG, FILES, &with);
+        assert!(
+            emits_literal(&selected, "custom"),
+            "--conditions custom must select the custom branch; got:\n{selected}"
+        );
+        assert!(
+            emits_literal(&selected, "plain"),
+            "the default `import` condition must still resolve — a custom condition \
+             ADDS to the defaults, and a subpath with no custom branch proves it was \
+             not substituted for them; got:\n{selected}"
+        );
+
+        // Control: without the flag the same package resolves the other way, so
+        // the assertion above is about the flag and not about the fixture.
+        let mut without = opts();
+        without.minify = false;
+        let default = bundle_with_package(SRC, "conditional", PKG, FILES, &without);
+        assert!(
+            emits_literal(&default, "import"),
+            "without --conditions the import branch must win; got:\n{default}"
+        );
+    }
+
+    /// `--sourcemap-exclude-sources` exists so a shipped map does not carry the
+    /// program's own source text. Nothing asserted it, and the flag is exactly the
+    /// kind that can silently no-op.
+    #[test]
+    fn excluding_sources_drops_the_original_text_from_the_map() {
+        const SRC: &str = "export const MARKER_FROM_SOURCE = 41 + 1;\n\
+                           globalThis.OUT = MARKER_FROM_SOURCE;\n";
+
+        let mut included = opts();
+        included.minify = false;
+        included.sourcemap = SourcemapMode::Inline;
+        included.sources_content = true;
+        let with_sources = bundle_fixture(SRC, &included);
+
+        let mut excluded = opts();
+        excluded.minify = false;
+        excluded.sourcemap = SourcemapMode::Inline;
+        excluded.sources_content = false;
+        let without_sources = bundle_fixture(SRC, &excluded);
+
+        // The map rides as a base64 data URL, so decode rather than string-matching
+        // the emitted code — the marker appears in the CODE either way.
+        let decode_map = |code: &str| -> String {
+            use base64::Engine as _;
+            let tail = code
+                .rsplit("base64,")
+                .next()
+                .expect("an inline sourcemap comment");
+            let b64 = tail.trim();
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .expect("the inline map must be valid base64"),
+            )
+            .expect("the decoded map must be UTF-8")
+        };
+
+        let kept = decode_map(&with_sources);
+        assert!(
+            kept.contains("MARKER_FROM_SOURCE"),
+            "the control must carry the original text, or this test proves nothing"
+        );
+        let dropped = decode_map(&without_sources);
+        assert!(
+            !dropped.contains("sourcesContent") || !dropped.contains("MARKER_FROM_SOURCE"),
+            "excluding sources must leave the authored text out of the map; got:\n{dropped}"
+        );
+    }
+
+    /// `--alias` was covered only by its `a=b` parser. Nothing asserted that an
+    /// alias actually redirects a resolution, which is the whole flag.
+    #[test]
+    fn an_alias_redirects_the_resolution_to_the_named_package() {
+        const PKG: &str = r#"{ "name": "replacement", "exports": "./index.js" }"#;
+        const FILES: &[(&str, &str)] = &[("index.js", "export const WHO = 'replacement';\n")];
+        const SRC: &str = "import { WHO } from 'original';\nglobalThis.OUT = WHO;\n";
+
+        let mut aliased = opts();
+        aliased.minify = false;
+        aliased.alias = vec!["original=replacement".to_string()];
+        let code = bundle_with_package(SRC, "replacement", PKG, FILES, &aliased);
+        assert!(
+            emits_literal(&code, "replacement"),
+            "the alias must redirect `original` to `replacement`; got:\n{code}"
+        );
     }
 
     fn emitted_entry_code(result: &BundleResult) -> String {

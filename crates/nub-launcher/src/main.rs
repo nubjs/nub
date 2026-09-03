@@ -1204,8 +1204,10 @@ fn alpine_package_for(lib: &str) -> String {
 /// version-manager layouts → PATH → shell-out provision. Legacy payloads accept
 /// any Node at or above their target; new payloads enforce exact targets and
 /// explicit ranges. Provisioning prefers `provision_version` — the newest release
-/// the COMPILER resolved for the pin — and falls back to the manifest version when
-/// the payload names none. Acceptance is unaffected either way.
+/// the COMPILER resolved for the pin AND judged able to run the payload — and
+/// falls back to the manifest version when the payload names none, which covers a
+/// legacy manifest and one whose newest match could not run its shim alike.
+/// Acceptance is unaffected either way.
 fn acquire_smol_node(
     m: &Manifest,
     base: &Path,
@@ -1243,9 +1245,11 @@ fn acquire_smol_node(
     }
 
     // 3. Provision via shell-out. Prefer the version the COMPILER resolved as the
-    // newest satisfying the pin: the target's floor may be the oldest release this
-    // binary tolerates — `--target 26` landing on 26.0.0. Legacy manifests name no
-    // preference and still get the floor.
+    // newest satisfying the pin THAT CAN RUN THIS PAYLOAD: the target's floor may
+    // be the oldest release this binary tolerates — `--target 26` landing on
+    // 26.0.0. Two payloads name no preference and get the floor instead: a legacy
+    // manifest, and one whose newest match lacked the API its shim needs, where
+    // the floor is the capability the build gate already proved.
     let fetch = smol_provision_version(m).unwrap_or_else(|| target.floor.clone());
     if !target.matches(&fetch) {
         bail!("compiled provision version {fetch} does not satisfy its runtime target");
@@ -1272,6 +1276,9 @@ struct SmolTarget {
     floor: NodeVersion,
     exact: bool,
     range: Option<VersionPin>,
+    /// The payload installs a `module.registerHooks` shim, so a candidate that
+    /// lacks the API cannot run it whatever the version policy says.
+    requires_augmentation: bool,
 }
 
 impl SmolTarget {
@@ -1281,10 +1288,14 @@ impl SmolTarget {
             floor,
             exact,
             range: None,
+            requires_augmentation: false,
         }
     }
 
-    fn matches(&self, candidate: &NodeVersion) -> bool {
+    /// The VERSION half alone. Split out so a caller can tell the two rejection
+    /// reasons apart: a candidate this accepts and `matches` rejects was refused
+    /// on capability, which is the one a user cannot read off the version number.
+    fn version_policy_admits(&self, candidate: &NodeVersion) -> bool {
         if let Some(range) = &self.range {
             candidate.satisfies(range)
         } else if self.exact {
@@ -1292,6 +1303,18 @@ impl SmolTarget {
         } else {
             candidate >= &self.floor
         }
+    }
+
+    /// Version policy AND capability. The two are separate questions and the
+    /// version one cannot answer the capability one: 23.0–23.4 sorts above a
+    /// 22.15 floor and satisfies a `>=22.15` range, yet predates `registerHooks`
+    /// on the 23.x line. Accepting such a candidate produced a binary that built
+    /// clean and threw `registerHooks is not a function` on the user's machine.
+    fn matches(&self, candidate: &NodeVersion) -> bool {
+        if self.requires_augmentation && !candidate.supports_augmentation() {
+            return false;
+        }
+        self.version_policy_admits(candidate)
     }
 }
 
@@ -1326,6 +1349,7 @@ fn smol_target(m: &Manifest) -> Result<SmolTarget> {
         floor,
         exact: m.smol_exact_target,
         range,
+        requires_augmentation: m.requires_augmentation,
     })
 }
 
@@ -1540,7 +1564,25 @@ fn version_manager_dirs() -> Vec<NodeDir> {
 
 /// Does a discovered `candidate` satisfy this smol payload's version policy?
 /// Kept as one predicate so managed-layout scans and PATH discovery cannot drift.
+///
+/// A CAPABILITY refusal is reported, once; an ordinary version miss stays quiet.
+/// The asymmetry is the point: a user can read "needs >= 26, found 22" off the
+/// numbers, but 23.4 looks strictly newer than a 22.15 floor and is refused
+/// anyway, so silence there reads as a ~50 MB download for no reason at all.
 fn smol_candidate_matches(candidate: &NodeVersion, target: &SmolTarget) -> bool {
+    if target.requires_augmentation
+        && !candidate.supports_augmentation()
+        && target.version_policy_admits(candidate)
+    {
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| {
+            eprintln!(
+                "nub: found Node {candidate}, but this program needs module.registerHooks, \
+                 which arrived in {} — looking for another",
+                candidate.fast_tier_floor_for_line()
+            );
+        });
+    }
     target.matches(candidate)
 }
 
@@ -1695,35 +1737,7 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn which_in_path(path: Option<&std::ffi::OsStr>, name: &str) -> Option<PathBuf> {
-    let path = path?;
-    for dir in std::env::split_paths(path) {
-        for candidate in command_candidates(&dir, name) {
-            if is_executable_file(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    let candidate = dir.join(name);
-    if Path::new(name).extension().is_some() {
-        return vec![candidate];
-    }
-
-    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    extensions
-        .split(';')
-        .filter(|extension| !extension.is_empty())
-        .map(|extension| dir.join(format!("{name}{extension}")))
-        .collect()
-}
-
-#[cfg(not(windows))]
-fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    vec![dir.join(name)]
+    nub_core::find_on_path_in(path, &[name])
 }
 
 /// Provision `version` for the host from nodejs.org. The launcher keeps TLS out
@@ -2959,6 +2973,24 @@ mod tests {
         fs::canonicalize(dir).unwrap()
     }
 
+    /// Stage a fixture file the way the extraction path stages a real one — mode
+    /// pinned, never taken from the ambient umask.
+    ///
+    /// `cache_metadata_is_trusted` refuses a group- or other-writable file, and a
+    /// bare `fs::write` yields 0o664 under a umask of 002 against the 0o644 a 022
+    /// umask gives. A fixture written the bare way therefore passes on one machine
+    /// and fails on another for a reason that has nothing to do with what it tests.
+    /// Production never has the problem: it writes through `create_private_file`,
+    /// which pins 0o600 at open time and again afterwards.
+    fn write_staged_fixture(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     fn test_manifest() -> Manifest {
         use sha2::{Digest, Sha256};
         Manifest {
@@ -2968,6 +3000,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
             node_blake3: String::new(),
@@ -4104,6 +4137,7 @@ mod tests {
             floor: NodeVersion::new(22, 0, 0),
             exact: false,
             range: Some(parse_target_spec(">=22 <23").unwrap()),
+            requires_augmentation: false,
         };
         assert!(smol_candidate_matches(&NodeVersion::new(22, 23, 1), &range));
         assert!(!smol_candidate_matches(&NodeVersion::new(21, 7, 3), &range));
@@ -4112,6 +4146,84 @@ mod tests {
         assert!(
             select_path_node((PathBuf::from("node"), NodeVersion::new(26, 5, 0)), &range).is_none(),
             "PATH must apply the range ceiling too"
+        );
+    }
+
+    /// A payload carrying a `registerHooks` shim must refuse a discovered Node that
+    /// lacks the API, whatever the version policy says about it.
+    ///
+    /// 23.0–23.4 is the band that makes this more than bookkeeping: it sorts above a
+    /// 22.15 floor and satisfies a `>=22.15` range, so every version-shaped check
+    /// admits it, and `registerHooks` did not reach the 23.x line until 23.5. A
+    /// `--smol --external` artifact built against a 22.15 floor therefore shipped
+    /// clean and threw `registerHooks is not a function` on a box running 23.2.
+    #[test]
+    fn a_shim_bearing_smol_artifact_refuses_a_node_without_register_hooks() {
+        let floor = NodeVersion::new(22, 15, 0);
+        let in_band = NodeVersion::new(23, 2, 0);
+        let above_band = NodeVersion::new(23, 5, 0);
+
+        let shimmed = SmolTarget {
+            floor: floor.clone(),
+            exact: false,
+            range: None,
+            requires_augmentation: true,
+        };
+        assert!(
+            !smol_candidate_matches(&in_band, &shimmed),
+            "23.2 clears the 22.15 floor but predates registerHooks, so the shim cannot run"
+        );
+        assert!(
+            smol_candidate_matches(&above_band, &shimmed),
+            "23.5 has the API and must still be accepted"
+        );
+        assert!(smol_candidate_matches(&floor, &shimmed));
+
+        // A carried range admits the same band, so the capability term has to
+        // survive the range arm rather than only the floor arm.
+        let shimmed_range = SmolTarget {
+            floor: floor.clone(),
+            exact: false,
+            range: Some(parse_target_spec(">=22.15").unwrap()),
+            requires_augmentation: true,
+        };
+        assert!(!smol_candidate_matches(&in_band, &shimmed_range));
+
+        // Without a shim the band is perfectly runnable and must not be refused —
+        // this is what keeps the fix from becoming a blanket 23.x ban.
+        let plain = SmolTarget::legacy(floor, false);
+        assert!(
+            smol_candidate_matches(&in_band, &plain),
+            "a payload with no shim has no reason to reject 23.2"
+        );
+    }
+
+    /// The capability term has to arrive from the MANIFEST, not from a hand-built
+    /// `SmolTarget`. Every other test of this rule constructs the target directly,
+    /// so `requires_augmentation: m.requires_augmentation` in `smol_target` could
+    /// be replaced with a literal `false` — deleting the fix on the reading side —
+    /// and stay green. This is the test that goes red for that.
+    #[test]
+    fn the_shim_requirement_reaches_the_target_from_the_manifest() {
+        let mut manifest = test_manifest();
+        manifest.shape = Shape::Smol;
+        manifest.node_version = "22.15.0".to_string();
+        manifest.requires_augmentation = true;
+        let target = smol_target(&manifest).unwrap();
+        assert!(
+            !target.matches(&NodeVersion::new(23, 2, 0)),
+            "23.2 clears the 22.15 floor but predates registerHooks on the 23.x line, \
+             so a payload that says it needs the API must not accept it"
+        );
+
+        // Same manifest, one field flipped: without it 23.2 is a fine runtime, which
+        // is what proves the refusal above came from the field and not the floor.
+        manifest.requires_augmentation = false;
+        assert!(
+            smol_target(&manifest)
+                .unwrap()
+                .matches(&NodeVersion::new(23, 2, 0)),
+            "a payload with no shim has no claim on registerHooks"
         );
     }
 
@@ -4228,7 +4340,7 @@ mod tests {
         let base = fresh_cache_dir("node-size-check");
         let node = base.join("node");
         let bytes = b"#!/bin/sh\nprintf 'v26.5.0\\n'\n";
-        fs::write(&node, bytes).unwrap();
+        write_staged_fixture(&node, bytes);
 
         let mut manifest = test_view().manifest;
         // Digests that can never match, so any fallback to hashing fails BOTH halves
@@ -4242,13 +4354,13 @@ mod tests {
             "an intact extraction whose length matches the manifest must be accepted"
         );
 
-        fs::write(&node, &bytes[..bytes.len() - 1]).unwrap();
+        write_staged_fixture(&node, &bytes[..bytes.len() - 1]);
         assert!(
             !embedded_node_file_is_ready(&node, &manifest),
             "a truncated extraction must be rejected — this is the field failure the \
              size check replaced the per-launch digest to catch"
         );
-        fs::write(&node, bytes).unwrap();
+        write_staged_fixture(&node, bytes);
         manifest.node_size = 0;
         manifest.node_blake3 = blake3::hash(bytes).to_hex().to_string();
         assert!(
@@ -4274,15 +4386,18 @@ mod tests {
         let base = fresh_cache_dir("compile-cache-outside-app");
         let view = test_view();
         let app_dir = app_cache_dir(&base, &view.manifest);
-        fs::create_dir_all(&app_dir).unwrap();
+        // Staged through the production helper, not `create_dir_all`: the readiness
+        // check trusts a directory only while it is not group- or other-writable,
+        // and `create_dir_all` takes its mode from the umask (0o775 under 002).
+        create_staging_subdirs(&base, &app_dir).unwrap();
         for file in &view.app_files {
             let dest = app_dir.join(&file.name);
-            fs::create_dir_all(dest.parent().unwrap()).unwrap();
-            fs::write(&dest, file.bytes).unwrap();
+            create_staging_subdirs(&base, dest.parent().unwrap()).unwrap();
+            write_staged_fixture(&dest, file.bytes);
         }
         // The marker is an EMPTY regular file — `completion_marker_is_ready`
         // requires len == 0, so any content here would fail the control below.
-        fs::write(app_dir.join(CACHE_COMPLETE_MARKER), b"").unwrap();
+        write_staged_fixture(&app_dir.join(CACHE_COMPLETE_MARKER), b"");
         assert!(
             app_cache_is_ready(&view, &app_dir),
             "control: a freshly written extraction must be ready, or the assertion \
@@ -4478,6 +4593,7 @@ mod tests {
             floor: NodeVersion::new(22, 0, 0),
             exact: false,
             range: Some(parse_target_spec(">=22 <23").unwrap()),
+            requires_augmentation: false,
         };
         assert_eq!(
             best_node_in_policy_probed(&NodeDir::plain(plain.clone()), &bounded, "darwin-arm64")

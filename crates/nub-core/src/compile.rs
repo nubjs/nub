@@ -81,7 +81,8 @@ pub struct Manifest {
     /// version satisfying [`Self::smol_version_range`].
     pub node_version: String,
     /// What `smol` DOWNLOADS when discovery finds nothing: the newest release
-    /// satisfying the compiled pin, resolved at compile time.
+    /// satisfying the compiled pin that can also RUN this payload, resolved at
+    /// compile time.
     ///
     /// Deliberately NOT an acceptance bound — discovery uses the explicit exact,
     /// range, or floor policy stored beside it. This exists because
@@ -90,6 +91,13 @@ pub struct Manifest {
     /// major plainly asks for the newest in that line. Resolved here rather than
     /// in the launcher to keep version lookup out of a component that is
     /// deliberately minimal.
+    ///
+    /// The capability qualifier is load-bearing, not decorative. The newest
+    /// satisfying release is not always one that can run the payload, so when
+    /// [`Self::requires_augmentation`] is set and that release lacks the API, this
+    /// field is left EMPTY and the launcher provisions the floor — which the build
+    /// gate has already proven capable. Recording it anyway produced a binary that
+    /// built clean and then refused its own download on the user's machine.
     ///
     /// Empty for embed, where `node_version` is already exact, and in legacy
     /// manifests, where the launcher falls back to the floor.
@@ -110,6 +118,24 @@ pub struct Manifest {
     /// fails closed.
     #[serde(default)]
     pub smol_version_range: String,
+    /// Whether the payload installs a `module.registerHooks` shim, which a
+    /// discovered Node must therefore provide. Set for a `--smol` build carrying
+    /// `--external` or `--allow-dynamic-import`.
+    ///
+    /// The build-time gate cannot stand in for this. It sees the pin's FLOOR, and
+    /// a floor in 22.15.0..23.0.0 admits the 23.0–23.4 band, which sorts above the
+    /// floor but predates `registerHooks` on the 23.x line — so `--target ">=22.15"`
+    /// passed the build and the artifact died at launch on `registerHooks is not a
+    /// function`. Recording the REQUIREMENT lets the launcher apply it to the
+    /// candidate it actually found, which closes the class rather than the shapes
+    /// the floor happens to catch.
+    ///
+    /// Absent in legacy manifests, where `false` reproduces their behavior exactly
+    /// — not because they carry no shim (a legacy `--smol --external` payload
+    /// carries one; that IS the bug) but because no launcher that read them ever
+    /// applied this check. `false` is what they were already doing.
+    #[serde(default)]
+    pub requires_augmentation: bool,
     /// The target triple this binary was compiled for (e.g. `darwin-arm64`).
     pub triple: String,
     /// Content hash (hex) of the DECOMPRESSED embedded Node — the cache key for
@@ -809,6 +835,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
@@ -836,6 +863,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
@@ -881,6 +909,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: ">=24 <25".into(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),
             node_blake3: String::new(),

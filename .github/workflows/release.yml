@@ -155,29 +155,28 @@ jobs:
       # .github/ except this workflow), and BUILD on any compare-API failure,
       # force-push, or truncated file list — a wasted build is cheap, a missing
       # canary is a silent gap.
+      #
+      # The release-bump commit is NOT exempt, though the v* tag run builds the
+      # same tree. That exemption cost one extra matrix per release and left the
+      # canary channel serving the PREVIOUS base version until the next code
+      # commit landed — measured at 21% of the channel's lifetime, a median 17h
+      # and a worst case of 51h after each release (#748). The two runs publish
+      # disjoint artifacts (`X.Y.Z` under `latest` and the immutable `vX.Y.Z`
+      # release; `X.Y.Z-canary.<date>.<run>` under `canary`), and they sit in
+      # different concurrency groups, so they run side by side rather than
+      # queueing. If a later main push supersedes this one while it is pending,
+      # the window still closes: the base version does not move again until the
+      # next release bump, so the superseding run stamps the same base.
       - id: canary
         name: Canary gate + version (main pushes only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           # Event data flows in via env, not ${{ }}-interpolation into the
-          # script body — head_commit.message is attacker-shaped text.
+          # script body.
           BEFORE: ${{ github.event.before }}
           HEAD_TS: ${{ github.event.head_commit.timestamp }}
-          HEAD_MSG: ${{ github.event.head_commit.message }}
         run: |
-          # The release flow (`git push origin main --tags`) delivers the
-          # version-bump commit as a main push AND the v* tag as a tag push.
-          # The tag run builds this exact tree, so a canary of it is a wasted
-          # 8-platform matrix — skip when the head commit is the release bump
-          # (subject exactly `v<semver>`, per the release runbook).
-          FIRST_LINE="$(printf '%s' "$HEAD_MSG" | head -1)"
-          if [[ "$FIRST_LINE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "canary=false" >> "$GITHUB_OUTPUT"
-            echo "canary_version=" >> "$GITHUB_OUTPUT"
-            echo "release-bump push ($FIRST_LINE) — the tag run builds this tree; skipping the canary build"
-            exit 0
-          fi
           BUILD=true
           if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
             COMPARE=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BEFORE}...${GITHUB_SHA}" 2>/dev/null) || COMPARE=""
@@ -2071,6 +2070,25 @@ jobs:
           tag_name: ${{ needs.verify.outputs.publish_tag }}
           generate_release_notes: true
           prerelease: false
+          # Promotion is an UPDATE, and an update that omits make_latest leaves the
+          # repo's "Latest" pointer untouched — v0.7.5 stayed latest through three
+          # stable 0.8.x promotions, so `releases/latest` (nub upgrade + both
+          # installers) kept serving 0.7.5. Claim it explicitly.
+          make_latest: "true"
+      - name: Assert the upgrade channel serves this release
+        # `nub upgrade`, install.sh, and install.ps1 all resolve the version from
+        # `releases/latest`, so a promotion that does not move the Latest pointer
+        # ships a release nobody is served. Read the pointer back rather than
+        # trusting the promote step's inputs.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.publish_tag }}
+        run: |
+          set -euo pipefail
+          LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          [ "$LATEST" = "$TAG" ] \
+            || { echo "::error::releases/latest is $LATEST, not $TAG — the upgrade channel is serving the wrong release"; exit 1; }
+          echo "✓ releases/latest serves $TAG"
 
   canary-immutable-release:
     name: Create immutable canary release

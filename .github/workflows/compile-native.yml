@@ -174,32 +174,44 @@ jobs:
       # reference run and the artifact are all the same build. That control is what
       # makes a green row mean something, and the harness prints how many rows were
       # discriminating so a run that quietly stops proving anything is visible.
+      #
+      # Every host, not just Linux. The class this catches — an augmentation the
+      # runtime makes and the compiler does not — is not Linux-specific, so gating
+      # it on one OS left the other three unguarded against exactly the failure
+      # the step exists to find. The harness needed one portability fix to get
+      # here: `--out` is taken verbatim, so it now names the target's exe suffix
+      # rather than asking for an extensionless `./bin` on Windows. The other two
+      # Unix-looking things in it are already portable — the provisioned-Node
+      # lookup falls back to `command -v node`, and XDG_CACHE_HOME outranks the
+      # platform cache roots on every OS (`nub-launcher/src/cache.rs`).
       - name: Compiled artifacts keep Nub's augmentations
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           nub="$GITHUB_WORKSPACE/target/release/nub"
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher"
+          if [[ "$RUNNER_OS" == Windows ]]; then nub+='.exe'; launcher+='.exe'; fi
           test -f "$nub"
+          test -f "$launcher"
           version="$(node --version)"
-          NUB="$nub" \
-          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+          NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
             tests/compile-augmentation/run.sh "${version#v}"
       # The other shipping shape, and a whole code path the default never touches:
       # --smol carries no Node blob and finds one at run time, so it computes the
       # injected flag set against a version the build never saw. That is the
       # reason the flag policy is what it is, so it should not be the untested one.
       - name: Compiled artifacts keep Nub's augmentations (--smol)
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           nub="$GITHUB_WORKSPACE/target/release/nub"
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher"
+          if [[ "$RUNNER_OS" == Windows ]]; then nub+='.exe'; launcher+='.exe'; fi
           test -f "$nub"
+          test -f "$launcher"
           version="$(node --version)"
           COMPILE_FLAGS=--smol \
-          NUB="$nub" \
-          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+          NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
             tests/compile-augmentation/run.sh "${version#v}"
       - name: Upload native-island failure logs
         if: failure()

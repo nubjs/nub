@@ -35,7 +35,7 @@ A range qualifies when its lower bound is representable and floor resolution ret
 
 The split is not cosmetic. The bundle is stripped against the resolved gate, so a form whose gate is not the range's minimum must not have its range enforced — the artifact would otherwise accept a Node whose polyfills it already removed. Two cases miss: an upper-only range, whose gate falls back to the newest matching release, and a range whose minimum is published but carries no artifact for the target, where the gate lands above it. [[crates/nub-core/src/version_management/mod.rs#range_minimum_is]] is the single predicate both sides read.
 
-When no installed Node qualifies, the launcher provisions the newest matching release resolved at compile time.
+When no installed Node qualifies, the launcher provisions the newest matching release resolved at compile time — provided that release can run the payload. A bundle carrying a `module.registerHooks` shim needs a Node that has the API, and version order does not imply it: 23.0 through 23.4 sort above a 22.15 floor and satisfy a range built on it, yet predate `registerHooks` on the 23.x line. Where the newest match fails that test the compiler records no preference at all, and the launcher provisions the floor, which the build already gated on the same capability.
 
 ## Anatomy of a compiled binary
 

@@ -39,12 +39,13 @@ Two questions decide which Node runs: *which version is pinned*, then *where tha
 Nub walks up from your working directory to the nearest pin, highest precedence first:
 
 1. **`NODE_EXECUTABLE`** — an absolute path to a Node binary (a hard override)
-2. **`package.json#/devEngines/runtime`** — the `node` entry
-3. **`.node-version`**
-4. **`.nvmrc`**
-5. **`.tool-versions`** — the asdf/mise file; its `nodejs` or `node` line
-6. **`package.json#/engines/node`** — a range or exact version
-7. **Nothing pinned anywhere up the tree** — whatever `node` is on your `PATH`, or the latest release when there's no `node` at all.
+2. **`nodeExecutable`** in `nub.jsonc` — a path, or a command that prints one
+3. **`package.json#/devEngines/runtime`** — the `node` entry
+4. **`.node-version`**
+5. **`.nvmrc`**
+6. **`.tool-versions`** — the asdf/mise file; its `nodejs` or `node` line
+7. **`package.json#/engines/node`** — a range or exact version
+8. **Nothing pinned anywhere up the tree** — whatever `node` is on your `PATH`, or the latest release when there's no `node` at all.
 
 This resolved Node version is auto-installed and cached for future runs.
 
@@ -69,7 +70,7 @@ Both fields take the `engines.node` grammar, so either can express a range or an
 
 The first pins exactly 22.15.0, patch included. The second resolves to the newest published release satisfying the range.
 
-Nub reads only the `node` entry's `version` under `devEngines.runtime`, and provisions that version regardless of `onFail`. That field governs entries declaring a *non*-Node runtime instead: Nub refuses by default, `onFail: "warn"` prints a notice and falls through, `onFail: "ignore"` falls through silently. Setting `NODE_EXECUTABLE` skips resolution altogether — it bypasses the pin files, the cache, the `nvm` scan, and any download, though the binary's version is still detected, so the floor check and tier dispatch still apply.
+Nub reads only the `node` entry's `version` under `devEngines.runtime`, and provisions that version regardless of `onFail`. That field governs entries declaring a *non*-Node runtime instead: Nub refuses by default, `onFail: "warn"` prints a notice and falls through, `onFail: "ignore"` falls through silently. Naming a binary outright skips resolution altogether — it bypasses the pin files, the cache, the `nvm` scan, and any download, though the version is still detected, so the floor check and tier dispatch still apply. The committed form is [`nodeExecutable`](/docs/config#nodeexecutable), which also takes a command so a project can defer to whatever tool already manages its toolchain; `NODE_EXECUTABLE` is the per-shell form and outranks it.
 
 Dependency build scripts follow the same root anchor during an install, so every member of a monorepo builds native dependencies under one Node rather than switching per member. Running a script with `nub run` inside a member still uses that member's own pin.
 
@@ -177,7 +178,7 @@ With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node`
 
 ## `nub node shim`
 
-Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. This is the fresh-install story: `brew install nubjs/tap/nub` (or the curl script), `nub node shim`, and now a bare `node file.js` works — Nub resolves the right version, provisions it if it's missing, and runs it.
+Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. This is the fresh-install story: `brew install nub` (or the curl script), `nub node shim`, and now a bare `node file.js` works — Nub resolves the right version, provisions it if it's missing, and runs it.
 
 ```console
 $ nub node shim

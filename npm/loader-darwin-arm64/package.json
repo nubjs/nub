@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/loader-darwin-arm64",
-  "version": "0.8.1",
+  "version": "0.8.3",
   "description": "Nub loader native addon for macOS ARM64 (Apple Silicon)",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",

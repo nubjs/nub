@@ -132,7 +132,7 @@ struct Row {
 /// settings accessor `install`/`add` use rather than standing up a
 /// [`aube_resolver::Resolver`] it would never resolve with. `None` means no
 /// window is in effect and every pick below stays on today's ungated path.
-fn age_gate_for(cwd: &Path) -> Option<aube_resolver::MinimumReleaseAge> {
+pub(super) fn age_gate_for(cwd: &Path) -> Option<aube_resolver::MinimumReleaseAge> {
     let files = super::FileSources::load(cwd);
     let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
     let ctx = files.ctx(&raw_workspace, aube_settings::values::process_env(), &[]);
@@ -150,10 +150,11 @@ fn age_gate_for(cwd: &Path) -> Option<aube_resolver::MinimumReleaseAge> {
 /// consults a dist-tag — so passing an absent tag through would SYNTHESIZE one
 /// and start flipping the exit code for registries that publish no `latest`.
 /// Nub pins the window on for every project, so that would be the default path.
-fn latest_pick(
+pub(super) fn latest_pick(
     packument: &Packument,
     registry_name: &str,
     gate: Option<&aube_resolver::MinimumReleaseAge>,
+    current: &str,
 ) -> Option<String> {
     let tagged = packument.dist_tags.get("latest").cloned();
     tagged.as_ref()?;
@@ -163,7 +164,46 @@ fn latest_pick(
     // The undeterminable flag is deliberately dropped: it describes the
     // `latest` tag's own candidate set, which no message keys on. See the
     // warning's rationale in `collect_rows`.
-    gated_pick(packument, registry_name, "latest", gate, tagged).0
+    let picked = gated_pick(packument, registry_name, "latest", gate, tagged).0?;
+
+    // Never offer a DOWNGRADE. That same widening walks DOWNWARD looking for a
+    // release old enough to clear the window, so a window wider than the
+    // installed version's own age lands below `current` — and the column then
+    // advertises an older version as the one to move to, counts as drift, and
+    // pins the exit code at 1 with nothing worth installing on offer. That is
+    // the dead end #722 was about, reached by a different route.
+    //
+    // "worth installing" rather than "installable": the lower release IS
+    // reachable — `update --latest` passes the literal `latest` range through
+    // the same widening (`update.rs:634`) and resolves to it.
+    //
+    // A pick at or below `current` reports `current` instead of dropping to
+    // unknown: there genuinely is no upgrade, and saying so is both truer and
+    // what lets the command exit 0.
+    //
+    // Accepted cost: a publisher who ROLLS BACK the tag — ships 3.0.0, retracts
+    // it, re-tags 2.9.1 — no longer surfaces here to someone already on 3.0.0.
+    // That signal was never dependable in this column, since it appears only
+    // when the installed version happens to sit above the tag, and a retraction
+    // reaches the user through deprecation metadata instead.
+    let (Ok(new), Ok(cur)) = (
+        node_semver::Version::parse(&picked),
+        node_semver::Version::parse(current),
+    ) else {
+        // Either side unparseable means the two are not ordered at all, so leave
+        // the pick alone rather than guess a direction. Two known ways `current`
+        // gets there: the `(missing)` sentinel for a dep absent from the graph,
+        // and a git dep read from an npm v1 lockfile, whose `version` the legacy
+        // lifter carries through verbatim (`aube-lockfile/src/npm/read.rs`).
+        // Not exhaustive — nub reads six lockfile formats and only pnpm's is
+        // known to normalize a local dep to a parseable `0.0.0`.
+        return Some(picked);
+    };
+    Some(if new < cur {
+        current.to_string()
+    } else {
+        picked
+    })
 }
 
 /// The version a column should show: what an install would actually land on.
@@ -194,7 +234,7 @@ fn latest_pick(
 /// `wanted` caller warns instead — and only that one, since only the manifest
 /// range predicts plain `update` — on stderr beside the existing
 /// packument-fetch warning; stdout stays data.
-fn gated_pick(
+pub(super) fn gated_pick(
     packument: &Packument,
     registry_name: &str,
     range: &str,
@@ -214,6 +254,23 @@ fn gated_pick(
         // Not an age verdict; leave today's fallback in place.
         aube_resolver::PickResult::NoMatch => (ungated, false),
     }
+}
+
+/// Announce that a package's registry served no publish times at all, so the
+/// window can admit no version of it and an install hard-errors.
+///
+/// Shared with the interactive pickers, which drop a cell on the same verdict.
+/// Dropping it silently would leave those commands reporting no work on a
+/// package every install refuses — #722's report-versus-installer disagreement,
+/// one surface over — so each caller that discards an `Undeterminable` says so
+/// here instead. Stderr, so stdout stays data.
+pub(super) fn warn_undatable(registry_name: &str) {
+    eprintln!(
+        "warn: {registry_name} has no registry publish times, so \
+         minimumReleaseAge cannot admit any version; \
+         `{}` will fail for it",
+        aube_util::cmd("update")
+    );
 }
 
 /// Serialize `DepType` using pnpm's `package.json` field names so
@@ -643,7 +700,7 @@ async fn collect_rows(
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let latest = latest_pick(packument, &registry_name, gate);
+        let latest = latest_pick(packument, &registry_name, gate, &current);
 
         // Wanted = highest version in the packument that still satisfies the
         // manifest range. Fall back to `current` when the range is unparseable
@@ -678,12 +735,7 @@ async fn collect_rows(
         // `latest` tag reaches that state routinely, and folding it in here
         // told the user an update would fail on a package where it succeeds.
         if wanted_undated && warned.insert(registry_name.clone()) {
-            eprintln!(
-                "warn: {registry_name} has no registry publish times, so \
-                 minimumReleaseAge cannot admit any version; \
-                 `{}` will fail for it",
-                aube_util::cmd("update")
-            );
+            warn_undatable(&registry_name);
         }
 
         let latest_known = latest.is_some();
@@ -1138,7 +1190,10 @@ mod age_gate_tests {
                 .as_deref(),
             Some("2.0.1")
         );
-        assert_eq!(latest_pick(&p, "pkg", None).as_deref(), Some("2.0.1"));
+        assert_eq!(
+            latest_pick(&p, "pkg", None, "2.0.0").as_deref(),
+            Some("2.0.1")
+        );
     }
 
     #[test]
@@ -1153,7 +1208,47 @@ mod age_gate_tests {
                 .as_deref(),
             Some("2.0.0")
         );
-        assert_eq!(latest_pick(&p, "pkg", Some(&g)).as_deref(), Some("2.0.0"));
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(),
+            Some("2.0.0")
+        );
+    }
+
+    /// A dist-tag SPECIFIER is gated like any other range.
+    ///
+    /// `"pkg": "beta"` in a manifest does not parse as a range, so the pickers
+    /// keep a dist-tag lookup as the fallback for it. That fallback is the raw
+    /// tag, and it has to stay INSIDE this call: applied to the result instead,
+    /// it hands back the exact version the window just declined, and the
+    /// picker's own screen cannot catch it — that screen compares against the
+    /// installed version, not against the policy.
+    #[test]
+    fn a_dist_tag_specifier_is_gated_and_the_raw_tag_does_not_come_back() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0", "beta": "2.0.1" },
+            "versions": {
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+                "2.0.1": { "name": "pkg", "version": "2.0.1" },
+            },
+            "time": {
+                "2.0.0": "2020-01-01T00:00:00.000Z",
+                "2.0.1": "2099-01-01T00:00:00.000Z",
+            },
+        }))
+        .expect("test packument parses");
+        // Guard the premise: only `latest` widens to `<=<tag>`, so a `beta`
+        // the window blocks refuses outright rather than scanning down to
+        // 2.0.0. Without that this case would be testing the widening.
+        assert!(matches!(
+            aube_resolver::pick_version_for_add(&p, "pkg", "beta", Some(&gate(true))),
+            aube_resolver::PickResult::AgeGated(_)
+        ));
+        assert_eq!(
+            gated_pick(&p, "pkg", "beta", Some(&gate(true)), Some("2.0.1".into())).0,
+            None,
+            "the tag fallback is what the window declined, so it must not survive it"
+        );
     }
 
     #[test]
@@ -1210,8 +1305,8 @@ mod age_gate_tests {
             "time": { "2.0.0": "2020-01-01T00:00:00.000Z" },
         }))
         .unwrap();
-        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true))), None);
-        assert_eq!(latest_pick(&p, "pkg", None), None);
+        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true)), "1.0.0"), None);
+        assert_eq!(latest_pick(&p, "pkg", None, "1.0.0"), None);
         // Guard the mechanism, so a resolver change cannot quietly reintroduce
         // the synthesis the call-site guard exists to stop.
         assert!(
@@ -1276,7 +1371,7 @@ mod age_gate_tests {
         .unwrap();
         let g = gate(true);
         assert_eq!(
-            latest_pick(&p, "pkg", Some(&g)),
+            latest_pick(&p, "pkg", Some(&g), "3.0.0"),
             None,
             "the `latest` column genuinely admits nothing here"
         );
@@ -1295,6 +1390,50 @@ mod age_gate_tests {
         assert!(
             !undated,
             "so the warning must NOT fire — `nub update` succeeds on this package"
+        );
+    }
+
+    /// The `Latest` column must never point BACKWARDS.
+    ///
+    /// A window wider than the installed version's own age sends the widened
+    /// `<=dist-tags.latest` scan down PAST `current` to the newest release old
+    /// enough to clear. Reporting that advertises a DOWNGRADE, counts as drift,
+    /// and holds the exit code at 1 with nothing installable — #722's dead end
+    /// reached by another route.
+    #[test]
+    fn a_window_wider_than_the_installed_version_offers_no_downgrade() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "1.0.0": { "name": "pkg", "version": "1.0.0" },
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+            },
+            // 2.0.0 is what is installed, and it is too new for the window;
+            // 1.0.0 is the newest release the window does admit.
+            "time": {
+                "1.0.0": "2020-01-01T00:00:00.000Z",
+                "2.0.0": "2099-01-01T00:00:00.000Z",
+            },
+        }))
+        .unwrap();
+        let g = gate(true);
+        // Guard the premise: without the clamp the column would say 1.0.0, so
+        // this case genuinely exercises the backwards pick rather than a refusal.
+        assert!(matches!(
+            aube_resolver::pick_version_for_add(&p, "pkg", "latest", Some(&g)),
+            aube_resolver::PickResult::Found(m) if m.version == "1.0.0"
+        ));
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(),
+            Some("2.0.0"),
+            "the newest admitted release is OLDER than what is installed, so \
+             there is no upgrade and the column reports current"
+        );
+        let r = row("2.0.0", "2.0.0", Some("2.0.0"));
+        assert!(
+            !has_drift(std::slice::from_ref(&r)),
+            "and with no upgrade on offer the command must exit 0"
         );
     }
 }

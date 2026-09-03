@@ -92,7 +92,7 @@ opt-level = 2
 split-debuginfo = "unpacked"
 
 [workspace.package]
-version = "0.8.1"
+version = "0.8.3"
 edition = "2024"
 # Workspace floor is 1.95: every member now builds on oxc 0.140 (unified so a
 # `--features compile` build links ONE oxc stack — the oxc-lockstep gate), and

@@ -245,7 +245,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let newest =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)
                 .ok()
-                .filter(|newest| *newest != floor);
+                .filter(|newest| {
+                    provision_preference_is_usable(newest, &floor, shim_plan.needed())
+                });
         eprintln!(
             "Using Node.js {} (resolved from {source}; {}{})",
             non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string()),
@@ -303,6 +305,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         } else {
             String::new()
         },
+        // Only smol discovers its runtime, so only smol can be handed one that
+        // cannot run the shim; embed carries an exact Node already gated above.
+        requires_augmentation: opts.smol && shim_plan.needed(),
         triple: target.triple(),
         node_sha256: node.sha256,
         node_blake3: node.blake3,
@@ -680,6 +685,29 @@ fn smol_version_range(pin: &VersionPin, gate: &NodeVersion) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Is `newest` worth recording as the version to DOWNLOAD when discovery finds
+/// nothing? Two ways it is not.
+///
+/// Equal to the floor, and the preference says nothing the launcher does not
+/// already know. Or — the case this exists for — newer than the floor, satisfying
+/// the pin, and still unable to run the payload: `--target ">=22.15 <23.5"`
+/// resolves to 23.4, which sorts above the floor and matches the range yet
+/// predates `registerHooks` on the 23.x line. Recording it produced a binary that
+/// built clean and then bailed on the user's machine, which is the same class the
+/// launcher's discovery check closes, reached through the other door.
+///
+/// Refusing is safe rather than merely conservative: no preference means the
+/// launcher provisions the FLOOR, and `check_node_support` has already failed the
+/// build if a shim-bearing floor lacks the API. So whenever `shim_needed` holds
+/// here, the floor is known to run the payload.
+fn provision_preference_is_usable(
+    newest: &NodeVersion,
+    floor: &NodeVersion,
+    shim_needed: bool,
+) -> bool {
+    newest != floor && (!shim_needed || newest.supports_augmentation())
 }
 
 /// The runtime contract printed beside the original target. Kept in step with
@@ -1899,19 +1927,20 @@ impl Drop for FileGuard {
     }
 }
 
-fn which_first(names: &[&str]) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    for name in names {
-        for dir in std::env::split_paths(&path) {
-            if dir.join(name).is_file() {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
+/// The first of `names` on PATH, as the matched path — which is what gets spawned,
+/// so discovery and execution cannot disagree.
+///
+/// Thin on purpose: the lookup lives in nub-core because the launcher needs the
+/// same one, and because nub-core's tests run on every OS leg while the
+/// compile-feature tests run only on Ubuntu. The rule it carries is that on
+/// Windows the strippers are on disk as `llvm-strip.exe`, so a bare
+/// `dir.join("llvm-strip")` matched nothing and `prepare_node_bytes` took its
+/// unstripped early return on every compile run on a Windows host.
+fn which_first(names: &[&str]) -> Option<PathBuf> {
+    nub_core::find_on_path(names)
 }
 
-fn run_ok(program: &str, args: &[&std::ffi::OsStr]) -> bool {
+fn run_ok(program: impl AsRef<std::ffi::OsStr>, args: &[&std::ffi::OsStr]) -> bool {
     std::process::Command::new(program)
         .args(args)
         .stdout(std::process::Stdio::null())
@@ -2546,6 +2575,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: "node".into(),
             node_blake3: String::new(),
@@ -2658,6 +2688,41 @@ mod tests {
         assert_eq!(non_exact_spec(&range, ">=20"), Some(">=20".to_string()));
         let major = version_management::parse_target_spec("24").unwrap();
         assert_eq!(non_exact_spec(&major, "24"), Some("24".to_string()));
+    }
+
+    /// The build end of the same rule the launcher enforces on discovery: a version
+    /// can be newer than the floor, satisfy the pin, and still be unable to run the
+    /// payload. `--target ">=22.15 <23.5"` is the shape that resolves to one.
+    #[test]
+    fn a_provision_preference_that_cannot_run_the_shim_is_dropped() {
+        let floor = NodeVersion::new(22, 15, 0);
+        let in_band = NodeVersion::new(23, 4, 0);
+        let above_band = NodeVersion::new(23, 5, 0);
+        let same_line = NodeVersion::new(22, 20, 0);
+
+        assert!(
+            !provision_preference_is_usable(&in_band, &floor, true),
+            "23.4 predates registerHooks on the 23.x line, so provisioning it would \
+             hand the launcher a Node it must then refuse"
+        );
+        // The control that keeps this from being a blanket 23.x ban: without a shim
+        // the payload does not need the API, so 23.4 is a perfectly good download.
+        assert!(
+            provision_preference_is_usable(&in_band, &floor, false),
+            "a payload with no shim has no claim on registerHooks"
+        );
+        assert!(
+            provision_preference_is_usable(&above_band, &floor, true),
+            "23.5 is where the 23.x line gained registerHooks"
+        );
+        assert!(
+            provision_preference_is_usable(&same_line, &floor, true),
+            "a newer version on the floor's own line stays preferred"
+        );
+        assert!(
+            !provision_preference_is_usable(&floor, &floor, true),
+            "a preference equal to the floor tells the launcher nothing new"
+        );
     }
 
     #[test]

@@ -185,11 +185,21 @@ else
 fi
 
 if [ -z "${NUB_SKIP_LAT_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -d "$SKILLS_ROOT/wiki" ]; then
+  # CANNOT-RUN IS NOT A VIOLATION, and conflating the two broke every push from a branch that
+  # predates this linter. `core.hooksPath` here is an ABSOLUTE path into the main checkout, so a
+  # worktree on any branch runs MAIN's hooks against ITS OWN tree — and a branch without the script
+  # died MODULE_NOT_FOUND under a banner reading WIKI PUBLIC LINT FAILED. Agents then pushed with
+  # the bypass the banner prints, which switches the gate off for real violations too. The `lat`
+  # gate below already separates the two cases; this one now does the same.
+  if [ ! -f "$SKILLS_ROOT/scripts/wiki-public-lint.mjs" ]; then
+    echo "pre-push: wiki-public-lint.mjs is not in this worktree — skipping the wiki gate (CI still gates it)." >&2
+  else
   lint_out=$(cd "$SKILLS_ROOT" && node scripts/wiki-public-lint.mjs 2>&1) || {
     printf '%s\n' "$lint_out" | head -20 >&2
     echo "pre-push: WIKI PUBLIC LINT FAILED — see scripts/wiki-public-lint.mjs. Bypass: NUB_SKIP_LAT_CHECK=1" >&2
     exit 1
   }
+  fi
   lat_out=$(cd "$SKILLS_ROOT" && npm run --silent lat:check 2>&1)
   lat_rc=$?
   if printf '%s' "$lat_out" | grep -qE "[0-9]+ errors? found"; then

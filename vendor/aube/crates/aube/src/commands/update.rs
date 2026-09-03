@@ -117,6 +117,28 @@ pub struct UpdateArgs {
     pub virtual_store: crate::cli_args::VirtualStoreArgs,
 }
 
+/// Whether an update must KEEP the version already pinned, rather than move to
+/// `candidate`.
+///
+/// Both `--latest` downgrade guards reduce to this one comparison; only the
+/// candidate differs. Against the registry's `latest` dist-tag it preserves a
+/// prerelease pin the publisher has moved below. Against the release-age
+/// window's own `latest` pick it preserves an installed version the window
+/// would otherwise walk backwards from (#722) — that pick comes from a range
+/// widened to `<=<tag>` and scanned DOWNWARD, so it can land below what is
+/// installed.
+///
+/// Either pin outranking the candidate is enough: the manifest may carry an
+/// exact pin, the lockfile a resolved version, and neither is authoritative
+/// over the other for this purpose.
+fn pin_outranks(
+    manifest_pin: Option<&node_semver::Version>,
+    locked_pin: Option<&node_semver::Version>,
+    candidate: &node_semver::Version,
+) -> bool {
+    manifest_pin.is_some_and(|v| v > candidate) || locked_pin.is_some_and(|v| v > candidate)
+}
+
 pub async fn run(
     args: UpdateArgs,
     mut filter: aube_workspace::selector::EffectiveFilter,
@@ -403,8 +425,19 @@ pub async fn run(
     // cell at-or-below `current`), so a "latest" pick can never name a
     // preserve-pin key and the pre-fetch here would be a redundant network
     // round.
-    let preserve_pin: BTreeSet<String> = if latest && update_all && !rich_picker {
+    //
+    // NOT gated on `update_all`: `update <pkg> --latest` and `update
+    // <pkg>@latest` reach the same widened range and downgrade identically, so
+    // scoping the guard to whole-project `--latest` left two of the three
+    // latest-targeting paths unprotected.
+    let preserve_pin: BTreeSet<String> = if (latest || !explicit_specs.is_empty()) && !rich_picker {
         let client = std::sync::Arc::new(super::make_client(&cwd));
+        // The release-age window is checked against per-version publish times,
+        // which the abbreviated packument does not carry — so a project with a
+        // window in effect needs the full document here, exactly as `outdated`
+        // does. `None` means no window and the age arm below is skipped.
+        let age_gate = super::outdated::age_gate_for(&cwd);
+        let full_cache_dir = super::packument_full_cache_dir_for_cwd(&cwd);
         let mut handles = Vec::new();
         for key in &manifest_keys_to_update {
             let original = all_specifiers.get(key).map(String::as_str).unwrap_or("");
@@ -424,8 +457,26 @@ pub async fn run(
             if manifest_pin.is_none() && locked_pin.is_none() {
                 continue;
             }
+            // Only a `latest`-derived target belongs in this guard at all. An
+            // explicit `<pkg>@<version>` is a deliberate pin the user typed —
+            // downgrade included — and must resolve as typed.
+            //
+            // This SKIPS the key rather than just gating the age arm: both
+            // guards here are latest-derived, so letting an explicit target
+            // reach the prerelease arm would preserve the pin and silently
+            // ignore the version asked for. Broadening the outer condition to
+            // cover `<pkg>@latest` is what first exposed a key with an
+            // explicit spec to this block.
+            let targets_latest = explicit_specs
+                .get(key)
+                .map_or(latest, |spec| spec == "latest");
+            if !targets_latest {
+                continue;
+            }
             let key_owned = key.clone();
             let client = client.clone();
+            let age_gate = age_gate.clone();
+            let full_cache_dir = full_cache_dir.clone();
             handles.push(tokio::spawn(async move {
                 // A fetch failure here would silently fall through to the
                 // rewrite path and downgrade the prerelease pin — exactly
@@ -434,7 +485,15 @@ pub async fn run(
                 // transient registry failure that broke the guard, then
                 // continue with the resolver path (which has its own
                 // retry/cache semantics and may still succeed).
-                let packument = match client.fetch_packument(&real_name).await {
+                let want_time = age_gate.is_some();
+                let fetched = if want_time {
+                    client
+                        .fetch_packument_with_time_cached(&real_name, &full_cache_dir)
+                        .await
+                } else {
+                    client.fetch_packument(&real_name).await
+                };
+                let packument = match fetched {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!(
@@ -453,9 +512,42 @@ pub async fn run(
                     );
                     return None;
                 };
-                let above_latest = manifest_pin.as_ref().is_some_and(|v| v > &parsed_latest)
-                    || locked_pin.as_ref().is_some_and(|v| v > &parsed_latest);
-                above_latest.then_some(key_owned)
+                let above_latest =
+                    pin_outranks(manifest_pin.as_ref(), locked_pin.as_ref(), &parsed_latest);
+
+                // A blocked `latest` tag widens to `<=<tag>` and the scan walks
+                // DOWNWARD for a release old enough to clear the window (#681).
+                // With a window wider than the installed version's own age that
+                // lands BELOW it, and the rewrite path would then install the
+                // downgrade — silently, and rewriting package.json with it.
+                // Preserve the pin instead, matching what the interactive picker
+                // already does per-cell (`update_picker::build_row` drops a
+                // `latest` cell at-or-below `current`) and what the report now
+                // shows (`outdated::latest_pick`).
+                let gated_below = want_time
+                    && age_gate.as_ref().is_some_and(|g| {
+                        match aube_resolver::pick_version_for_add(
+                            &packument,
+                            &real_name,
+                            "latest",
+                            Some(g),
+                        ) {
+                            aube_resolver::PickResult::Found(m) => {
+                                node_semver::Version::parse(&m.version).is_ok_and(|picked| {
+                                    pin_outranks(
+                                        manifest_pin.as_ref(),
+                                        locked_pin.as_ref(),
+                                        &picked,
+                                    )
+                                })
+                            }
+                            // A refusal installs nothing, so there is no
+                            // downgrade to guard against here.
+                            _ => false,
+                        }
+                    });
+
+                (above_latest || gated_below).then_some(key_owned)
             }));
         }
         let mut set = BTreeSet::new();
@@ -1257,11 +1349,13 @@ async fn pick_update_interactively(
     }
 
     let packuments = fetch_packuments(&registry_keys, specifiers, cwd).await?;
+    let gate = super::outdated::age_gate_for(cwd);
 
     let mut picker = demand::MultiSelect::new("Choose which dependencies to update")
         .description("Space to toggle, Enter to confirm")
         .filterable(true);
     let mut shown = 0usize;
+    let mut warned = std::collections::HashSet::new();
     for key in &registry_keys {
         let spec = specifiers
             .get(key.as_str())
@@ -1274,8 +1368,35 @@ async fn pick_update_interactively(
         let current = existing
             .and_then(|g| lookup_pkg(g, existing_importers, key, &real_name))
             .map(|p| p.version.as_str());
-        let registry_latest = packument.dist_tags.get("latest").map(String::as_str);
-        let wanted = super::wanted_version(packument, spec).or_else(|| current.map(str::to_owned));
+        // Same floor as the rich picker: offer what an install would land on,
+        // not the raw tag, so a release-age window cannot present a cell that
+        // resolves BELOW the installed version once selected. A dep with no
+        // current version has nothing to floor against, and the empty string
+        // fails to parse as semver, so the pick passes through unclamped.
+        let gated_latest = super::outdated::latest_pick(
+            packument,
+            &real_name,
+            gate.as_ref(),
+            current.unwrap_or_default(),
+        );
+        let registry_latest = gated_latest.as_deref();
+        // Gated for the same reason as the rich picker's in-range cell above.
+        // The fallback is the `ungated` argument rather than an `or_else` on
+        // the result: a refusal must stay refused, and an `or_else` outside
+        // would hand the cell back the very value the window declined.
+        let (wanted, wanted_undated) = super::outdated::gated_pick(
+            packument,
+            &real_name,
+            spec,
+            gate.as_ref(),
+            super::wanted_version(packument, spec).or_else(|| current.map(str::to_owned)),
+        );
+        // The registry dated nothing in range, so no version is installable and
+        // the cell is gone. Say so rather than let the package drop out of the
+        // list looking current — same warning, same reason, as the report.
+        if wanted_undated && warned.insert(real_name.clone()) {
+            super::outdated::warn_undatable(&real_name);
+        }
         // `--latest` rewrites past the manifest range, so the picker
         // shows the dist-tag latest as the target. Without `--latest`
         // we only refresh inside the range, so target = wanted.
@@ -1329,14 +1450,27 @@ async fn fetch_packuments(
 ) -> miette::Result<HashMap<String, aube_registry::Packument>> {
     let client = std::sync::Arc::new(super::make_client(cwd));
     let cache_dir = super::packument_cache_dir();
+    // A release-age window is checked against per-version publish times, which
+    // the abbreviated packument does not carry. Callers that gate a pick off
+    // these documents need the full one, same as `outdated`; without it a
+    // gated pick here silently degrades to the ungated answer.
+    let needs_time = super::outdated::age_gate_for(cwd).is_some();
+    let full_cache_dir = super::packument_full_cache_dir_for_cwd(cwd);
     let mut set = tokio::task::JoinSet::new();
     for key in registry_keys {
         let real_name = real_name_from_spec(key, specifiers.get(key.as_str()));
         let key_owned = (*key).clone();
         let client = client.clone();
         let cache_dir = cache_dir.clone();
+        let full_cache_dir = full_cache_dir.clone();
         set.spawn(async move {
-            let result = client.fetch_packument_cached(&real_name, &cache_dir).await;
+            let result = if needs_time {
+                client
+                    .fetch_packument_with_time_cached(&real_name, &full_cache_dir)
+                    .await
+            } else {
+                client.fetch_packument_cached(&real_name, &cache_dir).await
+            };
             (key_owned, result)
         });
     }
@@ -1403,7 +1537,9 @@ async fn pick_update_rich(
     }
 
     let packuments = fetch_packuments(&registry_keys, specifiers, cwd).await?;
+    let gate = super::outdated::age_gate_for(cwd);
     let mut rows = Vec::new();
+    let mut warned = std::collections::HashSet::new();
     for key in &registry_keys {
         let Some(packument) = packuments.get(key.as_str()) else {
             continue;
@@ -1427,9 +1563,43 @@ async fn pick_update_rich(
             .or_else(|| specifiers.get(key.as_str()))
             .map(String::as_str)
             .unwrap_or("");
-        let wanted = super::wanted_version(packument, spec)
-            .or_else(|| packument.dist_tags.get(spec).cloned());
-        let registry_latest = packument.dist_tags.get("latest").map(String::as_str);
+        // The in-range cell is gated for the same reason the `latest` cell is,
+        // and skipping it leaves a bypass rather than a cosmetic gap: when the
+        // gated `latest` is filtered out, `build_row` falls back to THIS value
+        // for the latest cell, and selecting a latest cell that duplicates the
+        // range cell is classified `in_range` — which resolves the raw manifest
+        // range and can land below `current`.
+        //
+        // The dist-tag fallback for a tag spec is the `ungated` argument, not
+        // an `or_else` on the result. Outside, it would hand back the RAW tag
+        // the window had just declined — the one input `build_row` cannot
+        // screen, since it screens against `current` rather than against the
+        // policy.
+        let (wanted, wanted_undated) = super::outdated::gated_pick(
+            packument,
+            &real_name,
+            spec,
+            gate.as_ref(),
+            super::wanted_version(packument, spec)
+                .or_else(|| packument.dist_tags.get(spec).cloned()),
+        );
+        // No version of this package is installable at all, so both cells go
+        // and the row disappears. The report warns rather than print `All
+        // dependencies up to date.` over a project every install refuses; the
+        // picker owes the same, for the same reason.
+        if wanted_undated && warned.insert(real_name.clone()) {
+            super::outdated::warn_undatable(&real_name);
+        }
+        // The `latest` cell offers what an install would actually land on, not
+        // the raw dist-tag. `build_row` drops a cell at-or-below `current`, but
+        // it can only do that against the version it is GIVEN — handed the raw
+        // tag it screens a version the resolver will never pick, and a window
+        // whose gated pick sits below `current` then installs a downgrade once
+        // the cell is selected. Same floor as the report's column and the
+        // non-interactive guard above.
+        let gated_latest =
+            super::outdated::latest_pick(packument, &real_name, gate.as_ref(), &current);
+        let registry_latest = gated_latest.as_deref();
         // The displayed spec is always the MANIFEST's (the dim annotation
         // answers "what does package.json say today"), even when an
         // explicit CLI spec drives the targets.
@@ -2643,6 +2813,48 @@ mod tests {
             assert!(
                 reject_unsupported_pkg_specs(&[bad.to_string()]).is_err(),
                 "{bad} should be rejected"
+            );
+        }
+    }
+    /// The `--latest` downgrade guard (#722).
+    ///
+    /// A release-age window wider than the installed version's own age drives
+    /// the gated `latest` pick BELOW what is installed, because the widened
+    /// `<=<tag>` range is scanned downward for something old enough to clear.
+    /// Preserving the pin is what stops `update --latest` installing that.
+    mod pin_outranks_tests {
+        use super::super::pin_outranks;
+
+        fn v(s: &str) -> node_semver::Version {
+            node_semver::Version::parse(s).expect("test version parses")
+        }
+
+        #[test]
+        fn a_candidate_below_either_pin_preserves_it() {
+            // Manifest pin alone.
+            assert!(pin_outranks(Some(&v("2.5.7")), None, &v("2.5.5")));
+            // Locked version alone — the #722 shape, where the manifest holds a
+            // range rather than an exact pin.
+            assert!(pin_outranks(None, Some(&v("2.5.7")), &v("2.5.5")));
+        }
+
+        #[test]
+        fn a_candidate_at_or_above_both_pins_is_taken() {
+            assert!(
+                !pin_outranks(Some(&v("2.5.7")), Some(&v("2.5.7")), &v("2.5.11")),
+                "a genuine upgrade must not be preserved away"
+            );
+            assert!(
+                !pin_outranks(Some(&v("2.5.7")), Some(&v("2.5.7")), &v("2.5.7")),
+                "equal is not a downgrade, so there is nothing to guard"
+            );
+        }
+
+        #[test]
+        fn no_pin_at_all_never_preserves() {
+            assert!(
+                !pin_outranks(None, None, &v("0.0.1")),
+                "nothing is installed to protect, so any candidate stands"
             );
         }
     }

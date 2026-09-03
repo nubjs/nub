@@ -224,9 +224,14 @@ fn run_compiled_artifact_with_timeout(artifact: &Path, cwd: &Path) -> std::proce
     run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(10))
 }
 
+/// Covers the TEST HARNESS, not a compiled artifact: nothing here is compiled.
+/// `run_compiled_artifact_command_with_timeout` is what every artifact e2e runs
+/// through, so a deadlock in its stdio drain would hang those tests rather than
+/// fail them. Driving it with a plain `node -e` writing 1 MB to each stream is
+/// the cheapest way to prove it drains concurrently.
 #[cfg(feature = "compile")]
 #[test]
-fn large_compiled_artifact_output_does_not_block_process_exit() {
+fn artifact_runner_drains_large_output_without_deadlock() {
     let runtime = compile_test_runtime();
     let mut command = Command::new(runtime.node_exec_path);
     command.args([
@@ -240,9 +245,12 @@ fn large_compiled_artifact_output_does_not_block_process_exit() {
     assert_eq!(output.stderr.len(), 1_000_000);
 }
 
+/// Also the harness, not an artifact. On Windows a grandchild inheriting stdio
+/// keeps the pipe open after the child exits, so a naive read-to-end never
+/// returns; the timeout has to fire on the CHILD rather than on end-of-stream.
 #[cfg(all(feature = "compile", windows))]
 #[test]
-fn timeout_returns_after_a_descendant_inherits_stdio() {
+fn artifact_runner_timeout_survives_a_descendant_holding_stdio() {
     let runtime = compile_test_runtime();
     let mut command = Command::new(runtime.node_exec_path);
     command.args([
@@ -276,6 +284,76 @@ setInterval(() => {}, 1000);"#,
 /// `__toCommonJS(namespace)` operand. The call then returned `undefined` with no
 /// error. A block body or any surrounding expression escapes the misread, so this
 /// fixture must keep the concise form to discriminate.
+/// The payload must TELL the launcher it needs `module.registerHooks`, because the
+/// launcher's refusal of an incapable Node keys on that manifest field and nothing
+/// else. The wiring is one expression in `compile::run`, and until this existed it
+/// could be replaced with a literal `false` — deleting the whole fix — with every
+/// other test still green.
+///
+/// Both directions are asserted, and the second is what makes the first mean
+/// something: a field hardwired `true` would satisfy the shim case and fail the
+/// plain one, so neither constant passes.
+///
+/// `--external` rather than `--allow-dynamic-import`, so the two compiles differ
+/// in exactly one thing. `--external`'s requirement applies unconditionally, while
+/// `--allow-dynamic-import` only installs the shim when a computed `import()`
+/// actually survives into the bundle — so testing it needs a different ENTRY too,
+/// and a two-variable comparison would not isolate the flag.
+#[cfg(feature = "compile")]
+#[test]
+fn a_smol_payload_records_whether_it_needs_the_register_hooks_shim() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.mjs");
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    std::fs::write(&entry, "console.log('ok');\n").expect("write entry");
+
+    // Read off the artifact rather than a return value: the manifest is what the
+    // launcher on a user's machine actually parses, so that is the surface worth
+    // pinning. It is stored as uncompressed JSON inside the payload.
+    let compile = |extra: &[&str], name: &str| -> String {
+        let artifact = work.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        let output = Command::new(nub_binary())
+            .args([
+                "compile",
+                "--smol",
+                "--target",
+                &runtime.node_target,
+                "--out",
+            ])
+            .arg(&artifact)
+            .arg(&entry)
+            .args(extra)
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            output.status.success(),
+            "compile {extra:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(&artifact).expect("read the compiled artifact");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    let shimmed = compile(&["--external", "some-pkg"], "shimmed");
+    assert!(
+        shimmed.contains(r#""requires_augmentation":true"#),
+        "--external installs the registerHooks shim, so the manifest must demand it; \
+         without that the launcher accepts a Node that cannot run the payload"
+    );
+
+    let plain = compile(&[], "plain");
+    assert!(
+        plain.contains(r#""requires_augmentation":false"#),
+        "a smol build with no shim must not demand registerHooks — doing so would refuse \
+         every 18.19-22.14 Node the compat tier still supports"
+    );
+}
+
 #[cfg(feature = "compile")]
 #[test]
 fn compile_resolves_commonjs_requires_of_esm() {

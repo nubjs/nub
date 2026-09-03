@@ -62,7 +62,7 @@ curl -fsSL https://nubjs.com/install.sh | bash
 irm https://nubjs.com/install.ps1 | iex
 
 # Homebrew (macOS / Linux)
-brew install nubjs/tap/nub
+brew install nub
 
 # Nix (flakes)
 nix run github:nubjs/nub
@@ -73,6 +73,13 @@ mise use -g nub
 # Or via npm (pnpm / yarn global add work too)
 npm install -g @nubjs/nub
 ```
+
+> [!NOTE]
+> Switching an existing `nubjs/tap` install over to the core formula takes an uninstall first:
+>
+> ```sh
+> brew uninstall nubjs/tap/nub && brew untap nubjs/tap && brew install nub
+> ```
 
 For GitHub Actions, use [`nubjs/setup-nub`](https://github.com/nubjs/setup-nub) in place of `actions/setup-node`. It's one-to-one compatible.
 

@@ -32,6 +32,8 @@ A green `cargo test` does not prove the *feature works when a user runs it*. Bui
 
 The highest-yield bug-finding shape is a **differential fixture**: one minimal fixture isolating ONE behavior, run against `nub` AND the reference tool it claims parity with (npm/pnpm/yarn/bun/node) on identical input. Always compare against the thing you assert parity with.
 
+**Where it runs: the builder VM by default.** Any probe or sweep that needs no macOS-specific behavior goes to a spot VM — write the whole loop below as ONE script and dispatch it with `nub scripts/remote-build.ts --job adhoc --script <file> --detach`, then `--attach <vm-name>` (the `remote-build` skill). The script runs at the synced repo root with `NUB_BIN` naming a fresh `--profile fast` build of your tree, real addon staged; the image carries Node 26 + npm, and the script installs pnpm/bun itself when a differential needs them. Batch a sweep into one script, not one VM per fixture. The merge-base control build can ride a second dispatch with `--source <merge-base-worktree>`. Stay local only for the tight fix-and-rerun loop against a warm binary and for macOS-native behavior.
+
 ## Two directions — and the second is the one that gets skipped
 
 **CONFIRM** is the loop below. **FALSIFY** is the sweep: before opening a PR on behavior, and again before calling a review round done, hunt across many fixtures for what your change broke *somewhere you were not looking*. Both are required; only the first is instinctive.

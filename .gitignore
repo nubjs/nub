@@ -170,10 +170,16 @@ tests/bench/RESULTS.md
 # local-only design corpus (symlink to external dir) — never tracked
 internal
 
-# The repo root is npm-only — a root pnpm-lock.yaml (beside a workspace
-# yaml) would mark the root as a workspace for nub and re-trigger the
-# engines-redirect the soak surfaces were moved to tools/ to avoid.
+# The repo root is nub-identity — `nub.lock` is the tracked lockfile and
+# devEngines.packageManager names nub — so every other PM's root lockfile is
+# residue. A root pnpm-lock.yaml (beside a workspace yaml) additionally marks
+# the root as a workspace for nub and re-triggers the engines-redirect the soak
+# surfaces were moved to tools/ to avoid.
 /pnpm-lock.yaml
+# npm leaves this behind whenever anyone runs `npm install` here to populate
+# node_modules, which the compile test suites need. Neither tracked nor ignored
+# left it one `git add` away from a commit, and it got into one.
+/package-lock.json
 
 # Maintainer-local frizz worker norms (names private orchestration tooling). The tool
 # was renamed fray→frizz and only the old name was listed, so FRIZZ.md sat untracked and

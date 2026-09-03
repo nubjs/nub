@@ -34,13 +34,19 @@ const ALWAYS_INJECT: &[&str] = &["--enable-source-maps"];
 /// documented as 26.2-only.
 ///
 /// Fixed on Node `main` by b5d37cd4 (nodejs/node#63215, 2026-08-20) in
-/// `lib/internal/errors/error_source.js`, which is in NO release yet (latest is
-/// v26.7.0, 2026-08-05). 26.8.0 is therefore the first release that can carry
-/// the fix, so the band is closed there — a **stopgap pending that release**.
-/// RE-VERIFY when 26.8.0 ships, and move the boundary up if it does not carry
-/// the fix:
+/// `lib/internal/errors/error_source.js`, and the band was predicted to close at
+/// 26.8.0 as the first release that could carry it.
+///
+/// RE-VERIFIED 2026-09-01, now that the release exists — the boundary below is
+/// measured rather than predicted, so this is no longer a stopgap. Running
 /// `node --enable-source-maps -e 'try{require("assert").ok(false)}catch(e){console.log(e.constructor.name)}'`
-/// must print `AssertionError`, not `TypeError`.
+/// on real binaries gives `TypeError` on 26.7.0 and `AssertionError` on 26.8.1.
+///
+/// The artifact published as v26.8.0 also gives `AssertionError`, with one caveat
+/// worth stating rather than rounding off: that build self-reports
+/// `v26.8.0-alpha.0.0.0`, which sorts BELOW `26.8.0` and so lands inside the band
+/// this constant withholds on. So the clean measurement is 26.7.0 broken / 26.8.1
+/// fixed, and 26.8.0 is bounded by the fix landing upstream before it was cut.
 ///
 /// The trade-off is unchanged: withholding costs only stack-trace remapping (a
 /// cosmetic loss), while injecting corrupts the TYPE of a thrown AssertionError,
