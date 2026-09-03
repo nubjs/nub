@@ -1169,6 +1169,20 @@ pub enum Command {
         #[arg(long, value_name = "TEXT")]
         install_message: Option<String>,
 
+        /// Remove a category of call at build time, repeatable:
+        /// `--drop console --drop debugger`. A dropped call is not evaluated, so
+        /// an argument with a side effect goes with it. Needs minification, which
+        /// is on by default.
+        #[arg(long, value_name = "NAME", action = ArgAction::Append)]
+        drop: Vec<DropArg>,
+
+        /// Write a build report to this path, in esbuild's metafile JSON schema:
+        /// every module the bundler read, every file it emitted, and what each
+        /// module contributed to each. Reads in esbuild's `analyzeMetafile`,
+        /// esbuild-visualizer, and bundle-buddy.
+        #[arg(long, value_name = "PATH")]
+        metafile: Option<String>,
+
         /// Let minification rename functions and classes. Names are preserved by
         /// default: minified class names break frameworks that key on them
         /// (dependency injection, ORM entities, class registries).
@@ -1593,6 +1607,18 @@ pub enum SourcemapArg {
     /// A `.map` written beside the executable and not shipped.
     External,
     None,
+}
+
+/// What `--drop` accepts. A closed set rather than a free string: the two are
+/// what the bundler's compress pass can remove, and an unrecognised name would
+/// otherwise be a build that silently drops nothing.
+#[cfg(feature = "compile")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DropArg {
+    /// Every `console.*()` call.
+    Console,
+    /// Every `debugger` statement.
+    Debugger,
 }
 
 /// Top-level entry point. Returns the process exit code.
@@ -3122,6 +3148,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             include,
             exclude,
             install_message,
+            drop,
+            metafile,
             node_options,
             icon,
             no_keep_names,
@@ -3148,6 +3176,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             define_file,
             node_options,
             icon,
+            metafile: metafile.as_deref().map(PathBuf::from),
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,
@@ -3184,6 +3213,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 tsconfig: tsconfig.map(PathBuf::from),
                 loaders: loader,
                 native_target: None,
+                drop_console: drop.contains(&DropArg::Console),
+                drop_debugger: drop.contains(&DropArg::Debugger),
+                metafile: metafile.is_some(),
                 // Filled in by `compile()` once the pin chain resolves the exact
                 // target Node; the CLI layer does not know it yet.
                 target_node: None,

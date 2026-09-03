@@ -54,8 +54,9 @@ use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
     CodeSplittingMode, EmittedChunk, InnerOptions, IsExternal, ManualCodeSplittingOptions,
-    MatchGroup, MatchGroupName, ModuleType, Output, OutputFormat, Platform, RawMinifyOptions,
-    ResolveOptions, ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    MatchGroup, MatchGroupName, ModuleType, Output, OutputFormat, Platform, RawCompressOptions,
+    RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed, ResolveOptions,
+    ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
@@ -64,7 +65,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use string_wizard::{Hires, MagicString, SourceMapOptions};
 
-use super::{closure, loaders, native, native_layout};
+use super::{closure, loaders, metafile, native, native_layout};
 
 /// Where the source map goes. `Linked` and `External` both emit a real `.map`;
 /// they differ only in whether the bundle references it — which for a compiled
@@ -134,6 +135,15 @@ pub struct BundleOptions {
     /// self-contained artifact — running from a cache dir with no `node_modules`
     /// in sight — needs the file carried along.
     pub native_target: Option<nub_core::compile::TargetPlatform>,
+    /// `--drop console`: remove every `console.*()` call. A call in statement
+    /// position goes entirely; one whose result is read becomes `void 0`, which
+    /// is the value `console.log` returned anyway.
+    pub drop_console: bool,
+    /// `--drop debugger`: remove every `debugger` statement.
+    pub drop_debugger: bool,
+    /// Collect a `--metafile` build report. Off unless asked for — it retains
+    /// every parsed module's source length and import edges for the whole graph.
+    pub metafile: bool,
     /// The Node this artifact is gated on, as (major, minor, patch) — the input to
     /// [`strip_native_polyfills`]. For the default shape that is the exact baked
     /// version. For `--smol` it is the FLOOR of the accepted set, so a polyfill is
@@ -191,6 +201,9 @@ pub struct BundleResult {
     /// bundled implementation chunk.  Compile writes a tiny public wrapper for
     /// each pair after it knows whether a runtime resolve hook is needed.
     pub worker_roots: Vec<WorkerRoot>,
+    /// The `--metafile` report, serialized. `None` unless
+    /// [`BundleOptions::metafile`] asked for one.
+    pub metafile: Option<metafile::Metafile>,
 }
 
 /// One statically traceable worker. `entry` is the URL rewritten into the
@@ -242,6 +255,7 @@ fn bundle_inner(
     // commonly a `/private/tmp` symlink; keep its output cwd in that same
     // spelling or relative region/map ids fall back to the build-machine path.
     let cwd = canonicalize_for_bundler(&cwd);
+    reject_drop_without_minify(opts)?;
     let stem = entry_abs
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -296,12 +310,13 @@ fn bundle_inner(
         // load extracted artifacts without a synthetic package boundary.
         entry_filenames: Some("[name].mjs".to_string().into()),
         chunk_filenames: Some("[name]-[hash].mjs".to_string().into()),
-        minify: Some(RawMinifyOptions::Bool(opts.minify)),
+        minify: Some(minify_options(opts)),
         // The ONLY keep-names switch we touch. Rolldown threads this single flag
         // into both the finalizer's `__name` helper and the minifier's
         // mangle/compress keep-names, so applying it a second time (e.g. via
-        // `RawMinifyOptions::Object`) would run the name-preserving transform
-        // twice and break tree-shaking (vitejs/vite#9164).
+        // `RawMangleOptions::keep_names`) would run the name-preserving transform
+        // twice and break tree-shaking (vitejs/vite#9164). [`minify_options`]
+        // leaves both nested fields unset for exactly that reason.
         keep_names: Some(opts.keep_names),
         treeshake: treeshake_options(opts),
         define: Some(defines(opts)?),
@@ -401,6 +416,13 @@ fn bundle_inner(
     ]);
     if let Some(plugin) = &native_plugin {
         plugins.push(Arc::clone(plugin) as SharedPluginable);
+    }
+    // Last, and observation-only: it never rewrites a module, so where it sits
+    // among the transforms decides only whether the source length it records is
+    // the authored text or the rewritten one. Last means what the bundler parsed.
+    let modules = Arc::new(metafile::Collector::default());
+    if opts.metafile {
+        plugins.push(Arc::clone(&modules) as SharedPluginable);
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -512,6 +534,13 @@ fn bundle_inner(
             bytes: a.bytes,
         })
         .collect();
+    // Chunk metadata is captured HERE, while it is still typed, but the report is
+    // only assembled once nub has finished pruning and rewriting its output — a
+    // chunk recorded now can still lose bytes to the native-addon rewrite, and an
+    // asset can still be dropped entirely.
+    let mut report = opts
+        .metafile
+        .then(|| metafile::Report::new(std::env::current_dir().ok()));
     // Rolldown marks an emitted worker chunk `is_entry` exactly like the program's
     // own, so the filenames are the only thing telling them apart here.
     let worker_names = new_urls.worker_names();
@@ -520,6 +549,9 @@ fn bundle_inner(
             Output::Chunk(c) => {
                 if c.is_entry && !worker_names.contains(c.filename.as_str()) {
                     entry = Some(c.filename.to_string());
+                }
+                if let Some(report) = report.as_mut() {
+                    report.add_chunk(c);
                 }
                 files.push(BundledFile {
                     name: c.filename.to_string(),
@@ -624,6 +656,19 @@ fn bundle_inner(
         warn_module_data_assets(&new_urls.module_assets(&kept));
     }
 
+    // The bundler's own output, and only that: `native_files` are verbatim copies
+    // of installed packages and the support files are generated rather than
+    // bundled, so neither has inputs to attribute and both would read as bundle
+    // output that isn't. The docs name what the report therefore excludes.
+    let metafile = report.map(|report| {
+        let emitted: Vec<(&str, usize)> = files
+            .iter()
+            .chain(assets.iter())
+            .map(|file| (file.name.as_str(), file.bytes.len()))
+            .collect();
+        report.finish(&emitted, &modules)
+    });
+
     Ok(BundleResult {
         entry,
         files,
@@ -636,6 +681,7 @@ fn bundle_inner(
         native_addons,
         external_imports: external_plugin.map_or_else(Vec::new, |p| p.take()),
         worker_roots: new_urls.worker_roots(),
+        metafile,
     })
 }
 
@@ -3587,6 +3633,47 @@ fn treeshake_options(opts: &BundleOptions) -> TreeshakeOptions {
     TreeshakeOptions::Boolean(true)
 }
 
+/// Minification settings, and the ONE place `--drop` is implemented.
+///
+/// Dropping is not a pass of its own: `console.*()` removal and `debugger`
+/// removal live in oxc's compressor, which Rolldown reaches only through the
+/// minify options. So `--drop` rides the object form, whose sole difference from
+/// `Bool(true)` is the two flags — Rolldown's own `object_all_true_equals_bool_true`
+/// test pins that equivalence, and both `keep_names` fields stay `None` so the
+/// single top-level `keep_names` option keeps driving them.
+///
+/// The consequence is the invariant [`reject_drop_without_minify`] enforces:
+/// there is no compress pass to carry the drop when minification is off, and the
+/// DCE-only path hard-overrides both flags back to false
+/// (`Minifier::build` replaces the options with `CompressOptions::dce()`).
+fn minify_options(opts: &BundleOptions) -> RawMinifyOptions {
+    if !opts.drop_console && !opts.drop_debugger {
+        return RawMinifyOptions::Bool(opts.minify);
+    }
+    RawMinifyOptions::Object(RawMinifyOptionsDetailed {
+        mangle: Some(RawMangleOptions::default()),
+        compress: Some(RawCompressOptions {
+            drop_console: Some(opts.drop_console),
+            drop_debugger: Some(opts.drop_debugger),
+            ..RawCompressOptions::default()
+        }),
+        remove_whitespace: true,
+    })
+}
+
+/// Refuse `--drop` alongside `--no-minify` rather than accepting it and silently
+/// dropping nothing. Gated here rather than in the CLI so every caller of the
+/// shared front end inherits it.
+fn reject_drop_without_minify(opts: &BundleOptions) -> Result<()> {
+    if (opts.drop_console || opts.drop_debugger) && !opts.minify {
+        bail!(
+            "cannot combine --drop with --no-minify: dropping runs inside minification, so with \
+             minification off there is no pass to perform it"
+        );
+    }
+    Ok(())
+}
+
 fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
     let mut map = FxIndexMap::default();
     for (k, v) in &opts.auto_define {
@@ -4774,6 +4861,9 @@ mod tests {
             tsconfig: None,
             loaders: Vec::new(),
             native_target: None,
+            drop_console: false,
+            drop_debugger: false,
+            metafile: false,
             target_node: None,
         }
     }
@@ -5483,6 +5573,17 @@ mod tests {
     }
 
     fn bundle_module_graph(tag: &str, entry: &str, files: &[(&str, &str)]) -> Result<BundleResult> {
+        let mut o = opts();
+        o.minify = false;
+        bundle_module_graph_with(tag, entry, files, &o)
+    }
+
+    fn bundle_module_graph_with(
+        tag: &str,
+        entry: &str,
+        files: &[(&str, &str)],
+        o: &BundleOptions,
+    ) -> Result<BundleResult> {
         let dir = fixture_dir(tag);
         for (name, source) in files {
             let path = dir.join(name);
@@ -5491,11 +5592,185 @@ mod tests {
             }
             std::fs::write(path, source).unwrap();
         }
-        let mut o = opts();
-        o.minify = false;
-        let result = bundle(&dir.join(entry), &o);
+        let result = bundle(&dir.join(entry), o);
         let _ = std::fs::remove_dir_all(dir);
         result
+    }
+
+    /// A fixture with all three shapes `--drop` has to distinguish: a bare
+    /// `console` call, one whose value is READ, and a `debugger`.
+    const DROP_FIXTURE: &[(&str, &str)] = &[(
+        "entry.ts",
+        "console.log('BARE_CALL');\n\
+         debugger;\n\
+         globalThis.OUT = console.log('READ_CALL');\n\
+         globalThis.KEPT = 'STILL_HERE';\n",
+    )];
+
+    /// Dropping is a build-time removal, so the only honest check is on the
+    /// emitted chunk: the calls are gone from the bytes that ship.
+    ///
+    /// The control runs at the SAME minify setting, because minification is the
+    /// mechanism `--drop` rides — a control with minify off would vary two things.
+    #[test]
+    fn drop_removes_console_and_debugger_from_the_emitted_chunk() {
+        let mut dropped = opts();
+        dropped.drop_console = true;
+        dropped.drop_debugger = true;
+        let code = emitted_chunk_code(
+            &bundle_module_graph_with("drop-on", "entry.ts", DROP_FIXTURE, &dropped)
+                .expect("the fixture bundles"),
+        );
+        assert!(
+            !code.contains("console.log"),
+            "--drop console must remove the calls; got:\n{code}"
+        );
+        assert!(
+            !code.contains("BARE_CALL") && !code.contains("READ_CALL"),
+            "a dropped call takes its arguments with it; got:\n{code}"
+        );
+        assert!(
+            !code.contains("debugger"),
+            "--drop debugger must remove the statement; got:\n{code}"
+        );
+        assert!(
+            code.contains("STILL_HERE"),
+            "only console and debugger are dropped; got:\n{code}"
+        );
+
+        let control = emitted_chunk_code(
+            &bundle_module_graph_with("drop-off", "entry.ts", DROP_FIXTURE, &opts())
+                .expect("the fixture bundles"),
+        );
+        assert!(
+            control.contains("console.log") && control.contains("debugger"),
+            "without --drop both must survive, or the assertions above prove nothing; \
+             got:\n{control}"
+        );
+    }
+
+    /// The value half, kept separate because it is the one a naive removal gets
+    /// wrong: `x = console.log(…)` must still assign, and `undefined` is what the
+    /// call returned anyway.
+    #[test]
+    fn dropping_a_console_call_whose_result_is_read_leaves_the_assignment() {
+        let mut o = opts();
+        o.drop_console = true;
+        let code = emitted_chunk_code(
+            &bundle_module_graph_with("drop-value", "entry.ts", DROP_FIXTURE, &o)
+                .expect("the fixture bundles"),
+        );
+        assert!(
+            code.contains("globalThis.OUT"),
+            "the assignment must survive its dropped right-hand side; got:\n{code}"
+        );
+        assert!(
+            code.contains("globalThis.OUT=void 0") || code.contains("globalThis.OUT = void 0"),
+            "a read console call becomes `void 0`, not nothing; got:\n{code}"
+        );
+    }
+
+    /// Dropping happens inside the minifier's compress pass, so `--no-minify`
+    /// leaves no pass to perform it. Refusing beats accepting the flag and
+    /// silently emitting every call it promised to remove.
+    #[test]
+    fn drop_is_refused_when_minification_is_off() {
+        let mut o = opts();
+        o.minify = false;
+        o.drop_console = true;
+        let err = bundle_module_graph_with("drop-no-minify", "entry.ts", DROP_FIXTURE, &o)
+            .expect_err("--drop with --no-minify must fail the build");
+        let message = err.to_string();
+        assert!(
+            message.contains("--drop") && message.contains("--no-minify"),
+            "the error must name both flags so the user knows what to change; got: {message}"
+        );
+    }
+
+    /// The build report's central claim: each input's contribution is MEASURED,
+    /// not apportioned. A module carrying an order of magnitude more source than
+    /// its sibling has to show up that way on both axes — the source the bundler
+    /// read, and the bytes the module put in the chunk.
+    #[test]
+    fn the_metafile_attributes_bytes_to_the_input_that_produced_them() {
+        let big = format!(
+            "export const BIG = [\n{}];\n",
+            "  'padding-padding-padding',\n".repeat(200)
+        );
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import { BIG } from './big.ts';\n\
+                 import { SMALL } from './small.ts';\n\
+                 globalThis.OUT = [BIG, SMALL];\n",
+            ),
+            ("big.ts", big.as_str()),
+            ("small.ts", "export const SMALL = 1;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        let result =
+            bundle_module_graph_with("metafile", "entry.ts", files, &o).expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let source_of = |name: &str| {
+            report
+                .inputs
+                .iter()
+                .find(|(path, _)| path.ends_with(name))
+                .unwrap_or_else(|| panic!("{name} missing from inputs: {:?}", report.inputs.keys()))
+                .1
+                .bytes
+        };
+        assert!(
+            source_of("big.ts") > 10 * source_of("small.ts"),
+            "input bytes must track real source size: big={} small={}",
+            source_of("big.ts"),
+            source_of("small.ts")
+        );
+
+        let entry = report
+            .outputs
+            .get(&result.entry)
+            .expect("the entry chunk is reported");
+        assert!(
+            entry.entry_point.is_some(),
+            "the entry chunk must carry an entryPoint"
+        );
+        let contributed = |name: &str| {
+            entry
+                .inputs
+                .iter()
+                .find(|(path, _)| path.ends_with(name))
+                .unwrap_or_else(|| {
+                    panic!("{name} missing from the chunk: {:?}", entry.inputs.keys())
+                })
+                .1
+                .bytes_in_output
+        };
+        assert!(
+            contributed("big.ts") > 10 * contributed("small.ts"),
+            "bytesInOutput must track what each module contributed: big={} small={}",
+            contributed("big.ts"),
+            contributed("small.ts")
+        );
+        // Unminified the per-input numbers ARE the rendered pieces of the chunk,
+        // so they have to account for most of it. They do not under minify, which
+        // runs after rendering — the docs say so rather than the report guessing.
+        let total: usize = entry.inputs.values().map(|i| i.bytes_in_output).sum();
+        assert!(
+            total <= entry.bytes && total * 2 > entry.bytes,
+            "unminified, attributed bytes ({total}) should account for most of the chunk ({})",
+            entry.bytes
+        );
+    }
+
+    #[test]
+    fn no_report_is_collected_unless_asked_for() {
+        let result = bundle_module_graph("metafile-off", "entry.ts", DROP_FIXTURE)
+            .expect("the fixture bundles");
+        assert!(result.metafile.is_none());
     }
 
     // Rolldown lowers mixed CommonJS/ESM cycles through lazy init wrappers.
