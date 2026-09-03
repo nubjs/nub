@@ -471,9 +471,7 @@ fn report_resolved_build(
     // either strand a gap on a narrow block or collide on a wide one. That is what
     // `install_report.rs::render_block` does, for the same reason.
     let width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
-    let cols = console::Term::stderr()
-        .size_checked()
-        .map_or(FALLBACK_COLS, |(_, cols)| cols as usize);
+    let cols = stderr_cols();
     eprintln!();
     for (label, spans) in rows {
         for line in render_row(label, &spans, width, cols, color) {
@@ -485,6 +483,15 @@ fn report_resolved_build(
 /// Assumed terminal width when stderr cannot be measured — a pipe, a log file, a
 /// CI runner. Matches `install_report.rs`.
 const FALLBACK_COLS: usize = 80;
+
+/// The width everything this module prints wraps to. Read once per surface
+/// rather than threaded down, and named so the block and the diagnostics
+/// demonstrably wrap to the same number.
+fn stderr_cols() -> usize {
+    console::Term::stderr()
+        .size_checked()
+        .map_or(FALLBACK_COLS, |(_, cols)| cols as usize)
+}
 
 /// One row: the label right-aligned in its gutter, then each span in its own ink.
 ///
@@ -781,12 +788,40 @@ pub(crate) fn note(line: &str) {
     }
 }
 
-/// The label column a warning's body hangs under: `warn` plus the same [`GAP`]
-/// the block uses, so a wrapped explanation lines up with the headline it
-/// explains instead of with the margin.
-const WARN_INDENT: usize = 4 + GAP;
+/// How loud a diagnostic is.
+///
+/// Separate from [`Ink`], which is the closing block's vocabulary and
+/// deliberately has three tiers and no more. A diagnostic answers a different
+/// question — how much of the reader's attention this deserves — so it gets its
+/// own two-value answer rather than a fourth `Ink` that only one surface uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tier {
+    /// Worth acting on; the build still produced an artifact.
+    Warn,
+    /// The build produced nothing.
+    Error,
+}
 
-/// A warning, drawn in the two tiers it has.
+impl Tier {
+    fn label(self) -> &'static str {
+        match self {
+            Tier::Warn => "warn",
+            Tier::Error => "error",
+        }
+    }
+
+    /// Yellow and red, which are the two colors nub already spends on exactly
+    /// these meanings: yellow on an install's `latest X` advisory, red on the
+    /// engine's `ERR_NUB_*` line. Neither is a new color.
+    fn sgr(self) -> &'static str {
+        match self {
+            Tier::Warn => "\x1b[33m",
+            Tier::Error => "\x1b[31m",
+        }
+    }
+}
+
+/// A warning, drawn in the two weights it has.
 ///
 /// Everything the compile path wants to say used to be one weight and one
 /// prefix — a `note:` in front of a paragraph — so a warning a reader had to act
@@ -804,34 +839,131 @@ const WARN_INDENT: usize = 4 + GAP;
 /// build, not a problem with it.
 pub(crate) fn warn(headline: &str, body: &[&str]) {
     let color = crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
-    for line in warn_lines(headline, body, color) {
+    for line in diagnostic_lines(Tier::Warn, headline, body, stderr_cols(), color) {
         note(&line);
     }
 }
 
-/// The lines [`warn`] prints, split from the printing so a test can read them.
+/// Report a failed build, and hand back the exit code it should carry.
+///
+/// `main` returns a `Result`, so an error escaping [`run`] reaches Rust's
+/// `Termination` and prints an unstyled `Error: …` — the same framing a panic
+/// gets, and indistinguishable at a glance from a warning that let the build
+/// finish. An error is a diagnostic one step louder than a warning, so it is
+/// drawn as one rather than left to the runtime.
+///
+/// Scoped to `nub compile` deliberately. nub's error surface is already split —
+/// the PM engine prints a red `ERR_NUB_*` line while everything reaching
+/// `Termination` prints a plain `Error:` — and closing that gap is a change to
+/// every command's output rather than this one's to make.
+pub(crate) fn report_error(err: &anyhow::Error) -> i32 {
+    let color = crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
+    for line in error_lines(err, stderr_cols(), color) {
+        note(&line);
+    }
+    1
+}
+
+/// Decompose an error into the lines [`report_error`] prints.
+///
+/// Split out for the same reason [`render_row`] is: the decomposition is the
+/// part with judgment in it, and a test that rebuilt it would not be testing
+/// what ships.
+fn error_lines(err: &anyhow::Error, cols: usize, color: bool) -> Vec<String> {
+    let rendered = err.to_string();
+    let mut source = rendered.lines();
+    let headline = source.next().unwrap_or_default();
+    // The message's own continuation lines first, then the cause chain. Several
+    // of these errors are already written as a headline plus an indented
+    // explanation — the "no Node version could be inferred" one runs to four —
+    // so their shape is kept rather than reflowed. The indent they came with is
+    // stripped, so the hanging indent is the only one in play and a body line
+    // cannot end up indented twice.
+    let mut body: Vec<String> = source.map(|line| line.trim_start().to_string()).collect();
+    body.extend(err.chain().skip(1).map(|cause| cause.to_string()));
+    let body: Vec<&str> = body.iter().map(String::as_str).collect();
+    diagnostic_lines(Tier::Error, headline, &body, cols, color)
+}
+
+/// The lines a diagnostic prints, split from the printing so a test can read
+/// them.
+///
+/// Shared by both tiers so they cannot drift into two different shapes — the
+/// point of a tier is that the reader learns one layout and reads severity off
+/// the label.
 ///
 /// Same reason [`render_row`] is split out: the body's hanging indent has to be
 /// computed from the label's VISIBLE width, and a test that rebuilt the
 /// arithmetic itself would stay green while production indented by the escape
 /// bytes instead.
-fn warn_lines(headline: &str, body: &[&str], color: bool) -> Vec<String> {
-    let label = if color {
-        // Yellow, which is what an install already spends on the `latest X`
-        // advisory — the CLI's existing "worth your attention, not an error".
-        format!("\x1b[33m\x1b[1mwarn\x1b[22m\x1b[39m")
+fn diagnostic_lines(
+    tier: Tier,
+    headline: &str,
+    body: &[&str],
+    cols: usize,
+    color: bool,
+) -> Vec<String> {
+    let label = tier.label();
+    let painted = if color {
+        format!("{}\x1b[1m{label}\x1b[22m\x1b[39m", tier.sgr())
     } else {
-        "warn".to_string()
+        label.to_string()
     };
-    let mut lines = vec![format!("{label}{}{headline}", " ".repeat(GAP))];
-    lines.extend(body.iter().map(|line| {
-        format!(
-            "{}{}",
-            " ".repeat(WARN_INDENT),
-            paint(line, Ink::Muted, color)
-        )
-    }));
+    // Everything hangs under the headline rather than under the margin, so an
+    // explanation reads as belonging to the thing it explains — and so does a
+    // headline long enough to wrap, which is not rare: `unknown --platform …`
+    // enumerates all eight and runs to 155 columns.
+    let indent = label.len() + GAP;
+
+    let mut lines = Vec::new();
+    for (i, chunk) in wrapped(headline, indent, cols).into_iter().enumerate() {
+        // The label sits on the first line only; the rest align under it.
+        let lead = if i == 0 {
+            format!("{painted}{}", " ".repeat(GAP))
+        } else {
+            " ".repeat(indent)
+        };
+        lines.push(format!("{lead}{chunk}"));
+    }
+    for line in body {
+        for chunk in wrapped(line, indent, cols) {
+            lines.push(format!(
+                "{}{}",
+                " ".repeat(indent),
+                paint(&chunk, Ink::Muted, color)
+            ));
+        }
+    }
     lines
+}
+
+/// Break `text` into chunks that each fit in `cols` once `indent` is added.
+///
+/// Painted AFTER this runs, never before — wrapping a string that already
+/// carries escapes counts those bytes as columns, which is the same trap
+/// [`render_row`]'s label gutter has.
+fn wrapped(text: &str, indent: usize, cols: usize) -> Vec<String> {
+    // A pathologically narrow terminal still has to make progress rather than
+    // emit one word per line forever.
+    let limit = cols.max(indent + 20);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut col = indent;
+    for (lead, word) in words(text) {
+        let needed = if line.is_empty() { 0 } else { lead } + word.chars().count();
+        if !line.is_empty() && col + needed > limit {
+            out.push(std::mem::take(&mut line));
+            col = indent;
+        }
+        if !line.is_empty() {
+            line.push_str(&" ".repeat(lead));
+            col += lead;
+        }
+        line.push_str(word);
+        col += word.chars().count();
+    }
+    out.push(line);
+    out
 }
 
 impl LiveLine {
@@ -4072,35 +4204,133 @@ mod tests {
         assert_eq!(words_out, words_in, "wrapping dropped or reordered a word");
     }
 
-    /// A warning's body hangs under its headline, not under the margin.
+    /// A diagnostic's body hangs under its headline, not under the margin.
     ///
-    /// The indent is the whole reason this tier reads as two: line up the body
-    /// with the left edge instead and the explanation stops looking like it
-    /// belongs to the headline above it. Asserted with color ON as well, because
-    /// that is the case where an implementation that padded the painted label
-    /// would silently indent by the escape bytes.
+    /// The indent is the whole reason a tier reads as two things: line the body
+    /// up with the left edge instead and the explanation stops looking like it
+    /// belongs to the headline above it. Both tiers are asserted, because they
+    /// have different label widths and a shared implementation is exactly where
+    /// one of them would silently pick up the other's indent.
+    ///
+    /// Color is asserted too — that is the case where an implementation padding
+    /// the PAINTED label would indent by the escape bytes instead of the letters.
     #[test]
-    fn a_warning_hangs_its_body_under_its_headline() {
+    fn a_diagnostic_hangs_its_body_under_its_headline() {
         let body = ["first explanation line", "second"];
         assert_eq!(
-            warn_lines("the embedded Node is not stripped", &body, false),
+            diagnostic_lines(
+                Tier::Warn,
+                "the embedded Node is not stripped",
+                &body,
+                80,
+                false
+            ),
             vec![
                 "warn  the embedded Node is not stripped".to_string(),
                 "      first explanation line".to_string(),
                 "      second".to_string(),
             ]
         );
-
-        let colored = warn_lines("headline", &body, true);
         assert_eq!(
-            colored.iter().map(|l| strip_sgr(l)).collect::<Vec<_>>(),
-            warn_lines("headline", &body, false),
-            "color must change nothing about which columns the lines occupy"
+            diagnostic_lines(
+                Tier::Error,
+                "entry file not found: app.ts",
+                &body,
+                80,
+                false
+            ),
+            vec![
+                "error  entry file not found: app.ts".to_string(),
+                "       first explanation line".to_string(),
+                "       second".to_string(),
+            ],
+            "the wider label carries a wider hanging indent"
         );
+
+        for (tier, sgr) in [(Tier::Warn, "\x1b[33m"), (Tier::Error, "\x1b[31m")] {
+            let colored = diagnostic_lines(tier, "headline", &body, 80, true);
+            assert_eq!(
+                colored.iter().map(|l| strip_sgr(l)).collect::<Vec<_>>(),
+                diagnostic_lines(tier, "headline", &body, 80, false),
+                "color must change nothing about which columns the lines occupy"
+            );
+            assert!(
+                colored[0].starts_with(&format!("{sgr}\x1b[1m{}", tier.label())),
+                "the label carries the whole of the diagnostic's weight: {:?}",
+                colored[0]
+            );
+        }
+    }
+
+    /// A headline too long for the terminal wraps under the label, not to the
+    /// margin.
+    ///
+    /// Uses the real one that forced this: `--platform` enumerates all eight
+    /// supported triples and runs to 155 columns, so on any ordinary terminal
+    /// the label's own line is the one that wraps. Left to the terminal, the
+    /// remainder restarts at column zero and the hanging indent the tier exists
+    /// for is honored only on lines short enough not to need it.
+    #[test]
+    fn a_diagnostic_too_wide_for_the_terminal_wraps_under_its_label() {
+        let headline = "unknown --platform \"sunos-sparc\". Supported: darwin-arm64, darwin-x64, \
+             linux-arm64, linux-arm64-musl, linux-x64, linux-x64-musl, win32-arm64, win32-x64";
+        let lines = diagnostic_lines(Tier::Error, headline, &[], 80, false);
+
         assert!(
-            colored[0].starts_with("\x1b[33m\x1b[1mwarn"),
-            "the label carries the whole of the warning's weight: {:?}",
-            colored[0]
+            lines.len() > 1,
+            "a 155-column headline must wrap: {lines:?}"
+        );
+        for line in &lines {
+            assert!(line.len() <= 80, "line runs past the terminal: {line:?}");
+        }
+        let indent = "error".len() + GAP;
+        for line in &lines[1..] {
+            assert_eq!(
+                line.len() - line.trim_start().len(),
+                indent,
+                "a continuation hangs under the headline, not at the margin: {line:?}"
+            );
+        }
+        let words_in: Vec<&str> = headline.split_whitespace().collect();
+        let words_out: Vec<&str> = lines.iter().flat_map(|l| l.split_whitespace()).collect();
+        assert_eq!(
+            words_out[1..],
+            words_in[..],
+            "wrapping dropped or reordered a word (the leading `error` label aside)"
+        );
+    }
+
+    /// An error keeps the shape it was written in, and picks up its causes.
+    ///
+    /// Several compile errors are authored as a headline plus an indented
+    /// explanation, so the decomposition has to hand the explanation to the body
+    /// rather than let it wrap as part of the headline — and it has to strip the
+    /// indent those lines already carry, or they end up indented twice.
+    #[test]
+    fn an_error_keeps_its_explanation_and_gains_its_causes() {
+        let multiline = anyhow::anyhow!(
+            "no Node version could be inferred for this project.\n  Pass --target <version>, or add a pin.\n  (nub compile does not fall back to \"latest\".)"
+        );
+        assert_eq!(
+            error_lines(&multiline, 80, false),
+            vec![
+                "error  no Node version could be inferred for this project.".to_string(),
+                "       Pass --target <version>, or add a pin.".to_string(),
+                "       (nub compile does not fall back to \"latest\".)".to_string(),
+            ]
+        );
+
+        let chained = anyhow::anyhow!("no such file or directory")
+            .context("reading app.ts")
+            .context("bundling app.ts");
+        assert_eq!(
+            error_lines(&chained, 80, false),
+            vec![
+                "error  bundling app.ts".to_string(),
+                "       reading app.ts".to_string(),
+                "       no such file or directory".to_string(),
+            ],
+            "every cause is stated; none is dropped and none repeats the headline"
         );
     }
 

@@ -3257,7 +3257,11 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 // target Node; the CLI layer does not know it yet.
                 target_node: None,
             },
-        }),
+        })
+        // A failed compile reports itself, in the same shape as the `warn` tier
+        // it already draws, instead of escaping to `Termination`'s unstyled
+        // `Error:` — which frames a bad `--platform` exactly like a panic.
+        .or_else(|err| Ok(crate::compile::report_error(&err))),
         Some(Command::Init {
             yes,
             js,
