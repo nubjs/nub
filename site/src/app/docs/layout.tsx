@@ -18,6 +18,7 @@ const COMMAND_BY_URL: Record<string, string> = {
   '/docs/runner/dlx': 'nub dlx',
   '/docs/install': 'nub install',
   '/docs/node': 'nub node',
+  '/docs/llm': 'nub llm',
   '/docs/pm': 'nub pm',
   '/docs/watch': 'nub watch',
 };
