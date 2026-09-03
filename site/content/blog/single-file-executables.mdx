@@ -52,23 +52,76 @@ The default shape embeds a full Node. A stock `node` binary is 139 MB on darwin-
   ]}
 />
 
-## Assets
+### App size
+
+A CLI built on `commander`, `chalk`, `ora` and `zod`:
+
+```console
+$ du -sh node_modules
+8.6M	node_modules
+
+$ nub compile cli.ts --smol --target lts --out cli
+Compiled cli — smol shape, Node 24.20.0, darwin-arm64, 1.0 MB
+
+$ ls -l cli
+-rwxr-xr-x  1  1007138  cli        # 941,090 baseline + 66,048 bytes of app
+
+$ ./cli --name nub
+✔ hello, nub
+```
+
+Four dependencies and 8.6 MB of `node_modules` become 66,048 bytes of bundled, tree-shaken, minified app.
+
+### Startup
+
+Time to first output, measured warm — after the one-time extraction on first run:
+
+<Bench
+  label="hello world · warm start"
+  accent="acid"
+  unit="ms"
+  max={53.7}
+  caption="hyperfine, macOS arm64, median of three 60-run passes. nub 0.9, bun 1.3.14, deno 2.8.1, node 26.7.0."
+  rows={[
+    { cmd: 'bun build --compile', ms: 13.6 },
+    { cmd: 'deno compile', ms: 24.2 },
+    { cmd: 'node hello.js', ms: 34.3 },
+    { cmd: 'nub compile', ms: 45.6, us: true },
+    { cmd: 'nub compile --smol', ms: 53.7, us: true },
+  ]}
+/>
+
+Nub is slowest in this chart. A stock `node` takes 34 ms on this machine before any user code runs, and the launcher adds about 11 ms: decoding the payload, then an integrity check over the extracted tree that runs on every start. It hands off by replacing itself with Node, so the binary you launched is the process you end up with.
+
+### Assets
 
 Imports of non-module files resolve at build time too:
 
 ```ts
 import prompt from "./prompt.md";     // inlined into the bundle, as a string
-import model from "./model.wasm";     // an absolute path to the extracted file
+import logo from "./logo.png";        // an absolute path to the extracted file
 
 // a file named relative to the module resolves too
 const table = readFileSync(new URL("./table.bin", import.meta.url));
 ```
 
-A text file (`.md`, `.txt`) is inlined into the bundle, and the import evaluates to its contents as a string. A binary file (`.wasm`, `.png`, `.bin`) ships inside the executable and is written out beside the bundle on first run; the import evaluates to that file's absolute path, so `readFileSync(model)` reads a real file. A literal `new URL(..., import.meta.url)` embeds the file it names, and the reference is rewritten to resolve at run time from any directory. The resolution is per module; a helper in a subdirectory keeps naming its own siblings. Files nothing imports — templates, migrations, a data directory — ship with `--include`.
+A text file (`.md`, `.txt`) is inlined into the bundle, and the import evaluates to its contents as a string. A binary file ships inside the executable and is written out beside the bundle on first run, and the import evaluates to that file's absolute path. A literal `new URL(..., import.meta.url)` embeds the file it names, and the reference is rewritten to resolve at run time from any directory. Files nothing imports — templates, migrations, a data directory — ship with `--include`.
 
+<Callout title="Computed paths">
 A CommonJS dependency bundled into the output keeps `__dirname` and `__filename`. Paths your own code computes from `import.meta.dirname` are the exception: bundling moves every module to the entry's location, so compute asset paths as the entry sees them.
+</Callout>
 
-## Native addons
+### WebAssembly
+
+A `.wasm` import is a binary asset like any other, so the import evaluates to the extracted file's path and the standard API reads it:
+
+```ts
+import wasm from "./model.wasm";
+
+const { instance } = await WebAssembly.instantiate(readFileSync(wasm));
+```
+
+#### Native addons
 
 Native addons are the hard case for a bundler: a `.node` file is machine code, and `dlopen` loads it from a path on disk. The compiler follows an addon's static import and packs it into the executable:
 
@@ -95,7 +148,7 @@ Error: this native addon is built for macOS, but the binary targets linux-x64: n
   install has to put the target's own platform package on disk before you compile.
 ```
 
-## Self-extraction
+### Self-extraction
 
 A compiled Nub binary has no virtual filesystem. On first run it unpacks its application files into a cache directory and runs from there, so `dlopen` and every `fs` call get ordinary files on an ordinary disk.
 
@@ -120,7 +173,10 @@ A compiled [`sharp`](https://www.npmjs.com/package/sharp) app extracts this tree
             └── … libvips-cpp.8.18.6.dylib
 ```
 
-The embedded Node extracts separately, keyed by content, and binaries built against the same runtime share one extracted copy. For a locked-down deploy, warm the cache when the image is built:
+The embedded Node extracts separately, keyed by content, and binaries built against the same runtime share one extracted copy.
+
+<Callout title="Locked-down deploys">
+Warm the cache when the image is built:
 
 ```dockerfile
 ENV XDG_CACHE_HOME=/opt/cache
@@ -128,8 +184,9 @@ RUN ./app --version || true   # the exit code is irrelevant; the extraction is t
 ```
 
 After that the binary writes nothing at run time, so a `readOnlyRootFilesystem` pod is fine. On Lambda the launcher uses the writable temp directory, so no warm-up step is needed.
+</Callout>
 
-## Dynamic imports and workers
+### Dynamic imports and workers
 
 Flattening a module graph into one file breaks three things that work under plain `node`: lazy dynamic imports, relative asset references, and workers.
 
@@ -146,7 +203,7 @@ _nub_commonjs-C_xMe9k8.mjs    main.mjs              worker-blob-url.cjs
 
 Chunks and assets land flat in one directory, which keeps a rewritten asset reference valid from every chunk. Workers compile the same way: a static `new Worker(new URL("./worker.ts", import.meta.url))` becomes a second bundled entry carrying the same runtime preamble as the program, and the thread sees the same `process.execPath` and the same globals.
 
-## Unbundled packages
+### Unbundled packages
 
 Some packages can't be bundled at all, because they read files from paths they build at run time. The compiler detects those, ships them in their installed layout — and then bundles each of their *dependencies* individually, emitting one chunk per package at the exact `node_modules` path the parent resolves:
 
@@ -160,73 +217,7 @@ Compiled app — smol shape, Node 26.0.0, darwin-arm64, 2.8 MB
 
 For that jsdom program, npm writes 1,834 files to `node_modules` and the compiled binary extracts 1,006. The package that needed its own files keeps all 657 of them. The clean packages around it collapse: parse5 goes from 33 files to 2, whatwg-url from 19 to 3, mdn-data from 25 to 4. The launcher byte-verifies the whole extracted tree before every run, so each of those 828 files would otherwise be an integrity check on every start.
 
-## App size
-
-A CLI built on `commander`, `chalk`, `ora` and `zod`:
-
-```console
-$ du -sh node_modules
-8.6M	node_modules
-
-$ nub compile cli.ts --smol --target lts --out cli
-Compiled cli — smol shape, Node 24.20.0, darwin-arm64, 1.0 MB
-
-$ ls -l cli
--rwxr-xr-x  1  1007138  cli        # 941,090 baseline + 66,048 bytes of app
-
-$ ./cli --name nub
-✔ hello, nub
-```
-
-Four dependencies and 8.6 MB of `node_modules` become 66,048 bytes of bundled, tree-shaken, minified app.
-
-## Startup
-
-Time to first output, measured warm — after the one-time extraction on first run:
-
-<Bench
-  label="hello world · warm start"
-  accent="acid"
-  unit="ms"
-  max={53.7}
-  caption="hyperfine, macOS arm64, median of three 60-run passes. nub 0.9, bun 1.3.14, deno 2.8.1, node 26.7.0."
-  rows={[
-    { cmd: 'bun build --compile', ms: 13.6 },
-    { cmd: 'deno compile', ms: 24.2 },
-    { cmd: 'node hello.js', ms: 34.3 },
-    { cmd: 'nub compile', ms: 45.6, us: true },
-    { cmd: 'nub compile --smol', ms: 53.7, us: true },
-  ]}
-/>
-
-Nub is slowest in this chart. A stock `node` takes 34 ms on this machine before any user code runs, and the launcher adds about 11 ms: decoding the payload, then an integrity check over the extracted tree that runs on every start. It hands off by replacing itself with Node, so the binary you launched is the process you end up with.
-
-## Flags
-
-Everything above is the default behavior of one command. The flags:
-
-```bash
-nub compile cli.ts --out dist/cli               # name the output
-nub compile cli.ts --platform linux-arm64-musl  # any of the eight targets
-nub compile cli.ts --target 24.20.0             # pin the exact Node baked in
-
-nub compile cli.ts --define BUILD='"2026-09-02"'  # compile-time constants
-nub compile cli.ts --sourcemap                    # stack traces name your .ts lines
-nub compile cli.ts --no-minify                    # readable output, for debugging it
-nub compile cli.ts --tsconfig tsconfig.build.json
-
-nub compile cli.ts --include data --exclude 'data/**/*.tmp'   # embed files no import names
-nub compile cli.ts --unbundled pino               # ship a package in its installed layout
-nub compile cli.ts --external playwright          # leave a package to the target machine
-nub compile cli.ts --allow-dynamic-import         # computed import() for plugin systems
-
-nub compile app.ts --icon icon.ico --platform win32-x64        # windows resources
-nub compile app.ts --node-options "--max-old-space-size=4096"  # bake in runtime flags
-```
-
-Each of these has its own section in [the compile docs](/docs/compile).
-
-## Cross-compilation
+### Cross-compilation
 
 Every target builds from every host; a single CI runner can produce the whole release:
 
@@ -257,7 +248,7 @@ Compiled app.exe — embed shape, Node 26.8.1, win32-x64, 30.0 MB
 
 The produced PE carries real `RT_ICON` and `RT_GROUP_ICON` resources, verified on Windows against an icon-less control. Nub decodes the `.ico` you supply and regenerates the standard set of sizes from it, so the source artwork should scale cleanly.
 
-## Reproducible builds
+### Reproducible builds
 
 Two compiles of an unchanged tree produce a byte-identical executable:
 
@@ -270,6 +261,31 @@ $ shasum -a 256 a b
 ```
 
 The checksum in your release notes is reproducible by anyone who checks out the tag.
+
+### Flags
+
+Everything above is the default behavior of one command. The flags:
+
+```bash
+nub compile cli.ts --out dist/cli               # name the output
+nub compile cli.ts --platform linux-arm64-musl  # any of the eight targets
+nub compile cli.ts --target 24.20.0             # pin the exact Node baked in
+
+nub compile cli.ts --define BUILD='"2026-09-02"'  # compile-time constants
+nub compile cli.ts --sourcemap                    # stack traces name your .ts lines
+nub compile cli.ts --no-minify                    # readable output, for debugging it
+nub compile cli.ts --tsconfig tsconfig.build.json
+
+nub compile cli.ts --include data --exclude 'data/**/*.tmp'   # embed files no import names
+nub compile cli.ts --unbundled pino               # ship a package in its installed layout
+nub compile cli.ts --external playwright          # leave a package to the target machine
+nub compile cli.ts --allow-dynamic-import         # computed import() for plugin systems
+
+nub compile app.ts --icon icon.ico --platform win32-x64        # windows resources
+nub compile app.ts --node-options "--max-old-space-size=4096"  # bake in runtime flags
+```
+
+Each of these has its own section in [the compile docs](/docs/compile).
 
 ## `--smol`
 
@@ -290,6 +306,8 @@ Most machines that run developer tools already have Node installed, so `--smol` 
 />
 
 That's 0.94 MB on disk, 504 KB gzipped.
+
+### Version pinning
 
 Nub does not infer a Node version for this shape. With no pin in the project, compiling stops:
 
@@ -312,6 +330,8 @@ nub compile cli.ts --smol --target ">=22 <23"   # accept a host Node in the rang
 nub compile cli.ts --smol --target 26.0.0       # use or provision exactly 26.0.0
 ```
 
+### `--install-message`
+
 A first run that downloads Node shows a progress box; `--install-message` replaces the default text:
 
 ```bash
@@ -320,12 +340,8 @@ nub compile cli.ts --smol --target lts --install-message "Setting up acme (one t
 
 A machine with no Node and no network access exits with an error that points to the default build.
 
-## opencode
-
-The examples above are small on purpose. For a full-size build, see [our Node fork of opencode](https://github.com/nubjs/opencode/tree/nub-compile): upstream ships the coding agent as a Bun executable, and the `nub-compile` branch builds the same app as a `nub compile` binary on stock Node — the flag-for-flag mapping from `Bun.build` lives in [`build-nub.mjs`](https://github.com/nubjs/opencode/blob/nub-compile/packages/opencode/script/build-nub.mjs).
-
 ## Get started
 
 <GetStarted />
 
-See [the compile docs](/docs/compile) for the full flag surface — assets and `--include`, native addons, workers, source maps, and shipping a package in its installed layout with `--unbundled`.
+For a full-size build, see [our Node fork of opencode](https://github.com/nubjs/opencode/tree/nub-compile): upstream ships the coding agent as a Bun executable, and the `nub-compile` branch builds the same app as a `nub compile` binary on stock Node, with the flag-for-flag mapping from `Bun.build` in [`build-nub.mjs`](https://github.com/nubjs/opencode/blob/nub-compile/packages/opencode/script/build-nub.mjs). [The compile docs](/docs/compile) cover the full flag surface — assets and `--include`, native addons, workers, source maps, and `--unbundled`.
