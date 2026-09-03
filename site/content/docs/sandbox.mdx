@@ -84,16 +84,13 @@ Windows sandboxes cannot open the null device. Git opens `/dev/null` when it sta
 
 This is a limit of the Windows sandbox itself, not something a wider policy can reach: the null device's permissions are reset by Windows on every boot, and only an administrator can change them. Microsoft [tracks it upstream](https://github.com/microsoft/win32-app-isolation/issues/73).
 
-Most packages are unaffected — Git is uncommon in dependency build scripts. When one does need it, exempt that package.
+A build script that needs Git's output will fail. Most tolerate it: in the measured set, every package that shells out to Git installs cleanly anyway, because each one falls back when the call fails.
 
-### Other packages that cannot run confined on Windows
+### The one package that needs an exemption
 
-| Package | Why |
-| --- | --- |
-| `lefthook` | Its build script runs Git, which cannot start in the sandbox. |
-| `cpu-features` | Its compiler probe starts a Visual Studio COM server, which refuses a sandboxed process. An install still succeeds, because the package is an optional dependency of `ssh2` — the native acceleration is skipped, not the install. |
-| `jpegtran-bin` | Ships a prebuilt executable with no relocation table. Windows cannot load such an image into a sandboxed process. |
-| `mozjpeg` | Ships the same kind of prebuilt executable. |
+`cpu-features` is the only package in the measured set whose install fails under the jail. Its compiler probe starts a Visual Studio COM server, and that server refuses a sandboxed caller.
+
+Installing it as a direct dependency fails. Installing something that depends on it optionally — `ssh2`, which is how almost everyone gets it — still succeeds, and only skips the native acceleration.
 
 ```json title="package.json"
 {
@@ -103,7 +100,7 @@ Most packages are unaffected — Git is uncommon in dependency build scripts. Wh
 }
 ```
 
-None of these fail under the jail on macOS or Linux, where the measured set installs clean.
+No package in the measured set fails under the jail on macOS or Linux.
 
 ## Rule order
 
