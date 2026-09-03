@@ -63,7 +63,19 @@ pub fn inject(
             if let Some(icon) = icon {
                 pe = pe
                     .set_icon(icon)
-                    .map_err(|e| anyhow!("setting the executable icon: {e:?}"))?;
+                    // The header check in `load_icon` proves the container is an
+                    // ICO, so a failure here is one of its IMAGES, and the raw
+                    // `image` error names a variant rather than an action. The
+                    // hint is the case that actually reaches users: a PNG-
+                    // compressed entry must be RGBA, and converters emit RGB.
+                    .map_err(|e| {
+                        anyhow!(
+                            "setting the executable icon: {e:?}\n\
+                             \x20\x20The container parsed, so one of the images inside it did \
+                             not. A PNG-compressed entry has to be RGBA — re-export the icon \
+                             with an alpha channel, or use one with uncompressed entries."
+                        )
+                    })?;
             }
             if let Some(version_info) = version_info {
                 pe = pe.set_version_info(version_info.to_vec());
