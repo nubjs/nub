@@ -26,12 +26,15 @@
 //!   on disk.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{MAIN_SEPARATOR, Path};
 use std::sync::{Arc, Mutex};
 
-use rolldown::plugin::{HookNoopReturn, HookUsage, Plugin, PluginContext};
-use rolldown_common::{ExportsKind, ModuleInfo, NormalModule, OutputChunk};
+use rolldown::plugin::{
+    HookNoopReturn, HookResolveIdArgs, HookResolveIdReturn, HookUsage, Plugin, PluginContext,
+    PluginContextResolveOptions,
+};
+use rolldown_common::{ExportsKind, ImportKind, ModuleInfo, NormalModule, OutputChunk};
 use serde::Serialize;
 
 /// esbuild's import-kind vocabulary, narrowed to the edges Rolldown reports.
@@ -41,24 +44,23 @@ use serde::Serialize;
 /// is neither ordered against nor the same length as the import records that do
 /// carry one, and the two cannot be zipped.
 ///
-/// It is right for a module that is wholly one format, which is every module in a
-/// normal graph, and WRONG for one that is not: an ESM module containing an
-/// unbound `require()` reports that edge as a statement. That shape is a
-/// bundler-only construct — a bare `require` in an ESM file throws under plain
-/// Node and survives only because the bundler rewrites it — but it compiles, so
-/// the report can carry the wrong kind. It is pinned by
-/// `an_unbound_require_in_an_esm_module_is_the_known_edge_kind_gap`, which asserts
-/// the wrong answer on purpose so that closing the gap fails the test rather than
-/// passing silently.
+/// This is the FALLBACK. The real kind comes from the resolver hook, which is the
+/// only place Rolldown offers it — see [`Collector::resolve_id`] — and reaches
+/// here through `Collector::require_edges`. The format is consulted only for an
+/// edge that hook never observed: a synthetic module, or a resolve that failed.
 ///
-/// Closing it needs a per-edge kind that this hook cannot supply. The records that
-/// carry one live on `NormalModule::ecma_view::import_records`, and measuring
-/// rather than assuming is what settles it: at `module_parsed` time that vector is
-/// EMPTY for every module, including one with two static imports, because it is
-/// filled during linking. So there is nothing to join against, and the two other
-/// candidate sources do not help either — `imported_ids` is a `FxIndexSet`,
-/// matching neither the order nor the length of the records, and a raw
-/// `module_request` cannot be mapped back to a resolved path.
+/// It has to be a fallback rather than the answer, because the format is wrong for
+/// a module that is not wholly one thing. An ESM module containing an unbound
+/// `require()` has an ESM format and a require edge at the same time; that shape is
+/// bundler-only — a bare `require` in an ESM file throws under plain Node and
+/// survives only because the bundler rewrites it — but it compiles, so the report
+/// has to get it right. Pinned by
+/// `an_unbound_require_in_an_esm_module_reports_its_real_edge_kind`.
+///
+/// The obvious source is not available, which is worth recording so nobody
+/// re-derives it: `NormalModule::ecma_view::import_records` carry a per-edge kind,
+/// but at `module_parsed` time that vector is EMPTY for every module — including
+/// one with two static imports — because it is filled during linking.
 const REQUIRE_CALL: &str = "require-call";
 const IMPORT_STATEMENT: &str = "import-statement";
 const DYNAMIC_IMPORT: &str = "dynamic-import";
@@ -153,6 +155,13 @@ struct Module {
 #[derive(Debug, Default)]
 pub struct Collector {
     modules: Mutex<Vec<Module>>,
+    /// `(importer id, resolved target id)` for every edge that was a `require()`.
+    ///
+    /// The per-edge kind exists ONLY in the resolver hook: `ModuleInfo` does not
+    /// carry it, and `NormalModule`'s import records — which do — are still empty
+    /// at `module_parsed` time because they are filled during linking. So the kind
+    /// is captured where it is offered and joined back by resolved id here.
+    require_edges: Mutex<BTreeSet<(String, String)>>,
 }
 
 impl Plugin for Collector {
@@ -189,8 +198,44 @@ impl Plugin for Collector {
         }
     }
 
+    /// Observe the import kind, which no later hook reports.
+    ///
+    /// Resolution is NOT influenced: this always returns `Ok(None)`, so the real
+    /// resolver chain decides as it would have. To learn where a `require()`
+    /// actually lands it re-runs that same chain through `ctx.resolve` with the
+    /// edge's own kind, which is why the answer matches the build's rather than
+    /// being a second opinion — `skip_self` defaults to true, so the call cannot
+    /// re-enter this hook.
+    fn resolve_id(
+        &self,
+        ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
+        let require_from = (args.kind == ImportKind::Require)
+            .then(|| args.importer.map(str::to_string))
+            .flatten();
+        let specifier = args.specifier.to_string();
+        let kind = args.kind;
+        async move {
+            if let Some(importer) = require_from {
+                let options = PluginContextResolveOptions {
+                    import_kind: kind,
+                    ..Default::default()
+                };
+                if let Ok(Ok(resolved)) = ctx
+                    .resolve(&specifier, Some(&importer), Some(options))
+                    .await
+                    && let Ok(mut edges) = self.require_edges.lock()
+                {
+                    edges.insert((importer, resolved.id.to_string()));
+                }
+            }
+            Ok(None)
+        }
+    }
+
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::ModuleParsed
+        HookUsage::ModuleParsed | HookUsage::ResolveId
     }
 }
 
@@ -272,6 +317,11 @@ impl Report {
     /// — an emitted asset — gets the empty relations esbuild uses for a file it
     /// copied rather than compiled.
     pub fn finish(self, emitted: &[(&str, usize)], modules: &Collector) -> Metafile {
+        let require_edges = modules
+            .require_edges
+            .lock()
+            .map(|edges| edges.clone())
+            .unwrap_or_default();
         let collected = modules
             .modules
             .lock()
@@ -286,6 +336,11 @@ impl Report {
                                 module.format,
                                 module.imports.clone(),
                                 module.dynamic_imports.clone(),
+                                // The RAW id as well as the rendered key: the
+                                // require-edge set is keyed by raw ids on both
+                                // sides, and rendering is lossy (a path under the
+                                // base becomes relative).
+                                module.id.clone(),
                             ),
                         )
                     })
@@ -294,36 +349,48 @@ impl Report {
             .unwrap_or_default();
         let inputs = collected
             .iter()
-            .map(|(path, (bytes, format, imports, dynamic_imports))| {
-                let edges = imports
-                    .iter()
-                    .map(|id| (id, static_kind(*format)))
-                    .chain(dynamic_imports.iter().map(|id| (id, DYNAMIC_IMPORT)))
-                    .map(|(id, kind)| {
-                        let rendered = render_id(id, self.base.as_deref());
-                        Import {
-                            // A target the bundler never parsed is one it never
-                            // pulled in: an `--external` package, or a `node:`
-                            // builtin. That is exactly esbuild's `external`.
-                            external: !collected.contains_key(&rendered),
-                            path: rendered,
-                            kind,
-                        }
-                    })
-                    .collect();
-                (
-                    path.clone(),
-                    Input {
-                        bytes: *bytes,
-                        imports: edges,
-                        format: match format {
-                            ExportsKind::Esm => Some("esm"),
-                            ExportsKind::CommonJs => Some("cjs"),
-                            ExportsKind::None => None,
+            .map(
+                |(path, (bytes, format, imports, dynamic_imports, raw_id))| {
+                    let edges = imports
+                        .iter()
+                        .map(|id| {
+                            // The resolver hook saw this edge's real kind; the format
+                            // is only the fallback for an edge it never observed (a
+                            // synthetic module, or a resolve that failed).
+                            let kind = if require_edges.contains(&(raw_id.clone(), id.clone())) {
+                                REQUIRE_CALL
+                            } else {
+                                static_kind(*format)
+                            };
+                            (id, kind)
+                        })
+                        .chain(dynamic_imports.iter().map(|id| (id, DYNAMIC_IMPORT)))
+                        .map(|(id, kind)| {
+                            let rendered = render_id(id, self.base.as_deref());
+                            Import {
+                                // A target the bundler never parsed is one it never
+                                // pulled in: an `--external` package, or a `node:`
+                                // builtin. That is exactly esbuild's `external`.
+                                external: !collected.contains_key(&rendered),
+                                path: rendered,
+                                kind,
+                            }
+                        })
+                        .collect();
+                    (
+                        path.clone(),
+                        Input {
+                            bytes: *bytes,
+                            imports: edges,
+                            format: match format {
+                                ExportsKind::Esm => Some("esm"),
+                                ExportsKind::CommonJs => Some("cjs"),
+                                ExportsKind::None => None,
+                            },
                         },
-                    },
-                )
-            })
+                    )
+                },
+            )
             .collect();
         let mut chunks = self.chunks;
         let outputs = emitted

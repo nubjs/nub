@@ -6252,20 +6252,17 @@ mod tests {
         );
     }
 
-    /// The known gap in `static_kind`, asserted at its WRONG answer on purpose.
+    /// The case the module format alone cannot get right, and the reason the kind
+    /// is captured in the resolver hook instead.
     ///
     /// An unbound `require()` inside an ESM module resolves and bundles, so the
-    /// module's format says ESM while one of its edges is really a require. The
-    /// kind comes from the format, so that edge is reported as a statement. This
-    /// shape is bundler-only — a bare `require` in an ESM file throws under plain
-    /// Node — but it compiles here, so the report can be wrong.
-    ///
-    /// Pinned rather than left in a comment so the gap cannot close silently: the
-    /// day a per-edge kind becomes reachable, this test fails and says what to
-    /// update. It cannot be closed today — `import_records`, which carry the kind,
-    /// are empty at `module_parsed` time because they are filled during linking.
+    /// module is ESM while one of its edges is really a require — a bundler-only
+    /// shape, since a bare `require` in an ESM file throws under plain Node, but
+    /// one that compiles here. Both edges are asserted: reporting them both as
+    /// requires would be just as wrong as reporting them both as statements, and
+    /// only checking the pair catches that.
     #[test]
-    fn an_unbound_require_in_an_esm_module_is_the_known_edge_kind_gap() {
+    fn an_unbound_require_in_an_esm_module_reports_its_real_edge_kind() {
         let files: &[(&str, &str)] = &[
             (
                 "entry.ts",
@@ -6302,10 +6299,17 @@ mod tests {
             "the fixture only means something if the importer is ESM"
         );
         assert_eq!(
-            cjs_edge.kind, "import-statement",
-            "KNOWN GAP: a require() edge from an ESM importer is reported as a \
-             statement. If this now reads require-call the gap is closed — update \
-             `static_kind`'s comment and delete this test"
+            cjs_edge.kind, "require-call",
+            "the require() edge from an ESM importer must report as a require-call"
+        );
+        let esm_edge = entry
+            .imports
+            .iter()
+            .find(|i| i.path.ends_with("esm-dep.mjs"))
+            .expect("the import edge is in the graph");
+        assert_eq!(
+            esm_edge.kind, "import-statement",
+            "the real import in the same module must stay a statement"
         );
     }
 
