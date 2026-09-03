@@ -1,6 +1,6 @@
 ---
 title: Web Storage
-description: Session storage is in-memory and always available; persistent local storage turns on once you point it at a backing file.
+description: Session storage is in-memory, and persistent local storage turns on once you point it at a backing file. Both need Node 22.4 or newer.
 ---
 
 Node hides `sessionStorage` and `localStorage` behind `--experimental-webstorage` on the 22.4–24 band (native from 25); Nub injects that flag on exactly that band. Below Node 22.4 the flag does not exist and Web Storage is unavailable.
