@@ -155,13 +155,13 @@ A command-line flag always wins over the file. See [nub.jsonc](/docs/config) for
 
 ## Compatibility mode
 
-Nub augments by default. Compatibility mode turns **every** augmentation off — no load hook, no preload, no unflagging, no `.env` loading — and runs your code on plain Node, exactly as `node <file>` would. It still runs the project's *pinned* Node; version provisioning stays on. (This is distinct from the compatibility *tier* — the startup path for the Node lines without sync `registerHooks`, in the [table above](#supported-versions-and-tiers) — which is about how augmentation is delivered, not whether it runs.)
+Nub augments by default. Compatibility mode turns every augmentation off — the load hook, preloads, unflagging, and `.env` loading — and runs your code on plain Node, as `node <file>` would. It still runs the project's *pinned* Node; version provisioning stays on. (This is distinct from the compatibility *tier* in the [table above](#supported-versions-and-tiers), the startup path for Node lines without sync `registerHooks`, which only changes how augmentation is delivered.)
 
-There are three spellings: a per-invocation flag, a tree-wide env var, and a project field. They compose — any one of them forces compatibility mode.
+The three forms below compose: any one of them forces compatibility mode.
 
 ### `--node`
 
-Pass `--node` to run a single invocation with zero augmentation. Your code runs on the project's *pinned* Node (from `.node-version` / `.nvmrc`, fetched if missing), vanilla — useful for checking whether a behavior reproduces on plain Node, on the exact version the project pins.
+Pass `--node` to run a single invocation with zero augmentation. Your code runs on the project's *pinned* Node (from `.node-version` / `.nvmrc`, fetched if missing), vanilla.
 
 ```bash
 nub --node script.js     # the project's pinned Node, vanilla
@@ -179,7 +179,7 @@ nub script.ts            # plain Node, still on the project's pinned version
 
 ### `nodeCompat`
 
-Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) is the project-wide form: everyone working in the repository gets plain Node without setting anything in their shell.
+Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) is the project-wide form: it applies to everyone working in the repository.
 
 ```jsonc title="nub.jsonc"
 {
@@ -192,7 +192,7 @@ None of the other `nub.jsonc` runtime fields apply once it is set.
 
 ## How it works
 
-Every augmentation rides on Node's own extension points — Nub patches nothing and ships no runtime of its own. It registers a `module.registerHooks()` load hook (an async `module.register()` loader-worker on the compatibility tier) for transpilation and resolution, and injects a small `--import` preload for the globals and `.env` loading. On the fast tier, transpilation runs through an embedded [oxc](https://oxc.rs) N-API addon.
+Every augmentation goes through Node's own extension points; Nub ships no patched Node and no runtime of its own. It registers a `module.registerHooks()` load hook (an async `module.register()` loader-worker on the compatibility tier) for transpilation and resolution, and injects a small `--import` preload for the globals and `.env` loading. On the fast tier, transpilation runs through an embedded [oxc](https://oxc.rs) N-API addon.
 
 <Callout>
 Read the [full docs](https://nodejs.org/api/module.html#moduleregisterhooksoptions) for module customization hooks on nodejs.org.

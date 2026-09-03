@@ -49,7 +49,7 @@ node --require @nubjs/loader app.ts       # same, delivered as a CommonJS preloa
 node --import @nubjs/loader/esm app.ts    # ESM hooks only
 ```
 
-Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The loader transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, exactly as it would under plain Node.
+Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The loader transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, as it would under plain Node.
 
 ## Node support
 

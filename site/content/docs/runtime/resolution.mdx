@@ -93,7 +93,7 @@ The probe order is extension-aware — it depends on the parent file's extension
 
 A directory import honors the directory's `package.json` `"main"` before falling back to probing `index.<ext>` in that same parent-aware order. Only `"main"` is consulted — `exports` is never read for a directory-path import, matching Node, which honors `exports` only for package-name resolution.
 
-This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts` / `.cts`) with a relative specifier. A plain `.js` file stays strict about relative extensions, exactly like vanilla Node. Subpaths into a dependency are covered below and follow a different rule.
+This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts` / `.cts`) with a relative specifier. A plain `.js` file stays strict about relative extensions, like vanilla Node. Subpaths into a dependency are covered below and follow a different rule.
 
 ## Package subpaths
 
@@ -113,9 +113,9 @@ The order here is fixed, and unlike relative imports it does not vary with the i
 .js  .json  .ts  .tsx
 ```
 
-JavaScript sorts first because a published package's `.ts` is unshipped source that Nub does not transpile inside node_modules. A workspace package symlinked into node_modules ships no `.js` at all, so the same order still lands on its TypeScript.
+JavaScript sorts first because a published package's `.ts` is unshipped source that Nub does not transpile inside node_modules. A workspace package symlinked into node_modules ships no `.js`, so the order lands on its TypeScript.
 
-Because the rule is about the dependency's shape rather than the importer's, it is not scoped to TypeScript-family parents — a `.js` file in a `checkJs` project resolves these the same way.
+Subpath probing applies from any importing file, `.js` included.
 
 A subpath naming a directory resolves that directory's `index` file, the way a `require` of the same subpath already does:
 
@@ -123,9 +123,9 @@ A subpath naming a directory resolves that directory's `index` file, the way a `
 import { parse } from "qs/lib";   // resolves qs/lib/index.js
 ```
 
-Only `index` is consulted. A directory's own `package.json` `main` is not read for a subpath — Node's `require` reads it, and deferring keeps both resolvers on the same answer. A trailing slash names the directory: `qs/lib/` is the directory, never a `qs/lib.js` beside it.
+Nub's probe consults only `index`; a directory's own `package.json` `main` is left to Node's resolver, so `require` and `import` land on the same file.
 
-<Callout>A dependency that declares `exports` is never probed. Its map decides what is reachable, exactly as on Node, so a subpath it withholds stays an error.</Callout>
+<Callout>A dependency that declares `exports` is never probed. Its map decides what is reachable, as on Node, so a subpath it withholds stays an error.</Callout>
 
 ## .js → .ts resolution
 
@@ -143,7 +143,7 @@ The swap only fires when the written extension points at a file that doesn't exi
 
 ## What falls through to Node
 
-Nub resolves only the TypeScript-aware cases Node has no opinion on. Everything else is Node's job, handled by Node's own resolver unchanged:
+Nub resolves only the TypeScript-aware cases. Node's own resolver handles everything else, unchanged:
 
 - package names
 - `exports` / `imports` maps

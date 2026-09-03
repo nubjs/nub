@@ -34,9 +34,9 @@ Script names take the same priority. A verb that names a script in the local `pa
 
 ## Writing a plugin
 
-A plugin is a runnable executable named `nub-<verb>` — a compiled JavaScript bin or a native binary, the same as any other `node_modules/.bin` entry or a `git`/`cargo` subcommand. There's no plugin-specific build target: author it in TypeScript and publish the compiled output, exactly as you'd ship any other bin. Installed bins aren't transpiled, so the entry that actually runs has to be JavaScript or native.
+A plugin is a runnable executable named `nub-<verb>` — a compiled JavaScript bin or a native binary, the same as any other `node_modules/.bin` entry or a `git`/`cargo` subcommand. There's no plugin-specific build target: author it in TypeScript and publish the compiled output, as you'd ship any other bin. Installed bins aren't transpiled, so the entry that actually runs has to be JavaScript or native.
 
-A JavaScript plugin runs under Nub's runtime augmentation, exactly as `nub run` runs a script — the version-gated globals are present. A native executable just runs. The plugin's exit code is what Nub returns.
+A JavaScript plugin runs under Nub's runtime augmentation, as `nub run` runs a script — the version-gated globals are present. A native executable just runs. The plugin's exit code is what Nub returns.
 
 ```js title="nub-changeset"
 #!/usr/bin/env node

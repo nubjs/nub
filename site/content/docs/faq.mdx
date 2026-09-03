@@ -69,7 +69,7 @@ Works. CommonJS, `require()`, dynamic `require()`, `require.cache`, `module.expo
 
 ## What about native (N-API) addons?
 
-Works. Native addons compile against Node's N-API ABI, and Nub is running on a stock Node binary, so addons load exactly as they do on plain Node. (Nub itself ships its `oxc` transpiler as an N-API addon; that path is the same path your `better-sqlite3` or `@napi-rs/canvas` uses.) Compiling one from source carries one upstream caveat under the default install layout — see [GYP-based native builds](/docs/install/virtual-store#gyp-based-native-builds).
+Works. Native addons compile against Node's N-API ABI, and Nub is running on a stock Node binary, so addons load as they do on plain Node. (Nub itself ships its `oxc` transpiler as an N-API addon; that path is the same path your `better-sqlite3` or `@napi-rs/canvas` uses.) Compiling one from source carries one upstream caveat under the default install layout — see [GYP-based native builds](/docs/install/virtual-store#gyp-based-native-builds).
 
 ## Does it support all Node core modules?
 
@@ -153,14 +153,14 @@ Yes — `nub script.ts` runs TypeScript directly, with the full TS surface (not 
 
 ## Why not just use Node's built-in TypeScript support?
 
-Node 22.18+ runs `.ts` files by default, but it *strips* types rather than transpiling them — so anything beyond erasable annotations is on its own:
+Node 22.18+ runs `.ts` files by default, but only strips types. Anything beyond erasable annotations fails:
 
 - `enum`, `namespace`, and parameter properties → syntax errors (Node 26 even removed `--experimental-transform-types`, the flag that used to handle them)
 - JSX and `emitDecoratorMetadata` → unsupported
 - `tsconfig.json` `paths`, `baseUrl`, `jsx`, `experimentalDecorators`, `extends` → ignored ("intentionally unsupported," per the Node 26 docs)
 - Extensionless `.ts` imports → unresolved, and no source maps
 
-Nub transpiles each file through its native addon instead, so all of that works. If your codebase is `erasableSyntaxOnly`-clean, Node's built-in support is fine; if it isn't, you need a real transpile pipeline.
+Nub transpiles each file through its native addon instead. If your codebase is `erasableSyntaxOnly`-clean, Node's built-in support is enough.
 
 ## Does it replace `nodemon` / `tsx watch`?
 
@@ -180,7 +180,7 @@ Not needed. Nub loads your env files automatically — with the Vite/Bun-style p
 The `[mode]` slot comes from `APP_ENV` — not `NODE_ENV`. To load a specific file directly, pass `--env-file` (repeatable); its values arrive verbatim, as on Node. In the automatic `.env*` files, expansion of `${VAR}` and `$VAR` is supported, including nested references and cycle detection.
 
 <Callout title="Test mode">
-Under the test mode (`APP_ENV=test`), `.env.local` is skipped, following the Next.js convention — local secrets shouldn't leak into your test suite.
+Under the test mode (`APP_ENV=test`), `.env.local` is skipped, following the Next.js convention.
 </Callout>
 
 Full details: [Runtime → Environment variables](/docs/runtime/env).
@@ -340,7 +340,7 @@ Useful when a script's `#!/usr/bin/env node` shebang chain expects real Node, wh
 
 ## Does Nub add anything to my `package.json`?
 
-No. The fields Nub reads are the existing standard ones, exactly as Node, `npm`, `pnpm`, and `yarn` read them:
+No. The fields Nub reads are the existing standard ones, as Node, `npm`, `pnpm`, and `yarn` read them:
 
 ```text
 scripts

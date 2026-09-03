@@ -41,23 +41,22 @@ Restarting 'src/server.ts'
 
 ## What triggers a restart
 
-The watch set is loader-instrumented, not glob-based: `nub watch` only watches files that were actually loaded as part of the run, plus a small set of off-graph files that invalidate the process when they change. Concretely, a restart fires on a change to:
+The watch set is loader-instrumented, not glob-based: `nub watch` only watches files that were actually loaded as part of the run, plus a small set of off-graph files that invalidate the process when they change. A restart fires on a change to:
 
 - Any file in the **resolved dependency graph** of the entry — including `.ts` / `.tsx` files transpiled in-memory through `module.registerHooks()` that Node never sees on disk.
 - Your **`.env*` files** — these are read once at boot and aren't in any import graph, so Nub reports them to the watcher explicitly. Files named with `--env-file` or `--env-file-if-exists` are watched the same way, and every restart re-reads them, so an edited value is live on the next run. Re-reading on restart needs Node 20.6 or newer, the version that introduced the underlying flag; below it the values are captured once at startup, and an edit applies only after you restart `nub watch` itself.
 - The **`tsconfig.json` extends chain** — editing a tsconfig (for example, changing a `paths` mapping) restarts the process even though tsconfig isn't imported by anything.
 - **`package.json`**.
 
-This is why a plain `node --watch` silently goes stale on a tsconfig edit, and why Nub reports those off-graph files over Node's internal `WATCH_REPORT_DEPENDENCIES` channel.
+Nub reports the off-graph files to Node's watcher over its `WATCH_REPORT_DEPENDENCIES` channel.
 
 ## What doesn't trigger a restart
 
-Because the watch set is the import graph rather than a directory glob, files that nothing in the run actually loads are not watched. A rebuild that emits `dist/foo.js` doesn't trigger a restart unless something in the run imported `dist/foo.js`.
+Files that nothing in the run loads are not watched. A rebuild that emits `dist/foo.js` doesn't trigger a restart unless something in the run imported `dist/foo.js`.
 
 ```bash
 nub watch src/server.ts
-# editing dist/** or coverage/** does not restart —
-# they aren't in the loaded dependency graph
+# editing dist/** or coverage/** does not restart
 ```
 
 ## Plain Node `--watch`
@@ -68,7 +67,7 @@ Nub's watch mode is not byte-for-byte Node — it adds the banner, the preserve-
 node --watch script.js
 ```
 
-Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node.
+Nub's PATH shim only affects descendants of an active `nub` call, so the `node` in your shell is your real Node.
 
 <Callout>
 Read the [full docs](https://nodejs.org/api/cli.html#--watch) for Node's `--watch` flag on nodejs.org.

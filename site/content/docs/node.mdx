@@ -169,7 +169,7 @@ With no pin the explainer reads `» resolved from node on PATH`. Bare `nub node`
 
 ## `nub node shim`
 
-Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. This is the fresh-install story: `brew install nub` (or the curl script), `nub node shim`, and now a bare `node file.js` works — Nub resolves the right version, provisions it if it's missing, and runs it.
+Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. On a fresh machine, `brew install nub` (or the curl script) followed by `nub node shim` is enough for a bare `node file.js` to run: Nub resolves and provisions the version.
 
 ```console
 $ nub node shim
@@ -179,9 +179,9 @@ node shim in /Users/you/.local/share/nub/node-shim (created)
   restart your shell, or run: source /Users/you/.zshrc
 ```
 
-The shimmed `node` runs stock Node, unchanged. It resolves and provisions the version — the [precedence above](#version-precedence) — but adds nothing else: no TypeScript, no injected globals, no automatic `.env`. So `node app.ts` type-strips exactly as stock Node does, while `nub app.ts` transpiles and runs it.
+The shimmed `node` runs stock Node, unchanged. It resolves and provisions the version (the [precedence above](#version-precedence)) and adds nothing else, so `node app.ts` type-strips as stock Node does while `nub app.ts` transpiles it.
 
-Like [`nub pm shim`](/docs/pm/pm-shim), it is opt-in and reversible. It installs a `node` link in `$XDG_DATA_HOME/nub/node-shim` — `~/.local/share/nub/node-shim` when that variable is unset — and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
+It installs a `node` link in `$XDG_DATA_HOME/nub/node-shim` — `~/.local/share/nub/node-shim` when that variable is unset — and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
 
 ```console
 $ nub node unshim
@@ -191,7 +191,7 @@ removed /Users/you/.local/share/nub/node-shim
 
 ## Mirrors and proxies
 
-Node downloads honor `HTTP(S)_PROXY` and `NO_PROXY`, and TLS-intercepting corporate CAs work out of the box through the system trust store. To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both from a project or user-level file, with no Nub-specific config:
+Node downloads use `HTTP(S)_PROXY` / `NO_PROXY` and the system trust store. To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both from a project or user-level file, with no Nub-specific config:
 
 ```ini title=".npmrc"
 node-mirror:release=https://artifactory.corp.example/node/

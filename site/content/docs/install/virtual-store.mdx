@@ -148,7 +148,7 @@ Holding 24 entries unreferenced for 30 days before removal.
 Install in any project that still needs them and they are kept.
 ```
 
-That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks exactly like garbage. Without the hold, one install followed by one prune would delete the rest.
+That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks like garbage. Without the hold, one install followed by one prune would delete the rest.
 
 With nothing registered at all, a prune skips the store entirely rather than treating an empty registry as an empty store:
 
