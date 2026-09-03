@@ -560,7 +560,7 @@ fn load_version_info(
     if info.strings.len() <= 1 && info.file_version == [0; 4] && info.product_version == [0; 4] {
         return Ok(None);
     }
-    Ok(Some(info.encode()))
+    Ok(Some(info.encode()?))
 }
 
 /// Version-resource defaults from the nearest `package.json`, walking up from the

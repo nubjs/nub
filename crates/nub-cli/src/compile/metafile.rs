@@ -34,11 +34,27 @@ use rolldown::plugin::{HookNoopReturn, HookUsage, Plugin, PluginContext};
 use rolldown_common::{ExportsKind, ModuleInfo, NormalModule, OutputChunk};
 use serde::Serialize;
 
-/// esbuild's import-kind vocabulary, narrowed to the two edges Rolldown reports
-/// per module. A `require()` is counted as `import-statement`: `ModuleInfo`
-/// carries no per-edge kind, so the alternative is inventing one.
-const STATIC_IMPORT: &str = "import-statement";
+/// esbuild's import-kind vocabulary, narrowed to the edges Rolldown reports.
+///
+/// The static kind is decided by the IMPORTER's module format, because
+/// `ModuleInfo` carries no per-edge kind: `imported_ids` is a `FxIndexSet`, so it
+/// is neither ordered against nor the same length as the import records that do
+/// carry one, and the two cannot be zipped. A CommonJS module's static edges are
+/// `require()` calls by definition, and an ESM module's are `import` statements,
+/// which is what makes the format a sound key rather than a guess. What it does
+/// not model is an ESM module reaching for `createRequire`; that edge is reported
+/// as a statement.
+const REQUIRE_CALL: &str = "require-call";
+const IMPORT_STATEMENT: &str = "import-statement";
 const DYNAMIC_IMPORT: &str = "dynamic-import";
+
+/// The static-edge kind for a module of this format.
+fn static_kind(format: ExportsKind) -> &'static str {
+    match format {
+        ExportsKind::CommonJs => REQUIRE_CALL,
+        _ => IMPORT_STATEMENT,
+    }
+}
 
 /// A Rollup-convention virtual id (`\0name`) rendered as an esbuild-style
 /// namespaced path. The NUL itself must not reach the JSON: a JSON string may
@@ -206,7 +222,7 @@ impl Report {
         let edges = chunk
             .imports
             .iter()
-            .map(|path| (path, STATIC_IMPORT))
+            .map(|path| (path, IMPORT_STATEMENT))
             .chain(
                 chunk
                     .dynamic_imports
@@ -266,7 +282,7 @@ impl Report {
             .map(|(path, (bytes, format, imports, dynamic_imports))| {
                 let edges = imports
                     .iter()
-                    .map(|id| (id, STATIC_IMPORT))
+                    .map(|id| (id, static_kind(*format)))
                     .chain(dynamic_imports.iter().map(|id| (id, DYNAMIC_IMPORT)))
                     .map(|(id, kind)| {
                         let rendered = render_id(id, self.base.as_deref());

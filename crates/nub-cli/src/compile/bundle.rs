@@ -6159,6 +6159,58 @@ mod tests {
         );
     }
 
+    /// esbuild distinguishes `require-call` from `import-statement`, and a report
+    /// that calls every static edge a statement describes a dependency graph that
+    /// is false for CommonJS. The kind comes from the IMPORTER's format, so the
+    /// fixture needs both directions to be meaningful: a `require()` inside a CJS
+    /// module, and an ESM `import` OF that CJS module, which is a real statement
+    /// and must stay one.
+    #[test]
+    fn a_require_edge_is_reported_as_a_require_call_not_a_statement() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import cjs from './cjs-a.cjs';\nglobalThis.OUT = cjs;\n",
+            ),
+            (
+                "cjs-a.cjs",
+                "const b = require('./cjs-b.cjs');\nmodule.exports = b + 1;\n",
+            ),
+            ("cjs-b.cjs", "module.exports = 41;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_module_graph_with("metafile-kinds", "entry.ts", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let kinds = |name: &str| -> Vec<String> {
+            report
+                .inputs
+                .iter()
+                .find(|(path, _)| path.ends_with(name))
+                .unwrap_or_else(|| panic!("{name} missing from inputs: {:?}", report.inputs.keys()))
+                .1
+                .imports
+                .iter()
+                .map(|i| i.kind.to_string())
+                .collect()
+        };
+
+        assert_eq!(
+            kinds("cjs-a.cjs"),
+            vec!["require-call"],
+            "a require() inside a CommonJS module is a require-call"
+        );
+        assert_eq!(
+            kinds("entry.ts"),
+            vec!["import-statement"],
+            "an ESM import OF a CommonJS module is still a statement"
+        );
+    }
+
     #[test]
     fn no_report_is_collected_unless_asked_for() {
         let result = bundle_module_graph("metafile-off", "entry.ts", DROP_FIXTURE)

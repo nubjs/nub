@@ -90,6 +90,14 @@ const VFT_APP: u32 = 0x0000_0001;
 /// flags, so the mask is the documented full set and the flags are zero.
 const VS_FFI_FILEFLAGSMASK: u32 = 0x0000_003F;
 
+/// `dwFileFlags` bits. Windows treats `PrivateBuild` and `SpecialBuild` as
+/// CONDITIONAL string fields: the docs say each is present only when its flag is
+/// set, so a string table carrying one while `dwFileFlags` reads zero contradicts
+/// itself, and a reader that trusts the fixed block ignores the string.
+/// <https://learn.microsoft.com/en-us/windows/win32/menurc/string-str>
+const VS_FF_PRIVATEBUILD: u32 = 0x0000_0008;
+const VS_FF_SPECIALBUILD: u32 = 0x0000_0020;
+
 /// A version resource ready to encode.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VersionInfo {
@@ -105,7 +113,17 @@ pub struct VersionInfo {
 
 impl VersionInfo {
     /// Encode the `RT_VERSION` resource bytes.
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// Fallible for one reason: every length in this format is a `WORD`, and a
+    /// metadata value long enough to overflow one would otherwise be TRUNCATED
+    /// into a resource that is still structurally walkable — the silent-corruption
+    /// mode this module exists to avoid. Checking the root alone is sufficient
+    /// because a node's length always includes its children's, so nothing inside
+    /// can overflow while the root fits.
+    ///
+    /// It is called before bundling, so an oversized value costs the user a
+    /// message rather than a build.
+    pub fn encode(&self) -> Result<Vec<u8>> {
         let mut root = Node::new("VS_VERSION_INFO", NodeType::Binary);
         root.value(&self.fixed_file_info());
 
@@ -132,7 +150,41 @@ impl VersionInfo {
             root.child(var_file_info);
         }
 
-        root.finish()
+        let bytes = root.finish();
+        if bytes.len() > usize::from(u16::MAX) {
+            let (widest, len) = self
+                .strings
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.len()))
+                .max_by_key(|(_, len)| *len)
+                .unwrap_or(("", 0));
+            bail!(
+                "the Windows version resource would be {} bytes, and the format's \
+                 lengths are 16-bit — the largest field is {widest} at {len} bytes.\n\
+                 \x20\x20Shorten it with --metadata {widest}=<shorter>, or drop it with \
+                 --metadata {widest}=",
+                bytes.len()
+            );
+        }
+        Ok(bytes)
+    }
+
+    /// `dwFileFlags`, derived from the strings rather than configurable.
+    ///
+    /// `PrivateBuild` and `SpecialBuild` are the two conditional fields in the
+    /// format: Windows reads each only when its flag is set, so accepting the
+    /// key while leaving the flag clear writes a field nothing will read. Deriving
+    /// it means the fixed block and the string table cannot disagree, which is the
+    /// same reason the version numbers are derived from their strings.
+    fn file_flags(&self) -> u32 {
+        let mut flags = 0;
+        if self.strings.contains_key("PrivateBuild") {
+            flags |= VS_FF_PRIVATEBUILD;
+        }
+        if self.strings.contains_key("SpecialBuild") {
+            flags |= VS_FF_SPECIALBUILD;
+        }
+        flags
     }
 
     /// The 52-byte `VS_FIXEDFILEINFO`. `dwFileDate*` stays zero — the field is
@@ -155,7 +207,7 @@ impl VersionInfo {
             product_ms,
             product_ls,
             VS_FFI_FILEFLAGSMASK,
-            0, // dwFileFlags
+            self.file_flags(),
             VOS_NT_WINDOWS32,
             VFT_APP,
             0, // dwFileSubtype — unused for VFT_APP
@@ -321,6 +373,11 @@ pub(crate) struct ParsedVersionInfo {
     pub file_version: [u16; 4],
     pub product_version: [u16; 4],
     pub strings: BTreeMap<String, String>,
+    /// `dwFileFlags`. Carried so `verify_artifact` compares it: it is DERIVED from
+    /// the strings, so a mismatch here means the fixed block and the string table
+    /// disagree about a conditional field, which is the one inconsistency a
+    /// structurally valid resource can still have.
+    pub file_flags: u32,
     /// The `Var` translation words, `(language, code page)`.
     pub translations: Vec<(u16, u16)>,
 }
@@ -360,6 +417,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<ParsedVersionInfo> {
     let mut out = ParsedVersionInfo {
         file_version: unpack(word(2), word(3)),
         product_version: unpack(word(4), word(5)),
+        file_flags: word(7),
         ..Default::default()
     };
 
@@ -519,7 +577,8 @@ mod tests {
     #[test]
     fn encoded_resource_parses_back_to_what_went_in() {
         let info = sample();
-        let parsed = parse(&info.encode()).expect("the encoded resource must parse");
+        let encoded = info.encode().expect("the fixture encodes");
+        let parsed = parse(&encoded).expect("the encoded resource must parse");
         assert_eq!(parsed.file_version, [1, 2, 3, 4]);
         assert_eq!(parsed.product_version, [1, 2, 0, 0]);
         assert_eq!(parsed.strings, info.strings);
@@ -540,7 +599,7 @@ mod tests {
                     product_version: [9, 9, 9, 9],
                     strings: [(key.clone(), value.clone())].into_iter().collect(),
                 };
-                let bytes = info.encode();
+                let bytes = info.encode().expect("the fixture encodes");
                 assert_eq!(
                     bytes.len() % 4,
                     0,
@@ -562,7 +621,7 @@ mod tests {
     /// here means the resource moved, not that a field was renamed.
     #[test]
     fn the_root_header_matches_the_documented_layout() {
-        let bytes = sample().encode();
+        let bytes = sample().encode().expect("the fixture encodes");
         assert_eq!(
             u16::from_le_bytes(bytes[0..2].try_into().unwrap()) as usize,
             bytes.len(),
@@ -599,7 +658,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        let bytes = info.encode();
+        let bytes = info.encode().expect("the fixture encodes");
         // "ProductName" + NUL = 5 words; the value is 4 chars + NUL.
         let at = find_key(&bytes, "ProductName").expect("the String node must be present");
         assert_eq!(
@@ -618,6 +677,62 @@ mod tests {
         assert_eq!(parse_version("").unwrap(), [0, 0, 0, 0]);
         assert_eq!(parse_version("v1.2.3").unwrap(), [0, 0, 0, 0]);
         assert!(parse_version("70000.0.0").is_err());
+    }
+
+    /// `PrivateBuild` and `SpecialBuild` are the format's two CONDITIONAL string
+    /// fields: Windows reads each only when its `dwFileFlags` bit is set, so
+    /// accepting the key while leaving the flag clear writes a field nothing
+    /// reads. The flags are derived rather than configurable so the fixed block
+    /// and the string table cannot disagree.
+    #[test]
+    fn a_conditional_string_sets_the_file_flag_that_makes_windows_read_it() {
+        let flags_for = |keys: &[&str]| {
+            let mut info = VersionInfo::default();
+            for key in keys {
+                info.strings.insert((*key).to_string(), "x".to_string());
+            }
+            let bytes = info.encode().expect("the fixture encodes");
+            parse(&bytes).expect("parses").file_flags
+        };
+
+        assert_eq!(
+            flags_for(&["ProductName"]),
+            0,
+            "an ordinary field sets no flag"
+        );
+        assert_eq!(flags_for(&["PrivateBuild"]), VS_FF_PRIVATEBUILD);
+        assert_eq!(flags_for(&["SpecialBuild"]), VS_FF_SPECIALBUILD);
+        assert_eq!(
+            flags_for(&["PrivateBuild", "SpecialBuild", "ProductName"]),
+            VS_FF_PRIVATEBUILD | VS_FF_SPECIALBUILD,
+            "both conditional fields set both bits and nothing else does"
+        );
+    }
+
+    /// Every length in this format is a `WORD`. A value too long to fit was
+    /// TRUNCATED into a resource that still walked, which is the silent
+    /// corruption this module exists to avoid — so it is refused instead, and
+    /// refused early enough to cost a message rather than a build.
+    #[test]
+    fn a_value_too_long_for_a_word_length_is_refused_rather_than_truncated() {
+        let mut info = VersionInfo::default();
+        info.strings
+            .insert("Comments".to_string(), "z".repeat(40_000));
+        let err = match info.encode() {
+            Ok(_) => panic!("an oversized value must not encode"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("16-bit") && err.contains("Comments"),
+            "the refusal must name the format limit and the offending field: {err}"
+        );
+
+        // The boundary is not near the limit by accident: a field this size still
+        // encodes, so the check is rejecting only what genuinely cannot fit.
+        let mut ok = VersionInfo::default();
+        ok.strings
+            .insert("Comments".to_string(), "z".repeat(30_000));
+        assert!(ok.encode().is_ok(), "a value that still fits must encode");
     }
 
     #[test]

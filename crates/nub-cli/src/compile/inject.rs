@@ -686,7 +686,7 @@ mod tests {
             &fixtures::pe(),
             &payload("main.js"),
             Some(&fixtures::png()),
-            Some(&info.encode()),
+            Some(&info.encode().expect("the fixture encodes")),
             &out,
         )
         .expect("inject");
