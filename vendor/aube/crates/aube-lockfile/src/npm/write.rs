@@ -386,25 +386,10 @@ pub fn write(
     // dropped entirely. `npm ci` then rejects the lockfile with
     // `Missing: <name>@<version> from lock file`. Emit the pair here.
     //
-    // Every name that will end up owning a root `node_modules/<name>`
-    // entry, gathered BEFORE anything is written: the root importer's own
-    // direct deps (which hoist there) and every workspace member (linked
-    // there by the member pass). A member's local link consults this to
-    // decide root-vs-nested, because the passes that claim those slots run
-    // after it and would otherwise overwrite the link silently.
-    let root_claimed: std::collections::BTreeSet<&str> = roots
-        .iter()
-        .map(|d| d.name.as_str())
-        .chain(
-            graph
-                .importers
-                .keys()
-                .filter(|p| p.as_str() != ".")
-                .filter_map(|p| workspace_package_for_importer(graph, p))
-                .map(|pkg| pkg.name.as_str()),
-        )
-        .collect();
-    emit_file_dep_links(graph, &roots, ".", &root_claimed, &mut packages);
+    // The root importer's own local deps always take the root slot, so
+    // they need no reservation set; the members' do, and theirs is built
+    // below once the member identities are known.
+    emit_file_dep_links(graph, &roots, ".", &Default::default(), &mut packages);
 
     // Resolve each workspace member's identity (name/version/peers).
     // A `LocalSource::Link` package exists only when the graph was
@@ -433,6 +418,52 @@ pub fn write(
             (p.as_str(), m)
         })
         .collect();
+
+    // Every name that will end up owning a root `node_modules/<name>`
+    // entry, gathered before the member loop writes anything: each
+    // top-level hoist placement, and each workspace member, which the
+    // loop links at the root. A member's local link consults this to
+    // decide root-vs-nested, because both of those passes serialize
+    // AFTER it and would otherwise overwrite the link — leaving the dep
+    // with orphaned metadata and no link node anywhere.
+    //
+    // Read off `placed` rather than recomputed from the root importer's
+    // direct deps: `placed` IS the hoist tree's own answer to what lands
+    // at the top level, so a TRANSITIVE that hoists there is covered by
+    // construction. Enumerating direct deps missed exactly those — root
+    // depending on `outer`, which pulls `shared@2`, alongside a member's
+    // `shared = file:../local`, silently dropped the member's link. The
+    // loop below grows `placed`, but only with `<importer>/node_modules/…`
+    // keys, so reading it here already sees the whole top level.
+    //
+    // Member names come from the same two sources the loop itself uses: a
+    // `LocalSource::Link` package when the graph was READ from a
+    // lockfile, and the on-disk manifest when it was freshly resolved.
+    // Consulting only the former missed every member on a fresh resolve,
+    // which is the common case.
+    let root_claimed: BTreeSet<String> = placed
+        .keys()
+        .filter_map(|install_path| install_path.strip_prefix("node_modules/"))
+        .filter(|name| !name.contains("/node_modules/"))
+        .map(str::to_string)
+        .chain(
+            graph
+                .importers
+                .keys()
+                .filter(|p| p.as_str() != ".")
+                .filter_map(|p| {
+                    workspace_package_for_importer(graph, p)
+                        .map(|pkg| pkg.name.as_str())
+                        .or_else(|| {
+                            member_manifests
+                                .get(p.as_str())
+                                .and_then(|m| m.name.as_deref())
+                        })
+                })
+                .map(str::to_string),
+        )
+        .collect();
+
     for (importer_path, importer_roots) in graph.importers.iter().filter(|(path, _)| *path != ".") {
         let linked = workspace_package_for_importer(graph, importer_path);
         let disk_manifest = member_manifests.get(importer_path.as_str());
@@ -783,7 +814,7 @@ fn emit_file_dep_links<'a>(
     graph: &'a LockfileGraph,
     roots: &[DirectDep],
     importer_path: &str,
-    root_claimed: &std::collections::BTreeSet<&str>,
+    root_claimed: &BTreeSet<String>,
     packages: &mut BTreeMap<String, WriteNpmPackage<'a>>,
 ) {
     for dep in roots {
@@ -814,7 +845,7 @@ fn emit_file_dep_links<'a>(
         // npm hoists the first target to the root and NESTS a conflicting
         // one under the importer that wants it, which is the only way the
         // format can express two members depending on the same NAME at
-        // different paths. Measured, npm 10, members `a`→`vendor/one` and
+        // different paths. Measured, npm 11.19.0, members `a`→`vendor/one` and
         // `b`→`vendor/two`:
         //
         //     "node_modules/shared":            { resolved: "vendor/one" }
@@ -832,8 +863,8 @@ fn emit_file_dep_links<'a>(
         // that — the link went to root while the slot looked free, the
         // later hoist pass overwrote it, and the member's link vanished
         // from the lockfile entirely rather than merely moving. Hence
-        // `root_claimed`, computed up front from every name that will own
-        // a root entry. Measured, npm 10:
+        // `root_claimed`, read off the hoist tree's own top level plus the
+        // member roster before either pass runs. Measured, npm 11.19.0:
         //
         //     "node_modules/shared":                 <the registry package>
         //     "packages/app/node_modules/shared":    { resolved: "vendor/local" }
@@ -876,7 +907,7 @@ fn emit_file_dep_links<'a>(
 /// result was a doubled prefix: a member `packages/app` declaring
 /// `file:../../vendor/local-pkg` was keyed `packages/app/vendor/local-pkg`,
 /// a path matching nothing on disk, where npm writes `vendor/local-pkg`
-/// (measured, npm 10). Root importers were unaffected, which is why it
+/// (measured, npm 11.19.0). Root importers were unaffected, which is why it
 /// went unnoticed.
 fn npm_file_dep_path(path_posix: &str) -> String {
     path_posix

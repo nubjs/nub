@@ -654,7 +654,7 @@ fn test_write_emits_link_dir_dep_as_link_pair() {
 /// Honest about what it does NOT prove: the emitter's workspace guard is
 /// belt-and-braces rather than load-bearing. `emit_file_dep_links` runs
 /// BEFORE the workspace pass, which rewrites the same two keys and so
-/// wins regardless — with the guard deleted, this test and all 546 others
+/// wins regardless — with the guard deleted, this test and all 579 others
 /// in the crate still pass (measured). The guard states which pass owns a
 /// member instead of leaving it to that ordering, and this test gives a
 /// future reordering something to fail against.
@@ -711,7 +711,7 @@ fn test_write_leaves_workspace_member_links_to_the_workspace_pass() {
 /// (`rebase_local`) and npm's keys are project-root-relative, so the two
 /// already agree — prepending the importer produced
 /// `packages/app/vendor/local-pkg`, a path matching nothing on disk,
-/// where npm 10 writes `vendor/local-pkg` (measured).
+/// where npm 11.19.0 writes `vendor/local-pkg` (measured).
 #[test]
 fn test_write_keys_a_member_local_dep_in_the_project_root_frame() {
     let local = LocalSource::Directory(PathBuf::from("vendor/local-pkg"));
@@ -773,7 +773,7 @@ fn test_write_keys_a_member_local_dep_in_the_project_root_frame() {
 
 /// Two members depending on the same NAME at different paths: npm hoists
 /// the first to the root and NESTS the conflicting one under the importer
-/// that wants it. Measured, npm 10 — `node_modules/shared` →
+/// that wants it. Measured, npm 11.19.0 — `node_modules/shared` →
 /// `vendor/one`, `packages/b/node_modules/shared` → `vendor/two`.
 ///
 /// Keying every link at the root made the last writer win, so the first
@@ -850,7 +850,7 @@ fn test_write_nests_a_conflicting_member_local_dep() {
 /// That is what `root_claimed` exists for. Without it the link was written
 /// to root while the slot still looked free, the hoist pass overwrote it,
 /// and the member's link vanished from the lockfile entirely — leaving the
-/// member resolving to the registry package. Measured, npm 10, root
+/// member resolving to the registry package. Measured, npm 11.19.0, root
 /// `shared = npm:is-number@7.0.0` + member `shared = file:../../vendor/local`:
 ///
 ///     "node_modules/shared":              <the registry package>
@@ -928,6 +928,196 @@ fn test_write_nests_a_member_local_dep_under_a_root_registry_alias() {
         packages["packages/app/node_modules/shared"]["resolved"], "vendor/local",
         "the member's local link must survive the later hoist pass, nested \
          under its own importer, got {packages}"
+    );
+}
+
+/// The root occupant reached the alias TRANSITIVELY — nothing in the root
+/// importer's own dependency list is named `shared`, but a dep of a dep
+/// hoists there.
+///
+/// Sibling of the test above and a distinct hole: predicting the root's
+/// occupants from the root importer's DIRECT deps missed every hoisted
+/// transitive, so the member's link went to root and the hoist pass
+/// erased it. The set is read off the hoist tree instead, which answers
+/// the question by construction. Measured, npm 11.19.0, root
+/// `fill-range@7.1.1` (which pulls `to-regex-range`) + member
+/// `to-regex-range = file:../../vendor/local`:
+///
+///     "node_modules/to-regex-range":              <the registry package>
+///     "packages/app/node_modules/to-regex-range": { resolved: "vendor/local", link: true }
+#[test]
+fn test_write_nests_a_member_local_dep_under_a_transitive_hoist() {
+    let local = LocalSource::Directory(PathBuf::from("vendor/local"));
+    let local_dp = local.dep_path("shared");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        local_dp.clone(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: local_dp.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    // `outer` is the root's only direct dep; `shared@2.0.0` rides in
+    // underneath it and hoists to the root alongside it.
+    graph.packages.insert(
+        "outer@1.0.0".to_string(),
+        LockedPackage {
+            name: "outer".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "outer@1.0.0".to_string(),
+            dependencies: [("shared".to_string(), "shared@2.0.0".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+    );
+    graph.packages.insert(
+        "shared@2.0.0".to_string(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "2.0.0".to_string(),
+            dep_path: "shared@2.0.0".to_string(),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "outer".to_string(),
+            dep_path: "outer@1.0.0".to_string(),
+            dep_type: DepType::Production,
+            specifier: Some("^1.0.0".to_string()),
+        }],
+    );
+    graph.importers.insert(
+        "packages/app".to_string(),
+        vec![DirectDep {
+            name: "shared".to_string(),
+            dep_path: local_dp,
+            dep_type: DepType::Production,
+            specifier: Some("file:../../vendor/local".to_string()),
+        }],
+    );
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("outer".to_string(), "^1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
+    std::fs::write(
+        dir.path().join("packages/app/package.json"),
+        r#"{"name":"@w/app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(
+        packages["node_modules/shared"]["version"], "2.0.0",
+        "the hoisted transitive keeps the root alias, got {packages}"
+    );
+    assert_eq!(
+        packages["packages/app/node_modules/shared"]["resolved"], "vendor/local",
+        "a transitive hoist claims the root slot just as a direct dep does, \
+         so the member's link nests rather than being erased, got {packages}"
+    );
+}
+
+/// The root occupant is a workspace MEMBER's own name, on a graph that was
+/// freshly resolved rather than read back from a lockfile.
+///
+/// Third shape of the same collision, and the one that survived the first
+/// two fixes. A member is linked at `node_modules/<its name>`, so its name
+/// claims the root — but the roster was built from
+/// `workspace_package_for_importer`, which only answers on a graph READ
+/// from an npm lockfile (it looks for the synthesized `link: true`
+/// package). On a fresh resolve every member was invisible to it, so a
+/// sibling's local link took the root slot and the member pass erased it.
+/// The roster now falls back to the on-disk manifests, exactly as the
+/// member pass itself does.
+///
+/// Ordering matters to the reproduction: `packages/a` (the local dep) must
+/// serialize BEFORE `packages/z` (the name), or the member entry is
+/// already in the map and the plain occupancy check catches it.
+///
+/// Measured, npm 11.19.0, member `packages/z` named `shared` + member
+/// `packages/a` with `shared = file:../../vendor/local`:
+///
+///     "node_modules/shared":            { resolved: "packages/z",  link: true }
+///     "packages/a/node_modules/shared": { resolved: "vendor/local", link: true }
+#[test]
+fn test_write_nests_a_member_local_dep_under_a_sibling_member_name() {
+    let local = LocalSource::Directory(PathBuf::from("vendor/local"));
+    let local_dp = local.dep_path("shared");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        local_dp.clone(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: local_dp.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(".".to_string(), vec![]);
+    graph.importers.insert(
+        "packages/a".to_string(),
+        vec![DirectDep {
+            name: "shared".to_string(),
+            dep_path: local_dp,
+            dep_type: DepType::Production,
+            specifier: Some("file:../../vendor/local".to_string()),
+        }],
+    );
+    // No `LocalSource::Link` package for either member: this is what a
+    // fresh resolve from package.json looks like.
+    graph.importers.insert("packages/z".to_string(), vec![]);
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (d, n, v) in [
+        ("packages/a", "@w/a", "1.0.0"),
+        ("packages/z", "shared", "2.0.0"),
+    ] {
+        std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        std::fs::write(
+            dir.path().join(d).join("package.json"),
+            format!(r#"{{"name":"{n}","version":"{v}"}}"#),
+        )
+        .unwrap();
+    }
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(
+        packages["node_modules/shared"]["resolved"], "packages/z",
+        "the member named `shared` keeps the root alias, got {packages}"
+    );
+    assert_eq!(
+        packages["packages/a/node_modules/shared"]["resolved"], "vendor/local",
+        "a member name claims the root slot even when only the on-disk \
+         manifest knows it, so the sibling's link nests, got {packages}"
     );
 }
 
