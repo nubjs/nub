@@ -84,6 +84,9 @@ installBin("test", "console.log('the installed bin')");
 if (process.platform === "win32") {
   writeFileSync(join(binDir, "whichshim.cmd"), "@echo off\r\necho cmd shim\r\n");
   writeFileSync(join(binDir, "whichshim"), "#!/bin/sh\necho 'sh shim'\n");
+  // Present so the PowerShell case is a real choice and not an absence: the one
+  // shim PowerShell could run exists, and nubr still declines to pick it.
+  writeFileSync(join(binDir, "whichshim.ps1"), "Write-Output 'ps1 shim'\r\n");
 }
 
 // Git Bash, not the System32 `bash.exe` that launches WSL — that one would
@@ -174,6 +177,26 @@ test(
     // shell cannot execute one — so every ordinary dependency bin failed.
     assert.equal(runWith({ ComSpec: bash }, "whichshim"), "sh shim");
     assert.equal(runWith({ ComSpec: "cmd.exe" }, "whichshim"), "cmd shim");
+  },
+);
+
+test(
+  "a PowerShell ComSpec refuses the bin instead of picking a shim it cannot run",
+  { skip: process.platform === "win32" ? false : "Windows only" },
+  () => {
+    // All three shims exist here, `.ps1` included. PowerShell could execute that
+    // one — but only under quoting nubr deliberately does not produce, because
+    // its escaping is a pinned port of npm's and npm has no PowerShell branch.
+    // Selecting it anyway would fail AFTER appearing to resolve, so the contract
+    // is a clean refusal that names the reason.
+    const err = assert.throws(() =>
+      runWith({ ComSpec: "powershell.exe" }, "whichshim"),
+    );
+    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    assert.match(out, /is not a file, a package.json script, or an installed bin/);
+    assert.match(out, /cannot run an installed bin through PowerShell/);
+    // Nothing ran: no shim's output reached the caller.
+    assert.doesNotMatch(out, /ps1 shim|cmd shim|sh shim/);
   },
 );
 

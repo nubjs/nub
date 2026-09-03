@@ -89,6 +89,21 @@ export function isCmdShell(shell) {
   return stem === "cmd" || stem.endsWith("\\cmd");
 }
 
+// PowerShell — neither of the two shells this module escapes for. npm's own
+// algorithm has exactly two branches, cmd and POSIX `sh`, and no PowerShell one
+// (verified in @npmcli/promise-spawn), so a command line built here reaches
+// PowerShell POSIX-quoted, where a quoted command path is a STRING EXPRESSION
+// rather than an invocation — it needs the `&` call operator. A third dialect
+// would put this file out of step with npm AND with the Rust port behind
+// `nub run`, which is the one thing its header forbids. So PowerShell is NAMED
+// here and the bin lookup refuses, rather than silently picking a shim that
+// cannot run.
+export function isPowerShell(shell) {
+  const lower = String(shell).toLowerCase();
+  const stem = (lower.endsWith(".exe") ? lower.slice(0, -4) : lower).replace(/^.*[\\/]/, "");
+  return stem === "powershell" || stem === "pwsh";
+}
+
 // Which `node_modules/.bin` shims the effective shell can actually execute, in
 // preference order. It belongs beside `isCmdShell` because it is the same fact:
 // npm writes THREE files for every bin — an extensionless `#!/bin/sh` script (one
@@ -99,12 +114,15 @@ export function isCmdShell(shell) {
 // picked the `.cmd` on a Windows box whose ComSpec is bash, where Node hands the
 // command to that shell with `-c`.
 //
-// `.ps1` is deliberately absent from both lists: npm always writes a `.cmd` next
-// to it, cmd.exe cannot execute a PowerShell script, and a POSIX shell cannot
-// either — so listing it could only ever select a file the shell then fails to
-// run. `.exe` is in both because a real executable needs no shim and no shell
+// PowerShell gets NO candidates, which is the refusal `isPowerShell` explains.
+// Its `.ps1` is the one shim it could run, but only under quoting this module
+// deliberately does not produce, so offering it would trade a clean miss for a
+// command that fails AFTER appearing to resolve. `.ps1` is absent from the other
+// two lists for the plainer reason that neither of those shells can execute one,
+// and `.exe` is in both because a real executable needs no shim and no shell
 // disagrees about it.
 export function binExts(shell) {
+  if (isPowerShell(shell)) return [];
   return isCmdShell(shell) ? [".cmd", ".exe", ".bat"] : ["", ".exe"];
 }
 

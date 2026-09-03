@@ -33,7 +33,13 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { binExts, commandLine, effectiveShell, spliceArgs } from "./nubr-escape.mjs";
+import {
+  binExts,
+  commandLine,
+  effectiveShell,
+  isPowerShell,
+  spliceArgs,
+} from "./nubr-escape.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Absolute, because a bare specifier never resolves out of a global install and
@@ -302,6 +308,12 @@ async function main() {
   const names = Object.keys(manifest?.scripts ?? {});
   process.stderr.write(
     `nubr: "${target}" is not a file, a package.json script, or an installed bin\n` +
+      // Under PowerShell nothing can match, because `binExts` offers no candidate
+      // there — so say so, rather than let an installed bin read as a typo.
+      (isPowerShell(SHELL)
+        ? `  ComSpec is ${SHELL}, and nubr cannot run an installed bin through PowerShell.\n` +
+          `  Set ComSpec to cmd.exe, or call the bin from a package.json script.\n`
+        : "") +
       (names.length ? `  scripts: ${names.join(", ")}\n` : ""),
   );
   process.exit(1);

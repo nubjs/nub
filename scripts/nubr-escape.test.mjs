@@ -15,6 +15,7 @@ import {
   bodyTargetsBatchFile,
   commandLine,
   isCmdShell,
+  isPowerShell,
   spliceArgs,
 } from "../runtime/nubr-escape.mjs";
 
@@ -81,6 +82,28 @@ test("the bin shim is chosen by the shell that will run it, not by the platform"
   // `.ps1` is never a candidate: no shell in either list can execute one.
   for (const shell of ["cmd.exe", "/bin/sh"]) {
     assert.equal(binExts(shell).includes(".ps1"), false, shell);
+  }
+});
+
+test("PowerShell offers no shim at all, rather than one it cannot invoke", () => {
+  // The escaping here is a pinned port of npm's, and npm has exactly two
+  // branches — cmd and POSIX sh — so a command line for PowerShell would arrive
+  // POSIX-quoted, where a quoted command path is a string expression and not an
+  // invocation. Offering the `.ps1` under that quoting would resolve and THEN
+  // fail; an empty list keeps the miss clean, and nubr explains it on stderr.
+  const shells = [
+    "powershell.exe",
+    "pwsh",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "/usr/bin/pwsh",
+  ];
+  for (const shell of shells) {
+    assert.equal(isPowerShell(shell), true, shell);
+    assert.deepEqual(binExts(shell), [], shell);
+  }
+  // A name that merely contains it is a different program.
+  for (const shell of ["cmd.exe", "/bin/sh", "bash", "mypwsh", "powershellx"]) {
+    assert.equal(isPowerShell(shell), false, shell);
   }
 });
 
