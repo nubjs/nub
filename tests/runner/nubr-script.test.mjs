@@ -67,7 +67,15 @@ const binDir = join(fixture, "node_modules", ".bin");
 mkdirSync(binDir, { recursive: true });
 function installBin(name, body) {
   if (process.platform === "win32") {
-    writeFileSync(join(binDir, `${name}.cmd`), `@echo off\r\nnode -e "${body}" %*\r\n`);
+    // The shim runs a real script FILE, the way npm's does — never `node -e`.
+    // With `-e` there is no script-path slot in `process.argv`, so `slice(2)`
+    // silently drops the FIRST forwarded argument. That read exactly like
+    // cmd.exe eating it, and it cost a Windows probe run to tell the two apart:
+    // all six candidate command-line assemblies delivered identically, which is
+    // what proves the harness was at fault and not the code under test.
+    const impl = join(binDir, `${name}-impl.cjs`);
+    writeFileSync(impl, `${body}\n`);
+    writeFileSync(join(binDir, `${name}.cmd`), `@echo off\r\nnode "%~dp0${name}-impl.cjs" %*\r\n`);
   } else {
     writeFileSync(join(binDir, name), `#!/usr/bin/env node\n${body}\n`, { mode: 0o755 });
   }

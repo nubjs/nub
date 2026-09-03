@@ -142,20 +142,15 @@ function shellPath(p) {
   return p.replace(/\\/g, "/");
 }
 
-// Hand a finished command line to the effective shell, the way npm hands one to
-// cmd.exe — NOT through Node's `shell` option.
-//
-// The difference is one pair of quotes and it is not cosmetic. Node wraps the
-// command (`args = ['/d', '/s', '/c', `"${command}"`]`, child_process.js), npm
-// passes the script bare (`realArgs.push('/d', '/s', '/c', script)`). The caret
-// escaping in nubr-escape.mjs is a byte-exact port of npm's, computed against
-// npm's assembly; pairing it with Node's gave cmd.exe a different parse, and the
-// real Windows leg silently DROPPED an argument — `nubr faketool -- "a b" "x;y"`
-// delivered only `x;y`. Matching npm's escaping while not matching its spawn was
-// half a port.
-//
-// `windowsVerbatimArguments` is the other half: without it libuv re-quotes the
-// string that cmd.exe is supposed to parse itself, mangling the carets.
+// Hand a finished command line to the effective shell, assembled the way npm
+// assembles one: `['/d', '/s', '/c', script]` with the script bare and
+// `windowsVerbatimArguments` set, so libuv does not re-quote the string cmd.exe
+// is meant to parse itself. Node's `shell` option is equivalent — it wraps the
+// script in one more pair of quotes and sets the same flag — and a Windows probe
+// measured the two delivering identical argv across nine adversarial argument
+// vectors. This spelling is kept because the escaping in nubr-escape.mjs is a
+// byte-exact port of npm's and is computed against THIS assembly; keeping both
+// halves from one source is what stops them drifting apart.
 function shellSpawn(commandLine, opts) {
   if (isCmdShell(SHELL)) {
     return spawn(SHELL, ["/d", "/s", "/c", commandLine], {
