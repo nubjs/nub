@@ -10,6 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   shEscape,
+  binExts,
   cmdEscape,
   bodyTargetsBatchFile,
   commandLine,
@@ -65,6 +66,21 @@ test("only a real cmd shell selects cmd escaping", () => {
   // The boundary matters: `mycmd` is a different program.
   for (const s of ["bash", "/bin/sh", "mycmd", "C:\\tools\\bash.exe"]) {
     assert.equal(isCmdShell(s), false, s);
+  }
+});
+
+test("the bin shim is chosen by the shell that will run it, not by the platform", () => {
+  // npm writes an extensionless `#!/bin/sh` shim AND a `.cmd` for every bin, and
+  // each shell can run only one of them. The case no host here can reach end to
+  // end is a Windows box whose ComSpec is bash: Node hands the command to that
+  // shell with `-c`, so the batch file is unrunnable and the shell shim is the
+  // only usable entry.
+  assert.deepEqual(binExts("cmd.exe"), [".cmd", ".exe", ".bat"]);
+  assert.deepEqual(binExts("C:\\Program Files\\Git\\bin\\bash.exe"), ["", ".exe"]);
+  assert.deepEqual(binExts("/bin/sh"), ["", ".exe"]);
+  // `.ps1` is never a candidate: no shell in either list can execute one.
+  for (const shell of ["cmd.exe", "/bin/sh"]) {
+    assert.equal(binExts(shell).includes(".ps1"), false, shell);
   }
 });
 

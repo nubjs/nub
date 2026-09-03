@@ -17,7 +17,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,10 +59,10 @@ writeFileSync(
 );
 mkdirSync(join(fixture, "build"), { recursive: true });
 
-// A stand-in for an installed dependency's bin. Windows runs the `.cmd` shim
-// rather than the extensionless file — npm writes both, and the extensionless
-// one is a Bash stub Windows cannot execute — so the fixture writes whichever
-// form this platform's shell will actually resolve, exactly as npm would.
+// A stand-in for an installed dependency's bin, written in the one form the
+// default shell here can execute: the `.cmd` under cmd.exe, the extensionless
+// script elsewhere. npm writes both on Windows and neither shell can run the
+// other's, which is what `whichshim` below exists to pin.
 const binDir = join(fixture, "node_modules", ".bin");
 mkdirSync(binDir, { recursive: true });
 function installBin(name, body) {
@@ -77,12 +77,45 @@ installBin("shadowed", "console.log('bin')");
 // `test` is a shell builtin on POSIX and a real package-bin name in the wild.
 installBin("test", "console.log('the installed bin')");
 
+// Both Windows shims for one bin, saying which one ran. npm writes all three
+// forms unconditionally — an extensionless `#!/bin/sh` script, a `.cmd` and a
+// `.ps1` — and only the shell decides which is runnable, so a fixture that
+// carries just one cannot tell a correct choice from a lucky one.
+if (process.platform === "win32") {
+  writeFileSync(join(binDir, "whichshim.cmd"), "@echo off\r\necho cmd shim\r\n");
+  writeFileSync(join(binDir, "whichshim"), "#!/bin/sh\necho 'sh shim'\n");
+}
+
+// Git Bash, not the System32 `bash.exe` that launches WSL — that one would
+// resolve the fixture path inside a different filesystem namespace.
+function findPosixShellOnWindows() {
+  const git = join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe");
+  if (existsSync(git)) return git;
+  try {
+    const found = execFileSync("where.exe", ["bash"], { encoding: "utf8" })
+      .trim()
+      .split(/\r?\n/)
+      .find((p) => p && !/\\System32\\/i.test(p));
+    return found ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // stdout only, last non-empty line: the preload writes an addon warning to
 // stderr whenever no platform package is installed, which is the normal state
 // here.
-function run(...argv) {
-  const out = execFileSync(process.execPath, [nubr, ...argv], { cwd: fixture, encoding: "utf8" });
+function runWith(env, ...argv) {
+  const out = execFileSync(process.execPath, [nubr, ...argv], {
+    cwd: fixture,
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
   return out.trim().split(/\r?\n/).filter(Boolean).at(-1);
+}
+
+function run(...argv) {
+  return runWith({}, ...argv);
 }
 
 // One case per class of thing a shell would otherwise act on. `%VAR%` is
@@ -123,6 +156,26 @@ test("a bin whose name is a shell builtin still runs the bin", () => {
   // is to hand the shell the resolved path, so its own lookup never applies.
   assert.equal(run("test"), "the installed bin");
 });
+
+test(
+  "a Windows ComSpec that is not cmd runs the shim that shell can execute",
+  { skip: process.platform === "win32" ? false : "Windows only" },
+  () => {
+    const bash = findPosixShellOnWindows();
+    // A precondition that quietly fails to hold turns this into a test that
+    // cannot fail. Every GitHub Windows runner ships Git Bash, so a miss there
+    // is a defect in this harness rather than a reason to skip.
+    if (!bash) {
+      assert.ok(!process.env.CI, "no POSIX shell found on a CI runner: the differential never ran");
+      return;
+    }
+    // Both shims exist; only the ComSpec differs. Picking the extension from
+    // process.platform selected the batch file for BOTH runs, and a POSIX-like
+    // shell cannot execute one — so every ordinary dependency bin failed.
+    assert.equal(runWith({ ComSpec: bash }, "whichshim"), "sh shim");
+    assert.equal(runWith({ ComSpec: "cmd.exe" }, "whichshim"), "cmd shim");
+  },
+);
 
 test("a script wins over an installed bin of the same name", () => {
   // npm's precedence: a script usually wraps the bin it is named after, so

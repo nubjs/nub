@@ -29,7 +29,7 @@ Four extra assertions run once per Node version, after the fixture sweep, becaus
 
 That column is what catches an entry-dispatch regression: because the fixture project is `"type": "module"`, a `.ts` entry is an ES module, and routing it through `Module.runMain` would fail on Node below 22.15 while passing everywhere else.
 
-`nubr-script.test.mjs` beside this file covers the same ground WITHOUT an install or an addon — argument fidelity, the npm environment, and the full dispatch order, where a script outranks both a directory and an installed bin of the same name — which is what lets CI run it on Windows and macOS as well as Linux (`node --test tests/runner/nubr-script.test.mjs`). The cmd.exe escape path and the Windows `.cmd` bin-shim lookup run nowhere else.
+`nubr-script.test.mjs` beside this file covers the same ground WITHOUT an install or an addon — argument fidelity, the npm environment, and the full dispatch order, where a script outranks both a directory and an installed bin of the same name — which is what lets CI run it on Windows and macOS as well as Linux (`node --test tests/runner/nubr-script.test.mjs`). The cmd.exe escape path and the Windows bin-shim lookup run nowhere else — including the configuration no POSIX host can reach at all: a Windows `ComSpec` that is not cmd, where Node hands the command to that shell with `-c` and only npm's extensionless `#!/bin/sh` shim is runnable. That case drives one bin through both shells and asserts which shim each picked, so it goes red if the choice is ever taken from the platform again.
 
 ## Tiers
 

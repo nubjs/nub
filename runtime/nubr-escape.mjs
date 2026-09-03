@@ -9,6 +9,10 @@
 // Keep the two in step: divergence from npm IS the bug, so do not "improve"
 // either one. A cmd.exe argument needs far more than quote-doubling — `%`, `!`,
 // `^`, `&`, parens and redirection all survive quotes and need caret escaping.
+//
+// Everything here hangs off ONE question — which shell will run the command —
+// so `effectiveShell`, `isCmdShell` and `binExts` live here too. Answering it
+// from `process.platform` instead has produced two separate defects.
 
 // POSIX `sh -c`. An argument with no shell-special character passes through
 // untouched, so plain words and `--flags` read exactly as the user typed them.
@@ -83,6 +87,25 @@ export function isCmdShell(shell) {
   const lower = String(shell).toLowerCase();
   const stem = lower.endsWith(".exe") ? lower.slice(0, -4) : lower;
   return stem === "cmd" || stem.endsWith("\\cmd");
+}
+
+// Which `node_modules/.bin` shims the effective shell can actually execute, in
+// preference order. It belongs beside `isCmdShell` because it is the same fact:
+// npm writes THREE files for every bin — an extensionless `#!/bin/sh` script (one
+// that handles CYGWIN/MINGW/MSYS/WSL2 explicitly, so it is meant to run on
+// Windows too), a `.cmd`, and a `.ps1` — and which of them is runnable is decided
+// by the shell, never by the platform. cmd.exe cannot run the shell shim; a
+// POSIX-like shell cannot run the batch file. Keying this on `process.platform`
+// picked the `.cmd` on a Windows box whose ComSpec is bash, where Node hands the
+// command to that shell with `-c`.
+//
+// `.ps1` is deliberately absent from both lists: npm always writes a `.cmd` next
+// to it, cmd.exe cannot execute a PowerShell script, and a POSIX shell cannot
+// either — so listing it could only ever select a file the shell then fails to
+// run. `.exe` is in both because a real executable needs no shim and no shell
+// disagrees about it.
+export function binExts(shell) {
+  return isCmdShell(shell) ? [".cmd", ".exe", ".bat"] : ["", ".exe"];
 }
 
 export function spliceArgs(body, args, shell = effectiveShell()) {

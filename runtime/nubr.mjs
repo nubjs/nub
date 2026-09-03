@@ -33,13 +33,20 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { commandLine, effectiveShell, spliceArgs } from "./nubr-escape.mjs";
+import { binExts, commandLine, effectiveShell, spliceArgs } from "./nubr-escape.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Absolute, because a bare specifier never resolves out of a global install and
 // `NODE_PATH` does not apply to ESM — an absolute URL is the only form that
 // reaches a child process reliably.
 const REGISTER_URL = pathToFileURL(path.join(HERE, "loader-register.mjs")).href;
+
+// The shell that will run a script body or a resolved bin, resolved once. Three
+// separate things read it — which shell `spawn` is given, which escaping the
+// forwarded arguments get, and which `node_modules/.bin` shim is runnable — and
+// they are only consistent if they read the SAME value. Deriving any of them
+// from `process.platform` instead has now produced two defects in a row.
+const SHELL = effectiveShell();
 
 const USAGE = `nubr — run TypeScript on Node
 
@@ -124,11 +131,6 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
   // author expects to run, which is the kind of wrong answer nobody notices.
   const phases = [`pre${name}`, name, `post${name}`].filter((p) => scripts[p]);
   const env = childEnv(cwd, manifest, path.join(cwd, "package.json"));
-  // Name the shell explicitly instead of `shell: true`, so the shell that RUNS
-  // the script and the escaping applied to its arguments come from one value.
-  // Deriving the escape from `process.platform` instead got this wrong on a
-  // Windows box whose ComSpec is not cmd, where Node invokes the shell with -c.
-  const shell = effectiveShell();
 
   const step = (i) => {
     if (i >= phases.length) return;
@@ -136,9 +138,11 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
     // Extra args go to the named script only, never to its pre/post hooks —
     // matching npm, where `npm run build -- --watch` leaves `prebuild` alone.
     const body =
-      phase === name ? spliceArgs(scripts[phase], extraArgs, shell) : scripts[phase];
+      phase === name ? spliceArgs(scripts[phase], extraArgs, SHELL) : scripts[phase];
+    // Name the shell explicitly instead of `shell: true`, so the shell that RUNS
+    // the script is the same value its arguments were escaped for.
     const child = spawn(body, {
-      shell,
+      shell: SHELL,
       cwd,
       stdio: "inherit",
       env: { ...env, npm_lifecycle_event: phase, npm_lifecycle_script: scripts[phase] },
@@ -170,9 +174,8 @@ function runScript(name, manifest, rawExtraArgs, cwd) {
 // forwarded arguments get the second caret pass cmd.exe's re-parse needs.
 function runBin(name, binPathAbs, rawExtraArgs, manifest, cwd) {
   const extraArgs = rawExtraArgs[0] === "--" ? rawExtraArgs.slice(1) : rawExtraArgs;
-  const shell = effectiveShell();
-  const child = spawn(commandLine(binPathAbs, extraArgs, shell), {
-    shell,
+  const child = spawn(commandLine(binPathAbs, extraArgs, SHELL), {
+    shell: SHELL,
     cwd,
     stdio: "inherit",
     // No npm_lifecycle_* here: nothing in package.json declared this run, so
@@ -189,19 +192,18 @@ function runBin(name, binPathAbs, rawExtraArgs, manifest, cwd) {
   });
 }
 
-// Windows runs the shim, never the extensionless Bash stub npm drops beside it;
-// an empty extension covers the POSIX symlink. Mirrors the resolution the full
-// CLI's `nubx` performs. `.ps1` is deliberately absent: npm always writes a
-// `.cmd` next to it, and cmd.exe cannot execute a PowerShell script, so listing
-// it could only ever pick a file the shell then fails to run.
-const BIN_EXTS = process.platform === "win32" ? [".cmd", ".exe", ".bat"] : [""];
-
+// The shim this shell can execute, from the same value that will execute it —
+// see `binExts`. Selecting it from `process.platform` instead picked the `.cmd`
+// on a Windows box whose ComSpec is a POSIX-like shell, which then cannot run a
+// batch file: every ordinary dependency bin failed, under a configuration the
+// escaping half already supports on purpose. Mirrors the resolution the full
+// CLI's `nubx` performs.
 function findBin(name, cwd) {
   // A name with a separator is a path, not a bin — it was already given its
   // chance as a file, and letting it match here would resolve `./x` off PATH.
   if (name.includes("/") || name.includes("\\")) return null;
   for (const dir of binPath(cwd)) {
-    for (const ext of BIN_EXTS) {
+    for (const ext of binExts(SHELL)) {
       const candidate = path.join(dir, name + ext);
       if (statKind(candidate) === "file") return candidate;
     }
