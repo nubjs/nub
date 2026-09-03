@@ -819,7 +819,7 @@ fn warn_lines(headline: &str, body: &[&str], color: bool) -> Vec<String> {
     let label = if color {
         // Yellow, which is what an install already spends on the `latest X`
         // advisory — the CLI's existing "worth your attention, not an error".
-        format!("\x1b[33m\x1b[1mwarn\x1b[22m\x1b[39m")
+        "\x1b[33m\x1b[1mwarn\x1b[22m\x1b[39m".to_string()
     } else {
         "warn".to_string()
     };
