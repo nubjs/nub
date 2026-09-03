@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 env:
-  NODE_SHA: 53234233acb
+  NODE_SHA: 53234233acb9a51180043b169e870048f3808d31
 
 jobs:
   build-and-measure:
