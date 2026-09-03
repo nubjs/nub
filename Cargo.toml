@@ -65,14 +65,14 @@ panic = "abort"
 # Size-optimize the COLD crates only. Whole-binary `opt-level = "z"` measured
 # −10.5 MB (48.6 → 38.1 MB, linux-x64, 2026-09-03) but de-optimizes the hot
 # paths, so the resolver, linker, lockfile, manifest, transpiler, JSON and TLS
-# crates keep `opt-level = 3` and only latency-irrelevant code takes "z": CLI
-# dispatch and command glue, arg parsing, prompts, templating, diagnostics, DNS
-# config, and the publish-provenance stack. Add a crate here only after
-# checking cargo-bloat shows it cold; never a crate on the install or startup
-# path.
+# crates keep `opt-level = 3` and only latency-irrelevant code takes "z": arg
+# parsing, prompts, templating, diagnostics, DNS config, and the
+# publish-provenance stack. `aube` (install orchestration) and `nub-cli`
+# (pm_engine glue, the phantom-closure walk) are NOT cold: with both at "z" a
+# warm resolve+link on the 84-dep bench fixture measured ~8% slower
+# (2.40 s → 2.59 s, same VM, interleaved runs). Add a crate here only after an
+# A/B on that fixture shows it costs nothing.
 [profile.release.package]
-aube = { opt-level = "z" }
-nub-cli = { opt-level = "z" }
 clap = { opt-level = "z" }
 clap_builder = { opt-level = "z" }
 clx = { opt-level = "z" }
