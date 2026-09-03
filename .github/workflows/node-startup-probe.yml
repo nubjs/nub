@@ -1,0 +1,91 @@
+name: node-startup-probe
+
+# Branch-scoped probe: builds Node.js at a pinned SHA on a real macOS arm64 runner in several
+# build-flag variants and measures cold-start cost per variant. No PR is involved; pushing to the
+# probe branch is the trigger. See tests/node-startup-probe/README.md.
+on:
+  push:
+    branches: [probe/node-startup]
+    paths:
+      - 'tests/node-startup-probe/**'
+      - '.github/workflows/node-startup-probe.yml'
+  workflow_dispatch:
+
+env:
+  NODE_SHA: 53234233acb
+
+jobs:
+  build-and-measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: baseline
+            second: atexit
+          - variant: inlines-hidden
+            second: ''
+          - variant: pr65526
+            second: atexit
+    runs-on: macos-15
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          brew install ninja hyperfine
+          sw_vers; sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string; clang --version | head -1
+
+      - name: Clone Node.js at pinned SHA
+        run: |
+          mkdir node && cd node
+          git init -q && git remote add origin https://github.com/nodejs/node.git
+          git fetch -q --depth 1 origin "$NODE_SHA" && git checkout -q FETCH_HEAD
+          git log -1 --format='%H %cd'
+
+      - name: Apply variant (${{ matrix.variant }})
+        run: tests/node-startup-probe/apply-variant.sh "${{ matrix.variant }}" node
+
+      - name: Configure and build
+        run: |
+          cd node
+          ./configure --ninja > configure.log 2>&1 || { tail -30 configure.log; exit 1; }
+          t0=$SECONDS
+          ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja.log 2>&1 || { tail -30 ninja.log; exit 1; }
+          echo "build took $((SECONDS - t0))s"; ls -la out/Release/node
+
+      - name: Measure (${{ matrix.variant }})
+        run: |
+          mkdir -p results bins
+          tests/node-startup-probe/measure-macos.sh node/out/Release/node "${{ matrix.variant }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}.txt"
+          cp node/out/Release/node "bins/node-${{ matrix.variant }}"
+
+      - name: Apply second-phase patch (${{ matrix.second }}) and rebuild incrementally
+        if: matrix.second != ''
+        run: |
+          tests/node-startup-probe/apply-variant.sh "${{ matrix.second }}" node
+          cd node
+          t0=$SECONDS
+          ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja2.log 2>&1 || { tail -30 ninja2.log; exit 1; }
+          echo "incremental rebuild took $((SECONDS - t0))s"
+
+      - name: Measure (${{ matrix.variant }}+${{ matrix.second }})
+        if: matrix.second != ''
+        run: |
+          tests/node-startup-probe/measure-macos.sh node/out/Release/node "${{ matrix.variant }}+${{ matrix.second }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}+${{ matrix.second }}.txt"
+          cp node/out/Release/node "bins/node-${{ matrix.variant }}+${{ matrix.second }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.variant }}
+          path: results/
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bins-${{ matrix.variant }}
+          path: bins/
+          retention-days: 3
+          compression-level: 1

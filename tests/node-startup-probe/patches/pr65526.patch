@@ -1,0 +1,142 @@
+diff --git a/deps/ada/ada.gyp b/deps/ada/ada.gyp
+index 30054e63e56..76a56b54f70 100644
+--- a/deps/ada/ada.gyp
++++ b/deps/ada/ada.gyp
+@@ -19,7 +19,21 @@
+       'dependencies': [
+         '../../tools/v8_gypfiles/v8.gyp:simdutf',
+       ],
+-      'sources': [ '<@(ada_sources)' ]
++      'sources': [ '<@(ada_sources)' ],
++      'conditions': [
++        # See the same setting in node.gyp.
++        ['node_shared=="false" and OS=="mac"', {
++          'xcode_settings': {
++            'GCC_SYMBOLS_PRIVATE_EXTERN': 'YES',  # -fvisibility=hidden
++            'GCC_INLINES_ARE_PRIVATE_EXTERN': 'YES'  # -fvisibility-inlines-hidden
++          },
++        }, 'node_shared=="false" and (OS!="aix" and OS!="os400") and (OS!="win" or clang==1)', {
++          'cflags': [
++            '-fvisibility=hidden',
++            '-fvisibility-inlines-hidden'
++          ],
++        }],  # MSVC hides the non-public symbols by default so no need to configure it.
++      ],
+     },
+   ]
+ }
+diff --git a/node.gyp b/node.gyp
+index b9975557502..3b8784e2dec 100644
+--- a/node.gyp
++++ b/node.gyp
+@@ -538,19 +538,21 @@
+       ['clang==0 and OS!="win"', {
+         'cflags': [ '-Wno-restrict', ],
+       }],
+-      # TODO(joyeecheung): investigate if it breaks addons.
+-      # ['OS=="mac"', {
+-      #   'xcode_settings': {
+-      #     'GCC_SYMBOLS_PRIVATE_EXTERN': 'YES',  # -fvisibility=hidden
+-      #     'GCC_INLINES_ARE_PRIVATE_EXTERN': 'YES'  # -fvisibility-inlines-hidden
+-      #   },
+-      # }],
+-      # ['OS!="win" or clang==1', {
+-      #   'cflags': [
+-      #     '-fvisibility=hidden',
+-      #     '-fvisibility-inlines-hidden'
+-      #   ],
+-      # }],
++      # Build with -fvisibility=hidden and -fvisibility-inlines-hidden to avoid
++      # including unnecessary internal symbols, which may lead to run-time fixups.
++      # This is not done on AIX where symbols are exported by tools/create_expfile.sh
++      # see https://github.com/nodejs/node/pull/56290#issuecomment-2582703109
++      ['node_shared=="false" and OS=="mac"', {
++        'xcode_settings': {
++          'GCC_SYMBOLS_PRIVATE_EXTERN': 'YES',  # -fvisibility=hidden
++          'GCC_INLINES_ARE_PRIVATE_EXTERN': 'YES'  # -fvisibility-inlines-hidden
++        },
++      }, 'node_shared=="false" and (OS!="aix" and OS!="os400") and (OS!="win" or clang==1)', {
++        'cflags': [
++          '-fvisibility=hidden',
++          '-fvisibility-inlines-hidden'
++        ],
++      }],  # MSVC hides the non-public symbols by default so no need to configure it.
+       # Pointer authentication for ARM64.
+       ['target_arch=="arm64"', {
+           'target_conditions': [
+diff --git a/src/node.h b/src/node.h
+index 02a4a4246c1..413ae3d96e9 100644
+--- a/src/node.h
++++ b/src/node.h
+@@ -1240,8 +1240,7 @@ NODE_EXTERN v8::Local<v8::Value> WinapiErrnoException(
+     const char* path = nullptr);
+ #endif
+ 
+-const char* signo_string(int errorno);
+-
++NODE_EXTERN const char* signo_string(int errorno);
+ 
+ typedef void (*addon_register_func)(
+     v8::Local<v8::Object> exports,
+diff --git a/tools/icu/icu-generic.gyp b/tools/icu/icu-generic.gyp
+index c4e8c6fbb9f..636707b17f1 100644
+--- a/tools/icu/icu-generic.gyp
++++ b/tools/icu/icu-generic.gyp
+@@ -58,6 +58,18 @@
+           [ 'OS == "mac" or OS == "ios"', {
+             'xcode_settings': {'GCC_ENABLE_CPP_RTTI': 'YES' },
+           }],
++          # See the same setting in node.gyp.
++          ['node_shared=="false" and OS=="mac"', {
++            'xcode_settings': {
++              'GCC_SYMBOLS_PRIVATE_EXTERN': 'YES',  # -fvisibility=hidden
++              'GCC_INLINES_ARE_PRIVATE_EXTERN': 'YES'  # -fvisibility-inlines-hidden
++            },
++          }, 'node_shared=="false" and (OS!="aix" and OS!="os400") and (OS!="win" or clang==1)', {
++            'cflags': [
++              '-fvisibility=hidden',
++              '-fvisibility-inlines-hidden'
++            ],
++          }],  # MSVC hides the non-public symbols by default so no need to configure it.
+           [ 'OS == "win"', {
+             'msvs_settings': {
+               'VCCLCompilerTool': {'RuntimeTypeInfo': 'true'},
+diff --git a/tools/v8_gypfiles/abseil.gyp b/tools/v8_gypfiles/abseil.gyp
+index 1a1de337860..47c90f83da4 100644
+--- a/tools/v8_gypfiles/abseil.gyp
++++ b/tools/v8_gypfiles/abseil.gyp
+@@ -377,6 +377,18 @@
+             '<(ABSEIL_ROOT)/absl/time/internal/cctz/src/time_zone_name_win.cc',
+           ],
+         }],
++        # See the same setting in node.gyp.
++        ['node_shared=="false" and OS=="mac"', {
++          'xcode_settings': {
++            'GCC_SYMBOLS_PRIVATE_EXTERN': 'YES',  # -fvisibility=hidden
++            'GCC_INLINES_ARE_PRIVATE_EXTERN': 'YES'  # -fvisibility-inlines-hidden
++          },
++        }, 'node_shared=="false" and (OS!="aix" and OS!="os400") and (OS!="win" or clang==1)', {
++          'cflags': [
++            '-fvisibility=hidden',
++            '-fvisibility-inlines-hidden'
++          ],
++        }],  # MSVC hides the non-public symbols by default so no need to configure it.
+       ],
+     },  # abseil
+   ]
+diff --git a/tools/v8_gypfiles/v8.gyp b/tools/v8_gypfiles/v8.gyp
+index 32fc99e2af9..ece11893816 100644
+--- a/tools/v8_gypfiles/v8.gyp
++++ b/tools/v8_gypfiles/v8.gyp
+@@ -52,10 +52,7 @@
+       }
+     },
+     'conditions': [
+-      # Build with -fvisibility=hidden and -fvisibility-inlines-hidden to avoid
+-      # including unnecessary internal symbols, which may lead to run-time fixups.
+-      # This is not done on AIX where symbols are exported by tools/create_expfile.sh
+-      # see https://github.com/nodejs/node/pull/56290#issuecomment-2582703109
++      # See the same setting in node.gyp
+       ['OS!="aix" and OS!="os400"', {
+         'defines': [
+           'BUILDING_V8_SHARED',  # Make V8_EXPORT visible.
