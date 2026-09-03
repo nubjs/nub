@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/runner-darwin-arm64",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Nub standalone-runner native addon for macOS ARM64 (Apple Silicon)",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",

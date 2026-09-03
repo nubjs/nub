@@ -63,10 +63,18 @@ addon:
 # documented rebuild path (the post-merge refresh, the dev-loop) goes through the
 # wrapper, which normally writes to the SHARED dir, so nothing updated
 # ./target/fast/nub and `nub-dev` silently served whatever was built last time
-# make ran. `--print-target` re-resolves the same shared/isolated decision.
+# make ran.
+#
+# The path comes from NUB_BUILD_TARGET_OUT — the dir THIS build resolved — not
+# from a second `--print-target`, which re-resolves from source content: a merge
+# landing on the shared tree during the build moves the content key, and the
+# symlink then names a bucket the build never wrote to (nub-dev dangling, seen
+# on a 27-minute rebuild that overlapped a merge). One build, one resolution.
 install-dev: addon-fast qos-global
-	scripts/rust-build.sh build --profile fast
-	@t=$$(scripts/rust-build.sh --print-target); \
+	@tf=$$(mktemp); \
+	  NUB_BUILD_TARGET_OUT=$$tf scripts/rust-build.sh build --profile fast || { rm -f $$tf; exit 1; }; \
+	  t=$$(cat $$tf); rm -f $$tf; \
+	  test -x $$t/fast/nub || { echo "install-dev: no binary at $$t/fast/nub" >&2; exit 1; }; \
 	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev; \
 	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev; \
 	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \

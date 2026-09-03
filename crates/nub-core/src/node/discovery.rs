@@ -100,6 +100,59 @@ pub enum DiscoveryError {
          \x20\x20Check your network / proxy, or install Node and put it on PATH."
     )]
     UnpinnedProvisionFailed { reason: String },
+
+    /// A `nodeExecutable` written as `$(command)` ran and failed. The run stops
+    /// here rather than falling back to the pin chain: a project that delegates
+    /// its Node to an external toolchain has said which binary it wants, and
+    /// substituting a different one is the silent fallback the field exists to
+    /// prevent. Names the command, the file that carries it, and the tool's own
+    /// stderr, because the fix is almost always in the toolchain rather than in
+    /// nub (an unbootstrapped machine, a missing `mise`).
+    #[error("{}", format_node_executable_failure(.command, .file, .failure, .stderr))]
+    NodeExecutableCommandFailed {
+        command: String,
+        // Not named `source`: thiserror reads that name as the error's cause.
+        file: String,
+        failure: String,
+        stderr: String,
+    },
+
+    /// An explicit binary override named a `node` that is really nub. Resolving
+    /// through it re-enters discovery, which reads the same override again, so
+    /// nub calls itself until something kills the process. Refused by name
+    /// because the alternative is a hang with no output at all, which no user
+    /// can debug and no error text can be read out of.
+    #[error(
+        "ERR_NUB_NODE_EXECUTABLE_SELF: `{path}` (from {origin}) is nub's own `node`, not a Node binary.\n\
+         \x20\x20Resolving through it would re-enter nub. Name a real Node binary, or remove the \
+         setting to use the project's pin."
+    )]
+    NodeExecutableIsNub {
+        path: String,
+        // Not named `source`: thiserror reads that name as the error's cause.
+        origin: String,
+    },
+}
+
+/// Format the `NodeExecutableCommandFailed` text. The tool's own stderr is the
+/// actionable half and is usually where the real fix is named, so it rides its
+/// own line — omitted entirely when the command said nothing.
+fn format_node_executable_failure(
+    command: &str,
+    file: &str,
+    failure: &str,
+    stderr: &str,
+) -> String {
+    // Every line, not just the first: a toolchain's error is routinely several
+    // lines, and indenting only the first leaves the rest hanging at column 0
+    // against nub's own message.
+    let detail: String = stderr
+        .lines()
+        .map(|line| format!("\n\x20\x20{line}"))
+        .collect();
+    format!(
+        "ERR_NUB_NODE_EXECUTABLE_FAILED: `{command}` (nodeExecutable in {file}) {failure}{detail}"
+    )
 }
 
 /// Format the `Unsupported` error text. Centralized so the canonical
@@ -139,10 +192,10 @@ fn format_unsupported(version: &NodeVersion, pin_source: Option<&str>) -> String
 /// floor-agnostic so callers like `nub --version` (which only need
 /// the binary path) don't trip the version gate.
 pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
-    // NODE_EXECUTABLE — the sole version-management override surface
-    // (node-version-management.md). An absolute path bypasses pin-file reading,
-    // cache, nvm, and download: use that binary directly. Its version is still
-    // detected, so the floor check + tier dispatch apply (a Node-16 NODE_EXECUTABLE
+    // The explicit-binary override — `NODE_EXECUTABLE`, else `nub.jsonc`'s
+    // `nodeExecutable` (node-version-management.md). A path bypasses pin-file
+    // reading, cache, nvm, and download: use that binary directly. Its version is
+    // still detected, so the floor check + tier dispatch apply (a Node-16 override
     // hard-errors exactly like a Node-16 pin). Brand-compliant: Node doesn't claim
     // the NODE_EXECUTABLE name, so piggybacking on NODE_* is the prescribed hatch.
     if let Some(node) = node_executable_override()? {
@@ -211,19 +264,13 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
 /// informational line rather than paying for resolution. NEVER use this on a run
 /// path: it deliberately under-reports rather than spawn.
 pub fn discover_node_cached(cwd: &Path) -> Option<ResolvedNode> {
-    // Honor the same NODE_EXECUTABLE override surface, but only when its version
-    // is already cached (no spawn).
-    if let Some(raw) = env::var_os("NODE_EXECUTABLE")
-        && !raw.is_empty()
-    {
-        let path = PathBuf::from(&raw);
-        let version = read_version_cache(&path)?;
-        let utf8_path = Utf8PathBuf::try_from(path).ok()?;
-        return Some(ResolvedNode {
-            path: utf8_path,
-            version,
-            pin_source: Some("NODE_EXECUTABLE".to_string()),
-        });
+    // Honor the same explicit-binary override surfaces, but only when the path is
+    // free to learn and its version is already cached (no spawn). A configured
+    // `$(command)` is therefore honored only once something else has already run
+    // it this process; until then this reports nothing rather than shelling out
+    // for an informational line.
+    if let Some(node) = cached_node_executable_override() {
+        return Some(node);
     }
 
     // resolve_pin_chain can error (RuntimeNotNode); a version query never fails on
@@ -783,6 +830,12 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
 ///
 /// - when `devEngines.runtime` won, the resolved version vs the pin file
 ///   (`.node-version`/`.nvmrc`) it overrode;
+/// - when an explicit-binary override won (`NODE_EXECUTABLE`,
+///   `nub.jsonc#nodeExecutable`), the version of that binary vs whatever the pin
+///   chain would have resolved. The override bypasses the chain entirely, so it
+///   is the one winner that can contradict every declared source at once —
+///   including `devEngines.runtime` and the pin files, which no other winner
+///   reaches;
 /// - the resolved version (whatever source won) vs `package.json#engines.node`.
 ///
 /// Returns `None` when nothing was pinned, there's nothing to compare against,
@@ -807,6 +860,26 @@ pub fn engines_disagreement_warning(cwd: &Path, node: &ResolvedNode) -> Option<S
         warnings.push(format!(
             "Warning: Node {} is pinned via {pin_source}, but {file_source} pins \
              \"{raw}\". devEngines.runtime wins; update one so they agree.",
+            node.version
+        ));
+    }
+
+    // An explicit-binary override (winner, above #1) vs the chain it bypassed.
+    // Compared against the chain's WINNER rather than every declared source: the
+    // chain's own precedence already decided which one would have run, and the
+    // losers' disagreement with it is a separate question this warning does not
+    // own. `engines.node` is left to the check below so a chain that bottoms out
+    // there is not reported twice.
+    if is_explicit_binary_source(pin_source)
+        && let Ok(chain) = resolve_pin_chain(cwd)
+        && let Some((raw, pin, chain_source)) = chain.pin
+        && chain_source != ENGINES_NODE_SOURCE
+        && !matches!(pin, VersionPin::Alias(_))
+        && !node.version.satisfies(&pin)
+    {
+        warnings.push(format!(
+            "Warning: Node {} is pinned via {pin_source}, but {chain_source} pins \"{raw}\". \
+             {pin_source} wins; update one so they agree.",
             node.version
         ));
     }
@@ -887,39 +960,15 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
 }
 
 /// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
-/// body. Four recursion guards: the per-invocation temp dirs (skipped by their
-/// `nub-node-shim-` name prefix, covering randomized and legacy PID-only names),
-/// the persistent global shim dir — skipped BOTH by canonical-path equality
-/// against the dir passed in AND by its `<nub|.nub>/node-shim` SHAPE, since the
-/// path is no longer fixed now that `XDG_DATA_HOME` can move it and that
-/// variable need not be set in the shell running the shim — and any
+/// body. Two recursion guards: every directory holding nub wearing Node's name
+/// ([`is_nub_shim_dir_with`], which owns that rule for the whole module), and any
 /// `node_modules/.bin` ([`is_package_bin_dir`]).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,
 ) -> Result<PathBuf, DiscoveryError> {
     for dir in env::split_paths(path_var) {
-        if let Some(name) = dir.file_name()
-            && name.to_string_lossy().starts_with("nub-node-shim-")
-        {
-            continue;
-        }
-        let canonical = dir.canonicalize().ok();
-        if let Some(skip) = persistent_shim
-            && canonical.as_deref() == Some(skip)
-        {
-            continue;
-        }
-        // Skip by SHAPE as well as by exact path. `node_shim_dir` now depends on
-        // XDG_DATA_HOME, and that variable need not be set in the shell that ends
-        // up running nub-as-node — so a shim installed under XDG would not match
-        // the path passed in, would not be skipped, and nub would resolve its own
-        // shim as "the real node" and recurse forever. The shape holds under
-        // either root, so it cannot drift out of sync with the resolution rule.
-        if canonical
-            .as_deref()
-            .is_some_and(crate::node::shim::is_node_shim_dir_shape)
-        {
+        if is_nub_shim_dir_with(&dir, persistent_shim) {
             continue;
         }
         if is_package_bin_dir(&dir) {
@@ -970,16 +1019,26 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
     Ok(version)
 }
 
-/// Resolve the `NODE_EXECUTABLE` override, if set. Split from the env read so the
-/// resolution is unit-testable without mutating the process environment.
+/// Resolve an explicit-binary override to a [`ResolvedNode`]. Split from the env
+/// read so the resolution is unit-testable without mutating the process
+/// environment. `source` names the surface that supplied the path, and becomes
+/// the node's `pin_source` so the floor error and the disagreement warnings
+/// attribute it.
 fn node_executable_from(
     raw: Option<std::ffi::OsString>,
+    source: &str,
 ) -> Result<Option<ResolvedNode>, DiscoveryError> {
     let Some(raw) = raw else { return Ok(None) };
     if raw.is_empty() {
         return Ok(None);
     }
     let path = PathBuf::from(raw);
+    if is_nub_as_node(&path) {
+        return Err(DiscoveryError::NodeExecutableIsNub {
+            path: path.display().to_string(),
+            origin: source.to_string(),
+        });
+    }
     // Detect the version (spawns `<path> --version`, mtime-cached). A bad path /
     // non-Node binary surfaces a clear VersionDetection error.
     let version = detect_version(&path)?;
@@ -988,13 +1047,350 @@ fn node_executable_from(
     Ok(Some(ResolvedNode {
         path: utf8_path,
         version,
-        // Name the override as the source so the floor error attributes it.
-        pin_source: Some("NODE_EXECUTABLE".to_string()),
+        pin_source: Some(source.to_string()),
     }))
 }
 
 fn node_executable_override() -> Result<Option<ResolvedNode>, DiscoveryError> {
-    node_executable_from(env::var_os("NODE_EXECUTABLE"))
+    // Environment first: `NODE_EXECUTABLE` outranks the configured field, and
+    // reading it here rather than trusting the CLI's overlay keeps that true for
+    // a value the overlay cannot model (a non-UTF-8 path) and for a command path
+    // that never resolves a config snapshot at all.
+    if let Some(raw) = env::var_os(NODE_EXECUTABLE_SOURCE).filter(|raw| !raw.is_empty()) {
+        return node_executable_from(Some(raw), NODE_EXECUTABLE_SOURCE);
+    }
+    let Some(setting) = NODE_EXECUTABLE.get() else {
+        return Ok(None);
+    };
+    let path = resolve_node_executable(setting)?;
+    node_executable_from(Some(path.into_os_string()), CONFIG_NODE_EXECUTABLE_SOURCE)
+}
+
+/// True when `path` is a `node` that is really nub — the persistent global shim,
+/// a per-invocation temp shim, or the binary reached under another name. Nub
+/// resolving a Node through one of those re-enters discovery, which reads the
+/// same override again, so it recurses until something kills it.
+///
+/// [`which_node_in`] already skips these dirs while scanning PATH, and for this
+/// exact reason. An explicit override is the one route that still reaches them —
+/// `$(which node)` being the likely spelling, since the user's `which` does not
+/// share nub's skip list — so the same rule is applied here.
+///
+/// The same three directory tests as [`which_node_in`], for the same reasons,
+/// plus an identity check against this executable that catches a SYMLINK to nub
+/// living outside any shim dir. The directory tests stay necessary regardless:
+/// the installed shim is a HARDLINK, which `canonicalize` does not resolve back
+/// to a shared path.
+fn is_nub_as_node(path: &Path) -> bool {
+    if let Ok(exe) = env::current_exe().and_then(|exe| exe.canonicalize())
+        && path.canonicalize().is_ok_and(|target| target == exe)
+    {
+        return true;
+    }
+    path.parent().is_some_and(is_nub_shim_dir)
+}
+
+/// A directory holding a `node` that is really nub: a per-invocation temp shim,
+/// or the persistent global one — the latter matched BOTH by canonical path and
+/// by its `<nub|.nub>/node-shim` shape, since `node_shim_dir` depends on
+/// `XDG_DATA_HOME` and that variable need not be set in the shell that ends up
+/// running nub.
+///
+/// The single answer to "is this nub wearing Node's name", used by the PATH scan
+/// ([`which_node_in`]), the override guard ([`is_nub_as_node`]) and the command
+/// PATH filter ([`node_executable_command_path`]). Three copies of this rule
+/// could disagree, and a directory one of them skipped while another accepted is
+/// how nub resolves its own shim and recurses.
+///
+/// The temp-shim prefix is delegated to [`spawn::is_path_shim_candidate`] rather
+/// than re-matched here, because on Windows it must be case-INSENSITIVE: PATH
+/// lookup there is, so a `NUB-NODE-SHIM-…` entry names the same directory a
+/// case-sensitive test would let through.
+///
+/// `persistent_shim` is injected so [`which_node_in`] stays testable without
+/// moving the real shim dir; [`is_nub_shim_dir`] resolves it for callers that
+/// have no reason to.
+fn is_nub_shim_dir_with(dir: &Path, persistent_shim: Option<&Path>) -> bool {
+    if crate::node::spawn::is_path_shim_candidate(dir) {
+        return true;
+    }
+    let Ok(canonical) = dir.canonicalize() else {
+        return false;
+    };
+    if persistent_shim == Some(canonical.as_path()) {
+        return true;
+    }
+    crate::node::shim::is_node_shim_dir_shape(&canonical)
+}
+
+/// [`is_nub_shim_dir_with`] against the real persistent shim dir.
+fn is_nub_shim_dir(dir: &Path) -> bool {
+    let persistent = crate::node::shim::node_shim_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok());
+    is_nub_shim_dir_with(dir, persistent.as_deref())
+}
+
+/// `PATH` with nub's own shim directories removed, for the shell a `$(command)`
+/// runs in.
+///
+/// `$(which node)` is the documented way to say "whatever Node is first on my
+/// PATH", and on a machine with `nub node shim` installed the literal first
+/// answer is nub's shim — which is nub, not a Node. Refusing that would break the
+/// recipe for exactly the users who opted into the shim, and honouring it would
+/// recurse. Removing the shim from the PATH the command SEES resolves it without
+/// nub second-guessing the answer: the tool is asked the same question with nub's
+/// own impersonation taken off the table, and whatever it then prints is used
+/// verbatim.
+///
+/// `node_modules/.bin` is deliberately NOT filtered, unlike in [`which_node_in`]:
+/// this is the user's own command, and a project-local tool on its PATH is
+/// legitimate.
+fn node_executable_command_path() -> std::ffi::OsString {
+    let path = env::var_os("PATH").unwrap_or_default();
+    let kept: Vec<PathBuf> = env::split_paths(&path)
+        .filter(|dir| !is_nub_shim_dir(dir))
+        .collect();
+    env::join_paths(kept).unwrap_or(path)
+}
+
+/// Source label for the `NODE_EXECUTABLE` override, doubling as the variable's
+/// own name — the two must not drift.
+const NODE_EXECUTABLE_SOURCE: &str = "NODE_EXECUTABLE";
+
+/// Source label for the `nub.jsonc` `nodeExecutable` field, shaped like the
+/// `package.json#…` labels.
+const CONFIG_NODE_EXECUTABLE_SOURCE: &str = "nub.jsonc#nodeExecutable";
+
+/// True for either explicit-binary override. Both bypass the whole pin chain, so
+/// the disagreement warnings — and `nub node which`, which must not credit a
+/// source that had no say — treat them identically.
+pub fn is_explicit_binary_source(source: &str) -> bool {
+    source == NODE_EXECUTABLE_SOURCE || source == CONFIG_NODE_EXECUTABLE_SOURCE
+}
+
+/// The `nodeExecutable` field as the CLI resolved it through config precedence.
+/// Only a FILE-backed value is published here: `NODE_EXECUTABLE` outranks the
+/// field and is read straight from the environment, so the two layers never
+/// compete inside this module.
+#[derive(Debug, Clone)]
+pub struct NodeExecutable {
+    /// The value exactly as authored — a path, or a `$(command)` to run.
+    pub spec: String,
+    /// The directory holding the `nub.jsonc` that carried it. A relative PATH
+    /// anchors here, so one committed value names one binary however deep in the
+    /// tree the user is standing.
+    pub root: PathBuf,
+    /// The invocation's working directory, where a `$(command)` runs — the same
+    /// anchor discovery itself uses. A toolchain manager answers per directory,
+    /// so asking it from the config file's directory would report the repo root's
+    /// Node for a monorepo member, and a GLOBAL file's command would report the
+    /// machine's Node for every project on it.
+    pub cwd: PathBuf,
+    /// The file's path, for error attribution.
+    pub file: PathBuf,
+}
+
+static NODE_EXECUTABLE: std::sync::OnceLock<NodeExecutable> = std::sync::OnceLock::new();
+
+/// The `$(command)` form spawns, so its result is memoized for the invocation —
+/// discovery runs on several paths per run and the command is the user's own
+/// toolchain, not something to re-shell for each of them. Held in a cloneable
+/// shape because [`DiscoveryError`] is not `Clone`: the memo owns the facts, and
+/// each read builds the error from them.
+static NODE_EXECUTABLE_RESOLVED: std::sync::OnceLock<Result<PathBuf, NodeExecutableFailure>> =
+    std::sync::OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct NodeExecutableFailure {
+    command: String,
+    file: String,
+    failure: String,
+    stderr: String,
+}
+
+impl From<NodeExecutableFailure> for DiscoveryError {
+    fn from(failure: NodeExecutableFailure) -> Self {
+        DiscoveryError::NodeExecutableCommandFailed {
+            command: failure.command,
+            file: failure.file,
+            failure: failure.failure,
+            stderr: failure.stderr,
+        }
+    }
+}
+
+/// Publish the configured `nodeExecutable` for this invocation. Called once by
+/// the CLI after config precedence resolves; a second call is a no-op, matching
+/// the config snapshot it mirrors.
+pub fn set_node_executable(setting: NodeExecutable) {
+    let _ = NODE_EXECUTABLE.set(setting);
+}
+
+/// A whole-value `$(…)` is the substitution form; anything else is a path. Only
+/// the whole value, never an embedded fragment: the command's exit status is
+/// what decides whether the run continues, and that is answerable for one
+/// command and not for a string that splices several together.
+fn command_substitution(spec: &str) -> Option<&str> {
+    let spec = spec.trim();
+    spec.strip_prefix("$(")?.strip_suffix(')')
+}
+
+/// Turn a `nodeExecutable` spec into a binary path — running its `$(command)`
+/// once per invocation, or resolving a literal path against the file that
+/// carried it.
+fn resolve_node_executable(setting: &NodeExecutable) -> Result<PathBuf, DiscoveryError> {
+    let Some(command) = command_substitution(&setting.spec) else {
+        return Ok(resolve_against(&setting.root, &setting.spec));
+    };
+    NODE_EXECUTABLE_RESOLVED
+        .get_or_init(|| run_node_executable_command(command, setting))
+        .clone()
+        .map_err(DiscoveryError::from)
+}
+
+fn run_node_executable_command(
+    command: &str,
+    setting: &NodeExecutable,
+) -> Result<PathBuf, NodeExecutableFailure> {
+    let fail = |failure: String, stderr: &str| NodeExecutableFailure {
+        command: command.to_string(),
+        file: setting.file.display().to_string(),
+        failure,
+        stderr: stderr.trim().to_string(),
+    };
+
+    let mut shell = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.arg("/C");
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c");
+        c
+    };
+    let output = shell
+        .arg(command)
+        .current_dir(&setting.cwd)
+        .env("PATH", node_executable_command_path())
+        .output()
+        .map_err(|error| fail(format!("could not run: {error}"), ""))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let code = match output.status.code() {
+            Some(code) => format!("exited {code}"),
+            None => "was killed by a signal".to_string(),
+        };
+        return Err(fail(code, &stderr));
+    }
+    // STRICT, not lossy. A tool that emits bytes nub cannot read as UTF-8 — a
+    // `cmd.exe` builtin on a non-UTF-8 Windows console codepage is the realistic
+    // case — would otherwise reach `detect_version` as a path carrying U+FFFD in
+    // place of the user's non-ASCII profile name, and fail there naming a binary
+    // the user never wrote. Nub cannot negotiate the encoding (a third-party tool
+    // picks its own, and `cmd /U` governs only cmd's OWN builtins), so it refuses
+    // the ambiguity where the fix is legible instead of corrupting the path.
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return Err(fail(
+            "printed a path that is not valid UTF-8".to_string(),
+            &stderr,
+        ));
+    };
+    // The FIRST non-empty line, not the whole output. A which-style tool prints
+    // one candidate per line and the first is the one PATH would have picked —
+    // Windows `where node` prints every match, so a box with two Nodes on PATH
+    // emits two lines. Trimming the lot instead would build a path with a newline
+    // inside it and fail naming a string the user never wrote.
+    let path = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if path.is_empty() {
+        return Err(fail("printed no path".to_string(), &stderr));
+    }
+    // Anchored where the command RAN, which is the convention every shell already
+    // gives its user, rather than where the value was written.
+    Ok(resolve_against(&setting.cwd, &path))
+}
+
+/// The [`node_executable_override`] surfaces, resolved without spawning
+/// anything — the no-spawn half of [`discover_node_cached`]. `None` whenever the
+/// answer would cost a process: an unrun `$(command)`, or a path whose version
+/// is not in the mtime-valid cache.
+fn cached_node_executable_override() -> Option<ResolvedNode> {
+    let (path, source) = match env::var_os(NODE_EXECUTABLE_SOURCE).filter(|raw| !raw.is_empty()) {
+        Some(raw) => (PathBuf::from(raw), NODE_EXECUTABLE_SOURCE),
+        None => {
+            let setting = NODE_EXECUTABLE.get()?;
+            let path = match command_substitution(&setting.spec) {
+                Some(_) => NODE_EXECUTABLE_RESOLVED.get()?.clone().ok()?,
+                None => resolve_against(&setting.root, &setting.spec),
+            };
+            (path, CONFIG_NODE_EXECUTABLE_SOURCE)
+        }
+    };
+    let version = read_version_cache(&path)?;
+    Some(ResolvedNode {
+        path: Utf8PathBuf::try_from(path).ok()?,
+        version,
+        pin_source: Some(source.to_string()),
+    })
+}
+
+/// Anchor a `nodeExecutable` path to the file that declared it: `~/` is the
+/// home dir, a relative path is relative to that file's directory (never the
+/// ambient cwd, which would make one committed value mean different binaries
+/// depending on where the user stood), and an absolute path is used as written.
+fn resolve_against(root: &Path, raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = dirs_next::home_dir()
+    {
+        return windows_exe(home.join(rest));
+    }
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return windows_exe(path.to_path_buf());
+    }
+    // Pushed component by component rather than joined whole: the portable
+    // spelling of a committed value is `./tools/node` on every platform, and
+    // joining that verbatim carries its `/` into a Windows path that otherwise
+    // uses `\`, so `nub node which` would print one path spelled two ways.
+    // Dropping a leading `.` keeps that output a path rather than an echo of how
+    // the config value happened to be written.
+    let mut resolved = root.to_path_buf();
+    for component in path.strip_prefix(".").unwrap_or(path).components() {
+        resolved.push(component);
+    }
+    windows_exe(resolved)
+}
+
+/// The `.exe` a Windows `node` actually lives under. The extension-less spelling
+/// is the one a `nub.jsonc` shared across a mixed-platform team can commit, and
+/// it already RUNS there because `CreateProcess` appends `.exe` itself — so the
+/// gap is invisible until something treats the value as a FILE. Two things do,
+/// and both fail quietly: [`read_version_cache`] stats it, so an extension-less
+/// path misses the cache on every single invocation and re-spawns
+/// `node --version` forever; and `nub node which` prints a path that is not on
+/// disk. Resolved once, here, so execution, the cache, and the reported path all
+/// name the same file.
+///
+/// Applies to the CONFIGURED value only. `NODE_EXECUTABLE` is set per shell on
+/// one machine, so it carries no portability problem to solve, and its semantics
+/// predate this field — it is used exactly as written.
+fn windows_exe(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if path.extension().is_none() && !path.is_file() {
+            let with_exe = path.with_extension("exe");
+            if with_exe.is_file() {
+                return with_exe;
+            }
+        }
+    }
+    path
 }
 
 /// nub's cache root (`$XDG_CACHE_HOME/nub` or `~/.cache/nub`). Public so the
@@ -2256,21 +2652,137 @@ mod tests {
             eprintln!("skipping: no node on PATH");
             return;
         };
-        let resolved = node_executable_from(Some(node_path.clone().into_os_string()))
-            .unwrap()
-            .expect("an explicit NODE_EXECUTABLE resolves to that binary");
+        let resolved = node_executable_from(
+            Some(node_path.clone().into_os_string()),
+            NODE_EXECUTABLE_SOURCE,
+        )
+        .unwrap()
+        .expect("an explicit NODE_EXECUTABLE resolves to that binary");
         assert_eq!(resolved.pin_source.as_deref(), Some("NODE_EXECUTABLE"));
         assert_eq!(resolved.path.as_std_path(), node_path.as_path());
         assert!(resolved.version.major() >= 18);
         // Unset / empty → no override (falls through to normal resolution).
-        assert!(node_executable_from(None).unwrap().is_none());
         assert!(
-            node_executable_from(Some(std::ffi::OsString::new()))
+            node_executable_from(None, NODE_EXECUTABLE_SOURCE)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            node_executable_from(Some(std::ffi::OsString::new()), NODE_EXECUTABLE_SOURCE)
                 .unwrap()
                 .is_none()
         );
         // A bad path is a clear error, not a silent fall-through.
-        assert!(node_executable_from(Some("/no/such/node".into())).is_err());
+        assert!(
+            node_executable_from(Some("/no/such/node".into()), NODE_EXECUTABLE_SOURCE).is_err()
+        );
+        // The configured field reaches the same resolution under its own label.
+        let configured = node_executable_from(
+            Some(node_path.clone().into_os_string()),
+            CONFIG_NODE_EXECUTABLE_SOURCE,
+        )
+        .unwrap()
+        .expect("a configured nodeExecutable resolves to that binary");
+        assert_eq!(
+            configured.pin_source.as_deref(),
+            Some("nub.jsonc#nodeExecutable")
+        );
+    }
+
+    /// A temp shim directory is matched the way its platform matches paths.
+    /// Windows PATH lookup is case-insensitive, so a re-cased entry names the
+    /// same directory and has to be filtered too; elsewhere it is simply a
+    /// different name and filtering it would be wrong. Asserted on both, so the
+    /// contract cannot regress on the platform the test is not running on.
+    #[test]
+    fn a_temp_shim_dir_is_matched_the_way_its_platform_matches_paths() {
+        let root = resolution_tmpdir("shim-case");
+        assert!(is_nub_shim_dir(&root.join("nub-node-shim-42-abc")));
+        assert_eq!(
+            is_nub_shim_dir(&root.join("NUB-NODE-SHIM-42-abc")),
+            cfg!(windows),
+            "the prefix test must follow the platform's own path-comparison rule"
+        );
+        assert!(!is_nub_shim_dir(&root.join("bin")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The spec grammar is a whole-value `$(…)` and nothing else — a path that
+    /// merely CONTAINS the sigil stays a path, so the exit-status contract has
+    /// exactly one command to be about.
+    #[test]
+    fn command_substitution_matches_only_the_whole_value() {
+        assert_eq!(
+            command_substitution("$(mise which node)"),
+            Some("mise which node")
+        );
+        assert_eq!(
+            command_substitution("  $(mise which node)  "),
+            Some("mise which node")
+        );
+        assert_eq!(command_substitution("/usr/local/bin/node"), None);
+        assert_eq!(command_substitution("$(brew --prefix)/bin/node"), None);
+        assert_eq!(command_substitution("$("), None);
+    }
+
+    /// A `$(command)` runs in the config file's directory and its stdout is the
+    /// path; a non-zero exit stops the run instead of falling back to the chain.
+    /// POSIX-only because the assertions are written in `sh`; the Windows leg of
+    /// the same contract rides the CLI integration test, which spells its command
+    /// per platform.
+    #[cfg(unix)]
+    #[test]
+    fn node_executable_command_reports_its_own_failure() {
+        let dir = resolution_tmpdir("node-exec-cmd");
+        let setting = |spec: &str| NodeExecutable {
+            spec: spec.to_string(),
+            root: dir.clone(),
+            cwd: dir.clone(),
+            file: dir.join("nub.jsonc"),
+        };
+        let ok = run_node_executable_command("printf ./bin/node", &setting("$(printf ./bin/node)"))
+            .expect("a zero-exit command supplies the path");
+        assert_eq!(
+            ok,
+            dir.join("bin/node"),
+            "relative output anchors where the command ran"
+        );
+
+        // Windows `where node` prints every match, so two Nodes on PATH means two
+        // lines. The first is the one PATH would have picked; taking the whole
+        // output would build a path with a newline inside it.
+        let multi = run_node_executable_command(
+            "echo /opt/a/node; echo /opt/b/node",
+            &setting("$(where node)"),
+        )
+        .expect("a multi-line answer names its first candidate");
+        assert_eq!(multi, PathBuf::from("/opt/a/node"));
+
+        let failed = run_node_executable_command(
+            "echo 'mise: command not found' >&2; exit 127",
+            &setting("$(x)"),
+        )
+        .expect_err("a non-zero exit is an error");
+        assert_eq!(failed.failure, "exited 127");
+        assert_eq!(failed.stderr, "mise: command not found");
+
+        let empty = run_node_executable_command("true", &setting("$(true)"))
+            .expect_err("a command that prints nothing has not answered the question");
+        assert_eq!(empty.failure, "printed no path");
+
+        // A toolchain's error is routinely several lines; every one is indented
+        // under nub's message rather than only the first.
+        let multiline = run_node_executable_command(
+            "printf 'no version is set\nrun: mise use node@22\n' >&2; exit 1",
+            &setting("$(x)"),
+        )
+        .expect_err("a non-zero exit is an error");
+        let rendered = DiscoveryError::from(multiline).to_string();
+        assert!(
+            rendered.ends_with("\n\x20\x20no version is set\n\x20\x20run: mise use node@22"),
+            "{rendered}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

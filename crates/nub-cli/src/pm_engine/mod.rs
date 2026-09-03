@@ -53,6 +53,7 @@
 
 mod bun_config;
 pub mod config_scope;
+mod duplicate_home;
 mod expo_compat;
 pub mod identity;
 pub mod info_family;
@@ -1006,6 +1007,86 @@ fn native_pm_mode(detected: Option<&DetectedLockfile>, truly_fresh: bool, cwd: &
     // already said so — a lone `packageManager: nub` declaration does not make
     // an otherwise-unresolved tree nub-identity.
     detected.is_some() && active_role(detected, cwd) == Some(config_scope::Role::Nub)
+}
+
+/// The engine settings this project's own `nub.jsonc` supplies, plus whether
+/// nub owns the project.
+///
+/// The config surface needs both to decide where a write belongs, and it runs
+/// OUTSIDE the engine session that normally computes them — `nub config` builds
+/// no install context, so `engine_context().project_config_settings` is empty
+/// on that path and reading it would report "nothing is shadowed" for every
+/// project. Resolved from the same lowering the session uses, so the answer
+/// tracks the real injection instead of predicting it a second time.
+///
+/// The embedder defaults are resolved for real rather than passed empty. They
+/// are not value-only: under `linker: global` an injected dependency puts
+/// `hoist=true` in the defaults, and that SUPPRESSES the
+/// `enableGlobalVirtualStore` push entirely. Passing `&[]` therefore invented a
+/// supplied setting the real session never injects, and refused an `.npmrc`
+/// write the install would have honored — a false refusal, which is the worst
+/// failure this guard has, since it breaks a configuration that works.
+pub(crate) fn project_supplied_settings(cwd: &Path) -> (Vec<String>, bool) {
+    let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient).unwrap_or(None);
+    let truly_fresh = is_truly_fresh_project(cwd, detected.as_ref());
+    let native_mode = native_pm_mode(detected.as_ref(), truly_fresh, cwd);
+    let defaults = nub_setting_defaults(
+        detected.as_ref(),
+        truly_fresh,
+        cwd,
+        VirtualStoreLocality::Default,
+    );
+    // The config verbs dispatch through `lookup_verb` and RETURN before the
+    // clap match that initializes the snapshot for ordinary routes, so on this
+    // path `effective_config` is unset unless it is asked for here. Without
+    // this the whole check reported "nothing is shadowed" for every project —
+    // inert, and silently so, because failing to recognize a shadow just lets
+    // the write through.
+    //
+    // A failure reports "supplies nothing" rather than propagating: a
+    // malformed `nub.jsonc` means we cannot know what it supplies, and refusing
+    // every `config set` on the strength of an unparseable file would be a
+    // worse answer than the `.npmrc` write this project already gets today.
+    // Returning here rather than falling through also keeps that promise when
+    // some earlier path in the same process already populated the snapshot.
+    if crate::cli::initialize_config_snapshot(false, false).is_err() {
+        return (Vec::new(), native_mode);
+    }
+    let Some(config) = crate::project_config::effective_config() else {
+        return (Vec::new(), native_mode);
+    };
+    let mut supplied = Vec::new();
+    if let Ok(lowered) =
+        lower_native_install_settings_for_mode(Some(&config.values.install), &defaults)
+    {
+        supplied.extend(lowered.layout.iter().map(|(key, _)| key.clone()));
+        // Release-age settings reach the engine only under nub's own identity
+        // (`scoped_install_settings`), so under an incumbent they shadow
+        // nothing and the `.npmrc` value is the one that gets read.
+        if native_mode {
+            supplied.extend(lowered.resolution.iter().map(|(key, _)| key.clone()));
+        }
+    }
+    // `verifyDeps` is read by `crate::verify_deps` rather than through the
+    // settings tier, and only an explicit value from a nub CONFIG FILE outranks
+    // `.npmrc` there. `sources` also carries the CLI and environment overlays,
+    // so testing "not defaulted" would let `NUB_VERIFY_DEPS` masquerade as a
+    // `nub.jsonc` field: the write meant for runs WITHOUT that variable would be
+    // refused, and the advice would name a field that still loses to the env.
+    if config
+        .sources
+        .get(&crate::project_config::ConfigKey::VerifyDeps)
+        .is_some_and(|s| {
+            matches!(
+                s.kind,
+                crate::project_config::ConfigSourceKind::Project
+                    | crate::project_config::ConfigSourceKind::Global
+            )
+        })
+    {
+        supplied.push("verifyDepsBeforeRun".to_string());
+    }
+    (supplied, native_mode)
 }
 
 fn lower_native_install_settings(

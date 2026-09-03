@@ -174,18 +174,28 @@ fn extract_with(candidates: &[PathBuf]) -> Option<PathBuf> {
     // Cold path: extract into the first SAFE, writable base. `try_extract` probes
     // writability by creating its tmp dir, so a read-only primary falls through.
     for base in candidates {
-        let Some(safe_base) = ensure_safe_base(base) else {
-            // Never decline a candidate silently. A Windows-only relocation hid
-            // here for exactly that reason: the runtime cache moved to `$TMPDIR`
-            // while every other nub cache kept honouring `XDG_CACHE_HOME`, and
-            // nothing said so — the only symptom was a cache dir that never
-            // appeared where it was configured to.
-            eprintln!(
-                "nub: {} is not usable for the runtime cache (unsafe owner or permissions); \
-                 trying the next location",
-                base.display()
-            );
-            continue;
+        let safe_base = match safe_base_or_reason(base) {
+            Ok(safe_base) => safe_base,
+            Err(reason) => {
+                // Never decline a candidate silently. A Windows-only relocation hid
+                // here for exactly that reason: the runtime cache moved to `$TMPDIR`
+                // while every other nub cache kept honouring `XDG_CACHE_HOME`, and
+                // nothing said so — the only symptom was a cache dir that never
+                // appeared where it was configured to.
+                //
+                // Report the reason the walker gave rather than asserting one. The
+                // old text said "unsafe owner or permissions" for every rejection,
+                // including a read-only filesystem and a transient failure of the
+                // Windows ACL query — so a log could not tell a real DACL problem
+                // from a one-off, which is exactly the distinction anyone chasing an
+                // intermittent relocation needs.
+                eprintln!(
+                    "nub: {} is not usable for the runtime cache ({reason}); \
+                     trying the next location",
+                    base.display()
+                );
+                continue;
+            }
         };
         if let Some((dir, self_extracted)) = try_extract(&safe_base) {
             // A dir WE just extracted should always verify; a mismatch means a
@@ -242,27 +252,49 @@ fn tmp_subdir_name() -> String {
 ///   an attacker who pre-created the path (`EEXIST`), so the POST-create owner check is
 ///   what actually rejects a planted base. A failed validation returns `None` — we
 ///   neither use nor destroy a dir we don't own.
-#[cfg(unix)]
 fn ensure_safe_base(base: &Path) -> Option<PathBuf> {
-    let base = canonical_unix_base_path(base).ok()?;
-    walk_unix_base(&base, true).ok()?;
-    fs::canonicalize(base).ok()
+    safe_base_or_reason(base).ok()
+}
+
+/// [`ensure_safe_base`], keeping the error instead of collapsing it to `None`.
+///
+/// The two differ only in what survives, and the difference is diagnostic rather
+/// than behavioural: a base is declined either way. It exists because the cold
+/// path's message used to NAME a cause — "unsafe owner or permissions" — that
+/// this function had not established. Every rejection reads the same in a log,
+/// so a transient `GetNamedSecurityInfoW` failure, a read-only filesystem and a
+/// genuinely world-writable directory are indistinguishable after the fact.
+///
+/// That cost a real investigation: an intermittent Windows CI failure where the
+/// cache base was refused and the runtime silently relocated, with nothing in the
+/// log to separate "the DACL is wrong" from "the ACL call failed this once". The
+/// walkers already return a specific `io::Error` — `walk_windows_base` even
+/// distinguishes a reparse point from an unsafe DACL — and all of it was being
+/// discarded one frame above where it was needed.
+#[cfg(unix)]
+fn safe_base_or_reason(base: &Path) -> std::io::Result<PathBuf> {
+    let base = canonical_unix_base_path(base)?;
+    walk_unix_base(&base, true)?;
+    fs::canonicalize(base)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn ensure_safe_base(base: &Path) -> Option<PathBuf> {
-    if !base.exists() && fs::create_dir_all(base).is_err() {
-        return None;
+fn safe_base_or_reason(base: &Path) -> std::io::Result<PathBuf> {
+    if !base.exists() {
+        fs::create_dir_all(base)?;
     }
-    is_safe_dir(base)
-        .then(|| fs::canonicalize(base).ok())
-        .flatten()
+    if !is_safe_dir(base) {
+        return Err(std::io::Error::other(
+            "runtime cache path is not a directory we own",
+        ));
+    }
+    fs::canonicalize(base)
 }
 
 #[cfg(windows)]
-fn ensure_safe_base(base: &Path) -> Option<PathBuf> {
-    walk_windows_base(base, true).ok()?;
-    fs::canonicalize(base).ok()
+fn safe_base_or_reason(base: &Path) -> std::io::Result<PathBuf> {
+    walk_windows_base(base, true)?;
+    fs::canonicalize(base)
 }
 
 /// The same validated, owner-only base the runtime cache uses, for the smaller
@@ -1180,6 +1212,22 @@ mod tests {
         fs::write(&file, b"x").unwrap();
         let unusable = file.join("subdir"); // parent is a file → create_dir_all errors
         assert!(ensure_safe_base(&unusable).is_none());
+
+        // And the REASON survives, because the cold path prints it verbatim. A
+        // rejection that reaches the log as a fixed string is why an intermittent
+        // Windows relocation could not be told apart from a real DACL problem, so
+        // the error being specific here is the whole point of keeping it.
+        let reason = safe_base_or_reason(&unusable).expect_err("an unusable base is refused");
+        assert!(
+            !reason.to_string().is_empty(),
+            "the refusal must carry a reason to print"
+        );
+        assert_ne!(
+            reason.kind(),
+            std::io::ErrorKind::Other,
+            "a parent-is-a-file refusal must keep the OS error, not a generic one: {reason}"
+        );
+
         fs::remove_file(&file).unwrap();
     }
 

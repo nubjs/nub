@@ -2070,6 +2070,25 @@ jobs:
           tag_name: ${{ needs.verify.outputs.publish_tag }}
           generate_release_notes: true
           prerelease: false
+          # Promotion is an UPDATE, and an update that omits make_latest leaves the
+          # repo's "Latest" pointer untouched — v0.7.5 stayed latest through three
+          # stable 0.8.x promotions, so `releases/latest` (nub upgrade + both
+          # installers) kept serving 0.7.5. Claim it explicitly.
+          make_latest: "true"
+      - name: Assert the upgrade channel serves this release
+        # `nub upgrade`, install.sh, and install.ps1 all resolve the version from
+        # `releases/latest`, so a promotion that does not move the Latest pointer
+        # ships a release nobody is served. Read the pointer back rather than
+        # trusting the promote step's inputs.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.publish_tag }}
+        run: |
+          set -euo pipefail
+          LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          [ "$LATEST" = "$TAG" ] \
+            || { echo "::error::releases/latest is $LATEST, not $TAG — the upgrade channel is serving the wrong release"; exit 1; }
+          echo "✓ releases/latest serves $TAG"
 
   canary-immutable-release:
     name: Create immutable canary release

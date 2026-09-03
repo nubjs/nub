@@ -38,17 +38,19 @@
 //! - **cooling window** — the resolved version's recorded publish time
 //!   (the lockfile-graph `time:` data the resolver records in-memory
 //!   whenever `minimumReleaseAge` is active) is older than the
-//!   `minimumReleaseAge` window. Unknown publish time fails closed *on a
-//!   fresh resolve* — a missing time there means the package never
-//!   cleared resolution-time vetting. On a **frozen** install
-//!   (`lockfile_vetted`) an unknown time instead *waives* the window:
-//!   since #892 (commit `2b61eaa`) the lockfile no longer persists
-//!   `time:` data under non-time-based resolution, so a frozen reinstall
-//!   legitimately has no times, and the cooling window — a
-//!   resolution-time defense against pulling a brand-new version — has
-//!   nothing to defend against when the install pulls nothing new. A
-//!   known-but-too-young time still denies even when frozen; only the
-//!   *absence* is waived, and only when `lockfile_vetted`. The other
+//!   `minimumReleaseAge` window. Unknown publish time fails closed for
+//!   a **new** pick — a missing time there means the package never
+//!   cleared resolution-time vetting. For a pick **inherited** from the
+//!   prior lockfile at the same version an unknown time instead
+//!   *waives* the window: since #892 (commit `2b61eaa`) the lockfile no
+//!   longer persists `time:` data under non-time-based resolution, so
+//!   an inherited pick legitimately has no time, and the cooling window
+//!   — a resolution-time defense against pulling a brand-new version —
+//!   has nothing to defend against for a pick that pulls nothing new. A
+//!   known-but-too-young time still denies; only the *absence* is
+//!   waived, and only for an inherited pick. This is decided
+//!   per-package ([`InheritedPicks`]), so one new pick does not revoke
+//!   the waiver for the rest of the graph. The other
 //!   gates (registry provenance, advisory vetting, the allowlist) still
 //!   apply. `minimumReleaseAge = 0` disables the floor entirely — it
 //!   consults the cooling defense, it never substitutes for it.
@@ -58,7 +60,61 @@
 //! explicitly named packages.
 
 use aube_scripts::AllowDecision;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+/// Which of this install's resolved picks were already in the prior
+/// lockfile at the same version.
+///
+/// The cooling window's unknown-publish-time arm waives the window for
+/// an inherited pick, because such a pick pulls nothing new and the
+/// window is a resolution-time defense against pulling something new
+/// (module docs above). **That question is per-package.** An `aube add`
+/// re-resolve produces one graph holding both kinds at once — the added
+/// package is new, every unrelated package is reproduced unchanged —
+/// and the whole-graph `lockfile_vetted` boolean cannot tell them
+/// apart. Answering it with that boolean made adding any dependency
+/// un-trust every *other* package's build scripts, so `aube install`
+/// and `aube add` disagreed about the same package in the same tree
+/// under the same config (nubjs/nub#764).
+#[derive(Debug, Clone)]
+pub(crate) enum InheritedPicks {
+    /// The graph came straight from the lockfile, so every pick is
+    /// inherited: frozen install, `aube ci`, a teammate clone.
+    All,
+    /// The resolver ran. Canonical `name@version` keys that were in the
+    /// prior lockfile; anything else in the graph is a new pick. Empty
+    /// when there was no prior lockfile to inherit from.
+    FromPriorLockfile(HashSet<String>),
+}
+
+impl InheritedPicks {
+    /// Canonical keys of every registry-resolved package in the prior
+    /// lockfile. Deliberately mirrors `lockfile_has_new_picks` — same
+    /// `(registry_name, version)` identity, same `local_source.is_none()`
+    /// filter — so the two never disagree about what counts as new.
+    pub(crate) fn from_prior(prior: Option<&aube_lockfile::LockfileGraph>) -> Self {
+        Self::FromPriorLockfile(
+            prior
+                .map(|g| {
+                    g.packages
+                        .values()
+                        .filter(|p| p.local_source.is_none())
+                        .map(|p| format!("{}@{}", p.registry_name(), p.version))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    /// `canonical` is the `name@version` spelling the caller already
+    /// built for the publish-time lookup.
+    fn contains(&self, canonical: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::FromPriorLockfile(keys) => keys.contains(canonical),
+        }
+    }
+}
 
 /// Resolved floor state for one install. Construct via
 /// [`DefaultTrustFloor::from_settings`] after the post-resolve OSV
@@ -80,6 +136,13 @@ pub(crate) struct DefaultTrustFloor {
     /// inherited trust is bounded to what the lockfile actually
     /// evidences.
     lockfile_vetted: bool,
+    /// Per-package counterpart to `lockfile_vetted`, consulted by the
+    /// cooling window's unknown-publish-time arm and nothing else. See
+    /// [`InheritedPicks`] for why that arm cannot use the boolean above:
+    /// the advisory gate `lockfile_vetted` feeds really is whole-graph,
+    /// the cooling window really is not, and one field was answering
+    /// both.
+    inherited: InheritedPicks,
     /// ISO-8601 UTC cutoff derived from `minimumReleaseAge`: publish
     /// times lexicographically `<=` this string satisfy the window.
     /// `None` when the window is disabled — which disables the floor.
@@ -92,6 +155,7 @@ impl DefaultTrustFloor {
             enabled: false,
             osv_gate_active: false,
             lockfile_vetted: false,
+            inherited: InheritedPicks::FromPriorLockfile(HashSet::new()),
             age_cutoff: None,
         }
     }
@@ -102,6 +166,7 @@ impl DefaultTrustFloor {
             enabled: true,
             osv_gate_active: true,
             lockfile_vetted: false,
+            inherited: InheritedPicks::FromPriorLockfile(HashSet::new()),
             age_cutoff: Some(age_cutoff.to_string()),
         }
     }
@@ -114,6 +179,7 @@ impl DefaultTrustFloor {
         mra_cli_minutes: Option<u64>,
         osv_gate_active: bool,
         lockfile_vetted: bool,
+        inherited: InheritedPicks,
     ) -> Self {
         let enabled = aube_settings::resolved::default_trust(ctx);
         if !enabled {
@@ -130,6 +196,7 @@ impl DefaultTrustFloor {
             enabled,
             osv_gate_active,
             lockfile_vetted,
+            inherited,
             age_cutoff,
         }
     }
@@ -146,6 +213,15 @@ impl DefaultTrustFloor {
     /// the delta build path must fall back to the full eligible scan
     /// so packages that just became trusted are not skipped merely
     /// because their package bytes are unchanged.
+    ///
+    /// `inherited` is deliberately NOT folded in. It is a per-run graph
+    /// fact, not a posture: the set grows on every `add`, so folding it
+    /// would churn this hash and force a full eligible scan on every
+    /// install that touches the manifest. The one transition it can
+    /// cause — a package denied for being too young, then waived once it
+    /// is inherited — is already carried by
+    /// `select_previously_unreviewed_now_allowed`, which reselects
+    /// packages that were unreviewed last time and are allowed now.
     pub(crate) fn fingerprint(&self) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"default-trust-floor-v1");
@@ -188,10 +264,40 @@ impl DefaultTrustFloor {
         pkg: &aube_lockfile::LockedPackage,
         times: &BTreeMap<String, String>,
     ) -> bool {
+        self.has_advisory_vetting() && self.trusts_ignoring_vetting(pkg, times)
+    }
+
+    /// This install lacked advisory vetting, and that alone is why the
+    /// floor did not trust the package — every other gate (enabled,
+    /// registry provenance, the allowlist, the cooling window) holds.
+    ///
+    /// Vetting is the floor's one *run-scoped* input: it turns on the
+    /// OSV gate reaching the network, or on the graph being inherited
+    /// from an already-vetted lockfile. Two otherwise-identical runs can
+    /// therefore disagree, and the run that says no leaves an allowed
+    /// build unrun. The install records these so the freshness predicate
+    /// can retry them instead of sealing the tree (nubjs/nub#764) — the
+    /// config-derived gates are excluded on purpose, because a package
+    /// the config denies is denied stably and re-running the full
+    /// install could never change the answer.
+    pub(crate) fn deferred_by_missing_vetting(
+        &self,
+        pkg: &aube_lockfile::LockedPackage,
+        times: &BTreeMap<String, String>,
+    ) -> bool {
+        !self.has_advisory_vetting() && self.trusts_ignoring_vetting(pkg, times)
+    }
+
+    /// [`Self::trusts`] with the advisory-vetting gate assumed to hold.
+    fn trusts_ignoring_vetting(
+        &self,
+        pkg: &aube_lockfile::LockedPackage,
+        times: &BTreeMap<String, String>,
+    ) -> bool {
         let Some(cutoff) = self.age_cutoff.as_deref() else {
             return false;
         };
-        if !self.enabled || !self.has_advisory_vetting() {
+        if !self.enabled {
             return false;
         }
         // Registry-resolved only. `local_source` covers file / link /
@@ -217,23 +323,30 @@ impl DefaultTrustFloor {
         match published {
             // Known publish time: enforce the window on every install.
             Some(t) => t.as_str() <= cutoff,
-            // Unknown publish time. On a FRESH resolve the resolver
-            // records `time:` data in-memory whenever `minimumReleaseAge`
-            // is active, so a missing time means the package never cleared
-            // resolution-time vetting — fail closed. On a FROZEN install
-            // (`lockfile_vetted`) the graph is inherited from a lockfile
-            // whose versions were already pinned and vetted when it was
-            // written; the cooling window is a *resolution-time* defense
-            // (don't pull a brand-new version), and a frozen install pulls
-            // nothing new. Since `2b61eaa` the lockfile no longer persists
-            // `time:` data under non-time-based resolution (upstream #892),
-            // so `times` is legitimately empty on a frozen reinstall — and
-            // re-applying the age gate against that absence would wrongly
-            // deny build scripts that ran for whoever locked the file. The
-            // other gates (registry provenance, advisory vetting via
-            // `lockfile_vetted`, the allowlist) all still applied above, so
-            // waiving *only* the cooling window here keeps the floor sound.
-            None => self.lockfile_vetted,
+            // Unknown publish time. For a NEW pick the resolver records
+            // `time:` data in-memory whenever `minimumReleaseAge` is
+            // active, so a missing time means the package never cleared
+            // resolution-time vetting — fail closed. For an INHERITED
+            // pick the version was already pinned and vetted when the
+            // lockfile was written; the cooling window is a
+            // *resolution-time* defense (don't pull a brand-new
+            // version), and an inherited pick pulls nothing new. Since
+            // `2b61eaa` the lockfile no longer persists `time:` data
+            // under non-time-based resolution (upstream #892), so
+            // `times` is legitimately empty for such picks — and
+            // re-applying the age gate against that absence would
+            // wrongly deny build scripts that ran for whoever locked the
+            // file. The other gates (registry provenance, advisory
+            // vetting, the allowlist) all still applied above, so
+            // waiving *only* the cooling window here keeps the floor
+            // sound.
+            //
+            // Per-package rather than the whole-graph `lockfile_vetted`:
+            // see [`InheritedPicks`]. Reading the boolean here meant one
+            // new pick anywhere in the graph revoked the waiver for
+            // every unrelated inherited package, which is why `aube add`
+            // un-trusted packages a plain `aube install` trusts.
+            None => self.inherited.contains(&canonical),
         }
     }
 }
@@ -303,6 +416,7 @@ mod tests {
             enabled: true,
             osv_gate_active: true,
             lockfile_vetted: false,
+            inherited: InheritedPicks::FromPriorLockfile(HashSet::new()),
             age_cutoff: aube_resolver::MinimumReleaseAge {
                 minutes: 1440,
                 ..Default::default()
@@ -320,6 +434,21 @@ mod tests {
         DefaultTrustFloor {
             osv_gate_active: false,
             lockfile_vetted: true,
+            inherited: InheritedPicks::All,
+            ..active_floor()
+        }
+    }
+
+    /// The `aube add` shape: the resolver ran and produced new picks, so
+    /// this install's advisory coverage comes from the live OSV gate
+    /// (`osv_gate_active = true`, `lockfile_vetted = false`) — while
+    /// every package listed in `inherited` was reproduced from the prior
+    /// lockfile unchanged.
+    fn add_floor(inherited: &[&str]) -> DefaultTrustFloor {
+        DefaultTrustFloor {
+            inherited: InheritedPicks::FromPriorLockfile(
+                inherited.iter().map(|s| s.to_string()).collect(),
+            ),
             ..active_floor()
         }
     }
@@ -438,6 +567,53 @@ mod tests {
         );
     }
 
+    /// A run with no advisory vetting skips the whole dep-script phase,
+    /// so a package the floor would otherwise have built goes unbuilt —
+    /// and before nubjs/nub#764 nothing recorded that, which sealed the
+    /// tree. Only the vetting gate may produce a deferral: every other
+    /// gate is config-derived, so a package it denies is denied stably
+    /// and re-running the install could not change the answer.
+    #[test]
+    fn missing_vetting_defers_a_build_that_every_other_gate_allows() {
+        let pkg = listed_pkg();
+        let times = times_published_minutes_ago(&pkg, 10 * 1440);
+
+        let mut no_vetting = active_floor();
+        no_vetting.osv_gate_active = false;
+        assert!(
+            no_vetting.deferred_by_missing_vetting(&pkg, &times),
+            "vetting is the only gate that failed, so this build is owed a retry"
+        );
+
+        assert!(
+            !active_floor().deferred_by_missing_vetting(&pkg, &times),
+            "a run that DID build the package owes nothing"
+        );
+        assert!(
+            !DefaultTrustFloor::disabled().deferred_by_missing_vetting(&pkg, &times),
+            "defaultTrust=false is a stable config denial, not a deferral"
+        );
+
+        // Config-derived denials stay out of the deferred set even when
+        // vetting is also missing — otherwise every install would bust
+        // the warm path for a package that can never become allowed.
+        let mut unlisted = listed_pkg();
+        unlisted.name = "not-on-the-trust-list".into();
+        assert!(
+            !no_vetting.deferred_by_missing_vetting(&unlisted, &times),
+            "a package off the allowlist is denied stably"
+        );
+        let young = times_published_minutes_ago(&pkg, 60);
+        assert!(
+            !no_vetting.deferred_by_missing_vetting(&pkg, &young),
+            "a version inside the cooling window is denied by config, not by the run"
+        );
+        assert!(
+            !no_vetting.deferred_by_missing_vetting(&pkg, &BTreeMap::new()),
+            "an unknown publish time fails closed rather than deferring forever"
+        );
+    }
+
     #[test]
     fn floor_defers_to_the_osv_gate_and_the_off_switch() {
         let pkg = listed_pkg();
@@ -515,8 +691,55 @@ mod tests {
         );
         assert!(
             !active_floor().trusts(&pkg, &BTreeMap::new()),
-            "a fresh resolve with no recorded publish time must still fail closed — \
-             the waiver is gated on lockfile_vetted"
+            "a NEW pick with no recorded publish time must still fail closed — \
+             the waiver is gated on the pick being inherited"
+        );
+    }
+
+    /// `aube add <something-else>` must not un-trust an unrelated
+    /// package that was already in the lockfile and already built
+    /// (nubjs/nub#764).
+    ///
+    /// The add re-resolves, so `lockfile_vetted` goes false for the
+    /// whole graph — but the graph is a MIXTURE: only the added package
+    /// is new. Reading that one boolean in the cooling window's
+    /// unknown-time arm revoked the waiver for every inherited package
+    /// too, so the same tree, config and package flipped from trusted to
+    /// unreviewed on `add` and back on the next `install`.
+    ///
+    /// Nothing here loosens the floor: the package this admits was
+    /// already built by the install that locked it, its version is
+    /// unchanged, and this install's live OSV gate covers it. The
+    /// widening is against the *previous behavior*, not against the
+    /// documented posture — which is what makes it the bug.
+    #[test]
+    fn adding_a_dependency_does_not_untrust_the_packages_already_locked() {
+        let pkg = listed_pkg();
+        let inherited_key = format!("{}@{}", pkg.name, pkg.version);
+        // Post-#892 the reproduced pick carries no publish time.
+        let no_times = BTreeMap::new();
+
+        assert!(
+            add_floor(&[&inherited_key]).trusts(&pkg, &no_times),
+            "a pick reproduced unchanged from the lockfile keeps its waiver when an \
+             unrelated package is added"
+        );
+        assert!(
+            !add_floor(&[]).trusts(&pkg, &no_times),
+            "the package being ADDED is a new pick with no publish time, so it still \
+             fails closed — the waiver did not become unconditional"
+        );
+        assert!(
+            !add_floor(&[&inherited_key]).trusts(&pkg, &times_published_minutes_ago(&pkg, 60)),
+            "a KNOWN too-young publish time still denies an inherited pick: only the \
+             absence of a time is waived"
+        );
+        // The deferral marker exists for builds a run could not attempt.
+        // An inherited pick that this run trusts was attempted, so it
+        // owes nothing — otherwise every `add` would strand a retry.
+        assert!(
+            !add_floor(&[&inherited_key]).deferred_by_missing_vetting(&pkg, &no_times),
+            "a package this run trusted and built is not owed a retry"
         );
     }
 

@@ -249,26 +249,135 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // token is constant-on and folds the scanner version, so a scanner-logic bump
     // invalidates a warm tree and re-links; standalone aube's `None` skips the fold.
     extra_settings_fingerprint: Some(crate::dynamic_phantom::settings_fingerprint),
-    // `aubeNoAutoInstall` skips the engine's own pre-run staleness check, which
-    // lives in `commands::auto_install::ensure_installed` — reached only from the
-    // engine's `run` / `exec` / `restart`. None of those is an `ENGINE_VERB`: nub
-    // runs scripts through its own frontend and gates freshness in
-    // `crate::verify_deps`, so the engine's gate never executes and the setting
-    // decides nothing here. Before this entry `nub config set aubeNoAutoInstall
-    // true` wrote that key into the user's `.npmrc` and `nub config list --all`
-    // advertised it — nub putting the ENGINE's brand in a user's config for a
-    // value nub never reads.
+    // Every engine setting whose ONLY reader sits on a code path nub does not
+    // route. A listed name is absent from `meta::find`/`meta::all`, so `config
+    // set` refuses it in both scopes, `config list --all` stops advertising it,
+    // and the generated accessor falls through to the default — which is what it
+    // already resolved to, since nothing here reads the setting.
     //
-    // Deliberately the ONLY entry. `verifyDepsBeforeRun` and
-    // `optimisticRepeatInstall` are read by that same dead gate, but their names
-    // are neutral and pnpm-shared, and nub honors `verify-deps-before-run` on its
-    // own path — hiding them would break the pnpm surface to fix nothing.
-    unsupported_settings: &[(
-        "aubeNoAutoInstall",
-        "nub does not auto-install before a run. Use `verifyDeps` in nub.jsonc, or \
-         `verify-deps-before-run` in .npmrc, to choose what happens when dependencies \
-         are stale.",
-    )],
+    // The entry bar is exactly that: NOTHING reads it back. A setting nub reads
+    // on its own surface stays off this list even when the ENGINE's reader is
+    // dead (`verifyDepsBeforeRun` — `crate::verify_deps` resolves it from
+    // `.npmrc` / the workspace yaml itself), and so does one npm reads from
+    // `.npmrc` even though nub does not (`color`, `loglevel`): the npm-shared
+    // route exists for cross-tool visibility, so those writes have a consumer.
+    // Each advice line has to name a replacement that accepts the same VALUE, not
+    // just the same concept.
+    //
+    // Reachability is decided against `ENGINE_VERBS`. The engine's own
+    // `cli_main`, `run`/`exec`/`restart`, `auto_install`, `update_check`,
+    // `npm_fallback`, self-version switching and node-runtime provisioning are
+    // all unrouted, and `deploy` is a nub stub — so a reader that only lives
+    // there decides nothing.
+    unsupported_settings: &[
+        // `commands::auto_install::ensure_installed`, reached only from the
+        // engine's `run`/`exec`/`restart`. nub runs scripts through its own
+        // frontend and gates freshness in `crate::verify_deps`. Before this
+        // entry `nub config set aubeNoAutoInstall true` wrote the ENGINE's brand
+        // into a user's `.npmrc` for a value nub never reads.
+        (
+            "aubeNoAutoInstall",
+            "nub does not auto-install before a run. Use `verifyDeps` in nub.jsonc, or \
+             `verify-deps-before-run` in .npmrc, to choose what happens when dependencies \
+             are stale.",
+        ),
+        // Same dead gate: the flag that lets that auto-install skip a repeat.
+        (
+            "optimisticRepeatInstall",
+            "nub does not auto-install before a run, so there is no repeat install to skip. \
+             Use `verifyDeps` in nub.jsonc, or `verify-deps-before-run` in .npmrc, to choose \
+             what happens when dependencies are stale.",
+        ),
+        // `commands::run`, the engine's script runner. nub runs scripts through
+        // its own frontend (`cli::run_single_script`), which runs `pre`/`post`
+        // unconditionally — the DECIDED behavior, not an oversight: the run docs
+        // promise `npm run` semantics for the hooks and name `--ignore-scripts`
+        // as the way to skip them. So the key can never decide anything here,
+        // and the advice repeats the documented escape hatch.
+        (
+            "enablePrePostScripts",
+            "nub always runs `pre`/`post` scripts for a named script, like npm. \
+             Pass `--ignore-scripts` to `nub run` to skip the whole lifecycle.",
+        ),
+        // `update_check::check_and_notify`, reached from the engine's own CLI
+        // dispatcher and `doctor`. nub's self-update is `nub upgrade`
+        // (`self_update_enabled: false`), which never runs during another verb.
+        (
+            "updateNotifier",
+            "nub does not check for its own updates while running a command. Run `nub upgrade` \
+             when you want a new version.",
+        ),
+        // `runtime::RuntimeSettings::from_ctx`. `resolve_context` returns the
+        // PATH fallback before consuming any of them under
+        // `runtime_switching: false` — nub owns Node provisioning.
+        (
+            "runtimeInstaller",
+            "nub provisions Node itself rather than delegating to another installer. \
+             Manage versions with `nub node install` and `nub node pin`.",
+        ),
+        (
+            "runtimeOnFail",
+            "nub provisions Node itself and installs a missing pin on demand. \
+             Manage versions with `nub node install` and `nub node pin`.",
+        ),
+        (
+            "nodeDownloadMirrors",
+            "nub provisions Node itself and does not read the engine's download mirrors. \
+             Install the version another way and `nub node pin` it.",
+        ),
+        // `startup::StartupSettings` / `package_manager_guard_mode`, built by
+        // the engine's own CLI dispatcher and by self-version switching. nub
+        // resolves the `packageManager` pin in `nub_core::pm::resolve`.
+        (
+            "packageManagerStrict",
+            "nub does not enforce another package manager's pin. `nub pm pin` records the \
+             project's manager, and `nub pm which` reports the one in force.",
+        ),
+        (
+            "packageManagerStrictVersion",
+            "nub does not enforce another package manager's pinned version. `nub pm pin` \
+             records the project's manager.",
+        ),
+        (
+            "managePackageManagerVersions",
+            "nub does not download or switch package-manager versions. `nub pm pin` records \
+             the project's manager, and `nub upgrade` updates nub itself.",
+        ),
+        // `commands::npm_fallback`, the engine's shell-out dispatcher for verbs
+        // it has no implementation of. Every verb nub routes runs in-process.
+        (
+            "npmPath",
+            "nub never shells out to npm; every package-manager verb runs in-process.",
+        ),
+        // `commands::deploy`, which `install_family` refuses as a stub.
+        (
+            "deployAllFiles",
+            "nub does not implement `deploy`. For now: pnpm deploy.",
+        ),
+        // Read by the engine's own CLI dispatcher to pick an output stream. nub
+        // owns its output routing.
+        (
+            "useStderr",
+            "nub chooses its own output streams. Redirect the command's stdout or stderr \
+             in your shell instead.",
+        ),
+        // Parity no-ops in the engine ITSELF, not just under nub: accepted and
+        // wired to nothing. Both carry the standing note in settings.toml that
+        // the flag comes off once a caller starts gating on them.
+        ("useBetaCli", "nub has no beta-gated commands."),
+        (
+            "ignoreCompatibilityDb",
+            "nub ships no package-compatibility database, so there is nothing to disable.",
+        ),
+        // `install::FrozenMode::default_for_env` asks `aube_util::env::is_ci()`,
+        // which reads the `CI` ENVIRONMENT VARIABLE. No reader consults the
+        // config key, so an `.npmrc` `ci=` line has never decided anything.
+        (
+            "ci",
+            "nub detects CI from the `CI` environment variable, not from config. Set `CI=1`, \
+             or pass `--frozen-lockfile` / `--no-frozen-lockfile` to pin the install mode.",
+        ),
+    ],
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's
@@ -313,8 +422,11 @@ const _: () = {
     assert!(!NUB.warm_trust_revalidate);
     assert!(matches!(NUB.trust_policy_ignore_after_default, Some(20160)));
     assert!(NUB.extra_settings_fingerprint.is_some());
-    assert!(matches!(NUB.unsupported_settings, [(n, a)]
-        if matches!(n.as_bytes(), b"aubeNoAutoInstall") && !a.is_empty()));
+    // Non-empty (the pattern implies it) and still led by the entry the list was
+    // introduced for. Every name's realness and advice is checked at test time by
+    // `every_unsupported_setting_names_a_real_one`, which needs the settings table.
+    assert!(matches!(NUB.unsupported_settings, [(n, _), ..]
+        if matches!(n.as_bytes(), b"aubeNoAutoInstall")));
 };
 
 #[cfg(test)]

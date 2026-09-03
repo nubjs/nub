@@ -45,6 +45,11 @@ use super::use_align::{self, AlignPlan, NUB_LEGACY_LOCKFILE, NUB_LOCKFILE};
 /// at build time, so the kebab line always parses). Objects and lists are
 /// emitted as JSON values — the engine's npmrc readers parse both
 /// (`object_setting_from_npmrc`, `parse_string_list`).
+///
+/// This is the HOME table, not the consumed set: an entry nub's embedder profile
+/// declares unsupported is warn-dropped by the earlier profile arm and never
+/// reaches this one. Entries deliberately stay listed so a setting that later
+/// becomes consumed resumes migrating without a second edit here.
 const NPMRC_KEYS: &[&str] = &[
     // data-shaped keys whose only engine-readable post-yaml home is .npmrc
     // (Bun-names addendum: no manifest-commons squatting)
@@ -431,6 +436,9 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
     }
 
     for (key, value) in source {
+        // Looked up once, ahead of the match, because a match GUARD cannot bind
+        // what it tests and the arm needs the same meta to reach the advice.
+        let unsupported = aube_settings::meta::unsupported_for_key(key);
         match key.as_str() {
             // structural / resolution-bearing → package.json
             "packages" => m.packages = Some(value.clone()),
@@ -479,6 +487,18 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
                     .iter()
                     .find(|(k, _)| k == key)
                     .map(|(_, n)| *n)
+                    .unwrap_or_default();
+                m.dropped.push(format!("{key} — {note}"));
+            }
+            // A setting nub's embedder profile declares it does not consume.
+            // Asked BEFORE [`NPMRC_KEYS`] and derived from the profile rather
+            // than a second hand-kept list, so the two cannot drift: migrating
+            // one of these would move a value out of a file pnpm read into a
+            // file nothing reads, and report it as migrated. The profile's own
+            // advice line is the note, so the drop names the replacement.
+            _ if unsupported.is_some() => {
+                let note = unsupported
+                    .and_then(|meta| aube_settings::meta::unsupported_advice(meta.name))
                     .unwrap_or_default();
                 m.dropped.push(format!("{key} — {note}"));
             }

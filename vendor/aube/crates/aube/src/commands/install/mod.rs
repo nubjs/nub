@@ -160,6 +160,33 @@ pub fn set_pre_summary_hook(hook: PreSummaryHook) {
     let _ = PRE_SUMMARY_HOOK.set(hook);
 }
 
+/// Resolve `preferFrozenLockfile` for the current project, the way the engine's
+/// own CLI does before [`InstallArgs::into_options`].
+///
+/// The embedder seam for a host that builds `InstallOptions` itself: the
+/// resolution needs a `ResolveCtx`, which needs `commands::FileSources`, and
+/// that is crate-private — so an embedder had no way to reach this setting and
+/// passed `None`, silently defaulting every project to the env-aware mode
+/// whatever its config said. Returns `None` when no source sets the setting,
+/// which is [`FrozenMode::from_override`]'s "fall back to the default" input, so
+/// an unset project resolves exactly as before.
+///
+/// Resolves from the WORKSPACE root when there is one, matching the engine's own
+/// call site: the workspace yaml lives there rather than in the member. A tree
+/// with no root at all reads from the cwd instead of failing — a config lookup
+/// must never be what ends a command.
+pub fn resolve_prefer_frozen_lockfile() -> Option<bool> {
+    let cwd = match crate::dirs::workspace_or_project_root() {
+        Ok(root) => root,
+        Err(_) => std::env::current_dir().ok()?,
+    };
+    let files = super::FileSources::load(&cwd);
+    let raw_ws = aube_manifest::workspace::load_raw(&cwd).unwrap_or_default();
+    let env = aube_settings::values::capture_env();
+    let ctx = files.ctx(&raw_ws, &env, &[]);
+    aube_settings::resolved::prefer_frozen_lockfile(&ctx)
+}
+
 pub(crate) fn emit_pre_summary(cwd: &std::path::Path, uses_shared_store: bool, is_noop: bool) {
     if let Some(hook) = PRE_SUMMARY_HOOK.get() {
         hook(PreSummary {
@@ -1430,6 +1457,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // allowlist without a per-install OSV run — see
     // `wiki/commands/pm/supply-chain-posture.md` Decision 2.
     let lockfile_vetted;
+    // Per-package counterpart to `lockfile_vetted`, for the floor's
+    // cooling-window waiver. The boolean above is a whole-graph fact and
+    // the waiver is not — see `default_trust::InheritedPicks`.
+    let inherited_picks;
     // The cold-install lockfile write runs on a `spawn_blocking` task so it
     // overlaps `filter_graph` + the link phase (see
     // `lockfile_write_overlap`). The handle escapes the resolve match arm
@@ -1573,6 +1604,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // `defaultTrust` floor inherits it rather than requiring a
             // (correctly skipped) per-install OSV run.
             lockfile_vetted = true;
+            // Nothing was re-resolved, so every pick is inherited.
+            inherited_picks = default_trust::InheritedPicks::All;
 
             // Check index cache, fetch missing tarballs. Tarball client
             // is lazy because eager construction costs ~20ms even when
@@ -2424,6 +2457,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let prior_lockfile = lockfile_pre_parse.as_ref().map(|(g, _)| g);
             let fresh_resolution =
                 super::add_supply_chain::lockfile_has_new_picks(&cwd, prior_lockfile, &graph);
+            // Computed here, while `prior_lockfile` is still borrowed.
+            // `fresh_resolution` collapses this to one bit for the
+            // advisory gate; the cooling-window waiver needs the
+            // per-package answer, because an `aube add` graph is a
+            // mixture and the bit says only that a mixture exists.
+            inherited_picks = default_trust::InheritedPicks::from_prior(prior_lockfile);
             let osv_settings = resolve_osv_routing_settings(&cwd);
             // Fire the OSV gate as a concurrent task that overlaps the
             // tail of the in-flight tarball downloads (`fetch_handle`,
@@ -3065,6 +3104,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         opts.minimum_release_age_override,
         osv_gate_active,
         lockfile_vetted,
+        inherited_picks,
     );
     let link::LinkPhaseOutput {
         stats,

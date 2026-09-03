@@ -82,6 +82,7 @@ See [Modern APIs](/docs/runtime/modern-apis) for the complete version-aware refe
 Like Corepack's shims, `nub` itself auto-installs Node versions as needed. When you run a file with `nub`, it infers the version of Node your project expects and provisions it — downloading and caching the matching stock build if it isn't already on your machine. The inference walks up from the working directory to the nearest pin, taking the first source that yields a version. Highest precedence first:
 
 - `NODE_EXECUTABLE` — an explicit path to a Node binary (a hard override)
+- `nodeExecutable` in `nub.jsonc` — a path, or a command that prints one
 - `package.json#/devEngines/runtime`
 - `.node-version`
 - `.nvmrc`

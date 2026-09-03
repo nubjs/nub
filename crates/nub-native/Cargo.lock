@@ -573,7 +573,7 @@ version = "0.1.0"
 
 [[package]]
 name = "nub-native"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "blake3",
  "jsonc-parser",
