@@ -278,6 +278,20 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Node blob already uses, and it lets the launcher decode only the files it
     // actually extracts. Level 19 matches the Node blob; the app region is small
     // enough that the time is not noticeable next to the ~107 MB one.
+    // Computed before `app_files` is consumed below. Only the VERBATIM payload
+    // sets can carry a file Node parses that the bundler did not: emitted asset
+    // copies, native-island contents, and `--include`s. Node's runtime loaders
+    // parse `.js`/`.mjs`/`.cjs`; other extensions are data to it.
+    let carries_runtime_parseable_js = bundled
+        .assets
+        .iter()
+        .map(|f| f.name.as_str())
+        .chain(bundled.native_files.iter().map(|f| f.name.as_str()))
+        .chain(layout.assets.iter().map(|a| a.rel.as_str()))
+        .any(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs")
+        });
     let app_files: Vec<_> = app_files
         .into_iter()
         .map(|file| {
@@ -317,11 +331,17 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
         node_flags: node_flags(&opts)?,
-        // The shim plan is the complete inventory of runtime module resolution:
-        // `--external` packages and surviving computed `import()` sites. When it
-        // is empty, Node never parses a module the bundler did not, and the
-        // launcher can drop the argv-only syntax flags (see the Manifest field).
-        sealed_module_graph: !shim_plan.needed(),
+        // Sealed only when Node can parse no module the bundler did not. Two
+        // channels can hand runtime Node a file it never saw: the shim plan
+        // (`--external` packages, surviving computed `import()`) and a VERBATIM
+        // payload file with a JS extension — an `--include`d script, a
+        // bundler-emitted asset copy, a native island's wrapper `.js` — reachable
+        // through the real `createRequire` every CJS chunk carries. Generated
+        // chunks and wrappers are exempt by construction: the bundler parsed
+        // them. Computed require of a path OUTSIDE the artifact stays out of the
+        // predicate on the plain-Node-baseline argument in the Manifest field's
+        // doc comment.
+        sealed_module_graph: !shim_plan.needed() && !carries_runtime_parseable_js,
     };
     let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
 
