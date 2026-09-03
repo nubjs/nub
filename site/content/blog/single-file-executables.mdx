@@ -57,14 +57,14 @@ The default shape embeds a full Node. A stock `node` binary is 139 MB on darwin-
 Imports of non-module files resolve at build time too:
 
 ```ts
-import prompt from "./prompt.md";     // the text, as a string
-import model from "./model.wasm";     // an absolute path to a real extracted file
+import prompt from "./prompt.md";     // inlined into the bundle, as a string
+import model from "./model.wasm";     // an absolute path to the extracted file
 
 // a file named relative to the module resolves too
 const table = readFileSync(new URL("./table.bin", import.meta.url));
 ```
 
-Text formats import as their contents; binary formats import as an absolute path, and every filesystem API works on that path. A literal `new URL(..., import.meta.url)` embeds the file it names, and the reference is rewritten to resolve at run time from any directory. The resolution is per module; a helper in a subdirectory keeps naming its own siblings. Files nothing imports — templates, migrations, a data directory — ship with `--include`.
+A text file (`.md`, `.txt`) is inlined into the bundle, and the import evaluates to its contents as a string. A binary file (`.wasm`, `.png`, `.bin`) ships inside the executable and is written out beside the bundle on first run; the import evaluates to that file's absolute path, so `readFileSync(model)` reads a real file. A literal `new URL(..., import.meta.url)` embeds the file it names, and the reference is rewritten to resolve at run time from any directory. The resolution is per module; a helper in a subdirectory keeps naming its own siblings. Files nothing imports — templates, migrations, a data directory — ship with `--include`.
 
 A CommonJS dependency bundled into the output keeps `__dirname` and `__filename`. Paths your own code computes from `import.meta.dirname` are the exception: bundling moves every module to the entry's location, so compute asset paths as the entry sees them.
 
