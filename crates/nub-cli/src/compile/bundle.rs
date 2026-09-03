@@ -118,9 +118,22 @@ pub struct BundleOptions {
     pub unbundled: Vec<String>,
     /// Packages the user forced INTO the bundle, overriding detection.
     pub bundled: Vec<String>,
-    /// Let a dynamic `import()` whose specifier is not statically analyzable
-    /// survive into the output instead of failing the build. Off by default.
-    pub allow_dynamic_import: bool,
+    /// Where a dynamic `import()` whose specifier is not statically analyzable may
+    /// survive into the output instead of failing the build. Empty refuses every
+    /// one, which is the default.
+    ///
+    /// Each entry is a glob over the path of the module the import is WRITTEN IN,
+    /// relative to the working directory — the anchor `--include` already uses. An
+    /// empty pattern, which the bare flag produces, matches everything.
+    ///
+    /// Scoped by IMPORTER rather than by specifier, which is where this parts
+    /// company with Bun. Bun matches its glob against the specifier's extracted
+    /// template shape and needs an `'<empty>'` sentinel for the opaque ones — but
+    /// an opaque specifier is precisely the case the flag exists for, so that
+    /// matcher can only ever describe the imports that did not need it. The
+    /// importer's path is known for every site and is the thing an author
+    /// controls.
+    pub allow_dynamic_import: Vec<String>,
     /// Explicit tsconfig; `None` keeps Rolldown's auto-discovery.
     pub tsconfig: Option<PathBuf>,
     /// `EXT=TYPE` from `--loader`, applied over nub's defaults. See
@@ -512,14 +525,19 @@ fn bundle_inner(
             !(in_runtime && dead_preload_chain)
         })
         .collect();
+    // The anchor for the `--allow-dynamic-import` globs. Read once: a pattern must
+    // mean the same thing for every site, and `current_dir` can in principle move
+    // under a build.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     reject_unresolved(
         &sites,
         &output.warnings,
-        opts.allow_dynamic_import,
+        &opts.allow_dynamic_import,
+        &cwd,
         uses_plug_n_play(entry_abs),
         nothing_installed(entry_abs),
     )?;
-    let dynamic_import_sites = if opts.allow_dynamic_import {
+    let dynamic_import_sites = if !opts.allow_dynamic_import.is_empty() {
         // Both `import()` shapes are excused by the flag and both are served by
         // the same runtime hook, so both are counted — omitting the variable-held
         // one would ship an artifact whose hook the build decided it did not need.
@@ -4619,7 +4637,9 @@ fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
 /// UNRESOLVED_IMPORT warnings for named specifiers that resolved to nothing.
 ///
 /// `allow_dynamic` excuses the `import()` sites ONLY — both the computed and the
-/// variable-held shape, since the runtime hook serves them identically. An
+/// variable-held shape, since the runtime hook serves them identically — and only
+/// those whose IMPORTER a pattern selects, so a site the globs do not name is
+/// refused exactly as it would be with no flag at all. An
 /// indirect `require` is a different defect with a different fix (the resolver
 /// picked a UMD build), and an UNRESOLVED_IMPORT is a static specifier that
 /// resolved to nothing — neither is served by a runtime resolve hook, so neither
@@ -4648,10 +4668,44 @@ fn uses_plug_n_play(entry: &Path) -> bool {
         .any(|dir| dir.join(".pnp.cjs").is_file() && !dir.join("node_modules").is_dir())
 }
 
+/// Whether `patterns` excuse a dynamic import written in `module`.
+///
+/// `module` is rolldown's module id, an absolute path. The user's glob is
+/// project-relative, so it is compared against the portion below `cwd` — the same
+/// anchor `--include` resolves its patterns against, and the only one a pattern
+/// typed at a shell prompt can mean.
+///
+/// A module OUTSIDE `cwd` — a dependency resolved through a parent's
+/// `node_modules` — matches no relative pattern and stays refused. That is the
+/// intended reading rather than a gap: a scoped escape hatch names the code you
+/// are vouching for, and you cannot vouch for a path you cannot write down.
+fn dynamic_import_allowed(patterns: &[String], cwd: &Path, module: &str) -> bool {
+    // The bare flag: allow-everything, and the behavior this flag had before it
+    // could be scoped.
+    if patterns.iter().any(|p| p.is_empty()) {
+        return true;
+    }
+    let Ok(rel) = Path::new(module).strip_prefix(cwd) else {
+        return false;
+    };
+    let rel = to_slash_path(rel);
+    patterns
+        .iter()
+        .any(|pattern| glob_match::glob_match(pattern, &rel))
+}
+
+fn to_slash_path(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn reject_unresolved(
     sites: &[DynamicSite],
     warnings: &[BuildDiagnostic],
-    allow_dynamic: bool,
+    allow_dynamic: &[String],
+    cwd: &Path,
     pnp: bool,
     uninstalled: bool,
 ) -> Result<()> {
@@ -4668,7 +4722,9 @@ fn reject_unresolved(
         any_native |= specifier_names_native_addon(&site.snippet);
         any_dependency_site |= unresolved_importer_is_dependency(&site.module);
         match site.kind {
-            SiteKind::Dynamic | SiteKind::Variable | SiteKind::Attributed if allow_dynamic => {
+            SiteKind::Dynamic | SiteKind::Variable | SiteKind::Attributed
+                if dynamic_import_allowed(allow_dynamic, cwd, &site.module) =>
+            {
                 continue;
             }
             SiteKind::Dynamic => any_dynamic = true,
@@ -5052,7 +5108,7 @@ mod tests {
             external: Vec::new(),
             unbundled: Vec::new(),
             bundled: Vec::new(),
-            allow_dynamic_import: false,
+            allow_dynamic_import: Vec::new(),
             tsconfig: None,
             loaders: Vec::new(),
             native_target: None,
@@ -7840,7 +7896,7 @@ console.log('ESM_ENTRY_MARK', path.sep);
         let mut o = opts();
         o.minify = false;
         o.external = vec!["peer".into()];
-        o.allow_dynamic_import = true;
+        o.allow_dynamic_import = vec![String::new()];
         let res = bundle_for_compile(&entry, &o, &dir)
             .expect("worker external and computed imports must stay runtime-resolvable");
 
@@ -8292,7 +8348,7 @@ await import("./data.json", { with: { type: "json" } });
 
         // The refusal itself, and the flag that excuses it — the specifier is
         // path-like, so the runtime hook can serve it from the launch directory.
-        let err = reject_unresolved(&scan.sites, &[], false, false, false)
+        let err = reject_unresolved(&scan.sites, &[], &[], Path::new("/p"), false, false)
             .expect_err("must refuse")
             .to_string();
         assert!(
@@ -8301,7 +8357,7 @@ await import("./data.json", { with: { type: "json" } });
              a literal to write a literal: {err}"
         );
         assert!(
-            reject_unresolved(&scan.sites, &[], true, false, false).is_ok(),
+            reject_unresolved(&scan.sites, &[], ALLOW_ALL, Path::new("/p"), false, false).is_ok(),
             "--allow-dynamic-import must still excuse it"
         );
     }
@@ -8382,7 +8438,7 @@ await import("./" + process.env.NUB_SUFFIX + ".mjs");
         let mut allowed = opts();
         allowed.minify = false;
         allowed.sourcemap = SourcemapMode::None;
-        allowed.allow_dynamic_import = true;
+        allowed.allow_dynamic_import = vec![String::new()];
         let result = bundle(&entry, &allowed)
             .expect("the opt-in must preserve every nonliteral dynamic import for runtime");
         assert_eq!(
@@ -8529,6 +8585,9 @@ const pkg = require("./package.json");
         assert!(sites[0].snippet.contains("./package.json"), "{sites:?}");
     }
 
+    /// The bare `--allow-dynamic-import`, whose empty pattern matches everything.
+    const ALLOW_ALL: &[String] = &[String::new()];
+
     fn dynamic_site() -> DynamicSite {
         DynamicSite {
             kind: SiteKind::Dynamic,
@@ -8538,6 +8597,45 @@ const pkg = require("./package.json");
             snippet: "import(pluginPath)".into(),
             resolves_to: Vec::new(),
         }
+    }
+
+    /// The scoped escape hatch: a glob over the file the import is WRITTEN IN.
+    ///
+    /// This is where nub parts company with Bun, which matches its glob against
+    /// the specifier's extracted template shape. An opaque specifier is exactly
+    /// what the flag exists for, so a specifier matcher can only ever describe the
+    /// imports that did not need it; the importer's path is known for every site.
+    #[test]
+    fn a_scoped_allow_excuses_only_the_files_its_glob_names() {
+        let cwd = Path::new("/p");
+        let site = dynamic_site(); // /p/src/plugins.ts
+
+        let scoped = [String::from("src/plugins/**")];
+        reject_unresolved(&[dynamic_site()], &[], &scoped, cwd, false, false)
+            .expect_err("a site outside the glob stays refused");
+
+        let hits = [String::from("src/*.ts")];
+        reject_unresolved(&[dynamic_site()], &[], &hits, cwd, false, false)
+            .expect("a site the glob names is excused");
+
+        // Repeatable, and any pattern matching is enough.
+        let several = [String::from("nope/**"), String::from("src/plugins.ts")];
+        reject_unresolved(&[dynamic_site()], &[], &several, cwd, false, false)
+            .expect("one matching pattern out of several is enough");
+
+        // The pattern is anchored at the working directory, the same anchor
+        // --include resolves against, so an absolute-looking glob does NOT match.
+        let absolute = [String::from("/p/src/*.ts")];
+        reject_unresolved(&[dynamic_site()], &[], &absolute, cwd, false, false)
+            .expect_err("globs are project-relative, not absolute");
+
+        // A module outside the working directory can be named by no relative
+        // pattern and stays refused — a dependency is not something you can vouch
+        // for by typing a path.
+        let mut outside = site;
+        outside.module = "/elsewhere/node_modules/x/index.js".into();
+        reject_unresolved(&[outside], &[], &hits, cwd, false, false)
+            .expect_err("a module outside the cwd matches no relative pattern");
     }
 
     /// A site the author cannot rewrite must be told about --unbundled, and one
@@ -8556,8 +8654,8 @@ const pkg = require("./package.json");
             snippet: "require('mdn-data/css/properties.json')".into(),
             ..dynamic_site()
         };
-        let err =
-            reject_unresolved(&[in_dependency], &[], false, false, false).expect_err("must fail");
+        let err = reject_unresolved(&[in_dependency], &[], &[], Path::new("/p"), false, false)
+            .expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("--unbundled"), "got: {msg}");
         assert!(
@@ -8566,7 +8664,8 @@ const pkg = require("./package.json");
         );
 
         let own_source =
-            reject_unresolved(&[dynamic_site()], &[], false, false, false).expect_err("must fail");
+            reject_unresolved(&[dynamic_site()], &[], &[], Path::new("/p"), false, false)
+                .expect_err("must fail");
         assert!(
             !own_source.to_string().contains("--unbundled"),
             "the author's own site must not be sent to --unbundled: {own_source}"
@@ -8579,8 +8678,8 @@ const pkg = require("./package.json");
     // scanner instead.
     #[test]
     fn rejection_names_the_site_the_fix_and_the_flag() {
-        let err =
-            reject_unresolved(&[dynamic_site()], &[], false, false, false).expect_err("must fail");
+        let err = reject_unresolved(&[dynamic_site()], &[], &[], Path::new("/p"), false, false)
+            .expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/plugins.ts:12:20"), "got: {msg}");
         assert!(msg.contains("import(pluginPath)"), "got: {msg}");
@@ -8613,7 +8712,15 @@ const pkg = require("./package.json");
     #[test]
     fn the_flag_excuses_only_the_computed_import() {
         assert!(
-            reject_unresolved(&[dynamic_site()], &[], true, false, false).is_ok(),
+            reject_unresolved(
+                &[dynamic_site()],
+                &[],
+                ALLOW_ALL,
+                Path::new("/p"),
+                false,
+                false
+            )
+            .is_ok(),
             "a permitted dynamic site must not fail the build"
         );
 
@@ -8625,8 +8732,15 @@ const pkg = require("./package.json");
             snippet: r#"require("./impl/format")"#.into(),
             resolves_to: Vec::new(),
         };
-        let err = reject_unresolved(&[dynamic_site(), indirect], &[], true, false, false)
-            .expect_err("an indirect require must still fail");
+        let err = reject_unresolved(
+            &[dynamic_site(), indirect],
+            &[],
+            ALLOW_ALL,
+            Path::new("/p"),
+            false,
+            false,
+        )
+        .expect_err("an indirect require must still fail");
         let msg = err.to_string();
         assert!(msg.contains("umd.js:4:15"), "got: {msg}");
         assert!(
@@ -8658,8 +8772,15 @@ const pkg = require("./package.json");
             snippet: "import(pkg)".into(),
             resolves_to: vec!["@x/core-darwin".into(), "@x/core-linux".into()],
         };
-        let err = reject_unresolved(std::slice::from_ref(&site), &[], false, false, false)
-            .expect_err("must fail");
+        let err = reject_unresolved(
+            std::slice::from_ref(&site),
+            &[],
+            &[],
+            Path::new("/p"),
+            false,
+            false,
+        )
+        .expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/platform.ts:7:22"), "got: {msg}");
         assert!(msg.contains("import(pkg)"), "got: {msg}");
@@ -8669,7 +8790,7 @@ const pkg = require("./package.json");
         );
         assert!(msg.contains("--allow-dynamic-import"), "got: {msg}");
 
-        reject_unresolved(&[site], &[], true, false, false)
+        reject_unresolved(&[site], &[], ALLOW_ALL, Path::new("/p"), false, false)
             .expect("the flag must excuse a variable specifier exactly as it does a computed one");
     }
 

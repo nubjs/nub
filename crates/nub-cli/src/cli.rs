@@ -1256,8 +1256,20 @@ pub enum Command {
         /// time — a plugin loader, a config module. Such an import is refused by
         /// default: the binary resolves it from the directory it is run in, so
         /// what it loads depends on the machine you ship to.
-        #[arg(long = "allow-dynamic-import", help_heading = COMPILE_ADVANCED)]
-        allow_dynamic_import: bool,
+        ///
+        /// Takes an optional glob scoping the permission to the files the imports
+        /// are written in, so one plugin directory can be excused without excusing
+        /// the whole program: `--allow-dynamic-import 'src/plugins/**'`.
+        /// Repeatable. Bare, it allows every one.
+        #[arg(
+            long = "allow-dynamic-import",
+            value_name = "GLOB",
+            num_args = 0..=1,
+            default_missing_value = "",
+            action = ArgAction::Append,
+            help_heading = COMPILE_ADVANCED
+        )]
+        allow_dynamic_import: Vec<String>,
 
         /// Use this tsconfig.json instead of the one discovered from the entry.
         #[arg(long, value_name = "PATH", help_heading = COMPILE_ADVANCED)]
