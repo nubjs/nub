@@ -11,7 +11,7 @@
 name: busybox-run-probe
 on:
   push:
-    branches: [busybox-shell, win-env-casing]
+    branches: [busybox-shell]
     paths:
       - 'tests/busybox-run-probe/**'
       - '.github/workflows/busybox-run-probe.yml'
