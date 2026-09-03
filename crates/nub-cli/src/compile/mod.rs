@@ -251,7 +251,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // 3. Resolve the Node version through nub run's SAME pin chain (so compile
     //    can't drift from run); --target overrides it. The pin context is the
     //    entry's project dir (walk up from there).
-    let (node_version, provision_version, node) = if opts.smol {
+    let (node_version, provision_version, node, runtime_summary) = if opts.smol {
         // Smol bakes the oldest acceptable runtime as its bundling floor. The
         // manifest also retains an explicit range so discovery can enforce both
         // ends; other non-exact targets retain floor behavior.
@@ -269,8 +269,8 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
                 .filter(|newest| {
                     provision_preference_is_usable(newest, &floor, shim_plan.needed())
                 });
-        eprintln!(
-            "Using Node.js {} (resolved from {source}; {}{})",
+        let summary = format!(
+            "Node {}, not embedded — from {source}; {}{}",
             non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string()),
             smol_runtime_policy(&pin, &floor),
             newest
@@ -278,7 +278,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
                 .map(|n| format!(", provisioning {n}"))
                 .unwrap_or_default()
         );
-        (floor, newest, EmbeddedNode::default())
+        (floor, newest, EmbeddedNode::default(), summary)
     } else {
         // Embed bakes ONE exact version — a range/major/alias collapses to the
         // newest satisfying release at compile time. (`build_node_blob` →
@@ -289,7 +289,8 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
         let node = build_node_blob(&exact, &target, &cache_root, &source)?;
-        (exact, None, node)
+        let summary = format!("Node {exact}, embedded — from {source}");
+        (exact, None, node, summary)
     };
 
     // Compress AFTER `sha256_of_app` above: that hash is the extraction cache key
@@ -385,15 +386,67 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     publish_detached_maps(staged_maps);
 
     let size = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
-    eprintln!(
-        "Compiled {} — {} shape, Node {}, {}, {:.1} MB",
-        out_path.display(),
-        if opts.smol { "smol" } else { "embed" },
-        node_version,
-        target.triple(),
-        size as f64 / 1_000_000.0
-    );
+    report_resolved_build(&out_path, size, &runtime_summary, &target);
     Ok(0)
+}
+
+/// The build's resolved configuration, as a labelled block.
+///
+/// It replaces a single comma-separated line, and the reason is not only that
+/// five unlabelled facts in a row are hard to read. The Node version's
+/// PROVENANCE was missing entirely on the default path: a `--smol` build said
+/// where its pin came from and an embed build never did, because the embed
+/// path's only mention rode the provisioning line, which prints when a Node is
+/// downloaded and stays silent when one is cached. Where the runtime came from
+/// is the fact a reader most often wants, so it is now stated on every build.
+///
+/// Deliberately three rows and no more. Unbundled packages, native addons,
+/// externals and embedded assets are already reported above with the reason each
+/// one earned, which a table cell cannot carry — repeating them here would trade
+/// that reason for a second, worse copy.
+///
+/// The word `shape` is gone from user-facing output with it. It is nub's internal
+/// name for the embed/`--smol` split; a reader knows the flag, not the noun.
+fn report_resolved_build(
+    out_path: &Path,
+    size: u64,
+    runtime_summary: &str,
+    target: &TargetPlatform,
+) {
+    eprintln!();
+    for (label, value) in resolved_build_rows(out_path, size, runtime_summary, target) {
+        eprintln!("  {label:<9}{value}");
+    }
+}
+
+/// The rows themselves, split from the printing so they can be asserted on.
+fn resolved_build_rows(
+    out_path: &Path,
+    size: u64,
+    runtime_summary: &str,
+    target: &TargetPlatform,
+) -> [(&'static str, String); 3] {
+    [
+        (
+            "output",
+            format!(
+                "{}  ({:.1} MB)",
+                out_path.display(),
+                size as f64 / 1_000_000.0
+            ),
+        ),
+        ("runtime", runtime_summary.to_string()),
+        (
+            "target",
+            if target.is_host() {
+                // Saying so is the difference between a reader checking a triple
+                // against their own machine and not having to.
+                format!("{} (this machine)", target.triple())
+            } else {
+                target.triple().to_string()
+            },
+        ),
+    ]
 }
 
 /// Write the `--metafile` report, pretty-printed because it is read by people at
@@ -1502,6 +1555,10 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
             ]);
         }
         sign.extend_from_slice(&["-s".as_ref(), "-".as_ref(), tmp.as_os_str()]);
+        // Announced BEFORE the call, not after it. Signing a ~107 MB binary takes
+        // real time, and a progress line printed once it finished left that whole
+        // stretch labelled by the previous phase.
+        eprintln!("Signing embedded Node.js");
         ok = run_ok("codesign", &sign);
     }
 
@@ -1532,9 +1589,7 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         return Ok(original);
     }
 
-    if needs_resign {
-        eprintln!("Signing embedded Node.js");
-    } else {
+    if !needs_resign {
         eprintln!("Stripped the embedded Node");
     }
     Ok(stripped)
@@ -3282,6 +3337,46 @@ mod tests {
         assert!(
             msg.contains("linux-x64"),
             "should list what IS supported: {msg}"
+        );
+    }
+
+    /// The resolved-config block that replaced the old one-line summary.
+    ///
+    /// The host suffix is the row worth pinning: it is the difference between a
+    /// reader checking a triple against their own machine and not having to, and
+    /// it is the one row whose text depends on something other than its input.
+    #[test]
+    fn the_resolved_build_block_labels_every_row_and_marks_a_host_target() {
+        let host = TargetPlatform::host().unwrap();
+        let rendered = |rows: [(&'static str, String); 3]| {
+            rows.iter()
+                .map(|(label, value)| format!("{label}={value}"))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            rendered(resolved_build_rows(
+                Path::new("dist/cli"),
+                29_473_842,
+                "Node 26.8.1, embedded — from package.json#engines.node",
+                &host,
+            )),
+            vec![
+                "output=dist/cli  (29.5 MB)".to_string(),
+                "runtime=Node 26.8.1, embedded — from package.json#engines.node".to_string(),
+                format!("target={} (this machine)", host.triple()),
+            ]
+        );
+
+        let foreign = SUPPORTED_TRIPLES
+            .iter()
+            .map(|t| TargetPlatform::parse(t).unwrap())
+            .find(|t| *t != host)
+            .unwrap();
+        assert_eq!(
+            resolved_build_rows(Path::new("dist/cli"), 0, "", &foreign)[2],
+            ("target", foreign.triple().to_string()),
+            "a cross-compiled target must not claim to be this machine"
         );
     }
 
