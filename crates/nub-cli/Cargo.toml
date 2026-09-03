@@ -235,9 +235,9 @@ semver = "1"
 node-semver = "2"
 pathdiff = { version = "0.2", optional = true }
 # pnpm-workspace.yaml read + regeneration for `nub pm use nub` / `use pnpm`
-# (pm_engine/use_nub.rs). serde_yaml is archived/unmaintained; serde_yaml_ng
-# is the maintained, API-compatible fork, aliased as `serde_yaml` so the
-# source paths are unchanged.
+# (pm_engine/use_nub.rs). serde_yaml is archived/unmaintained; yaml_serde is
+# the maintained, API-compatible fork vendor/aube already builds, aliased as
+# `serde_yaml` so the source paths are unchanged.
 serde_yaml = { package = "yaml_serde", version = "0.10" }
 sha2.workspace = true
 hex = "0.4"

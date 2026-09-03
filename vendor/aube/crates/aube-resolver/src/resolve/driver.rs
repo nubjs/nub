@@ -29,7 +29,7 @@ use crate::package_ext::{
 };
 use crate::semver_util::{
     AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
-    version_satisfies,
+    sparse_pick_needs_refetch, version_satisfies,
 };
 use crate::workspace_spec::workspace_range_binds;
 use crate::{
@@ -591,13 +591,18 @@ impl<'a> ResolveDriver<'a> {
     /// fail-open hazard). Returns `false` (accept the offline pick) for
     /// frozen picks whose history is settled. See the big comment on the
     /// matching arm in the pick loop for the full rationale.
+    #[allow(clippy::too_many_arguments)]
     fn primer_pick_needs_refetch(
         &self,
         packument: &aube_registry::Packument,
         picked_version: &str,
+        range_str: &str,
         cutoff_for_pkg: Option<&str>,
-        range_is_dist_tag: bool,
+        pick_lowest: bool,
+        locked_version: Option<&str>,
+        sparse_seed: bool,
     ) -> bool {
+        let range_is_dist_tag = range_resolves_via_dist_tag(packument, range_str);
         // A dist-tag (`latest`, `next`, a custom tag) is a MUTABLE pointer
         // the publisher can repoint between builds. The primer bakes the
         // tag's value at build time, and `classify_regime` — which keys
@@ -613,6 +618,21 @@ impl<'a> ResolveDriver<'a> {
         // fresh-resolve refetched, so the two diverged and `update`
         // downgraded). Refetch unconditionally so the tag is re-read live.
         if range_is_dist_tag {
+            return true;
+        }
+        // An age-pruned seed has holes in settled history, so the regime
+        // argument below ("a refetch could never surface a newer
+        // satisfying version") does not hold when the range could match
+        // a version the prune dropped above the pick.
+        if sparse_seed
+            && sparse_pick_needs_refetch(
+                packument,
+                picked_version,
+                range_str,
+                pick_lowest,
+                locked_version,
+            )
+        {
             return true;
         }
         match classify_regime(packument, picked_version) {
@@ -723,10 +743,10 @@ impl<'a> ResolveDriver<'a> {
         {
             self.ensure_fetch(&fetch_name);
             match self.fetcher.join_next().await {
-                Some(Ok(Ok((name, packument, from_primer)))) => {
+                Some(Ok(Ok((name, packument, primer_seed)))) => {
                     self.fetcher.release_in_flight(&name);
-                    if from_primer {
-                        self.fetcher.note_primer_seeded(name.clone());
+                    if let Some(seed) = primer_seed {
+                        self.fetcher.note_primer_seeded(name.clone(), seed);
                     }
                     self.resolver.cache.insert(name, packument);
                     self.packument_fetch_count += 1;
@@ -966,8 +986,11 @@ impl<'a> ResolveDriver<'a> {
                         && self.primer_pick_needs_refetch(
                             packument,
                             &meta.version,
+                            &task.range,
                             cutoff_for_pkg,
-                            range_resolves_via_dist_tag(packument, &task.range),
+                            pick_lowest,
+                            locked_version,
+                            self.fetcher.primer_seed_is_sparse(&registry_name),
                         ) =>
                 {
                     // Consume the seed flag (one refetch per package,

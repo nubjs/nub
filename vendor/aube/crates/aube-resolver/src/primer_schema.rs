@@ -6,6 +6,13 @@ pub(crate) struct Seed {
     pub(crate) etag: Option<String>,
     #[serde(default, rename = "lm")]
     pub(crate) last_modified: Option<String>,
+    /// `generate-primer.mjs` dropped at least one old version from this
+    /// seed (`--prune-age-days`), keeping the highest version of every
+    /// `major.minor` line and every dist-tag target. The resolver reads
+    /// this to refetch a pick that a dropped version could outrank
+    /// (`semver_util::sparse_pick_needs_refetch`).
+    #[serde(default, rename = "sp")]
+    pub(crate) sparse: bool,
     #[serde(rename = "p")]
     pub(super) packument: PrimerPackument,
 }
