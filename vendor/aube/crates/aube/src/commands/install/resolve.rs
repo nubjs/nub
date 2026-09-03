@@ -313,7 +313,8 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     // resolve-time logs strictly ahead of post-resolve logs in the
     // ndjson stream.
     crate::pnpmfile::ReadPackageHostChain::drain_forwarders(read_package_forwarders).await;
-    crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, cwd, &mut graph).await?;
+    crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, cwd, manifest, &mut graph)
+        .await?;
     // Same patch-config recording as the main install branch — keeps
     // `--lockfile-only` output byte-identical to a full install's.
     crate::patches::record_patches_on_graph(cwd, &mut graph)?;

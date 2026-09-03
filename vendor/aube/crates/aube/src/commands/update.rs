@@ -908,7 +908,8 @@ pub async fn run(
     // Drain the readPackage stderr forwarders so resolve-time `ctx.log`
     // records flush to stdout before afterAllResolved emits its own.
     crate::pnpmfile::ReadPackageHostChain::drain_forwarders(read_package_forwarders).await;
-    crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, &cwd, &mut graph).await?;
+    crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, &cwd, &manifest, &mut graph)
+        .await?;
 
     let mut catalog_updates: BTreeMap<super::CatalogSource, Vec<super::catalogs::CatalogUpdate>> =
         BTreeMap::new();

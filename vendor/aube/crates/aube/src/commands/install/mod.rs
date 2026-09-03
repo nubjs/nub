@@ -2494,8 +2494,13 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // logs in the ndjson stream.
             drop(resolver);
             crate::pnpmfile::ReadPackageHostChain::drain_forwarders(read_package_forwarders).await;
-            crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, &cwd, &mut graph)
-                .await?;
+            crate::pnpmfile::run_after_all_resolved_chain(
+                &pnpmfile_paths,
+                &cwd,
+                &manifest,
+                &mut graph,
+            )
+            .await?;
             // Record the project's patch configuration (manifest /
             // workspace-yaml `patchedDependencies` + sha256 of each
             // patch file) on the graph before anything downstream
