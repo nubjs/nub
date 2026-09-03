@@ -514,10 +514,11 @@ pub(crate) fn range_resolves_via_dist_tag(packument: &Packument, range_str: &str
 /// and refetches.
 ///
 /// Conservative wherever the seed cannot prove the pick: `pick_lowest`
-/// (the floor of a range is exactly what was dropped) and a locked
-/// version the seed does not hold refetch outright, so does anything
-/// unparseable, and `Range::allows_any` overlaps bounds without npm's
-/// prerelease rule.
+/// (the floor of a range is exactly what was dropped), a locked version
+/// the seed does not hold, and a deprecated pick (`outranks` prefers any
+/// live version, so a dropped live one anywhere in the range beats it)
+/// refetch outright, so does anything unparseable, and
+/// `Range::allows_any` overlaps bounds without npm's prerelease rule.
 pub(crate) fn sparse_pick_needs_refetch(
     packument: &Packument,
     picked_version: &str,
@@ -536,6 +537,13 @@ pub(crate) fn sparse_pick_needs_refetch(
         .is_ok_and(|pinned| pinned == picked)
     {
         return false;
+    }
+    if packument
+        .versions
+        .get(picked_version)
+        .is_some_and(|meta| meta.deprecated.is_some())
+    {
+        return true;
     }
     let Ok(range) = node_semver::Range::parse(normalize_range(range_str)) else {
         return true;

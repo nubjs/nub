@@ -7443,6 +7443,18 @@ fn sparse_pick_refetches_only_when_a_dropped_version_could_outrank_it() {
     assert!(refetch("^1.2.0", "1.2.5", false, Some("1.2.3")));
     assert!(!refetch("^1.2.0", "1.2.5", false, Some("1.2.5")));
 
+    // A deprecated line end loses to a dropped live version below it
+    // (`outranks` prefers live over deprecated before comparing versions),
+    // so it is not authoritative even with nothing above it. An exact pin
+    // has no other candidate.
+    let mut seed = make_packument("baz", &["1.0.1"], "1.0.1");
+    seed.versions.get_mut("1.0.1").unwrap().deprecated = Some("use 2.x".to_string());
+    let refetch = |range: &str, picked: &str| {
+        crate::semver_util::sparse_pick_needs_refetch(&seed, picked, range, false, None)
+    };
+    assert!(refetch("^1.0.0", "1.0.1"));
+    assert!(!refetch("1.0.1", "1.0.1"));
+
     // Prereleases sit on their own line. A stable pick ignores a held
     // next-major beta unless the range names a prerelease of that line;
     // an exact prerelease pin the seed holds is final; a prerelease range
