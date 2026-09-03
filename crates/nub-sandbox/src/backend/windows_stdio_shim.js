@@ -71,8 +71,6 @@
 // of its own.
 import { createRequire } from "node:module";
 
-if (process.env.__NUB_JAIL_DIAG_SPAWN) { try { process._rawDebug("NUBSHIM loaded pid=" + process.pid); } catch {} }
-
 const cp = createRequire(process.execPath)("node:child_process");
 import fs from "node:fs";
 import net from "node:net";
@@ -234,19 +232,6 @@ function install() {
       if (slots) slots.abort();
       closeScratch(ignored);
       throw thrown;
-    }
-    // ⛔ `spawn UNKNOWN` IS A UV ERRNO libuv COULD NOT TRANSLATE, AND NODE PRINTS IT WITH NO
-    // NUMBER — which makes a jail-only launch failure nearly undiagnosable from the outside. The
-    // package's own error text names whatever it tried NEXT, not what actually failed: measured on
-    // `jpegtran-bin`, the visible message was a missing `autoreconf` from a source-build fallback,
-    // three steps downstream of the launch that really failed. This prints the raw errno and the
-    // image, gated on an internal env var so it costs nothing when unset.
-    if (process.env.__NUB_JAIL_DIAG_SPAWN) {
-      try {
-        process._rawDebug(
-          `NUBSPAWN errno=${err} file=${options.file} args=${JSON.stringify((options.args || []).slice(0, 4))} cwd=${options.cwd || ""} stdio=${JSON.stringify(stdio.slice(0, 3).map((s) => (typeof s === "number" ? "fd" : String(s))))}`,
-        );
-      } catch {}
     }
     // Safe the instant `uv_spawn` returns: the child holds its own duplicated handles, and nothing
     // here is ever read back.
@@ -549,13 +534,6 @@ function install() {
     options.stdio = stdio;
 
     const result = origSpawnSync(file, args, options);
-    if (result && process.env.__NUB_JAIL_DIAG_SPAWN) {
-      try {
-        process._rawDebug(
-          `NUBSPAWNSYNC errno=${result.error.errno} code=${result.error.code} file=${file} args=${JSON.stringify((args || []).slice(0, 4))}`,
-        );
-      } catch {}
-    }
     for (const fd of fds) {
       try {
         fs.closeSync(fd);

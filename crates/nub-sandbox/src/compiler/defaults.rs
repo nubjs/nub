@@ -830,17 +830,6 @@ const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     "VCINSTALLDIR",
     "VSCMD_VER",
     "WindowsSDKVersion",
-    // ⛔ THE JAIL'S OWN DIAGNOSTIC SWITCH, AND IT HAS TO BE ADMITTED OR IT CANNOT WORK. The
-    // stdio shim runs INSIDE the confined child, so a debug flag set in the operator's shell is
-    // scrubbed before the shim ever reads it — the flag looks dead and the shim looks absent.
-    // Measured 2026-09-02: a spawn diagnostic reported ZERO spawns on a package that demonstrably
-    // failed at spawn, and only a positive control (an unconditional "shim loaded" line, also
-    // silent) showed the instrument was blind rather than the seam unused. Same class as the
-    // three MSVC stamps above and `electron_config_cache`: dropped by this scrub, silently.
-    //
-    // Admitting it adds no capability. It gates logging only, the value is never interpreted, and
-    // an ambient one can at most turn on diagnostics the operator could get by other means.
-    "__NUB_JAIL_DIAG_SPAWN",
 ];
 
 /// Whether an env key is admitted into the build-jail's lifecycle env — the
