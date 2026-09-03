@@ -661,6 +661,7 @@ mod tests {
             install_message: None,
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
         };
         nub_core::compile::encode(
             &manifest,

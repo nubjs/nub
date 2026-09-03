@@ -1,21 +1,26 @@
-# Does a console window actually appear? — the one question CI cannot answer.
+# Does a console actually appear? - the one question CI cannot answer.
+#
+# ASCII ONLY, deliberately. PowerShell 5.1 reads a BOM-less script in the ANSI
+# codepage, so a single em-dash in a comment fails the whole file with "The string
+# is missing the terminator", pointing at the last line rather than the offending
+# one. Keep every character in this file plain ASCII.
 #
 # run.sh asserts everything measurable without a desktop: the subsystem byte, that
 # the artifact runs, and that the launcher took the suppressing path. None of that
 # is the user-visible claim. This script makes the claim directly, by launching the
-# artifact the way Explorer does and counting the console windows that appear.
+# artifact the way Explorer does and watching for a console being allocated.
 #
-# NOT wired into CI. A hosted runner has no interactive desktop, so a console
-# window may be un-creatable there and every assertion below would pass without
-# meaning anything — the exact false green the harness is built to avoid. Run it on
-# a real Windows desktop or the local Windows VM.
+# NOT wired into CI. A hosted runner may not be able to allocate a console at all,
+# in which case every assertion below passes without meaning anything - the exact
+# false green this harness exists to avoid. The control arm detects that and says
+# so instead of reporting a pass.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File observe-console.ps1 `
 #     -Hidden .\hidden.exe -Shown .\shown.exe
 param(
   [Parameter(Mandatory = $true)][string]$Hidden,
   [Parameter(Mandatory = $true)][string]$Shown,
-  [int]$SettleMs = 1500
+  [int]$SettleMs = 2000
 )
 $ErrorActionPreference = 'Stop'
 
@@ -31,7 +36,7 @@ public static class Win {
   static extern int GetClassName(IntPtr hWnd, StringBuilder buf, int max);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
   // Every console window is one of these two classes: the classic conhost window
-  // and the Windows 11 / Windows Terminal one. Counted rather than matched by
+  // and the Windows 11 / Windows Terminal one. Counted by class rather than by
   // title, which a program can change.
   public static List<IntPtr> Consoles() {
     var found = new List<IntPtr>();
@@ -49,43 +54,54 @@ public static class Win {
 }
 '@
 
+# Two independent signals, because each one is blind somewhere.
+#
+# CONSOLE HOST COUNT is the primary. Windows starts one console host process per
+# console it allocates, and it does so in every window station - including the
+# non-interactive one an SSH session runs in, where window enumeration sees
+# nothing at all. This is the signal that survives being driven remotely.
+#
+# WINDOW COUNT is the confirmation, and it is what literally answers "did
+# something appear on screen". It only means anything on an interactive desktop,
+# so it is reported rather than asserted on.
 function Measure-Launch([string]$exe, [string]$label) {
   $before = [Win]::Consoles()
   $hosts0 = @(Get-Process -Name conhost, OpenConsole -ErrorAction SilentlyContinue).Count
-  # ShellExecute, which is what a double-click in Explorer does — and unlike a
-  # direct spawn it hands the child no console of ours to inherit, so a
-  # console-subsystem program gets a brand new window.
+  # ShellExecute, which is what a double-click in Explorer does. Unlike a direct
+  # spawn it hands the child no console of ours to inherit, so a console-subsystem
+  # program gets a brand new one.
   $proc = Start-Process -FilePath $exe -PassThru
   Start-Sleep -Milliseconds $SettleMs
-  $after = [Win]::Consoles()
+  $after  = [Win]::Consoles()
   $hosts1 = @(Get-Process -Name conhost, OpenConsole -ErrorAction SilentlyContinue).Count
   try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
-  $new = @($after | Where-Object { $before -notcontains $_ }).Count
-  Write-Host ("  {0}: {1} new console window(s), conhost delta {2}" -f $label, $new, ($hosts1 - $hosts0))
-  return $new
+  $windows = @($after | Where-Object { $before -notcontains $_ }).Count
+  $hosts = $hosts1 - $hosts0
+  Write-Host ("  {0}: {1} new console host(s), {2} new console window(s)" -f $label, $hosts, $windows)
+  return $hosts
 }
 
 $fail = 0
 
-# The control runs FIRST and on purpose. If an ordinary compiled binary shows no
-# console either, then this desktop cannot create one and the hidden result below
-# proves nothing — which is a different answer from "the feature works".
+# The control runs FIRST and on purpose. If an ordinary compiled binary allocates
+# no console either, this host cannot show one and the hidden result below proves
+# nothing - which is a different answer from "the feature works".
 Write-Host "== control: a binary built WITHOUT --hide-console =="
-$shownWindows = Measure-Launch $Shown 'shown.exe'
-if ($shownWindows -lt 1) {
-  Write-Host "  INCONCLUSIVE: no console appeared for the control either, so this"
-  Write-Host "                environment cannot show one and the arm below is vacuous."
+$shownHosts = Measure-Launch $Shown 'shown.exe'
+if ($shownHosts -lt 1) {
+  Write-Host "  INCONCLUSIVE: the control allocated no console either, so this host"
+  Write-Host "                cannot show one and the arm below would be vacuous."
   Write-Host "RESULT: inconclusive on this host"
   exit 0
 }
-Write-Host "  ok: the control opens a console, so this desktop can show one"
+Write-Host "  ok: the control allocates a console, so this host can"
 
-Write-Host "== the claim: --hide-console opens none =="
-$hiddenWindows = Measure-Launch $Hidden 'hidden.exe'
-if ($hiddenWindows -eq 0) {
-  Write-Host "  ok: no console window appeared"
+Write-Host "== the claim: --hide-console allocates none =="
+$hiddenHosts = Measure-Launch $Hidden 'hidden.exe'
+if ($hiddenHosts -eq 0) {
+  Write-Host "  ok: no console was allocated"
 } else {
-  Write-Host ("  FAIL: {0} console window(s) appeared" -f $hiddenWindows)
+  Write-Host ("  FAIL: {0} console host(s) started, so a window would appear" -f $hiddenHosts)
   $fail = 1
 }
 

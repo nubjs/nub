@@ -3550,6 +3550,7 @@ mod tests {
             out: None,
             icon: None,
             metadata: Vec::new(),
+            hide_console: false,
             smol: false,
             target: None,
             platform: None,
