@@ -89,6 +89,14 @@ fn ndjson_reporter() -> bool {
 /// stack traces, hook-body diagnostics) never collides.
 const HOOK_LOG_SENTINEL: &str = "__AUBE_HOOK_LOG__ ";
 
+/// Sentinel our shims prepend to a chunk the hook wrote to its own
+/// stdout — a bare `console.log` in a pnpmfile body. Every shim owns
+/// the child's stdout as a machine-readable result channel, so a user
+/// write there would corrupt the protocol; [`STDOUT_CAPTURE_JS`]
+/// re-routes it through stderr under this tag and the parent replays
+/// it verbatim on its own stdout, which is where pnpm puts it.
+const HOOK_STDOUT_SENTINEL: &str = "__AUBE_HOOK_STDOUT__ ";
+
 /// Return the path to the project's pnpmfile if one exists.
 ///
 /// Override precedence is `cli > workspace_yaml > default`:
@@ -109,11 +117,19 @@ pub fn detect(
     cli_pnpmfile: Option<&Path>,
     workspace_pnpmfile_path: Option<&str>,
 ) -> Option<PathBuf> {
+    // Every path this returns is handed to a `node -e` shim that
+    // `require()`s it, and Node cannot dereference a Windows verbatim
+    // path: `path.resolve(r"\\?\C:\…")` mangles the prefix and the
+    // require dies with `EISDIR … lstat 'C:'`. `cwd` here is whatever
+    // the command resolved as its project root, which on some paths is
+    // already canonicalized (and so verbatim), so strip on the way out
+    // rather than trusting every producer.
+    let plain = aube_util::path::strip_verbatim_prefix;
     if let Some(rel) = cli_pnpmfile {
         let p = if rel.is_absolute() {
-            rel.to_path_buf()
+            plain(rel)
         } else {
-            cwd.join(rel)
+            plain(&cwd.join(rel))
         };
         if !p.is_file() {
             tracing::warn!(
@@ -126,7 +142,7 @@ pub fn detect(
         return Some(p);
     }
     if let Some(rel) = workspace_pnpmfile_path {
-        let p = cwd.join(rel);
+        let p = plain(&cwd.join(rel));
         if !p.is_file() {
             tracing::warn!(
                 code = aube_codes::warnings::WARN_AUBE_PNPMFILE_NOT_FOUND,
@@ -144,7 +160,7 @@ pub fn detect(
     if !pnpmfile_default_enabled() {
         return None;
     }
-    default_path(cwd)
+    default_path(cwd).map(|p| plain(&p))
 }
 
 /// Resolve `--global-pnpmfile <path>`. Unlike [`detect`], there is no
@@ -154,10 +170,11 @@ pub fn detect(
 /// is a hard miss with a warning, matching the local-pnpmfile shape.
 pub fn detect_global(cwd: &Path, cli_global: Option<&Path>) -> Option<PathBuf> {
     let rel = cli_global?;
+    // Non-verbatim for the same reason as [`detect`].
     let p = if rel.is_absolute() {
-        rel.to_path_buf()
+        aube_util::path::strip_verbatim_prefix(rel)
     } else {
-        cwd.join(rel)
+        aube_util::path::strip_verbatim_prefix(&cwd.join(rel))
     };
     if !p.is_file() {
         tracing::warn!(
@@ -299,6 +316,33 @@ fn apply(wire: LockfileWire, graph: &mut LockfileGraph) {
     }
 }
 
+/// Preamble every shim runs before it loads the pnpmfile. Swaps
+/// `process.stdout.write` for one that tags the chunk and sends it down
+/// stderr, and stashes the real writer on `globalThis.__aubeRawStdout`
+/// for the shim's own protocol frames.
+///
+/// pnpm runs hooks inside its own process, so `console.log` in a
+/// pnpmfile reaches the user's terminal. Our shims run the hook in a
+/// child whose stdout carries the result (the round-tripped lockfile,
+/// the `readPackage` NDJSON responses, the hooks-gate bit), so before
+/// this the user's line was either swallowed or — worse, on the
+/// long-lived `readPackage` host — spliced into the response stream as
+/// an unparseable frame.
+///
+/// Installed ahead of `loadPnpmfile` so a `console.log` at module scope
+/// is captured too.
+const STDOUT_CAPTURE_JS: &str = r#"
+const __AUBE_STDOUT_SENTINEL = '__AUBE_HOOK_STDOUT__ ';
+globalThis.__aubeRawStdout = process.stdout.write.bind(process.stdout);
+process.stdout.write = function (chunk, encoding, callback) {
+  if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+  const ok = process.stderr.write(__AUBE_STDOUT_SENTINEL + JSON.stringify(text) + '\n');
+  if (typeof callback === 'function') callback();
+  return ok;
+};
+"#;
+
 const LOAD_PNPMFILE_JS: &str = r#"
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -329,16 +373,24 @@ process.stdin.on('end', async () => {
     const fn = hooks[hookName];
     let result = input;
     if (typeof fn === 'function') {
-      const ctx = {
-        log: (...args) => {
-          const message = args.map((a) => typeof a === 'string' ? a : require('util').inspect(a)).join(' ');
-          process.stderr.write(SENTINEL + JSON.stringify({hook: hookName, message}) + '\n');
-        },
+      const emit = (...args) => {
+        const message = args.map((a) => typeof a === 'string' ? a : require('util').inspect(a)).join(' ');
+        process.stderr.write(SENTINEL + JSON.stringify({hook: hookName, message}) + '\n');
       };
+      // pnpm gives each hook a different second argument: `readPackage`
+      // and `afterAllResolved` get `{log}`, `preResolution` gets a
+      // `{info, warn}` logger and no `log` at all (`requireHooks.ts`
+      // `createReadPackageHookContext` vs `createPreResolutionHookLogger`).
+      // `log` stays on the preResolution object as well, because it has
+      // been aube's spelling since the hook landed and dropping it would
+      // break pnpmfiles written against aube for nothing.
+      const ctx = hookName === 'preResolution'
+        ? { info: emit, warn: emit, log: emit }
+        : { log: emit };
       const out = await fn(input, ctx);
       if (out && typeof out === 'object') result = out;
     }
-    process.stdout.write(JSON.stringify(result));
+    globalThis.__aubeRawStdout(JSON.stringify(result));
   } catch (err) {
     console.error('[pnpmfile] hook failed:', (err && err.stack) || err);
     process.exit(1);
@@ -351,7 +403,7 @@ process.stdin.on('end', async () => {
 /// one-shot hook only needs a `run_one_shot_hook(.., name, ..)` call —
 /// don't add a parallel shim.
 fn one_shot_hook_shim() -> String {
-    format!("{LOAD_PNPMFILE_JS}{SHIM}")
+    format!("{STDOUT_CAPTURE_JS}{LOAD_PNPMFILE_JS}{SHIM}")
 }
 
 /// Drain the child's stderr line-by-line. Lines tagged with
@@ -372,7 +424,9 @@ fn spawn_stderr_forwarder(
         let mut stdout = tokio::io::stdout();
         let mut stderr_w = tokio::io::stderr();
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(rest) = line.strip_prefix(HOOK_LOG_SENTINEL) {
+            if let Some(rest) = line.strip_prefix(HOOK_STDOUT_SENTINEL) {
+                forward_hook_stdout(rest, &mut stdout, &mut stderr_w).await;
+            } else if let Some(rest) = line.strip_prefix(HOOK_LOG_SENTINEL) {
                 forward_hook_log(rest, &prefix, &from, &mut stdout, &mut stderr_w).await;
             } else {
                 let _ = stderr_w.write_all(line.as_bytes()).await;
@@ -386,6 +440,28 @@ fn spawn_stderr_forwarder(
 struct HookLogRecord {
     hook: String,
     message: String,
+}
+
+/// Replay one chunk the hook wrote to its own stdout. The payload is a
+/// JSON string holding the chunk verbatim, newlines included, so it is
+/// written through unchanged — this is a passthrough of the user's own
+/// output, not a log record we get to reformat. A payload we cannot
+/// decode falls back to stderr rather than being dropped.
+async fn forward_hook_stdout(
+    payload: &str,
+    stdout: &mut tokio::io::Stdout,
+    stderr_w: &mut tokio::io::Stderr,
+) {
+    match serde_json::from_str::<String>(payload) {
+        Ok(text) => {
+            let _ = stdout.write_all(text.as_bytes()).await;
+            let _ = stdout.flush().await;
+        }
+        Err(_) => {
+            let _ = stderr_w.write_all(payload.as_bytes()).await;
+            let _ = stderr_w.write_all(b"\n").await;
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -550,40 +626,114 @@ pub async fn run_after_all_resolved_chain(
 /// Snapshot passed to the `preResolution` hook before resolve starts.
 /// Mirrors pnpm's context shape (camelCase on the wire) so existing
 /// pnpmfiles can read the fields they expect.
+///
+/// The two lockfiles are pnpm's **in-memory** `LockfileObject`
+/// ([`aube_lockfile::pnpm::hook_view`]), never `null`: pnpm hands the
+/// hook an empty object when there is no lockfile on disk, and hooks
+/// written against it dereference `wantedLockfile.packages[key]
+/// .resolution` without a guard.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreResolutionContext<'a> {
     pub lockfile_dir: &'a Path,
     pub store_dir: Option<&'a Path>,
-    pub current_lockfile: Option<LockfileWire>,
-    pub wanted_lockfile: Option<LockfileWire>,
+    pub current_lockfile: serde_json::Value,
+    pub wanted_lockfile: serde_json::Value,
     pub exists_current_lockfile: bool,
     pub exists_non_empty_wanted_lockfile: bool,
     pub registries: BTreeMap<String, String>,
 }
 
+/// Everything [`PreResolutionContext::from_existing`] needs that isn't
+/// already a field of the context. Grouped rather than passed
+/// positionally: seven arguments of which three are paths and two are
+/// borrowed slices is a signature that invites a silent swap.
+pub struct PreResolutionInputs<'a> {
+    pub lockfile_dir: &'a Path,
+    pub store_dir: Option<&'a Path>,
+    /// The on-disk lockfile graph, or `None` when there is none.
+    pub existing: Option<&'a LockfileGraph>,
+    /// Root manifest — the projection needs it for the same reason the
+    /// lockfile writer does (patched dependencies, alias recovery).
+    pub manifest: &'a aube_manifest::PackageJson,
+    /// Importer ids to seed the empty lockfile with when `existing` is
+    /// `None`. `["."]` for a single project.
+    pub importer_ids: &'a [String],
+    /// Resolved lockfile settings, stamped into that empty lockfile the
+    /// way pnpm's `createLockfileObject` does.
+    pub settings: aube_lockfile::LockfileSettings,
+    /// Effective `peersSuffixMaxLength`. Part of the synthesized settings
+    /// but not of [`aube_lockfile::LockfileSettings`], because pnpm omits
+    /// it from the file at its 1000 default and so it is not a
+    /// round-tripped lockfile field.
+    pub peers_suffix_max_length: u64,
+    pub registries: BTreeMap<String, String>,
+}
+
 impl<'a> PreResolutionContext<'a> {
-    /// Build the snapshot for `lockfile_dir`. `existing` is the on-disk
-    /// lockfile graph (or `None` when there isn't one); both
-    /// `currentLockfile` and `wantedLockfile` are derived from it
-    /// because at preResolution time they're identical — pnpm only
-    /// diverges them after resolve has produced the wanted graph.
-    pub fn from_existing(
-        lockfile_dir: &'a Path,
-        store_dir: Option<&'a Path>,
-        existing: Option<&LockfileGraph>,
-        registries: BTreeMap<String, String>,
-    ) -> Self {
-        let wire = existing.map(to_wire);
+    /// Build the snapshot for `inputs.lockfile_dir`. Both
+    /// `currentLockfile` and `wantedLockfile` are derived from the
+    /// on-disk lockfile because at preResolution time they're identical
+    /// — pnpm only diverges them after resolve has produced the wanted
+    /// graph, and aube keeps no separate installed-state lockfile of
+    /// its own for the `current` side to come from.
+    ///
+    /// A projection failure is not fatal: the hook is an observation
+    /// point, and refusing the whole install because one lockfile entry
+    /// would not render is a worse outcome than handing the hook the
+    /// empty object. The error is logged.
+    pub fn from_existing(inputs: PreResolutionInputs<'a>) -> Self {
+        let PreResolutionInputs {
+            lockfile_dir,
+            store_dir,
+            existing,
+            manifest,
+            importer_ids,
+            settings,
+            peers_suffix_max_length,
+            registries,
+        } = inputs;
+        let empty = || {
+            aube_lockfile::pnpm::hook_view::empty_lockfile_object(
+                importer_ids,
+                &settings,
+                peers_suffix_max_length,
+            )
+        };
+        let lockfile = match existing {
+            Some(graph) => {
+                match aube_lockfile::pnpm::hook_view::lockfile_object(
+                    lockfile_dir,
+                    graph,
+                    manifest,
+                ) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        tracing::warn!(
+                            "[pnpmfile] could not project the lockfile for preResolution: {e}"
+                        );
+                        empty()
+                    }
+                }
+            }
+            None => empty(),
+        };
         let exists_current_lockfile = existing.is_some();
-        let exists_non_empty_wanted_lockfile = wire
-            .as_ref()
-            .is_some_and(|w| !w.importers.is_empty() || !w.packages.is_empty());
+        // pnpm's `existsWantedLockfile && !isEmptyLockfile(wanted)`, and
+        // `isEmptyLockfile` reads IMPORTERS, not packages — "every importer has
+        // an empty `specifiers` and an empty `dependencies`"
+        // (`lockfile/fs/src/write.ts`). A workspace whose only edges are
+        // `workspace:*` links writes no `packages:` rows at all and is still
+        // not empty, so deriving this from the package map flips the answer on
+        // exactly that shape. Reading it off the projected object also leaves
+        // one definition of empty rather than two that can drift.
+        let exists_non_empty_wanted_lockfile =
+            existing.is_some() && !aube_lockfile::pnpm::hook_view::is_empty(&lockfile);
         Self {
             lockfile_dir,
             store_dir,
-            current_lockfile: wire.clone(),
-            wanted_lockfile: wire,
+            current_lockfile: lockfile.clone(),
+            wanted_lockfile: lockfile,
             exists_current_lockfile,
             exists_non_empty_wanted_lockfile,
             registries,
@@ -592,11 +742,20 @@ impl<'a> PreResolutionContext<'a> {
 }
 
 /// Run the `preResolution` hook before the resolver walks the graph.
-/// Fire-and-forget — the hook's return value is discarded by pnpm and
-/// by aube. Skips spawning `node` when the pnpmfile doesn't reference
-/// `preResolution` so a hook-less pnpmfile doesn't pay the per-install
-/// node-startup cost on every command. `prefix` is the project root
-/// used to enrich `ctx.log` records under `--reporter=ndjson`.
+/// The hook's declared return type is `Promise<void>`, so nothing comes
+/// back by design. Skips spawning `node` when the pnpmfile doesn't
+/// reference `preResolution` so a hook-less pnpmfile doesn't pay the
+/// per-install node-startup cost on every command. `prefix` is the
+/// project root used to enrich `ctx.log` records under
+/// `--reporter=ndjson`.
+///
+/// The one place the contract genuinely differs: pnpm runs the hook
+/// in-process against the live lockfile object, so a hook that *mutates*
+/// `ctx.wantedLockfile` in place changes what pnpm resolves. Aube runs it
+/// in a child, so that edit cannot cross back. Rather than let it no-op
+/// in silence — the worst kind of divergence, because the pnpmfile looks
+/// like it worked — the returned snapshot is compared against what was
+/// sent and any edit is reported.
 pub async fn run_pre_resolution(
     pnpmfile: &Path,
     prefix: &Path,
@@ -608,8 +767,34 @@ pub async fn run_pre_resolution(
     let input_json = serde_json::to_vec(ctx)
         .into_diagnostic()
         .wrap_err("failed to serialize preResolution context")?;
-    run_one_shot_hook(pnpmfile, prefix, "preResolution", &input_json).await?;
+    let stdout = run_one_shot_hook(pnpmfile, prefix, "preResolution", &input_json).await?;
+    warn_on_pre_resolution_mutation(pnpmfile, ctx, &stdout);
     Ok(())
+}
+
+/// Compare the context the hook handed back against the one it was
+/// given. A malformed or missing reply is not a mutation and is
+/// ignored — the hook already ran, and its exit status was checked.
+fn warn_on_pre_resolution_mutation(
+    pnpmfile: &Path,
+    sent: &PreResolutionContext<'_>,
+    stdout: &[u8],
+) {
+    let Ok(returned) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return;
+    };
+    let Some(returned) = returned.get("wantedLockfile") else {
+        return;
+    };
+    if *returned != sent.wanted_lockfile {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_HOOK_PRE_RESOLUTION_MUTATED,
+            "[pnpmfile] preResolution in {} edited the lockfile it was given; \
+             aube runs the hook out of process, so the edit is discarded. \
+             Use readPackage or afterAllResolved to change resolution.",
+            pnpmfile.display(),
+        );
+    }
 }
 
 /// Run `preResolution` for each pnpmfile in `paths` (global first,
@@ -679,10 +864,10 @@ async function main() {
         }
         result = out;
       }
-      process.stdout.write(JSON.stringify({ id, pkg: result }) + '\n');
+      globalThis.__aubeRawStdout(JSON.stringify({ id, pkg: result }) + '\n');
     } catch (err) {
       const msg = (err && err.stack) || String(err);
-      process.stdout.write(JSON.stringify({ id, error: String(msg) }) + '\n');
+      globalThis.__aubeRawStdout(JSON.stringify({ id, error: String(msg) }) + '\n');
     }
   }
 }
@@ -693,7 +878,7 @@ main().catch((err) => {
 "#;
 
 fn read_package_shim() -> String {
-    format!("{LOAD_PNPMFILE_JS}{READ_PACKAGE_SHIM}")
+    format!("{STDOUT_CAPTURE_JS}{LOAD_PNPMFILE_JS}{READ_PACKAGE_SHIM}")
 }
 
 /// Long-lived node child that answers `readPackage` calls one at a
@@ -960,13 +1145,30 @@ async fn has_hook(pnpmfile: &Path, name: &str) -> Result<bool> {
     Ok(contents.contains(name))
 }
 
+/// Whether any pnpmfile in `paths` mentions `name`. Same cheap
+/// text scan [`has_hook`] uses to decide whether spawning `node` is
+/// worth it — over-reporting (the name appears in a comment) costs one
+/// wasted child, under-reporting would silently skip a real hook.
+///
+/// An unreadable pnpmfile answers `false` here rather than erroring:
+/// this gate only decides whether to take a fast path, and the real
+/// hook run downstream is where a broken pnpmfile should surface.
+pub async fn any_declares_hook(paths: &[PathBuf], name: &str) -> bool {
+    for path in paths {
+        if has_hook(path, name).await.unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Node shim that loads the pnpmfile the way pnpm does and prints `1`
 /// when it exports a `hooks` object, `0` otherwise. Reuses the shared
 /// [`LOAD_PNPMFILE_JS`] loader so default-vs-named export resolution
 /// matches the hook-execution path exactly.
 const HOOKS_GATE_SHIM: &str = r#"
 loadPnpmfile(process.env.AUBE_PNPMFILE)
-  .then((mod) => { process.stdout.write(mod != null && mod.hooks != null ? '1' : '0'); })
+  .then((mod) => { globalThis.__aubeRawStdout(mod != null && mod.hooks != null ? '1' : '0'); })
   .catch((err) => {
     console.error('[pnpmfile] failed to load for checksum gate:', (err && err.stack) || err);
     process.exit(1);
@@ -988,7 +1190,7 @@ loadPnpmfile(process.env.AUBE_PNPMFILE)
 /// `module.exports = { hooks }`, `export default { hooks }`, and
 /// `export const hooks = …` all count, mirroring pnpm's resolution.
 pub async fn exports_hooks(pnpmfile: &Path) -> Result<bool> {
-    let shim = format!("{LOAD_PNPMFILE_JS}{HOOKS_GATE_SHIM}");
+    let shim = format!("{STDOUT_CAPTURE_JS}{LOAD_PNPMFILE_JS}{HOOKS_GATE_SHIM}");
     let output = tokio::process::Command::new(crate::runtime::internal_node_program())
         .arg("-e")
         .arg(shim)
@@ -1186,6 +1388,41 @@ mod tests {
     fn detect_global_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(detect_global(dir.path(), Some(Path::new("nope.cjs"))).is_none());
+    }
+
+    /// Node cannot dereference a Windows verbatim path — the shim's
+    /// `path.resolve()` mangles the `\\?\` prefix and the `require`
+    /// dies with `EISDIR … lstat 'C:'`. A caller whose project root was
+    /// canonicalized hands one of these in, so both detectors have to
+    /// return the plain form whatever they were given.
+    #[cfg(windows)]
+    #[test]
+    fn detected_paths_are_never_windows_verbatim() {
+        // The default-file arm below reads the process-global gate that
+        // sibling tests flip, so take the same lock they do.
+        let _lock = default_gate_lock();
+        let _gate = DefaultGateGuard::set(true);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PNPMFILE_CJS_NAME), "").unwrap();
+        std::fs::write(dir.path().join("hooks.cjs"), "").unwrap();
+        // Strip before prepending: whether the temp dir arrives plain or
+        // already verbatim, this names the same directory rather than the
+        // unopenable `\\?\\\?\C:\…` a blind prefix would build.
+        let plain_dir = aube_util::path::strip_verbatim_prefix(dir.path());
+        let verbatim = PathBuf::from(format!(r"\\?\{}", plain_dir.display()));
+
+        for found in [
+            detect(&verbatim, None, None),
+            detect(&verbatim, Some(Path::new("hooks.cjs")), None),
+            detect_global(&verbatim, Some(Path::new("hooks.cjs"))),
+        ] {
+            let found = found.expect("the file exists under both spellings");
+            assert!(
+                !found.to_string_lossy().starts_with(r"\\?\"),
+                "a verbatim path reaches Node's require and fails there: {}",
+                found.display()
+            );
+        }
     }
 
     #[test]

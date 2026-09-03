@@ -3,7 +3,7 @@
 
 **Question:** Should Nub ship a single monolithic N-API addon (oxc transpiler + data-format parsers in one `.node` file) or multiple per-concern addons (`nub-transpile.node`, `nub-data-loaders.node`, …)?
 
-**Headline answer:** **Single monolithic addon for v0.1.** Nub is the only consumer of these bindings, and they ride inside the same `@nubjs/nub-<platform>` package as the Rust binary (per the brand-boundary exception in [[agents|`AGENTS.md`]]). Every split argument — lazy load, independent versioning, size win — collapses against Nub's distribution shape.
+**Headline answer:** **A single monolithic addon.** Nub is the only consumer of these bindings, and they ride inside the same `@nubjs/nub-<platform>` package as the Rust binary (per the brand-boundary exception in [[agents|`AGENTS.md`]]). Every split argument — lazy load, independent versioning, size win — collapses against Nub's distribution shape.
 
 **Builds on:** [[research/wasm-vs-napi-for-transpile]].
 ---
@@ -69,10 +69,10 @@ Splitting multiplies the CI matrix by the number of addons and wins nothing on b
 
 ### Runtime
 
-Three runtime concerns: dlopen cost, the lazy-loading argument, and symbol conflicts. None of them separates the two shapes at v0.1 scale.
+Three runtime concerns: dlopen cost, the lazy-loading argument, and symbol conflicts. None of them separates the two shapes at Nub's scale.
 
 - **dlopen cost.** A 4–5 MB `.node` dlopen is sub-ms warm, ~2–3 ms cold. Doubling the count is still sub-perceptible. dlopen happens at preload setup, not per file.
-- **Lazy loading.** A multi-addon shape could defer `require('./nub-data-loaders.node')` until the first `.yaml`/`.toml`/`.json5`/`.jsonc` import. Savings: ~1–2 ms cold-start dlopen + ~1 MB RSS for projects with no data-format imports. Cost: a second `.node`, doubled CI, an extra branch in the load-hook hot path. Savings are below Node's own ~27 ms startup floor; cost is real engineering surface. **Non-argument at v0.1 scale.**
+- **Lazy loading.** A multi-addon shape could defer `require('./nub-data-loaders.node')` until the first `.yaml`/`.toml`/`.json5`/`.jsonc` import. Savings: ~1–2 ms cold-start dlopen + ~1 MB RSS for projects with no data-format imports. Cost: a second `.node`, doubled CI, an extra branch in the load-hook hot path. Savings are below Node's own ~27 ms startup floor; cost is real engineering surface. **Non-argument at Nub's scale.**
 - **Symbol conflicts.** napi-rs registers via `napi_register_module_v1`; Rust mangles per-crate symbols into the cdylib. Combining oxc + parser crates into one cdylib has no known collision risk; no embedded jemalloc/mimalloc in these crates by default.
 
 ### Maintenance
@@ -105,7 +105,7 @@ Internal name `nub-native.node` is fine: nothing outside the `@nubjs/nub-*` inst
 
 Splitting later is cheap, so the single-addon choice is not a one-way door.
 
-A later reason to split — a Phase-2 native addon for HTMLRewriter large enough to warrant lazy load, or a license issue forcing one parser into its own crate — is cheap to act on: extract the data-format functions into a separate cargo crate, add a second `napi build` step, add a second `.node` to `@nubjs/nub-*`, branch the load-hook dispatch on extension. Defer the split until evidence forces it.
+A later reason to split — a native addon large enough to warrant lazy load, or a license issue forcing one parser into its own crate — is cheap to act on: extract the data-format functions into a separate cargo crate, add a second `napi build` step, add a second `.node` to `@nubjs/nub-*`, branch the load-hook dispatch on extension. Defer the split until evidence forces it.
 
 ## 5. Sources
 
@@ -119,11 +119,12 @@ All npm package data retrieved 2026-05-25.
 - [`lightningcss` 1.32.0](https://www.npmjs.com/package/lightningcss) (2026-03-09) — 11 per-platform addons, single binding.
 - [`@biomejs/biome` 2.4.15](https://www.npmjs.com/package/@biomejs/biome) (2026-05-09) — single CLI per platform via `@biomejs/cli-*`.
 - [napi.rs](https://napi.rs/) — N-API binding generator; per-module `napi_register_module_v1` init pattern.
-- [[research/wasm-vs-napi-for-transpile]] — establishes N-API as the v0.1 transpiler binding choice.
+- [[research/wasm-vs-napi-for-transpile]] — establishes N-API as the transpiler binding choice.
 
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
-- 2026-05-25 — Initial write-up. Recommendation: single monolithic `nub-native.node` addon for v0.1.
-- 2026-05-28 — Corrected the distribution-package scope throughout from `@nub/cli-<platform>-<arch>` to the shipped `@nubjs/nub-<platform>` (A23 doc-drift reconciliation; the bare `@nub` scope is used by nothing). No change to the single-monolithic-addon recommendation — only the package name the addon ships inside.
+- 2026-05-25 — Initial write-up. Recommendation: a single monolithic `nub-native.node` addon.
+- 2026-05-28 — Corrected the distribution-package scope throughout to the shipped `@nubjs/nub-<platform>`. No change to the single-monolithic-addon recommendation — only the package name the addon ships inside.
+- 2026-08-28 — Restated the recommendation as a current verdict rather than a version-scoped one.

@@ -71,8 +71,14 @@
 use core::mem::size_of;
 use pe_edit::{
     IconDirectory, IconDirectoryEntry, ResourceData, ResourceEntry, ResourceEntryName,
-    ResourceTable, CODE_PAGE_ID_EN_US, RT_GROUP_ICON, RT_ICON, RT_RCDATA,
+    ResourceTable, CODE_PAGE_ID_EN_US, RT_GROUP_ICON, RT_ICON, RT_RCDATA, RT_VERSION,
 };
+
+// libsui: the resource-directory language for the version resource. US English
+// rather than neutral, matching the `040904B0` StringTable the encoder emits;
+// Windows' resource loader falls back to whatever language is present, so this
+// is found under any UI locale.
+const LANG_EN_US: u32 = 0x0409;
 use image::{imageops::FilterType::Lanczos3, ImageFormat, ImageReader};
 use std::io::Cursor;
 use std::io::Write;
@@ -139,6 +145,10 @@ pub struct PortableExecutable<'a> {
     image: pe_edit::Image<'a>,
     resource_dir: pe_edit::ResourceDirectory,
     icons: Vec<IconDirectoryEntry>,
+    // libsui: deferred to build() rather than inserted on call, because the root
+    // table is emitted in insertion order and RT_VERSION must sort after
+    // RT_GROUP_ICON. See set_version_info.
+    version_info: Option<Vec<u8>>,
 }
 
 impl<'a> PortableExecutable<'a> {
@@ -149,6 +159,7 @@ impl<'a> PortableExecutable<'a> {
                 .map_err(|_| Error::InvalidObject("Failed to parse PE"))?,
             resource_dir: pe_edit::ResourceDirectory::default(),
             icons: Vec::new(),
+            version_info: None,
         })
     }
 
@@ -257,6 +268,24 @@ impl<'a> PortableExecutable<'a> {
         Ok(self)
     }
 
+    /// Set the `VS_VERSIONINFO` resource — the fields Explorer's Details tab and
+    /// `GetFileVersionInfo` read.
+    ///
+    /// libsui: `resource` is the already-encoded `RT_VERSION` payload; this
+    /// method only places it in the tree, because the encoding is a
+    /// self-contained binary format with its own alignment rules and belongs
+    /// with the tests that exercise it.
+    ///
+    /// The insertion is DEFERRED to [`Self::build`]. Entries are emitted in the
+    /// order they are inserted and the PE resource directory requires ID entries
+    /// in ascending order — `FindResource` binary-searches them — so `RT_VERSION`
+    /// (16) has to follow the `RT_GROUP_ICON` (14) entry that `build` adds last.
+    /// Inserting here would place 16 before 14 and lose both resources.
+    pub fn set_version_info(mut self, resource: Vec<u8>) -> Self {
+        self.version_info = Some(resource);
+        self
+    }
+
     /// Build and write the modified PE file
     pub fn build<W: std::io::Write>(mut self, writer: &mut W) -> Result<(), Error> {
         // TODO: the order of the table entries matters. this works for now.
@@ -306,6 +335,29 @@ impl<'a> PortableExecutable<'a> {
                 ResourceEntryName::from_string("MAINICON"),
                 ResourceEntry::Table(inner_table),
                 0,
+            );
+        }
+
+        // libsui: last, so the root table's ID entries stay ascending — RT_ICON
+        // (3), RT_RCDATA (10), RT_GROUP_ICON (14), RT_VERSION (16).
+        if let Some(resource) = self.version_info.take() {
+            let root = self.resource_dir.root_mut();
+            let mut data = ResourceData::default();
+            // The version resource is UTF-16 throughout, and its language must
+            // agree with the StringTable key the encoder wrote.
+            data.set_codepage(CODE_PAGE_ID_EN_US as u32);
+            data.set_data(resource);
+            let mut language_table = ResourceTable::default();
+            language_table.insert(ResourceEntryName::ID(LANG_EN_US), ResourceEntry::Data(data));
+            // Name 1 is VS_VERSION_INFO — the only id GetFileVersionInfo looks up.
+            let mut name_table = ResourceTable::default();
+            name_table.insert(
+                ResourceEntryName::ID(1),
+                ResourceEntry::Table(language_table),
+            );
+            root.insert(
+                ResourceEntryName::ID(RT_VERSION as u32),
+                ResourceEntry::Table(name_table),
             );
         }
 

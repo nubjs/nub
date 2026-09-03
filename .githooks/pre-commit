@@ -64,6 +64,17 @@ case "$staged" in
   *) exit 0 ;;
 esac
 
+# wiki/ is public: refuse the mechanical tells of internal material before the
+# graph gate runs (scripts/wiki-public-lint.mjs; AGENTS.local.md carries the rules).
+wiki_staged=$(printf '%s\n' "$staged" | grep '^wiki/.*\.md$' | tr '\n' ' ')
+if [ -n "$wiki_staged" ]; then
+  lint_out=$(cd "$ROOT" && node scripts/wiki-public-lint.mjs $wiki_staged 2>&1) || {
+    printf '%s\n' "$lint_out" | head -20 >&2
+    echo "pre-commit: WIKI PUBLIC LINT FAILED — see scripts/wiki-public-lint.mjs. Bypass: git commit --no-verify" >&2
+    exit 1
+  }
+fi
+
 out=$(cd "$ROOT" && npm run --silent lat:check 2>&1)
 rc=$?
 if printf '%s' "$out" | grep -qE "[0-9]+ errors? found"; then

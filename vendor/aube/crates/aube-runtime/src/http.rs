@@ -122,7 +122,8 @@ impl Http {
                     tokio::time::sleep(wait).await;
                 }
                 Err(e) => {
-                    if attempt >= self.retries {
+                    if attempt >= self.retries || aube_util::agent_sandbox::is_hard_network_deny(&e)
+                    {
                         return Err(Error::DownloadFailed {
                             url: url.to_string(),
                             reason: e.to_string(),

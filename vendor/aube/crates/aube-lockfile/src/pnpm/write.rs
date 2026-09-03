@@ -65,6 +65,30 @@ mod tests {
 
 /// Write a LockfileGraph as pnpm-lock.yaml v9 format.
 pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Result<(), Error> {
+    let lockfile = build(path, graph, manifest)?;
+    let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
+    let yaml = reformat_for_pnpm_parity(&yaml);
+    // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
+    // quarantine during the write used to leave the user with a
+    // truncated pnpm-lock.yaml on disk, next install failed to
+    // parse and the user thought their lockfile was gone. See
+    // atomic_write_lockfile for full rationale.
+    crate::atomic_write_lockfile(path, yaml.as_bytes())?;
+    Ok(())
+}
+
+/// Project a `LockfileGraph` onto pnpm's v9 lockfile schema without
+/// serializing it. Split out of [`write`] so the pnpmfile hook view
+/// ([`super::hook_view`]) hands hooks the exact same projection the
+/// writer puts on disk — dep-path translation, patch-hash suffixes,
+/// alias recovery and all — instead of a second, drifting one.
+/// `path` decides `pnpm-lock.yaml`-only behavior (native alias
+/// encoding) and roots the workspace-member manifest reads.
+pub(super) fn build(
+    path: &Path,
+    graph: &LockfileGraph,
+    manifest: &PackageJson,
+) -> Result<WritablePnpmLockfile, Error> {
     let native_pnpm_aliases = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -445,22 +469,25 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             let deps = pkg.peer_dependencies_with_meta_defaults();
             if deps.is_empty() { None } else { Some(deps) }
         };
-        let peer_meta = if pkg.peer_dependencies_meta.is_empty() {
+        // Only `optional: true` peers are recorded. pnpm's resolver
+        // drops a non-optional `peerDependenciesMeta` entry outright
+        // (`peerDependenciesWithoutOwn` skips `peerMeta.optional !== true`),
+        // so its lockfile type is `{ optional: true }` and every entry
+        // carries the field. pnpm 12's reader models that as a required
+        // `bool` and fails the whole file with ERR_PNPM_BROKEN_LOCKFILE
+        // on an empty mapping, which is what emitting the non-optional
+        // entries with the false flag skipped used to produce (real case:
+        // vitest declaring `vite: { optional: false }`).
+        let peer_meta: BTreeMap<String, WritablePeerDepMeta> = pkg
+            .peer_dependencies_meta
+            .iter()
+            .filter(|(_, v)| v.optional)
+            .map(|(k, _)| (k.clone(), WritablePeerDepMeta { optional: true }))
+            .collect();
+        let peer_meta = if peer_meta.is_empty() {
             None
         } else {
-            Some(
-                pkg.peer_dependencies_meta
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            WritablePeerDepMeta {
-                                optional: v.optional,
-                            },
-                        )
-                    })
-                    .collect(),
-            )
+            Some(peer_meta)
         };
         // Always render the path through `path_posix()` so the
         // lockfile uses forward slashes regardless of the host OS —
@@ -950,15 +977,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
         snapshots,
     };
 
-    let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
-    let yaml = reformat_for_pnpm_parity(&yaml);
-    // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
-    // quarantine during the write used to leave the user with a
-    // truncated pnpm-lock.yaml on disk, next install failed to
-    // parse and the user thought their lockfile was gone. See
-    // atomic_write_lockfile for full rationale.
-    crate::atomic_write_lockfile(path, yaml.as_bytes())?;
-    Ok(())
+    Ok(lockfile)
 }
 
 fn registry_tarball_url_is_not_derivable(
@@ -1033,7 +1052,7 @@ fn pruned_time_entries(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WritablePnpmLockfile {
+pub(super) struct WritablePnpmLockfile {
     lockfile_version: String,
     settings: WritableSettings,
     /// pnpm v9 emits a top-level `catalogs:` map immediately after
@@ -1215,11 +1234,9 @@ struct WritableRuntimeTarget {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WritablePeerDepMeta {
-    // pnpm v9 omits `optional: false` entirely; only the truthy form
-    // shows up in real-world lockfiles. Skip the default so we stay
-    // byte-identical for the rare case where a packument explicitly
-    // marks a peer as non-optional.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    // Always `true` — the writer filters non-optional peers out of the
+    // map rather than emitting them with the field skipped, because an
+    // empty mapping is not a valid `peerDependenciesMeta` value.
     optional: bool,
 }
 

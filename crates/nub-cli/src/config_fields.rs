@@ -90,6 +90,12 @@ const FIELDS: &[Field] = &[
         global_only: false,
     },
     Field {
+        address: "nodeExecutable",
+        path: "nodeExecutable",
+        shape: Shape::Str,
+        global_only: false,
+    },
+    Field {
         address: "preload",
         path: "preload",
         shape: Shape::StrList,
@@ -593,7 +599,6 @@ mod tests {
             .iter()
             .flat_map(|field| {
                 aube_settings::all()
-                    .iter()
                     .filter(move |engine| {
                         field.address == engine.name || engine.npmrc_keys.contains(&field.address)
                     })

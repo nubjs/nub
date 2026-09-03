@@ -256,8 +256,10 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             crate::pnpmfile::detect(cwd, pnpmfile, ws_config.pnpmfile_path.as_deref()).as_deref(),
         )
     };
-    crate::commands::run_pnpmfile_pre_resolution(&pnpmfile_paths, cwd, existing_for_resolver)
-        .await?;
+    // `preResolution` already ran in `install::run_inner`, ahead of the
+    // `--lockfile-only` short-circuit that reaches this function — and
+    // ahead of the up-to-date early return above it, which used to skip
+    // the hook entirely.
     super::control::check_cancelled()?;
     let (read_package_host, read_package_forwarders) =
         match crate::pnpmfile::ReadPackageHostChain::spawn(&pnpmfile_paths, cwd)

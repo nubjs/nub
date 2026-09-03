@@ -11,7 +11,7 @@ Nub's types package declares the keyed Promise combinators, `Temporal`, the brow
 
 ## How augmentation works
 
-Nub augments the stock Node binary through mechanisms Node itself provides. It does not patch Node, replace V8, or ship a fork.
+Nub augments the stock Node binary through mechanisms Node itself provides.
 
 - **JavaScript polyfills** run from Nub's preload and feature-detect each property before defining it. They fill missing globals and methods without replacing native or user-supplied implementations.
 - **Lazy globals** defer larger fallbacks until first use. On older Node versions, reading `Temporal` loads the fallback and replaces the getter with the resulting namespace.
@@ -19,11 +19,11 @@ Nub augments the stock Node binary through mechanisms Node itself provides. It d
 - **Experimental flags** expose APIs already built into a particular Node release. Nub derives flags from the exact Node version because passing an unknown flag would abort Node during startup.
 - **Loader hooks** add supported import formats through Node's module-loader API. They do not emulate native subsystems that are absent from the running Node.
 
-Native implementations always win. As Node adds an API, Nub's feature check steps aside and the native one takes over.
+Native implementations always win.
 
 Compatibility mode turns all of this off: `nub --node`, or `NODE_COMPAT=1`, runs the project's pinned Node with no polyfills, preload patches, loader hooks, or automatically enabled flags. See [the runtime overview](/docs/runtime#compatibility-mode).
 
-Availability below covers Nub's supported Node range, beginning with Node 18.19. A native-version note says when Nub steps aside.
+Availability below covers Nub's supported Node range, beginning with Node 18.19. Each entry names the Node version where the native implementation takes over.
 
 ## JavaScript APIs
 
@@ -366,7 +366,7 @@ try {
 
 ### `Math.sumPrecise()`
 
-The [`Math.sumPrecise()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sumPrecise) method reduces floating-point error and avoids overflow caused only by an unfortunate addition order.
+The [`Math.sumPrecise()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sumPrecise) method reduces floating-point error and avoids overflow caused by addition order.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships this method yet.
@@ -697,7 +697,7 @@ if (consented) {
 ```
 
 <Callout type="warn" title="The dynamic form aborts the process">
-Nub enables this V8 feature for every program on Node 26.4+, not only the ones that use it. So the dynamic counterpart, `import.defer(specifier)`, behaves differently than it does on bare Node: Node raises a catchable `SyntaxError`, while under Nub the same code dies on a V8 fatal error that no handler can catch. The underlying crash is a Node defect, but Nub is what exposes it. Use the static form.
+Nub enables this V8 feature for every program on Node 26.4+, not only the ones that use it. So the dynamic counterpart, `import.defer(specifier)`, behaves differently than it does on bare Node: Node raises a catchable `SyntaxError`, while under Nub the same code terminates with an uncatchable V8 fatal error. The crash is a Node defect that Nub's flag exposes. Use the static form.
 </Callout>
 
 ### Module syntax detection

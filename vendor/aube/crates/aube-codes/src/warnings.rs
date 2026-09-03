@@ -15,10 +15,12 @@ pub const WARN_AUBE_HOOK_IMPORTER_MUTATED: &str = "WARN_AUBE_HOOK_IMPORTER_MUTAT
 pub const WARN_AUBE_HOOK_IMPORTER_ADDED: &str = "WARN_AUBE_HOOK_IMPORTER_ADDED";
 pub const WARN_AUBE_HOOK_IDENTITY_REWRITTEN: &str = "WARN_AUBE_HOOK_IDENTITY_REWRITTEN";
 pub const WARN_AUBE_HOOK_PACKAGE_ADDED: &str = "WARN_AUBE_HOOK_PACKAGE_ADDED";
+#[rustfmt::skip] pub const WARN_AUBE_HOOK_PRE_RESOLUTION_MUTATED: &str = "WARN_AUBE_HOOK_PRE_RESOLUTION_MUTATED";
 
 // ── install lifecycle ───────────────────────────────────────────────
 pub const WARN_AUBE_IGNORED_BUILD_SCRIPTS: &str = "WARN_AUBE_IGNORED_BUILD_SCRIPTS";
 pub const WARN_AUBE_DEFAULT_TRUST_BUILDS: &str = "WARN_AUBE_DEFAULT_TRUST_BUILDS";
+#[rustfmt::skip] pub const WARN_AUBE_BUILD_NOT_ATTEMPTED: &str = "WARN_AUBE_BUILD_NOT_ATTEMPTED";
 #[rustfmt::skip] pub const WARN_AUBE_OPTIONAL_BUILD_FAILED: &str = "WARN_AUBE_OPTIONAL_BUILD_FAILED";
 #[rustfmt::skip] pub const WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED: &str = "WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED";
 #[rustfmt::skip] pub const WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT: &str = "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT";
@@ -75,6 +77,9 @@ pub const WARN_AUBE_HTTP_RETRY_TRANSPORT: &str = "WARN_AUBE_HTTP_RETRY_TRANSPORT
 pub const WARN_AUBE_HTTP_RETRY_BODY_READ: &str = "WARN_AUBE_HTTP_RETRY_BODY_READ";
 pub const WARN_AUBE_HTTP_RETRY_BODY_DECODE: &str = "WARN_AUBE_HTTP_RETRY_BODY_DECODE";
 
+// ── store ───────────────────────────────────────────────────────────
+pub const WARN_AUBE_STORE_FALLBACK: &str = "WARN_AUBE_STORE_FALLBACK";
+
 // ── registry caching / perf ─────────────────────────────────────────
 pub const WARN_AUBE_PACKUMENT_CACHE_WRITE: &str = "WARN_AUBE_PACKUMENT_CACHE_WRITE";
 pub const WARN_AUBE_SLOW_METADATA: &str = "WARN_AUBE_SLOW_METADATA";
@@ -93,6 +98,7 @@ pub const WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL: &str = "WARN_AUBE_UNSUPPORTED_
 #[rustfmt::skip] pub const WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION: &str = "WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION";
 pub const WARN_AUBE_EXOTIC_SUBDEP_SKIPPED: &str = "WARN_AUBE_EXOTIC_SUBDEP_SKIPPED";
 pub const WARN_AUBE_PEER_DEDUPE_COLLISION: &str = "WARN_AUBE_PEER_DEDUPE_COLLISION";
+#[rustfmt::skip] pub const WARN_AUBE_TRUST_DOWNGRADE_SKIPPED: &str = "WARN_AUBE_TRUST_DOWNGRADE_SKIPPED";
 
 // ── lockfile ────────────────────────────────────────────────────────
 pub const WARN_AUBE_LOCKFILE_MERGE_CONFLICT: &str = "WARN_AUBE_LOCKFILE_MERGE_CONFLICT";
@@ -197,6 +203,12 @@ pub const ALL: &[CodeMeta] = &[
         description: "A pnpmfile hook added a wholly-new package entry; aube ignored it.",
         exit_code: None,
     },
+    CodeMeta {
+        name: WARN_AUBE_HOOK_PRE_RESOLUTION_MUTATED,
+        category: category::PNPMFILE_HOOKS,
+        description: "A pnpmfile `preResolution` hook edited the lockfile it was handed. pnpm runs the hook in-process, so such an edit reaches the resolver; aube runs it in a child and the edit is discarded. Move the change to `readPackage` or `afterAllResolved`.",
+        exit_code: None,
+    },
     // Install lifecycle
     CodeMeta {
         name: WARN_AUBE_IGNORED_BUILD_SCRIPTS,
@@ -208,6 +220,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_DEFAULT_TRUST_BUILDS,
         category: category::INSTALL_LIFECYCLE,
         description: "The `defaultTrust` floor let listed packages run build scripts without an explicit `allowBuilds` entry. Disclosure, not an error — set `defaultTrust=false` or an explicit `allowBuilds: false` entry to opt out.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_BUILD_NOT_ATTEMPTED,
+        category: category::INSTALL_LIFECYCLE,
+        description: "A dependency the build policy allows could not have its build scripts attempted, because its directory in the virtual store was not on disk when the lifecycle phase ran. The install records this so the next one retries instead of reporting the tree up to date; `aube install --force` rebuilds immediately.",
         exit_code: None,
     },
     CodeMeta {
@@ -456,6 +474,12 @@ pub const ALL: &[CodeMeta] = &[
         exit_code: None,
     },
     CodeMeta {
+        name: WARN_AUBE_STORE_FALLBACK,
+        category: category::LINKER,
+        description: "The default store is not writable; using a project-local store under node_modules for this run.",
+        exit_code: None,
+    },
+    CodeMeta {
         name: WARN_AUBE_HTTP_RETRY_BODY_READ,
         category: category::HTTP_RETRIES,
         description: "Retrying after a response-body read error (timeout, partial body).",
@@ -540,6 +564,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_EXOTIC_SUBDEP_SKIPPED,
         category: category::RESOLVER,
         description: "An optional or peer dep used an exotic specifier and was skipped under `blockExoticSubdeps=true`.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_TRUST_DOWNGRADE_SKIPPED,
+        category: category::RESOLVER,
+        description: "`trustPolicy=no-downgrade` refused the version the range would otherwise resolve to, so an older satisfying version that keeps its trust evidence was installed instead.",
         exit_code: None,
     },
     CodeMeta {

@@ -126,6 +126,7 @@ impl NpmConfig {
         // Feed tagged entries so `apply_tagged` can reject
         // high-privilege settings sourced from untrusted locations.
         let xdg = aube_util::env::xdg_config_home();
+        let local_app_data = aube_util::env::local_app_data();
         let home = home_dir();
         // `NPM_CONFIG_USERCONFIG` / `npm_config_userconfig` move the
         // user-level `.npmrc` off the default `$HOME/.npmrc`. npm and
@@ -142,6 +143,7 @@ impl NpmConfig {
         let tagged = load_npmrc_entries_tagged_with_globals(
             home.as_deref(),
             xdg.as_deref(),
+            local_app_data.as_deref(),
             project_dir,
             user_rc_override.as_deref(),
             &global_paths,
@@ -201,6 +203,7 @@ pub fn load_npmrc_entries_split(project_dir: &Path) -> SplitNpmrcEntries {
         return hit.clone();
     }
     let xdg = aube_util::env::xdg_config_home();
+    let local_app_data = aube_util::env::local_app_data();
     let home = home_dir();
     let user_rc_override =
         userconfig_env_value().and_then(|raw| expand_userconfig_path(&raw, home.as_deref()));
@@ -208,6 +211,7 @@ pub fn load_npmrc_entries_split(project_dir: &Path) -> SplitNpmrcEntries {
     let tagged = load_npmrc_entries_tagged_with_globals(
         home.as_deref(),
         xdg.as_deref(),
+        local_app_data.as_deref(),
         project_dir,
         user_rc_override.as_deref(),
         &global_paths,
@@ -271,6 +275,7 @@ pub struct SplitNpmrcEntries {
 /// project files that can block or be attacker-controlled.
 pub fn load_user_npmrc_entries(project_dir: &Path) -> Vec<(String, String)> {
     let xdg = aube_util::env::xdg_config_home();
+    let local_app_data = aube_util::env::local_app_data();
     let home = home_dir();
     let user_rc_override =
         userconfig_env_value().and_then(|raw| expand_userconfig_path(&raw, home.as_deref()));
@@ -278,6 +283,7 @@ pub fn load_user_npmrc_entries(project_dir: &Path) -> Vec<(String, String)> {
     let mut tagged = load_user_npmrc_entries_tagged(
         home.as_deref(),
         xdg.as_deref(),
+        local_app_data.as_deref(),
         project_dir,
         user_rc_override.as_deref(),
         &global_paths,
@@ -353,6 +359,7 @@ pub fn load_npmrc_entries(project_dir: &Path) -> Vec<(String, String)> {
     // explicit override so tests don't inherit the developer's real
     // `XDG_CONFIG_HOME` and pick up whatever auth tokens live there.
     let xdg = aube_util::env::xdg_config_home();
+    let local_app_data = aube_util::env::local_app_data();
     let home = home_dir();
     // `*_CONFIG_USERCONFIG` relocates the user-level `.npmrc` (XDG
     // layouts, `~/.config/npm/npmrc`, etc.). Read directly rather than
@@ -367,6 +374,7 @@ pub fn load_npmrc_entries(project_dir: &Path) -> Vec<(String, String)> {
     let tagged = load_npmrc_entries_tagged_with_globals(
         home.as_deref(),
         xdg.as_deref(),
+        local_app_data.as_deref(),
         project_dir,
         user_rc_override.as_deref(),
         &global_paths,
@@ -472,6 +480,10 @@ pub(super) fn load_npmrc_entries_tagged_with_home(
     load_npmrc_entries_tagged_with_globals(
         home,
         xdg_config_home,
+        // Derived, not a parameter: isolation is the whole point of this
+        // shim, so no fixture should be able to forget to pass it and
+        // silently read the developer's real `%LOCALAPPDATA%` (nub#605).
+        home.map(test_local_app_data).as_deref(),
         project_dir,
         user_rc_override,
         &GlobalNpmrcPaths::default(),
@@ -489,6 +501,7 @@ pub(super) fn load_npmrc_entries_tagged_with_home(
 pub(super) fn load_npmrc_entries_tagged_with_globals(
     home: Option<&Path>,
     xdg_config_home: Option<&Path>,
+    local_app_data: Option<&Path>,
     project_dir: &Path,
     user_rc_override: Option<&Path>,
     global_paths: &GlobalNpmrcPaths,
@@ -549,19 +562,16 @@ pub(super) fn load_npmrc_entries_tagged_with_globals(
     {
         out.extend(entries.into_iter().map(|(k, v)| (NpmrcSource::User, k, v)));
     }
-    if let Some(home) = home
-        && pnpm_auth_ini_enabled()
+    if pnpm_auth_ini_enabled()
+        && let Some(auth_ini) = pnpm_global_auth_ini_path(home, xdg_config_home, local_app_data)
+        && auth_ini.exists()
+        && let Ok(entries) = parse_npmrc(&auth_ini)
     {
-        let auth_ini = pnpm_global_auth_ini_path(home, xdg_config_home);
-        if auth_ini.exists()
-            && let Ok(entries) = parse_npmrc(&auth_ini)
-        {
-            out.extend(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| (NpmrcSource::PnpmAuth, k, v)),
-            );
-        }
+        out.extend(
+            entries
+                .into_iter()
+                .map(|(k, v)| (NpmrcSource::PnpmAuth, k, v)),
+        );
     }
     if let Some((auth_path, auth_source)) = resolve_npmrc_auth_file_tagged(home, project_dir, &out)
         && !auth_source.is_project_controlled()
@@ -603,6 +613,7 @@ pub(super) fn load_npmrc_entries_tagged_with_globals(
 fn load_user_npmrc_entries_tagged(
     home: Option<&Path>,
     xdg_config_home: Option<&Path>,
+    local_app_data: Option<&Path>,
     project_dir: &Path,
     user_rc_override: Option<&Path>,
     global_paths: &GlobalNpmrcPaths,
@@ -644,19 +655,16 @@ fn load_user_npmrc_entries_tagged(
     {
         out.extend(entries.into_iter().map(|(k, v)| (NpmrcSource::User, k, v)));
     }
-    if let Some(home) = home
-        && pnpm_auth_ini_enabled()
+    if pnpm_auth_ini_enabled()
+        && let Some(auth_ini) = pnpm_global_auth_ini_path(home, xdg_config_home, local_app_data)
+        && auth_ini.exists()
+        && let Ok(entries) = parse_npmrc(&auth_ini)
     {
-        let auth_ini = pnpm_global_auth_ini_path(home, xdg_config_home);
-        if auth_ini.exists()
-            && let Ok(entries) = parse_npmrc(&auth_ini)
-        {
-            out.extend(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| (NpmrcSource::PnpmAuth, k, v)),
-            );
-        }
+        out.extend(
+            entries
+                .into_iter()
+                .map(|(k, v)| (NpmrcSource::PnpmAuth, k, v)),
+        );
     }
     if let Some((auth_path, _auth_source)) = resolve_npmrc_auth_file_tagged(home, project_dir, &out)
         && auth_path.exists()
@@ -998,17 +1006,46 @@ fn resolve_global_npmrc_paths_from_std_env() -> GlobalNpmrcPaths {
 /// [`load_npmrc_entries`]; tests inject an override or `None`) the file
 /// lives at `<xdg>/pnpm/auth.ini` on every OS; otherwise it follows the
 /// platform default — macOS `~/Library/Preferences/pnpm`, Windows
-/// `%LOCALAPPDATA%\pnpm\config`, Linux `~/.config/pnpm`. A flat
+/// `<local_app_data>\pnpm\config`, Linux `~/.config/pnpm`. A flat
 /// `~/.config/pnpm` is correct only on Linux, so the previous
 /// home-joined fallback read the wrong location on a stock macOS or
 /// Windows box and silently missed the user's `auth.ini` there.
-fn pnpm_global_auth_ini_path(home: &Path, xdg_config_home: Option<&Path>) -> PathBuf {
-    let config_dir = aube_util::env::pnpm_config_dir_with(Some(home), xdg_config_home)
-        // `home` is always `Some` at every call site (guarded by
-        // `if let Some(home) = home`), so the helper only returns `None`
-        // when both home and XDG are absent — impossible here. Keep a
-        // defined fallback rather than unwrap so a future caller change
-        // can't panic.
-        .unwrap_or_else(|| home.join(".config").join("pnpm"));
-    config_dir.join("auth.ini")
+///
+/// `local_app_data` is the Windows root, injected for the same reason
+/// `home` is: production reads `%LOCALAPPDATA%`, tests pin a tempdir. It
+/// is inert on every other platform.
+///
+/// `None` means no config dir resolves at all — no XDG root, no home, and
+/// (on Windows) no local-app-data root — so there is no `auth.ini` to
+/// read. Guarding on the config dir rather than on `home` is what keeps
+/// this matching pnpm, whose Windows branch reads `%LOCALAPPDATA%`
+/// without consulting a home directory at all.
+fn pnpm_global_auth_ini_path(
+    home: Option<&Path>,
+    xdg_config_home: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Option<PathBuf> {
+    aube_util::env::pnpm_config_dir_with(home, xdg_config_home, local_app_data)
+        .map(|dir| dir.join("auth.ini"))
+}
+
+/// The `%LOCALAPPDATA%`-equivalent root the `*_with_home` test loaders
+/// pin under an injected tempdir home. A real Windows profile puts it at
+/// `<home>\AppData\Local`, so mirroring that keeps the Windows branch of
+/// [`aube_util::env::pnpm_config_dir_with`] genuinely under test instead
+/// of routing every fixture to the `~/.config` fallback a `None` would
+/// select — while staying inside the tempdir.
+#[cfg(test)]
+pub(super) fn test_local_app_data(home: &Path) -> PathBuf {
+    home.join("AppData").join("Local")
+}
+
+/// The `auth.ini` path the `*_with_home` test loaders read for a given
+/// tempdir `$HOME` and no XDG override. Fixture writers compose their
+/// path through this rather than by hand, so the write and the read can
+/// never drift apart on a platform nobody ran the suite on (nub#605).
+#[cfg(test)]
+pub(super) fn test_pnpm_global_auth_ini_path(home: &Path) -> PathBuf {
+    pnpm_global_auth_ini_path(Some(home), None, Some(&test_local_app_data(home)))
+        .expect("a home is given, so every platform branch resolves")
 }

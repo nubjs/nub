@@ -1,0 +1,16 @@
+{
+  "name": "@nubjs/loader-win32-x64",
+  "version": "0.8.3",
+  "description": "Nub loader native addon for Windows x64",
+  "license": "MIT",
+  "repository": "https://github.com/nubjs/nub",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "nub-native.node"
+  ]
+}

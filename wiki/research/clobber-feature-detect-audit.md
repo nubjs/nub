@@ -1,21 +1,21 @@
 # Clobber feature-detect audit
 
-**Date:** 2026-05-25. Scope: re-evaluate every userland package currently in (or proposed for) Nub's v0.1 default clobber set against a tightened bar.
+**Date:** 2026-05-25. Scope: re-evaluate every userland package in Nub's default clobber set against a tightened bar.
 
-A clobber is justified only when the userland package does *not* already feature-detect and route to native on Nub's Node 22.15+ floor, or when there is a specific, articulable parity benefit beyond install-size. Triggered by a 2026-05-25 objection that a clobber which only saves parse-cost on a polyfill already routing to native is not buying what the legacy-polyfill doc claimed it was.
+A clobber is justified only when the userland package does *not* already feature-detect and route to native on Nub's Node 22.15+ floor, or when there is a specific, articulable parity benefit beyond install-size.
 
-Companion to [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]], [[research/legacy-polyfill-clobber-candidates]].
+Companion to [[research/userland-package-clobbering-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]].
 
 ## TL;DR
 
 The reframed bar keeps the three default entries and rejects every proposed addition: the five "strong adds" and three secondary candidates all drop, and `web-streams-polyfill` stays deferred.
 
 - **The three default-clobber entries keep their seats, for a stronger reason than the existing doc records.** The published main entry of `@js-temporal/polyfill`, `urlpattern-polyfill`, and `abort-controller` does NOT feature-detect to native on Nub's Node 22.15+ floor; each unconditionally loads and executes its polyfill source on every import. Clobber is genuine code elimination (~125 KB Temporal, ~18 KB URLPattern, ~3 KB + `event-target-shim` for AbortController), not a faster no-op.
-- **All five "strong adds" from [[research/legacy-polyfill-clobber-candidates]] lose their seats.** `safe-buffer`, `queue-microtask`, `buffer-from`, `setimmediate`, and `performance-now` all feature-detect to native on Node ≥4.5 / ≥8.5 / ≥11. On the 22.15+ floor each is already a noop substitution by binding: `safe-buffer` returns `require('buffer')`; `queue-microtask` returns `queueMicrotask.bind(globalThis)`; `buffer-from` returns a wrapper that immediately delegates to `Buffer.from`; `setimmediate` runs an IIFE that early-returns and produces an empty module; `performance-now` returns `() => performance.now()`. Clobber would save parse-cost on the package file and eliminate no runtime work, because there is none to eliminate.
+- **Five earlier candidates lose their seats.** `safe-buffer`, `queue-microtask`, `buffer-from`, `setimmediate`, and `performance-now` all feature-detect to native on Node ≥4.5 / ≥8.5 / ≥11. On the 22.15+ floor each is already a noop substitution by binding: `safe-buffer` returns `require('buffer')`; `queue-microtask` returns `queueMicrotask.bind(globalThis)`; `buffer-from` returns a wrapper that immediately delegates to `Buffer.from`; `setimmediate` runs an IIFE that early-returns and produces an empty module; `performance-now` returns `() => performance.now()`. Clobber would save parse-cost on the package file and eliminate no runtime work, because there is none to eliminate.
 - **The three secondary candidates also drop.** `is-buffer` doesn't feature-detect but introduces a behavioral delta vs native on degenerate inputs (the existing "no API-parity bugs" criterion applies); `atob` doesn't feature-detect but the eliminated body is a single 5-line `Buffer.from(s, 'base64').toString('binary')` wrapper, below "load-bearing"; `abab`'s `lib/atob` returns `null` on invalid input where native throws `DOMException`, a parity bug that disqualifies it independently of the reframed bar.
-- **`web-streams-polyfill@4.x` ponyfill does not feature-detect** (verified via [`dist/ponyfill.js`](https://unpkg.com/web-streams-polyfill@4.3.0/dist/ponyfill.js) — the full polyfill loads unconditionally, only the optional `/polyfill` sub-path touches `globalThis`). It clears (a) cleanly with a large elimination (~50 KB of stream-spec code), and stays deferred to v0.x for the same reason as before: the existing simple-string-match clobber table would over-match `/es5`.
+- **`web-streams-polyfill@4.x` ponyfill does not feature-detect** (verified via [`dist/ponyfill.js`](https://unpkg.com/web-streams-polyfill@4.3.0/dist/ponyfill.js) — the full polyfill loads unconditionally, only the optional `/polyfill` sub-path touches `globalThis`). It clears (a) cleanly with a large elimination (~50 KB of stream-spec code), and is not clobbered, for a machinery reason: the existing simple-string-match clobber table would over-match `/es5`.
 - **No new "doesn't-feature-detect" candidates make it past the existing parity bar.** In the browserify-shim family (`events`, `process`, `buffer`, `assert`, `util`, `path`, `stream`, `string_decoder`, `crypto-browserify`, `os-browserify`, `tty-browserify`, `domain-browser`, `punycode`) none are loaded on Node — the bare-specifier resolver picks the core module before `node_modules`, so the userland shim sits dormant on disk. `readable-stream@4.x` is loaded on Node and does not feature-detect, but prefers its own vendored stream implementation by design (only `READABLE_STREAM=disable` routes to native), so clobbering would invert the package's purpose. `inherits@2.0.4` feature-detects to `util.inherits`. `safer-buffer` partially feature-detects, but its `safer.Buffer` is a `Buffer` minus `allocUnsafe`/`allocUnsafeSlow` by design, so clobbering re-introduces the methods the package exists to prevent.
-- **Net effect on the package-clobbering plan:** the v0.1 default set stays at three entries (Temporal, URLPattern, AbortController). The "strong adds" tranche is rejected wholesale. Each existing entry's rationale should lead with (a) — real code elimination — instead of install-size or Bun-parity.
+- **Net effect:** the default set is three entries (Temporal, URLPattern, AbortController); the five candidates are rejected wholesale, and each entry's rationale is (a) — real code elimination — rather than install-size or Bun-parity.
 
 ## The reframed bar
 
@@ -26,7 +26,7 @@ A userland package is a clobber candidate only if at least one of:
 
 The bar is a floor, not a ceiling: a package clearing (a) or (b) still has to pass the existing criteria (pure-spec-shim shape, no API-parity bugs, native equivalent exists). Clearing (a) trivially — eliminating a 3-line wrapper — does not merit a seat; the elimination must outweigh the per-clobber surface (parity risk, support burden, debug-output noise).
 
-Install-size, parse-time, and "feels modern" are not articulable parity benefits under (b). They were the legacy-polyfill doc's rationales, and they are now insufficient.
+Install-size, parse-time, and "feels modern" are not articulable parity benefits under (b). They are insufficient.
 
 ## Per-candidate verification table
 
@@ -45,7 +45,7 @@ Twelve packages, each read at its published main entry: whether it feature-detec
 | `is-buffer` | 2.0.5 | **No** | Three-line function `obj != null && obj.constructor != null && typeof obj.constructor.isBuffer === 'function' && obj.constructor.isBuffer(obj)` defined and exported | **Not quite** — userland reads `obj.constructor.isBuffer`; native `Buffer.isBuffer` does an internal brand check; degenerate inputs (fake `.constructor.isBuffer = () => true`) diverge | **Drop** — clears (a) but trips the existing "no API-parity bug" criterion | [`index.js`](https://unpkg.com/is-buffer@2.0.5/index.js) |
 | `atob` | 2.1.2 | **No** | `function atob(str) { return Buffer.from(str, 'base64').toString('binary'); }; module.exports = atob.atob = atob;` runs every import | **Yes** on valid input — same binary-string-from-base64 behavior | **Drop** — clears (a) but the elimination is a 5-line wrapper; magnitude is below load-bearing, no parity benefit under (b) | [`node-atob.js`](https://unpkg.com/atob@2.1.2/node-atob.js) |
 | `abab` | 2.0.6 | **No** | Loads `./lib/atob` (101 lines, spec-divergent in error-handling) and `./lib/btoa` (62 lines); exports `{ atob, btoa }` | **No** — userland `atob` returns `null` on invalid input; native throws `DOMException`; consumer code that branches on the return value differs | **Drop** — clears (a), but the null-vs-throw on invalid input is an API-parity bug | [`index.js`](https://unpkg.com/abab@2.0.6/index.js), [`lib/atob.js`](https://unpkg.com/abab@2.0.6/lib/atob.js) |
-| `web-streams-polyfill` | 4.3.0 | **No** | Main entry `dist/ponyfill.js` (~50 KB) defines `ReadableStream`/`WritableStream`/`TransformStream`/queueing-strategy/BYOB classes; `/polyfill` subentry additionally installs to `globalThis` (also no guard) | **Yes** (named exports map 1:1 to global classes on Node 18+) | **Defer to v0.x** — clears (a) with a large elimination, but sub-path-aware clobber-table machinery is needed first | [`dist/ponyfill.js`](https://unpkg.com/web-streams-polyfill@4.3.0/dist/ponyfill.js) |
+| `web-streams-polyfill` | 4.3.0 | **No** | Main entry `dist/ponyfill.js` (~50 KB) defines `ReadableStream`/`WritableStream`/`TransformStream`/queueing-strategy/BYOB classes; `/polyfill` subentry additionally installs to `globalThis` (also no guard) | **Yes** (named exports map 1:1 to global classes on Node 18+) | **Not clobbered** — clears (a) with a large elimination, but sub-path-aware clobber-table machinery is needed first | [`dist/ponyfill.js`](https://unpkg.com/web-streams-polyfill@4.3.0/dist/ponyfill.js) |
 
 ## Per-candidate brief
 
@@ -200,7 +200,7 @@ The main entry `dist/ponyfill.js` is the full polyfill, and the deferral is a to
 
 A UMD wrapper defines `ByteLengthQueuingStrategy`, `CountQueuingStrategy`, `ReadableByteStreamController`, `ReadableStream`, `ReadableStreamBYOBReader`, `ReadableStreamBYOBRequest`, `ReadableStreamDefaultController`, `ReadableStreamDefaultReader`, `TransformStream`, `TransformStreamDefaultController`, `WritableStream`, `WritableStreamDefaultController`, `WritableStreamDefaultWriter` and assigns them into the exports namespace. No `if (typeof ReadableStream !== 'undefined')` guard, and no `globalThis` write from the main entry — that is the `/polyfill` sub-path's job.
 
-Verified: the file ends with `e.ReadableStream=ReadableStream, e.WritableStream=WritableStream, …` (UMD exports), and the only `globalThis` reference is `const fr = "undefined" != typeof globalThis ? globalThis : "undefined" != typeof self ? self : …` for the `DOMException` lookup, not a `URLPattern`-style assignment. The package clears (a) with a substantial elimination (~50 KB of stream-spec implementation). The `/polyfill` sub-path additionally installs the classes on `globalThis`, also without a feature-detect guard. Both are clobber-safe; `/es5` and `/polyfill/es5` are not (the user explicitly opted into ES5 output), and the existing simple-string-match clobber table would over-match. Deferred to v0.x for that machinery reason, not for any feature-detect reason.
+Verified: the file ends with `e.ReadableStream=ReadableStream, e.WritableStream=WritableStream, …` (UMD exports), and the only `globalThis` reference is `const fr = "undefined" != typeof globalThis ? globalThis : "undefined" != typeof self ? self : …` for the `DOMException` lookup, not a `URLPattern`-style assignment. The package clears (a) with a substantial elimination (~50 KB of stream-spec implementation). The `/polyfill` sub-path additionally installs the classes on `globalThis`, also without a feature-detect guard. Both are clobber-safe; `/es5` and `/polyfill/es5` are not (the user explicitly opted into ES5 output), and the existing simple-string-match clobber table would over-match. Not clobbered, for that machinery reason, not for any feature-detect reason.
 
 ## Newly-found "doesn't feature-detect" candidates
 
@@ -225,7 +225,7 @@ The meta-finding: the "doesn't feature-detect on Node 22.15+" pool, once filtere
 
 ## Recommendation
 
-Proposed v0.1 default-clobber set under the reframed bar:
+The default clobber set under the reframed bar — the three entries `runtime/transform-core.mjs` ships:
 
 | Package | Clobbered to | Why this clears the reframed bar |
 |---|---|---|
@@ -233,11 +233,11 @@ Proposed v0.1 default-clobber set under the reframed bar:
 | `urlpattern-polyfill` | `{ URLPattern: globalThis.URLPattern }` (native on Node 24+; Nub's polyfill on older Node) | (a). Main entry unconditionally loads ~18 KB of polyfill source; the global-write guard does not gate the named export. Clobber eliminates the polyfill bundle on native-supporting Node. |
 | `abort-controller` | `{ AbortController: globalThis.AbortController, AbortSignal: globalThis.AbortSignal }` (native on Node 16+; present on Nub's 22.15+ floor) | (a). Main entry unconditionally loads `event-target-shim` and constructs its own `AbortSignal extends EventTarget`. Never feature-detects. Native additionally provides `AbortSignal.timeout`/`.any`/`.abort` and `signal.throwIfAborted()` (additive, no regression). Also clears (b) via Bun-parity. |
 
-Deferred (clears (a) cleanly, but needs sub-path-aware clobber-table machinery first):
+Not clobbered (clears (a) cleanly, but would need sub-path-aware clobber-table machinery):
 
-- `web-streams-polyfill@4.x` — main entry (`./`) and `/polyfill` sub-path are clobber-safe; `/es5` and `/polyfill/es5` must be passed through. Track for v0.x.
+- `web-streams-polyfill@4.x` — main entry (`./`) and `/polyfill` sub-path are clobber-safe; `/es5` and `/polyfill/es5` must be passed through.
 
-Demoted from the [[research/legacy-polyfill-clobber-candidates]] recommendations:
+Rejected:
 
 - `safe-buffer` — feature-detects to `require('buffer')` on every supported Node. No real elimination.
 - `queue-microtask` — feature-detects to `queueMicrotask.bind(globalThis)` on Node ≥11.
@@ -247,12 +247,6 @@ Demoted from the [[research/legacy-polyfill-clobber-candidates]] recommendations
 - `is-buffer` — doesn't feature-detect, but trips the existing parity bar (degenerate-input divergence vs native).
 - `atob` — doesn't feature-detect; clears (a) but the 5-line wrapper is below the load-bearing threshold.
 - `abab` — doesn't feature-detect; clears (a) but `lib/atob`'s null-on-invalid-input vs native's `DOMException` throw is a parity bug. Also deprecated upstream.
-
-Follow-on action items for the package-clobbering plan (deliberately not applied in this audit):
-
-- Strengthen the rationale field on each of the three existing entries to lead with (a) — real code elimination — instead of install-size or Bun-parity. The `abort-controller` wording is the most outdated.
-- Add a subsection stating the (a)/(b) test verbatim so future audit cycles use the same rule.
-- Do not pull in any of the five "strong adds" from [[research/legacy-polyfill-clobber-candidates]].
 
 ## Sources
 
@@ -280,10 +274,11 @@ Every verdict above traces to a main entry read from unpkg at the version named,
 - `safer-buffer@2.1.2` main entry: https://unpkg.com/safer-buffer@2.1.2/safer.js.
 - `fast-text-encoding@1.0.6` main entry: https://unpkg.com/fast-text-encoding@1.0.6/text.min.js.
 - Node bare-specifier resolution prefers core: https://nodejs.org/api/modules.html#core-modules — "Core modules can also be identified using the node: prefix … Without the node: prefix, Node.js will use the core module if both a core module and a third-party module of the same name are installed."
-- Existing clobber corpus: [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]], [[research/legacy-polyfill-clobber-candidates]].
+- Existing clobber corpus: [[research/userland-package-clobbering-audit]], [[research/clobber-technical-followup]], [[research/clobber-perf-comparison]].
 
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

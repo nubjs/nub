@@ -16,6 +16,7 @@
 //! under `$XDG_CACHE_HOME/nub`: a shim is an installation the user opted into,
 //! and wiping a cache must never silently remove entries their PATH points at.
 
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::Write as _;
@@ -900,13 +901,18 @@ const BLOCK_MARKER: &str = "# nub shims";
 /// persistent `node` shim (`crate::node::shim`) without duplicating it. Each
 /// family carries a DISTINCT marker so an unshim strips exactly its own block —
 /// never a sibling's, never install.sh's `# nub` block.
+///
+/// Fields are [`Cow`] because not every family's directory is known at compile
+/// time: the global-bin block's path is RESOLVED AT RUNTIME (it follows
+/// `XDG_BIN_HOME` and friends), so its lines cannot be `&'static str` the way
+/// the two fixed `~/.nub/…` families' can.
 pub(crate) struct ShimBlock {
     /// The marker comment written on its own line above the PATH line.
-    pub(crate) marker: &'static str,
+    pub(crate) marker: Cow<'static, str>,
     /// The POSIX (bash/zsh) `export PATH="…:$PATH"` line.
-    pub(crate) posix_line: &'static str,
+    pub(crate) posix_line: Cow<'static, str>,
     /// The fish `set -gx PATH … $PATH` line.
-    pub(crate) fish_line: &'static str,
+    pub(crate) fish_line: Cow<'static, str>,
     /// A substring the PATH line must contain for [`strip_block`]'s defensive
     /// "is this really our line" guard.
     ///
@@ -916,7 +922,7 @@ pub(crate) struct ShimBlock {
     /// leave the PATH line behind pointing at a directory it had just deleted.
     /// The guard is only a defensive check on a line already identified by its
     /// own `marker` comment, so matching one character less costs nothing.
-    pub(crate) dir_marker: &'static str,
+    pub(crate) dir_marker: Cow<'static, str>,
 }
 
 /// The PM shims' block (`# nub shims`). One descriptor: the resolution rule has
@@ -925,11 +931,67 @@ pub(crate) struct ShimBlock {
 /// (`$HOME/.nub/shims`, which contains it) and an unshim can clean up an install
 /// that predates the move.
 pub(crate) const PM_SHIM_BLOCK: ShimBlock = ShimBlock {
-    marker: BLOCK_MARKER,
-    posix_line: SHIMS_POSIX_PATH_LINE,
-    fish_line: SHIMS_FISH_PATH_LINE,
-    dir_marker: "nub/shims",
+    marker: Cow::Borrowed(BLOCK_MARKER),
+    posix_line: Cow::Borrowed(SHIMS_POSIX_PATH_LINE),
+    fish_line: Cow::Borrowed(SHIMS_FISH_PATH_LINE),
+    dir_marker: Cow::Borrowed("nub/shims"),
 };
+
+/// Build the global-bin family's block for a directory resolved at runtime.
+///
+/// Unlike the two fixed families this one cannot be a `const`: the directory
+/// follows `XDG_BIN_HOME` and the user's settings, so it is only known once the
+/// engine has resolved it. The marker is distinct from both `# nub shims` and
+/// install.sh's `# nub`, so each family adds and strips exactly its own block.
+///
+/// The emitted line stays `$HOME`-relative when the directory is under the home
+/// directory, matching install.sh, so a profile synced between machines keeps
+/// working. Both dialects quote the path so a directory containing a space
+/// survives fish's word splitting.
+pub fn global_bin_block(dir: &Path, home: &Path) -> ShimBlockSpec {
+    let shown = match dir.strip_prefix(home) {
+        Ok(rel) => format!("$HOME/{}", rel.display()),
+        Err(_) => dir.display().to_string(),
+    };
+    ShimBlockSpec {
+        inner: ShimBlock {
+            marker: Cow::Borrowed(GLOBAL_BIN_MARKER),
+            posix_line: Cow::Owned(format!(r#"export PATH="{shown}:$PATH""#)),
+            fish_line: Cow::Owned(format!(r#"set -gx PATH "{shown}" $PATH"#)),
+            dir_marker: Cow::Owned(shown),
+        },
+    }
+}
+
+/// The global-bin family's marker. Distinct from `# nub shims` and from
+/// install.sh's `# nub` so the three never strip or rewrite each other.
+const GLOBAL_BIN_MARKER: &str = "# nub global bin";
+
+/// Opaque wrapper so [`ShimBlock`] stays crate-private while callers outside
+/// this module can still name a block they built.
+pub struct ShimBlockSpec {
+    inner: ShimBlock,
+}
+
+/// Wire `dir` into every profile the current shell reads, idempotently.
+///
+/// Adds the block when absent, REWRITES the line when our marker is there with
+/// a different directory beneath it, and does nothing when it already matches.
+/// A profile is never given a second copy of this block.
+pub fn add_global_bin_path_block(dir: &Path) -> Result<ProfileOutcome> {
+    let home = dirs_next::home_dir().context("cannot locate the home directory")?;
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let shell = Path::new(&shell)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "bash".to_string());
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let spec = global_bin_block(dir, &home);
+    add_path_block_for(&shell, &home, xdg.as_deref(), &spec.inner)
+}
 
 /// Outcome of [`add_path_block`], for the CLI's "what changed" report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -938,9 +1000,15 @@ pub enum ProfileOutcome {
     Added(PathBuf),
     /// The profile already carries the PATH line — adding twice is a no-op.
     AlreadyPresent(PathBuf),
+    /// The profile carried our marker with a DIFFERENT line beneath it, and the
+    /// line was rewritten in place; appending instead is what would accumulate a
+    /// stale block per relocation. Reached both by a family whose directory is
+    /// resolved at runtime and by a FIXED one across an upgrade that moved its
+    /// constant — #752 moving the shims under `XDG_DATA_HOME` is the latter.
+    Rewritten(PathBuf),
     /// No known profile exists / is writable for this shell — the CLI prints
     /// `line` as "add this to your shell config yourself" and exits 0.
-    Manual { line: &'static str },
+    Manual { line: String },
 }
 
 /// Append the marked PATH block to ALL of the current shell's profile files —
@@ -996,15 +1064,19 @@ pub(crate) fn add_path_block_for(
     let targets = shell_profiles(shell, home, xdg_config, block);
     if targets.is_empty() {
         return Ok(ProfileOutcome::Manual {
-            line: block.posix_line,
+            line: block.posix_line.to_string(),
         });
     }
     let mut first_added: Option<PathBuf> = None;
+    let mut first_rewritten: Option<PathBuf> = None;
     let mut first_present: Option<PathBuf> = None;
     for target in &targets {
-        match append_block(target, block.marker)? {
+        match append_block(target, &block.marker)? {
             ProfileOutcome::Added(p) => {
                 first_added.get_or_insert(p);
+            }
+            ProfileOutcome::Rewritten(p) => {
+                first_rewritten.get_or_insert(p);
             }
             ProfileOutcome::AlreadyPresent(p) => {
                 first_present.get_or_insert(p);
@@ -1015,11 +1087,12 @@ pub(crate) fn add_path_block_for(
             ProfileOutcome::Manual { .. } => {}
         }
     }
-    Ok(match (first_added, first_present) {
-        (Some(p), _) => ProfileOutcome::Added(p),
-        (None, Some(p)) => ProfileOutcome::AlreadyPresent(p),
-        (None, None) => ProfileOutcome::Manual {
-            line: block.posix_line,
+    Ok(match (first_added, first_rewritten, first_present) {
+        (Some(p), _, _) => ProfileOutcome::Added(p),
+        (None, Some(p), _) => ProfileOutcome::Rewritten(p),
+        (None, None, Some(p)) => ProfileOutcome::AlreadyPresent(p),
+        (None, None, None) => ProfileOutcome::Manual {
+            line: block.posix_line.to_string(),
         },
     })
 }
@@ -1028,7 +1101,7 @@ pub(crate) fn add_path_block_for(
 /// missing file may be created.
 struct ProfileTarget {
     path: PathBuf,
-    line: &'static str,
+    line: String,
     may_create: bool,
 }
 
@@ -1044,7 +1117,7 @@ fn shell_profiles(
 ) -> Vec<ProfileTarget> {
     let posix = |path: PathBuf, may_create: bool| ProfileTarget {
         path,
-        line: block.posix_line,
+        line: block.posix_line.to_string(),
         may_create,
     };
     match shell {
@@ -1085,7 +1158,7 @@ fn shell_profiles(
                 .unwrap_or_else(|| home.join(".config"));
             vec![ProfileTarget {
                 path: base.join("fish").join("config.fish"),
-                line: block.fish_line,
+                line: block.fish_line.to_string(),
                 may_create: true,
             }]
         }
@@ -1098,6 +1171,36 @@ fn appendable(path: &Path) -> bool {
     std::fs::OpenOptions::new().append(true).open(path).is_ok()
 }
 
+/// Replace a profile's whole contents without ever truncating it.
+///
+/// `std::fs::write` is create + TRUNCATE + `write_all`, so a crash, SIGKILL or
+/// ENOSPC between those steps leaves the user's `.zshrc` empty or holding a
+/// partial prefix — and everything else in it goes too. This is not a file nub
+/// owns, so write beside it and rename, which is atomic.
+///
+/// The rename targets the CANONICALIZED path — a `~/.zshrc` that is a symlink
+/// into a dotfiles repo must stay a symlink, with the edit landing in the
+/// linked-to file; renaming onto the symlink path would replace the link with a
+/// regular file and orphan the dotfiles copy. Permissions are copied over so a
+/// 600 profile stays 600.
+fn replace_profile_atomically(path: &Path, contents: &str, tag: &str) -> Result<()> {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let tmp = target.with_file_name(format!(
+        "{}.nub-{tag}-{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("replacing {}", target.display()));
+    }
+    Ok(())
+}
+
 /// Append `\n# nub shims\n<line>\n` — byte-for-byte what install.sh's three
 /// `echo`s produce for its own block. Idempotency keys on the PATH line itself
 /// (trimmed line equality), so a hand-added identical line also counts as
@@ -1107,17 +1210,31 @@ fn append_block(target: &ProfileTarget, marker: &str) -> Result<ProfileOutcome> 
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if !target.may_create {
-                return Ok(ProfileOutcome::Manual { line: target.line });
+                return Ok(ProfileOutcome::Manual {
+                    line: target.line.clone(),
+                });
             }
             String::new()
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Ok(ProfileOutcome::Manual { line: target.line });
+            return Ok(ProfileOutcome::Manual {
+                line: target.line.clone(),
+            });
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", target.path.display())),
     };
     if existing.lines().any(|l| l.trim() == target.line) {
         return Ok(ProfileOutcome::AlreadyPresent(target.path.clone()));
+    }
+    // Our marker is here but the line under it differs, so the directory moved
+    // between runs (a resolved-at-runtime family: `XDG_BIN_HOME` changed, the
+    // setting changed, a different HOME). Replace that line rather than append
+    // a second block — appending is what silently accumulates one stale PATH
+    // entry per relocation, and the user never sees it because a shell only
+    // reports the winning entry.
+    if let Some(rewritten) = rewrite_marked_line(&existing, marker, &target.line) {
+        replace_profile_atomically(&target.path, &rewritten, "shim")?;
+        return Ok(ProfileOutcome::Rewritten(target.path.clone()));
     }
     if target.may_create {
         if let Some(parent) = target.path.parent() {
@@ -1132,13 +1249,43 @@ fn append_block(target: &ProfileTarget, marker: &str) -> Result<ProfileOutcome> 
     {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Ok(ProfileOutcome::Manual { line: target.line });
+            return Ok(ProfileOutcome::Manual {
+                line: target.line.clone(),
+            });
         }
         Err(e) => return Err(e).with_context(|| format!("opening {}", target.path.display())),
     };
     write!(file, "\n{marker}\n{}\n", target.line)
         .with_context(|| format!("appending to {}", target.path.display()))?;
     Ok(ProfileOutcome::Added(target.path.clone()))
+}
+
+/// Replace the line directly beneath `marker` with `line`, returning the new
+/// file contents — or `None` when the marker is absent, or is present but is
+/// the last line, or already carries `line`.
+///
+/// Anchoring on the MARKER rather than on the line text is the whole point: a
+/// runtime-resolved directory spells differently between runs (`$HOME`-relative
+/// against absolute, a different `HOME` under `sudo`, a relocated
+/// `XDG_BIN_HOME`), so line-equality misses and appends a duplicate. The marker
+/// is the stable identity.
+///
+/// Only the FIRST occurrence is rewritten; a file that somehow carries two of
+/// our blocks keeps the second, which a later run then reports as already
+/// present rather than silently deleting a line we may not have written.
+fn rewrite_marked_line(existing: &str, marker: &str, line: &str) -> Option<String> {
+    let mut lines: Vec<&str> = existing.lines().collect();
+    let at = lines.iter().position(|l| l.trim() == marker)?;
+    let target = lines.get(at + 1)?;
+    if target.trim() == line {
+        return None;
+    }
+    lines[at + 1] = line;
+    let mut out = lines.join("\n");
+    if existing.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// Strip the marked block from EVERY profile [`add_path_block`] may have
@@ -1188,26 +1335,7 @@ pub(crate) fn remove_path_block_from_profiles(
         let Some(stripped) = strip_block(&content, block) else {
             continue;
         };
-        // Temp + rename: a torn write must never truncate a shell profile.
-        // The rename targets the CANONICALIZED path — a `~/.zshrc` that is a
-        // symlink into a dotfiles repo must stay a symlink, with the edit
-        // landing in the linked-to file; renaming onto the symlink path would
-        // replace the link with a regular file and orphan the dotfiles copy.
-        // Permissions are copied over so a 600 profile stays 600.
-        let target = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let tmp = target.with_file_name(format!(
-            "{}.nub-unshim-{}",
-            target.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        ));
-        std::fs::write(&tmp, &stripped).with_context(|| format!("writing {}", tmp.display()))?;
-        if let Ok(meta) = std::fs::metadata(&target) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
-        }
-        if let Err(e) = std::fs::rename(&tmp, &target) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("replacing {}", target.display()));
-        }
+        replace_profile_atomically(&path, &stripped, "unshim")?;
         changed.push(path);
     }
     Ok(changed)
@@ -1225,7 +1353,7 @@ pub(crate) fn remove_path_block_from_profiles(
 /// after the path line; we excise that whole span, so whatever surrounded it —
 /// including "the file ended right here, no newline" — is restored verbatim.
 fn strip_block(content: &str, block: &ShimBlock) -> Option<String> {
-    let marker = block.marker;
+    let marker: &str = &block.marker;
     // The marker as it sits on its own line: find a line whose trimmed text is
     // exactly the block's marker. We scan line starts so an in-prose mention of
     // the string can't be mistaken for the marker.
@@ -1260,7 +1388,7 @@ fn strip_block(content: &str, block: &ShimBlock) -> Option<String> {
             .find('\n')
             .map(|n| block_end + n + 1)
             .unwrap_or(content.len());
-        if content[block_end..path_line_end].contains(block.dir_marker) {
+        if content[block_end..path_line_end].contains(&*block.dir_marker) {
             block_end = path_line_end; // our PATH line + its newline
         }
     }
@@ -2239,10 +2367,10 @@ mod tests {
     // so the test asserts the ENGINE's block-independence without depending on
     // `node::shim`'s constant (this is the pm layer's own test).
     const TEST_NODE_BLOCK: ShimBlock = ShimBlock {
-        marker: "# nub node shim",
-        posix_line: r#"export PATH="$HOME/.nub/node-shim:$PATH""#,
-        fish_line: "set -gx PATH $HOME/.nub/node-shim $PATH",
-        dir_marker: ".nub/node-shim",
+        marker: Cow::Borrowed("# nub node shim"),
+        posix_line: Cow::Borrowed(r#"export PATH="$HOME/.nub/node-shim:$PATH""#),
+        fish_line: Cow::Borrowed("set -gx PATH $HOME/.nub/node-shim $PATH"),
+        dir_marker: Cow::Borrowed(".nub/node-shim"),
     };
 
     #[test]
@@ -2313,7 +2441,7 @@ mod tests {
         assert_eq!(
             add_path_block_for("tcsh", &home, None, &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::Manual {
-                line: SHIMS_POSIX_PATH_LINE
+                line: SHIMS_POSIX_PATH_LINE.to_string()
             }
         );
     }
@@ -2693,6 +2821,61 @@ mod tests {
         );
     }
 
+    /// What temp + rename BUYS on this path is torn-write safety, and what it
+    /// COSTS is this: `rename` onto a symlinked `~/.zshrc` replaces the link
+    /// with a regular file and orphans the dotfiles copy, where the plain
+    /// `std::fs::write` it replaces followed the link. Canonicalizing first is
+    /// what keeps the old behaviour, and this test is what holds it — dropping
+    /// the `canonicalize` in `replace_profile_atomically` turns it red, as it
+    /// does the strip-path test above.
+    ///
+    /// The torn write itself has no unit test: it needs the process to die
+    /// between truncate and `write_all`. The atomicity is argued from `rename`,
+    /// not measured here.
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_edits_through_a_symlinked_profile_without_replacing_the_link() {
+        let home = tmpdir("symlink-rewrite");
+        let home = home.as_path();
+        let dotfiles = home.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let real = dotfiles.join("zshrc");
+        // The pre-#752 line, so wiring the current block rewrites rather than appends.
+        std::fs::write(
+            &real,
+            format!("export EDITOR=vi\n\n{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".zshrc")).unwrap();
+        // The sibling zsh profile carries the same old line, as a pre-#752 nub
+        // wrote it. An empty one would be an `Added`, which outranks
+        // `Rewritten` in the fold and would hide the case under test.
+        std::fs::write(
+            home.join(".zshenv"),
+            format!("{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        )
+        .unwrap();
+
+        let outcome = add_path_block_for("zsh", home, None, &PM_SHIM_BLOCK).unwrap();
+        assert!(
+            matches!(outcome, ProfileOutcome::Rewritten(_)),
+            "expected a rewrite, got {outcome:?}"
+        );
+        assert!(
+            home.join(".zshrc").symlink_metadata().unwrap().is_symlink(),
+            "the profile must still be a symlink — replacing it orphans the dotfiles copy"
+        );
+        let after = std::fs::read_to_string(&real).unwrap();
+        assert!(
+            after.starts_with("export EDITOR=vi\n"),
+            "the rest of the profile must survive the rewrite:\n{after}"
+        );
+        assert!(
+            after.contains("XDG_DATA_HOME") && !after.contains(".nub/shims"),
+            "the line under the marker must be the new one:\n{after}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn reachability_reports_the_first_hit_and_flags_shadowing() {
@@ -2768,5 +2951,120 @@ mod tests {
             err.contains("ghost.cjs") && err.contains("does not exist"),
             "a dangling bin entry must name the missing file, got: {err}"
         );
+    }
+
+    /// The global-bin block's directory is resolved at runtime, so it is the one
+    /// family whose line can legitimately CHANGE between runs. Wiring it twice
+    /// must leave one block, and wiring a different directory must REPLACE the
+    /// line rather than add a second — a profile that accumulates PATH entries
+    /// is invisible to the user, because a shell only ever reports the winner.
+    #[test]
+    fn global_bin_block_is_written_once_and_rewritten_in_place() {
+        let home = tmpdir("global-bin-idem");
+        let home = home.as_path();
+        let first = home.join(".local/bin");
+        let block = global_bin_block(&first, home);
+
+        let added = add_path_block_for("zsh", home, None, &block.inner).unwrap();
+        assert!(matches!(added, ProfileOutcome::Added(_)), "got {added:?}");
+
+        let again = add_path_block_for("zsh", home, None, &block.inner).unwrap();
+        assert!(
+            matches!(again, ProfileOutcome::AlreadyPresent(_)),
+            "a second identical wiring must be a no-op, got {again:?}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert_eq!(
+            zshrc.matches(GLOBAL_BIN_MARKER).count(),
+            1,
+            "two wirings must leave exactly one block:\n{zshrc}"
+        );
+
+        // Relocate: same marker, different directory.
+        let moved = home.join("elsewhere/bin");
+        let moved_block = global_bin_block(&moved, home);
+        let rewritten = add_path_block_for("zsh", home, None, &moved_block.inner).unwrap();
+        assert!(
+            matches!(rewritten, ProfileOutcome::Rewritten(_)),
+            "a changed directory must rewrite, got {rewritten:?}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert_eq!(
+            zshrc.matches(GLOBAL_BIN_MARKER).count(),
+            1,
+            "relocating must not add a second block:\n{zshrc}"
+        );
+        assert!(
+            zshrc.contains("elsewhere/bin"),
+            "the new directory must be present:\n{zshrc}"
+        );
+        assert!(
+            !zshrc.contains("$HOME/.local/bin"),
+            "the stale directory must be gone, not merely outranked:\n{zshrc}"
+        );
+    }
+
+    /// `Rewritten` is reachable for a FIXED-directory family too, which is why
+    /// cli.rs handles it rather than treating it as dead. The directory is a
+    /// compile-time constant within one build, but the CONSTANT ITSELF changed
+    /// between releases (#752 moved the shims under `XDG_DATA_HOME`), so a
+    /// profile written by an older nub carries a different line under the same
+    /// marker. cli.rs strips the block instead only when the legacy DIRECTORY
+    /// still exists, so a synced dotfile on a machine that never had
+    /// `~/.nub/shims` lands here — with the live shell still pointing at the
+    /// old directory, which is why that arm prints the re-source hint.
+    #[test]
+    fn an_upgraded_profile_rewrites_the_pre_xdg_shims_line() {
+        let home = tmpdir("shims-upgrade");
+        let home = home.as_path();
+        // What a pre-#752 nub wrote: BOTH zsh profiles, since `Added` on any one
+        // target outranks `Rewritten` in the fold and would mask this.
+        let legacy = format!("{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n");
+        std::fs::write(home.join(".zshrc"), &legacy).unwrap();
+        std::fs::write(home.join(".zshenv"), &legacy).unwrap();
+
+        let outcome = add_path_block_for("zsh", home, None, &PM_SHIM_BLOCK).unwrap();
+        assert!(
+            matches!(outcome, ProfileOutcome::Rewritten(_)),
+            "a profile carrying the pre-XDG line must be rewritten, got {outcome:?}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert!(
+            !zshrc.contains(".nub/shims"),
+            "the pre-XDG directory must be gone, not merely outranked:\n{zshrc}"
+        );
+        assert!(
+            zshrc.contains("XDG_DATA_HOME"),
+            "the XDG line must replace it:\n{zshrc}"
+        );
+        assert_eq!(
+            zshrc.matches(BLOCK_MARKER).count(),
+            1,
+            "an upgrade must not add a second block:\n{zshrc}"
+        );
+    }
+
+    /// A directory under the home dir is emitted `$HOME`-relative so a profile
+    /// synced between machines keeps working, and both dialects quote it so a
+    /// path containing a space survives fish's word splitting.
+    #[test]
+    fn global_bin_block_lines_are_home_relative_and_quoted() {
+        let home = Path::new("/home/u");
+        let block = global_bin_block(&home.join(".local/bin"), home);
+        assert_eq!(
+            &*block.inner.posix_line,
+            r#"export PATH="$HOME/.local/bin:$PATH""#
+        );
+        assert_eq!(
+            &*block.inner.fish_line,
+            r#"set -gx PATH "$HOME/.local/bin" $PATH"#
+        );
+
+        // Outside the home dir there is nothing to relativize against.
+        let block = global_bin_block(Path::new("/opt/bin"), home);
+        assert_eq!(&*block.inner.posix_line, r#"export PATH="/opt/bin:$PATH""#);
     }
 }

@@ -22,6 +22,7 @@ use same_file::Handle as FileHandle;
 
 use super::discovery::ResolvedNode;
 use super::flags;
+use super::version::NodeVersion;
 
 #[cfg(windows)]
 #[derive(Debug)]
@@ -964,61 +965,8 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // applied below, OUTSIDE this block — see the comment at that site. Applying
         // them here would skip them on exactly the spawn that needs them most: a
         // re-entrant one, which is every `node` a script launches through the shim.
-
-        // Web Storage: injected here, NOT through `compute_inject_flags`, so it sits
-        // OUTSIDE the Stage-4 accepted-flag intersection above. Safe: its band is
-        // CLOSED (`22.4–<25`) and the flag stabilized (not removed) at 25 — no
-        // open-ended-removal hazard, so it needs no probe guard. (Any FUTURE
-        // open-ended flag should go through `compute_inject_flags` to inherit the
-        // guard, not this direct-injection path.)
-        //
-        // nub ALWAYS injects `--experimental-webstorage` on the band
-        // where that flag is the enabling mechanism (Node 22.4 through <25, i.e.
-        // `webstorage_flag_needed`), regardless of whether the user opted into
-        // localStorage persistence (the maintainer, 2026-06-15: "a flag that we inject no
-        // matter what"). On that band `sessionStorage` needs ONLY the flag (no file)
-        // — gating it behind a `--localstorage-file` opt-in wrongly broke out-of-the-
-        // box sessionStorage. So inject the flag unconditionally in-band; this makes
-        // sessionStorage work everywhere on 22.4–24 and installs the `localStorage`
-        // getter (which still throws `ERR_INVALID_ARG_VALUE` on ACCESS until the user
-        // supplies a `--localstorage-file`). Empirically the flag alone does NOT throw
-        // at startup on 22.4–24, so always-injecting is safe.
-        //
-        // nub NEVER synthesizes `--localstorage-file` — localStorage persistence
-        // stays the user's explicit opt-in (forwarded verbatim if they pass it).
-        //
-        // Scope is exactly the `webstorage_flag_needed` band: below 22.4 the flag is
-        // an unrecognized "bad option" (would crash startup), and on 25+ Web Storage
-        // is native so the flag is unnecessary. Skip the inject when the user already
-        // supplied `--experimental-webstorage` / `--no-experimental-webstorage` (no
-        // double-add; respect an explicit disable — nub never re-enables over a user
-        // negation).
-        if flags::should_inject_experimental_webstorage(
-            &config.node.version,
-            config.user_args,
-            node_options.as_deref(),
-        ) {
-            cmd.arg("--experimental-webstorage");
-        }
-
-        // Web Storage localStorage neutralization: on the band where nub injects
-        // `--experimental-webstorage` AND the user did NOT supply their own
-        // `--localstorage-file`, the injected flag installs a `localStorage` getter
-        // that throws `ERR_INVALID_ARG_VALUE` on access (even `typeof localStorage`
-        // throws). Signal nub's startup preload to replace that throwing getter with
-        // a plain `undefined` value — matching Node 25+'s clean shape so
-        // `typeof localStorage === "undefined"` feature-detection is safe — while
-        // `sessionStorage` (which needs only the flag) keeps working out of the box.
-        // When the user passes `--localstorage-file`, this is skipped and
-        // `localStorage` works normally. The signal is an internal `__NUB_*` env var
-        // (brand-boundary-permitted plumbing); the preload deletes it after reading.
-        if flags::should_neutralize_experimental_webstorage_localstorage(
-            &config.node.version,
-            config.user_args,
-            node_options.as_deref(),
-        ) {
-            cmd.env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
-        }
+        // Web Storage's flag and its paired neutralize signal are in that same set,
+        // and moved out for the same reason — see the site below.
 
         // PATH shim: prepend a temp dir with a `node` symlink → nub.
         if let Ok(shim_dir) = setup_path_shim(config.nub_binary) {
@@ -1093,7 +1041,8 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // duplicate is two independent exclude tokens (a harmless re-exclude), not a
         // space-joined single value like the preload/PnP `--require` above.
         if flags::test_coverage_exclude_supported(&config.node.version) {
-            if let Some(glob) = coverage_exclude_glob(
+            for glob in coverage_exclude_globs(
+                &config.node.version,
                 config.user_args,
                 node_options.as_deref(),
                 preload.as_deref(),
@@ -1214,13 +1163,32 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // Reuses the NODE_OPTIONS read at the top of the function rather than
         // re-reading the (constant) env value.
         //
-        // Only flags that cannot abort an OLDER descendant ride this channel, with one
-        // KNOWN RESIDUAL — `--experimental-webstorage`, floor 22.4, still pushed below
-        // and reachable; see the full note in `compute_augmentation_env` —
-        // `flags::node_options_safe_inject_flags`, today just `--enable-source-maps`
-        // (Node 12.12+, below nub's 18.19 floor). The version-gated FEATURE flags do
-        // NOT, and neither does `--disable-warning=ExperimentalWarning`, whose 20.11
-        // floor is above that support floor; they are on argv above, and only there.
+        // The rule for this channel: a token belongs here only if its floor is at or
+        // below nub's 18.19 support floor, because NODE_OPTIONS is inherited by the
+        // whole subtree and a descendant on an older Node aborts on anything it cannot
+        // parse. That is `flags::node_options_safe_inject_flags` — today just
+        // `--enable-source-maps` (Node 12.12+). The version-gated FEATURE flags are not
+        // here, nor is `--disable-warning=ExperimentalWarning` (floor 20.11), nor
+        // `--experimental-webstorage` (floor 22.4); they ride argv, and only argv.
+        //
+        // ONE DELIBERATE EXCEPTION REMAINS: `--test-coverage-exclude` (floor 22.5),
+        // pushed just below as a single token carrying nub's own runtime glob — and
+        // deliberately not Node's default test-file pattern, which rides argv instead
+        // (see that site). It breaks the rule knowingly — a descendant below 22.5
+        // aborts on it — because it is the only token here that MUST share a channel
+        // with the preload: a coverage grandchild nub never spawns inherits the preload
+        // through this string alone, so an exclude on argv would not reach it and nub's
+        // own runtime would be instrumented into the user's report. See its own comment
+        // for the full argument.
+        //
+        // KEPT ON PURPOSE (the maintainer, 2026-08-28), asked and answered when the
+        // webstorage flag was moved off this channel. The known, accepted cost is that
+        // a host on Node 22.5+ still cannot run Electron 34 or older (embedded Node
+        // 20.18.1), which dies exit 9 on this token. The alternatives were to gate the
+        // push on `coverage_active_for_cache` — already computed above, and it would
+        // spare every non-coverage run — or to move it to argv like the rest; both were
+        // declined in favour of keeping coverage reports clean unconditionally. So this
+        // is a settled trade, not an oversight: do NOT "fix" it silently.
         // NODE_OPTIONS is inherited by the whole subtree, and nub's set is matched to
         // the version of the Node it resolved, so
         // any descendant on an OLDER Node aborts at startup — Node rejects an unknown
@@ -1301,20 +1269,29 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
                 "--test-coverage-exclude={}",
                 node_options_token(&format!("{}/**", runtime_dir.display()))
             ));
+            // Deliberately WITHOUT Node's default test-file pattern beside it, even
+            // though this exclude is what turns that default off in a grandchild.
+            // Node applies the default only when its exclude list is EMPTY, and a file
+            // is skipped when ANY listed glob matches it (its matchers are built with
+            // `nonegate`, so `!` is literal, not a negation). A grandchild that passes
+            // its own exclude therefore cannot escape a default carried here: its
+            // own pattern is OR-ed on top of one it never sees. Measured on 26.7 with
+            // Node's `--test-coverage-exclude=!test/**` snapshot tests: the default
+            // matched every file (a Node checkout keeps its fixtures under `test/`,
+            // which the pattern's `test/**/*` alternative covers; elsewhere the
+            // source rows would survive) and the literal `!test/**` matched nothing,
+            // so the report was EMPTY. A grandchild that passes no exclude loses the
+            // default instead (test files appear in its report) — the smaller
+            // divergence, and the one shipped before the argv site learned to
+            // restate it. Only a runtime path Node skips on its own (a
+            // `/node_modules/` segment) would remove the exclude, and with it this
+            // trade.
         }
-        // Web Storage (mirrors the argv site above): always inject
-        // `--experimental-webstorage` into NODE_OPTIONS on the flag-needed band
-        // (22.4–24.x), regardless of any `--localstorage-file` opt-in, so a child
-        // `node` re-invocation inherits the flag and `sessionStorage` works out of
-        // the box. nub never synthesizes `--localstorage-file`. Same guard: only
-        // in-band, and not if the user already supplied/disabled the flag.
-        if flags::should_inject_experimental_webstorage(
-            &config.node.version,
-            config.user_args,
-            node_options.as_deref(),
-        ) {
-            node_opts_parts.push("--experimental-webstorage".to_string());
-        }
+        // Web Storage is deliberately NOT pushed here. Its 22.4 floor is above nub's
+        // 18.19 support floor, so on this inherited channel it aborted any descendant
+        // older than 22.4 — it rides argv instead, at the site below. A child `node`
+        // still gets it: that child comes back through the PATH shim into this
+        // function, which applies it to that process's own argv.
         if let Some(existing) = existing_opts {
             // An INHERITED NODE_OPTIONS (ancestor nub or user-set) is appended
             // verbatim EXCEPT we first snip any version-gated flag whose floor
@@ -1363,6 +1340,70 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // Argv reaches this process and nothing below it, which is the whole point.
         // Boolean flags are idempotent, so a merged duplicate is harmless.
         cmd.args(&inject_flags);
+
+        // Web Storage rides argv from here for exactly the reason above, and it is the
+        // last flag to move: its 22.4 floor is ABOVE nub's 18.19 support floor, so while
+        // it sat on the inherited NODE_OPTIONS channel any descendant older than 22.4
+        // aborted on it. That was reachable, not theoretical — a host on the 22.4–24 LTS
+        // band running Electron <= 34 (which embeds Node 20.18.1; Electron 28 embeds
+        // 18.18.2) hit it, and issue #7 was the same flag reaching an older child through
+        // a nested `.nvmrc`. `strip_unsupported_node_options` never covered it, because
+        // that is applied only to the INHERITED string, never to nub's own fresh tokens.
+        //
+        // It is injected here rather than through `compute_inject_flags`, so it sits
+        // OUTSIDE the Stage-4 accepted-flag intersection. Safe: its band is CLOSED
+        // (`22.4–<25`) and the flag stabilized (not removed) at 25 — no open-ended-
+        // removal hazard, so it needs no probe guard. (Any FUTURE open-ended flag should
+        // go through `compute_inject_flags` to inherit that guard, not this path.)
+        //
+        // nub ALWAYS injects it on the band where it is the enabling mechanism (Node
+        // 22.4 through <25, i.e. `webstorage_flag_needed`), regardless of whether the
+        // user opted into localStorage persistence (the maintainer, 2026-06-15: "a flag
+        // that we inject no matter what"). On that band `sessionStorage` needs ONLY the
+        // flag (no file) — gating it behind a `--localstorage-file` opt-in wrongly broke
+        // out-of-the-box sessionStorage. So inject unconditionally in-band; this makes
+        // sessionStorage work everywhere on 22.4–24 and installs the `localStorage`
+        // getter (which still throws `ERR_INVALID_ARG_VALUE` on ACCESS until the user
+        // supplies a `--localstorage-file`). Empirically the flag alone does NOT throw at
+        // startup on 22.4–24, so always-injecting is safe.
+        //
+        // nub NEVER synthesizes `--localstorage-file` — localStorage persistence stays
+        // the user's explicit opt-in (forwarded verbatim if they pass it).
+        //
+        // Below 22.4 the flag is an unrecognized "bad option" (would crash startup), and
+        // on 25+ Web Storage is native so the flag is unnecessary. Skip the inject when
+        // the user already supplied `--experimental-webstorage` /
+        // `--no-experimental-webstorage` (no double-add; respect an explicit disable —
+        // nub never re-enables over a user negation).
+        if flags::should_inject_experimental_webstorage(
+            &config.node.version,
+            config.user_args,
+            node_options.as_deref(),
+        ) {
+            cmd.arg("--experimental-webstorage");
+        }
+
+        // The localStorage neutralization signal moves WITH the flag, and must: on the
+        // band where nub injects `--experimental-webstorage` and the user did NOT supply
+        // `--localstorage-file`, the flag installs a `localStorage` getter that throws
+        // `ERR_INVALID_ARG_VALUE` on any access — even `typeof localStorage` throws.
+        // This tells nub's preload to delete that getter so the global is ABSENT,
+        // matching vanilla Node 24's shape, while `sessionStorage` keeps working.
+        //
+        // Pairing them at one site is what keeps the subtree correct now that the flag
+        // is per-process. The preload deliberately does NOT delete this var (see
+        // runtime/polyfills.cjs), so it still inherits downward — but inheritance alone
+        // can no longer be relied on to cover a descendant, because the flag that makes
+        // it necessary is now applied per spawn. Setting it wherever the flag is set is
+        // both sufficient and idempotent. The signal is an internal `__NUB_*` env var
+        // (brand-boundary-permitted plumbing).
+        if flags::should_neutralize_experimental_webstorage_localstorage(
+            &config.node.version,
+            config.user_args,
+            node_options.as_deref(),
+        ) {
+            cmd.env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
+        }
     }
 
     // `v8Flags` ride argv for the same structural reason as the block above — the
@@ -2069,25 +2110,27 @@ pub fn compute_augmentation_env(
     //
     // It also carries `flags::node_options_safe_inject_flags` — today only
     // `--enable-source-maps`, which exists from Node 12.12 and so cannot abort any
-    // descendant in nub's supported range — plus `--experimental-webstorage` below.
+    // descendant in nub's supported range. Nothing else.
     //
-    // KNOWN RESIDUAL, not closed here. `--experimental-webstorage` is the one remaining
-    // version-gated token on this inherited channel, and its 22.4 floor IS above nub's
-    // 18.19 support floor, so a descendant below 22.4 aborts on it. It IS reachable:
-    // nub injects it whenever the HOST is in the 22.4-24 band, and Electron 34 embeds
-    // Node 20.18.1 while Electron 28 embeds 18.18.2 (Electron 35 is the first to clear
-    // 22.4, at 22.14.0) — so a host on the 22.4-24 LTS band running Electron <=34 hits
-    // exactly this. `strip_unsupported_node_options` does not save it either: that is
-    // applied only to the INHERITED string, never to nub's own freshly-pushed tokens.
+    // `--experimental-webstorage` was the last version-gated token on this inherited
+    // channel and is no longer on it. Its 22.4 floor is above nub's 18.19 support
+    // floor, so a descendant below 22.4 aborted on it, and that was reachable rather
+    // than theoretical: nub injects it whenever the HOST is in the 22.4-24 band, and
+    // Electron 34 embeds Node 20.18.1 while Electron 28 embeds 18.18.2 (Electron 35 is
+    // the first to clear 22.4, at 22.14.0) — so a host on the 22.4-24 LTS band running
+    // Electron <= 34 hit exactly this. `strip_unsupported_node_options` never covered
+    // it: that is applied only to the INHERITED string, never to nub's own freshly
+    // pushed tokens. Issue #7 was the same flag reaching an older child (a nested
+    // `.nvmrc` inside node_modules), and it was closed by the node_modules pin guard
+    // and `strip_unsupported_node_options` rather than by taking the flag off this
+    // channel; taking it off is what finally removed the class.
     //
-    // It is pre-existing rather than introduced here, and moving it is not a one-line
-    // change: its argv application and its paired localStorage-neutralization signal
-    // both live inside the augment block, so both would have to move out together and
-    // be re-verified across the 22.4-24 band — which is why it is not folded in here.
-    // This is not hypothetical: issue #7 was this same flag leaking to an older child
-    // (a nested `.nvmrc` inside node_modules), and it was closed by the node_modules
-    // pin guard and `strip_unsupported_node_options`, never by taking the flag off this
-    // channel. Do NOT read this channel as "safe for every descendant".
+    // The invariant to preserve: a token belongs here ONLY if its floor is at or below
+    // nub's 18.19 support floor. Anything version-gated goes on argv. This function
+    // now satisfies it with no exceptions — note that is STRICTER than `spawn_node`'s
+    // NODE_OPTIONS, which deliberately keeps `--test-coverage-exclude` (floor 22.5)
+    // because that token has to share a channel with the preload. Do not assume the
+    // two sets match.
     //
     // WHY NOT THE FEATURE FLAGS. `NODE_OPTIONS` is inherited by the ENTIRE process
     // subtree, and nub's flag set is matched to the version of the Node it resolved
@@ -2132,20 +2175,18 @@ pub fn compute_augmentation_env(
             .iter()
             .map(|opt| node_options_token(opt)),
     );
-    // Web Storage (mirrors `spawn_node`): always inject
-    // `--experimental-webstorage` on the flag-needed band (22.4–24.x) so a
-    // script-run child shell's `node` has `sessionStorage` out of the box, with no
-    // `--localstorage-file` opt-in required. nub never synthesizes
-    // `--localstorage-file`. (Scripts have no argv here — the only user channel is
-    // NODE_OPTIONS.) Guarded against double-add / a user
-    // `--no-experimental-webstorage` disable.
-    if flags::should_inject_experimental_webstorage(
-        &node_version,
-        &[],
-        existing_node_options.as_deref(),
-    ) {
-        node_opts_parts.push("--experimental-webstorage".to_string());
-    }
+    // Web Storage is deliberately NOT pushed here (mirrors `spawn_node`). This env
+    // is inherited by the whole script subtree, and the flag's 22.4 floor is above
+    // nub's 18.19 support floor, so a descendant on an older Node aborted on it. A
+    // script's `node` still gets it: that invocation goes through the PATH shim into
+    // `spawn_node`, which puts it on that process's own argv. The cost is the same one
+    // the version-gated feature flags already pay — a script that launches Node by
+    // ABSOLUTE PATH bypasses the shim and so gets the preload without the flag.
+    //
+    // The neutralize signal below still IS set here. It is a plain `__NUB_*` env var
+    // that no Node parses as a flag, so it cannot abort anything at any version; it
+    // seeds the subtree for whichever descendants do receive the flag on argv.
+    //
     // localStorage-neutralize decision: compute BEFORE `existing_node_options` is
     // consumed below. Scripts have no argv here — the only user channel is
     // NODE_OPTIONS. Neutralize when nub injects the flag (flag-needed band, no user
@@ -2604,7 +2645,11 @@ impl ShimPathMatcher {
     }
 }
 
-fn is_path_shim_candidate(path: &Path) -> bool {
+/// Whether `path` names a per-invocation shim directory. `pub(crate)` because
+/// discovery filters the same directories out of PATH, and a second prefix
+/// matcher living there could disagree with this one about a Windows case
+/// variant — which is the whole reason the Windows arm below exists.
+pub(crate) fn is_path_shim_candidate(path: &Path) -> bool {
     let Some(file_name) = path.file_name() else {
         return false;
     };
@@ -2822,9 +2867,78 @@ fn coverage_active_for_cache(
     coverage_active(user_args, node_options) || node_v8_coverage.is_some_and(|v| !v.is_empty())
 }
 
-/// The `--test-coverage-exclude=<glob>` flag nub injects to keep its own preloaded
-/// runtime modules out of the user's coverage report (R9), or `None` when coverage
-/// isn't active or the runtime dir can't be resolved. The glob is keyed to the
+/// Node's own default coverage exclusion, which it applies ONLY when no
+/// `--test-coverage-exclude` is set at all: `kDefaultPattern` in
+/// `lib/internal/test_runner/utils.js`, reached by the
+/// `coverageExcludeGlobs.length === 0` fallback in `parseCommandLine`. nub's
+/// runtime exclude below is itself a `--test-coverage-exclude`, so injecting it
+/// silently switches that default OFF and folds the user's own `*.test.js` back
+/// into their report. Where the target Node HAS that default — 23.5.0 and up, see
+/// `should_restate_default_coverage_exclude` — the argv site re-states the default
+/// beside the runtime exclude, so the union is Node's default behavior plus nub's
+/// runtime exclusion. The NODE_OPTIONS site deliberately does not (see the comment
+/// there). Below 23.5 Node applies no default at all, and the runtime exclude goes
+/// out alone.
+///
+/// The TypeScript extensions are stated unconditionally where Node appends them
+/// only under `--strip-types` (default-on since 22.18 / 23.6). nub transpiles TS
+/// on every supported Node regardless of that flag, so under nub a `*.test.ts` is
+/// a test file on the whole supported band, not just where stock Node could have
+/// loaded one.
+const NODE_DEFAULT_COVERAGE_EXCLUDE: &str =
+    "**/{test,test/**/*,test-*,*[._-]test}.{js,mjs,cjs,ts,mts,cts}";
+
+/// Whether the USER asked for a specific coverage exclusion, on argv or through an
+/// inherited NODE_OPTIONS. Node drops its default pattern the moment any exclude is
+/// present, so nub must drop it too — re-adding it would hide files the user asked
+/// to see. An ancestor nub's NODE_OPTIONS carries ITS runtime exclude (the same
+/// `<runtime dir>/**` glob this process would inject, `own_runtime_glob`), and
+/// that token is nub's, not the user's. It reaches here when the ancestor's
+/// preload token no longer matches ours byte-for-byte — re-quoted in transit by a
+/// tool that re-emits NODE_OPTIONS, or a different tier's preload — so the raw
+/// `contains` re-entrancy check misses and this process injects again; without
+/// the subtraction the default would be dropped and the report would list the
+/// test files. (An exact match is re-entrant and injects nothing at all.)
+///
+/// The comparison is on the token's VALUE after `split_node_options`, not on the
+/// raw string: an inherited token is re-emitted through `node_options_token` as
+/// a whole (see `split_inherited_preloads`), which moves a spacey path's quotes
+/// from the value to the front of the token, and tools such as Next.js re-parse
+/// and re-emit NODE_OPTIONS in their own quoting.
+///
+/// KNOWN LIMIT: the runtime exclude of a DIFFERENT nub install upstream (another
+/// version, another cache dir) names a directory this process does not own, so
+/// it counts as a user exclude here and the default is not restated. And a
+/// grandchild spawned by absolute `process.execPath` never passes through nub at
+/// all, so nothing here can see its argv; see the NODE_OPTIONS site for what that
+/// grandchild gets and why.
+fn user_supplied_coverage_exclude(
+    user_args: &[String],
+    node_options: Option<&str>,
+    own_runtime_glob: Option<&str>,
+) -> bool {
+    let is_exclude = |token: &str| {
+        token == "--test-coverage-exclude" || token.starts_with("--test-coverage-exclude=")
+    };
+    let is_own = |token: &str| {
+        own_runtime_glob.is_some_and(|glob| {
+            token
+                .strip_prefix("--test-coverage-exclude=")
+                .is_some_and(|value| value == glob)
+        })
+    };
+    user_args.iter().any(|arg| is_exclude(arg))
+        || node_options.is_some_and(|opts| {
+            split_node_options(opts)
+                .iter()
+                .any(|token| is_exclude(token) && !is_own(token))
+        })
+}
+
+/// The `--test-coverage-exclude=<glob>` flags nub injects on argv when coverage is
+/// active — nub's own preloaded runtime modules (R9), plus Node's default test-file
+/// pattern that injecting them would otherwise disable. Empty when coverage isn't
+/// active or the runtime dir can't be resolved. The runtime glob is keyed to the
 /// ABSOLUTE directory holding the injected preload — the same dir `find_preload`
 /// returns the preload from — so it can never accidentally match a user's own
 /// `runtime/` directory the way a relative `**/runtime/**` would.
@@ -2835,19 +2949,47 @@ fn coverage_active_for_cache(
 /// denominator a hair. This is a stock-Node quirk of `--test-coverage-exclude`,
 /// NOT something nub introduces; a future reader comparing nub's aggregate to a
 /// hand-computed one should not be surprised by a fractional branch-% difference.
-fn coverage_exclude_glob(
+fn coverage_exclude_globs(
+    node_version: &NodeVersion,
     user_args: &[String],
     node_options: Option<&str>,
     preload: Option<&str>,
-) -> Option<String> {
+) -> Vec<String> {
     if !coverage_active(user_args, node_options) {
-        return None;
+        return Vec::new();
     }
-    let runtime_dir = Path::new(preload?).parent()?;
-    Some(format!(
-        "--test-coverage-exclude={}/**",
-        runtime_dir.display()
-    ))
+    let Some(runtime_dir) = preload.map(Path::new).and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let runtime_glob = format!("{}/**", runtime_dir.display());
+    let mut globs = vec![format!("--test-coverage-exclude={runtime_glob}")];
+    if should_restate_default_coverage_exclude(
+        node_version,
+        user_args,
+        node_options,
+        Some(&runtime_glob),
+    ) {
+        globs.push(format!(
+            "--test-coverage-exclude={NODE_DEFAULT_COVERAGE_EXCLUDE}"
+        ));
+    }
+    globs
+}
+
+/// Whether nub must re-state Node's default coverage exclusion beside the runtime
+/// exclude it is about to inject. Both conditions are load-bearing and neither
+/// implies the other: the host Node must HAVE that default (23.5+, a strictly
+/// higher floor than the flag's own 22.5 — see
+/// `flags::test_coverage_default_exclusion_applied`), and the user must not have
+/// supplied an exclude of their own, which turns the default off for stock node too.
+fn should_restate_default_coverage_exclude(
+    node_version: &NodeVersion,
+    user_args: &[String],
+    node_options: Option<&str>,
+    own_runtime_glob: Option<&str>,
+) -> bool {
+    flags::test_coverage_default_exclusion_applied(node_version)
+        && !user_supplied_coverage_exclude(user_args, node_options, own_runtime_glob)
 }
 
 /// True when `node_options` already carries OUR specific preload path — i.e. a
@@ -3016,6 +3158,70 @@ pub fn node_options_token(value: &str) -> String {
     }
 }
 
+/// Whether a `--require` / `--import` value names one of NUB'S OWN preload entry
+/// points — the runtime preload, or a synthesized preload chainer — rather than a
+/// user's. `value` must already be slash-normalized; a `file://` prefix is
+/// irrelevant because only the last two path components are read.
+///
+/// Recognized by SHAPE, deliberately, because the recognizer has to hold for a nub of
+/// any version whose token this process inherited, and because the directory the
+/// preload lives in is not one path but two:
+///
+/// - `<...>/runtime/preload.{mjs,cjs}` — the in-repo sidecar an `embed-runtime`-off
+///   dev build resolves to.
+/// - `<cache>/runtime-<version>-<hash8>/preload.{mjs,cjs}` — the extracted runtime
+///   cache every SHIPPED build resolves to (`runtime_cache::CACHE_KEY`).
+///
+/// A substring test for the first spelling alone silently misses every released
+/// binary, which is exactly how nub's own `--import` came to be folded into the
+/// chainer that nub's preload then imports: on the compat tier that is an ESM cycle
+/// through a top-level await, so the child hangs and Node exits 13 with no output
+/// (#746). CJS cycles resolve to a partial export instead of deadlocking, which is
+/// why the fast tier survived the same fold and hid the bug.
+///
+/// The cache spelling is matched against the FULL key grammar rather than a
+/// `runtime-` prefix, because over-claiming here is its own bug: a user entry wrongly
+/// held out of the chainer keeps its own `NODE_OPTIONS` token, and on the compat tier
+/// that token is a `--require` Node re-runs inside the loader worker — the double
+/// execution the chainer's compat-tier routing exists to prevent. A package directory
+/// named `runtime-hooks` is enough to trip a prefix test.
+fn is_nub_preload_entry(value: &str) -> bool {
+    let Some((parent, file)) = value.rsplit_once('/') else {
+        return false;
+    };
+    match file {
+        "preload.mjs" | "preload.cjs" => {
+            is_nub_runtime_dir(parent.rsplit('/').next().unwrap_or_default())
+        }
+        // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`.
+        "preload-chain.mjs" | "preload-chain.cjs" => parent.ends_with("/.nub"),
+        _ => false,
+    }
+}
+
+/// The directory name a nub preload sits in: the dev sidecar's plain `runtime`, or a
+/// shipped `runtime-<version>-<blobhash8>` cache key (`crates/nub-core/build.rs`,
+/// where `blobhash8` is the first four bytes of the blob's SHA-256 rendered as
+/// lowercase hex). The version is not validated — it is `CARGO_PKG_VERSION` and may
+/// carry a prerelease suffix with its own dashes — so the hex suffix is what carries
+/// the discrimination.
+fn is_nub_runtime_dir(dir: &str) -> bool {
+    if dir == "runtime" {
+        return true;
+    }
+    let Some(rest) = dir.strip_prefix("runtime-") else {
+        return false;
+    };
+    let Some((version, hash8)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    !version.is_empty()
+        && hash8.len() == 8
+        && hash8
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+
 /// Split a NODE_OPTIONS-shaped string into individual flag tokens — the inverse of
 /// [`node_options_token`], mirroring Node's own `ParseNodeOptionsEnvVar`
 /// (.repos/node/src/node_options.cc): split on whitespace EXCEPT inside a
@@ -3042,9 +3248,9 @@ pub fn node_options_token(value: &str) -> String {
 ///   loader is not an import.
 /// - Yarn PnP (`.pnp.cjs`, `.pnp.loader.mjs`) — PnP's resolver has to install before
 ///   nub's preload, and the chainers run after it.
-///
-/// Safe against re-entrancy by construction: the caller only rebuilds `NODE_OPTIONS`
-/// when NOT re-entrant, so the inherited value cannot already carry nub's own token.
+/// - nub's own preload and chainer ([`is_nub_preload_entry`]) — the chainer is rebuilt
+///   on every spawn, re-entrant ones included, so an inherited nub token really does
+///   reach here and folding it would make nub's preload load itself.
 pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String>) {
     // Left in place rather than folded. PnP's resolver must install before nub's
     // preload, and nub's OWN tokens must stay exactly where they are: a NESTED nub
@@ -3052,10 +3258,7 @@ pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String
     // from inside itself and break the re-entrancy detection that keys on that token.
     fn keep_in_place(value: &str) -> bool {
         let v = value.trim_matches('"').replace('\\', "/");
-        v.ends_with(".pnp.cjs")
-            || v.ends_with(".pnp.loader.mjs")
-            || v.contains("/runtime/preload.")
-            || v.contains("/.nub/preload-chain.")
+        v.ends_with(".pnp.cjs") || v.ends_with(".pnp.loader.mjs") || is_nub_preload_entry(&v)
     }
 
     let tokens = split_node_options(value);
@@ -3306,8 +3509,10 @@ fn vendored_node_path(preload: Option<&str>) -> Option<OsString> {
 
 /// Find the preload entry script relative to the Nub binary.
 ///
-/// In development: `<repo>/runtime/preload.mjs`
-/// In distribution: `<nub-install-dir>/runtime/preload.mjs`
+/// In development (`embed-runtime` off): `<repo>/runtime/preload.mjs`
+/// In distribution: `<cache>/runtime-<version>-<hash8>/preload.mjs` — the extracted
+/// runtime cache, NOT a `runtime/` directory beside the binary. Anything matching
+/// this path by shape has to accept both spellings ([`is_nub_preload_entry`]).
 pub fn find_public_preload(nub_binary: &Path) -> Option<String> {
     find_preload(nub_binary)
 }
@@ -3679,6 +3884,91 @@ mod tests {
         assert_eq!(rest, "--title=t");
     }
 
+    /// A SHIPPED nub resolves its preload out of the extracted runtime cache
+    /// (`runtime-<version>-<hash8>/`), never a plain `runtime/` sidecar — so the
+    /// recognizer has to hold for that spelling too. It did not, and folding nub's
+    /// own compat-tier `--import` into the chainer that nub's preload then imports
+    /// made an ESM cycle through a top-level await: exit 13, no output, on every
+    /// nested `node` a script ran under Node < 22.15 (#746). Every fixture in the
+    /// suite used the dev sidecar path, so the whole gate was dead in release.
+    #[test]
+    fn nub_preload_is_recognized_in_the_shipped_runtime_cache_layout() {
+        // Each path is spelled the way its platform spells it, and the `--import`
+        // URL comes from `to_file_url` rather than a hand-built `file://` prefix, so
+        // every token here is one nub can really emit. A hand-built URL got the
+        // Windows drive form wrong (`file://C:/…`, whose `C:` parses as the URL
+        // authority and which Node rejects) — and a fixture that is not the real
+        // shape is precisely what let this bug through in the first place.
+        for (own, windows) in [
+            (
+                "/home/u/.cache/nub/runtime-0.8.2-e6384feb/preload.mjs",
+                false,
+            ),
+            (
+                "/home/u/.cache/nub/runtime-0.8.2-e6384feb/preload.cjs",
+                false,
+            ),
+            ("/opt/nub/runtime/preload.mjs", false),
+            ("/p/node_modules/.nub/preload-chain.mjs", false),
+            (
+                r"C:\Users\u\AppData\Local\nub\runtime-0.8.2-e6384feb\preload.cjs",
+                true,
+            ),
+        ] {
+            let url = to_file_url(own, windows);
+            let (rest, req, imp) = split_inherited_preloads(&format!(
+                "--import={url} --require={own} --require /a.cjs"
+            ));
+            assert_eq!(req, vec!["/a.cjs"], "only the user entry folds: {own}");
+            assert!(imp.is_empty(), "nub's own import must not fold: {own}");
+            assert_eq!(
+                rest.matches("preload").count(),
+                2,
+                "both nub tokens forwarded verbatim for {own}: {rest}"
+            );
+        }
+
+        // Over-claiming is its own bug, so the negative half matters as much: a user
+        // entry wrongly held back keeps its own token, and on the compat tier that
+        // `--require` is re-run inside the loader worker. A shared basename is not
+        // enough (A26), and neither is a `runtime-` prefix without the cache key's
+        // 8-hex blob suffix — `runtime-hooks` is an ordinary package name.
+        for theirs in [
+            "/my/app/preload.cjs",
+            "/app/runtime-hooks/preload.cjs",
+            "/n/node_modules/@scope/runtime-hooks/preload.mjs",
+            "/app/runtime-/preload.mjs",
+            "/app/runtime-0.8.2-E6384FEB/preload.mjs",
+            "/app/runtime-0.8.2-e6384fe/preload.mjs",
+            "/app/.nub/preload.mjs",
+        ] {
+            let (rest, req, _) = split_inherited_preloads(&format!("--require={theirs}"));
+            assert_eq!(req, vec![theirs], "a user entry must fold: {theirs}");
+            assert!(rest.is_empty(), "nothing left behind for {theirs}: {rest}");
+        }
+    }
+
+    /// The recognizer and [`find_preload`] must agree on THIS build's layout,
+    /// whichever one it is. Binds the two together so a future move of the runtime
+    /// cache cannot silently re-open #746 under the feature set that ships.
+    #[test]
+    fn nub_recognizes_the_preload_it_actually_injects() {
+        let exe = std::env::current_exe().expect("test binary path");
+        match find_preload(&exe) {
+            Some(preload) => assert!(
+                is_nub_preload_entry(&preload.replace('\\', "/")),
+                "nub must recognize its own preload as un-foldable: {preload}"
+            ),
+            // Nothing resolvable means nothing is injected either, so there is no
+            // token to recognize — but a feature-on build carries the blob and must
+            // always extract one.
+            #[cfg(feature = "embed-runtime")]
+            None => panic!("an embed-runtime build must resolve its own preload"),
+            #[cfg(not(feature = "embed-runtime"))]
+            None => {}
+        }
+    }
+
     #[test]
     fn split_node_options_is_the_inverse_of_node_options_token() {
         // One element per FLAG is the contract: `compute_augmentation_env` re-quotes
@@ -3782,9 +4072,11 @@ mod tests {
 
     #[test]
     fn script_spawn_policy_respects_quoted_node_options() {
-        // `compute_augmentation_env` has no argv channel: its script-shell
-        // Web Storage decision comes solely from inherited NODE_OPTIONS. Keep
-        // quoted user intent identical to the ordinary/direct spawn path.
+        // `compute_augmentation_env` has no argv channel, so its script-shell Web
+        // Storage decision reads inherited NODE_OPTIONS alone. It no longer PUSHES the
+        // flag (that moved to argv in `spawn_node`), but it still decides the
+        // localStorage neutralize signal the same way, and a user's quoted intent must
+        // land identically on both paths — which is what this pins.
         let version = NodeVersion::new(22, 15, 0);
         assert!(!flags::should_inject_experimental_webstorage(
             &version,
@@ -5482,30 +5774,98 @@ mod tests {
     #[test]
     fn coverage_exclude_targets_absolute_runtime_dir_only_when_coverage_active() {
         let preload = "/opt/nub/runtime/preload.mjs";
+        let runtime = "--test-coverage-exclude=/opt/nub/runtime/**";
+        let default = format!("--test-coverage-exclude={NODE_DEFAULT_COVERAGE_EXCLUDE}");
+        // 26.7 has Node's own default exclusion; 22.15 has the FLAG but no default.
+        let modern = NodeVersion::new(26, 7, 0);
+        let no_default = NodeVersion::new(22, 15, 0);
 
         // No coverage flag anywhere → no exclude injected.
-        assert!(coverage_exclude_glob(&[], None, Some(preload)).is_none());
+        assert!(coverage_exclude_globs(&modern, &[], None, Some(preload)).is_empty());
 
         // Coverage via argv → exclude keyed to the ABSOLUTE runtime dir (the
-        // preload's parent), with a trailing `/**` — not a broad `**/runtime/**`.
+        // preload's parent), with a trailing `/**` — not a broad `**/runtime/**` —
+        // PLUS Node's default test-file pattern, which the runtime exclude would
+        // otherwise disable.
         let argv = vec![
             "--test".to_string(),
             "--experimental-test-coverage".to_string(),
         ];
         assert_eq!(
-            coverage_exclude_glob(&argv, None, Some(preload)).as_deref(),
-            Some("--test-coverage-exclude=/opt/nub/runtime/**"),
+            coverage_exclude_globs(&modern, &argv, None, Some(preload)),
+            vec![runtime.to_string(), default.clone()],
         );
 
         // Coverage via NODE_OPTIONS is detected the same way.
         assert_eq!(
-            coverage_exclude_glob(&[], Some("--experimental-test-coverage"), Some(preload))
-                .as_deref(),
-            Some("--test-coverage-exclude=/opt/nub/runtime/**"),
+            coverage_exclude_globs(
+                &modern,
+                &[],
+                Some("--experimental-test-coverage"),
+                Some(preload)
+            ),
+            vec![runtime.to_string(), default.clone()],
+        );
+
+        // On a Node with no default exclusion of its own, re-stating the pattern
+        // would EXCLUDE test files stock node reports — the parity break in the
+        // opposite direction. Only the runtime exclude goes out there.
+        assert_eq!(
+            coverage_exclude_globs(&no_default, &argv, None, Some(preload)),
+            vec![runtime.to_string()],
+        );
+
+        // A user exclude turns Node's default off for stock node too, so nub must
+        // not re-add it — on either channel.
+        let mut user_argv = argv.clone();
+        user_argv.push("--test-coverage-exclude=dist/**".to_string());
+        assert_eq!(
+            coverage_exclude_globs(&modern, &user_argv, None, Some(preload)),
+            vec![runtime.to_string()],
+        );
+        assert_eq!(
+            coverage_exclude_globs(
+                &modern,
+                &argv,
+                Some("--test-coverage-exclude=dist/**"),
+                Some(preload)
+            ),
+            vec![runtime.to_string()],
+        );
+
+        // An ancestor nub's NODE_OPTIONS carries the SAME runtime exclude this
+        // process injects, with no matching preload token beside it (re-quoted in
+        // transit, or a different tier's preload). That token is nub's own, not a
+        // user exclude, so the default is still restated; the quoted form
+        // node_options_token emits for a spacey path counts the same.
+        assert_eq!(
+            coverage_exclude_globs(&modern, &argv, Some(runtime), Some(preload)),
+            vec![runtime.to_string(), default.clone()],
+        );
+        let spacey = "/opt/my nub/runtime/preload.mjs";
+        let spacey_runtime = "--test-coverage-exclude=/opt/my nub/runtime/**";
+        let spacey_opts = format!(
+            "--require=x --test-coverage-exclude={}",
+            node_options_token("/opt/my nub/runtime/**")
+        );
+        assert_eq!(
+            coverage_exclude_globs(&modern, &argv, Some(&spacey_opts), Some(spacey)),
+            vec![spacey_runtime.to_string(), default.clone()],
+        );
+        // …and after an intermediate re-emit that quotes the WHOLE token (the
+        // passthrough in split_inherited_preloads, or a tool re-parsing
+        // NODE_OPTIONS), where the quotes move to the front of the token.
+        let requoted = format!(
+            "--require=x {}",
+            node_options_token("--test-coverage-exclude=/opt/my nub/runtime/**")
+        );
+        assert_eq!(
+            coverage_exclude_globs(&modern, &argv, Some(&requoted), Some(spacey)),
+            vec![spacey_runtime.to_string(), default.clone()],
         );
 
         // Coverage active but no resolvable preload → nothing to exclude.
-        assert!(coverage_exclude_glob(&argv, None, None).is_none());
+        assert!(coverage_exclude_globs(&modern, &argv, None, None).is_empty());
     }
 
     #[test]
@@ -5739,6 +6099,28 @@ mod tests {
         // The 22.14.x boundary stays on the compat (import) channel.
         let boundary = preload_injection_for(mjs, &NodeVersion::new(22, 14, 99), false);
         assert_eq!(boundary.flag, "--import");
+
+        // 23.0–23.4 sorts above 22.15 but predates `registerHooks` on the 23.x line
+        // (which got it at 23.5.0), so it MUST take the compat channel. Routing it to
+        // `--require preload.cjs` crashed every run at startup with
+        // `module_.registerHooks is not a function`.
+        for pre in [
+            NodeVersion::new(23, 0, 0),
+            NodeVersion::new(23, 4, 0),
+            NodeVersion::new(23, 4, 99),
+        ] {
+            let injection = preload_injection_for(mjs, &pre, false);
+            assert_eq!(
+                injection.flag, "--import",
+                "Node {pre} has no sync registerHooks and must use the compat preload"
+            );
+            assert_eq!(injection.value, "file:///opt/nub/runtime/preload.mjs");
+        }
+
+        // 23.5.0 is the 23.x line's fast floor — the release that added registerHooks.
+        let fast235 = preload_injection_for(mjs, &NodeVersion::new(23, 5, 0), false);
+        assert_eq!(fast235.flag, "--require");
+        assert_eq!(fast235.value, "/opt/nub/runtime/preload.cjs");
     }
 
     fn tokens(specs: &[&str], version: &NodeVersion) -> Vec<String> {

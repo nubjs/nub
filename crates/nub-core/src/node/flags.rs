@@ -15,7 +15,7 @@ use super::version::NodeVersion;
 /// Flags Nub injects on EVERY supported Node version where they are safe.
 /// `--enable-source-maps` has existed since Node 12.12, so it is structurally
 /// available across the whole 18.19+ range — BUT it is gated out of the
-/// `source_maps_safe`-false band (Node 26.2.x; see that predicate).
+/// `source_maps_safe`-false band (Node 26.0.0–26.7.x; see that predicate).
 /// (`--disable-warning` is NOT here — it doesn't exist on Node 18.x / 20.0–20.10
 /// and is gated below; injecting it there is a hard "bad option" / "not allowed
 /// in NODE_OPTIONS" error, which broke the compat tier on those versions.)
@@ -23,19 +23,36 @@ const ALWAYS_INJECT: &[&str] = &["--enable-source-maps"];
 
 /// Whether nub may inject `--enable-source-maps` on this Node version.
 ///
-/// Node **26.2.x specifically** has a regression where, with source maps enabled,
-/// a no-message `assert.ok(false)` / `assert(false)` rethrows as a `TypeError`
-/// instead of the expected `AssertionError` (the source-map remapping path
-/// mis-constructs the error for the no-message form). Empirically isolated to the
-/// 26.2 patch band: Node 18.19 / 20 / 22 / 24 / 25 and 26.1 are all clean, and a
-/// future 26.3 is expected clean too. So nub withholds the injection ONLY on
-/// 26.2.x — source maps are unavailable there (a cosmetic loss: stack traces are
-/// not remapped), which is far better than corrupting the type of a thrown
-/// AssertionError. Verified on real Node 26.2.0:
+/// The whole **Node 26.x** line released so far regresses (nodejs/node#63169):
+/// with source maps enabled and no source map for the file, the remapping path's
+/// `getErrorSourceLocation` returns `undefined`, so a no-message
+/// `assert(false)` / `assert.ok(false)` / `assert.strict(false)` throws
+/// `TypeError [ERR_INVALID_ARG_TYPE]` ("The \"message\" argument …") instead of
+/// the expected `AssertionError`. Verified on real 26.0.0 / 26.3.0 / 26.5.1 /
+/// 26.7.0; 25.x is clean (25.9.0 yields an `AssertionError` with a degraded
+/// message, which is the right TYPE). This band was previously — and wrongly —
+/// documented as 26.2-only.
+///
+/// Fixed on Node `main` by b5d37cd4 (nodejs/node#63215, 2026-08-20) in
+/// `lib/internal/errors/error_source.js`, and the band was predicted to close at
+/// 26.8.0 as the first release that could carry it.
+///
+/// RE-VERIFIED 2026-09-01, now that the release exists — the boundary below is
+/// measured rather than predicted, so this is no longer a stopgap. Running
 /// `node --enable-source-maps -e 'try{require("assert").ok(false)}catch(e){console.log(e.constructor.name)}'`
-/// prints `TypeError`; without the flag it prints `AssertionError`.
+/// on real binaries gives `TypeError` on 26.7.0 and `AssertionError` on 26.8.1.
+///
+/// The artifact published as v26.8.0 also gives `AssertionError`, with one caveat
+/// worth stating rather than rounding off: that build self-reports
+/// `v26.8.0-alpha.0.0.0`, which sorts BELOW `26.8.0` and so lands inside the band
+/// this constant withholds on. So the clean measurement is 26.7.0 broken / 26.8.1
+/// fixed, and 26.8.0 is bounded by the fix landing upstream before it was cut.
+///
+/// The trade-off is unchanged: withholding costs only stack-trace remapping (a
+/// cosmetic loss), while injecting corrupts the TYPE of a thrown AssertionError,
+/// which breaks `node:test` assertions outright.
 fn source_maps_safe(node_version: &NodeVersion) -> bool {
-    !(node_version.major() == 26 && node_version.minor() == 2)
+    !(node_version.major() == 26 && *node_version < NodeVersion::new(26, 8, 0))
 }
 
 /// `--disable-warning=ExperimentalWarning` (suppresses Node's experimental-feature
@@ -305,6 +322,31 @@ pub(crate) fn test_coverage_exclude_supported(node_version: &NodeVersion) -> boo
     *node_version >= MIN_TEST_COVERAGE_EXCLUDE
 }
 
+/// Node started excluding the user's own test files from an
+/// `--experimental-test-coverage` report by default in **23.5.0** — commit
+/// `ea9a675f56`, "test_runner: exclude test files from coverage by default"
+/// (nodejs/node#56060), which added the `coverageExcludeGlobs.length === 0`
+/// fallback to `kDefaultPattern` in `lib/internal/test_runner/utils.js`.
+///
+/// It was **never backported to 22.x**, so this floor does NOT coincide with
+/// `MIN_TEST_COVERAGE_EXCLUDE` (22.5.0): on 22.5–22.x and 23.0–23.4 the flag
+/// exists while the default exclusion does not. That gap is the whole reason this
+/// is a separate gate. nub pairs Node's default pattern with its own runtime
+/// exclude to stop the exclude from switching that default off — so on a Node that
+/// has no such default, injecting the pattern would EXCLUDE test files stock Node
+/// includes, breaking parity in the opposite direction.
+///
+/// Verified empirically on the logic.js/logic.test.js fixture: 18.19.0, 22.15.0,
+/// 22.16.0, 22.23.1, 22.23.2, 23.0.0, 23.3.0 and 23.4.0 all report the test file;
+/// 23.5.0, 23.6.0, 23.11.0, 24.0.0, 24.17.0, 25.9.0, 26.3.0 and 26.7.0 all exclude
+/// it. 22.23.2 is the newest 22.x published, which is what rules out a backport.
+const MIN_TEST_COVERAGE_DEFAULT_EXCLUSION: NodeVersion = NodeVersion::new(23, 5, 0);
+
+/// Whether the target Node applies its own default test-file coverage exclusion.
+pub(crate) fn test_coverage_default_exclusion_applied(node_version: &NodeVersion) -> bool {
+    *node_version >= MIN_TEST_COVERAGE_DEFAULT_EXCLUSION
+}
+
 /// Compute the flags Nub should inject for the given Node version,
 /// after subtracting any user opt-outs from argv and NODE_OPTIONS.
 ///
@@ -353,8 +395,9 @@ pub fn compute_inject_flags(
     let mut flags: Vec<&str> = Vec::new();
 
     for &flag in ALWAYS_INJECT {
-        // --enable-source-maps is withheld on Node 26.2.x (see `source_maps_safe`):
-        // there it turns a no-message AssertionError into a TypeError.
+        // --enable-source-maps is withheld below Node 26.8 on the 26.x line (see
+        // `source_maps_safe`): there it turns a no-message AssertionError into a
+        // TypeError.
         if flag == "--enable-source-maps" && !source_maps_safe(&node_version) {
             continue;
         }
@@ -1067,6 +1110,31 @@ mod tests {
     }
 
     #[test]
+    fn test_coverage_default_exclusion_gated_to_23_5_and_never_backported_to_22() {
+        // The two coverage gates do NOT share a floor, and treating them as one is
+        // what breaks parity on 22.x: there the flag exists but Node has no default
+        // test-file exclusion, so pairing nub's runtime exclude with Node's default
+        // pattern would hide test files stock Node reports. 22.23.2 is the newest
+        // 22.x published and still has no default — the line never got the backport.
+        assert!(!test_coverage_default_exclusion_applied(&v(18, 19, 0)));
+        assert!(!test_coverage_default_exclusion_applied(&v(22, 15, 0)));
+        assert!(!test_coverage_default_exclusion_applied(&v(22, 23, 2)));
+        assert!(!test_coverage_default_exclusion_applied(&v(23, 4, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(23, 5, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(24, 0, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(26, 7, 0)));
+
+        // The whole band between the two floors has the flag and not the default.
+        for version in [v(22, 5, 0), v(22, 23, 2), v(23, 4, 0)] {
+            assert!(
+                test_coverage_exclude_supported(&version)
+                    && !test_coverage_default_exclusion_applied(&version),
+                "{version:?} must be inside the flag-without-default band"
+            );
+        }
+    }
+
+    #[test]
     fn strips_gated_node_options_flag_below_floor_both_token_forms() {
         // Node 20.0 is below --experimental-webstorage (22.4), --disable-warning
         // (20.11), and --test-coverage-exclude (22.5). Both the valueless and the
@@ -1124,12 +1192,13 @@ mod tests {
     }
 
     #[test]
-    fn source_maps_withheld_only_on_26_2_band() {
-        // Node 26.2.x regresses: with --enable-source-maps, a no-message
-        // assert.ok(false) rethrows as TypeError instead of AssertionError. nub
-        // withholds the injection there and ONLY there — 24 / 25 / 26.1 and a
-        // future 26.3 are clean. (Verified empirically on real Node 26.2.0.)
-        for ver in [v(24, 0, 0), v(25, 8, 0), v(26, 1, 0), v(26, 3, 0)] {
+    fn source_maps_withheld_across_the_whole_26_x_regression_band() {
+        // Every Node 26.x below 26.8 regresses (nodejs/node#63169): with
+        // --enable-source-maps, a no-message assert.ok(false) throws TypeError
+        // [ERR_INVALID_ARG_TYPE] instead of AssertionError. The band's EDGES are
+        // what this pins — 25.9.0 below it, 26.8.0 (first release that can carry
+        // the upstream fix b5d37cd4) and 27.0.0 above it.
+        for ver in [v(24, 0, 0), v(25, 9, 0), v(26, 8, 0), v(27, 0, 0)] {
             assert!(
                 source_maps_safe(&ver),
                 "source maps must be safe to inject on {ver:?}"
@@ -1140,8 +1209,8 @@ mod tests {
                 "--enable-source-maps must inject on {ver:?}"
             );
         }
-        // The affected band: every 26.2.x patch is gated out.
-        for ver in [v(26, 2, 0), v(26, 2, 5)] {
+        // The affected band: 26.0.0 through 26.7.x, inclusive.
+        for ver in [v(26, 0, 0), v(26, 2, 0), v(26, 7, 0)] {
             assert!(
                 !source_maps_safe(&ver),
                 "source maps must be withheld on {ver:?}"

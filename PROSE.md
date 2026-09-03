@@ -21,7 +21,8 @@ Maintainer responsiveness on a public repo is a visible signal of the project's 
 - **Don't cite file paths, line numbers, or symbol names unless the reader has to open that file.** They make a two-line decision read as a report, and nobody asked you to show your work. Say what the code does instead — "the parse context is per-call state now", not "`core/memoizer.ts:133` writes onto the context".
 - **Never reply to an automated bot as if it were a human.** CI bots, review bots, dependency bots, and similar automation are not people. Don't thank them, don't address them conversationally, don't acknowledge their comments as if a person wrote them. Act on what the automation reports; don't converse with it.
 - **Reference the associated issue(s) in every PR body.** A PR that resolves a bug uses a closing keyword — `Closes #N` / `Fixes #N` — so the merge auto-closes the issue. A PR that merely relates to an issue (touches the area, partial work, follow-up) uses `Refs #N`. Never land a fix-PR that leaves its issue unlinked.
-- **Close issues with a brief factual comment — never silently.** State what fixed it, or why no code fix is needed (working as intended, a usage question, a duplicate, won't-fix). Keep the comment as short as possible while carrying that one fact. Don't leave a non-fix issue hanging, and don't close without a word.
+- **Close issues with a brief factual comment — never silently, never a recap.** State what resolved it, or why no code fix is needed (working as intended, a usage question, a duplicate, won't-fix), in a line — the linked PR already carries what was done and how, so don't re-explain the fix or the process. Thank an external reporter. Don't leave a non-fix issue hanging, and don't close without a word.
+- **The final comment on a merged PR is a sign-off, not a summary.** Extremely concise — no restatement of what the PR did or the process of doing it. Thank an external contributor, and acknowledge the release the change landed in (`Shipped in v<ver>: <release link>`), or that it ships in the next release if one isn't cut yet.
 - **On release, comment the version + release link on every closed issue and merged PR that shipped in it.** A fix being merged is not the same as it being on a published binary; this comment closes that gap for the reporter. For each issue closed and PR merged since the previous release, post the version it shipped in and a link to the release.
 
 ---
@@ -36,6 +37,7 @@ Register: terse, code-first, no marketing fluff inside docs pages. Show the thin
 - **Never start a sentence with a lowercase letter.** Capitalize the first word even when it would naturally be lowercase (a command name, a package, an identifier). Reword so a capitalized prose word leads — this also satisfies the rule above.
 - **Section headings are the command/flag/field spelling, not prose — wherever a section maps cleanly onto one.** A section about a flag is headed by that flag; a section about a subcommand is headed by that subcommand — not an English paraphrase. Prose headings are for sections with no command surface (concepts, behaviors). Nest sub-syntax as a child heading under the owning flag.
 - **A heading that IS a code token is rendered as inline code — backtick the whole token.** Covers flags, subcommands, config/property fields, file names, env vars, and API identifiers. (The "never START a heading with inline code" rule governs PROSE headings only — don't open a prose heading with a backtick. A heading that is *purely* a code token backticks the entire token, and that is correct. A prose heading with a token mid-phrase backticks just that token.)
+- **Frame a section by the feature, not its absence.** Head an opt-in capability by what the reader gets and lead the body with how to enable it — "Reference cycles", not "No cycle support by default". Negative framing ("No X", "X is not supported by default") sells the gap instead of the feature; the limitation rides along as a clause, not as the headline. (Burned 2026-08-28: a Zod Mini section headed "No cycle support by default" — the maintainer: "dont frame things negatively".)
 - **Keep register consistent within a sibling-heading group, and never make a heading the place for pedantic correctness.**
   - **Don't mix registers across sibling headings.** A run of headings that flips between English, a syntax token, and a flag is unacceptable — pick one register for the group. For feature/concept sections, English wins (a syntax token becomes the English name of the concept). A code-token heading is for a group that is genuinely command/flag/field reference; a lone feature never gets a code-token heading just because it happens to have a syntax.
   - **Never cram exact syntax into a heading for correctness** — the body carries the precise spelling. The heading names the topic cleanly in English; pedantic accuracy lives in the prose.
@@ -73,6 +75,8 @@ Register: terse, code-first, no marketing fluff inside docs pages. Show the thin
 
 - **Terminal mockups show real captured output only — never invented lines.** Capture from the actual built binary or ground the exact string in the source; never invent example output, and never show output for a flag or command that doesn't exist.
 - **Never address a concern nobody has — cut defensive editorializing.** Lines that pre-empt an imagined worry ("no minimum version", "this is the correct, conservative behavior", "rather than silently misread") answer a question the reader never asked. If a reader wasn't going to ask it, delete the sentence. State what the feature does; don't defend against objections nobody raised.
+- **Never reassure the reader that something works — the reassurance is what plants the doubt.** "X keeps working", "this is safe for Y", "we fixed the case where Z" all imply the reader should have been worried, and most of them never were. It reads as *by the way, there was a bug you never suspected*. If a thing works, say nothing; the absence of a warning is the claim. Only name a behavior when the reader must DO something differently because of it.
+- **Cut the process, keep the conclusion.** How a finding was reached — what was gated on what, which measurement superseded which, what you expected before you looked — is your working memory, not the reader's. They want the answer and enough evidence to trust it. A sentence explaining why you are telling them something is nearly always the sentence to delete.
 - **Don't inventory the exceptions — omission is usually the better edit.** A reader is served by the rule, not by a catalog of where it bends; cutting a true-but-peripheral clause is not a loss of accuracy, it IS the edit. The test: does the reader's next action change if they never learn it? Two tells — a sentence whose only job is an asymmetry between two things that behave the same in the common case, and a caveat restating what an earlier line already established. An exception that genuinely bites belongs in the section where a reader would hit it, not stacked into an intro.
 - **Don't sprinkle a cross-cutting flag's asides across unrelated pages.** A flag that cuts across many features (an escape hatch, a compatibility toggle) gets introduced once, on its own surface — or as a documented flag of the command a page is about. Don't tack a tangential "and `--flag` turns this off" note onto an unrelated feature page that never introduces the flag; it just confuses people.
 
@@ -114,6 +118,57 @@ The rules above govern every marketing surface; these govern the SHAPE of a long
 - **Bailout commands are sub-section asides, not top-level sections.** Surfaces that exist for completeness get a short child heading under the section whose behavior they back up, never their own top-level section.
 - **Asides are styled and sparing.** Default blockquote styling is rarely acceptable on a marketing surface; style asides deliberately, and use one per post at most.
 - **Showcase protective refusals as a feature — with real failure output.** Wherever the tool eagerly refuses an unsound or unsupported operation, show it: the failing command, the real captured error, and (where useful) the exit code, then one tight framing sentence — never a paragraph apologizing for it. Mark failure/unsupported lines distinctly (a red ❌ in the inline comment) and successful lines with a check, so the asymmetry reads at a glance. Real captured output only; never invent it.
+
+### Plain statements, not conversation
+
+Public prose is written, not spoken. A sentence that would sound natural said aloud to a colleague — an idiom, a hedge, an aside, a bit of personality attached to a tool — reads as chatty on a page, and a post full of them reads as padded. The fix is always the same: say the fact in the plainest declarative that carries it. Concretely, the habits to cut, each with the plain form beside it:
+
+| Habit | Conversational | Plain |
+| --- | --- | --- |
+| Colloquial verb or idiom | Node has been circling it since 19.7.0. | Node's version has been experimental since 19.7.0. |
+| Idiom standing in for a number | Starting a stock `node` costs what it costs — 34 ms on this machine. | A stock `node` takes 34 ms on this machine before any user code runs. |
+| Cleft or "what X is" construction | Nub staples the same way Bun and Deno do. What it staples on is a stock Node. | Nub uses the same stapling. The runtime is a stock Node. |
+| Personified tool | `dlopen` loads it, and `dlopen` wants a file on disk. | `dlopen` loads it from a path on disk. |
+| Narrative flourish for a technical fact | Addons are where bundler-based tools historically gave up. | Native addons are the hard case for a bundler. |
+| Chatty aside or hedge ("do watch … though") | Do watch any path your own code computes from `import.meta.dirname`, though: | Paths your own code computes from `import.meta.dirname` are the exception: |
+| Cute filler around a concrete detail | you'll find `audio-capture.node` and friends sitting under a `bunfs/root/` prefix, waiting to be written out | its binary carries `audio-capture.node` and its siblings under a `bunfs/root/` prefix |
+| First-person disclaimer as a topic sentence | We didn't invent extraction. | Extraction is established practice. |
+| Parenthetical aside with an idiom | (Lambda needs no ceremony at all — the launcher uses the writable temp directory there.) | On Lambda the launcher uses the writable temp directory, so no warm-up step is needed. |
+| Metaphor as a label | The dials, when a build needs them: | The flags: |
+| Casual preposition or verb ("on them", "grab") | already have a Node on them / telling the user to grab the default build | already have Node installed / an error that points to the default build |
+| Vague demonstrative ("like this", "this thing") | Nub won't guess a version for a binary like this. | Nub does not infer a Node version for this shape. |
+| Advice register ("worth using when you can") | A range is worth using when you can, because it lets the binary adopt whatever qualifying Node the machine already has. | A range lets the binary use any qualifying Node already on the machine: |
+| Spoken-rhythm qualifier ("that do end up") | First runs that do end up downloading a Node show a progress box while it happens; | A first run that downloads Node shows a progress box; |
+| Intensifier | Nub is totally erasable. | Nub is fully erasable. |
+| "Here is …" presenter opener | Here is what a compiled `sharp` app extracts: | A compiled `sharp` app extracts this tree: |
+| Chatty code comment | `// the ordinary ESM way to name a file beside your module also just works` | `// a file named relative to the module resolves too` |
+
+**Headings are noun phrases, never sentences.** A heading that reads as a clause or a claim ("The app is the small part", "Packages that ship as files don't drag their dependencies along", "The same source compiles to the same bytes") is a topic sentence in the wrong place — the argument belongs in the body, and the heading names the topic. Keep the command/flag-spelling rule for reference sections; for everything else, the shortest noun phrase that identifies the section:
+
+| Sentence-shaped heading | Noun phrase |
+| --- | --- |
+| Imports that aren't code | Assets |
+| Real files, not a virtual filesystem | Self-extraction |
+| What the bundler does with the hard parts | Dynamic imports and workers |
+| Packages that ship as files don't drag their dependencies along | Unbundled packages |
+| The app is the small part | App size |
+| The flag tour | Flags |
+| Eight targets, one machine | Cross-compilation |
+| The same source compiles to the same bytes | Reproducible builds |
+| A real app, compiled | opencode |
+
+### Reads-as-AI: the fingerprint catalogue and the lineup test
+
+Careful frontier-model prose passes every published AI-detection tell (delve-words, em dashes, burstiness — all dead as signals) and passes neural detectors near zero, and an LLM judge asked "does this read as AI?" against a rubric shares the generator's taste and passes text a human reads as machine-written in two paragraphs. What still gives it away is structural, and it survives ordinary revision:
+
+- **The shaped closer.** Every paragraph lands on a tidy resolution: an antithesis ("X rather than Y", "not X but Y"), a colon-then-aphorism, a free-standing epigram, or a slogan restating the section ("That's the whole trick — …"). Fix: end paragraphs on a fact; delete the closer and reread — the paragraph usually ended fine one sentence earlier.
+- **Fact → pivot → significance.** A concrete fact, then a dash or colon, then a clause explaining why it matters. Once per piece is style; every paragraph is a fingerprint.
+- **The concession engine.** Concede the competitor's strength, deliver three parallel examples, land the punchline for your side — the same escalating shape each time. Fix: state your position first, plainly, and let the prior art follow as reporting with no return-pivot.
+- **Narrated structure and agentless labels.** Pre-announced moves ("One failure mode to know about:"), abstract topic sentences with no actor ("The version contract stays explicit."), personified tools ("the linker wants…"), performed candor ("no point pretending otherwise"), stacked reassurance endings ("X is fine. Y needs no ceremony either.").
+- **Uniform density and constructed numbers.** Exactly one number per clause, every claim equally weighted, no measurement conditions — and ratios computed from two other numbers purely for rhetorical effect ("all eight targets for half the download of one X binary"). Humans write "38 ms on my machine, median of 30 runs" and then go three paragraphs with no number at all; a reported measurement names its conditions, a constructed comparison names none.
+- **Zero authorial presence** in prose that carries a byline. A true first-person anchor — an incident, a machine, a surprise — discriminates more than any amount of polish. Never fabricate one; a signed post's first-person claims must be true.
+
+Evaluating a de-slop pass needs a discrimination test, not a score. Assemble ten-plus verified human samples of the same genre — comparable launch posts and essays, plus the credited author's own published prose, fetched verbatim (not through a summarizing fetcher, which paraphrases) — shuffle the candidate chunks unlabeled among them, and have a fresh judge rank the lineup by "most likely machine-generated," naming where it would bet real money and quoting evidence for every high placement. The candidate must not attract money-bets. The rules that make it work: a fresh judge every round (one that saw an earlier draft is contaminated); instruct judges that recognizing a famous sample is not evidence and that failing to place a sample is not either; and when several candidates come from one document, expect them to cluster on shared voice and subject — read the quoted evidence, not the rank, and treat "these N fall together" as the confound it is. A neural detector is a regression gate only: passing means nothing, failing means the edit regressed. The loop has converged when the judges' quoted evidence stops being fixable spans and becomes the confound; past that point the remaining gate is a human read.
 
 ---
 

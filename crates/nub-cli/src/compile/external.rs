@@ -59,9 +59,9 @@ impl ShimPlan<'_> {
         !self.external.is_empty() || self.dynamic
     }
 
-    /// The flag to name in a diagnostic. `--external` first: both share the 22.15
-    /// floor, but `--external`'s applies unconditionally, so it is the one a user
-    /// can act on without first knowing whether a computed import survived.
+    /// The flag to name in a diagnostic. `--external` first: both share the same
+    /// requirement, but `--external`'s applies unconditionally, so it is the one a
+    /// user can act on without first knowing whether a computed import survived.
     fn flag(&self) -> &'static str {
         if self.external.is_empty() {
             "--allow-dynamic-import"
@@ -76,21 +76,35 @@ const WRAPPER: &str = "__nub_entry.mjs";
 /// The generated hook module.
 const HOOK: &str = "__nub_external.mjs";
 
-/// `module.registerHooks` — a synchronous resolve hook, no loader worker and no
-/// experimental warning — landed in Node 22.15, the same floor nub's own fast
-/// tier uses. Below it the shim has nothing to register with.
-fn min_node() -> NodeVersion {
-    NodeVersion::new(22, 15, 0)
-}
-
 /// Reject a shim-needing build against a Node the shim cannot run on, BEFORE the
 /// ~100 MB runtime download. `version` is the exact embedded version, or (under
 /// `--smol`) the floor the launcher refuses to start below — so in both shapes
 /// it is a lower bound on what will actually run the artifact. `source` names
 /// where that version came from, because a bare major pin floors at `X.0.0` and
 /// the refusal is otherwise baffling on a machine running a newer X.
+///
+/// The generated `__nub_external.mjs` calls `module.registerHooks` unconditionally,
+/// so the gate is exactly "does that API exist" — [`NodeVersion::supports_augmentation`],
+/// the same predicate nub's own fast tier uses. This function used to hold a private
+/// `22.15.0` floor and compare against it, which accepted Node 23.0.0–23.4.x: those
+/// sort above 22.15.0 but predate `registerHooks` on the 23.x line, which got it at
+/// 23.5.0. The build succeeded and the ARTIFACT died at startup on `registerHooks is
+/// not a function`. A bare `--target 23` floors at 23.0.0, landing in that band.
+///
+/// This gate sees a FLOOR, not the pin's whole acceptance set, so it cannot be the
+/// only check under `--smol`: a pin whose floor lands in 22.15.0..23.0.0 passes here
+/// and the launcher would still accept a 23.2 that satisfies `candidate >= floor`.
+/// Illustrative shapes, not a closed list: `--target ">=22.15"`, `--target 22.15`,
+/// `--target lts/jod`, `--target "<23"`.
+///
+/// That class is closed at the other end rather than here. `Manifest::requires_augmentation`
+/// records that the payload NEEDS the API, and `SmolTarget::matches` applies
+/// `supports_augmentation` to the candidate it actually discovered — judging the
+/// runtime in hand instead of predicting it from a bound. This gate remains worth
+/// keeping because it fails the BUILD, which is where a target the author chose
+/// wrong should be reported, and it does so before the ~100 MB download.
 pub fn check_node_support(version: &NodeVersion, source: &str, plan: &ShimPlan<'_>) -> Result<()> {
-    if !plan.needed() || *version >= min_node() {
+    if !plan.needed() || version.supports_augmentation() {
         return Ok(());
     }
     let flag = plan.flag();
@@ -99,14 +113,25 @@ pub fn check_node_support(version: &NodeVersion, source: &str, plan: &ShimPlan<'
     } else {
         "or drop --external and let the package be bundled"
     };
+    // Suggest a floor on the line the user already targets. Telling someone on 23.4
+    // to "pass --target 22.15 (or newer)" is both a cross-major downgrade and, taken
+    // literally, wrong — 23.4 IS newer than 22.15.
+    let floor = version.fast_tier_floor_for_line();
+    // "or newer" is only safe from the 23.x floor up; from 22.15 it would sweep the
+    // 23.0–23.4 band right back in, which is the very fallacy this gate exists to fix.
+    let onward = if floor == NodeVersion::new(23, 5, 0) {
+        format!("Pass --target {floor} (or newer)")
+    } else {
+        format!("Pass --target {floor} or newer, other than 23.0 through 23.4")
+    };
     bail!(
-        "{flag} needs Node {} or newer, and this build targets Node {version} \
+        "{flag} needs module.registerHooks, and this build targets Node {version} \
          (from {source}).\n\
-         \x20\x20It is served by a hook the artifact installs at startup\n\
-         \x20\x20(module.registerHooks), which older Node does not have.\n\
-         \x20\x20Pass --target {} (or newer), {way_out}.",
-        min_node(),
-        min_node()
+         \x20\x20The artifact installs that hook at startup to resolve what it was\n\
+         \x20\x20told to leave for run time.\n\
+         \x20\x20module.registerHooks reached the 22.x line at 22.15.0 and the 23.x\n\
+         \x20\x20line at 23.5.0, so Node {version} does not have it.\n\
+         \x20\x20{onward}, {way_out}."
     )
 }
 
@@ -483,6 +508,73 @@ mod tests {
         assert!(
             dyn_msg.contains("--allow-dynamic-import") && !dyn_msg.contains("--external"),
             "must name only the flag in play: {dyn_msg}"
+        );
+    }
+
+    /// The gate is "does `module.registerHooks` exist", not "is this newer than
+    /// 22.15.0". Node 23.0.0–23.4.x sorts above 22.15.0 and has no such API — the
+    /// 23.x line got it at 23.5.0 — so a shim build against that band produced a
+    /// binary that died at startup. A bare `--target 23` floors at 23.0.0, which is
+    /// how a user reaches this without naming a patch version.
+    #[test]
+    fn the_node_gate_refuses_the_23_0_to_23_4_registerhooks_hole() {
+        let prettier = pkgs(&["prettier"]);
+
+        for refused in [
+            NodeVersion::new(23, 0, 0),
+            NodeVersion::new(23, 4, 0),
+            NodeVersion::new(23, 4, 99),
+        ] {
+            let err = match check_node_support(&refused, "--target 23", &plan(&prettier, false)) {
+                Err(err) => err,
+                Ok(()) => panic!("Node {refused} has no registerHooks and must be refused"),
+            };
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(&refused.to_string()),
+                "must name what was targeted: {msg}"
+            );
+            // The suggestion has to stay on the line the user targets. Sending someone
+            // on 23.4 to 22.15 is a cross-major downgrade, and "22.15 or newer" would
+            // re-admit the very band being refused.
+            assert!(
+                msg.contains("--target 23.5.0"),
+                "must suggest the 23.x line's own floor, not 22.15.0: {msg}"
+            );
+            assert!(
+                !msg.contains("--target 22.15.0"),
+                "must not suggest a cross-major downgrade: {msg}"
+            );
+        }
+
+        // Both real floors are accepted, and so is everything above the 23.x one.
+        for accepted in [
+            NodeVersion::new(22, 15, 0),
+            NodeVersion::new(23, 5, 0),
+            NodeVersion::new(23, 11, 1),
+            NodeVersion::new(24, 0, 0),
+        ] {
+            assert!(
+                check_node_support(&accepted, "--target", &plan(&prettier, false)).is_ok(),
+                "Node {accepted} has registerHooks and must be accepted"
+            );
+        }
+    }
+
+    /// Below the 22.x floor the suggestion cannot say a bare "or newer": that phrase
+    /// sweeps 23.0–23.4 back in, which is the ordering fallacy the gate exists to fix.
+    #[test]
+    fn the_node_gate_excludes_the_hole_when_it_suggests_the_22_floor() {
+        let err = check_node_support(
+            &NodeVersion::new(20, 19, 0),
+            "--target",
+            &plan(&pkgs(&["prettier"]), false),
+        )
+        .expect_err("must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("other than 23.0 through 23.4"),
+            "a 22.15 suggestion must carve out the hole: {msg}"
         );
     }
 

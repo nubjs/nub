@@ -21,7 +21,7 @@ symlink .repos
 
 # Internal design corpus (plans, command/runtime specs, research). Gitignored so
 # absent in a fresh worktree — symlinked so an impl agent can read the canonical
-# spec a .fray thread points to (e.g. wiki/commands/init.md).
+# spec a frizz thread points to (e.g. wiki/commands/init.md).
 symlink wiki
 
 # fray orchestration control surface. Symlinked so a worktree-isolated sub-agent
@@ -32,7 +32,11 @@ symlink wiki
 # (the sandbox check is path-prefix based and doesn't resolve symlinks).
 # NOTE: this covers SCRIPTED worktrees (new-worktree.ts). HARNESS-created
 # isolation:worktree worktrees do NOT run new-worktree.ts — those rely on the
-# dispatch-prompt step-0 `ln -s <abs-shared-root>/.fray .fray`.
+# dispatch-prompt step-0 `ln -s <abs-shared-root>/.frizz .frizz`.
+# Both names: the tool was renamed fray -> frizz, and only the old name was
+# listed, so a scripted worktree silently got NO orchestration surface
+# ("source missing, skipping '.fray'").
+symlink .frizz
 symlink .fray
 
 # The prebuilt N-API addon. `--all-features` turns on `embed-runtime`, whose

@@ -105,6 +105,7 @@ pub const ERR_AUBE_USAGE_SPEC_WRITE_FAILED: &str = "ERR_AUBE_USAGE_SPEC_WRITE_FA
 pub const ERR_AUBE_REMOVE_PRIOR_INSTALL_DIR: &str = "ERR_AUBE_REMOVE_PRIOR_INSTALL_DIR";
 pub const ERR_AUBE_CONFIG_NESTED_AUBE_KEY: &str = "ERR_AUBE_CONFIG_NESTED_AUBE_KEY";
 pub const ERR_AUBE_NO_BRANDED_CONFIG_FILE: &str = "ERR_AUBE_NO_BRANDED_CONFIG_FILE";
+#[rustfmt::skip] pub const ERR_AUBE_CONFIG_SETTING_UNSUPPORTED: &str = "ERR_AUBE_CONFIG_SETTING_UNSUPPORTED";
 pub const ERR_AUBE_CONFLICTING_BUILD_FLAGS: &str = "ERR_AUBE_CONFLICTING_BUILD_FLAGS";
 pub const ERR_AUBE_ACCESS_INVALID_ARGUMENT: &str = "ERR_AUBE_ACCESS_INVALID_ARGUMENT";
 pub const ERR_AUBE_SHIM_CREATE_FAILED: &str = "ERR_AUBE_SHIM_CREATE_FAILED";
@@ -593,6 +594,12 @@ pub const ALL: &[CodeMeta] = &[
         name: ERR_AUBE_CONFIG_NESTED_AUBE_KEY,
         category: category::ENGINE_CLI,
         description: "`aube config set <prefix>.<sub> …` was used for a key whose prefix is an aube map setting (e.g. `allowBuilds.<pkg>`). Such nested writes would otherwise land in `.npmrc` where aube doesn't read them and npm warns/errors about the unknown key — set the map in workspace yaml or `package.json#aube.<prefix>` instead.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_CONFIG_SETTING_UNSUPPORTED,
+        category: category::ENGINE_CLI,
+        description: "`config set` named a setting the active embedder profile declares it does not consume (`unsupported_settings`), because it does not route the command that reads it. Writing the key would put a value in the user config that nothing will ever read — and, for an engine-branded name, put the engine's brand there under the host's hand. The error names the host's equivalent knob. Unreachable for standalone aube, whose list is empty.",
         exit_code: None,
     },
     CodeMeta {

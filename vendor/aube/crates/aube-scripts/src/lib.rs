@@ -1295,7 +1295,18 @@ pub async fn run_root_script_by_name(
 /// fallback: returns `Some("node-gyp rebuild")` when the package ships
 /// a `binding.gyp` at its root AND the manifest leaves both `install`
 /// and `preinstall` empty (either one is the author's explicit
-/// opt-out from the default).
+/// opt-out from the default) AND the manifest does not set
+/// `"gypfile": false`.
+///
+/// `gypfile: false` is npm's opt-out for a package that carries a
+/// `binding.gyp` for source builds but ships prebuilt binaries for
+/// normal installs. The gate mirrors npm's `@npmcli/run-script`
+/// (`lib/run-script-pkg.js`), whose condition is `!scripts.install &&
+/// !scripts.preinstall && gypfile !== false && isNodeGypPackage(path)`.
+/// Without it, `install` shelled out to `node-gyp rebuild` for packages
+/// npm installs with no toolchain at all — `better-sqlite3` >= 13 is the
+/// canonical case — so the install failed on any machine without Python
+/// and a C++ compiler even though the package's own prebuilds load fine.
 ///
 /// `has_binding_gyp` is passed by the caller so this helper is
 /// agnostic to *how* presence was detected — the install pipeline
@@ -1308,6 +1319,9 @@ pub fn implicit_install_script(
     has_binding_gyp: bool,
 ) -> Option<&'static str> {
     if !has_binding_gyp {
+        return None;
+    }
+    if manifest.extra.get("gypfile").and_then(|v| v.as_bool()) == Some(false) {
         return None;
     }
     if manifest

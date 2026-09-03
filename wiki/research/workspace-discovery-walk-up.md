@@ -13,7 +13,7 @@ Every tool walks up past leaf `package.json` files to a root-shaped marker. Only
 - **pnpm and bun have a footgun fallback:** with no workspace-root marker found in the walk-up, they *descend* from cwd instead, treating every `package.json` under cwd as a package to run in. Running `pnpm -r exec pwd` from `/tmp` enumerated every test monorepo under `/tmp` and ran in each package; from `/` it timed out at 10 s walking the entire filesystem. Bun behaves the same way for `--filter='*'`.
 - **npm is the outlier in semantics:** from a sub-package it finds the workspace root, but `npm run --workspaces` *silently scopes to only the current sub-package* — siblings run only with explicit `--workspace=name` flags or an invocation from the root.
 - **Cargo and yarn classic are the only ones that fail loudly when there is no workspace,** with a clean "could not find Cargo.toml in X or any parent directory" / "Cannot find the root of your workspace" error. Yarn 4 also errors cleanly ("No project found in /"). Deno errors when there is no `deno.json` / `package.json` to anchor to.
-- **No tool surveyed uses a bounded walk that stops at the first `package.json`.** All of them either walk to the filesystem root looking for a workspace marker, or — pnpm and bun — fall back to filesystem descent. The alternative Nub is considering (bound the walk at the nearest `package.json`) is not represented in the surveyed ecosystem.
+- **No tool surveyed uses a bounded walk that stops at the first `package.json`.** All of them either walk to the filesystem root looking for a workspace marker, or — pnpm and bun — fall back to filesystem descent. A bounded walk (stop at the nearest `package.json`) is not represented in the surveyed ecosystem.
 - **Practical recommendation for `nub run -r`:** mirror cargo's contract — walk up looking for a workspace-root marker (a `package.json` with `"workspaces"`, a `pnpm-workspace.yaml`, or whatever Nub standardises on) and error clearly if none is found before the filesystem root. **Do not** ship pnpm's fallback descent; it is the source of every recursive command's worst case (`pnpm -r` from `$HOME` walks the user's home directory). Whether to also support npm's "scoped to current sub-package" semantic is a separate decision this doc has no opinion on.
 
 ## (1) Test scaffold
@@ -317,7 +317,7 @@ What each tool does in a lone package with no enclosing workspace. Four of the s
 
 **No.** Every tool surveyed either walks unbounded to the filesystem root looking for a workspace-shaped marker, or — pnpm and bun — walks unbounded *and* descends from cwd on a miss.
 
-The "stop at the first `package.json` going up" design Nub is considering is not represented in the surveyed ecosystem. That is not necessarily wrong: Nub is the runtime while the package manager is something else (pnpm/npm/yarn/bun), so the semantics of `nub run -r <script>` are Nub's to define. The closest analog is **cargo's contract**: walk up to a clearly-marked workspace root, error if none is found.
+A "stop at the first `package.json` going up" design is not represented in the surveyed ecosystem. That is not necessarily wrong: Nub is the runtime while the package manager is something else (pnpm/npm/yarn/bun), so the semantics of `nub run -r <script>` are Nub's to define. The closest analog is **cargo's contract**: walk up to a clearly-marked workspace root, error if none is found.
 
 ### (3.6) Documented justification for the walk-past-leaf behavior
 
@@ -382,10 +382,11 @@ Notes only; the design decision itself lives elsewhere.
 - deno workspaces: <https://docs.deno.com/runtime/fundamentals/workspaces/>
 - deno task `--help` (in-tool) for the `-r` / `-f` flags (not on the docs page as of 2026-05-21)
 
-All empirical commands above were run on macOS 25.5 (Darwin 25.5.0, arm64) on 2026-05-21. Raw test scaffolds were under `/tmp/nub-ws-test.H8RRFa/` and are not preserved beyond the research session.
+All empirical commands above were run on macOS 25.5 (Darwin 25.5.0, arm64) on 2026-05-21. Raw test scaffolds were under `/tmp/nub-ws-test.H8RRFa/` and are not preserved.
 
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Reworded the design-in-progress references as a neutral comparison.

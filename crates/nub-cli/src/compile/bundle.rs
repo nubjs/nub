@@ -48,14 +48,15 @@ use rolldown::plugin::{
     HookRenderChunkArgs, HookRenderChunkOutput, HookRenderChunkReturn, HookResolveIdArgs,
     HookResolveIdOutput, HookResolveIdReturn, HookTransformArgs, HookTransformOutput,
     HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, PluginContext,
-    SharedLoadPluginContext, SharedTransformPluginContext,
+    PluginContextResolveOptions, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
     CodeSplittingMode, EmittedChunk, InnerOptions, IsExternal, ManualCodeSplittingOptions,
-    MatchGroup, MatchGroupName, ModuleType, Output, OutputFormat, Platform, RawMinifyOptions,
-    ResolveOptions, ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    MatchGroup, MatchGroupName, ModuleType, Output, OutputFormat, Platform, RawCompressOptions,
+    RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed, ResolveOptions, ResolvedExternal,
+    SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
@@ -64,7 +65,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use string_wizard::{Hires, MagicString, SourceMapOptions};
 
-use super::{closure, loaders, native, native_layout};
+use super::{closure, loaders, metafile, native, native_layout};
 
 /// Where the source map goes. `Linked` and `External` both emit a real `.map`;
 /// they differ only in whether the bundle references it — which for a compiled
@@ -134,6 +135,15 @@ pub struct BundleOptions {
     /// self-contained artifact — running from a cache dir with no `node_modules`
     /// in sight — needs the file carried along.
     pub native_target: Option<nub_core::compile::TargetPlatform>,
+    /// `--drop console`: remove every `console.*()` call. A call in statement
+    /// position goes entirely; one whose result is read becomes `void 0`, which
+    /// is the value `console.log` returned anyway.
+    pub drop_console: bool,
+    /// `--drop debugger`: remove every `debugger` statement.
+    pub drop_debugger: bool,
+    /// Collect a `--metafile` build report. Off unless asked for — it retains
+    /// every parsed module's source length and import edges for the whole graph.
+    pub metafile: bool,
     /// The Node this artifact is gated on, as (major, minor, patch) — the input to
     /// [`strip_native_polyfills`]. For the default shape that is the exact baked
     /// version. For `--smol` it is the FLOOR of the accepted set, so a polyfill is
@@ -191,6 +201,9 @@ pub struct BundleResult {
     /// bundled implementation chunk.  Compile writes a tiny public wrapper for
     /// each pair after it knows whether a runtime resolve hook is needed.
     pub worker_roots: Vec<WorkerRoot>,
+    /// The `--metafile` report, serialized. `None` unless
+    /// [`BundleOptions::metafile`] asked for one.
+    pub metafile: Option<metafile::Metafile>,
 }
 
 /// One statically traceable worker. `entry` is the URL rewritten into the
@@ -242,6 +255,7 @@ fn bundle_inner(
     // commonly a `/private/tmp` symlink; keep its output cwd in that same
     // spelling or relative region/map ids fall back to the build-machine path.
     let cwd = canonicalize_for_bundler(&cwd);
+    reject_drop_without_minify(opts)?;
     let stem = entry_abs
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -296,12 +310,13 @@ fn bundle_inner(
         // load extracted artifacts without a synthetic package boundary.
         entry_filenames: Some("[name].mjs".to_string().into()),
         chunk_filenames: Some("[name]-[hash].mjs".to_string().into()),
-        minify: Some(RawMinifyOptions::Bool(opts.minify)),
+        minify: Some(minify_options(opts)),
         // The ONLY keep-names switch we touch. Rolldown threads this single flag
         // into both the finalizer's `__name` helper and the minifier's
         // mangle/compress keep-names, so applying it a second time (e.g. via
-        // `RawMinifyOptions::Object`) would run the name-preserving transform
-        // twice and break tree-shaking (vitejs/vite#9164).
+        // `RawMangleOptions::keep_names`) would run the name-preserving transform
+        // twice and break tree-shaking (vitejs/vite#9164). [`minify_options`]
+        // leaves both nested fields unset for exactly that reason.
         keep_names: Some(opts.keep_names),
         treeshake: treeshake_options(opts),
         define: Some(defines(opts)?),
@@ -383,6 +398,16 @@ fn bundle_inner(
     // `__dirname`/`__filename` from the virtual `\0nub-path-globals` module), and its
     // rewrite blanks bytes in place without moving any position.
     let mut plugins: Vec<SharedPluginable> = Vec::new();
+    // FIRST, ahead of every resolver: a plugin that claims an edge returns before
+    // the ones behind it are asked, so an observer placed later never sees what
+    // `ExternalImports` or `NativeAddons` resolved. It rewrites nothing and always
+    // declines, so nothing downstream changes.
+    let edge_kinds: metafile::EdgeKinds = Arc::default();
+    if opts.metafile {
+        plugins.push(
+            Arc::new(metafile::EdgeWatcher::new(Arc::clone(&edge_kinds))) as SharedPluginable,
+        );
+    }
     if let Some(plugin) = &external_plugin {
         // Claim raw package requests before aliases and resolver plugins.
         plugins.push(Arc::clone(plugin) as SharedPluginable);
@@ -402,6 +427,13 @@ fn bundle_inner(
     if let Some(plugin) = &native_plugin {
         plugins.push(Arc::clone(plugin) as SharedPluginable);
     }
+    // Last, and observation-only: it never rewrites a module, so where it sits
+    // among the transforms decides only whether the source length it records is
+    // the authored text or the rewritten one. Last means what the bundler parsed.
+    let modules = Arc::new(metafile::Collector::default());
+    if opts.metafile {
+        plugins.push(Arc::clone(&modules) as SharedPluginable);
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -412,7 +444,9 @@ fn bundle_inner(
             .with_options(options)
             .with_plugins(plugins)
             .build()
-            .map_err(|e| anyhow!("rolldown init:\n{}", render_diagnostics(&e)))?;
+            // Not "rolldown init" — a bad `--define` key lands here, and the
+            // vendored bundler's name is not a thing the user can act on.
+            .map_err(|e| anyhow!("preparing the bundler:\n{}", render_diagnostics(&e)))?;
         bundler
             .generate()
             .await
@@ -510,6 +544,13 @@ fn bundle_inner(
             bytes: a.bytes,
         })
         .collect();
+    // Chunk metadata is captured HERE, while it is still typed, but the report is
+    // only assembled once nub has finished pruning and rewriting its output — a
+    // chunk recorded now can still lose bytes to the native-addon rewrite, and an
+    // asset can still be dropped entirely.
+    let mut report = opts
+        .metafile
+        .then(|| metafile::Report::new(std::env::current_dir().ok()));
     // Rolldown marks an emitted worker chunk `is_entry` exactly like the program's
     // own, so the filenames are the only thing telling them apart here.
     let worker_names = new_urls.worker_names();
@@ -518,6 +559,9 @@ fn bundle_inner(
             Output::Chunk(c) => {
                 if c.is_entry && !worker_names.contains(c.filename.as_str()) {
                     entry = Some(c.filename.to_string());
+                }
+                if let Some(report) = report.as_mut() {
+                    report.add_chunk(c);
                 }
                 files.push(BundledFile {
                     name: c.filename.to_string(),
@@ -622,6 +666,23 @@ fn bundle_inner(
         warn_module_data_assets(&new_urls.module_assets(&kept));
     }
 
+    // The bundler's own output, and only that: `native_files` are verbatim copies
+    // of installed packages and the support files are generated rather than
+    // bundled, so neither has inputs to attribute and both would read as bundle
+    // output that isn't. The docs name what the report therefore excludes.
+    // Drained before the report rather than in the result below, because the
+    // report has to rename external edges and `take` empties the plugin.
+    let external_imports = external_plugin.map_or_else(Vec::new, |p| p.take());
+
+    let metafile = report.map(|report| {
+        let emitted: Vec<(&str, usize)> = files
+            .iter()
+            .chain(assets.iter())
+            .map(|file| (file.name.as_str(), file.bytes.len()))
+            .collect();
+        report.finish(&emitted, &modules, &edge_kinds, &external_imports)
+    });
+
     Ok(BundleResult {
         entry,
         files,
@@ -632,8 +693,9 @@ fn bundle_inner(
         root_support_files: prelude.root_support_files().collect(),
         dynamic_import_sites,
         native_addons,
-        external_imports: external_plugin.map_or_else(Vec::new, |p| p.take()),
+        external_imports,
         worker_roots: new_urls.worker_roots(),
+        metafile,
     })
 }
 
@@ -1605,7 +1667,7 @@ impl CompilePreamble {
     /// on the source path and retains its current layout.
     fn worker_root(&self, source: &Path) -> Result<String> {
         let source = canonicalize_for_bundler(source);
-        let hash = format!("{:x}", Sha256::digest(source.to_string_lossy().as_bytes()));
+        let hash = hex::encode(Sha256::digest(source.to_string_lossy().as_bytes()));
         let id = format!("\0nub:compile-worker-{hash}");
         let mut roots = self
             .roots
@@ -1760,6 +1822,7 @@ impl Plugin for CompilePreamble {
     ) -> impl std::future::Future<Output = HookResolveIdReturn> + Send {
         let root = self.has_root(args.specifier);
         let specifier = args.specifier.to_string();
+        let kind = args.kind;
         let prelude_path = self.runtime_dir.join("compile-preamble.mjs");
         let private_importers = Arc::clone(&self.private_importers);
         let private_import = args.importer.is_some_and(|importer| {
@@ -1788,8 +1851,16 @@ impl Plugin for CompilePreamble {
                 .lock()
                 .map_err(|_| anyhow!("the compile-prelude graph was poisoned by an earlier panic"))?
                 .insert(importer.clone());
+            // The edge's OWN kind, not the default. Re-resolving a `require()`
+            // as an import picks the `import` branch of a conditional `exports`
+            // map, which can be a different file — and it also fabricates an
+            // import edge for the metafile, which reports what the resolver saw.
+            let options = PluginContextResolveOptions {
+                import_kind: kind,
+                ..Default::default()
+            };
             let resolved = ctx
-                .resolve(&specifier, Some(&importer), None)
+                .resolve(&specifier, Some(&importer), Some(options))
                 .await
                 .context("resolving a compile-prelude dependency")?
                 .map_err(|err| {
@@ -2454,7 +2525,7 @@ fn worker_output_name(project_root: &Path, source: &Path, stem: &str) -> String 
         .unwrap_or_else(|| source.to_path_buf())
         .to_string_lossy()
         .replace('\\', "/");
-    let hash = format!("{:x}", Sha256::digest(logical.as_bytes()));
+    let hash = hex::encode(Sha256::digest(logical.as_bytes()));
     worker_output_name_with_hash(stem, &hash)
 }
 
@@ -2608,13 +2679,14 @@ fn is_module_extension(path: &Path) -> bool {
 /// addresses is the absence of a build-time signal about that.
 fn warn_module_data_assets(sources: &[PathBuf]) {
     for source in sources {
-        eprintln!(
-            "note: {} is embedded as a data asset, not as code.\n\
-             \x20\x20It ships exactly as written — never transpiled — and its own imports would\n\
-             \x20\x20resolve against the extracted app dir, which has no node_modules. Reading\n\
-             \x20\x20its text works; executing it does not. A worker entry belongs in\n\
-             \x20\x20new Worker(new URL(…)), which is bundled as a real chunk instead.",
-            source.display()
+        super::warn(
+            &format!("{} ships as a data asset, not as code", source.display()),
+            &[
+                "It ships exactly as written — never transpiled — and its own imports would",
+                "resolve against the extracted app dir, which has no node_modules. Reading",
+                "its text works; executing it does not. A worker entry belongs in",
+                "new Worker(new URL(…)), which is bundled as a real chunk instead.",
+            ],
         );
     }
 }
@@ -3585,6 +3657,53 @@ fn treeshake_options(opts: &BundleOptions) -> TreeshakeOptions {
     TreeshakeOptions::Boolean(true)
 }
 
+/// Minification settings, and the ONE place `--drop` is implemented.
+///
+/// Dropping is not a pass of its own: `console.*()` removal and `debugger`
+/// removal live in oxc's compressor, which Rolldown reaches only through the
+/// minify options. So `--drop` rides the object form, whose sole difference from
+/// `Bool(true)` is the two flags — Rolldown's own `object_all_true_equals_bool_true`
+/// test pins that equivalence, and both `keep_names` fields stay `None` so the
+/// single top-level `keep_names` option keeps driving them.
+///
+/// The consequence is the invariant [`reject_drop_without_minify`] enforces:
+/// there is no compress pass to carry the drop when minification is off, and the
+/// DCE-only path hard-overrides both flags back to false
+/// (`Minifier::build` replaces the options with `CompressOptions::dce()`).
+///
+/// A flag the user did NOT pass stays `None`, which is not the same as `false`:
+/// an unset field falls back to `CompressOptions::smallest()`, and that already
+/// has `drop_debugger` ON. Writing `Some(false)` for the flag the user left out
+/// would make `--drop console` start EMITTING `debugger` statements that plain
+/// minification removes — measured on a compiled artifact, not reasoned about.
+fn minify_options(opts: &BundleOptions) -> RawMinifyOptions {
+    if !opts.drop_console && !opts.drop_debugger {
+        return RawMinifyOptions::Bool(opts.minify);
+    }
+    RawMinifyOptions::Object(RawMinifyOptionsDetailed {
+        mangle: Some(RawMangleOptions::default()),
+        compress: Some(RawCompressOptions {
+            drop_console: opts.drop_console.then_some(true),
+            drop_debugger: opts.drop_debugger.then_some(true),
+            ..RawCompressOptions::default()
+        }),
+        remove_whitespace: true,
+    })
+}
+
+/// Refuse `--drop` alongside `--no-minify` rather than accepting it and silently
+/// dropping nothing. Gated here rather than in the CLI so every caller of the
+/// shared front end inherits it.
+fn reject_drop_without_minify(opts: &BundleOptions) -> Result<()> {
+    if (opts.drop_console || opts.drop_debugger) && !opts.minify {
+        bail!(
+            "cannot combine --drop with --no-minify: dropping runs inside minification, so with \
+             minification off there is no pass to perform it"
+        );
+    }
+    Ok(())
+}
+
 fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
     let mut map = FxIndexMap::default();
     for (k, v) in &opts.auto_define {
@@ -3598,9 +3717,174 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
                  \x20\x20--define 'API_URL=\"https://example.com\"'"
             )
         })?;
+        if let Some(s) = swallowed_define(&v) {
+            let (kept, suggested, outcome) = (&s.kept, &s.suggested, swallowed_define_outcome(&s));
+            bail!(
+                "--define value for `{k}` is not a complete JavaScript expression: {suggested}\n\
+                 \x20\x20A define value is an EXPRESSION, and JavaScript keeps only `{kept}` here —\n\
+                 \x20\x20the rest is discarded (`//` opens a comment). Accepted, it would\n\
+                 \x20\x20{outcome}\n\
+                 \x20\x20Quote it to make it a string:\n\
+                 \x20\x20--define '{k}=\"{suggested}\"'"
+            );
+        }
         map.insert(k, v);
     }
     Ok(map)
+}
+
+/// A `--define` value like `https://example.com`, which is a valid JS expression and
+/// therefore invisible to every other stage of the build.
+///
+/// It parses as the bare identifier `https` followed by a `//` line comment, so oxc
+/// accepts it, the define key validates, the bundle emits `console.log(https)`, and the
+/// only symptom is a `ReferenceError` in the shipped executable — after distribution,
+/// potentially long after. A correctly quoted value (`API="https://x"`) starts with a
+/// quote and never reaches this test, so matching `<scheme>://` costs nothing legitimate:
+/// there is no reason to write an expression followed immediately by a comment.
+///
+/// The scheme grammar is the UNION of two things, because either is enough to make the
+/// value truncate silently. JavaScript identifier characters cover `https`, `_foo` and
+/// `$x`. RFC 3986's `+`, `-` and `.` cover the schemes that are not identifiers at all
+/// and truncate into a different shape: `git+ssh://host` parses as the sum `git + ssh`,
+/// `ms-appx://host` as the difference `ms - appx`, and `obj.http://x` as a member
+/// access — each one accepted by oxc, each one a `ReferenceError` in the shipped binary.
+/// Measured against all three before this was widened.
+///
+/// Leading whitespace is skipped for the same reason oxc skips it: it is trivia, so
+/// ` https://example.com` is the identical trap with a space in front, and testing the
+/// raw first byte walked straight past it.
+/// The three pieces an unquoted-URL diagnostic needs, which stop being the same string
+/// as soon as the scheme is punctuated.
+///
+/// `url` is the value without leading trivia, so the suggested replacement does not
+/// bake a stray space into the string. `expr` is what JavaScript actually keeps, since
+/// `//` opens a comment and everything after it is discarded. `failing` is the first
+/// identifier in that expression, which is the name the `ReferenceError` will really
+/// carry — `git+ssh://h` keeps `git+ssh` and dies on `git`, so quoting the whole scheme
+/// into the message would print an error the user never sees.
+/// What JavaScript would actually keep from a `--define` value, when that is less
+/// than what the user wrote.
+pub(crate) struct SwallowedDefine {
+    /// The source text the parser consumed — what would really be substituted.
+    pub kept: String,
+    /// The value with leading whitespace and comments removed, i.e. the text worth
+    /// quoting in the suggested fix.
+    pub suggested: String,
+    /// The identifier that would be undefined at run time, when `kept` begins with
+    /// one. `2://x` keeps the number `2` and raises nothing, so this is `None` there.
+    pub failing: Option<String>,
+}
+
+/// Leading whitespace and JavaScript comments, removed.
+fn strip_js_trivia(s: &str) -> &str {
+    let mut s = s;
+    loop {
+        s = s.trim_start();
+        if let Some(rest) = s.strip_prefix("//") {
+            // All FOUR ECMAScript line terminators end a `//` comment, not just `\n`:
+            // carriage return and the two Unicode separators do as well. Missing them
+            // made this function swallow the rest of the value as trivia, so a real
+            // truncation read as "nothing was dropped" and shipped silently — the exact
+            // failure the guard exists to prevent. `len_utf8` rather than `+ 1` because
+            // U+2028 and U+2029 are three bytes each, and slicing mid-character panics.
+            s = rest
+                .find(['\n', '\r', '\u{2028}', '\u{2029}'])
+                .map_or("", |i| {
+                    let width = rest[i..].chars().next().map_or(1, char::len_utf8);
+                    &rest[i + width..]
+                });
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            // An unterminated block comment runs to the end, leaving nothing.
+            s = rest.find("*/").map_or("", |i| &rest[i + 2..]);
+        } else {
+            return s;
+        }
+    }
+}
+
+fn leading_identifier(kept: &str) -> Option<String> {
+    let mut chars = kept.char_indices();
+    let (_, first) = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return None;
+    }
+    let end = chars
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '$'))
+        .map_or(kept.len(), |(i, _)| i);
+    Some(kept[..end].to_string())
+}
+
+/// Catch a `--define` value that JavaScript reads as less than the user wrote.
+///
+/// The root cause is upstream: oxc's define validation parses the value and then
+/// throws the result away WITHOUT checking that the parse reached the end of the
+/// input, so a value that stops early is accepted and silently truncated. That is
+/// how `--define API=https://example.com` builds cleanly and then dies at run time
+/// with `ReferenceError: https is not defined` — `//` opened a comment.
+///
+/// Two distinct shapes get here, which is why one test is not enough:
+///
+///  - **Truncation.** The parser stops early and the remainder is real code.
+///    `https://example.com` keeps `https`; `2://x` keeps the number `2`;
+///    `http:/single` keeps `http`. A leading comment (`/* c */https://x`) lands here
+///    too, which the previous `trim_start`-based check could not see.
+///  - **A complete parse that still lost the tail to a comment.** `git+ssh://host`
+///    parses ENTIRELY, as `git + ssh` followed by a comment, so nothing is truncated
+///    — and it still fails at run time on `git`. Only the scheme shape catches it.
+///
+/// Anything the parser rejects outright is left alone: oxc reports that itself, and
+/// its message is about the syntax rather than a guess at intent.
+pub(crate) fn swallowed_define(value: &str) -> Option<SwallowedDefine> {
+    let allocator = oxc_allocator::Allocator::default();
+    let expr = oxc_parser::Parser::new(&allocator, value, oxc_span::SourceType::default())
+        .parse_expression()
+        .ok()?;
+    // The span START matters as much as the end: it sits AFTER any leading comment,
+    // so slicing from 0 would fold that comment into the text shown as "what
+    // JavaScript keeps" — and would then hide the identifier behind a `/`, costing
+    // the ReferenceError the message exists to name.
+    let span = oxc_span::GetSpan::span(&expr);
+    let (start, end) = (span.start as usize, span.end as usize);
+    let kept = value.get(start..end)?.trim();
+
+    let truncated = !strip_js_trivia(value.get(end..)?).is_empty();
+    // `<scheme>://` where the scheme is spellable as JS. RFC 3986 allows `+`, `-`
+    // and `.` in a scheme, and each of those keeps the value parsing as arithmetic
+    // or member access rather than failing.
+    let comment_swallowed = strip_js_trivia(value)
+        .split_once("://")
+        .is_some_and(|(scheme, _)| {
+            !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '+' | '-' | '.'))
+        });
+    if !truncated && !comment_swallowed {
+        return None;
+    }
+    Some(SwallowedDefine {
+        kept: kept.to_string(),
+        suggested: strip_js_trivia(value).trim().to_string(),
+        failing: leading_identifier(kept),
+    })
+}
+
+/// The consequence sentence, which cannot be fixed copy: a value keeping a bare
+/// identifier raises `ReferenceError`, while one keeping a literal just substitutes
+/// the wrong thing and runs. Promising an error that never arrives would send the
+/// reader hunting for the wrong symptom.
+pub(crate) fn swallowed_define_outcome(s: &SwallowedDefine) -> String {
+    match &s.failing {
+        Some(id) => format!(
+            "build cleanly and the compiled binary would fail at run time with\n\
+             \x20\x20`ReferenceError: {id} is not defined`."
+        ),
+        None => format!(
+            "build cleanly and the compiled binary would silently use `{}`.",
+            s.kept
+        ),
+    }
 }
 
 /// Rolldown's `ResolveOptions::alias` shape: a specifier maps to an ordered list
@@ -3748,7 +4032,7 @@ impl ExternalImports {
             hash.update((part.len() as u64).to_le_bytes());
             hash.update(part.as_bytes());
         }
-        let id = format!("\0nub:compile-external:{:x}", hash.finalize());
+        let id = format!("\0nub:compile-external:{}", hex::encode(hash.finalize()));
         Some(ExternalImport {
             id,
             specifier: specifier.to_string(),
@@ -4648,14 +4932,14 @@ fn report_unbundled_packages(packages: &[String]) {
     if unique.is_empty() {
         return;
     }
-    eprintln!(
+    super::note(&format!(
         "Shipping {} package{} unbundled, in {} own installed layout:",
         unique.len(),
         if unique.len() == 1 { "" } else { "s" },
         if unique.len() == 1 { "its" } else { "their" }
-    );
+    ));
     for package in unique {
-        eprintln!("  {package}");
+        super::note(&format!("  {package}"));
     }
 }
 
@@ -4681,13 +4965,13 @@ fn warn_deferred_imports(sites: &[&DynamicSite]) {
         } else {
             format!(" — resolves to {}", quoted_list(&site.resolves_to))
         };
-        eprintln!(
+        super::note(&format!(
             "note: {}:{}:{} {} is resolved where the binary runs, not at build time{resolved}",
             site.module, site.line, site.column, site.snippet
-        );
+        ));
     }
     if let Some(rest) = sites.len().checked_sub(MAX).filter(|n| *n > 0) {
-        eprintln!("note: … and {rest} more deferred import site(s)");
+        super::note(&format!("note: … and {rest} more deferred import site(s)"));
     }
 }
 
@@ -4772,8 +5056,176 @@ mod tests {
             tsconfig: None,
             loaders: Vec::new(),
             native_target: None,
+            drop_console: false,
+            drop_debugger: false,
+            metafile: false,
             target_node: None,
         }
+    }
+
+    /// Whether the bundle emits `value` as a string literal. Quote-agnostic on
+    /// purpose: the source may write `'x'` and the emitted chunk `"x"`, and which
+    /// quote the bundler chose is never what these tests are asserting.
+    fn emits_literal(code: &str, value: &str) -> bool {
+        code.contains(&format!("\"{value}\"")) || code.contains(&format!("'{value}'"))
+    }
+
+    /// Bundle an entry that imports a package, with that package laid out under a
+    /// real `node_modules` so resolution — `exports` conditions included — runs for
+    /// real rather than through a stub.
+    fn bundle_with_package(
+        entry_src: &str,
+        pkg_name: &str,
+        pkg_json: &str,
+        files: &[(&str, &str)],
+        o: &BundleOptions,
+    ) -> String {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nub-bundle-pkg-{}-{seq}", std::process::id()));
+        let pkg = dir.join("node_modules").join(pkg_name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), pkg_json).unwrap();
+        for (name, body) in files {
+            std::fs::write(pkg.join(name), body).unwrap();
+        }
+        // The project's own manifest, without which the entry has no package
+        // boundary and the dependency resolves to nothing — verified against the
+        // real binary, which resolves the same fixture correctly once it is here.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{ "name": "fixture", "type": "module" }"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("entry.ts"), entry_src).unwrap();
+        let res = bundle(&dir.join("entry.ts"), o).expect("bundle succeeds");
+        // Every chunk, not just the entry: a package's code routinely lands in a
+        // split chunk, and which chunk it lands in is not what these tests are about.
+        let code = emitted_chunk_code(&res);
+        let _ = std::fs::remove_dir_all(&dir);
+        code
+    }
+
+    /// `--conditions` claims to ADD to the default condition set rather than
+    /// replace it, which is a claim about the vendored resolver's behavior, not
+    /// nub's. Nothing pinned it, so a resolver bump could silently turn an
+    /// additive flag into a replacing one and quietly change which `exports`
+    /// branch every compiled binary resolves.
+    ///
+    /// Both halves are asserted deliberately: the custom branch is selected when
+    /// asked for, and `import` still resolves when it is — the second is what
+    /// catches "replaced" masquerading as "added".
+    #[test]
+    fn a_custom_condition_is_added_to_the_defaults_not_substituted_for_them() {
+        const PKG: &str = r#"{
+            "name": "conditional",
+            "exports": {
+                ".": { "custom": "./custom.js", "import": "./import.js" },
+                "./plain": { "import": "./plain.js" }
+            }
+        }"#;
+        const FILES: &[(&str, &str)] = &[
+            ("custom.js", "export const WHICH = 'custom';\n"),
+            ("import.js", "export const WHICH = 'import';\n"),
+            ("plain.js", "export const PLAIN = 'plain';\n"),
+        ];
+        const SRC: &str = "import { WHICH } from 'conditional';\n\
+                           import { PLAIN } from 'conditional/plain';\n\
+                           globalThis.OUT = WHICH + PLAIN;\n";
+
+        let mut with = opts();
+        with.minify = false;
+        with.conditions = vec!["custom".to_string()];
+        let selected = bundle_with_package(SRC, "conditional", PKG, FILES, &with);
+        assert!(
+            emits_literal(&selected, "custom"),
+            "--conditions custom must select the custom branch; got:\n{selected}"
+        );
+        assert!(
+            emits_literal(&selected, "plain"),
+            "the default `import` condition must still resolve — a custom condition \
+             ADDS to the defaults, and a subpath with no custom branch proves it was \
+             not substituted for them; got:\n{selected}"
+        );
+
+        // Control: without the flag the same package resolves the other way, so
+        // the assertion above is about the flag and not about the fixture.
+        let mut without = opts();
+        without.minify = false;
+        let default = bundle_with_package(SRC, "conditional", PKG, FILES, &without);
+        assert!(
+            emits_literal(&default, "import"),
+            "without --conditions the import branch must win; got:\n{default}"
+        );
+    }
+
+    /// `--sourcemap-exclude-sources` exists so a shipped map does not carry the
+    /// program's own source text. Nothing asserted it, and the flag is exactly the
+    /// kind that can silently no-op.
+    #[test]
+    fn excluding_sources_drops_the_original_text_from_the_map() {
+        const SRC: &str = "export const MARKER_FROM_SOURCE = 41 + 1;\n\
+                           globalThis.OUT = MARKER_FROM_SOURCE;\n";
+
+        let mut included = opts();
+        included.minify = false;
+        included.sourcemap = SourcemapMode::Inline;
+        included.sources_content = true;
+        let with_sources = bundle_fixture(SRC, &included);
+
+        let mut excluded = opts();
+        excluded.minify = false;
+        excluded.sourcemap = SourcemapMode::Inline;
+        excluded.sources_content = false;
+        let without_sources = bundle_fixture(SRC, &excluded);
+
+        // The map rides as a base64 data URL, so decode rather than string-matching
+        // the emitted code — the marker appears in the CODE either way.
+        let decode_map = |code: &str| -> String {
+            use base64::Engine as _;
+            // `rsplit(..).next()` yields the WHOLE string when the separator is
+            // absent, so its `expect` could never fire and a chunk with no inline
+            // map reached the base64 decoder instead of failing here.
+            let (_, tail) = code
+                .rsplit_once("base64,")
+                .expect("the chunk carries an inline sourcemap comment");
+            let b64 = tail.trim();
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .expect("the inline map must be valid base64"),
+            )
+            .expect("the decoded map must be UTF-8")
+        };
+
+        let kept = decode_map(&with_sources);
+        assert!(
+            kept.contains("MARKER_FROM_SOURCE"),
+            "the control must carry the original text, or this test proves nothing"
+        );
+        let dropped = decode_map(&without_sources);
+        assert!(
+            !dropped.contains("sourcesContent") || !dropped.contains("MARKER_FROM_SOURCE"),
+            "excluding sources must leave the authored text out of the map; got:\n{dropped}"
+        );
+    }
+
+    /// `--alias` was covered only by its `a=b` parser. Nothing asserted that an
+    /// alias actually redirects a resolution, which is the whole flag.
+    #[test]
+    fn an_alias_redirects_the_resolution_to_the_named_package() {
+        const PKG: &str = r#"{ "name": "replacement", "exports": "./index.js" }"#;
+        const FILES: &[(&str, &str)] = &[("index.js", "export const WHO = 'replacement';\n")];
+        const SRC: &str = "import { WHO } from 'original';\nglobalThis.OUT = WHO;\n";
+
+        let mut aliased = opts();
+        aliased.minify = false;
+        aliased.alias = vec!["original=replacement".to_string()];
+        let code = bundle_with_package(SRC, "replacement", PKG, FILES, &aliased);
+        assert!(
+            emits_literal(&code, "replacement"),
+            "the alias must redirect `original` to `replacement`; got:\n{code}"
+        );
     }
 
     fn emitted_entry_code(result: &BundleResult) -> String {
@@ -4825,6 +5277,186 @@ mod tests {
             err.to_string().contains("KEY=VALUE"),
             "the error must name the expected shape, got: {err}"
         );
+    }
+
+    /// A bare URL as a define value used to build clean and ship a binary that died at
+    /// run time. Reproduced end to end before this guard existed: `--define
+    /// API=https://example.com` compiled with no diagnostic, emitted
+    /// `console.log(https)`, and exited 1 with `ReferenceError: https is not defined`
+    /// the first time the program touched the value. It is invisible to every other
+    /// stage because it is VALID JavaScript — identifier plus a `//` line comment — so
+    /// the define key validates and oxc parses it happily.
+    #[test]
+    fn define_rejects_an_unquoted_url_before_it_can_ship() {
+        let mut o = opts();
+        o.define = vec!["API=https://example.com".into()];
+        let err = defines(&o).expect_err("an unquoted URL define must be rejected at build time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ReferenceError: https is not defined"),
+            "the error must name the run-time failure it prevents, so the fix is obvious \
+             without shipping the binary first, got: {msg}"
+        );
+        assert!(
+            msg.contains(r#"--define 'API="https://example.com"'"#),
+            "the error must show the corrected command verbatim, got: {msg}"
+        );
+    }
+
+    /// The guard must not fire on the CORRECT spelling, or it would reject the very
+    /// form the error message tells people to use. `--help` documents this shape.
+    #[test]
+    fn define_accepts_a_quoted_url() {
+        let mut o = opts();
+        o.define = vec![r#"API="https://example.com""#.into()];
+        let map = defines(&o).expect("a quoted URL is a valid string expression");
+        assert_eq!(
+            map.get("API").map(String::as_str),
+            Some(r#""https://example.com""#)
+        );
+    }
+
+    /// A value the parser consumes to the END is fine however many colons, slashes or
+    /// comments it contains. These are the shapes closest to the trap, so they are what
+    /// would break first if the guard were tightened carelessly — a trailing comment in
+    /// particular has to survive, because `--define-file` values are commonly annotated.
+    #[test]
+    fn define_url_guard_ignores_expressions_that_merely_look_similar() {
+        for value in [
+            "a?b:c",           // conditional
+            "1/2//3",          // division, then a real comment
+            r#""http://x""#,   // already a string
+            r#" "http://x""#,  // a string with leading trivia
+            "{\"a\":1}\n// n", // an object, then an explanatory comment
+            "/* lead */ 42",   // a comment before a complete value
+        ] {
+            let mut o = opts();
+            o.define = vec![format!("K={value}")];
+            assert!(
+                defines(&o).is_ok(),
+                "the URL guard must not fire on {value:?}"
+            );
+        }
+    }
+
+    /// The predicate is now "the parser did not reach the end", not "it looks like a
+    /// URL", and these are the cases that distinction buys. Each one built cleanly and
+    /// shipped a wrong value under the previous character-matching guard.
+    ///
+    /// The first is a REGRESSION case: a comment before the URL defeated the old
+    /// `trim_start`, because trimming removes whitespace and a comment is not whitespace.
+    ///
+    /// The last two changed behaviour deliberately. Both were previously allowed on the
+    /// grounds that they "run" — but running is not the bar, since both silently
+    /// substitute something the user plainly did not write. Neither raises
+    /// `ReferenceError`, so the message must not promise one.
+    /// A `//` comment ends at any of the FOUR ECMAScript line terminators, so code after
+    /// a bare `\r`, U+2028 or U+2029 is live code that a truncated value drops. Only `\n`
+    /// was recognised at first, which made the trivia scan eat the remainder and report
+    /// "nothing dropped" — the guard went silent on exactly the values it exists to catch.
+    /// Measured against the built binary: `\n` fired, the other three shipped.
+    ///
+    /// The `\n` row is the positive control. It passed while the others were broken, so a
+    /// version of this test without it would have looked like coverage and proved nothing.
+    #[test]
+    fn define_guard_ends_a_line_comment_at_every_terminator() {
+        for terminator in ['\n', '\r', '\u{2028}', '\u{2029}'] {
+            let mut o = opts();
+            o.define = vec![format!("K=1//c{terminator}after")];
+            let err = defines(&o).err().unwrap_or_else(|| {
+                panic!(
+                    "U+{:04X} ends a line comment, so `after` is live code the value drops — \
+                     the guard must reject it",
+                    terminator as u32
+                )
+            });
+            assert!(
+                err.to_string().contains("keeps only `1`"),
+                "U+{:04X}: the error must name what survives, got: {err}",
+                terminator as u32
+            );
+        }
+    }
+
+    #[test]
+    fn define_guard_catches_what_the_url_shape_missed() {
+        for (value, keeps, expect_reference_error) in [
+            ("/* c */https://x", "https", true),
+            ("2://x", "2", false),
+            ("http:/single", "http", true),
+        ] {
+            let mut o = opts();
+            o.define = vec![format!("K={value}")];
+            let err = defines(&o).expect_err("a truncated define must be rejected at build time");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("JavaScript keeps only `{keeps}`")),
+                "the error must say what JavaScript actually keeps for {value:?}, got: {msg}"
+            );
+            assert_eq!(
+                msg.contains("ReferenceError"),
+                expect_reference_error,
+                "a kept literal raises nothing, so {value:?} must not be described as one \
+                 (and vice versa), got: {msg}"
+            );
+        }
+    }
+
+    /// The first guard matched identifier characters only, and that is not the shape of
+    /// a URL scheme. Each of these compiled and then died at run time — measured against
+    /// the built binary before the predicate was widened, which is why they are pinned
+    /// here rather than reasoned about.
+    ///
+    /// The diagnostic has to name the identifier that ACTUALLY fails, which stops being
+    /// the whole scheme the moment it is punctuated: JavaScript keeps `git+ssh` but the
+    /// program dies on `git`.
+    #[test]
+    fn define_url_guard_covers_punctuated_schemes_and_leading_trivia() {
+        for (value, keeps, fails_on, suggested) in [
+            (
+                "git+ssh://host/repo",
+                "git+ssh",
+                "git",
+                "git+ssh://host/repo",
+            ),
+            (
+                "ms-appx://host/path",
+                "ms-appx",
+                "ms",
+                "ms-appx://host/path",
+            ),
+            ("obj.http://x", "obj.http", "obj", "obj.http://x"),
+            (
+                " https://example.com",
+                "https",
+                "https",
+                "https://example.com",
+            ),
+            (
+                "\thttps://example.com",
+                "https",
+                "https",
+                "https://example.com",
+            ),
+        ] {
+            let mut o = opts();
+            o.define = vec![format!("K={value}")];
+            let err = defines(&o).expect_err("{value:?} must be rejected at build time");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("JavaScript keeps only `{keeps}`")),
+                "the error must say what JavaScript actually keeps for {value:?}, got: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("ReferenceError: {fails_on} is not defined")),
+                "the error must name the identifier that really fails for {value:?}, got: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("--define 'K=\"{suggested}\"'")),
+                "the suggested command must be pasteable — leading trivia trimmed, not baked \
+                 into the string — for {value:?}, got: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -5318,6 +5950,17 @@ mod tests {
     }
 
     fn bundle_module_graph(tag: &str, entry: &str, files: &[(&str, &str)]) -> Result<BundleResult> {
+        let mut o = opts();
+        o.minify = false;
+        bundle_module_graph_with(tag, entry, files, &o)
+    }
+
+    fn bundle_module_graph_with(
+        tag: &str,
+        entry: &str,
+        files: &[(&str, &str)],
+        o: &BundleOptions,
+    ) -> Result<BundleResult> {
         let dir = fixture_dir(tag);
         for (name, source) in files {
             let path = dir.join(name);
@@ -5326,11 +5969,605 @@ mod tests {
             }
             std::fs::write(path, source).unwrap();
         }
-        let mut o = opts();
-        o.minify = false;
-        let result = bundle(&dir.join(entry), &o);
+        let result = bundle(&dir.join(entry), o);
         let _ = std::fs::remove_dir_all(dir);
         result
+    }
+
+    /// The same fixture shape, bundled the way `nub compile` does.
+    ///
+    /// The difference is `launch_root`, and it is not cosmetic: without one,
+    /// `bundle_inner` hands `--external` to Rolldown's own matcher, which is
+    /// evaluated BEFORE plugins, so no `resolve_id` hook ever sees the edge. With
+    /// one, the request goes through [`ExternalImports`] instead — the path a
+    /// compiled artifact actually takes, and the only one where plugin ORDER can
+    /// decide what the report says.
+    fn bundle_compile_graph_with(
+        tag: &str,
+        entry: &str,
+        files: &[(&str, &str)],
+        o: &BundleOptions,
+    ) -> Result<BundleResult> {
+        let dir = fixture_dir(tag);
+        for (name, source) in files {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, source).unwrap();
+        }
+        let result = bundle_for_compile(&dir.join(entry), o, &dir);
+        let _ = std::fs::remove_dir_all(dir);
+        result
+    }
+
+    /// A fixture with all three shapes `--drop` has to distinguish: a bare
+    /// `console` call, one whose value is READ, and a `debugger`.
+    const DROP_FIXTURE: &[(&str, &str)] = &[(
+        "entry.ts",
+        "console.log('BARE_CALL');\n\
+         debugger;\n\
+         globalThis.OUT = console.log('READ_CALL');\n\
+         globalThis.KEPT = 'STILL_HERE';\n",
+    )];
+
+    /// Dropping is a build-time removal, so the only honest check is on the
+    /// emitted chunk: the calls are gone from the bytes that ship.
+    ///
+    /// The control runs at the SAME minify setting, because minification is the
+    /// mechanism `--drop` rides — a control with minify off would vary two things.
+    #[test]
+    fn drop_removes_console_calls_from_the_emitted_chunk() {
+        let mut dropped = opts();
+        dropped.drop_console = true;
+        let code = emitted_chunk_code(
+            &bundle_module_graph_with("drop-on", "entry.ts", DROP_FIXTURE, &dropped)
+                .expect("the fixture bundles"),
+        );
+        assert!(
+            !code.contains("console.log"),
+            "--drop console must remove the calls; got:\n{code}"
+        );
+        assert!(
+            !code.contains("BARE_CALL") && !code.contains("READ_CALL"),
+            "a dropped call takes its arguments with it; got:\n{code}"
+        );
+        assert!(
+            code.contains("STILL_HERE"),
+            "only console calls are dropped; got:\n{code}"
+        );
+
+        let control = emitted_chunk_code(
+            &bundle_module_graph_with("drop-off", "entry.ts", DROP_FIXTURE, &opts())
+                .expect("the fixture bundles"),
+        );
+        assert!(
+            control.contains("console.log"),
+            "without --drop the calls must survive, or the assertions above prove \
+             nothing; got:\n{control}"
+        );
+    }
+
+    /// The regression this exists for: `--drop console` must not turn OFF the
+    /// `debugger` removal minification already performs. Rolldown reads an unset
+    /// compress flag from `CompressOptions::smallest()`, where `drop_debugger` is
+    /// already true — so writing `Some(false)` for the flag the user did not pass
+    /// would make asking for less produce MORE debug code than asking for nothing.
+    #[test]
+    fn asking_to_drop_only_console_does_not_resurrect_debugger_statements() {
+        // Positive control first: the fixture really does carry a `debugger`, and
+        // it survives when nothing removes it. Without this the assertion below
+        // would pass against a fixture that never had one.
+        let mut unminified = opts();
+        unminified.minify = false;
+        let raw = emitted_chunk_code(
+            &bundle_module_graph_with("debugger-control", "entry.ts", DROP_FIXTURE, &unminified)
+                .expect("the fixture bundles"),
+        );
+        assert!(
+            raw.contains("debugger"),
+            "the fixture must contain a debugger statement for this test to mean \
+             anything; got:\n{raw}"
+        );
+
+        for (tag, drop_debugger) in [("console-only", false), ("both", true)] {
+            let mut o = opts();
+            o.drop_console = true;
+            o.drop_debugger = drop_debugger;
+            let code = emitted_chunk_code(
+                &bundle_module_graph_with(tag, "entry.ts", DROP_FIXTURE, &o)
+                    .expect("the fixture bundles"),
+            );
+            assert!(
+                !code.contains("debugger"),
+                "{tag}: no debugger statement may reach a minified chunk; got:\n{code}"
+            );
+        }
+    }
+
+    /// The value half, kept separate because it is the one a naive removal gets
+    /// wrong: `x = console.log(…)` must still assign, and `undefined` is what the
+    /// call returned anyway.
+    #[test]
+    fn dropping_a_console_call_whose_result_is_read_leaves_the_assignment() {
+        let mut o = opts();
+        o.drop_console = true;
+        let code = emitted_chunk_code(
+            &bundle_module_graph_with("drop-value", "entry.ts", DROP_FIXTURE, &o)
+                .expect("the fixture bundles"),
+        );
+        assert!(
+            code.contains("globalThis.OUT"),
+            "the assignment must survive its dropped right-hand side; got:\n{code}"
+        );
+        assert!(
+            code.contains("globalThis.OUT=void 0") || code.contains("globalThis.OUT = void 0"),
+            "a read console call becomes `void 0`, not nothing; got:\n{code}"
+        );
+    }
+
+    /// Dropping happens inside the minifier's compress pass, so `--no-minify`
+    /// leaves no pass to perform it. Refusing beats accepting the flag and
+    /// silently emitting every call it promised to remove.
+    #[test]
+    fn drop_is_refused_when_minification_is_off() {
+        let mut o = opts();
+        o.minify = false;
+        o.drop_console = true;
+        // Matched rather than `expect_err`, which would need `BundleResult: Debug`
+        // — and giving it that means deriving Debug across every field type it
+        // holds, for a message no passing run ever prints.
+        let err = match bundle_module_graph_with("drop-no-minify", "entry.ts", DROP_FIXTURE, &o) {
+            Ok(_) => panic!("--drop with --no-minify must fail the build"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("--drop") && message.contains("--no-minify"),
+            "the error must name both flags so the user knows what to change; got: {message}"
+        );
+    }
+
+    /// The build report's central claim: each input's contribution is MEASURED,
+    /// not apportioned. A module carrying an order of magnitude more source than
+    /// its sibling has to show up that way on both axes — the source the bundler
+    /// read, and the bytes the module put in the chunk.
+    #[test]
+    fn the_metafile_attributes_bytes_to_the_input_that_produced_them() {
+        let big = format!(
+            "export const BIG = [\n{}];\n",
+            "  'padding-padding-padding',\n".repeat(200)
+        );
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import { BIG } from './big.ts';\n\
+                 import { SMALL } from './small.ts';\n\
+                 globalThis.OUT = [BIG, SMALL];\n",
+            ),
+            ("big.ts", big.as_str()),
+            ("small.ts", "export const SMALL = 1;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        // An output's `bytes` is the finished FILE, so the default inline
+        // sourcemap would put a base64 map bigger than the code inside the number
+        // the sum below is compared against, and the ratio would say nothing about
+        // attribution. Turned off here so the comparison measures what it claims.
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_module_graph_with("metafile", "entry.ts", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let source_of = |name: &str| {
+            report
+                .inputs
+                .iter()
+                .find(|(path, _)| path.ends_with(name))
+                .unwrap_or_else(|| panic!("{name} missing from inputs: {:?}", report.inputs.keys()))
+                .1
+                .bytes
+        };
+        assert!(
+            source_of("big.ts") > 10 * source_of("small.ts"),
+            "input bytes must track real source size: big={} small={}",
+            source_of("big.ts"),
+            source_of("small.ts")
+        );
+
+        let entry = report
+            .outputs
+            .get(&result.entry)
+            .expect("the entry chunk is reported");
+        assert!(
+            entry.entry_point.is_some(),
+            "the entry chunk must carry an entryPoint"
+        );
+        let contributed = |name: &str| {
+            entry
+                .inputs
+                .iter()
+                .find(|(path, _)| path.ends_with(name))
+                .unwrap_or_else(|| {
+                    panic!("{name} missing from the chunk: {:?}", entry.inputs.keys())
+                })
+                .1
+                .bytes_in_output
+        };
+        assert!(
+            contributed("big.ts") > 10 * contributed("small.ts"),
+            "bytesInOutput must track what each module contributed: big={} small={}",
+            contributed("big.ts"),
+            contributed("small.ts")
+        );
+        // Unminified the per-input numbers ARE the rendered pieces of the chunk,
+        // so they have to account for most of it. They do not under minify, which
+        // runs after rendering — the docs say so rather than the report guessing.
+        let total: usize = entry.inputs.values().map(|i| i.bytes_in_output).sum();
+        assert!(
+            total <= entry.bytes && total * 2 > entry.bytes,
+            "unminified, attributed bytes ({total}) should account for most of the chunk ({})",
+            entry.bytes
+        );
+    }
+
+    /// esbuild distinguishes `require-call` from `import-statement`, and a report
+    /// that calls every static edge a statement describes a dependency graph that
+    /// is false for CommonJS. The kind comes from the IMPORTER's format, so the
+    /// fixture needs both directions to be meaningful: a `require()` inside a CJS
+    /// module, and an ESM `import` OF that CJS module, which is a real statement
+    /// and must stay one.
+    #[test]
+    fn a_require_edge_is_reported_as_a_require_call_not_a_statement() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import cjs from './cjs-a.cjs';\nglobalThis.OUT = cjs;\n",
+            ),
+            (
+                "cjs-a.cjs",
+                "const b = require('./cjs-b.cjs');\nmodule.exports = b + 1;\n",
+            ),
+            ("cjs-b.cjs", "module.exports = 41;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_module_graph_with("metafile-kinds", "entry.ts", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let kinds = |name: &str| -> Vec<String> {
+            report
+                .inputs
+                .iter()
+                .find(|(path, _)| path.ends_with(name))
+                .unwrap_or_else(|| panic!("{name} missing from inputs: {:?}", report.inputs.keys()))
+                .1
+                .imports
+                .iter()
+                .map(|i| i.kind.to_string())
+                .collect()
+        };
+
+        assert_eq!(
+            kinds("cjs-a.cjs"),
+            vec!["require-call"],
+            "a require() inside a CommonJS module is a require-call"
+        );
+        assert_eq!(
+            kinds("entry.ts"),
+            vec!["import-statement"],
+            "an ESM import OF a CommonJS module is still a statement"
+        );
+    }
+
+    /// A `require` bound to a local — a `createRequire` result, a UMD factory
+    /// parameter — is a call the bundler cannot rewrite, so the specifier stays
+    /// unresolved and compilation refuses the build.
+    ///
+    /// Worth pinning on its own, and it is NOT the whole story for the metafile:
+    /// an UNBOUND `require()` in the same module resolves fine. See
+    /// `an_unbound_require_in_an_esm_module_is_the_known_edge_kind_gap`.
+    #[test]
+    fn a_locally_bound_require_is_refused_rather_than_left_unresolved() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import { createRequire } from 'node:module';\n\
+                 import { A } from './esm-dep.mjs';\n\
+                 const require = createRequire(import.meta.url);\n\
+                 globalThis.OUT = [A, require('./cjs-dep.cjs')];\n",
+            ),
+            ("esm-dep.mjs", "export const A = 1;\n"),
+            ("cjs-dep.cjs", "module.exports = 41;\n"),
+        ];
+        let mut o = opts();
+        o.metafile = true;
+        let err = match bundle_module_graph_with("esm-require", "entry.ts", files, &o) {
+            Ok(_) => panic!("an ESM module holding a require must not bundle"),
+            Err(err) => err.to_string(),
+        };
+        // Both halves matter. The site pins WHICH import was refused — a generic
+        // "could not be resolved" would also match an unrelated failure and the
+        // test would pass while proving nothing. The hint pins WHY: that the
+        // `require` was a local binding, which is the mechanism the exactness
+        // argument rests on.
+        assert!(
+            err.contains("require('./cjs-dep.cjs')"),
+            "the refusal must name the require site: {err}"
+        );
+        assert!(
+            err.contains("`require` is a local binding"),
+            "the refusal must be the local-binding one, not another unresolved import: {err}"
+        );
+    }
+
+    /// The case the module format alone cannot get right, and the reason the kind
+    /// is captured in the resolver hook instead.
+    ///
+    /// An unbound `require()` inside an ESM module resolves and bundles, so the
+    /// module is ESM while one of its edges is really a require — a bundler-only
+    /// shape, since a bare `require` in an ESM file throws under plain Node, but
+    /// one that compiles here. Both edges are asserted: reporting them both as
+    /// requires would be just as wrong as reporting them both as statements, and
+    /// only checking the pair catches that.
+    #[test]
+    fn an_unbound_require_in_an_esm_module_reports_its_real_edge_kind() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import { A } from './esm-dep.mjs';\n\
+                 const cjs = require('./cjs-dep.cjs');\n\
+                 globalThis.OUT = [A, cjs];\n",
+            ),
+            ("esm-dep.mjs", "export const A = 1;\n"),
+            ("cjs-dep.cjs", "module.exports = 41;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_module_graph_with("esm-unbound-require", "entry.ts", files, &o)
+            .expect("an unbound require in an ESM module bundles — that is the premise");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let entry = report
+            .inputs
+            .iter()
+            .find(|(path, _)| path.ends_with("entry.ts"))
+            .expect("the entry is an input")
+            .1;
+        let cjs_edge = entry
+            .imports
+            .iter()
+            .find(|i| i.path.ends_with("cjs-dep.cjs"))
+            .expect("the require edge is in the graph");
+
+        assert_eq!(
+            entry.format,
+            Some("esm"),
+            "the fixture only means something if the importer is ESM"
+        );
+        assert_eq!(
+            cjs_edge.kind, "require-call",
+            "the require() edge from an ESM importer must report as a require-call"
+        );
+        let esm_edge = entry
+            .imports
+            .iter()
+            .find(|i| i.path.ends_with("esm-dep.mjs"))
+            .expect("the import edge is in the graph");
+        assert_eq!(
+            esm_edge.kind, "import-statement",
+            "the real import in the same module must stay a statement"
+        );
+    }
+
+    /// esbuild reports one entry per SOURCE edge. Rolldown's `imported_ids` is
+    /// deduplicated by target, so a module that both imports and requires the same
+    /// file has one entry there — and the report has to have two, with different
+    /// kinds. This is what the observation set exists to supply.
+    #[test]
+    fn one_target_imported_and_required_reports_both_edges() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import d from './dep.cjs';\n\
+                 const r = require('./dep.cjs');\n\
+                 globalThis.OUT = [d, r];\n",
+            ),
+            ("dep.cjs", "module.exports = 7;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_module_graph_with("metafile-dual-edge", "entry.ts", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let mut kinds: Vec<&str> = report
+            .inputs
+            .iter()
+            .find(|(path, _)| path.ends_with("entry.ts"))
+            .expect("the entry is an input")
+            .1
+            .imports
+            .iter()
+            .filter(|i| i.path.ends_with("dep.cjs"))
+            .map(|i| i.kind)
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            vec!["import-statement", "require-call"],
+            "both source edges to the same target must survive, with their own kinds"
+        );
+    }
+
+    /// A plugin's own `ctx.resolve` must not invent an edge kind.
+    ///
+    /// `CompilePreamble` re-enters the resolver to resolve its private graph from
+    /// the runtime directory. Passing no options there defaulted the import kind to
+    /// `Import`, and because the watcher sits ahead of every resolver it recorded
+    /// that fabricated edge alongside the real one — so each `require()` in nub's
+    /// own CJS runtime files was reported twice, once as an import statement.
+    ///
+    /// The fixture authors no `require()` at all, so no target in the whole graph
+    /// may carry two different kinds. It also covers the resolution itself, which
+    /// is the half that outlives the report: re-resolving a `require()` as an
+    /// import takes the `import` branch of a conditional `exports` map.
+    #[test]
+    fn a_plugins_internal_resolve_does_not_fabricate_an_edge_kind() {
+        let files: &[(&str, &str)] = &[("entry.mjs", "export const A = 1;\n")];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_compile_graph_with("metafile-nested-resolve", "entry.mjs", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        // The private prelude graph has to be in the report, or the assertion
+        // below passes by covering nothing.
+        assert!(
+            report
+                .inputs
+                .values()
+                .any(|input| input.imports.iter().any(|i| i.kind == "require-call")),
+            "the prelude's CommonJS runtime files should be in the graph"
+        );
+
+        for (path, input) in &report.inputs {
+            for edge in &input.imports {
+                let kinds: BTreeSet<&str> = input
+                    .imports
+                    .iter()
+                    .filter(|other| other.path == edge.path)
+                    .map(|other| other.kind)
+                    .collect();
+                assert_eq!(
+                    kinds.len(),
+                    1,
+                    "{path} reports {} with {kinds:?}, but the fixture writes no \
+                     module that both imports and requires one target",
+                    edge.path
+                );
+            }
+        }
+    }
+
+    /// Two edges that share an importer, a target AND a kind collapse to one.
+    ///
+    /// This asserts the WRONG answer deliberately. esbuild 0.28.2 emits two
+    /// entries for two identical `import` statements; nub emits one, because
+    /// Rolldown memoizes resolution on (importer, specifier, kind) and the second
+    /// occurrence never reaches a plugin — see [`metafile::EdgeKinds`] for why no
+    /// other hook carries it. Pinned rather than left silent so that a Rolldown
+    /// version which does expose per-edge records fails here and sends the next
+    /// reader to that comment instead of to a fresh investigation.
+    #[test]
+    fn two_identical_imports_to_one_target_are_reported_once_unlike_esbuild() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.mjs",
+                "import './dep.mjs';\nimport './dep.mjs';\nglobalThis.OUT = 1;\n",
+            ),
+            ("dep.mjs", "globalThis.D = 1;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        let result = bundle_compile_graph_with("metafile-same-kind-repeat", "entry.mjs", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let entry = report
+            .inputs
+            .iter()
+            .find(|(path, _)| path.ends_with("entry.mjs"))
+            .expect("the entry is an input")
+            .1;
+        let to_dep: Vec<&str> = entry
+            .imports
+            .iter()
+            .filter(|i| i.path.ends_with("dep.mjs"))
+            .map(|i| i.kind)
+            .collect();
+        assert_eq!(
+            to_dep,
+            vec!["import-statement"],
+            "esbuild reports both occurrences; Rolldown resolves the pair once, so \
+             nub reports one. Update the divergence note if this ever changes."
+        );
+    }
+
+    /// A resolver plugin that claims an edge returns before the ones behind it are
+    /// asked, so an observer placed after `ExternalImports` never sees an external
+    /// `require()` and the report falls back to the importer's ESM format. That is
+    /// why the watcher is registered FIRST; this is the regression for it.
+    ///
+    /// It bundles through [`bundle_compile_graph_with`] deliberately: the plain
+    /// helper supplies no launch root, which sends `--external` to Rolldown's own
+    /// pre-plugin matcher and leaves nothing for plugin order to get wrong.
+    #[test]
+    fn an_external_require_from_an_esm_module_keeps_its_kind() {
+        let files: &[(&str, &str)] = &[
+            (
+                "entry.ts",
+                "import { A } from './esm-dep.mjs';\n\
+                 const ext = require('peer');\n\
+                 globalThis.OUT = [A, ext];\n",
+            ),
+            ("esm-dep.mjs", "export const A = 1;\n"),
+        ];
+        let mut o = opts();
+        o.minify = false;
+        o.metafile = true;
+        o.sourcemap = SourcemapMode::None;
+        o.external = vec!["peer".into()];
+        let result = bundle_compile_graph_with("metafile-external-require", "entry.ts", files, &o)
+            .expect("the fixture bundles");
+        let report = result.metafile.expect("--metafile collects a report");
+
+        let entry = report
+            .inputs
+            .iter()
+            .find(|(path, _)| path.ends_with("entry.ts"))
+            .expect("the entry is an input")
+            .1;
+        let external = entry
+            .imports
+            .iter()
+            .find(|i| i.external)
+            .expect("the external edge is in the graph");
+        assert_eq!(
+            external.kind, "require-call",
+            "an external resolved by an earlier plugin must still report its kind"
+        );
+        assert_eq!(
+            external.path, "peer",
+            "an external edge is reported by the specifier the runtime resolves, \
+             not by nub's synthetic id"
+        );
+        assert!(
+            entry
+                .imports
+                .iter()
+                .any(|i| i.path.ends_with("esm-dep.mjs") && i.kind == "import-statement"),
+            "the ordinary import in the same module must stay a statement"
+        );
+    }
+
+    #[test]
+    fn no_report_is_collected_unless_asked_for() {
+        let result = bundle_module_graph("metafile-off", "entry.ts", DROP_FIXTURE)
+            .expect("the fixture bundles");
+        assert!(result.metafile.is_none());
     }
 
     // Rolldown lowers mixed CommonJS/ESM cycles through lazy init wrappers.

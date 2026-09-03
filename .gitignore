@@ -113,6 +113,16 @@ npm/nub-*/bin/
 npm/nub/*.tgz
 npm/nub-*/*.tgz
 
+# Standalone-loader packages (npm/loader, npm/loader-<platform>): the JS is a
+# verbatim slice of runtime/ staged in by scripts/build-loader-npm.mjs, and the
+# addon comes from the platform build — only package.json + README are source.
+npm/loader/*.mjs
+npm/loader/*.cjs
+npm/loader/LICENSE
+npm/loader/*.tgz
+npm/loader-*/nub-native.node
+npm/loader-*/*.tgz
+
 # nub's localStorage/cache leaking into cwd as `0/<node-version>-<arch>-…` when
 # XDG_CACHE_HOME is unset and the store path resolves relative (a real nub bug —
 # the cache should always live under ~/.cache/nub). Ignore the stray dirs until
@@ -160,10 +170,16 @@ tests/bench/RESULTS.md
 # local-only design corpus (symlink to external dir) — never tracked
 internal
 
-# The repo root is npm-only — a root pnpm-lock.yaml (beside a workspace
-# yaml) would mark the root as a workspace for nub and re-trigger the
-# engines-redirect the soak surfaces were moved to tools/ to avoid.
+# The repo root is nub-identity — `nub.lock` is the tracked lockfile and
+# devEngines.packageManager names nub — so every other PM's root lockfile is
+# residue. A root pnpm-lock.yaml (beside a workspace yaml) additionally marks
+# the root as a workspace for nub and re-triggers the engines-redirect the soak
+# surfaces were moved to tools/ to avoid.
 /pnpm-lock.yaml
+# npm leaves this behind whenever anyone runs `npm install` here to populate
+# node_modules, which the compile test suites need. Neither tracked nor ignored
+# left it one `git add` away from a commit, and it got into one.
+/package-lock.json
 
 # Maintainer-local frizz worker norms (names private orchestration tooling). The tool
 # was renamed fray→frizz and only the old name was listed, so FRIZZ.md sat untracked and
@@ -182,6 +198,10 @@ catalog-legacy/
 
 # Scratch: profiler dumps, one-off probes, and scan output. These reached main once
 # (7ae35e252b) and were removed in the following commit; the patterns stop a repeat.
+# Default output dir for scripts/download-stats.mjs (CSVs, summary.json, the chart).
+# Regenerated on demand from live APIs, so it is derived data, never tracked.
+/tmp/
+
 *.cpuprofile
 /p.js
 /rev.rs

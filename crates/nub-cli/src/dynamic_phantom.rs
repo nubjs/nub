@@ -123,7 +123,6 @@ fn settings_token(enabled: bool) -> String {
 /// The registration is process-global set-once; a second call is ignored. The
 /// link-time consumption of the sidecars this writes lives in
 /// [`crate::pm_engine::phantom_closure`], not here.
-// @lat: [[research/force-materialization-scope#Synthesis (Prong D)#3. Shape — curated denylist vs structural heuristic]]
 pub fn register() {
     if !enabled() {
         return;
@@ -198,13 +197,24 @@ fn scan_and_cache(dir: &Path, index: &PackageIndex) {
 /// only an unavailable or failed scan degrades to "no eject", never a crash or a
 /// false break. The write-on-scan reuses [`scan_and_cache`]'s atomic publish, so
 /// a subsequent install hits the warm sidecar when publication succeeds.
-pub(crate) fn cached_or_scan_verdict(dir: &Path, index: &PackageIndex) -> Option<ScanResult> {
+pub(crate) fn cached_or_scan_verdict(
+    dir: &Path,
+    read_fallback_dir: Option<&Path>,
+    index: &PackageIndex,
+) -> Option<ScanResult> {
     let fingerprint = index_content_fingerprint(index);
     let sidecar = sidecar_path(dir, &fingerprint);
-    if let Ok(bytes) = std::fs::read(&sidecar)
-        && let Ok(result) = serde_json::from_slice::<ScanResult>(&bytes)
-    {
-        return Some(result);
+    // `read_fallback_dir` is the global store's sidecar tier when installs
+    // are writing a project-local store: its verdicts are read, never
+    // written, the same layering the CAS itself uses.
+    let cached = std::iter::once(sidecar.clone())
+        .chain(read_fallback_dir.map(|dir| sidecar_path(dir, &fingerprint)));
+    for candidate in cached {
+        if let Ok(bytes) = std::fs::read(&candidate)
+            && let Ok(result) = serde_json::from_slice::<ScanResult>(&bytes)
+        {
+            return Some(result);
+        }
     }
     // No (or unreadable) sidecar → scan the already-loaded index now, cache it,
     // and use the verdict for this install's eject decision.
@@ -269,34 +279,42 @@ fn write_sidecar_atomic(sidecar: &Path, fingerprint: &str, result: &ScanResult) 
     }
 }
 
-/// Nub's CAS store schema dir: `<store-root>/v1/`, the parent of the CAS
-/// `files/` and `index/` tiers and the `phantom/` sidecar tier. Resolves through
-/// [`aube::commands::resolved_project_store_dir`], the engine's own `storeDir`
-/// resolution anchored at the walked-up project/workspace root — so a configured
-/// `store-dir` override moves the sidecar tier WITH the store it indexes (#643).
-/// The ANCHOR is the load-bearing half: `.npmrc` and `pnpm-workspace.yaml`
-/// discovery does not walk up, and the install pipeline anchors at
-/// `workspace_or_project_root()`, so resolving against the raw process cwd
-/// instead would miss the override for every command run from inside a workspace
-/// member and silently return the default store. Falls back to nub's
-/// [`crate::pm_engine::nub_data_dir`] — the same base its `storeDir` embedder
-/// default is built from — when no project root resolves at all. `None` when no
-/// data home resolves either. `pub(crate)` so the sidecar CONSUMER
-/// ([`crate::pm_engine::phantom_closure`]) derives its store handle from the
-/// same base this producer uses.
-pub(crate) fn store_v1_dir() -> Option<PathBuf> {
-    if let Some(custom) = aube::commands::resolved_project_store_dir() {
-        return Some(custom.join("v1"));
+/// Nub's CAS store schema dirs: `<store-root>/v1/`, the parent of the CAS
+/// `files/` and `index/` tiers and the `phantom/` sidecar tier — the one the
+/// engine WRITES this run, plus the read-only global one it still reads when
+/// the default store is unwritable (a coding agent's sandbox). Resolves through
+/// [`aube::commands::resolved_project_store_v1_dirs`], the engine's own
+/// `storeDir` resolution and fallback decision, anchored at the walked-up
+/// project/workspace root — so a configured `store-dir` override moves the
+/// sidecar tier WITH the store it indexes (#643), and a project-local fallback
+/// store carries its own sidecars. The ANCHOR is the load-bearing half:
+/// `.npmrc` and `pnpm-workspace.yaml` discovery does not walk up, and the
+/// install pipeline anchors at `workspace_or_project_root()`, so resolving
+/// against the raw process cwd instead would miss the override for every
+/// command run from inside a workspace member and silently return the default
+/// store. Falls back to nub's [`crate::pm_engine::nub_data_dir`] — the same
+/// base its `storeDir` embedder default is built from — when no project root
+/// resolves at all. `None` when no data home resolves either. `pub(crate)` so
+/// the sidecar CONSUMER ([`crate::pm_engine::phantom_closure`]) derives its
+/// store handle from the same dirs this producer uses.
+pub(crate) fn store_v1_dirs() -> Option<aube::commands::StoreV1Dirs> {
+    if let Some(dirs) = aube::commands::resolved_project_store_v1_dirs() {
+        return Some(dirs);
     }
-    Some(crate::pm_engine::nub_data_dir()?.join("store/v1"))
+    Some(aube::commands::StoreV1Dirs {
+        primary: crate::pm_engine::nub_data_dir()?.join("store/v1"),
+        read_fallback: None,
+    })
 }
 
-/// The per-content sidecar directory: `<nub-data>/store/v1/phantom/`, next to the
-/// CAS + index tiers. `None` when no data home resolves (the scanner then simply
-/// doesn't arm). `pub(crate)` so the consumer reads the same directory this
-/// producer writes.
+/// The per-content sidecar directory the producer WRITES: `<store>/v1/phantom/`
+/// under the primary store, next to the CAS + index tiers. `None` when no data
+/// home resolves (the scanner then simply doesn't arm). `pub(crate)` so the
+/// consumer writes on-demand verdicts to the same directory this producer does;
+/// the consumer additionally READS the global store's sidecars through
+/// [`store_v1_dirs`]'s fallback.
 pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
-    Some(store_v1_dir()?.join("phantom"))
+    Some(store_v1_dirs()?.primary.join("phantom"))
 }
 
 /// The phantom scanner's LOGIC version — BUMP on ANY change to the scanner's
@@ -476,8 +494,8 @@ mod tests {
         // No sidecar yet — the extract hook did not run for this warm CAS entry.
         // The consumer must scan on-demand.
         assert!(!sidecar.exists(), "precondition: no sidecar written yet");
-        let v =
-            cached_or_scan_verdict(&sidecar_dir, &index).expect("scan-on-miss yields a verdict");
+        let v = cached_or_scan_verdict(&sidecar_dir, None, &index)
+            .expect("scan-on-miss yields a verdict");
         assert!(
             v.has_unguarded_phantom,
             "the undeclared import must be flagged on the scan-on-miss path"
@@ -495,7 +513,7 @@ mod tests {
         // A corrupt sidecar is treated like a miss, rescanned while the CAS blobs
         // are available, and atomically replaced with valid JSON.
         std::fs::write(&sidecar, b"not-json").unwrap();
-        let repaired = cached_or_scan_verdict(&sidecar_dir, &index)
+        let repaired = cached_or_scan_verdict(&sidecar_dir, None, &index)
             .expect("a corrupt sidecar is rescanned and repaired");
         assert!(
             repaired.has_unguarded_phantom
@@ -515,11 +533,21 @@ mod tests {
         // destroying the CAS blobs leaves only the cached verdict (the fingerprint
         // is a pure function of the in-memory index).
         let _ = std::fs::remove_dir_all(base.join("store"));
-        let v2 = cached_or_scan_verdict(&sidecar_dir, &index).expect("cached verdict served");
+        let v2 = cached_or_scan_verdict(&sidecar_dir, None, &index).expect("cached verdict served");
         assert!(
             v2.has_unguarded_phantom && v2.targets.iter().any(|t| t.name == "undeclared-phantom"),
             "the repaired sidecar is served without rescanning"
         );
+
+        // A project-local sidecar tier (the sandbox store fallback) READS the
+        // global tier's verdict: with the CAS gone a rescan is impossible, so a
+        // served verdict can only have come from the fallback — and nothing is
+        // written into the local tier for it.
+        let local_dir = base.join("local-phantom");
+        let v3 = cached_or_scan_verdict(&local_dir, Some(&sidecar_dir), &index)
+            .expect("the global tier's verdict is read through");
+        assert!(v3.has_unguarded_phantom);
+        assert!(!local_dir.exists(), "a read-through writes nothing locally");
 
         let _ = std::fs::remove_dir_all(&base);
     }

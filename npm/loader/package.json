@@ -1,0 +1,61 @@
+{
+  "name": "@nubjs/loader",
+  "version": "0.8.3",
+  "description": "Standalone TypeScript loader for Node.js from the Nub project — TypeScript, JSX, tsconfig paths, and data-format imports through a native transform, registered the way tsx and ts-node are",
+  "license": "MIT",
+  "repository": "https://github.com/nubjs/nub",
+  "homepage": "https://nubjs.com",
+  "bugs": {
+    "url": "https://github.com/nubjs/nub/issues"
+  },
+  "keywords": [
+    "typescript",
+    "loader",
+    "esm",
+    "nodejs",
+    "tsx",
+    "ts-node",
+    "transpiler",
+    "jsx"
+  ],
+  "engines": {
+    "node": ">=18.19.0"
+  },
+  "exports": {
+    ".": {
+      "import": "./loader-register.mjs",
+      "require": "./loader-register.cjs"
+    },
+    "./esm": "./loader-esm.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "loader-register.mjs",
+    "loader-register.cjs",
+    "loader-esm.mjs",
+    "loader-entry.mjs",
+    "loader-addon-env.mjs",
+    "loader-platform.cjs",
+    "transform-core.mjs",
+    "preload-common.cjs",
+    "preload-async-hooks.mjs",
+    "pnp-util.cjs",
+    "floor-builtin.mjs",
+    "cache-evict.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@oxc-project/runtime": "0.140.0"
+  },
+  "optionalDependencies": {
+    "@nubjs/loader-darwin-arm64": "0.8.3",
+    "@nubjs/loader-darwin-x64": "0.8.3",
+    "@nubjs/loader-linux-x64": "0.8.3",
+    "@nubjs/loader-linux-x64-musl": "0.8.3",
+    "@nubjs/loader-linux-arm64": "0.8.3",
+    "@nubjs/loader-linux-arm64-musl": "0.8.3",
+    "@nubjs/loader-win32-x64": "0.8.3",
+    "@nubjs/loader-win32-arm64": "0.8.3"
+  }
+}

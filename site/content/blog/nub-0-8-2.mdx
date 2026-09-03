@@ -1,0 +1,51 @@
+---
+title: "Nub 0.8.2"
+description: Ships the TypeScript loader as a standalone package for plain Node, and fixes a round of install, resolution, configuration, and compile issues.
+author: The Nub Team
+date: 2026-09-01
+---
+
+Nub's TypeScript loader is now a standalone package that runs under stock `node`, alongside fixes across install, resolution, configuration, and `nub compile`.
+
+<NubIntro />
+
+## The loader as a standalone package
+
+`@nubjs/loader` runs TypeScript, JSX, tsconfig paths, and data-format imports under plain Node, with no Nub binary involved — install it as a dev dependency and register it the way tsx and ts-node are registered:
+
+```sh
+npm install --save-dev @nubjs/loader
+node --import @nubjs/loader app.ts
+```
+
+Every preload form Node accepts works:
+
+```sh
+node --import @nubjs/loader app.ts        # ESM hooks + CommonJS require() augmentation
+node --require @nubjs/loader app.ts       # CommonJS delivery (Node 20.19+)
+node --import @nubjs/loader/esm app.ts    # ESM hooks only
+```
+
+It also works anywhere a preload can be set rather than passed, such as `NODE_OPTIONS="--import @nubjs/loader" vitest`. The native transform rides eight platform packages as `optionalDependencies`, covering macOS, Linux (glibc and musl), and Windows on x64 and arm64. Source that runs under the loader also runs unchanged under tsx or ts-node, so adopting it is reversible. Documentation is at [nubjs.com/docs/loader](https://nubjs.com/docs/loader). ([#810](https://github.com/nubjs/nub/pull/810))
+
+## Install and update
+
+| PR | What changed |
+| --- | --- |
+| [#819](https://github.com/nubjs/nub/pull/819) | A version refused by the no-downgrade trust policy backtracks to an older in-range version that still carries its trust evidence, instead of aborting the install. |
+| [#823](https://github.com/nubjs/nub/pull/823) | Neither `outdated` nor `update` reports or offers a version below the one already installed. |
+| [#811](https://github.com/nubjs/nub/pull/811) | Engine settings Nub never reads are no longer listed or written by the config commands. |
+
+## Runtime
+
+The web-storage flag is passed on the command line instead of through `NODE_OPTIONS`, which every descendant process inherits. The flag does not exist before Node 22.4, so a child running an older Node aborted at startup — reachable on a host in the Node 22.4–24 band running Electron 34 or earlier, which embeds Node 20.18.1. ([#812](https://github.com/nubjs/nub/pull/812))
+
+## Compile
+
+`nub compile` finds the strip tool on Windows — the probe never matched `llvm-strip.exe`, so every Windows compile silently produced an artifact roughly 4 MB larger than it should be. ([#827](https://github.com/nubjs/nub/pull/827))
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.8.2) list every change in this release.
+
+## Get started
+
+<GetStarted />

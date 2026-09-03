@@ -199,7 +199,15 @@ jobs:
         with:
           shared-key: ci-check
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --manifest-path crates/nub-phantom/Cargo.toml --all-targets
+      # `--locked`, because this crate is its OWN workspace with its own tracked
+      # `Cargo.lock` — the fifth in the repo, alongside the root, nub-native,
+      # nub-launcher and vendor/aube. Without it this step silently re-resolves
+      # around a stale lock, so a manifest change that should have moved the lock
+      # passes here and the tracked file keeps describing a dependency graph that
+      # no longer exists. That is not hypothetical: switching this crate's gzip
+      # backend left the lock still naming the old CMake-backed one, and nothing
+      # in the build caught it. Nothing else covers this workspace either.
+      - run: cargo check --locked --manifest-path crates/nub-phantom/Cargo.toml --all-targets
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
@@ -390,11 +398,16 @@ jobs:
       # runtime, never from the checkout. Install and stage the locked copies
       # before building nub.exe so the release blob contains a self-sufficient
       # runtime for the offline --smol gate below.
+      # A released nub materializes node_modules from nub.lock; the nub under
+      # test is built in the next step and cannot install its own inputs.
+      - uses: ./setup
+        with:
+          cache: 'true'
       - name: Install and stage runtime dependencies for embedded compile
         shell: bash
         run: |
           set -euo pipefail
-          npm ci
+          nub install --frozen-lockfile --node-linker hoisted
           rm -rf runtime/node_modules
           mkdir -p \
             runtime/node_modules/@js-temporal \
@@ -419,7 +432,23 @@ jobs:
       # the staged runtime/ into the binary; the binary extracts it on first run. The
       # feature (not the profile) is what triggers the include_bytes! blob arm + the
       # find_preload extraction path, so this exercises the same code a release build does.
+      # Static MSVC CRT, matching what release.yml ships — this leg is where a link
+      # failure surfaces on a PR instead of during a release. Rust links the CRT
+      # dynamically by default, which puts VCRUNTIME140.dll and VCRUNTIME140_1.dll in
+      # nub.exe's import table; on a clean Windows Server 2022 the process then dies at
+      # 0xC0000135 with EMPTY stderr, because the loader fails it before any code runs.
+      #
+      # Set per-STEP rather than per-job deliberately: the addon built above is a cdylib
+      # loaded into the user's node.exe and MUST keep the dynamic CRT, or it gets a
+      # private heap and any allocation crossing that boundary becomes corruption.
+      # `+crt-static` is STICKY — a later `-crt-static` does not undo it, in either
+      # order and with no warning — so the flag must never reach a build that has to
+      # stay dynamic. That is also why this is an env var here and not a root
+      # `.cargo/config.toml`: cargo CONCATENATES rustflags down the directory tree, so a
+      # root config would reach crates/nub-native with no way to opt back out.
       - name: Build release nub.exe (--features embed-runtime,compile)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build -p nub-cli --release --features embed-runtime,compile
       # `nub compile` injects this real release launcher into the artifact. Build
       # it in its own workspace, as release.yml does; it is intentionally not a
@@ -427,6 +456,29 @@ jobs:
       - name: Build release nub-launcher template
         shell: bash
         run: (cd crates/nub-launcher && cargo build --locked --release)
+      # GATE: neither shipped Windows binary may depend on the VC++ redistributable.
+      #
+      # This runner already HAS the redistributable, so every functional test above
+      # passes whether or not the static CRT survived — deleting
+      # crates/nub-launcher/.cargo/config.toml or the RUSTFLAGS above would go
+      # unnoticed here and fail only on a user's clean machine, silently, at
+      # 0xC0000135 with nothing on stderr. Nothing else in CI can see that, so the
+      # linkage contract is asserted directly against the artifact.
+      #
+      # It walks the PE import directory rather than searching the file for the string
+      # `VCRUNTIME140.dll`, which is the shortcut that looks equivalent and is not: a DLL
+      # name is ordinary ASCII, so any copy anywhere matches. Measured on Microsoft's own
+      # node.exe, a whole-file search reports five VC++ DLLs it does not import. The
+      # script also refuses a file whose import table it could not read, so the gate
+      # cannot pass by finding nothing.
+      - name: Verify no VC++ redistributable dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in target/release/nub.exe crates/nub-launcher/target/release/nub-launcher.exe; do
+            test -f "$f" || { echo "::error::$f not found — this gate must not be skipped silently"; exit 1; }
+            node scripts/pe-imports.mjs --check "$f" > /dev/null
+          done
       # The WHOLE point of a Windows runner is the on-access AV heuristic (process
       # writes a DLL then dlopen's it). GitHub-hosted runners ship with real-time
       # protection OFF, so try to turn it ON before the round-trip so the scan is
@@ -464,7 +516,21 @@ jobs:
           # Cold, isolated cache so the FIRST run is forced to extract (proves the
           # DLL write + dlopen). cache_dir() honors XDG_CACHE_HOME on every platform,
           # so the extracted dir is <XDG_CACHE_HOME>\nub\runtime-<key>.
-          $cache = Join-Path $env:RUNNER_TEMP "nub-embed-cache"
+          # NOT under RUNNER_TEMP, which is on D: — and about one windows-latest
+          # image in six gives D:\a\_temp an EFFECTIVE
+          # `Authenticated Users: Modify` ACE. `Modify` contains DELETE, which is in
+          # the runtime cache's non-leaf dangerous mask, so nub correctly refuses the
+          # ancestor, relocates the cache, and leaves no runtime-* dir where the
+          # assertions below look for one. That is nub behaving as designed on a
+          # volume where any authenticated user could delete the cache; only an
+          # ancestor nub owns is repairable, and this one belongs to the runner.
+          #
+          # Measured, not guessed: a 12-shard probe walking the real predicate found
+          # RUNNER_TEMP unusable on 1 shard while USERPROFILE, LOCALAPPDATA and TEMP
+          # were usable on all 12 — including that shard. USERPROFILE is on the system
+          # volume and carries no such grant. (`TEMP` also works but is an 8.3 short
+          # path here, which is a poor thing to compare against.)
+          $cache = Join-Path $env:USERPROFILE "nub-embed-cache"
           if (Test-Path $cache) { Remove-Item -Recurse -Force $cache }
           $env:XDG_CACHE_HOME = $cache
           $nubRoot = Join-Path $cache "nub"
@@ -875,10 +941,14 @@ jobs:
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10
+      # No `cache: npm` — setup-node's npm cache keys on a lockfile npm can read,
+      # and the root now carries only nub.lock. Warm deps instead come from the
+      # `./setup` step further down, which is passed `cache: 'true'`; the action
+      # defaults that input to "false" and gates its cache steps on it, so
+      # dropping the input here without adding it there is a cold install.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: ${{ matrix.node }}
-          cache: 'npm'
       # Side-install the off-matrix tier representatives for the version_tiers
       # integration test: compat 22.13, unsupported 18.18, detect-module in-band
       # 20.11 (flag still required there), and 26.5 (carries the node:ffi/vfs/
@@ -938,15 +1008,28 @@ jobs:
         run: |
           pnpm --version
           npm --version
-      # Root deps are npm-managed (package-lock.json — same PM wpt-worker's
-      # root `npm ci` uses; the pnpm domain lives in tools/).
-      - run: npm ci
-      # `npm` runs through the Socket Firewall shim, which `exec`s sfw — so sfw's
-      # status IS this step's status. An sfw crash that exits 0 leaves a
-      # half-built tree (package dirs present, package.json missing) and a GREEN
-      # install step; the tree then surfaces six minutes later as unresolvable
-      # helper imports in five unrelated transpile tests. Assert the install
-      # actually produced something resolvable, so infra failure fails here.
+      # Root deps come from nub.lock — the repo root is nub-identity, so nub is
+      # the only manager that reads it (the pnpm domain still lives in tools/).
+      # A released nub installs them: this leg builds no nub of its own before
+      # the tests need the tree. `hoisted` keeps node_modules real directories.
+      #
+      # THIS INSTALL NO LONGER PASSES THROUGH THE SOCKET FIREWALL SHIM. sfw is
+      # wired by shimming `npm`/`pnpm` by NAME on PATH, and `nub` carries no such
+      # shim, so the interception that covered the old `npm ci` does not cover
+      # this step. What still holds on EVERY leg: nub.lock pins each tarball by
+      # integrity hash and `--frozen-lockfile` refuses to re-resolve. Lifecycle
+      # confinement does NOT hold everywhere — the build jail is Linux (landlock
+      # + seccomp) and macOS only (aube-scripts/src/lib.rs has no Windows arm),
+      # so on the windows-latest cell the mitigation is the pinned lockfile
+      # alone. The shims stay for the pnpm/npm surfaces the tests drive.
+      - uses: ./setup
+        with:
+          cache: 'true'
+      - run: nub install --frozen-lockfile --node-linker hoisted
+      # An installer that exits 0 on a half-built tree (package dirs present,
+      # package.json missing) surfaces six minutes later as unresolvable helper
+      # imports in five unrelated transpile tests. Assert the install actually
+      # produced something resolvable, so infra failure fails HERE.
       - name: assert root deps actually installed
         run: node -e "require.resolve('@oxc-project/runtime/helpers/usingCtx')"
       # The data-format loader tests need the nub-native addon (the npm yaml/toml/
@@ -1010,7 +1093,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --manifest-path crates/nub-launcher/Cargo.toml
+          # `cd`, not `--manifest-path`: cargo discovers `.cargo/config.toml` by walking up
+          # from the WORKING DIRECTORY, so the manifest form silently skipped the launcher's
+          # own config and built it with the dynamic MSVC CRT while every shipped path
+          # (release.yml, compile-native.yml, the Windows embed job) builds it static. This
+          # step would then have tested a launcher linked unlike the one users get.
+          (cd crates/nub-launcher && cargo build --locked)
           launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/debug/nub-launcher"
           if [[ "$RUNNER_OS" == "Windows" ]]; then launcher="$launcher.exe"; fi
           test -f "$launcher"
@@ -1356,14 +1444,71 @@ jobs:
           persist-credentials: false
       - run: make version-check
 
+  # The build-slot layer of the machine-global rustc governor (scripts/rustc-qos.sh)
+  # is a lock-free protocol over a directory tree whose failure mode is a host-wide
+  # stall, and nothing else in CI runs scripts/*.sh. The harness drives the real
+  # script with a fake cargo/rustc pair — POSIX sh plus a C compiler, ~3 min — and
+  # the version check refuses a governor change that forgot to bump the stamp
+  # build-status relies on to spot a stale installed copy.
+  build-slots:
+    name: Build-slot governor (${{ matrix.os }})
+    needs: matrix-plan
+    # Path-gated on BOTH groups: the governor itself is scripts/**, which lives
+    # in the `scripts` filter, while the harness is tests/**, which lives in
+    # `rust` — neither group alone covers this job. Same shape as docs-links.
+    if: needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
+    # Both platforms: the governor is only ever INSTALLED on the maintainer's
+    # darwin host (bash-3.2 /bin/sh, BSD ps/awk), while ubuntu's dash + procps
+    # is the other dialect the same POSIX script must keep speaking.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Version stamp bumped with the governor
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: scripts/rustc-qos-version-check.sh "$BASE" HEAD
+      - run: tests/build-slots/run.sh
+
   # Make THIS job (`CI gate`) the sole required status check in branch protection.
   # A docs-only PR → Rust matrix skipped → this gate green → mergeable. A Rust PR
   # → matrix runs → this gate reflects it. The merge gate is never weakened: a
   # real failure still fails here.
+  target-gc:
+    name: Target-dir collector
+    needs: matrix-plan
+    # Path-gated on BOTH groups, like the other scripts gates: the collector is
+    # scripts/**, its harness tests/**. Ubuntu and macOS because the script must
+    # keep speaking both the BSD and GNU stat/date/find dialects.
+    if: needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: tests/target-gc/run.sh
+
   ci-gate:
     name: CI gate
     if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency]
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed

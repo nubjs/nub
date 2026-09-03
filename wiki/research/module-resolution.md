@@ -1,10 +1,10 @@
 ---
 **Status:** v3, 2026-05-16. v2 was rewritten after a Node-TS-state audit; v3 incorporates a Bun-vs-tsx prior-art pass and reframes candidate probing around dynamic ordering rather than worst-case probe count.
-**Builds on:** [[research/tsx-architecture]] (candidate-list pattern), [[research/augmentation-layers]] (resolve-hook positioning), [[research/rust-from-js]] (N-API call-cost rules).
+**Builds on:** [[research/augmentation-layers]] (resolve-hook positioning), [[research/rust-from-js]] (N-API call-cost rules).
 **Sibling:** [[research/tsconfig-paths]] — TS path-alias resolution, split out because its design surface warrants its own page.
 ---
 
-# Research: module resolution — extensionless ESM in TS, and how close we can get to Bun
+# Research: module resolution — extensionless ESM in TS
 
 Working write-up; conclusions are the current best read and may be revisited as the facts change.
 
@@ -18,7 +18,7 @@ This doc nails down:
 
 1. What Node's current TS support actually does and doesn't do (so we fix the right gap).
 2. How candidate probing should work, with dynamic ordering keyed on the parent file's extension.
-3. **A differential analysis vs Bun**: where can we plausibly match Bun, and where are we structurally unable to compete because we sit outside the runtime?
+3. **Where the remaining cost sits**: resolution itself is cache-bound; Node startup and the prelude dominate the cold path.
 
 tsconfig path-aliases are a sibling concern with its own surface and have moved to [[research/tsconfig-paths]]. The extensions-swap-style "let unbuilt packages import each other's TS sources" trick from tsx is *out of scope* — Bun doesn't fully do it either; see [Non-goals](#non-goals).
 
@@ -121,58 +121,8 @@ What *is* the constraint is per-import fs latency. With dynamic ordering, averag
 
 **Things we explicitly don't move to Rust:**
 
-- Bare-specifier resolution itself (exports, conditions, subpath imports). Node's resolver is canonical and the spec moves under us; reimplementing it is the [[research/augmentation-layers#Augmentation layer A: bundle-then-exec (Rolldown statically linked)|bundle-then-exec sharp edge]] in miniature. The compat trust contract argues for Node's resolver, even at a perf cost (see [differential analysis](#differential-analysis-vs-bun)).
+- Bare-specifier resolution itself (exports, conditions, subpath imports). Node's resolver is canonical and the spec moves under us; reimplementing it is the [[research/augmentation-layers#Augmentation layer A: bundle-then-exec (Rolldown statically linked)|bundle-then-exec sharp edge]] in miniature. The compat trust contract argues for Node's resolver, even at a perf cost.
 - `nextResolve` in a loop. We call it zero times for resolved relative paths and once for bare specifiers. tsx's per-candidate `nextResolve` is an artifact of being pure JS; we don't have to pay it.
-
-## Differential analysis vs Bun
-
-The goal is competitive parity with Bun on cold and warm TS-app startup, accepting that some gap is structural because Nub is outside the runtime. Itemizing what each side pays per import.
-
-### What Bun pays per import
-
-Four costs, all inside the runtime: the candidate stats, a resolver-state lookup, handing the result to JSC, and the `node_modules` walk for bare specifiers.
-
-1. Stat syscall(s) for candidate probing — same count as us with warm caches.
-2. Hashmap lookup in the resolver state.
-3. Resolution result handed to JSC's module loader as a native pointer.
-4. For bare specifiers: walk `node_modules`, parse `package.json`, evaluate `exports` conditions — all in Rust with the resolver's own caches.
-
-### What Nub pays per import
-
-Five costs: Node's hook dispatch, the napi round-trip, the fs probe for relatives, Node's own JS resolver for bare specifiers, and the prelude bootstrap. Two of the five are structural.
-
-1. **Node's `module.registerHooks()` invocation.** Node calls our JS hook for every resolve and every load. The dispatch itself (allocating the context object, invoking the callback) is a few hundred nanoseconds per import in Node's machinery. **Structural — only removable by forking Node.**
-2. **JS → napi → JS round-trip.** ~230 ns per call when returning a small object. For 500 imports: ~115 μs. Tiny.
-3. **JS → Rust → fs → Rust → JS for resolved relatives.** This is the path we have the most control over. Roughly the same fs cost as Bun, plus the napi cost above.
-4. **JS → Rust → `null` → JS → `nextResolve(...)` for bare specifiers.** This is the load-bearing structural disadvantage. `nextResolve` runs Node's own ESM resolver, which is implemented in JavaScript (`lib/internal/modules/esm/`). It walks `package.json`s, parses `exports`, evaluates conditions — all in JS. Bun's equivalent is Rust with tight data structures. Per bare specifier the delta is probably **5–50 μs depending on the depth of the package**. For an app with 50 bare specifiers at cold cache, that's ~250 μs–2.5 ms of pure overhead Bun doesn't pay.
-5. **Hook prelude bootstrap.** Process spawn → `--import nub-hooks.mjs` runs the prelude before user code. Adds ~1–5 ms of startup. Bun has zero of this; its hooks are built in. **Structural.**
-
-### Where we can close the gap
-
-Both costs we control are fs-bound, so both collapse to hashmap lookups once a resolution cache is in place.
-
-- (3) and (4) — the per-import fs and bare-specifier costs — both collapse to hashmap lookups with a per-process resolution cache. Warm process: roughly Bun-parity per import.
-- A **persistent on-disk resolution cache**, keyed on `(parent_dir, specifier, project_signature)`, eliminates the cold-cache bare-specifier cost on second-and-subsequent runs of the same project. With a populated cache, `nub script.ts` should resolve in close to the same wall-time as `bun script.ts`, modulo (1) and (5).
-
-### Where we cannot close the gap
-
-Three fixed costs survive any caching, all of them consequences of running on the user's own Node instead of inside a bundled runtime.
-
-- (1) **Per-import hook invocation overhead.** Even an empty resolve hook costs Node a few hundred ns of dispatch. With 500 imports, ~150 μs we can't avoid. Bun pays zero.
-- (5) **Hook prelude bootstrap.** Spawning Node + loading the prelude before user code is a fixed cost. Bun's loader is the runtime; nothing to bootstrap.
-- **Node's own cold start.** Stock Node 24 starts in ~30 ms; measured Bun is ~10 ms. The ~20 ms delta exists before any resolution happens. **Structural — only removable by forking Node or embedding it.**
-
-### Honest summary
-
-For a typical TS app cold start, our floor is roughly:
-
-```
-Bun:  ~10 ms (runtime start) + resolution
-Nub:  ~30 ms (Node start) + ~1–5 ms (prelude) + ~150 μs (hook
-              dispatch) + resolution
-```
-
-The resolution cost itself we can drive within ~5% of Bun via the cache. The ~20–25 ms Node-startup-and-prelude gap is what we're stuck with. **For the kind of TS apps Nub targets (apps that take 100 ms+ to bootstrap their own logic), this is in the noise.** For microbenchmarks of "how fast does hello world run", we lose by a factor of 2–3x on cold start, and we should be honest about that when discussing perf.
 
 ## Non-goals
 
@@ -194,7 +144,7 @@ The JS side is a thin shim over one napi call. The Rust side gates on the parent
 
 ```js
 // nub-resolve.mjs — installed via module.registerHooks() from the prelude
-import { resolve as nativeResolve } from "@nub/native";
+import { resolve as nativeResolve } from "../native/index.cjs";
 
 const hook = {
   resolve(specifier, context, nextResolve) {
@@ -215,7 +165,7 @@ module.registerHooks(hook);
 ```
 
 ```rust
-// crates/nub-resolve/src/lib.rs (shape, not literal API)
+// crates/nub-native/src/resolve.rs (shape, not literal API)
 #[napi]
 pub fn resolve(specifier: String, parent_url: Option<String>) -> Option<ResolvedEntry> {
     let parent_url = parent_url?;
@@ -268,16 +218,6 @@ Cold-start ballpark for a 500-import TS app:
 
 Total resolution: ~3.5 ms. Both numbers well inside the < 50 ms cold-start ambition; the dominant cost is Node startup + prelude (see [differential analysis](#differential-analysis-vs-bun)).
 
-## Open questions
-
-Five items are unresolved: cheap ambiguous-TS detection, the on-disk cache's shape, a possible migration to Node's new loader API, non-erasable TS as a wedge, and whether the bare-specifier cost estimate holds.
-
-- **Does swc's parser give us a cheap "is this an ambiguous TS file" answer?** Format detection cost scales with file size; if swc exposes a cheap-mode check, we skip pulling in es-module-lexer.
-- **Persistent on-disk resolution cache shape.** Same content-addressed store as the transform cache, or a separate store? Folding in is probably right for atomic eviction; unverified.
-- **Interaction with [nodejs/node#62720](https://github.com/nodejs/node/issues/62720) (the new `vm/modules` API).** If the new high-level loader API lands in 2026 and exposes a different resolution-customization surface, this design may migrate.
-- **Non-erasable TS coverage as a wedge.** With v26 removing `--experimental-transform-types`, the population of "real TS codebases that can't run on plain Node at all" got bigger. Worth measuring against the NestJS / TypeORM / decorator-heavy worlds specifically; might want a dedicated benchmark/demo for that case.
-- **Bare-specifier resolution speed.** Is the "Node's JS resolver is ~5–50 μs per bare specifier" estimate borne out? If it's at the high end of that range, the persistent resolution cache becomes more important; if low, less. Microbench needed.
-
 ## Sources
 
 Node's own TypeScript documentation and the PRs behind it, plus the tsx and Bun resolver source read locally at the line ranges cited.
@@ -287,7 +227,7 @@ Node's own TypeScript documentation and the PRs behind it, plus the tsx and Bun 
 - Type-stripping unflagged: [nodejs/node#56350](https://github.com/nodejs/node/pull/56350) (v23.6.0).
 - `--experimental-transform-types` removed in v26.0.0 — confirmed in current API docs; PR not pulled in this pass.
 - TypeScript 5.7 / 5.8 `rewriteRelativeImportExtensions` and `erasableSyntaxOnly`: TS release notes.
-- tsx resolve hook: `tsx/src/esm/hook/resolve.ts`, `src/utils/map-ts-extensions.ts`. Full breakdown in [[research/tsx-architecture]].
+- tsx resolve hook: `tsx/src/esm/hook/resolve.ts`, `src/utils/map-ts-extensions.ts`.
 - Bun resolver: `bun/src/resolver/resolver.rs` (`load_as_file` at 5657–5671, `.js→.ts` rewrite at 5686–5739), `bun/src/resolver/options.rs` (`ExtensionOrder` at 130–193), `bun/src/bun_core/feature_flags.rs:109–110` (`DISABLE_AUTO_JS_TO_TS_IN_NODE_MODULES`).
 - Node's ESM resolution algorithm: [nodejs.org/api/esm.html#resolution-algorithm](https://nodejs.org/api/esm.html#resolution-algorithm).
 - `module.registerHooks()` sync hook API: [nodejs.org/api/module.html](https://nodejs.org/api/module.html).
@@ -297,4 +237,5 @@ Node's own TypeScript documentation and the PRs behind it, plus the tsx and Bun 
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

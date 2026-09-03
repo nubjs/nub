@@ -67,8 +67,11 @@ jobs:
           (cd crates/nub-native && cargo build)
           mkdir -p runtime/addons
           cp target/debug/libnub_native.so runtime/addons/nub-native.node
+      # The nub built directly above installs the root deps — this leg never
+      # needs a published nub. `--ignore-scripts` is preserved; `hoisted` keeps
+      # node_modules a tree of real directories for the bundle staging below.
       - name: Install runtime npm deps
-        run: npm ci --ignore-scripts
+        run: ./target/debug/nub install --frozen-lockfile --ignore-scripts --node-linker hoisted
       - name: Stage the reusable nub bundle
         shell: bash
         run: |

@@ -1,6 +1,6 @@
 ---
 **Status:** v1, 2026-05-16. Split out from [[research/module-resolution]] because the design surface is large enough on its own.
-**Builds on:** [[research/module-resolution]] (extensionless probing and the resolve-hook split), [[research/tsx-architecture]] (tsx's path-alias implementation), [[research/rust-from-js]] (N-API call-cost rules).
+**Builds on:** [[research/module-resolution]] (extensionless probing and the resolve-hook split), [[research/rust-from-js]] (N-API call-cost rules).
 ---
 
 # Research: tsconfig path-alias resolution
@@ -90,7 +90,7 @@ Open: vendor `get-tsconfig` and call it via napi, or port the JSONC + `extends` 
 
 ## Differential analysis vs Bun
 
-Per [[research/module-resolution#Differential analysis vs Bun|`module-resolution.md`]], the differential surface is:
+Per [[research/module-resolution|`module-resolution.md`]], the differential surface is:
 
 - **Bun**: parses tsconfig in Rust at first encounter, caches the parsed table on its resolver state, applies on each resolve. Single language, no boundary.
 - **Nub**: parses tsconfig in Rust (in the napi-vendored resolver), caches in the same Rust-side cache, applies on each resolve via the single napi call. One napi crossing per import.
@@ -132,4 +132,5 @@ The specification, the tsc reference implementation, and the four existing runti
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Dropped a cross-reference to a withdrawn document.

@@ -272,7 +272,6 @@ pub(crate) enum ScanResult {
 /// the role-keyed scan here). `checksumBehavior`/`enableHardenedMode` are NOT here: aube verifies
 /// every tarball's SHA-512 by default (`verifyStoreIntegrity=true`), satisfying
 /// the `throw` posture.
-// @lat: [[research/pnpm-specific-behavior#6. Recommended baseline ("essentially compatible")]]
 pub(crate) fn scan_unsupported_config(
     role: Role,
     major: Option<u64>,
@@ -523,7 +522,7 @@ fn bunfig_install_bool(root: &Path, key: &str) -> Option<bool> {
     let mut value = None;
     for path in bunfig_paths(root) {
         if let Some(raw) = read_config_text(&path)
-            && let Ok(parsed) = raw.parse::<toml::Value>()
+            && let Ok(parsed) = raw.parse::<toml::Table>()
             && let Some(b) = parsed
                 .get("install")
                 .and_then(toml::Value::as_table)

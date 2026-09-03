@@ -231,6 +231,59 @@ fn a_workspace_member_points_the_loader_at_the_root_schema() {
 
 #[cfg(unix)]
 #[test]
+fn a_package_inside_a_package_finds_the_enclosing_schema() {
+    // `fns/` carries its own manifest, so it is the project root — and the schema
+    // one level up was neither that nor the workspace root. The lookup checked
+    // exactly those two directories, so this ran on nub's own `.env*` cascade
+    // with no diagnostic at all, which is the silent substitution the whole
+    // hand-over exists to refuse. The walk now covers everything up to the
+    // workspace root.
+    let dir = project(&[
+        (
+            "package.json",
+            r#"{"name":"ws","version":"1.0.0","workspaces":["apps/*"]}"#,
+        ),
+        ("apps/web/package.json", r#"{"name":"web"}"#),
+        ("apps/web/.env.schema", "# ---\nA=1\n"),
+        ("apps/web/.env", "FROM_DOTENV=cascade\n"),
+        ("apps/web/fns/package.json", r#"{"name":"fns"}"#),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+    std::fs::copy(
+        dir.path().join("probe.mjs"),
+        dir.path().join("apps/web/fns/probe.mjs"),
+    )
+    .expect("probe into the nested package");
+
+    let run = run(&dir.path().join("apps/web/fns"));
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "the enclosing package's schema must reach a package nested inside it. \
+         stderr: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.var("FROM_DOTENV"),
+        None,
+        "and finding it must stand nub's own cascade down, not run beside it. \
+         stderr: {}",
+        run.stderr
+    );
+    let handed = run
+        .var("LOADER_PATH")
+        .expect("the loader must be given a --path");
+    assert_eq!(
+        std::fs::canonicalize(&handed).expect("canonicalize --path"),
+        std::fs::canonicalize(dir.path().join("apps/web")).expect("canonicalize member"),
+        "the loader must be pointed at the directory the schema is in. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn nub_watch_also_puts_the_loader_in_front_of_node() {
     // `nub watch` assembles its own `node --watch` command instead of going
     // through `spawn_node`, so it does not inherit the wrap — but detection has

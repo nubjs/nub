@@ -50,13 +50,15 @@ The evidence behind each table row: package size, the bench or issue thread that
 
 ## Re-ranked clobber priority by perf magnitude
 
+Ranked by measured runtime magnitude, largest first.
+
 1. **`@js-temporal/polyfill`** — strict perf win. ~1.25 ms cold-start saved plus a C++/native-bigint hot-path advantage of unknown but architecturally substantial size. Largest install-size delta *and* largest single-feature runtime delta in the audit.
 2. **`urlpattern-polyfill`** — minor perf win. ~30 % faster `test()`; ~0.15 ms cold-start saved. Install-size dominates.
-3. **`abort-controller`** — negligible runtime delta, ~1 KB cold-start saving. Include only if the v0.x clobber-table machinery already exists for free.
+3. **`abort-controller`** — negligible runtime delta, ~1 KB cold-start saving. Worth including only where the clobber table already exists and the entry is free.
 4. **`cross-fetch` / `isomorphic-fetch`** — negligible. Already no-ops on Node ≥18 or trivially small. Install-size hygiene only.
 5. **`node-fetch`, `ws` (client), `eventsource`** — **remove from any perf-driven clobber list.** Userland and native are tied or userland-favored on the published benches.
 
-The earlier audit baseline was `@js-temporal/polyfill` and `urlpattern-polyfill` plus in-flight followups on `node-fetch`, `ws`, and `eventsource`; under perf those three followups are eliminated and `abort-controller` enters as a distant third.
+The earlier audit baseline was `@js-temporal/polyfill` and `urlpattern-polyfill`, with `node-fetch`, `ws`, and `eventsource` left open; under perf those three are eliminated and `abort-controller` enters as a distant third. Those three are the clobber table Nub ships today.
 
 ## Sources
 
@@ -80,10 +82,11 @@ Published benchmarks, the Node and undici issue threads behind each verdict, npm
 - V8 blog "Blazingly fast parsing, part 2" — https://v8.dev/blog/preparser
 - V8 blog "The cost of JavaScript in 2019" — https://v8.dev/blog/cost-of-javascript-2019
 - Cloudflare Workers cold-start parse-cost — https://towardsaws.com/aws-lambda-vs-google-cloud-run-vs-cloudflare-workers-cold-starts-and-costs-89674e69208e
-- Companion: [[research/userland-package-clobbering-audit]], [[research/polyfill-demand-audit]]
+- Companion: [[research/userland-package-clobbering-audit]]
 
 ## Changelog
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

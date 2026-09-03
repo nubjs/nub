@@ -1,15 +1,15 @@
 ---
 title: Watch mode
-description: Restart-on-change for files and scripts, driven by the resolved dependency graph plus your environment files, tsconfig, and package manifest — no glob hygiene required.
+description: Restart-on-change for files and scripts, driven by the resolved dependency graph plus your environment files, tsconfig, and package manifest — no glob list to maintain.
 ---
 
-Watch mode (`nub watch`) runs your entry point and restarts it whenever something it actually depends on changes.
+Watch mode (`nub watch`) runs your entry point and restarts it whenever a file it depends on changes.
 
-The engine underneath is Node's own `--watch` (run with `--watch-preserve-output`), with Nub-side glue that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher. There is no glob list to maintain.
+The engine underneath is Node's own `--watch` (run with `--watch-preserve-output`), with a Nub-side layer that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher.
 
 For how `nub` runs files in the first place, see [Running files](/docs/runtime); for scripts, [Running scripts](/docs/runner/run).
 
-## Watch and restart a file
+## Watching a file
 
 The watcher takes a file, not a script name. Point `nub watch` at an entry file — the one your `dev` script runs, for example. It runs the file, then restarts the process on any change to the file or anything in its resolved import graph.
 
@@ -19,11 +19,11 @@ nub watch src/server.ts
 
 TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath. A project [`nub.jsonc`](/docs/config) is in force on every restart: preloads, environment files, loaders, conditions, TypeScript transforms, and the selected tsconfig.
 
-A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/runner/run#forward-arguments).
+A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/runner/run#argument-forwarding).
 
 ## `--watch`
 
-Flag and subcommand are aliases: `nub --watch <file>` dispatches to the exact same code path as `nub watch <file>` — same defaults, same behavior. The flag form is there for `node --watch script.ts` muscle memory.
+Flag and subcommand are aliases: `nub --watch <file>` and `nub watch <file>` run the same code path. The flag form matches `node --watch script.ts`.
 
 ```bash
 nub --watch src/server.ts
@@ -39,38 +39,33 @@ Completed running 'src/server.ts'. Waiting for file changes before restarting...
 Restarting 'src/server.ts'
 ```
 
-## What triggers a restart
+## Watched files
 
-The watch set is loader-instrumented, not glob-based: `nub watch` only watches files that were actually loaded as part of the run, plus a small set of off-graph files that invalidate the process when they change. Concretely, a restart fires on a change to:
+The watch set is loader-instrumented, not glob-based: `nub watch` only watches files loaded as part of the run, plus a small set of off-graph files that invalidate the process when they change. A restart fires on a change to:
 
 - Any file in the **resolved dependency graph** of the entry — including `.ts` / `.tsx` files transpiled in-memory through `module.registerHooks()` that Node never sees on disk.
 - Your **`.env*` files** — these are read once at boot and aren't in any import graph, so Nub reports them to the watcher explicitly. Files named with `--env-file` or `--env-file-if-exists` are watched the same way, and every restart re-reads them, so an edited value is live on the next run. Re-reading on restart needs Node 20.6 or newer, the version that introduced the underlying flag; below it the values are captured once at startup, and an edit applies only after you restart `nub watch` itself.
 - The **`tsconfig.json` extends chain** — editing a tsconfig (for example, changing a `paths` mapping) restarts the process even though tsconfig isn't imported by anything.
 - **`package.json`**.
 
-This is why a plain `node --watch` silently goes stale on a tsconfig edit, and why Nub reports those off-graph files over Node's internal `WATCH_REPORT_DEPENDENCIES` channel.
+Nub reports the off-graph files to Node's watcher over its `WATCH_REPORT_DEPENDENCIES` channel.
 
-## What doesn't trigger a restart
-
-Because the watch set is the import graph rather than a directory glob, files that nothing in the run actually loads are simply not watched. A rebuild that emits `dist/foo.js` doesn't trigger a restart unless something in the run imported `dist/foo.js`.
+A rebuild that emits `dist/foo.js` does not trigger a restart unless something in the run imported `dist/foo.js`.
 
 ```bash
 nub watch src/server.ts
-# editing dist/** or coverage/** does not restart —
-# they aren't in the loaded dependency graph
+# editing dist/** or coverage/** does not restart
 ```
-
-There is no ignore list to maintain.
 
 ## Plain Node `--watch`
 
-Nub's watch mode is not byte-for-byte Node — it adds the banner, the preserve-output default, and the off-graph reporting. When you want vanilla Node `--watch` with no Nub-side glue at all, type `node --watch` directly in your shell.
+Nub's watch mode adds the banner, the preserve-output default, and the off-graph reporting on top of Node's. For vanilla `node --watch`, run it directly:
 
 ```bash
 node --watch script.js
 ```
 
-Nub's PATH shim is per-invocation: it only affects descendants of an active `nub ...` call, so the `node` in your shell is always your real Node.
+Nub's per-invocation PATH shim only affects descendants of an active `nub` call. A `node` installed by [`nub node shim`](/docs/node#nub-node-shim) resolves the pinned version and adds nothing else, so `node --watch` stays vanilla there too.
 
 <Callout>
 Read the [full docs](https://nodejs.org/api/cli.html#--watch) for Node's `--watch` flag on nodejs.org.

@@ -605,6 +605,13 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
         Some(ConfigCommand::Set(set)) => {
             super::engine_brand_preflight();
             if global {
+                // Global scope has no router, so it repeats the refusals it
+                // needs — the same shape as the map refusal below. A setting
+                // nub does not consume is refused in BOTH scopes; `--global`
+                // would otherwise be an open door straight to `~/.npmrc`.
+                if let Some(err) = npmrc_first::unsupported_setting_refusal(&set.key) {
+                    return Err(err);
+                }
                 // Neutral global write. npm-shared/auth keys FIRST (a key like
                 // `registry` is auth, not the `registries` map — the shared
                 // check must win before the map refusal below).
@@ -628,7 +635,33 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                 let pnpm_incumbent = aube_util::engine_context().read_branded_pnpm_config;
                 let scalar_to_yaml = project_scalar_home(pnpm_incumbent)
                     == config_model::ScalarHome::PnpmWorkspaceYaml;
-                match npmrc_first::classify_set(&set.key, scalar_to_yaml) {
+                let route = npmrc_first::classify_set(&set.key, scalar_to_yaml);
+                // `nub.jsonc` outranks every file home for the settings it
+                // supplies, so a write of one is read by nothing. Asked AFTER
+                // the route is chosen, for two reasons: the refusal can name the
+                // file it actually blocked — a non-shared scalar under a pnpm 11
+                // incumbent was bound for `pnpm-workspace.yaml`, not `.npmrc` —
+                // and a key the engine handles, or already refuses, never pays
+                // for the project lookup at all.
+                //
+                // The answer is a refusal rather than a different destination:
+                // the two surfaces do not share a value grammar, and moving the
+                // write would desynchronize `get` from `set`. See the
+                // duplicate_home module docs.
+                let blocked_home = match &route {
+                    npmrc_first::SetRoute::ProjectWorkspaceYaml => Some("pnpm-workspace.yaml"),
+                    npmrc_first::SetRoute::ProjectNpmrc => Some(".npmrc"),
+                    npmrc_first::SetRoute::Engine | npmrc_first::SetRoute::Refuse(_) => None,
+                };
+                if let Some(home) = blocked_home {
+                    let (supplied, _native) =
+                        super::project_supplied_settings(&std::env::current_dir()?);
+                    if let Some(field) = super::duplicate_home::shadowing_field(&set.key, &supplied)
+                    {
+                        return Err(super::duplicate_home::shadowed_error(&set.key, field, home));
+                    }
+                }
+                match route {
                     npmrc_first::SetRoute::Engine => {} // fall through to delegate
                     npmrc_first::SetRoute::ProjectWorkspaceYaml => {
                         return npmrc_first::set_project_workspace_yaml(&set.key, &set.value);
@@ -800,6 +833,16 @@ mod npmrc_first {
     /// non-pnpm / nub-identity surface. npm-shared keys (`.npmrc`) and map
     /// refusals are independent of this signal.
     pub(super) fn classify_set(key: &str, scalar_to_yaml: bool) -> SetRoute {
+        // A setting nub's embedder profile declares it does not consume. First,
+        // and its own arm rather than a case of the `setting_for_key` match
+        // below — that lookup is embedder-FILTERED, so an unsupported setting
+        // reads as unknown and falls to the free-form `ProjectNpmrc` route,
+        // writing the key verbatim into the user's `.npmrc`. That is how
+        // `aubeNoAutoInstall` used to land there: inert, unreadable by anything,
+        // and carrying the engine's brand into a file nub wrote.
+        if let Some(err) = unsupported_setting_refusal(key) {
+            return SetRoute::Refuse(err);
+        }
         if is_npm_shared_key(key) {
             return SetRoute::Engine;
         }
@@ -822,6 +865,18 @@ mod npmrc_first {
             // `.npmrc` about the setting just written. `.npmrc` is
             // where the paired `keep_layout` allowlist reads them back from.
             Some(meta) if meta.layout => SetRoute::ProjectNpmrc,
+            // A known scalar with NO `.npmrc` alias cannot be read back out of
+            // the file this route writes: `write_plan` falls back to the key
+            // verbatim, so the line lands, `config set` reports success, and
+            // every reader looks somewhere else — the same silent no-op an
+            // unsupported setting used to produce. Refused rather than declared
+            // unsupported, because the surfaces these DO have (a CLI flag, the
+            // workspace yaml under a pnpm incumbent) keep working and must keep
+            // reading. Only the `.npmrc` route is decided here; the yaml route's
+            // own `.npmrc` fallback re-asks in [`set_project_npmrc`].
+            Some(meta) if !scalar_to_yaml && meta.npmrc_keys.is_empty() => {
+                SetRoute::Refuse(no_npmrc_home_error(meta))
+            }
             // Known scalar (including canonical dotted names like
             // `peerDependencyRules.allowedVersions`).
             Some(_) => scalar_route,
@@ -864,6 +919,9 @@ mod npmrc_first {
     /// so a stale `auto-install-peers=` line can't shadow a fresh
     /// `autoInstallPeers=` write (the engine reads them last-write-wins).
     pub(super) fn set_project_npmrc(key: &str, value: &str) -> Result<i32> {
+        if let Some(err) = no_npmrc_home_refusal(key) {
+            return Err(err);
+        }
         let path = project_root().join(".npmrc");
         let (sweep, write_key) = write_plan(key);
         npmrc_set(&path, &sweep, &write_key, value)?;
@@ -880,6 +938,9 @@ mod npmrc_first {
     /// read-coherent. (Auth/registry keys take the engine's own user-`.npmrc`
     /// writer instead — see the `set` dispatch.)
     pub(super) fn set_user_npmrc(key: &str, value: &str) -> Result<i32> {
+        if let Some(err) = no_npmrc_home_refusal(key) {
+            return Err(err);
+        }
         let Some(home) = home_dir() else {
             return Err(anyhow!(
                 "nub config set --global: could not locate the home directory\n\
@@ -941,7 +1002,7 @@ mod npmrc_first {
     /// then any alias surface (npmrc/yaml/env/cli spellings).
     fn setting_for_key(key: &str) -> Option<&'static SettingMeta> {
         meta::find(key).or_else(|| {
-            meta::all().iter().find(|meta| {
+            meta::all().find(|meta| {
                 meta.npmrc_keys.contains(&key)
                     || meta.workspace_yaml_keys.contains(&key)
                     || meta.env_vars.contains(&key)
@@ -1030,6 +1091,71 @@ mod npmrc_first {
             }
         }
         cwd
+    }
+
+    /// The refusal for a key naming a setting nub's embedder profile declares
+    /// it does not consume, `None` for every other key. Both write scopes ask
+    /// this — the project route through [`classify_set`], the global one
+    /// directly, since it has no router.
+    ///
+    /// `key` is echoed as the user spelled it; the advice is looked up by the
+    /// CANONICAL name, which is where the profile hangs it.
+    pub(super) fn unsupported_setting_refusal(key: &str) -> Option<anyhow::Error> {
+        let meta = meta::unsupported_for_key(key)?;
+        let advice = meta::unsupported_advice(meta.name).unwrap_or_default();
+        Some(anyhow!(
+            "nub config set {key}: `{key}` is not a nub setting\n\x20\x20{advice}"
+        ))
+    }
+
+    /// The refusal for a key naming a real setting that has NO `.npmrc` alias,
+    /// `None` for every other key — including an unknown one, which is free-form
+    /// and legitimately lands in `.npmrc` verbatim.
+    ///
+    /// The choke point every `.npmrc` write asks, so the yaml route's own
+    /// fallback and the global writer are covered as well as
+    /// [`classify_set`]'s direct route.
+    pub(super) fn no_npmrc_home_refusal(key: &str) -> Option<anyhow::Error> {
+        setting_for_key(key)
+            .filter(|meta| meta.npmrc_keys.is_empty())
+            .map(no_npmrc_home_error)
+    }
+
+    /// Name the surfaces that DO read the setting. Both settings in this class
+    /// today (`pnpmfilePath`, `globalPnpmfile`) carry a CLI flag, and only
+    /// `pnpmfilePath` also has a workspace-yaml key.
+    ///
+    /// An `AUBE_*` variable is never offered: `env_prefix: None` means nub does
+    /// not read the engine's env family, so naming one would replace a dead
+    /// write with a dead export. That leaves both of these with real advice; a
+    /// future setting sourced ONLY from `AUBE_*` would fall to the last line,
+    /// which is the honest answer rather than a wrong pointer.
+    fn no_npmrc_home_error(meta: &SettingMeta) -> anyhow::Error {
+        let mut homes: Vec<String> = Vec::new();
+        if let Some(flag) = meta.cli_flags.first() {
+            let flag = flag.trim_start_matches('-');
+            homes.push(format!("pass `--{flag} <value>` on the command line"));
+        }
+        if !meta.workspace_yaml_keys.is_empty() {
+            homes.push(format!(
+                "set `{}:` in pnpm-workspace.yaml under a pnpm project",
+                meta.workspace_yaml_keys[0]
+            ));
+        }
+        if let Some(var) = meta.env_vars.iter().find(|v| !v.starts_with("AUBE_")) {
+            homes.push(format!("export `{var}`"));
+        }
+        let advice = if homes.is_empty() {
+            "it has no config-file home at all".to_string()
+        } else {
+            homes.join(", or ")
+        };
+        anyhow!(
+            "nub config set {}: `{}` is not readable from .npmrc, so writing it there would do nothing\n\
+             \x20\x20{advice}",
+            meta.name,
+            meta.name
+        )
     }
 
     fn map_setting_error(name: &str) -> anyhow::Error {
@@ -1174,6 +1300,50 @@ mod npmrc_first {
                 ),
                 "control: a non-layout scalar still follows the pnpm-v11 scalar home"
             );
+        }
+
+        /// A real setting with NO `.npmrc` alias is refused on the `.npmrc`
+        /// route and still allowed on the yaml one.
+        ///
+        /// Both halves matter and they pull opposite ways. `write_plan` falls
+        /// back to the key verbatim, so without the refusal the line lands and
+        /// nothing reads it; but `pnpmfilePath` DOES have a workspace-yaml key,
+        /// which a pnpm-v11 incumbent reads back — so a blanket refusal would
+        /// take away the one home that works. The invariant is per-ROUTE, not
+        /// per-setting. `autoInstallPeers` is the control: an ordinary scalar
+        /// with an `.npmrc` alias is untouched on both routes.
+        #[test]
+        fn a_setting_with_no_npmrc_alias_is_refused_on_the_npmrc_route() {
+            for key in ["pnpmfilePath", "globalPnpmfile"] {
+                assert!(
+                    matches!(classify_set(key, false), SetRoute::Refuse(_)),
+                    "{key} has no .npmrc alias and must not be written there"
+                );
+            }
+            assert!(
+                matches!(
+                    classify_set("pnpmfilePath", true),
+                    SetRoute::ProjectWorkspaceYaml
+                ),
+                "pnpmfilePath has a workspace-yaml key a pnpm-v11 incumbent reads back"
+            );
+            for scalar_to_yaml in [true, false] {
+                assert!(
+                    no_npmrc_home_refusal("autoInstallPeers").is_none(),
+                    "control: a setting with an .npmrc alias is never refused for lacking one"
+                );
+                assert!(
+                    !matches!(
+                        classify_set("autoInstallPeers", scalar_to_yaml),
+                        SetRoute::Refuse(_)
+                    ),
+                    "control: the ordinary scalar route is untouched (scalar_to_yaml={scalar_to_yaml})"
+                );
+            }
+            // An UNKNOWN key names no setting, so it is free-form config and
+            // still legal in `.npmrc`. Guarding by "has no alias" rather than by
+            // "is a known setting" would have refused every custom key.
+            assert!(no_npmrc_home_refusal("some-custom-key").is_none());
         }
 
         #[test]

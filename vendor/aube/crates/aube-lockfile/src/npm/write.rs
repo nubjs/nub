@@ -57,6 +57,15 @@ struct WriteNpmPackage<'a> {
     os: Vec<String>,
     cpu: Vec<String>,
     libc: Vec<String>,
+    /// Root importer only. npm mirrors the manifest's `workspaces` into
+    /// `packages[""]` and copies it VERBATIM rather than normalizing it,
+    /// so this borrows the parsed value instead of flattening to
+    /// `patterns()`: an array stays an array and bun's object form stays
+    /// an object, which is what npm writes back (measured, npm 11.19.0).
+    /// The third form aube parses, a bare `"workspaces": "packages/*"`,
+    /// has no npm spelling to match — npm rejects that manifest outright
+    /// (`npm install` exits 1), so nothing it produces can diverge.
+    workspaces: Option<&'a aube_manifest::Workspaces>,
     funding: Option<WriteNpmFunding<'a>>,
     link: bool,
     dev: bool,
@@ -159,6 +168,22 @@ impl Serialize for WriteNpmPackage<'_> {
         if !self.os.is_empty() {
             map.serialize_entry("os", &self.os)?;
         }
+        // `workspaces` is the one key whose BUCKET depends on its value,
+        // because `json-stringify-nice` sorts on the runtime type and npm
+        // copies this field through verbatim. The usual array form is a
+        // non-object, so it sorts here, last among the scalars after `os`
+        // — npm writes `name, version, license, workspaces, dependencies`.
+        // Bun's object form sorts with the object keys instead, last
+        // again: npm writes `… dependencies, engines, workspaces`. Both
+        // measured, npm 11.19.0. A bare string has no npm spelling to
+        // match (npm rejects that manifest), and is a non-object, so it
+        // rides with the array.
+        if let Some(
+            v @ (aube_manifest::Workspaces::Array(_) | aube_manifest::Workspaces::String(_)),
+        ) = self.workspaces
+        {
+            map.serialize_entry("workspaces", v)?;
+        }
 
         // --- object keys ---
         // preferred (swKeyOrder): dependencies
@@ -189,9 +214,71 @@ impl Serialize for WriteNpmPackage<'_> {
         if !self.peer_dependencies_meta.is_empty() {
             map.serialize_entry("peerDependenciesMeta", &self.peer_dependencies_meta)?;
         }
+        // The object half of the split described above — `workspaces`
+        // sorts alphabetically among the object keys, i.e. last.
+        if let Some(v @ aube_manifest::Workspaces::Object { .. }) = self.workspaces {
+            map.serialize_entry("workspaces", v)?;
+        }
 
         map.end()
     }
+}
+
+/// The root project's `license` and `bin`, normalized the way npm normalizes
+/// them into the root importer entry (verified against npm 11.17): an object
+/// `license` collapses to its `type`, a string `bin` expands to
+/// `{ <name-without-scope>: <path> }`, and every bin path sheds its leading
+/// `./` segments — npm writes `"./a.js"` and `"././d.js"` alike as `d.js`,
+/// so leaving them on churns the lockfile against npm's own output.
+///
+/// Both are read out of [`aube_manifest::PackageJson::extra`], the flattened
+/// catch-all, rather than promoted to typed fields — nothing else in aube
+/// consumes them, and a typed field would change how a manifest re-serializes.
+/// `engines` is already typed, so the caller reads it directly.
+///
+/// Only the ROOT importer gets this. A workspace member's entry is built from
+/// whichever of the link package or an on-disk manifest is available, and the
+/// manifest is absent on exactly the path that matters here (a graph read back
+/// from an npm lockfile), so there is nothing to mirror.
+fn root_manifest_metadata(
+    manifest: &aube_manifest::PackageJson,
+) -> (Option<&str>, BTreeMap<&str, &str>) {
+    let license = manifest.extra.get("license").and_then(|v| match v {
+        serde_json::Value::String(s) => Some(s.as_str()),
+        serde_json::Value::Object(o) => o.get("type").and_then(|t| t.as_str()),
+        _ => None,
+    });
+
+    // Repeated rather than single: npm collapses `././d.js` all the way to
+    // `d.js`. Prefix-stripping keeps the result a borrow of the manifest.
+    fn strip_dot_slash(mut path: &str) -> &str {
+        while let Some(rest) = path.strip_prefix("./") {
+            path = rest;
+        }
+        path
+    }
+
+    let mut bin: BTreeMap<&str, &str> = BTreeMap::new();
+    match manifest.extra.get("bin") {
+        Some(serde_json::Value::Object(entries)) => {
+            for (target, path) in entries {
+                if let Some(path) = path.as_str() {
+                    bin.insert(target.as_str(), strip_dot_slash(path));
+                }
+            }
+        }
+        Some(serde_json::Value::String(path)) => {
+            if let Some(name) = manifest.name.as_deref() {
+                bin.insert(
+                    name.rsplit('/').next().unwrap_or(name),
+                    strip_dot_slash(path.as_str()),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    (license, bin)
 }
 
 /// npm emits `funding: {"url": "…"}` verbatim, one key, on every
@@ -294,16 +381,28 @@ pub fn write(
 
     let mut packages: BTreeMap<String, WriteNpmPackage> = BTreeMap::new();
 
-    // Root importer entry — mirrors the manifest's dep fields.
+    // Root importer entry — mirrors the manifest's dep fields, plus the
+    // `license`/`bin`/`engines` npm copies across from the project's own
+    // `package.json`. Omitting the latter three silently dropped them from a
+    // hand-written `package-lock.json` on the first rewrite.
+    let (root_license, root_bin) = root_manifest_metadata(manifest);
     packages.insert(
         root_key.to_string(),
         WriteNpmPackage {
             name: manifest.name.as_deref(),
             version: manifest.version.as_deref(),
+            license: root_license,
             dependencies: borrow_map(&manifest.dependencies),
             dev_dependencies: borrow_map(&manifest.dev_dependencies),
             optional_dependencies: borrow_map(&manifest.optional_dependencies),
             peer_dependencies: borrow_map(&manifest.peer_dependencies),
+            bin: root_bin,
+            engines: manifest
+                .engines
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect(),
+            workspaces: manifest.workspaces.as_ref(),
             ..Default::default()
         },
     );
@@ -317,7 +416,11 @@ pub fn write(
     // so the canonical-map lookup misses and the package would otherwise be
     // dropped entirely. `npm ci` then rejects the lockfile with
     // `Missing: <name>@<version> from lock file`. Emit the pair here.
-    emit_file_dep_links(graph, &roots, ".", &mut packages);
+    //
+    // The root importer's own local deps always take the root slot, so
+    // they need no reservation set; the members' do, and theirs is built
+    // below once the member identities are known.
+    emit_file_dep_links(graph, &roots, ".", &Default::default(), &mut packages);
 
     // Resolve each workspace member's identity (name/version/peers).
     // A `LocalSource::Link` package exists only when the graph was
@@ -346,6 +449,52 @@ pub fn write(
             (p.as_str(), m)
         })
         .collect();
+
+    // Every name that will end up owning a root `node_modules/<name>`
+    // entry, gathered before the member loop writes anything: each
+    // top-level hoist placement, and each workspace member, which the
+    // loop links at the root. A member's local link consults this to
+    // decide root-vs-nested, because both of those passes serialize
+    // AFTER it and would otherwise overwrite the link — leaving the dep
+    // with orphaned metadata and no link node anywhere.
+    //
+    // Read off `placed` rather than recomputed from the root importer's
+    // direct deps: `placed` IS the hoist tree's own answer to what lands
+    // at the top level, so a TRANSITIVE that hoists there is covered by
+    // construction. Enumerating direct deps missed exactly those — root
+    // depending on `outer`, which pulls `shared@2`, alongside a member's
+    // `shared = file:../local`, silently dropped the member's link. The
+    // loop below grows `placed`, but only with `<importer>/node_modules/…`
+    // keys, so reading it here already sees the whole top level.
+    //
+    // Member names come from the same two sources the loop itself uses: a
+    // `LocalSource::Link` package when the graph was READ from a
+    // lockfile, and the on-disk manifest when it was freshly resolved.
+    // Consulting only the former missed every member on a fresh resolve,
+    // which is the common case.
+    let root_claimed: BTreeSet<String> = placed
+        .keys()
+        .filter_map(|install_path| install_path.strip_prefix("node_modules/"))
+        .filter(|name| !name.contains("/node_modules/"))
+        .map(str::to_string)
+        .chain(
+            graph
+                .importers
+                .keys()
+                .filter(|p| p.as_str() != ".")
+                .filter_map(|p| {
+                    workspace_package_for_importer(graph, p)
+                        .map(|pkg| pkg.name.as_str())
+                        .or_else(|| {
+                            member_manifests
+                                .get(p.as_str())
+                                .and_then(|m| m.name.as_deref())
+                        })
+                })
+                .map(str::to_string),
+        )
+        .collect();
+
     for (importer_path, importer_roots) in graph.importers.iter().filter(|(path, _)| *path != ".") {
         let linked = workspace_package_for_importer(graph, importer_path);
         let disk_manifest = member_manifests.get(importer_path.as_str());
@@ -397,7 +546,13 @@ pub fn write(
             },
         );
 
-        emit_file_dep_links(graph, importer_roots, importer_path, &mut packages);
+        emit_file_dep_links(
+            graph,
+            importer_roots,
+            importer_path,
+            &root_claimed,
+            &mut packages,
+        );
 
         let workspace_tree_roots = non_link_roots(graph, importer_roots);
         let workspace_tree = super::build_hoist_tree(&canonical, &workspace_tree_roots);
@@ -627,10 +782,10 @@ fn non_link_roots(graph: &LockfileGraph, roots: &[DirectDep]) -> Vec<DirectDep> 
     roots
         .iter()
         .filter(|dep| {
-            // `Link` deps are pure symlinks (no virtual-store node), and
-            // `Directory`/`Tarball` `file:` deps are emitted out of band by
-            // `emit_file_dep_links` as npm's `link: true` pair — neither
-            // belongs in the hoisted `name@version` tree.
+            // All three are emitted out of band by `emit_file_dep_links`
+            // as npm's `link: true` pair, and `Link` additionally has no
+            // virtual-store node at all — so none of them belongs in the
+            // hoisted `name@version` tree.
             !graph.packages.get(&dep.dep_path).is_some_and(|pkg| {
                 matches!(
                     pkg.local_source,
@@ -656,14 +811,41 @@ fn non_link_roots(graph: &LockfileGraph, roots: &[DirectDep]) -> Vec<DirectDep> 
 /// prefix and a leading `./`, but keeps `../` parent climbs), carries
 /// only `name`/`version`, and is what `npm ci` validates the root
 /// `dependencies` entry against. The second is the `node_modules/<name>`
-/// symlink record pointing back at that path. `LocalSource::Link`
-/// (`link:` deps and workspace members) is handled separately — npm
-/// links those too but the importer/workspace machinery already emits
-/// their pair, so this only covers `file:` directory and tarball deps.
+/// symlink record pointing back at that path.
+///
+/// `LocalSource::Link` gets the SAME pair, with one exception. npm has no
+/// separate encoding for `link:` — a `file:` directory dependency is
+/// already written as a link record — so the two only differ inside aube,
+/// where `Link` skips the virtual store. The exception is a workspace
+/// MEMBER, which is also a `Link` but whose pair the importer/workspace
+/// pass below owns. A member is exactly a link whose TARGET is an
+/// importer, so ask `graph.importers` directly.
+///
+/// That guard is belt-and-braces, not load-bearing, and the comment says
+/// so rather than implying a correctness dependency that does not exist:
+/// this function runs BEFORE the workspace pass, which rewrites the same
+/// two keys and wins on ordering alone — deleting the guard leaves the
+/// whole crate's tests green (measured). It is here to state which pass
+/// owns a member instead of resting that on pass order.
+///
+/// Not `workspace_package_for_importer`: that asks "is there a package
+/// linking AT this path", which a plain `link:` dep answers about
+/// ITSELF — it is the package linking at its own target — so using it
+/// here silently skips every dep this function exists to emit.
+///
+/// This function used to take `Directory`/`Tarball` only, on the stated
+/// grounds that "the importer/workspace machinery already emits their
+/// pair" for every `Link`. That is true of a workspace member and false
+/// of a `link:` to a plain directory, which has no importer entry at all
+/// — so nothing emitted it, `non_link_roots` also kept it out of the
+/// hoist tree, and it vanished from the lockfile. nub's own freshness
+/// check then read the importer as having zero direct deps and failed
+/// every later `--frozen-lockfile` with `manifest adds <name>@link:…`.
 fn emit_file_dep_links<'a>(
     graph: &'a LockfileGraph,
     roots: &[DirectDep],
     importer_path: &str,
+    root_claimed: &BTreeSet<String>,
     packages: &mut BTreeMap<String, WriteNpmPackage<'a>>,
 ) {
     for dep in roots {
@@ -671,9 +853,15 @@ fn emit_file_dep_links<'a>(
             continue;
         };
         let resolved = match &pkg.local_source {
-            Some(local @ (LocalSource::Directory(_) | LocalSource::Tarball(_))) => {
-                npm_file_dep_path(importer_path, &local.path_posix())
+            Some(LocalSource::Link(path))
+                if graph.importers.contains_key(&*path.to_string_lossy()) =>
+            {
+                continue;
             }
+            Some(
+                local
+                @ (LocalSource::Directory(_) | LocalSource::Tarball(_) | LocalSource::Link(_)),
+            ) => npm_file_dep_path(&local.path_posix()),
             _ => continue,
         };
         packages.insert(
@@ -684,8 +872,46 @@ fn emit_file_dep_links<'a>(
                 ..Default::default()
             },
         );
+
+        // npm hoists the first target to the root and NESTS a conflicting
+        // one under the importer that wants it, which is the only way the
+        // format can express two members depending on the same NAME at
+        // different paths. Measured, npm 11.19.0, members `a`→`vendor/one` and
+        // `b`→`vendor/two`:
+        //
+        //     "node_modules/shared":            { resolved: "vendor/one" }
+        //     "packages/b/node_modules/shared": { resolved: "vendor/two" }
+        //
+        // Keying every link at the root unconditionally made the last
+        // writer win, so `a` silently resolved to `b`'s package — no error,
+        // a wrong module. Take the root slot only if it is free or already
+        // points at this exact target; otherwise nest.
+        //
+        // `packages` alone cannot answer that, because it is still being
+        // built: the hoist tree and the workspace pass both serialize AFTER
+        // this one and can claim the same root alias. A root registry dep
+        // aliased `shared` plus a member's `shared = file:…` hit exactly
+        // that — the link went to root while the slot looked free, the
+        // later hoist pass overwrote it, and the member's link vanished
+        // from the lockfile entirely rather than merely moving. Hence
+        // `root_claimed`, read off the hoist tree's own top level plus the
+        // member roster before either pass runs. Measured, npm 11.19.0:
+        //
+        //     "node_modules/shared":                 <the registry package>
+        //     "packages/app/node_modules/shared":    { resolved: "vendor/local" }
+        let is_root_importer = importer_path == "." || importer_path.is_empty();
+        let root_key = format!("node_modules/{}", dep.name);
+        let taken_by_other = match packages.get(&root_key) {
+            Some(existing) => existing.resolved.as_deref() != Some(resolved.as_str()),
+            None => !is_root_importer && root_claimed.contains(dep.name.as_str()),
+        };
+        let key = if taken_by_other && !is_root_importer {
+            format!("{importer_path}/node_modules/{}", dep.name)
+        } else {
+            root_key
+        };
         packages.insert(
-            format!("node_modules/{}", dep.name),
+            key,
             WriteNpmPackage {
                 resolved: Some(resolved),
                 link: true,
@@ -695,19 +921,30 @@ fn emit_file_dep_links<'a>(
     }
 }
 
-/// Render the lockfile path key for a `file:` dep's package entry the
-/// way npm does: drop a leading `./` (npm normalizes `file:./local-pkg`
-/// to `local-pkg`) but preserve `../` climbs verbatim
-/// (`file:../sib` → `../sib`). For a non-root importer the stored path is
-/// importer-relative, so re-anchor it to the project root the way npm's
-/// keys are project-relative.
-fn npm_file_dep_path(importer_path: &str, path_posix: &str) -> String {
-    let normalized = path_posix.strip_prefix("./").unwrap_or(path_posix);
-    if importer_path == "." || importer_path.is_empty() {
-        normalized.to_string()
-    } else {
-        format!("{importer_path}/{normalized}")
-    }
+/// Render the lockfile path key for a local dep's package entry the way
+/// npm does: drop a leading `./` (npm normalizes `file:./local-pkg` to
+/// `local-pkg`) but preserve `../` climbs verbatim (`file:../sib` →
+/// `../sib`).
+///
+/// The path arrives PROJECT-ROOT-relative whichever importer declared
+/// it — `aube_resolver::local_source::rebase_local` rewrites every
+/// variant that way precisely so downstream code can resolve it with one
+/// `project_root.join(rel)` — and npm's keys are project-root-relative
+/// too, so the two frames already agree and nothing needs re-anchoring.
+///
+/// This used to take an `importer_path` and prepend it, on the stated
+/// belief that "for a non-root importer the stored path is
+/// importer-relative". That belief contradicted `rebase_local`, and the
+/// result was a doubled prefix: a member `packages/app` declaring
+/// `file:../../vendor/local-pkg` was keyed `packages/app/vendor/local-pkg`,
+/// a path matching nothing on disk, where npm writes `vendor/local-pkg`
+/// (measured, npm 11.19.0). Root importers were unaffected, which is why it
+/// went unnoticed.
+fn npm_file_dep_path(path_posix: &str) -> String {
+    path_posix
+        .strip_prefix("./")
+        .unwrap_or(path_posix)
+        .to_string()
 }
 
 type DepSections<'a> = (

@@ -1,0 +1,19 @@
+{
+  "name": "@nubjs/loader-linux-x64",
+  "version": "0.8.3",
+  "description": "Nub loader native addon for Linux x64 (glibc)",
+  "license": "MIT",
+  "repository": "https://github.com/nubjs/nub",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "nub-native.node"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

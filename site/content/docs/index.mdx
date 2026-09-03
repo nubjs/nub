@@ -13,7 +13,7 @@ nub run dev              # run a package.json script
 nubx prisma generate     # run a CLI from node_modules/.bin
 ```
 
-Every augmentation rides on Node's own public extension surfaces, and the package manager reads and writes whatever lockfile your project already uses.
+Every augmentation uses Node's own public extension surfaces, and the package manager reads and writes whatever lockfile your project already uses.
 
 ## The toolkit
 
@@ -25,7 +25,7 @@ Every augmentation rides on Node's own public extension surfaces, and the packag
 - **A watcher** — restart on changes to your source, your `.env*` files, and your `tsconfig.json`, driven by the dependency graph. See [watch](/docs/watch).
 - **A GitHub Action** — swap `actions/setup-node` for `nubjs/setup-nub` to install Nub, warm the project's Node, and cache Nub's store in CI. See [GitHub Action](/docs/deployment/github-action).
 
-## What Nub replaces
+## Replaced tools
 
 | Nub | Instead of |
 |---|---|
@@ -46,10 +46,10 @@ npm install -g @nubjs/nub
 Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work too. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`. On macOS and Linux, install with Homebrew:
 
 ```bash
-brew install nubjs/tap/nub
+brew install nub
 ```
 
-With [mise](https://mise.jdx.dev), `nub` and `nubx` both land on `PATH`:
+With [mise](https://mise.jdx.dev), `nub` and `nubx` are both put on `PATH`:
 
 ```bash
 mise use -g nub
@@ -76,7 +76,7 @@ Every code commit to `main` publishes a canary build for all platforms, versione
 npm install -g @nubjs/nub@canary
 ```
 
-The same binaries are attached to the rolling [canary release](https://github.com/nubjs/nub/releases/tag/canary) on GitHub. Canary tracks the newest commit and passes build and smoke checks only — expect rough edges, and pin back to `@nubjs/nub@latest` to return to the stable channel.
+The same binaries are attached to the rolling [canary release](https://github.com/nubjs/nub/releases/tag/canary) on GitHub. Canary tracks the newest commit and passes build and smoke checks only; pin back to `@nubjs/nub@latest` to return to the stable channel.
 
 ## Package management
 
@@ -90,11 +90,11 @@ nub update
 nub ci                   # frozen-lockfile install
 ```
 
-It's optional: keep running your existing package manager and reach for Nub for everything else. See [install](/docs/install) for lockfile fidelity per incumbent, and [pm](/docs/pm) for provisioning the exact package-manager version a project pins.
+The installer is optional: keep your existing package manager and use Nub for everything else. See [install](/docs/install) for lockfile fidelity per incumbent, and [pm](/docs/pm) for provisioning the exact package-manager version a project pins.
 
 ## Configuration
 
-Everything above works with no configuration. When you want to change a default, put a `nub.jsonc` at the project root:
+To change a default, put a `nub.jsonc` at the project root:
 
 ```jsonc title="nub.jsonc"
 {
@@ -117,6 +117,6 @@ Unknown keys and invalid values stop the command with an error. See [nub.jsonc](
 - **Node 18.19+** (Node 18 LTS) for augmented modes.
 - macOS (arm64, x64), Linux (x64, arm64), Windows (x64, arm64).
 
-## Where to next
+## Next steps
 
 - Quick answers: the [FAQ](/docs/faq).

@@ -81,7 +81,8 @@ pub struct Manifest {
     /// version satisfying [`Self::smol_version_range`].
     pub node_version: String,
     /// What `smol` DOWNLOADS when discovery finds nothing: the newest release
-    /// satisfying the compiled pin, resolved at compile time.
+    /// satisfying the compiled pin that can also RUN this payload, resolved at
+    /// compile time.
     ///
     /// Deliberately NOT an acceptance bound — discovery uses the explicit exact,
     /// range, or floor policy stored beside it. This exists because
@@ -90,6 +91,13 @@ pub struct Manifest {
     /// major plainly asks for the newest in that line. Resolved here rather than
     /// in the launcher to keep version lookup out of a component that is
     /// deliberately minimal.
+    ///
+    /// The capability qualifier is load-bearing, not decorative. The newest
+    /// satisfying release is not always one that can run the payload, so when
+    /// [`Self::requires_augmentation`] is set and that release lacks the API, this
+    /// field is left EMPTY and the launcher provisions the floor — which the build
+    /// gate has already proven capable. Recording it anyway produced a binary that
+    /// built clean and then refused its own download on the user's machine.
     ///
     /// Empty for embed, where `node_version` is already exact, and in legacy
     /// manifests, where the launcher falls back to the floor.
@@ -110,6 +118,24 @@ pub struct Manifest {
     /// fails closed.
     #[serde(default)]
     pub smol_version_range: String,
+    /// Whether the payload installs a `module.registerHooks` shim, which a
+    /// discovered Node must therefore provide. Set for a `--smol` build carrying
+    /// `--external` or `--allow-dynamic-import`.
+    ///
+    /// The build-time gate cannot stand in for this. It sees the pin's FLOOR, and
+    /// a floor in 22.15.0..23.0.0 admits the 23.0–23.4 band, which sorts above the
+    /// floor but predates `registerHooks` on the 23.x line — so `--target ">=22.15"`
+    /// passed the build and the artifact died at launch on `registerHooks is not a
+    /// function`. Recording the REQUIREMENT lets the launcher apply it to the
+    /// candidate it actually found, which closes the class rather than the shapes
+    /// the floor happens to catch.
+    ///
+    /// Absent in legacy manifests, where `false` reproduces their behavior exactly
+    /// — not because they carry no shim (a legacy `--smol --external` payload
+    /// carries one; that IS the bug) but because no launcher that read them ever
+    /// applied this check. `false` is what they were already doing.
+    #[serde(default)]
+    pub requires_augmentation: bool,
     /// The target triple this binary was compiled for (e.g. `darwin-arm64`).
     pub triple: String,
     /// Content hash (hex) of the DECOMPRESSED embedded Node — the cache key for
@@ -184,6 +210,31 @@ pub struct Manifest {
     /// Node is not present to ask, so a flag it rejects fails loudly at startup.
     #[serde(default)]
     pub node_flags: Vec<String>,
+    /// Whether every module this artifact can execute was already parsed by the
+    /// bundler — no `--external` packages, no retained computed `import()`, and
+    /// no verbatim payload file at all (an `--include`, an emitted asset copy, a
+    /// native island), so nothing the artifact ships resolves through the real
+    /// module loader at runtime. Presence, not extension: the CJS loader parses
+    /// an exact-path `require()` of any unknown extension as JS.
+    ///
+    /// What it buys: the launcher skips the feature matrix's `UnflagArgv` rows
+    /// (today `--js-defer-import-eval`). Those flags exist to enable in-progress
+    /// JS syntax in files Node parses at runtime, which `nub run` must assume
+    /// anywhere in the graph — but a sealed bundle has no such files, and the
+    /// bundler already lowered the graph it emitted (Rolldown evaluates
+    /// `import defer` eagerly, so the syntax never survives into the payload).
+    /// Measured on Node 26.7: the V8 flag alone costs ~6 ms of warm start,
+    /// because a non-default V8 flag invalidates the snapshot fast path.
+    ///
+    /// Residual channels a sealed graph still has — `createRequire()` on a
+    /// computed path — behave exactly as they do under bare `node app.js`,
+    /// which carries none of these flags either, so skipping them cannot make
+    /// the artifact diverge from the plain-Node baseline.
+    ///
+    /// Absent in legacy manifests; `false` preserves their launcher behavior
+    /// (always inject) exactly.
+    #[serde(default)]
+    pub sealed_module_graph: bool,
 }
 
 /// One logical file in the payload. `B` is `Vec<u8>` on the writing side and
@@ -809,6 +860,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
@@ -818,6 +870,7 @@ mod tests {
             minify: false,
             install_message: None,
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         }
     }
 
@@ -836,6 +889,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
@@ -847,6 +901,7 @@ mod tests {
             // Non-empty on purpose: an empty vec round-trips through almost any
             // encoding bug, so it would fix the build without covering the field.
             node_flags: vec!["--max-old-space-size=256".into(), "--no-warnings".into()],
+            sealed_module_graph: false,
         };
         let app = vec![
             AppFile::plain("main.js", b"import './c.js'\n".to_vec()),
@@ -881,6 +936,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: ">=24 <25".into(),
+            requires_augmentation: false,
             triple: "darwin-arm64".into(),
             node_sha256: String::new(),
             node_blake3: String::new(),
@@ -891,6 +947,7 @@ mod tests {
             install_message: None,
             // Empty here, so the pair covers both ends of the field.
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         };
         let app = vec![AppFile::plain("main.js", b"console.log(1)".to_vec())];
         let blob = encode_with_license(&manifest, &app, &[], &[]);

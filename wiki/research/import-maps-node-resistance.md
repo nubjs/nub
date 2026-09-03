@@ -1,6 +1,6 @@
-# Why Node hasn't shipped Import Maps — and what that means for Nub
+# Why Node hasn't shipped Import Maps
 
-Research compiled 2026-05-22 to test the hypothesis that the Node maintainers' non-implementation of WICG Import Maps is sound, and to ask whether Nub's import-map polyfill fills a real gap or replicates a browser surface that does not fit Node.
+Research compiled 2026-05-22 to test the hypothesis that the Node maintainers' non-implementation of WICG Import Maps is sound.
 
 Sibling refs: [[research/tsconfig-paths]], [[research/exports-map-ts-swap]], [[research/module-resolution]].
 
@@ -12,7 +12,6 @@ The operative reason is a substantive technical argument — made by Bedford (20
 
 The resistance is not uniform. Booth, Bedford, and wesleytodd have repeatedly said they would ship it if the PR were finished, and in 2026-03 arcanis landed [`--experimental-package-map`][PR 62239], a Node-shaped sibling framed as "as close to import maps as possible, with a light design difference making it possible to stay compatible with other Node.js resolution features." Node is shipping the underlying need import maps address, with Node-native semantics rather than the WICG spec.
 
-**Recommendation: scope down (preferred) or drop.** The bare-specifier-remap subset the polyfill uniquely solves overlaps heavily with `package.json` `imports`, tsconfig paths, and the incoming `--experimental-package-map`. The HTTPS-URL-target portion is already out of scope per the 2026-05-18 decision, and dead on arrival anyway because [`--experimental-network-imports` was removed][PR 53822] in 2024. What remains is a small, brittle surface that risks teaching Nub users to author `importmap.json` files that do not transfer to plain Node, do not compose with the package manager's `package-map.json`, and do not compose cleanly with conditional exports.
 
 ## The Node discussion — canonical sources
 
@@ -104,7 +103,7 @@ Functionally overlaps the project-internal aliasing use case, and `paths` is mor
 
 But `paths` is compile-time-only by spec, and runtime tools (tsx, Nub, ts-node) honor it as a courtesy.
 
-For Nub this is the operative comparison: Nub already ships tsconfig-paths runtime support in v0, covering the project-internal alias case import maps would otherwise address. The remaining import-map-unique use case is cross-package remapping — vendoring and mocking — which is outside the tsconfig-paths scope.
+For Nub this is the operative comparison: Nub ships tsconfig-paths runtime support, covering the project-internal alias case import maps would otherwise address. The remaining import-map-unique use case is cross-package remapping — vendoring and mocking — which is outside the tsconfig-paths scope.
 
 ### The removed `--experimental-network-imports`
 
@@ -112,7 +111,7 @@ For Nub this is the operative comparison: Nub already ships tsconfig-paths runti
 
 That forecloses the import-maps use case of URL targets pointing at CDNs: there is nothing for `"react": "https://esm.sh/react"` to map to in Node. Either Node ships network imports again — no champion, no plan — or import maps in Node are restricted to file-URL targets, which is the same scope as `imports` plus cross-package reach.
 
-Nub's import-map plan already excludes HTTPS targets, decided 2026-05-18. That is correct under the augmenter-not-fork posture: HTTPS imports would require network fetch, integrity, caching, and versioning — package-manager-shaped work outside Nub's scope.
+HTTPS targets are out of scope for any remapping Nub does: HTTPS imports would require network fetch, integrity, caching, and versioning — package-manager-shaped work outside an augmenter's scope.
 
 ### Summary table
 
@@ -137,7 +136,7 @@ The three positions under consideration:
 
 1. **Sound and well-reasoned** — Node has good architectural reasons, hypothesis holds.
 2. **Sound but historically contingent** — Reasonable at the time, possibly revisitable.
-3. **Possibly wrong** — Weak reasoning or political inertia, Nub's polyfill fills a real gap.
+3. **Possibly wrong** — Weak reasoning or political inertia; a runtime polyfill would fill a real gap.
 
 **The evidence is solidly Position 2, slightly leaning Position 1.**
 
@@ -148,63 +147,6 @@ Position 1 is almost right, but Node has not rejected anything: [#49443] is stil
 Position 2 captures the truth. There was a window where shipping the WICG spec might have been right — roughly Bedford's 2020 framing of an ephemeral view with partial mapping falling through to Node's resolver — but the spec did not evolve to accommodate Node's host model (no condition mechanism, scope-by-path keying) and Node moved on to package maps. The 2020 conversation now reads as Node testing whether the WICG group would adopt Node's constraints; the answer was no.
 
 **The hypothesis is essentially right.** WICG Import Maps were designed for the browser-side bare-specifier-to-URL problem, and Node has solved the equivalent problem differently and better via `exports`/conditions. It overshoots only in calling Node's posture "resistance": the accurate framing is deferral until the spec fits Node's host model, with active work on a Node-shaped sibling in the meantime.
-
-## Implication for Nub's posture
-
-Nub's plan currently positions WICG Import Maps as a v0.1 ship-in-Phase-1 feature, reversed from the earlier defer-past-v0 stance on 2026-05-18 on the reasoning that the spec is "now stabilized and web standard."
-
-**That framing is true but partial.** WICG Import Maps are stable in browsers (Chrome, Edge, Firefox, Safari, Deno), not as a Node-host feature. Adopting them means adopting a spec the Node maintainers chose not to take and built an alternative to — a different ecosystem position from polyfilling what Node will ship eventually.
-
-### Is Nub's polyfill addressing a real ecosystem gap?
-
-**Marginally.** The gap is narrow:
-
-- The HTTPS-URL-target use case is out of scope by the 2026-05-18 decision, and dead in Node anyway.
-- The project-internal bare-specifier-alias use case is already covered by tsconfig paths plus `package.json` `imports`. Nub ships tsconfig paths in v0, and users with `imports` get them free via Node's resolver.
-- The cross-package remap / vendoring / mocking use case is the real gap, and it is narrow — the Bedford 2020 list of mocking and vendoring specific deps. The WICG spec does work for these, modulo the conditional-resolution collapse problem.
-- The package-manager-generates-a-map use case is going to be `package-map.json` rather than WICG `importmap.json`, if anything. No package manager has shipped Import Map generation; arcanis at Yarn is committed to package maps, and pnpm (zkochan on PR 62239) signaled support.
-
-So the real gap Nub would fill: a user vendoring `react` to `./vendor/react.js` across a whole project. That is solvable with `package.json` `imports` per-package (one entry per package), with tsconfig paths if the user accepts the TS-only abstraction, or with a Nub-specific `importmap.json`. The Nub-specific surface is the most uniform and the most lock-in-prone.
-
-### Does the polyfill create lock-in?
-
-**Yes, modestly.** A user who writes `importmap.json` is writing a file that:
-
-- Plain Node doesn't read (Nub could publish a `module.registerHooks()` shim package, but that's "Nub-on-Node," not "Node native").
-- Plain Node + `package-map.json` doesn't compose with — different shape, different keying.
-- Browser doesn't read at runtime (browsers read `<script type="importmap">` inline, not a file).
-- Deno reads but with different semantics (`importMap` in `deno.json`).
-
-That is the brand-boundary risk [[agents|`CLAUDE.md`]] and the reversibility filter call out: a user who adopts the feature has written a config only Nub reads, which does not transfer.
-
-Compare tsconfig paths: `tsconfig.json` `paths` is read by tsc at compile time, by IDE tooling, and by tsx/ts-node/Bun as well as Nub — a Nub augmentation of an existing artifact rather than a Nub-specific one, at a much lower reversibility cost.
-
-The brand-boundary check from [[agents|`CLAUDE.md`]] asks whether a user on plain Node, plus the corresponding `module.register()` / `--import` / npm-addon, would get the same result. For import maps the answer is yes: Nub could publish an import-maps loader under a neutral name (not `@nub/*`, per the brand rules) and a plain-Node user could install it. The mechanism-level test passes; the config-level test — would the user's `importmap.json` be a portable artifact? — fails.
-
-### Could the polyfill be scoped down to bare-specifier remapping only?
-
-**Yes, and that is probably the right answer if it is kept at all.** The concrete scope-down:
-
-- **File targets only** (already decided).
-- **`imports` map only**, no `scopes` map. Scopes break under Node's peer-dep semantics and have no straightforward Nub use case: neither project-internal aliasing nor cross-package vendoring needs them.
-- **Skip trailing-slash patterns initially.** They overlap with `exports` subpath patterns and create the most which-mechanism-wins confusion.
-- **Document it as a transitional polyfill:** prefer `package.json` `imports` for project-internal aliasing and tsconfig paths for TS-family projects; the import-map polyfill covers what neither does, and if Node's `--experimental-package-map` stabilizes, expect Nub to honor that instead.
-
-The scoped-down version is small and well-defined, does not pretend to be a faithful WICG implementation — Nub's resolution model has the same condition and peer-dep collapse problems Node's does — and is droppable if nobody adopts it.
-
-### Recommendation
-
-1. **Strongly preferred: scope down the polyfill.** Keep the `imports` map only (no `scopes`, no trailing-slash patterns for v0.1), file targets only, documented as transitional, and monitor `--experimental-package-map` stabilization for a possible pivot. This keeps the web-standard alignment without the lock-in cost of the full surface.
-
-2. **Acceptable alternative: drop entirely from v0.1, revisit post-1.0.** tsconfig paths plus Node's `package.json` `imports` cover ~95% of real user needs. The remaining 5% — cross-package vendoring without `imports` — is a small enough user base that waiting for either WICG or Node package maps to stabilize is defensible, and it cuts a small surface with real lock-in risk and modest user value.
-
-3. **Not recommended: ship full WICG-spec import maps (the current plan).** Reasons:
-   - It sets Nub users up to author `importmap.json` files that do not transfer to plain Node, to `package-map.json`, or to browsers without a polyfill.
-   - It adopts a spec the Node maintainers chose not to, in a way that does not compose with Node's planned alternative.
-   - The conditional-resolution collapse problem (jkrems' `node-addons` example) is unsolved in Nub's plan, so Nub inherits the same defect.
-   - It misuses "web standard" as a justification: WICG Import Maps are a browser standard, Node's host shape says no, and Nub is a Node augmenter rather than a browser on the server.
-
-Option 1 amounts to keeping the plan doc, narrowing its supported list, adding the scope-down rationale, linking to this research, and tracking whether Nub should honor `--experimental-package-map`.
 
 ## Sources
 
@@ -229,4 +171,5 @@ Eleven sources: the Node issues and PRs where the argument happened, the WHATWG 
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

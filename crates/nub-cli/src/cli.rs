@@ -170,12 +170,15 @@ fn emit_ndjson_summary(passed: usize, failed: usize) {
 /// dependency spun up a thread during init (A19). Set once; never mutated after.
 static ENV_FILE_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-/// Raw (unexpanded, un-stripped) merge of the explicit `--env-file` contents —
-/// the values Node's own `--env-file` parser delivers. The watch path forwards
-/// the explicit files to the watched Node (#479) and compares [`ENV_FILE_VARS`]
-/// against this map to inject only keys whose `${VAR}` expansion changed the
-/// raw value (see [`watch_inject_vars`]); every plain var is left to Node's
-/// re-read so it live-reloads across restarts.
+/// Un-stripped merge of the explicit `--env-file` contents — the values Node's
+/// own `--env-file` parser delivers. The watch path forwards the explicit files
+/// to the watched Node (#479) and diffs [`ENV_FILE_VARS`] against this map (see
+/// [`watch_inject_vars`]) so a var Node already delivers is left to Node's
+/// re-read and live-reloads across restarts. The two maps now differ only by the
+/// denied-key strip, since `--env-file` values are no longer expanded; keeping
+/// them separate is what preserves that strip (a denied key must stay out of
+/// [`ENV_FILE_VARS`] but stay IN the forwarded set, so the guard can neutralize
+/// it rather than let a startup consumer act on it).
 static ENV_FILE_VARS_RAW: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 /// Explicit `--env-file` / `--env-file-if-exists` paths in command-line order
@@ -287,10 +290,14 @@ fn merge_child_env(
 /// `.env*` files as `--env-file` args, which Node re-reads on every restart — so
 /// injecting a var Node already delivers identically would FREEZE it at the `nub
 /// watch` startup value (Node's `--env-file` never overrides an already-present
-/// env var). Inject a key iff nub's `${VAR}` expansion changed it from the raw
-/// value Node actually delivers — `forwarded_raw` is the unexpanded merge of the
-/// files that really reach Node as `--env-file` args; every plain var is left to
-/// Node's `--env-file` and live-reloads on restart. A key absent from
+/// env var). Inject a key iff nub's value differs from the raw value Node
+/// actually delivers — `forwarded_raw` is the unexpanded merge of the files that
+/// really reach Node as `--env-file` args; every var Node delivers identically is
+/// left to Node's `--env-file` and live-reloads on restart. In practice the
+/// difference comes from `${VAR}` expansion, which only the auto-discovered and
+/// `nub.jsonc`-sourced families get: an explicit `--env-file` is delivered
+/// verbatim (Node's own semantics), so it never diverges and is always left to
+/// Node once forwarded. A key absent from
 /// `forwarded_raw` is injected, because injection is then its only delivery
 /// channel: that covers the explicit `--env-file` case (auto-discovery is
 /// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
@@ -1157,10 +1164,39 @@ pub enum Command {
         #[arg(long = "icon", value_name = "FILE")]
         icon: Option<PathBuf>,
 
+        /// Windows version-resource field, as `Key=value`; repeatable. These are
+        /// the fields Explorer's Details tab shows. Defaults come from
+        /// `package.json` (name, version, description, author), so most builds
+        /// need no flag; `Key=` drops a defaulted field. Known keys: Comments,
+        /// CompanyName, FileDescription, FileVersion, InternalName,
+        /// LegalCopyright, LegalTrademarks, OriginalFilename, PrivateBuild,
+        /// ProductName, ProductVersion, SpecialBuild. Works when cross-compiling,
+        /// and is refused for a non-Windows target rather than ignored.
+        #[arg(
+            long = "metadata",
+            value_name = "KEY=VALUE",
+            action = ArgAction::Append
+        )]
+        metadata: Vec<String>,
+
         /// Custom message the compiled binary shows on a terminal while it sets
         /// itself up on first run. Default: `Initializing...`.
         #[arg(long, value_name = "TEXT")]
         install_message: Option<String>,
+
+        /// Remove a category of call at build time, repeatable:
+        /// `--drop console --drop debugger`. A dropped call is not evaluated, so
+        /// an argument with a side effect goes with it. Needs minification, which
+        /// is on by default.
+        #[arg(long, value_name = "NAME", action = ArgAction::Append)]
+        drop: Vec<DropArg>,
+
+        /// Write a build report to this path, in esbuild's metafile JSON schema:
+        /// every module the bundler read, every file it emitted, and what each
+        /// module contributed to each. Reads in esbuild's `analyzeMetafile`,
+        /// esbuild-visualizer, and bundle-buddy.
+        #[arg(long, value_name = "PATH")]
+        metafile: Option<String>,
 
         /// Let minification rename functions and classes. Names are preserved by
         /// default: minified class names break frameworks that key on them
@@ -1337,6 +1373,20 @@ pub enum Command {
         #[arg(long)]
         ignore_scripts: bool,
 
+        /// Run this pnpmfile instead of the project's own one. Relative
+        /// paths resolve against the project root. Naming a path this way
+        /// is what loads hooks in a project whose incumbent is not pnpm.
+        #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+        pnpmfile: Option<PathBuf>,
+
+        /// Run this pnpmfile before the project's own one.
+        #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+        global_pnpmfile: Option<PathBuf>,
+
+        /// Skip `.pnpmfile.cjs` / `.pnpmfile.mjs` hooks for this install.
+        #[arg(long)]
+        ignore_pnpmfile: bool,
+
         /// Skip optionalDependencies.
         #[arg(long)]
         no_optional: bool,
@@ -1407,6 +1457,14 @@ pub enum Command {
     /// Clean install for CI: delete node_modules, install strictly from the
     /// lockfile (drift or a missing lockfile is a hard error).
     Ci {
+        /// Skip devDependencies; install only production deps.
+        #[arg(short = 'P', long, visible_alias = "production")]
+        prod: bool,
+
+        /// Install only devDependencies.
+        #[arg(short = 'D', long, conflicts_with = "prod")]
+        dev: bool,
+
         /// Skip all lifecycle scripts (root and dependency).
         #[arg(long)]
         ignore_scripts: bool,
@@ -1578,6 +1636,19 @@ pub enum SourcemapArg {
     /// A `.map` written beside the executable and not shipped.
     External,
     None,
+}
+
+/// What `--drop` accepts. A closed set rather than a free string: the two are
+/// what the bundler's compress pass can remove, and an unrecognised name would
+/// otherwise be a build that silently drops nothing.
+#[cfg(feature = "compile")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DropArg {
+    /// Every `console.*()` call.
+    Console,
+    /// Every `debugger` statement. Minification already removes these, so this
+    /// pins the guarantee rather than changing what is emitted.
+    Debugger,
 }
 
 /// Top-level entry point. Returns the process exit code.
@@ -1812,6 +1883,11 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
             "--os",
             "--cpu",
             "--libc",
+            // Same shape again: `nub install --pnpmfile hooks.cjs` would read
+            // the path as a package spec. Caught by `cli_grammar_parity` the
+            // day these two landed, exactly as the note above predicts.
+            "--pnpmfile",
+            "--global-pnpmfile",
         ];
         let mut i = 0;
         while i < body.len() {
@@ -2007,8 +2083,8 @@ fn run_nub() -> Result<i32> {
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
-    // Parallel raw (pre-expansion) merge + the flag paths themselves, retained
-    // for the watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
+    // Parallel pre-strip merge + the flag paths themselves, retained for the
+    // watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
     // ENV_FILE_PATHS.
     let mut env_file_raw_vars: std::collections::HashMap<String, String> = Default::default();
     let mut env_file_paths: Vec<(PathBuf, bool)> = Vec::new();
@@ -2270,10 +2346,13 @@ fn run_nub() -> Result<i32> {
         return delegate_to_self(&version);
     }
 
-    // Expand ${VAR} references in --env-file values now that all files have been
-    // parsed (multiple --env-file flags may cross-reference each other), matching
-    // the expansion load_env_files applies on the non-watch run path.
-    nub_core::workspace::env::expand_env_map(&mut env_file_vars);
+    // No `${VAR}` expansion here, deliberately: `--env-file` is the Node-compat
+    // flag and Node's own parser delivers every value verbatim. Auto-discovered
+    // `.env*` DO expand (load_env_files) — the asymmetry is the recorded decision
+    // in wiki/research/env-file-loading.md, "expand in defaults, don't expand in
+    // `--env-file=`". Expanding was a real compat bug: it silently truncated any
+    // value holding a literal `$` (`PASSWORD=foo$bar` → `foo`) and failed Node's
+    // own test/parallel/test-dotenv.js.
 
     // Env hygiene (Deno parity): ignore runtime-control vars (NODE_OPTIONS et al.)
     // from the explicit `--env-file` map too, so no env-file-sourced value silently
@@ -3104,8 +3183,11 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             include,
             exclude,
             install_message,
+            drop,
+            metafile,
             node_options,
             icon,
+            metadata,
             no_keep_names,
             no_treeshake,
             ignore_annotations,
@@ -3130,6 +3212,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             define_file,
             node_options,
             icon,
+            metadata,
+            metafile: metafile.as_deref().map(PathBuf::from),
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,
@@ -3166,6 +3250,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 tsconfig: tsconfig.map(PathBuf::from),
                 loaders: loader,
                 native_target: None,
+                drop_console: drop.contains(&DropArg::Console),
+                drop_debugger: drop.contains(&DropArg::Debugger),
+                metafile: metafile.is_some(),
                 // Filled in by `compile()` once the pin chain resolves the exact
                 // target Node; the CLI layer does not know it yet.
                 target_node: None,
@@ -3209,6 +3296,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             prod,
             dev,
             ignore_scripts,
+            pnpmfile,
+            global_pnpmfile,
+            ignore_pnpmfile,
             no_optional,
             offline,
             prefer_offline,
@@ -3235,6 +3325,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 prod,
                 dev,
                 ignore_scripts,
+                pnpmfile,
+                global_pnpmfile,
+                ignore_pnpmfile,
                 no_optional,
                 offline,
                 prefer_offline,
@@ -3254,6 +3347,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             })
         }
         Some(Command::Ci {
+            prod,
+            dev,
             ignore_scripts,
             no_optional,
             registry,
@@ -3270,6 +3365,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             age_gate.apply();
             platform.apply();
             crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+                prod,
+                dev,
                 ignore_scripts,
                 no_optional,
                 registry,
@@ -3583,6 +3680,11 @@ fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config:
         },
         environment: ProjectConfig {
             node_compat: node_compat_env_setting(),
+            // The field's pre-existing environment surface. Modelled here so the
+            // snapshot reports the value that will actually win; discovery reads
+            // the variable itself rather than trusting this layer (see
+            // `project_config::publish_node_executable`).
+            node_executable: env::var("NODE_EXECUTABLE").ok().filter(|v| !v.is_empty()),
             verify_deps: verify_deps_env_setting(),
             ..ProjectConfig::default()
         },
@@ -3590,12 +3692,34 @@ fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config:
     }
 }
 
+/// The `nodeExecutable` alone, for the `nub node` group. Every verb here resolves
+/// a Node — `which` and bare status to REPORT which one governs, `ls` to mark the
+/// active entry, `install` and `uninstall` to skip or guard one — so the field
+/// reaches all of them and the group cannot disagree with itself about which
+/// binary is current. `nub node which` printing one binary while `nub app.ts`
+/// runs another is the drift `resolution_source` exists to prevent, and `ls`
+/// marking a different version would be the same drift one verb over.
+///
+/// Not a snapshot, though: [`dispatch_subcommand`] explains why this group
+/// initializes none (a malformed `nub.jsonc` in some ancestor must never block
+/// `nub node install`), and best-effort keeps that intact — a file that will not
+/// load simply contributes nothing, and a `$(command)` that fails is swallowed by
+/// every verb except `which`, where the failure IS the answer.
+fn publish_node_executable_best_effort(cwd: &Path) {
+    if let Ok(config) =
+        crate::project_config::load_effective_config(cwd, config_overlays(false, false))
+    {
+        crate::project_config::publish_node_executable(&config);
+    }
+}
+
 pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
     let cwd = env::current_dir()?;
-    crate::project_config::initialize_effective_config(
+    let effective = crate::project_config::initialize_effective_config(
         &cwd,
         config_overlays(cli_node, cli_no_check),
     )?;
+    crate::project_config::publish_node_executable(effective);
     debug_assert!(crate::project_config::effective_config().is_some());
     Ok(())
 }
@@ -3621,7 +3745,7 @@ fn initialize_runtime_config_snapshot(cli_node: bool, cli_no_check: bool) -> Res
     let overlays = config_overlays(cli_node, cli_no_check);
     let forced_compat = cli_node || overlays.environment.node_compat == Some(true);
     match crate::project_config::initialize_effective_config(&cwd, overlays.clone()) {
-        Ok(_) => {}
+        Ok(effective) => crate::project_config::publish_node_executable(effective),
         // The error names the offending file by absolute path, which is what
         // makes a degrade visible when the file sits above the cwd.
         Err(error) if forced_compat => {
@@ -3629,7 +3753,9 @@ fn initialize_runtime_config_snapshot(cli_node: bool, cli_no_check: bool) -> Res
                 "nub: {error}\n\x20\x20ignored — compat mode (--node / NODE_COMPAT) runs with \
                  no project config"
             );
-            crate::project_config::initialize_effective_config_without_project(&cwd, overlays);
+            crate::project_config::publish_node_executable(
+                crate::project_config::initialize_effective_config_without_project(&cwd, overlays),
+            );
         }
         Err(error) => return Err(error.into()),
     }
@@ -5440,6 +5566,54 @@ const NUB_SHELL_SUBDIR: &str = "nub-sh";
 /// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
 /// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
 /// it compiles everywhere.
+/// Re-bind, inside the script body, the lowercase environment names nub set.
+///
+/// busybox-w32's shell UP-CASES every name when it loads the Windows environment,
+/// so a script body sees `NPM_PACKAGE_NAME` and `$npm_package_name` expands to
+/// nothing — while npm, pnpm, yarn and bun all deliver the lowercase name on the
+/// same fixture. Upstream considers the up-casing correct and declined the
+/// preserve-casing patch (rmyorston/busybox-w32#125), so the restoration is nub's
+/// to do.
+///
+/// One `export` prologue fixes all three symptoms at once, because busybox's own
+/// variable lookup is case-SENSITIVE: `$npm_package_name` expands, the lowercase
+/// name is back in the environment every child inherits, and `Object.keys` sees
+/// it — for a consumer in any language, not only the Node children nub augments.
+///
+/// It re-binds NAMES, never values, so nothing needs quoting and a value carrying
+/// quotes or newlines cannot break the body. Derived from the command's own env
+/// rather than from a hand-kept list, so a variable added later is covered
+/// without anyone remembering this function.
+///
+/// Scope is deliberately what NUB set, not the whole inherited environment. busybox
+/// up-cases an inherited lowercase name too, but restoring those means re-exporting
+/// arbitrary host variables into every script body to undo a shell's documented
+/// behavior, which is a much larger claim than fixing the names nub is responsible
+/// for. It also keeps the prologue small: measured at 15 exportable names and 741
+/// bytes against a 32767-byte command line, and the real figure is lower because
+/// `get_envs` sees only what nub set rather than what it inherited.
+fn lowercase_env_prologue(command: &std::process::Command) -> String {
+    let mut names: Vec<&str> = command
+        .get_envs()
+        // A `None` value is a REMOVAL, and re-exporting one would put the name back.
+        .filter(|(_, value)| value.is_some())
+        .filter_map(|(name, _)| name.to_str())
+        .filter(|name| {
+            // An uppercase-only name is unaffected by the up-casing, and a name
+            // that is not a shell identifier cannot be exported at all.
+            name.contains(|c: char| c.is_ascii_lowercase())
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .iter()
+        .map(|name| format!("export {name}=\"${}\"; ", name.to_ascii_uppercase()))
+        .collect()
+}
+
 fn resolve_bundled_busybox() -> Result<String> {
     let to_utf8 = |p: PathBuf| -> Result<String> {
         p.to_str()
@@ -5592,6 +5766,9 @@ fn build_script_command(
         None if cfg!(windows) => (resolve_bundled_busybox()?, vec!["sh", "-c"]),
         None => ("sh".to_string(), vec!["-c"]),
     };
+    // Only the bundled busybox needs the casing prologue below: a `--script-shell`
+    // the user chose is theirs, and an explicit `cmd` is case-insensitive.
+    let uses_bundled_busybox = cfg!(windows) && custom_shell.is_none();
 
     // Append the user's extra args the way npm does (@npmcli/promise-spawn):
     // each arg is escaped for the target shell and spliced onto the UNescaped
@@ -5632,7 +5809,7 @@ fn build_script_command(
     // consumer — is gone; an explicit `script-shell=cmd` still takes this path
     // with cmd-escaped args (unchanged), it was never the verbatim default.
     let mut command = StdCommand::new(&shell);
-    command.args(&shell_args).arg(&full_cmd);
+    command.args(&shell_args);
     command.current_dir(&project.root);
 
     // PATH: shim dir (when augmenting) → `.bin` walk-up chain → system PATH.
@@ -5845,6 +6022,15 @@ fn build_script_command(
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
     }
+
+    // The script body goes on LAST, because on Windows its prologue is derived
+    // from every `command.env` call above.
+    let prologue = if uses_bundled_busybox {
+        lowercase_env_prologue(&command)
+    } else {
+        String::new()
+    };
+    command.arg(format!("{prologue}{full_cmd}"));
 
     Ok((command, full_cmd))
 }
@@ -7314,7 +7500,7 @@ fn bin_launcher(path: &Path, args: &[String]) -> std::process::Command {
 /// hardcoded format. `nub/<v> npm/? …` under nub identity / fresh, incumbent-
 /// first (`pnpm/<pin> nub/<v> …`) in a compat project. `node_version` is the
 /// caller's already-resolved Node so this does not re-discover it.
-// @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec-path gap — three routes, not one]]
+// @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec surface — three routes, not one]]
 fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
     let product = crate::pm_engine::run_lifecycle_ua_product(cwd, node_version);
     nub_core::workspace::scripts::user_agent_string(&product)
@@ -8897,7 +9083,7 @@ nub {v} — the all-in-one Node.js toolkit
   watch <file>                run a file and restart on changes
   nubx <pkg>                  fetch and run a package binary
   init                        scaffold a new project
-
+{compileverb}
 {runtime}
   -                           read script from stdin
   --                          end of nub options; the rest is the script's argv
@@ -8962,6 +9148,7 @@ nub {v} — the all-in-one Node.js toolkit
         v = v,
         usage = help_bold("Usage:"),
         headline = help_bold("Headline commands:"),
+        compileverb = COMPILE_HELP_LINE,
         runtime = help_bold("Runtime options (passed through to Node):"),
         pm = help_bold("Package manager commands:"),
         toolchain = help_bold("Manage the toolchain:"),
@@ -8970,6 +9157,23 @@ nub {v} — the all-in-one Node.js toolkit
         )
     )
 }
+
+/// The `compile` entry for the two help surfaces, or nothing when the verb is not
+/// in this build. Release binaries pass `--features compile`, so users see it; a
+/// feature-off dev build must not advertise a verb it would reject. Each surface
+/// gets its own spelling because their indentation and grouping differ, and the
+/// verbose one carries its section heading so the heading disappears with it
+/// rather than leaving an empty group.
+#[cfg(feature = "compile")]
+const COMPILE_HELP_LINE: &str = "  compile <file>              build a standalone executable\n";
+#[cfg(not(feature = "compile"))]
+const COMPILE_HELP_LINE: &str = "";
+
+#[cfg(feature = "compile")]
+const COMPILE_HELP_SECTION: &str =
+    "  Build:\n    compile                  build a file into a standalone executable\n\n";
+#[cfg(not(feature = "compile"))]
+const COMPILE_HELP_SECTION: &str = "";
 
 /// `nub --help` — the verbose reference: nub's command surface plus a fuller
 /// Node runtime flag and environment-variable reference. The power-user / agent
@@ -9020,7 +9224,7 @@ nub {v} — the all-in-one Node.js toolkit
     publish / pack / version / dist-tag
     login / logout / whoami / owner / token
 
-  Manage the toolchain:
+{compileverb}  Manage the toolchain:
     node                     manage Node versions (install / ls / uninstall / pin)
     pm                       manage the project's package manager
     upgrade                  upgrade nub itself
@@ -9105,6 +9309,7 @@ nub {v} — the all-in-one Node.js toolkit
         v = v,
         usage = help_bold("Usage:"),
         commands = help_bold("Commands:"),
+        compileverb = COMPILE_HELP_SECTION,
         nubopts = help_bold("Nub options:"),
         noderun = help_bold("Common Node runtime flags (passed through to Node):"),
         nodeenv = help_bold("Common environment variables:"),
@@ -9142,6 +9347,7 @@ fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::Res
 /// Spec: `internal/commands/node-versions.md`.
 fn run_node(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
+    publish_node_executable_best_effort(&cwd);
     let store = nub_core::node::discovery::node_store_dir().ok_or_else(|| {
         anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")
     })?;
@@ -9174,7 +9380,7 @@ fn run_node(args: &[String]) -> Result<i32> {
         if let Ok(node) = discover_node_for_status(&cwd) {
             println!("node {}", node.version);
             println!("  path      {}", node.path);
-            println!("  resolved  {}", resolution_source(&cwd));
+            println!("  resolved  {}", resolution_source(&cwd, &node));
             println!();
         }
         println!("{NODE_HELP}");
@@ -9192,7 +9398,7 @@ fn run_node(args: &[String]) -> Result<i32> {
             println!("{}", node.path);
             use std::io::Write as _;
             std::io::stdout().flush().ok();
-            eprintln!("» resolved from {}", resolution_source(&cwd));
+            eprintln!("» resolved from {}", resolution_source(&cwd, &node));
             Ok(0)
         }
         "install" => {
@@ -10339,6 +10545,21 @@ fn run_pm_shim_install() -> Result<i32> {
         ProfileOutcome::AlreadyPresent(profile) => {
             println!("  PATH: already present in {}", profile.display())
         }
+        // Reached on upgrade. The directory is a compile-time constant within
+        // one build, but the CONSTANT ITSELF moved under XDG in #752, so a
+        // profile written by an older nub still names `$HOME/.nub/shims` beneath
+        // this marker and the line is rewritten in place. Only when that legacy
+        // directory is already GONE — the migration above strips the block
+        // outright while it still exists — so the live shell carries a
+        // directory on PATH that holds no shims, which is why the re-source
+        // hint matters more here than on a fresh add.
+        ProfileOutcome::Rewritten(profile) => println!(
+            "  PATH: updated the entry in {} to point at {}\n  \
+             restart your shell, or run: source {}",
+            profile.display(),
+            dir.display(),
+            profile.display()
+        ),
         // No writable profile for this shell: print the line and exit 0 (the
         // spec's manual fallback — the shims themselves are installed).
         ProfileOutcome::Manual { line } => println!(
@@ -10486,6 +10707,21 @@ fn run_node_shim_install() -> Result<i32> {
         ProfileOutcome::AlreadyPresent(profile) => {
             println!("  PATH: already present in {}", profile.display())
         }
+        // Reached on upgrade. The directory is a compile-time constant within
+        // one build, but the CONSTANT ITSELF moved under XDG in #752, so a
+        // profile written by an older nub still names `$HOME/.nub/node-shim` beneath
+        // this marker and the line is rewritten in place. Only when that legacy
+        // directory is already GONE — the migration above strips the block
+        // outright while it still exists — so the live shell carries a
+        // directory on PATH that holds no shims, which is why the re-source
+        // hint matters more here than on a fresh add.
+        ProfileOutcome::Rewritten(profile) => println!(
+            "  PATH: updated the entry in {} to point at {}\n  \
+             restart your shell, or run: source {}",
+            profile.display(),
+            dir.display(),
+            profile.display()
+        ),
         ProfileOutcome::Manual { line } => println!(
             "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
         ),
@@ -11060,7 +11296,17 @@ fn relink_shims_after_selfowned(install_dir: &Path) {
 /// re-printed here (the `discover_node` call that precedes every caller already
 /// printed them); a chain refusal can't reach here for the same reason, but is
 /// named honestly rather than misreported as PATH.
-fn resolution_source(cwd: &Path) -> String {
+///
+/// `node` is the resolution being explained, and an explicit-binary override
+/// (`NODE_EXECUTABLE`, `nub.jsonc#nodeExecutable`) reports ITSELF: it never
+/// consulted the chain, so crediting a pin source there would name a file that
+/// had no say in the path printed on the line above.
+fn resolution_source(cwd: &Path, node: &nub_core::node::discovery::ResolvedNode) -> String {
+    if let Some(source) = node.pin_source.as_deref()
+        && nub_core::node::discovery::is_explicit_binary_source(source)
+    {
+        return source.to_string();
+    }
     match nub_core::node::discovery::resolve_pin_chain(cwd) {
         Ok(chain) => match chain.pin {
             Some((raw, _pin, source)) => format!("{source} ({raw})"),
@@ -11869,6 +12115,16 @@ mod tests {
             Some(args(&["add", "--os", "linux", "react"])),
             "--os linux with a package routes to add, the os value is not mis-forwarded"
         );
+        // The pnpmfile path flags are the same shape once more, and shipped
+        // with exactly this bug: `--pnpmfile=h.cjs` parsed while
+        // `--pnpmfile h.cjs` read the path as a package spec.
+        for flag in ["--pnpmfile", "--global-pnpmfile"] {
+            assert_eq!(
+                install_to_add_args(&args(&["install", flag, "hooks.cjs"])),
+                None,
+                "nub install {flag} hooks.cjs stays on the native install path"
+            );
+        }
     }
 
     #[test]
@@ -13581,7 +13837,10 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
-        let source = resolution_source(&dir);
+        // A stand-in resolution: `resolution_source` reads only `pin_source`, and
+        // `None` is the ordinary case that consults the chain.
+        let chain_resolved = nub_core::node::discovery::ResolvedNode::fallback();
+        let source = resolution_source(&dir, &chain_resolved);
         assert!(
             source.contains("devEngines.runtime") && source.contains(">=22"),
             "the governing source must be reported with its raw spec, got: {source}"
@@ -13590,7 +13849,17 @@ mod tests {
         // No source at all → PATH, named as such.
         let bare = pm_tmpdir("res-src-bare");
         std::fs::write(bare.join("package.json"), r#"{"name":"app"}"#).unwrap();
-        assert_eq!(resolution_source(&bare), "node on PATH");
+        assert_eq!(resolution_source(&bare, &chain_resolved), "node on PATH");
+
+        // An explicit-binary override reports itself: the pin chain named above
+        // had no say in which binary ran, so crediting it would be a lie the user
+        // acts on.
+        let mut overridden = nub_core::node::discovery::ResolvedNode::fallback();
+        overridden.pin_source = Some("nub.jsonc#nodeExecutable".to_string());
+        assert_eq!(
+            resolution_source(&dir, &overridden),
+            "nub.jsonc#nodeExecutable"
+        );
     }
 
     #[test]
@@ -13686,6 +13955,40 @@ mod tests {
             busybox_candidates(root).into_iter().find(|p| p.is_file()),
             Some(beside),
             "the packaged sibling layout must take precedence over the staged copy"
+        );
+    }
+
+    /// The prologue restores the lowercase names busybox-w32 up-cases, and the
+    /// filters are the whole contract: re-exporting the wrong thing is worse than
+    /// re-exporting nothing, because it puts a name back into the environment that
+    /// the caller had removed, or writes a line the shell refuses to parse.
+    #[test]
+    fn the_casing_prologue_rebinds_only_the_names_a_shell_can_export() {
+        let mut command = std::process::Command::new("sh");
+        command.env("npm_package_name", "acme");
+        command.env("npm_config_user_agent", "nub/0.9");
+        // Already uppercase: busybox leaves it alone, so re-binding it is noise.
+        command.env("NODE_OPTIONS", "--x");
+        // Not a shell identifier, and not exportable under any casing.
+        command.env("weird-name", "v");
+        command.env("2fast", "v");
+        // A REMOVAL. Re-exporting it would resurrect the name.
+        command.env_remove("npm_lifecycle_event");
+
+        let prologue = lowercase_env_prologue(&command);
+
+        assert_eq!(
+            prologue,
+            "export npm_config_user_agent=\"$NPM_CONFIG_USER_AGENT\"; \
+             export npm_package_name=\"$NPM_PACKAGE_NAME\"; ",
+            "only lowercase, exportable, still-set names belong in the prologue"
+        );
+
+        // A body prefixed with it is still one shell word away from the original.
+        let body = format!("{prologue}echo $npm_package_name");
+        assert!(
+            body.ends_with("; echo $npm_package_name"),
+            "the prologue must end in a separator so the body is a fresh command: {body}"
         );
     }
 

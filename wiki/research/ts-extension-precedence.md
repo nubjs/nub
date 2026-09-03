@@ -1,7 +1,7 @@
 ---
 **Status:** v1, 2026-05-18.
 **Scope:** Extensionless ESM imports inside `.ts`/`.tsx`/`.mts`/`.cts` files. What extension wins when `./foo` could match `./foo.ts`, `./foo.tsx`, `./foo.js`, `./foo/index.ts`, etc.
-**Builds on:** [[research/module-resolution]] (parent-extension-aware probing), [[research/tsx-architecture]] (candidate-list pattern).
+**Builds on:** [[research/module-resolution]] (parent-extension-aware probing).
 **Sibling:** [[research/exports-map-ts-swap]] — the related `.js → .ts` exports-map controversy.
 **Informs:** the resolve hook, and the Rust-side `candidates_for(parent_ext, …)` candidate-list generation.
 ---
@@ -51,7 +51,7 @@ A few oddities to call out:
 - **Bun's local-default and ESM-mode lists differ.** The `MODULE_EXTENSION_ORDER` quoted above is the ESM path; Bun's generic default (`EXTENSION_ORDER`) is `.tsx, .ts, .jsx, .cts, .cjs, .js, .mjs, .mts, .json`. The ESM list deliberately interleaves `.mts/.mjs` higher than the CJS variants, and the CJS list pushes `.cts/.cjs` higher. In practice, both lists agree that `.ts` beats `.js` in the local case.
 - **`node_modules` flips the priority** in both Bun and tsx. Both cite the esbuild v0.20.0 release notes: a published package's `.js` is more likely to be correct (because the author ran the build) than the `.ts` source they may have shipped alongside. This is a real design decision, not an oversight.
 - **Rspack** ships `.js, .json` as the literal default, but every TS preset / starter (`@rsbuild/plugin-typescript`, `create-rspack-app`) extends it to `.ts, .tsx, .js, .json` before user code sees it. The "default" in the docs and the "default" in practice are different things.
-- **esbuild's default is bundler-only.** esbuild's `transform` API (the one tsx uses) does no resolution at all — tsx supplies the probing logic above it. So esbuild's order matters only for `nub build`-class consumers, not for runtime `import` semantics.
+- **esbuild's default is bundler-only.** esbuild's `transform` API (the one tsx uses) does no resolution at all — tsx supplies the probing logic above it. So esbuild's order matters only for bundler consumers, not for runtime `import` semantics.
 - **oxc-resolver's "default" is conservative on purpose.** It mirrors Node's runtime resolver, which doesn't know about TS. Anyone embedding oxc-resolver in a TS-aware tool sets the extension list themselves. So oxc-resolver's "default" doesn't really count as a prior-art datapoint for the TS question.
 - **Deno doesn't play.** Deno's no-magic policy means `import "./foo"` is an error; the user writes `import "./foo.ts"`. Deno cleanly opts out of this entire question.
 
@@ -174,4 +174,5 @@ The source file or documentation page each tool's probe order was read from.
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Links to internal planning documents were removed and reference-checkout paths rewritten; findings, tables and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

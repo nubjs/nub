@@ -119,10 +119,12 @@
 //!   edit parent is on-disk temp state, never printed.
 //!
 //! KNOWN APPROXIMATIONS (install/ci, from slice 2):
-//! - `preferFrozenLockfile` from `.npmrc` / workspace yaml is not consulted
-//!   when defaulting the frozen mode (aube's `FileSources` is crate-private
-//!   at the pinned API); without a CLI flag the mode falls back to aube's
-//!   env-aware default (CI ⇒ frozen, else prefer-frozen).
+//! - (resolved) `preferFrozenLockfile` from `.npmrc` / workspace yaml is now
+//!   consulted when defaulting the frozen mode, through the fork's
+//!   `install::resolve_prefer_frozen_lockfile` seam (`FileSources` is still
+//!   crate-private; the seam builds the `ResolveCtx` engine-side). An unset
+//!   project still falls back to aube's env-aware default (CI ⇒ frozen, else
+//!   prefer-frozen), so only a project that sets the key changes behavior.
 //! - (resolved) The yarn gate now maps aube's frozen-drift failure by its
 //!   stable `ERR_AUBE_OUTDATED_LOCKFILE` diagnostic code; the old message
 //!   substring backstop is gone.
@@ -401,8 +403,92 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
 
 // ───────────────────────── wired verbs ──────────────────────────
 
+/// Put the global bin directory on PATH after a successful global install.
+///
+/// Installing a package globally has exactly one purpose — running it by name —
+/// so an install that leaves the directory unreachable has not done what was
+/// asked. The engine has already warned and named the line; this wires it.
+///
+/// Deliberately narrow. It runs ONLY on a successful global install, only when
+/// the directory is genuinely absent from PATH (after the move to the shared
+/// user-binary directory that is already true for few systems), and it writes
+/// through the marker-keyed path so a profile can never collect a second copy
+/// of the block. A failure here is reported and swallowed: the packages are
+/// installed either way, and an unwritable profile must not fail the install.
+fn wire_global_bin_path(code: i32) {
+    if code != 0 {
+        return;
+    }
+    let Ok(layout) = aube::commands::global::GlobalLayout::resolve() else {
+        return;
+    };
+    if aube::commands::global::dir_is_on_path(&layout.bin_dir) {
+        return;
+    }
+    // Windows profile/registry editing is out of scope for v0 — the same call
+    // `nub pm shim` makes (cli.rs, `run_pm_shim_install`). Without this, the
+    // shell probe below finds no `SHELL`, falls back to the POSIX dialect, and
+    // writes `export PATH=…` into a `.profile` that neither cmd.exe nor
+    // PowerShell reads — then reports PATH configured. Printing the line is
+    // honest; the silent POSIX write is worse than either doing it properly or
+    // not doing it at all.
+    if cfg!(windows) {
+        eprintln!(
+            "  PATH: add {} to your PATH (PATH editing isn't automated on Windows yet)",
+            layout.bin_dir.display()
+        );
+        return;
+    }
+    match nub_core::pm::shim::add_global_bin_path_block(&layout.bin_dir) {
+        Ok(nub_core::pm::shim::ProfileOutcome::Added(p)) => {
+            eprintln!(
+                "  PATH: added {} to {}",
+                layout.bin_dir.display(),
+                p.display()
+            );
+            eprintln!("  Restart your shell, or source that file, to pick it up.");
+        }
+        Ok(nub_core::pm::shim::ProfileOutcome::Rewritten(p)) => {
+            eprintln!(
+                "  PATH: updated the nub global bin entry in {} to {} — restart \
+                 your shell, or source that file, to pick it up.",
+                p.display(),
+                layout.bin_dir.display()
+            );
+        }
+        // The line is in a profile this shell reads, but the CURRENT shell has
+        // not sourced it — otherwise the on-PATH check above would have
+        // returned. Say what to do about the session in hand.
+        Ok(nub_core::pm::shim::ProfileOutcome::AlreadyPresent(p)) => {
+            eprintln!(
+                "  PATH: {} is already configured in {} — restart your shell, \
+                 or source that file, to pick it up.",
+                layout.bin_dir.display(),
+                p.display()
+            );
+        }
+        // No profile this shell reads could be written. This is the ONLY path
+        // that asks the user to do it by hand, which is why the engine no
+        // longer prints a remediation of its own.
+        Ok(nub_core::pm::shim::ProfileOutcome::Manual { line }) => {
+            eprintln!(
+                "warning: {} is not on PATH, so the commands just installed will \
+                 not run.\n  No shell profile could be written — add this line \
+                 yourself:\n    {line}",
+                layout.bin_dir.display()
+            );
+        }
+        Err(e) => eprintln!("warning: could not update your shell profile: {e}"),
+    }
+}
+
 fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb): (_, aube::commands::add::AddArgs) = parse_or_return!(typed, args);
+    // Before `engine_session`, for the reason `run_install` does it — and
+    // this is also the path `nub install <pkg> --pnpmfile <p>` lands on.
+    if verb.pnpmfile.is_some() || verb.global_pnpmfile.is_some() || verb.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
+    }
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
@@ -411,6 +497,8 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("add", &verb.packages),
         ));
     }
+    // Read before the move: `run` consumes `verb`.
+    let is_global = verb.global;
     super::min_release_age::arm();
     let code = finish_quieted(
         &globals.output,
@@ -418,6 +506,9 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
         aube::commands::add::run(verb, globals.effective_filter()),
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
+    if is_global {
+        wire_global_bin_path(code);
+    }
     stamp_if_virgin(&session, code);
     crate::install_engine::record(&session.cwd, code);
     // `nub add vite` (or adding any dep to a vite project) changes the graph;
@@ -460,6 +551,10 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             "warn: --depth {depth} is ignored; nub only refreshes direct deps. \
              For a full refresh, delete the lockfile and run `nub install`."
         ));
+    }
+    // Same ordering requirement as `run_install` / `run_add`.
+    if verb.pnpmfile.is_some() || verb.global_pnpmfile.is_some() || verb.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
     }
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {
@@ -1086,6 +1181,13 @@ pub struct InstallFlags {
     pub prod: bool,
     pub dev: bool,
     pub ignore_scripts: bool,
+    /// `--pnpmfile` / `--global-pnpmfile` / `--ignore-pnpmfile`. An explicitly
+    /// named path is the documented way to run hooks in a project whose
+    /// incumbent is not pnpm — the scope warning in `pm_engine::mod` tells the
+    /// user exactly that, so the flags have to exist for the advice to hold.
+    pub pnpmfile: Option<std::path::PathBuf>,
+    pub global_pnpmfile: Option<std::path::PathBuf>,
+    pub ignore_pnpmfile: bool,
     pub no_optional: bool,
     pub offline: bool,
     pub prefer_offline: bool,
@@ -1101,11 +1203,14 @@ pub struct InstallFlags {
     pub output: super::output::OutputFlags,
 }
 
-/// `nub ci` flags. `ci` is frozen + clean by definition, so only the script /
-/// optional-dep / registry knobs are configurable (mirrors `aube ci`'s
-/// `CiArgs`, whose flattened NetworkArgs carries `--registry` upstream).
+/// `nub ci` flags. `ci` is frozen + clean by definition, so the lockfile-mode
+/// knobs are fixed; the dep-axis / script / optional-dep / registry knobs stay
+/// configurable (mirrors `aube ci`'s `CiArgs`, whose flattened NetworkArgs
+/// carries `--registry` upstream).
 #[derive(Debug, Default)]
 pub struct CiFlags {
+    pub prod: bool,
+    pub dev: bool,
     pub ignore_scripts: bool,
     pub no_optional: bool,
     pub registry: Option<String>,
@@ -1149,6 +1254,12 @@ impl WorkspaceFilterFlags {
 
 /// `nub install` — route through the embedded aube install engine.
 pub fn run_install(flags: InstallFlags) -> Result<i32> {
+    // Before `engine_session`, which drives the brand preflight that emits the
+    // "pnpmfile ignored" scope warning: an invocation that named its own
+    // pnpmfile has already answered the question that warning asks.
+    if flags.pnpmfile.is_some() || flags.global_pnpmfile.is_some() || flags.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
+    }
     let session = super::engine_session(flags.dir.as_deref())?;
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
@@ -1178,6 +1289,13 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     args.prod = flags.prod || config.dep_selection.prod;
     args.dev = flags.dev || config.dep_selection.dev;
     args.ignore_scripts = flags.ignore_scripts;
+    // An explicitly named pnpmfile loads whatever the project's incumbent is
+    // — `detect`'s `pnpmfile_default_enabled` gate only ever suppresses the
+    // cwd DEFAULT. That is the remedy the non-pnpm-incumbent scope warning
+    // offers, so these three ride straight through to the engine.
+    args.pnpmfile = flags.pnpmfile.clone();
+    args.global_pnpmfile = flags.global_pnpmfile.clone();
+    args.ignore_pnpmfile = flags.ignore_pnpmfile;
     args.no_optional = flags.no_optional || config.dep_selection.no_optional;
     args.offline = flags.offline || config.offline;
     args.prefer_offline = flags.prefer_offline;
@@ -1198,8 +1316,22 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     let global_frozen = args.lockfile.frozen_override();
     let cli_flags = args.to_cli_flag_bag(global_frozen, args.virtual_store.flags());
 
-    // yaml_prefer_frozen: None — see KNOWN APPROXIMATIONS in the module doc.
-    let mut opts = args.into_options(global_frozen, None, cli_flags, super::env_snapshot());
+    // `preferFrozenLockfile` from the project's own config, and `None` — no
+    // source sets it — is the same env-aware default this used to pass
+    // unconditionally. Resolved lazily because the resolution is real file I/O
+    // (`FileSources::load` plus the workspace yaml) and `from_override` ignores
+    // the value outright once a CLI override exists — which is the common CI
+    // shape, where `--frozen-lockfile` is passed on every run.
+    let prefer_frozen = global_frozen
+        .is_none()
+        .then(aube::commands::install::resolve_prefer_frozen_lockfile)
+        .flatten();
+    let mut opts = args.into_options(
+        global_frozen,
+        prefer_frozen,
+        cli_flags,
+        super::env_snapshot(),
+    );
     // The settings hash makes release-policy drift miss the no-op warm path.
     // Once there is real install work, opt into revalidating the existing
     // lockfile picks under the effective age gate. The engine only re-resolves
@@ -1450,8 +1582,8 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         // The explicit CLI flag always wins (OR'd in, never overridden) — same
         // contract as `run_install`.
         dep_selection: DepSelection::from_flags(
-            dep.prod,
-            dep.dev,
+            dep.prod || flags.prod,
+            dep.dev || flags.dev,
             dep.no_optional || flags.no_optional,
         ),
         ignore_scripts: flags.ignore_scripts,

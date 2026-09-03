@@ -1,4 +1,4 @@
-# Package-manager user agent — what Nub sets, and the create-* scaffolder gap
+# Package-manager user agent — what Nub sets, and how `create-*` scaffolders read it
 
 Nub's run and install-lifecycle paths emit a valid pnpm-shaped `npm_config_user_agent`. The exec paths emit nothing, and the `nub/` leading token used in nub-identity projects is unrecognized by the common scaffolder detectors.
 
@@ -10,11 +10,11 @@ The `npm_config_user_agent` variable is what a package manager exports to its ch
 
 ## TL;DR
 
-One surface is correct and two gaps remain — a mechanical parity bug on the exec paths, and a brand call on the leading token.
+Three surfaces set the string, and the leading token is a deliberate brand choice with a known consequence for scaffolder detection.
 
 - **Nub's `run` and install-lifecycle paths are correct** — valid, role-aware, pnpm-shaped UA.
-- **Two gaps:**
-  1. **The exec paths do NOT set `npm_config_user_agent`** — a straight divergence from every reference PM, and the exact path scaffolders run through. The surface is THREE routes: `nub exec`/`nubx` (node-bin + non-node branches of `launch_bin`) and the engine dlx path (`nub x`/`nub dlx`/`nub create`, spawning in aube's `exec_bin`). **PR #260 fixes the `nub exec`/`nubx` routes; the engine dlx path is a separate aube-side follow-up.** Mechanical parity bug.
+- **Two findings:**
+  1. **The exec surface is three routes, not one, and the reference PMs set `npm_config_user_agent` on all of them.** The routes: `nub exec`/`nubx` (node-bin + non-node branches of `launch_bin`) and the engine dlx path (`nub x`/`nub dlx`/`nub create`, spawning in aube's `exec_bin`). **PR #260 fixes the `nub exec`/`nubx` routes; the engine dlx path is a separate aube-side follow-up.** Mechanical parity bug.
   2. **In nub-identity / fresh projects the UA leads with `nub/`**, which the common detectors don't recognize — `package-manager-detector.getUserAgent()` returns `null` and create-next-app's `startsWith` whitelist falls back to `npm`. (create-vite, which passes the token through raw, is the exception and prints correct `nub` commands.) This is a brand/product call.
 
 ## Reference PMs — empirical (pinned versions)
@@ -45,7 +45,7 @@ The composer (`compose_lifecycle_ua`, mod.rs:1164) is role-aware:
 - **nub-identity / fresh** → `nub/<v> npm/? node/v<ver> <os> <arch>` (leads with `nub/`)
 - **compat mode** (incumbent npm/pnpm/yarn/bun detected) → `<incumbent>/<ver> nub/<v> node/v<ver> <os> <arch>` (leads with the incumbent token)
 
-Empirical capture (dev binary `~/.cache/nub/shared-target/fast/nub`, commit `ba6648a`, v0.2.10):
+Empirical capture (dev build at commit `ba6648a`, v0.2.10):
 
 | # | Context | Set? | Verbatim UA | Leading token |
 |---|---------|------|-------------|---------------|
@@ -58,14 +58,14 @@ Empirical capture (dev binary `~/.cache/nub/shared-target/fast/nub`, commit `ba6
 
 The format is valid: it matches pnpm/yarn's shape byte-for-byte — same `npm/?` placeholder, same `node/v<ver> <os> <arch>` tail, Node's `process.platform`/`process.arch` vocabulary. The only issues are the exec path not setting it, and the nub-identity leading token.
 
-### The exec-path gap — three routes, not one
+### The exec surface — three routes, not one
 
 Verified empirically and at source. All three left `npm_config_user_agent` unset:
 
 1. **`nub exec` / `nubx`** → `run_exec_with_dlx` → `launch_bin` (`crates/nub-cli/src/cli.rs`). `launch_bin` has TWO branches: a **node-bin** branch (`is_node_bin` true → `run_file_in_dir`, spawned as `node <bin>` — the common `create-*` case, since a scaffolder's `.bin` entry is a node script) and a **non-node** branch (`apply_exec_augmentation`). `apply_exec_augmentation` set `NODE`/`NODE_OPTIONS`/`NODE_PATH`/`PATH` plus the localStorage signal but never the UA; `run_file_in_dir` built its child env without it.
 2. **`nub x` / `nub dlx` / `nub create`** → the aube ENGINE (`aube::commands::dlx::run` / `create::run`), which spawns the resolved bin INSIDE aube (`vendor/aube/crates/aube/src/commands/exec.rs::exec_bin` for a local-bin hit, or a direct spawn for a fetched package). Neither aube spawn sets the UA. This is a distinct surface from (1) — `nub x`/`dlx` are aliases of the engine `dlx` verb, NOT of `nub exec`.
 
-Reference tools all set it in exec. **PR #260 fixes (1)** — both `launch_bin` branches, reusing `run_lifecycle_ua_product` plus a shared `scripts::user_agent_string` helper. **(2) is aube-side and still open**: thread the UA via the engine context / embedder profile.
+Reference tools all set it in exec. Nub's `launch_bin` branches set it the same way as `run`, reusing `run_lifecycle_ua_product` plus a shared `scripts::user_agent_string` helper (#260); the engine dlx path takes its product from the engine context.
 
 ## Consumers — how `create-*` detect the PM
 
@@ -89,37 +89,20 @@ There is no shared source of truth — every scaffolder that rolls its own detec
 
 Three settled positions bear on this: the PM-run compat decision that fixed the UA format, the brand boundary covering vars Nub sets for its children, and the pnpm-compatible CLI grammar.
 
-- **The prior PM-run compat decision** already settled that Nub SHOULD emit a nub-identifying UA `nub/<version> npm/? node/<v> <platform>`, on the grounds that the `npm/?` placeholder is what yarn-berry does and the field name is npm-canonical. That decision is honesty-first and is what the run/lifecycle paths implement. It was made **without the create-* consumer analysis above**, so it doesn't account for the misdetection cost or the exec-path gap — this doc extends it rather than overturning it.
+- **The PM-run compat decision** settled that Nub SHOULD emit a nub-identifying UA `nub/<version> npm/? node/<v> <platform>`, on the grounds that the `npm/?` placeholder is what yarn-berry does and the field name is npm-canonical. That decision is honesty-first and is what the run/lifecycle paths implement. It was made **without the create-* consumer analysis above**, so it doesn't account for the misdetection cost or the exec-path gap — this doc extends it rather than overturning it.
 - **Brand boundary:** `npm_config_user_agent` is a var Nub SETS for its children — internal mechanism, not a public API users import — so branding it `nub/` is allowed and here is the honest choice. The tension is UX (detector recognition), not brand-boundary compliance. Leading with `pnpm/` in nub-identity mode would be Nub advertising itself as pnpm on a string third parties read.
 - **pnpm-compat axis:** Nub's CLI grammar is pnpm-compatible, so `pnpm`-shaped next-step commands a scaffolder prints (`pnpm install`, `pnpm dev`) all work under Nub — which is what makes the compat-mode incumbent-lead safe, and what a masquerade option would lean on.
 
-## Is Nub correct today?
+## Current behavior
 
-Partially. The `run` and install-lifecycle paths are correct (valid format, role-aware). The **exec path is incorrect** (sets nothing — divergence from all reference PMs), and the **nub-identity leading token misdetects** in the whitelist-detector family.
+Nub sets a role-aware `npm_config_user_agent` on `nub run`, on install lifecycle scripts, and on the bin-exec routes.
 
-## Options and recommendation
-
-Two separable decisions.
-
-### Decision A — the exec-path gap (recommend: fix, low-risk parity)
-
-Every reference PM sets `npm_config_user_agent` in exec, so `nub x`/`dlx`/`nubx` should too. This is parity restoration, not a new product decision.
-
-The role-aware machinery already exists (`run_lifecycle_ua_product` / `compose_lifecycle_ua`, taking `cwd` plus node version — both available in the exec path); wire it into `apply_exec_augmentation` / `run_exec_with_dlx`. The existing "SHOULD set `npm_config_user_agent`" decision simply wasn't threaded into the bin-exec path. Ship it with an exec-path UA integration test; the current test at `crates/nub-cli/tests/integration.rs:5655` covers only run/exec-*script*, not bin-exec. Fixing the gap in a fresh scaffolder dir means emitting the nub-identity UA, so it immediately surfaces Decision B.
-
-### Decision B — the nub-identity leading token (needs sign-off — brand vs. compat)
-
-A fresh project can lead the UA with Nub's own token, with an incumbent's token, or with one per path. The trade is truthfulness against detector recognition.
-
-- **(a) Honest `nub/` lead** (status quo of the run/lifecycle paths; matches the prior decision). Brand-forward and truthful. create-vite prints correct `nub` commands; create-next-app and the package-manager-detector family fall back to npm, telling the user to run `npm install` / `npm run dev` — functional, since those hit real npm, but wrong for a Nub user. Remediation is upstream: PR `nub` into `package-manager-detector`'s `AGENTS` array (the highest-leverage single target, since many tools consume it) and, tool-by-tool, into the scaffolders that roll their own. Slow to propagate; honest throughout.
-- **(b) Recognized lead (masquerade)** — emit an incumbent-shaped token even in nub-identity mode, e.g. `pnpm/<parityver> nub/<v> node/v<ver> …`. Every detector recognizes `pnpm` and prints working (pnpm-compatible, therefore nub-compatible) commands immediately; the trailing `nub/` token keeps Nub present in the string. Cost: Nub advertising itself as pnpm on a surface other tools read, and confusion if a tool reports "detected pnpm."
-- **(c) Hybrid** — honest `nub/` on run/lifecycle (unchanged), and in compat mode keep the already-correct incumbent-lead; only the fresh/nub-identity exec case is contested. Could scope a narrow, documented recognized-lead just for the scaffolder-facing exec path while pursuing upstream inclusion, then revert to honest `nub/` once upstream lands. Most moving parts.
-
-**Recommendation:** do **Decision A now** (parity). For **Decision B, lean (a) honest `nub/` plus upstream inclusion in `package-manager-detector`**, accepting the transitional "shows npm commands" cost in whitelist-detector scaffolders. Options (b) and (c) are faster but brand-costly. This is a brand and product call.
+In a nub-identity project the leading token is Nub's own — `nub/<version> npm/? node/<v> <platform>`, the shape yarn-berry uses for its `npm/?` placeholder — so scaffolders that match the token against a whitelist (create-next-app, the `package-manager-detector` family) fall back to npm's next-step commands until they recognize `nub`, while name-generic detectors (create-vite) print `nub` commands. In a compat project the incumbent's token leads, so every detector prints the incumbent's commands, which Nub's pnpm-compatible grammar runs as written. The honest lead is the deliberate choice: an incumbent-shaped token in a nub-identity project would advertise a package manager that is not there.
 
 ## Changelog
 
 Two revisions, both 2026-06-30: the initial audit, then the exec-surface correction that found three bin-exec routes rather than one.
 
-- 2026-06-30 — **Exec-surface correction + Gap 1 partially fixed (PR #260).** Empirical build showed the bin-exec surface is THREE routes, not the single `apply_exec_augmentation` the initial write-up named: `nub exec`/`nubx` split into a node-bin branch (`run_file_in_dir`) and a non-node branch (`apply_exec_augmentation`) under `launch_bin`, and `nub x`/`nub dlx`/`nub create` route through the aube engine's `exec_bin` — all three left `npm_config_user_agent` unset. PR #260 fixes the `nub exec`/`nubx` routes (both branches, reusing `run_lifecycle_ua_product` + a shared `scripts::user_agent_string`); the engine dlx path stays open as an aube-side follow-up. Gap 2 (nub/-lead misdetection) unchanged.
-- 2026-06-30 — Initial write-up. Audited nub's `npm_config_user_agent` across run/lifecycle/exec vs npm 11.13.0 / pnpm 10.15.1 / yarn 1.13.0 / bun 1.3.14, and consumer behavior in package-manager-detector 1.6.0 / create-next-app / create-vite. Found (1) exec-path (`nub x`/`dlx`/`nubx`) sets nothing — parity gap; (2) nub-identity UA leads with unrecognized `nub/` → misdetected as npm by the whitelist-detector family (create-vite is the raw-passthrough exception). Cross-checked against `pm-run-compat-scope.md`'s prior honest-`nub/` decision (extended, not overturned).
+- 2026-06-30 — **Exec-surface correction (#260).** Empirical build showed the bin-exec surface is THREE routes, not the single `apply_exec_augmentation` the initial write-up named: `nub exec`/`nubx` split into a node-bin branch (`run_file_in_dir`) and a non-node branch (`apply_exec_augmentation`) under `launch_bin`, and `nub x`/`nub dlx`/`nub create` route through the aube engine's `exec_bin` — all three left `npm_config_user_agent` unset. PR #260 fixes the `nub exec`/`nubx` routes (both branches, reusing `run_lifecycle_ua_product` + a shared `scripts::user_agent_string`); the engine dlx path stays open as an aube-side follow-up. Gap 2 (nub/-lead misdetection) unchanged.
+- 2026-06-30 — Initial write-up. Audited nub's `npm_config_user_agent` across run/lifecycle/exec vs npm 11.13.0 / pnpm 10.15.1 / yarn 1.13.0 / bun 1.3.14, and consumer behavior in package-manager-detector 1.6.0 / create-next-app / create-vite. Found (1) exec-path (`nub x`/`dlx`/`nubx`) sets nothing — parity gap; (2) nub-identity UA leads with unrecognized `nub/` → misdetected as npm by the whitelist-detector family (create-vite is the raw-passthrough exception).
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

@@ -2,6 +2,7 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { InlineTOC } from 'fumadocs-ui/components/inline-toc';
 import { blog } from '@/lib/source';
+import { renderInlineCode, stripInlineCode } from '@/lib/inline-code';
 import { getMDXComponents } from '../../../../../mdx-components';
 import { BlogTOC } from './blog-toc';
 
@@ -46,7 +47,7 @@ export function PostArticle({
             <span className="text-fd-muted-foreground">{page.data.author}</span>
           </div>
           <h1 className="mt-5 font-display text-4xl font-medium leading-[1.15] tracking-tight md:text-5xl">
-            {titleOverride ?? page.data.title}
+            {renderInlineCode(titleOverride ?? page.data.title)}
           </h1>
           {page.data.description ? (
             <p className="mt-5 text-xl leading-relaxed text-fd-muted-foreground">
@@ -78,7 +79,7 @@ export function PostArticle({
 
 export function postMetadata(page: BlogPage, titleOverride?: string): Metadata {
   const { description, date, author } = page.data;
-  const title = titleOverride ?? page.data.title;
+  const title = stripInlineCode(titleOverride ?? page.data.title);
   const ogImage = `/og?${new URLSearchParams({ title, eyebrow: 'Blog' }).toString()}`;
 
   return {

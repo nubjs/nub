@@ -11,6 +11,30 @@
 // get-tsconfig mirror), so allow it.
 #![allow(clippy::collapsible_if)]
 
+// This addon must NEVER link the MSVC C runtime statically. It is a cdylib that Node
+// loads into its own process, so a static CRT gives it a private heap and a private
+// copy of the CRT's global state: anything allocated on one side of the `node.exe`
+// boundary and freed on the other becomes heap corruption — silent, late, and nothing
+// like the honest link error you would want.
+//
+// The guard is here because the mistake is easy to make and impossible to see. The
+// shipped `nub.exe` and the compiled-artifact launcher DO want `+crt-static` (without
+// it they die at 0xC0000135 on a clean Windows box), and the obvious way to arrange
+// that — a `+crt-static` in the repo-root `.cargo/config.toml` — reaches this crate
+// too. Cargo CONCATENATES rustflags from every config file up the directory tree
+// rather than letting the nearest one win, and `+crt-static` is sticky: a later
+// `-crt-static` does not undo it, in either order, with no diagnostic. So there is no
+// way to opt back out from here, and a build that should have failed would instead
+// have shipped. Those binaries get the flag from their own build steps instead.
+#[cfg(all(windows, target_feature = "crt-static"))]
+compile_error!(
+    "nub-native must link the MSVC CRT dynamically: it is a cdylib loaded into node.exe, \
+     and a static CRT gives it a private heap (cross-boundary frees corrupt memory). \
+     Something put `-C target-feature=+crt-static` in this build — most likely a \
+     `.cargo/config.toml` above this crate, whose rustflags cargo concatenates and which \
+     cannot be overridden from here. Scope that flag to the nub.exe/launcher build steps."
+);
+
 mod cache;
 mod detect;
 mod resolve;

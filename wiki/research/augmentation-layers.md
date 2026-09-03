@@ -1,6 +1,6 @@
 # Research: augmentation layers (bundler vs loader hooks) and Rust-from-JS interop
 
-**Status:** v2, 2026-05-16. Initial claims verified the same day, then revised after reading the tsx source directly. Informs the pre-processing model, the `nub build` bundler, and package replacement by name.
+**Status:** v2, 2026-05-16. Initial claims verified the same day, then revised after reading the tsx source directly. Informs the pre-processing model and where a bundler pass fits relative to it.
 
 ## Question
 
@@ -13,12 +13,12 @@ Where in the pipeline does Nub augment Node, and how do augmentations get implem
 
 The motivating intuition — "Bun and tsx bundle with esbuild or their own bundler before passing the result to Node" — is the wrong mental model, and "tsx just transpiles per file" is incomplete. The accurate picture, from the tsx source:
 
-- **tsx ships two hooks, not one.** A resolve hook (744 lines in `src/esm/hook/resolve.ts`) and a load hook (420 lines in `src/esm/hook/load.ts`), plus a parallel CJS path (`src/cjs/api/module-resolve-filename/`, `src/cjs/api/module-extensions.ts`). The resolve hook does the heavy lifting — extension probing for `.ts/.tsx/.jsx` candidates, directory-import → `index.{ts,tsx,jsx,js}` resolution, tsconfig `paths` alias rewriting, `.js → .ts` swap in exports/imports maps. The load hook then calls esbuild's `transformSync` per file, and cached output is content-hashed. Architectural ancestor: `@esbuild-kit/{esm,cjs}-loader`. Detailed breakdown: [[research/tsx-architecture]].
+- **tsx ships two hooks, not one.** A resolve hook (744 lines in `src/esm/hook/resolve.ts`) and a load hook (420 lines in `src/esm/hook/load.ts`), plus a parallel CJS path (`src/cjs/api/module-resolve-filename/`, `src/cjs/api/module-extensions.ts`). The resolve hook does the heavy lifting — extension probing for `.ts/.tsx/.jsx` candidates, directory-import → `index.{ts,tsx,jsx,js}` resolution, tsconfig `paths` alias rewriting, `.js → .ts` swap in exports/imports maps. The load hook then calls esbuild's `transformSync` per file, and cached output is content-hashed. Architectural ancestor: `@esbuild-kit/{esm,cjs}-loader`.
 - The implication for Nub: **resolution and transform are both first-class augmentation surfaces inside the loader-hook layer** — interception happens *before* Node's default resolver runs (resolve hook) and *between resolution and parse* (load hook). esbuild's `transform` API has no plugin system, but the resolve hook is itself the plugin point.
 - **Bun** transpiles per module on first import, inside its runtime — the transpiler is invoked from JavaScriptCore's module-loader callback, not as a pre-pass. Bun's docs state "every file is transpiled on the fly … before being executed." Bun's *bundler* (`bun build` / `Bun.build`) is a separate code path for deploy artifacts, not for running scripts.
 - **esbuild-runner** is the one widely-known bundle-before-exec precedent. The community moved off it toward per-file tools (tsx, swc-node, ts-node) because the bundled-runtime model hits the module-identity sharp edges below.
 
-So Nub's planned design (sync `module.registerHooks()` plus a content-addressed cache) is the same shape as both tsx and Bun. Bundle-before-exec is the road less travelled.
+So Nub's design (sync `module.registerHooks()` plus a content-addressed cache) is the same shape as both tsx and Bun. Bundle-before-exec is the road less travelled.
 
 ## Augmentation layer A: bundle-then-exec (Rolldown statically linked)
 
@@ -26,9 +26,9 @@ What this would build: `nub run script.ts` invokes a Rust binary that calls vend
 
 **What it buys:**
 
-- Virtual modules and custom specifier resolution via Rolldown plugins (`nub:foo`, `~/...`, asset imports).
+- Virtual modules and custom specifier resolution via Rolldown plugins (synthetic specifiers, `~/...` aliases, asset imports).
 - Whole-program transforms — constant folding across module boundaries, dead-code elimination of unused exports, tree-shaking before Node sees the code.
-- Shared output: `nub build` and `nub run` would use one pipeline.
+- Shared output: a bundling pass and the run path would share one pipeline.
 - Custom Rust-side plugins inside the vendored Rolldown — pure-Rust augmentation without an N-API hop per transform.
 
 **What it costs:**
@@ -39,7 +39,7 @@ What this would build: `nub run script.ts` invokes a Rust binary that calls vend
 - **The debugger and source-map story is more complex.** The artifact is one file with sections per source; debuggers handle it, but there is more rope.
 - **Rolldown's Rust plugin trait is not a stable public API.** The team's published position is napi-rs first: the committed contract is the Rollup-compatible JS plugin interface, mirrored across napi and wasi backends. Built-in plugins live behind an internal `Plugin` trait that is explicitly unstable, so embedding Rolldown as a Rust crate and writing plugins against that trait means pinning a commit and absorbing churn. Confirmed by the rolldown maintainers.
 
-## Augmentation layer B: per-file loader hooks (current plan)
+## Augmentation layer B: per-file loader hooks (the chosen layer)
 
 Sync `module.registerHooks()` (Node 24.13.1+) intercepts each module as Node resolves and loads it. Rust transformers (swc, lightningcss) run via napi-rs; a content-hash disk cache short-circuits known files.
 
@@ -49,15 +49,15 @@ Sync `module.registerHooks()` (Node 24.13.1+) intercepts each module as Node res
 - Node's resolver is preserved — conditional exports, subpath imports, `node:*` builtins and native addons behave exactly as in stock Node. Compatibility is the trust contract, and this path defends it by default.
 - Module identity is preserved end-to-end: singletons, `instanceof` across packages, `require.cache`, `import.meta.url` all native.
 - A unified `require` / `import` path. The sync hooks API, unlike the older async `register()`, was designed so one resolve/load pair covers CJS and ESM, closing async `register()`'s historical CJS gaps.
-- **A recent Node fix unlocks `node:*` interception via sync hooks** (commit `2d560e4` / PR #58004 — `require('node:zlib')` previously skipped the sync chain), giving a hook over the `node:*` namespace from outside the runtime. The fix shipped in the 24.x line; worth a v1 sanity check against the pinned Node floor.
+- **A recent Node fix unlocks `node:*` interception via sync hooks** (commit `2d560e4` / PR #58004 — `require('node:zlib')` previously skipped the sync chain), giving a hook over the `node:*` namespace from outside the runtime. The fix shipped in the 24.x line.
 - Hook code is a `--import nub-hooks.mjs` prelude — easy to reason about, easy to opt out of for debugging.
 
 **What it costs:**
 
-- No whole-program transforms. Cross-module dead-code elimination or constant propagation at run time is out of reach on this layer — that is `nub build`'s job.
+- No whole-program transforms. Cross-module dead-code elimination or constant propagation at run time is out of reach on this layer — that is a bundler's job.
 - One hook per import, so import-heavy startup paths pay N×(hook cost). The content-addressed cache makes the per-hit cost stat-bound; a cold cache pays the full transform.
-- The resolve hook can claim arbitrary `<scheme>:<rest>` specifiers (`nub:foo`), matching virtual modules in a bundler plugin, and bare specifiers and `node:*` are interceptable too — so a new specifier namespace is not a bundler-only capability.
-- Hooks are **not** inherited by worker threads unless re-preloaded. The spawn pipeline controls the prelude, so this is solvable, but worth remembering when Workers land.
+- The resolve hook can claim arbitrary `<scheme>:<rest>` specifiers, matching virtual modules in a bundler plugin, and bare specifiers and `node:*` are interceptable too — so a synthetic specifier is not a bundler-only capability.
+- Hooks are **not** inherited by worker threads unless re-preloaded. The spawn pipeline controls the prelude, so this is solvable, but worth remembering for anything that starts a worker.
 
 ## Augmentation layer C: stock Node, no pre-processing (`nub run script.js`)
 
@@ -67,28 +67,16 @@ For JS needing no transformation, both layers above add zero overhead.
 
 Moved to its own write-up: [[research/rust-from-js]].
 
-The architectural summary: N-API addons via napi-rs are the default Rust-from-JS path on stock Node, with a ~26 ns floor per trivial call and ~230 ns returning objects. **Surfaces must be coarse-grained** — one call per operation, never per token or byte. Bun-style sub-microsecond globals are unreachable without modifying the Node runtime, which is out of scope (see [[research/forking-node]]). WASM and Rust sidecars are special-case options.
+The architectural summary: N-API addons via napi-rs are the default Rust-from-JS path on stock Node, with a ~26 ns floor per trivial call and ~230 ns returning objects. **Surfaces must be coarse-grained** — one call per operation, never per token or byte. Bun-style sub-microsecond globals are unreachable without modifying the Node runtime, which is out of scope. WASM and Rust sidecars are special-case options.
 
 ## Recommendation
 
 Hooks stay the default execution pipeline and the bundler stays off the run path. Every augmentation the bundler was proposed for is reachable through a resolve hook or an `--import` prelude instead.
 
 1. **Keep the loader-hook layer as the default execution pipeline.** It matches what Bun and tsx do, defends Node compatibility automatically, and avoids the module-identity sharp edges of bundle-then-exec.
-2. **Rolldown stays scoped to `nub build` and explicit bundle commands**, off the `nub run` hot path. The "bundler-level augmentation for free" framing over-promises: most of the wanted augmentation is reachable via resolve hooks (virtual specifiers, package replacement) or `--import` preludes (globals).
+2. **Rolldown stays scoped to explicit bundling**, off the run hot path. The "bundler-level augmentation for free" framing over-promises: most of the wanted augmentation is reachable via resolve hooks or `--import` preludes (globals).
 3. **New globals and built-in modules are implementable in Rust**, via a small N-API prelude addon loaded by `--import`. Keep the surface coarse-grained, with the JS side calling into Rust in chunks rather than per-byte hot loops. V8 Fast API is on the horizon but unreliable to plan around.
-4. **New module specifier namespaces** — `nub:foo` and the like, currently off the table under the brand boundary — are served by the resolve hook returning a synthetic URL whose load hook returns Rust-transformed JS source, or thin JS re-exporting the N-API prelude. No bundler needed.
-5. **Package replacement by name** is also a resolve-hook job: when the resolver sees `swc` / `tsx` / `lightningcss`, redirect to the built-in implementation. No bundler layer required.
-
-## Open follow-ups
-
-Six items the recommendation does not settle: two measurements, two design questions about the N-API surface and worker inheritance, one upstream dependency to track, and one deferral.
-
-- **Cache-hit micro-benchmark.** Confirm the sync hook plus cache path is sub-ms per intercepted file under realistic load, measured against tsx and ts-node baselines.
-- **Worker-thread hook inheritance** — the concrete UX for users spawning Workers from a Nub-run script. Likely "Nub spawns with `--import` and Workers inherit `execArgv` by default"; needs verification.
-- **Interception of `node:*` via sync hooks** is fixed in Node 24.x; verify against the pinned floor (24.13.1+) and add a CI smoke test.
-- **N-API surface design.** The concrete first APIs (hash, file read, Rust-side path resolution) and a written-down coarse-grained-only convention.
-- **Rolldown Rust plugin trait stability.** Track whether the rolldown team publishes a stable Rust plugin contract during 2026. If it lands, `nub build`'s Rust-plugin story improves, but it does not change the runtime-pipeline call.
-- **Workers, embedding API.** Out of scope today; revisit after v1 ships.
+4. **A resolve hook can serve a synthetic specifier** — returning a URL whose load hook supplies generated source — so that capability does not require a bundler either.
 
 ## Sources verified (2026-05-16)
 
@@ -106,4 +94,5 @@ The primary sources behind the claims above — tsx's and Bun's transpile models
 
 Every revision to this document, with the date and what changed.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links, private attributions and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Restated the layer choice as the shipped design; removed the follow-ups.

@@ -25,7 +25,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status test verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -63,10 +63,18 @@ addon:
 # documented rebuild path (the post-merge refresh, the dev-loop) goes through the
 # wrapper, which normally writes to the SHARED dir, so nothing updated
 # ./target/fast/nub and `nub-dev` silently served whatever was built last time
-# make ran. `--print-target` re-resolves the same shared/isolated decision.
+# make ran.
+#
+# The path comes from NUB_BUILD_TARGET_OUT — the dir THIS build resolved — not
+# from a second `--print-target`, which re-resolves from source content: a merge
+# landing on the shared tree during the build moves the content key, and the
+# symlink then names a bucket the build never wrote to (nub-dev dangling, seen
+# on a 27-minute rebuild that overlapped a merge). One build, one resolution.
 install-dev: addon-fast qos-global
-	scripts/rust-build.sh build --profile fast
-	@t=$$(scripts/rust-build.sh --print-target); \
+	@tf=$$(mktemp); \
+	  NUB_BUILD_TARGET_OUT=$$tf scripts/rust-build.sh build --profile fast || { rm -f $$tf; exit 1; }; \
+	  t=$$(cat $$tf); rm -f $$tf; \
+	  test -x $$t/fast/nub || { echo "install-dev: no binary at $$t/fast/nub" >&2; exit 1; }; \
 	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev; \
 	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev; \
 	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
@@ -87,18 +95,37 @@ addon-fast:
 	@echo "Built: runtime/addons/nub-native.node (fast profile)"
 
 # Machine-global rustc governor: every cargo invocation on this host — any
-# worktree, clone, or direct `cargo` call — compiles at utility QoS AND takes a
-# token from a global concurrency semaphore, closing the gap the entry-point
-# clamps above leave open. The QoS half protects interactive work; the semaphore
-# half is what stops N concurrent agent builds from multiplying their individually
-# polite job caps into an N-fold oversubscription. See scripts/rustc-qos.sh.
+# worktree, clone, or direct `cargo` call — compiles at utility QoS, waits its
+# turn for a build slot (at most two builds compile at once; the rest queue),
+# AND takes a token from a global rustc semaphore, closing the gap the
+# entry-point clamps above leave open. The QoS half protects interactive work;
+# the slot is what stops N concurrent agent builds from multiplying their
+# individually polite job caps into an N-fold oversubscription and a swap storm.
+# See scripts/rustc-qos.sh.
 qos-global:
 	@scripts/qos-global.sh
 
-# Why is this machine saturated? Prints the SUM no single session can see: load,
-# live builds, semaphore occupancy, and which builds are outside the cap.
+# Why is this machine saturated, and why is my build not starting? Prints the
+# SUM no single session can see: load, which builds hold the compile slots and
+# who is queued behind them, token occupancy, and which builds are outside the cap.
 build-status:
 	@scripts/build-status.sh
+
+# What the self-pruning collector would reclaim right now (it runs for real,
+# hourly, from rust-build.sh; scripts/target-gc.sh has the policy).
+target-gc:
+	@scripts/target-gc.sh --dry-run
+
+test-target-gc:
+	@tests/target-gc/run.sh
+
+# Host-wide emergency switch for the build-slot layer: every wrapper checks the
+# file on entry and on each wait iteration, so `off` releases builds already
+# queued. Leaves the QoS clamp and the rustc tokens in place.
+build-slots-off:
+	@mkdir -p $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem} && touch $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem}/off && echo "build slots OFF (make build-slots-on to restore)"
+build-slots-on:
+	@rm -f $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem}/off && echo "build slots ON"
 
 uninstall-dev:
 	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev
@@ -106,6 +133,13 @@ uninstall-dev:
 
 test:
 	$(CARGO) test
+
+# The build-slot layer of the machine-global rustc governor, driven by a fake
+# cargo/rustc pair in a private state dir — ~3 min, no real build, never touches
+# the installed governor. CI runs the same script (the `build-slots` job, on
+# ubuntu and macOS), and `verify` includes it.
+test-build-slots:
+	@tests/build-slots/run.sh
 
 # Bounded host-local gate. Platform matrices, Docker jobs, and change-specific
 # end-to-end tests remain separate parts of the pre-push verification loop.
@@ -130,9 +164,11 @@ verify:
 	@# above. A lint ships nothing, so grant it here exactly as ci.yml's clippy job does
 	@# rather than vendoring npm packages into runtime/ on every developer's tree.
 	NUB_ALLOW_INCOMPLETE_RUNTIME=1 NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features --profile fast -- -D warnings
+	@tests/build-slots/run.sh
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features --profile fast -- -D warnings)
 	tests/brand-lint/check-env-reads.sh
 	tests/brand-lint/check-path-literals.sh
+	@tests/target-gc/run.sh
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" test
 
 # Run the integration suite across a Node version matrix (18.19 floor → 22.15
@@ -207,6 +243,20 @@ version-check:
 			const types = JSON.parse(fs.readFileSync('npm/nub-types/package.json', 'utf8')); \
 			if (types.version !== v) errors.push('npm/nub-types/package.json has ' + types.version + ', expected ' + v); \
 		} catch { errors.push('missing or unreadable npm/nub-types/package.json'); } \
+		try { \
+			const loader = JSON.parse(fs.readFileSync('npm/loader/package.json', 'utf8')); \
+			if (loader.version !== v) errors.push('npm/loader/package.json has ' + loader.version + ', expected ' + v); \
+			for (const [dep, ver] of Object.entries(loader.optionalDependencies || {})) { \
+				if (ver !== v) errors.push(dep + ' optionalDependency pinned at ' + ver + ', expected ' + v); \
+				const pkg = 'npm/' + dep.replace('@nubjs/', '') + '/package.json'; \
+				try { \
+					const p = JSON.parse(fs.readFileSync(pkg, 'utf8')); \
+					if (p.version !== v) errors.push(pkg + ' has ' + p.version + ', expected ' + v); \
+				} catch { errors.push('missing or unreadable ' + pkg); } \
+			} \
+			const lrt = (loader.dependencies || {})['@oxc-project/runtime']; \
+			if (!lrt) errors.push('npm/loader/package.json: @oxc-project/runtime missing from dependencies'); \
+		} catch { errors.push('missing or unreadable npm/loader/package.json'); } \
 		const cargo = fs.readFileSync('Cargo.toml', 'utf8'); \
 		const cm = cargo.match(/^version = \x22([^\x22]*)\x22/m); \
 		if (!cm) errors.push('Cargo.toml: workspace version line not found'); \

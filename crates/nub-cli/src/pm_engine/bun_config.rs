@@ -45,7 +45,11 @@ fn load_bunfig_file(path: &Path) -> Vec<(String, String)> {
 }
 
 fn parse_bunfig_file(path: &Path) -> Option<Value> {
-    std::fs::read_to_string(path).ok()?.parse::<Value>().ok()
+    let table = std::fs::read_to_string(path)
+        .ok()?
+        .parse::<toml::Table>()
+        .ok()?;
+    Some(Value::Table(table))
 }
 
 /// Whether the project's `bunfig.toml` directs `node_modules` layout.
@@ -317,7 +321,7 @@ mod tests {
     use super::*;
 
     fn parsed(source: &str) -> Vec<(String, String)> {
-        let value = source.parse::<Value>().unwrap();
+        let value = Value::Table(source.parse::<toml::Table>().unwrap());
         entries_from_bunfig(&value)
     }
 

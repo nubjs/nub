@@ -35,7 +35,7 @@ A range qualifies when its lower bound is representable and floor resolution ret
 
 The split is not cosmetic. The bundle is stripped against the resolved gate, so a form whose gate is not the range's minimum must not have its range enforced — the artifact would otherwise accept a Node whose polyfills it already removed. Two cases miss: an upper-only range, whose gate falls back to the newest matching release, and a range whose minimum is published but carries no artifact for the target, where the gate lands above it. [[crates/nub-core/src/version_management/mod.rs#range_minimum_is]] is the single predicate both sides read.
 
-When no installed Node qualifies, the launcher provisions the newest matching release resolved at compile time.
+When no installed Node qualifies, the launcher provisions the newest matching release resolved at compile time — provided that release can run the payload. A bundle carrying a `module.registerHooks` shim needs a Node that has the API, and version order does not imply it: 23.0 through 23.4 sort above a 22.15 floor and satisfy a range built on it, yet predate `registerHooks` on the 23.x line. Where the newest match fails that test the compiler records no preference at all, and the launcher provisions the floor, which the build already gated on the same capability.
 
 ## Anatomy of a compiled binary
 
@@ -69,14 +69,14 @@ What the launcher does between exec and handing control to Node. The cache is ch
 2. A `--smol` launcher first proves whether a usable external Node exists. This determines whether the selected cache will hold app data only or must supply Node.
 3. `cache::resolve()` selects one cache root and threads it through the run. Normal candidates are the XDG cache, the home cache, and a per-user temporary directory. A cold cache must be writable; it must permit execution only when it will supply Node. A proven external `--smol` Node makes a `noexec` app cache valid.
 4. `acquire_node` extracts or provisions Node when no external `--smol` Node was found. `ensure_app` extracts the bundled entry and assets. Durable completion markers are written after each tree is complete, and later runs reject an incomplete publication.
-5. `compute_inject_flags` selects flags for the Node version. The launcher prepends the absolute compile bootstrap, appends the extracted entry and application arguments, and inherits `NODE_OPTIONS` unchanged.
-6. The launcher starts Node in its own process group, forwards signals and the exit status, and hands an interactive terminal to the child.
+5. `compute_inject_flags` selects flags for the Node version. The launcher prepends the absolute compile bootstrap, appends the extracted entry and application arguments, and inherits `NODE_OPTIONS` unchanged. A payload whose module graph is sealed — no `--external` packages, no retained computed `import()`, and no verbatim payload file — additionally skips the argv-only V8 syntax flags: those enable in-progress syntax in files Node parses at runtime, which a sealed bundle does not have, and a non-default V8 flag forfeits the startup-snapshot fast path.
+6. On Unix the launcher replaces its own process image with Node via `exec`, so the artifact and Node are one process: the terminal delivers signals directly, the exit status is Node's own, and no per-run child process is created or torn down. Windows has no `exec`, so the launcher there starts Node as a child in its own process group, forwards signals and the exit status, and hands an interactive terminal to it.
 
 Cache selection validates the properties it relies on before using extracted files, including ownership or access control. It checks for an executable mount where supported only when Node will run from that cache. This protects the launcher's cache handoff from other principals; it is not a sandbox, and code running as the same user can modify user-owned files.
 
 ## Process identity
 
-The outer artifact remains the application's executable identity even though the operating-system child process is Node:
+The outer artifact remains the application's executable identity even though the process that ends up running is Node — on Unix the launcher's own process after `exec`, on Windows a child:
 
 | Value | Compiled artifact |
 | --- | --- |

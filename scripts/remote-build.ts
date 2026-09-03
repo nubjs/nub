@@ -14,16 +14,16 @@
 // reads 155, sys time is ~25%, and the disk sustains 3000-4000 tps at 5-6 KB/transfer.
 // The bottleneck is not compute — it is cargo fingerprint/stat churn across a dozen
 // multi-GB target dirs on ONE APFS volume. So the win from going remote is not "more
-// cores", it is that every builder brings its OWN disk. See
-// wiki/research/remote-build-offload.md for the full measurement set.
+// cores", it is that every builder brings its OWN disk.
 //
 // WHAT GOES REMOTE, AND WHAT MUST NOT. Measured on n2-standard-16 vs the Mac:
 //   warm incremental   8.1s remote vs ~5s local   -> STAYS LOCAL, remote loses
 //   cold `release`     7m00s remote vs ~15m local -> remote wins 2x
 //   clippy --all-targets --all-features  35.3s    -> remote
 //   cargo test -p nub-cli   39.4s warm            -> remote, 718 passed / 0 failed
-// The inner loop is deliberately NOT a job type here. This tool is for the heavy,
-// cold-anyway gates that are what actually saturate the Mac.
+// The inner loop is deliberately NOT a job type here. Everything else — the CI gates AND
+// ad-hoc fixture runs (`--job adhoc`) — defaults to a VM: only the warm incremental loop
+// and macOS-specific behavior belong on the Mac.
 //
 // LINUX-NATIVE ONLY, DELIBERATELY. An earlier version of this tool also cross-compiled
 // `aarch64-apple-darwin` here via cargo-zigbuild plus hand-written Apple framework stub
@@ -86,7 +86,6 @@ const BASE_IMAGE_FAMILY = "ubuntu-2404-lts-amd64";
 const BASE_IMAGE_PROJECT = "ubuntu-os-cloud";
 const MACHINE_TYPE = "c3-standard-8";
 const DISK_GB = "50";
-const ZIG_VERSION = "0.16.0";
 const NODE_MAJOR = "26";
 const SSH_USER = "nub";
 const SSH_KEY = join(homedir(), ".ssh", "nub-vm");
@@ -105,6 +104,7 @@ const HELP = `remote-build — run a nub CI gate on an ephemeral GCE spot VM
 
 Usage:
   nub scripts/remote-build.ts [--job clippy|test] [options]
+  nub scripts/remote-build.ts --job adhoc --script <file>   # build nub on the VM, run your script
   nub scripts/remote-build.ts --fanout <n>        # n concurrent builders + local-load sampling
   nub scripts/remote-build.ts --build-image       # bake the golden image (once, ~10 min)
   nub scripts/remote-build.ts --reap              # delete stray builder VMs
@@ -112,12 +112,17 @@ Usage:
 Jobs:
   clippy   the full CI clippy gate (default)
   test     the whole-workspace test suite
+  adhoc    build the nub binary + real addon, then run YOUR --script at the synced repo
+           root with NUB_BIN naming the built binary. For fixture probes and ad-hoc e2e
+           sweeps (the ad-hoc-test loop) that need no macOS-specific behavior. The image
+           carries Node ${NODE_MAJOR} + npm; a script installs any other reference tool itself.
 
 For a macOS BINARY use scripts/mac-build.ts, which builds natively on a real macOS
 runner. This tool is Linux-native gates only.
 
 Options:
   --job <j>          Job to run (default: clippy).
+  --script <file>    The local script an adhoc job runs on the VM (required for --job adhoc).
   --fanout <n>       Run n builders concurrently; samples local CPU/load throughout.
   --source <dir>     Worktree to build (default: the git root of the cwd).
   --machine <type>   GCE machine type (default: ${MACHINE_TYPE}).
@@ -145,6 +150,7 @@ export function parseArgs(argv: string[]) {
     fanout: 1,
     out: "",
     source: "",
+    script: "",
     machine: MACHINE_TYPE,
     onDemand: false,
     keep: false,
@@ -164,6 +170,7 @@ export function parseArgs(argv: string[]) {
     else if (v === "--fanout") a.fanout = Number(argv[++i]);
     else if (v === "--out") a.out = argv[++i];
     else if (v === "--source") a.source = argv[++i];
+    else if (v === "--script") a.script = argv[++i];
     else if (v === "--machine") a.machine = argv[++i];
     else if (v === "--on-demand") a.onDemand = true;
     else if (v === "--keep") a.keep = true;
@@ -177,8 +184,21 @@ export function parseArgs(argv: string[]) {
       process.exit(2);
     }
   }
-  if (!["clippy", "test"].includes(a.job)) {
-    process.stderr.write(`remote-build: --job must be clippy|test\n`);
+  if (!["clippy", "test", "adhoc"].includes(a.job)) {
+    process.stderr.write(`remote-build: --job must be clippy|test|adhoc\n`);
+    process.exit(2);
+  }
+  // Required both ways: a bare `--job adhoc` has nothing to run, and `--script` on a gate
+  // job would be silently ignored — the reader would believe their probe ran when only the
+  // gate did. (`--script` as the FINAL argv element leaves it falsy, caught here too, same
+  // trap as --attach below.) The file itself is read in main(), so a typo'd path fails
+  // loudly before any VM is provisioned.
+  if (a.job === "adhoc" && !a.script) {
+    process.stderr.write(`remote-build: --job adhoc needs --script <file>\n`);
+    process.exit(2);
+  }
+  if (a.script && a.job !== "adhoc") {
+    process.stderr.write(`remote-build: --script only applies to --job adhoc\n`);
     process.exit(2);
   }
   // Whitelisted for the same reason --job is: `profile` is interpolated into a script piped
@@ -224,14 +244,15 @@ function gcloudEnv() {
   return { ...process.env, CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: CRED };
 }
 
-async function gcloud(args: string[]) {
+async function gcloud(args: string[], timeoutMs = 180_000) {
   const full = [...args, "--project", PROJECT];
   const { stdout } = await execFileAsync("gcloud", full, {
     env: gcloudEnv(),
     maxBuffer: 64 * 1024 * 1024,
-    // No gcloud call here should ever take minutes; without this a hung API call hangs the
-    // whole run, and for the bake there is no server-side backstop to end it.
-    timeout: 180_000,
+    // Almost no gcloud call here should ever take minutes; without this a hung API call
+    // hangs the whole run, and for the bake there is no server-side backstop to end it.
+    // The one documented exception passes its own budget: `images create` (see the bake).
+    timeout: timeoutMs,
   });
   return stdout.trim();
 }
@@ -437,7 +458,7 @@ mkdir -p runtime/addons
 [ -d node_modules ] || npm install --no-audit --no-fund --loglevel=error
 `;
 
-export function jobScript(job: string, profile: string) {
+export function jobScript(job: string, profile: string, adhocB64 = "") {
   // Mirror .github/workflows/ci.yml EXACTLY. The root clippy does NOT cover nub-native —
   // it is its own workspace (panic=unwind cdylib), `exclude`d from the root — so a
   // root-only run goes green on code CI then rejects. The brand lints are cheap greps.
@@ -460,9 +481,33 @@ tests/brand-lint/check-path-literals.sh`;
   // loader tests dlopen it — an 11-byte placeholder makes them fail on a malformed library
   // rather than skip. Build it here for the same reason.
   if (job === "test") {
+    // `unset NUB_ALLOW_INCOMPLETE_RUNTIME` before `cargo test`, not before the addon build:
+    // PREPARE exports it for the CLIPPY gate, and ci.yml's TEST job deliberately does not —
+    // this job builds the real addon, so it needs no opt-out. Leaving it set made
+    // `brand_boundary_no_globals_no_env` fail: that test spawns nub and asserts the child
+    // sees ZERO `NUB_*` vars, and cargo passes its own environment straight through. The one
+    // failure aborted the run at `tests/integration.rs`, so every suite after it
+    // alphabetically was silently never reached by ANY remote test job.
     return `${PREPARE}(cd crates/nub-native && cargo build)
 cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
+unset NUB_ALLOW_INCOMPLETE_RUNTIME
 cargo test`;
+  }
+  // The caller's script RUNS the binary, which the gates never do — two consequences. The
+  // placeholder addon PREPARE staged must be overwritten with the real one (a non-embedded
+  // nub dlopens runtime/addons/nub-native.node for real, per the same reasoning as the test
+  // job), and NUB_ALLOW_INCOMPLETE_RUNTIME must not leak into the script's environment (a
+  // spawned nub child must see the environment a user's would). The payload ships INSIDE
+  // this script as base64 and lands on disk before running, for the stdin-truncation reason
+  // remoteJobCommand documents. Contract: cwd is the synced repo root, NUB_BIN names the
+  // built binary, and the payload's exit code is the job's rc (PREPARE's `set -e`).
+  if (job === "adhoc") {
+    return `${PREPARE}(cd crates/nub-native && cargo build)
+cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
+cargo build -p nub-cli --profile ${profile}
+printf %s '${adhocB64}' | base64 -d > "$HOME/adhoc-job.sh"
+unset NUB_ALLOW_INCOMPLETE_RUNTIME
+NUB_BIN="$CARGO_TARGET_DIR/${profile}/nub" bash "$HOME/adhoc-job.sh"`;
   }
 }
 
@@ -618,7 +663,7 @@ async function attachToJob(a: ReturnType<typeof parseArgs>, name: string) {
   }
 }
 
-async function startDetached(a: ReturnType<typeof parseArgs>, source: string, live: Set<string>) {
+async function startDetached(a: ReturnType<typeof parseArgs>, source: string, live: Set<string>, scriptB64 = "") {
   const name = `nub-builder-${Date.now().toString(36)}-1-${Math.random().toString(36).slice(2, 6)}`;
   const log = (s: string) => process.stdout.write(`[1] ${s}\n`);
   log(`creating ${name} (${a.machine}${a.onDemand ? "" : ", spot"})`);
@@ -640,7 +685,7 @@ async function startDetached(a: ReturnType<typeof parseArgs>, source: string, li
     log(`ssh up at ${ip} on ${zone}/${placement.machine}`);
     syncSource(source, ip);
     log("source synced");
-    await startDetachedJob(ip, jobScript(a.job, a.profile));
+    await startDetachedJob(ip, jobScript(a.job, a.profile, scriptB64));
   } catch (e) {
     if (!a.keep) await deleteInstance(name, zone);
     live.delete(`${name}|${zone}`);
@@ -661,6 +706,7 @@ async function oneBuild(
   source: string,
   outDir: string,
   live: Set<string>,
+  scriptB64 = "",
 ) {
   const name = `nub-builder-${Date.now().toString(36)}-${idx}-${Math.random().toString(36).slice(2, 6)}`;
   const t0 = Date.now();
@@ -689,7 +735,7 @@ async function oneBuild(
     syncSource(source, ip);
     log(`source synced (+${((Date.now() - t0) / 1000).toFixed(0)}s)`);
 
-    await runJob(ip, jobScript(a.job, a.profile), (l) => log(l));
+    await runJob(ip, jobScript(a.job, a.profile, scriptB64), (l) => log(l));
 
     const secs = (Date.now() - t0) / 1000;
     log(`done in ${secs.toFixed(0)}s`);
@@ -831,15 +877,17 @@ mkdir -p runtime/addons && printf 'placeholder' > runtime/addons/nub-native.node
 export NUB_ALLOW_INCOMPLETE_RUNTIME=1
 npm install --no-audit --no-fund --loglevel=error
 cargo fetch
-mkdir -p "$HOME/.darwin-stubs"
-cp -R scripts/darwin-stubs/. "$HOME/.darwin-stubs/"
 # Best-effort: a warm-up failure still leaves a usable image (toolchain + registry), so it
 # must not abort the bake — but it must not be SILENT either, or a cold-building image is
-# indistinguishable from a warm one. Warn loudly rather than `|| true`.
-# A "NOT best-effort" note here once described an aarch64-apple-darwin cross-build as the
-# bake's zig/SDK smoke test. That build no longer exists — darwin artifacts come from
-# scripts/mac-build.ts on a real macOS runner, per this file's header — so the note
-# documented a command that was not here. The .darwin-stubs copy above is retained.
+# indistinguishable from a warm one. Warn loudly rather than \`|| true\`.
+# ESCAPE EVERY BACKTICK IN THIS BLOCK. A raw one closes the template literal, and the rest
+# of the block rides an ||-short-circuited tagged template that never evaluates — so the
+# SHIPPED script silently ends at the raw backtick while the source reads complete. This
+# comment once held || true in raw backticks: cargo fetch ran, nothing compiled, and the
+# bake would have imaged a cold builder as warm. A unit test now scans this block for raw
+# backticks. (A darwin-stubs copy also lived here after its cross-build was removed; once
+# the stubs left the tree it killed every bake at that line under set -e. Darwin artifacts
+# come from scripts/mac-build.ts on a real macOS runner — nothing darwin belongs in the bake.)
 #
 # Warm with the EXACT invocations jobScript() runs, not an approximation of them. Cargo
 # fingerprints on the command shape, so \`cargo build -p nub-cli --profile fast\` warmed
@@ -852,6 +900,10 @@ cp -R scripts/darwin-stubs/. "$HOME/.darwin-stubs/"
 cargo clippy --all-targets --all-features --profile fast -- -D warnings || echo "WARM-WARN: clippy warm-up failed; builders will cold-compile"
 (cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings) || echo "WARM-WARN: addon clippy warm-up failed"
 (cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked) || echo "WARM-WARN: launcher warm-up failed; the clippy job will cold-compile it"
+# jobScript("adhoc")'s build, verbatim. Nothing above warms it: clippy is a different
+# driver and --all-features a different feature set, so the plain nub-cli binary the adhoc
+# job runs would cold-compile on every builder without this line.
+cargo build -p nub-cli --profile fast || echo "WARM-WARN: nub-cli warm-up failed; adhoc jobs will cold-compile"
 # The test job runs on the DEFAULT profile (matching ci.yml), a separate artifact universe
 # from \`fast\`. --no-run stops at link, which is all the warming needs.
 cargo test --workspace --no-run || echo "WARM-WARN: test warm-up failed; the test job will cold-compile"
@@ -873,11 +925,16 @@ echo "warm target dir: $(du -sh "$CARGO_TARGET_DIR" | cut -f1)"
     process.stdout.write("remote-build: stopping instance for imaging\n");
     await gcloud(["compute", "instances", "stop", name, "--zone", zone]);
     const image = `${IMAGE_FAMILY}-${Date.now().toString(36)}`;
+    // Imaging a 50 GB disk routinely exceeds the helper's 180s default — measured
+    // 2026-09-01: the default killed the client mid-create while the image finished
+    // server-side, so the bake reported failure on a bake that had worked AND the
+    // `finally` deleted the bake VM under a live create. gcloud blocks until the image
+    // is READY, so a real budget here is the whole fix.
     await gcloud([
       "compute", "images", "create", image,
       "--source-disk", name, "--source-disk-zone", zone,
       "--family", IMAGE_FAMILY,
-    ]);
+    ], 20 * 60_000);
     process.stdout.write(`remote-build: image ${image} created in family ${IMAGE_FAMILY}\n`);
   } finally {
     await deleteInstance(name, zone);
@@ -889,6 +946,16 @@ async function main() {
   const a = parseArgs(process.argv.slice(2));
   const source = a.source || repoRoot(process.cwd());
   const outDir = a.out || join(source, "target", "remote");
+  // Read before any VM exists: a typo'd --script path must fail here, not minutes later on
+  // a provisioned, synced builder.
+  let scriptB64 = "";
+  if (a.job === "adhoc") {
+    if (!existsSync(a.script)) {
+      process.stderr.write(`remote-build: --script file not found: ${a.script}\n`);
+      process.exit(2);
+    }
+    scriptB64 = readFileSync(a.script).toString("base64");
+  }
 
   // Layer 1: best-effort local cleanup. Deliberately not the only layer — a SIGKILL
   // bypasses this entirely, which is why every VM also self-deletes server-side.
@@ -937,7 +1004,7 @@ async function main() {
     return;
   }
   if (a.detach) {
-    await startDetached(a, source, live);
+    await startDetached(a, source, live, scriptB64);
     return;
   }
 
@@ -957,7 +1024,7 @@ async function main() {
 
   const t0 = Date.now();
   const results = await Promise.all(
-    Array.from({ length: a.fanout }, (_, i) => oneBuild(i + 1, a, source, outDir, live)),
+    Array.from({ length: a.fanout }, (_, i) => oneBuild(i + 1, a, source, outDir, live, scriptB64)),
   );
   clearInterval(sampler);
   const wall = (Date.now() - t0) / 1000;

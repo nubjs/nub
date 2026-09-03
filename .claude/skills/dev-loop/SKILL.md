@@ -15,12 +15,19 @@ description: >-
   separately measured to give 0% Rust speedup and is NOT used. Covers the real
   incantations (`cargo
   build -p nub-cli --profile fast`, `make install-dev`, `make addon-fast`), the
-  test invocations, and the exact CI cheap gates.
+  test invocations, and the exact CI cheap gates. SCOPE — the local loop is the
+  EXCEPTION, not the default: a cold build, `clippy --all-targets
+  --all-features`, a full `cargo test`, a `release` build or a multi-fixture
+  sweep goes OFF-HOST, via a CI-run test or the `remote-build` skill. This skill
+  covers only what must stay local — the ~5s warm rebuild you are actively
+  iterating against, and macOS-native checks.
 metadata:
   internal: true
 ---
 
 # Building & testing nub
+
+**Before you build anything here: does this belong on the local box at all?** The default home for a build, a gate, or a test run is off-host — a committed test that CI runs, or an ephemeral spot VM via the `remote-build` skill (`--job clippy|test|adhoc --detach`, collected with `--attach`). What stays local is the ~5s warm incremental rebuild you are actively iterating against, and macOS-native behavior. A cold build, `clippy --all-targets --all-features`, a full `cargo test`, a `release` build or a multi-fixture sweep goes remote unless you have a stated reason. See `AGENTS.md` → "Builds and tests go REMOTE by default".
 
 nub is a Rust workspace — `nub-cli`, `nub-core`, `nub-native` plus the vendored aube PM engine (`vendor/aube`, plain in-tree files, its own Cargo workspace, linked in-process as a library).
 
@@ -62,8 +69,7 @@ There is **no `nub build` command**.
 
 **Build politeness — the maintainer works on this machine.**
 
-- **Job cap (already set, machine-wide):** `~/.cargo/config.toml` pins `[build] jobs = 6` of 8 perf cores. CI is unaffected. Leave it in place.
-- **Background QoS — wrap every agent build:** `taskpolicy -b cargo build -p nub-cli --profile fast` (macOS background QoS → E-cores, yields to interactive) or `nice -n 10 cargo build …`. For a build already hammering the host: `renice 20 -p <pid>` + `taskpolicy -b -p <pid>` on the running `cargo`/`rustc` tree.
+- **The machine-wide governor does the clamping, not you.** `~/.cargo/config.toml` binds `scripts/rustc-qos.sh` as the rustc wrapper (`make qos-global`; `install-dev` re-runs it), which runs every rustc at utility QoS, lets at most two builds compile at once (the rest queue first-come-first-served), and caps the host at six rustc. So a build that sits at `Compiling` with no CPU is queued, not hung: `make build-status` shows who holds the slots and who is waiting. Do not wrap builds in `taskpolicy`/`nice` yourself, and never set `NUB_BUILD_FG=1` or blank `RUSTC_WRAPPER` from an agent — the `rust-build-hygiene` skill has the rules. `~/.cargo/config.toml` also pins `[build] jobs = 6`; CI is unaffected. Leave both in place.
 
 **Why `fast`, never `release`, for iteration** (measured, macOS arm64):
 
@@ -153,7 +159,7 @@ cargo test -p <crate>        # scoped to what you changed; DEFAULT profile, as C
 
 Keep `--profile fast` on clippy — it is what CI's check and clippy jobs run and it keeps the gates in the same artifact universe as the dev loop; without it, gating drives a second full dependency build under `dev`. `cargo test` stays on the default profile, matching CI's test jobs.
 
-**The two heavy gates belong on a remote builder.** `cargo clippy --all-targets --all-features` and a full `cargo test` are what saturate the host when many worktrees are building. Run them off-box — `nub scripts/remote-build.ts --job clippy --detach`, then `--attach <vm-name>` to collect (the `remote-build` skill) — for a few cents each, with the byte-identical CI invocation. **Use `--detach`/`--attach`, not the plain foreground form**: a foreground run is SIGKILLed at the agent harness's timeout, which no handler can catch, so cleanup is skipped and the builder leaks until its server-side TTL. The `--profile fast` inner loop stays local. For a macOS binary, `nub scripts/mac-build.ts` builds natively on a real macOS runner and pulls the signed artifact back.
+**The heavy gates run on a remote builder BY DEFAULT — local is the exception.** `cargo clippy --all-targets --all-features`, a full `cargo test`, and any cold build are what saturate the host when many worktrees are building (the bottleneck is disk churn on one APFS volume, not cores). The same tool also runs ad-hoc fixture probes off-box: `--job adhoc --script <file>` builds the fast-profile `nub` on the VM and runs your script against it (the `ad-hoc-test` skill). Run the gates off-box — `nub scripts/remote-build.ts --job clippy --detach`, then `--attach <vm-name>` to collect (the `remote-build` skill) — for a few cents each, with the byte-identical CI invocation. **Use `--detach`/`--attach`, not the plain foreground form**: a foreground run is SIGKILLed at the agent harness's timeout, which no handler can catch, so cleanup is skipped and the builder leaks until its server-side TTL. The `--profile fast` inner loop stays local. For a macOS binary, `nub scripts/mac-build.ts` builds natively on a real macOS runner and pulls the signed artifact back.
 
 Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENTS.md). For the e2e probe loop, use the `ad-hoc-test` skill. Get it green locally and push ONCE.
 

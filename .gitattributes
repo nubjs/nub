@@ -16,3 +16,13 @@ tests/fixtures/import-text-named/*  text eol=lf
 # provisioning ever widens.
 tests/fixtures/data-loaders-require/*       text eol=lf
 tests/fixtures/loader-redirect-both-ways/*  text eol=lf
+
+# Same trap, third form: the compile-augmentation harness reads `*.flags` as
+# ARGV and `*.differs` as a reason string, so a CRLF checkout appends `\r` to a
+# flag's value. On Windows that turned `--sourcemap=inline` into
+# `error: invalid value 'inline' for '--sourcemap[=<MODE>]'` — a message naming a
+# value that IS in the allowed list, because the `\r` making it invalid does not
+# print. It surfaced the moment the erasability gate started running on every
+# native host rather than Linux alone. `**` rather than `*` because the `.d`
+# companion directories nest, and their sources feed the same byte comparisons.
+tests/compile-augmentation/fixtures/**  text eol=lf

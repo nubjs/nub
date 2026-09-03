@@ -7,6 +7,8 @@ description: Reclaim disk on the maintainer's Mac when the volume is full or fil
 
 The dev Mac has a 1.8 TiB data volume that fills with Rust build output. Measured 2026-08-14: the volume hit **340 MiB free** — every agent tool call failed `ENOSPC` before it could run — and a sweep took it to **189 GiB** without deleting one line of source.
 
+**Most of this now prunes itself.** `scripts/target-gc.sh` runs hourly from every `rust-build.sh` build: orphaned buckets go after a day, anything idle 14 days goes, and a low-disk pressure pass (under 100 GiB free) collects idle state aggressively while sparing the newest. `make target-gc` shows what it would take right now. The manual sweeps below remain the tool for IMMEDIATE reclaim — the collector never touches a dir written within 2h, never the newest rlib seed, never `nub-dev`'s bucket — and for the families it does not scan (merged worktree checkouts).
+
 **Judge every reclaim by `df`, never `du`.** `scripts/rust-build.sh` CoW-clones buckets with `cp -c`, so APFS bills the same physical blocks to every referencing path. Summed `du` sizes overstate what you get back — measured, a set of buckets `du` called 135 G returned 73 GiB of `df`. A `du -sh` over `~/.cache/nub` also takes minutes; `df` is instant.
 
 ```sh
@@ -43,12 +45,12 @@ python3 .claude/skills/disk-reduction/scripts/clean-shared-buckets.py           
 python3 .claude/skills/disk-reduction/scripts/clean-shared-buckets.py --apply
 ```
 
-**Why buckets orphan so fast.** A bucket is `~/.cache/nub/shared-target-<key>`, where `<key>` hashes the content of the depended-on crates (`vendor/aube` and `crates`, excluding the leaves `nub-cli`/`nub-native`/`nub-phantom`). Two facts compound:
+**Why buckets orphan so fast.** A bucket is `~/.cache/nub/shared-target-<key>`, where `<key>` hashes the content of the depended-on crates plus `runtime/` (`vendor/aube`, `crates` excluding the leaves `nub-cli`/`nub-native`/`nub-phantom`, and `runtime`). Two facts compound:
 
 - **Only a NON-diverged worktree resolves to a bucket at all.** The moment a branch touches a depended-on crate, `rust-build.sh` sends it to a private `$root/target` instead — so most feature branches reference no bucket, and a bucket's referrers are only ever the worktrees sitting at some exact content state.
-- **`main` advancing moves the key.** Every merge that touches `vendor/aube` or a non-leaf crate strands the previous bucket.
+- **`main` advancing moves the key.** Every merge that touches `vendor/aube`, a non-leaf crate, or `runtime/` strands the previous bucket.
 
-`rust-build.sh` has its own GC, but it only retires a bucket after **14 days** of untouched mtime, so a fortnight of churn accumulates first. On 2026-08-14, 13 of 15 buckets proved orphaned — 12 in the first pass, holding ~135 G by `du` and returning 73 GiB of `df`, plus a 15 G bucket that orphaned the moment its last worktree was removed. Re-run the audit after removing any worktree.
+`scripts/target-gc.sh` (run hourly by `rust-build.sh`) retires an orphaned bucket after **a day** and anything idle after 14; before it existed, the only GC was a 14-day mtime sweep, so a fortnight of churn accumulated first. On 2026-08-14, 13 of 15 buckets proved orphaned — 12 in the first pass, holding ~135 G by `du` and returning 73 GiB of `df`, plus a 15 G bucket that orphaned the moment its last worktree was removed. Re-run the audit after removing any worktree.
 
 **What the script never deletes:**
 
@@ -77,7 +79,7 @@ Removing a clean worktree is lossless — the branch and its commits stay in the
 - **Expect a CONCURRENT sweeper, and never read the audit as a stable plan.** Dozens of agent sessions share this host, so another one is often mid-sweep: measured 2026-08-17, free space climbed 14 → 87 GiB during two read-only audits, five targets listed as eligible were already gone by the apply pass, and one worktree flipped dirty→clean between the two runs. Consequences: re-audit rather than trusting a list you printed minutes ago, and treat a vanished path as success. `clean-worktree-targets.py` used a bare `shutil.rmtree`, which raises `FileNotFoundError` on exactly that race and aborted the whole run with ~70 GiB of candidates still pending; it now deletes via `rm -rf` and reports a `failed=` count so a real permission error is still visible.
 - **`du -sh -d1` silently prints nothing.** BSD `du` rejects `-s` with `-d` and writes the usage error to stderr, so a `2>/dev/null` scan for big directories returns an empty list that reads as "nothing here". Use `du -h -d1`.
 - **This shell is zsh; `rust-build.sh` is `#!/bin/sh`.** zsh does not word-split an unquoted `$var`, so lifting the `$leaves` pathspec idiom into an interactive shell collapses three `:(exclude)` pathspecs into one bogus one and yields a **different hash**. Every bucket then looks orphaned, including the live one. Write the pathspecs as separate literal arguments, or drive git from Python where argv is explicit.
-- **Never map buckets by running `--print-target` in every worktree.** It is not a read: it `mkdir`s and `touch`es the target (the liveness signal), CoW-seeds a private target for an isolated worktree — recreating the multi-GB dirs you just deleted — and fires the 14-day GC. Use it once, in the main tree, as the control.
+- **`--print-target` is now a pure read on both branches** — it exits before the seeding, the `mkdir`/`touch` liveness signal, and the 14-day GC, so mapping buckets by running it per worktree no longer recreates the dirs you just deleted. (It was a write until 2026-08-27; on an older checkout of `rust-build.sh`, use it once, in the main tree, as the control.)
 - **You cannot fake a `cargo` process by copying a system binary.** `cp /bin/sleep /tmp/cargo` breaks the code signature, and arm64 macOS kills the copy on exec — so a "is a build running?" negative control silently tests nothing and reports the guard as broken. Test the parser against synthetic `ps` output instead.
 - **`grep -E 'lld'` matches `installd`.** macOS runs `installd`, `system_installd` and `appinstalld` continuously, so a loose linker grep reports builds on a completely idle machine. Match the executable basename exactly.
 - **Read `ps -Ao comm=`, not `command=`, when hunting build processes.** An argv listing includes your own command line, so any check that mentions `cargo` matches itself and blocks forever.

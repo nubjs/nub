@@ -197,6 +197,44 @@ fn classify_registry_error_prefers_hook_over_http_url() {
 }
 
 #[test]
+fn sandbox_help_fires_only_for_a_classified_network_deny() {
+    use crate::error::format_registry_help_for;
+    use aube_util::agent_sandbox::AgentSandbox;
+
+    let denied =
+        "network access denied: error sending request for url (https://registry.npmjs.org/cowsay)";
+    assert!(matches!(
+        classify_registry_error(denied),
+        RegistryErrorKind::NetworkDenied
+    ));
+    let help = format_registry_help_for("cowsay", denied, Some(AgentSandbox::Codex));
+    assert!(help.contains("blocked by the Codex sandbox"), "{help}");
+    assert!(!help.contains("npm login"), "{help}");
+    // The same deny outside a sandbox still names policy, not the registry.
+    let help = format_registry_help_for("cowsay", denied, None);
+    assert!(help.contains("refused by policy"), "{help}");
+    assert!(help.contains("--offline"), "{help}");
+
+    // Sandbox presence alone changes nothing: an auth failure, an integrity
+    // failure, and a plain transport error keep their own help.
+    for (msg, expected) in [
+        ("fetch https://reg.example: HTTP 401", "check auth"),
+        (
+            "tarball https://x/y.tgz: Integrity mismatch",
+            "integrity check failed",
+        ),
+        (
+            "HTTP error: error sending request for url (https://reg.example/x)",
+            "check auth",
+        ),
+    ] {
+        let help = format_registry_help_for("x", msg, Some(AgentSandbox::ClaudeCode));
+        assert!(help.contains(expected), "{msg}: {help}");
+        assert!(!help.contains("sandbox"), "{msg}: {help}");
+    }
+}
+
+#[test]
 fn unknown_catalog_entry_help_explains_chained_value() {
     // Chained-catalog case: the help path suggests a concrete semver
     // range instead of listing siblings (which would match the user's
@@ -2805,6 +2843,217 @@ async fn trust_policy_no_downgrade_blocks_downgraded_install() {
 
     server.abort();
     let _ = std::fs::remove_dir_all(base);
+}
+
+/// The gate deadlock this backtracking exists to break, end to end through the
+/// driver. `foo` mirrors `fastq`: two attested releases, then a hand-published
+/// 2.0.2 that npm tagged `latest`. `^2.0.0` resolves to that head, the trust
+/// gate refuses it, and before the fix the whole install aborted with a signed
+/// 2.0.1 sitting inside the range. Now the resolver keeps walking down.
+///
+/// The second half is the invariant: `>=2.0.2` admits nothing but the refused
+/// version, so the refusal still stands. Backtracking changes which version is
+/// installed, never whether an untrusted one can be.
+#[tokio::test]
+async fn trust_policy_no_downgrade_backtracks_to_a_still_trusted_version() {
+    use aube_registry::Attestations;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut packument = make_packument("foo", &["1.0.0", "2.0.0", "2.0.1", "2.0.2"], "2.0.2");
+    for (ver, time) in [
+        ("1.0.0", "2025-01-01T00:00:00.000Z"),
+        ("2.0.0", "2025-02-01T00:00:00.000Z"),
+        ("2.0.1", "2025-02-02T00:00:00.000Z"),
+        ("2.0.2", "2025-03-01T00:00:00.000Z"),
+    ] {
+        packument.time.insert(ver.to_string(), time.to_string());
+    }
+    for ver in ["2.0.0", "2.0.1"] {
+        packument
+            .versions
+            .get_mut(ver)
+            .unwrap()
+            .dist
+            .as_mut()
+            .unwrap()
+            .attestations = Some(Attestations {
+            provenance: Some(serde_json::json!({
+                "predicateType": "https://slsa.dev/provenance/v1"
+            })),
+        });
+    }
+    let body = serde_json::to_vec(&packument).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-trust-backtrack-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(base.join("packuments")).unwrap();
+    std::fs::create_dir_all(base.join("packuments-full")).unwrap();
+
+    let resolve_range = |range: &str| {
+        let registry = registry.clone();
+        let base = base.clone();
+        let range = range.to_string();
+        async move {
+            let policy = crate::DependencyPolicy {
+                trust_policy: crate::TrustPolicy::NoDowngrade,
+                ..crate::DependencyPolicy::default()
+            };
+            let mut resolver = Resolver::new(Arc::new(aube_registry::client::RegistryClient::new(
+                &registry,
+            )))
+            .with_packument_cache(base.join("packuments"))
+            .with_packument_full_cache(base.join("packuments-full"))
+            .with_dependency_policy(policy);
+            let mut manifest = PackageJson::default();
+            manifest.dependencies.insert("foo".to_string(), range);
+            resolver.resolve(&manifest, None).await
+        }
+    };
+
+    let graph = resolve_range("^2.0.0")
+        .await
+        .expect("the range still admits a signed 2.0.1");
+    assert!(
+        graph_has_package(&graph, "foo", "2.0.1"),
+        "must fall back to the newest release that kept its provenance"
+    );
+    assert!(!graph_has_package(&graph, "foo", "2.0.2"));
+
+    match resolve_range(">=2.0.2")
+        .await
+        .expect_err("nothing in this range keeps its evidence")
+    {
+        Error::TrustDowngrade(d) => assert_eq!(d.picked_version, "2.0.2"),
+        other => panic!("expected TrustDowngrade, got {other:?}"),
+    }
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// The `latest`-was-steered notice names `minimumReleaseAge` by wording, so a
+/// pick the TRUST gate moved must not be reported under it. `bar@1.1.0` is
+/// mature and tagged `latest`; only its missing attestation pushes the resolve
+/// down to 1.0.0, and dlx — the only consumer of this notice — would otherwise
+/// tell the user their tool is older because it was published too recently.
+#[tokio::test]
+async fn a_trust_repick_is_not_reported_as_an_age_gate_fallback() {
+    use aube_registry::Attestations;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const NAME: &str = "trust-repick-notice";
+    let mut packument = make_packument(NAME, &["1.0.0", "1.1.0"], "1.1.0");
+    packument
+        .time
+        .insert("1.0.0".to_string(), "2025-01-01T00:00:00.000Z".to_string());
+    packument
+        .time
+        .insert("1.1.0".to_string(), "2025-02-01T00:00:00.000Z".to_string());
+    packument
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .dist
+        .as_mut()
+        .unwrap()
+        .attestations = Some(Attestations {
+        provenance: Some(serde_json::json!({
+            "predicateType": "https://slsa.dev/provenance/v1"
+        })),
+    });
+    let body = serde_json::to_vec(&packument).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            });
+        }
+    });
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-trust-notice-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(base.join("packuments")).unwrap();
+    std::fs::create_dir_all(base.join("packuments-full")).unwrap();
+
+    let policy = crate::DependencyPolicy {
+        trust_policy: crate::TrustPolicy::NoDowngrade,
+        ..crate::DependencyPolicy::default()
+    };
+    let mut resolver = Resolver::new(Arc::new(aube_registry::client::RegistryClient::new(
+        &registry,
+    )))
+    .with_packument_cache(base.join("packuments"))
+    .with_packument_full_cache(base.join("packuments-full"))
+    .with_dependency_policy(policy)
+    .with_minimum_release_age(Some(MinimumReleaseAge {
+        minutes: 60,
+        strict: true,
+        ..Default::default()
+    }));
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert(NAME.to_string(), "latest".to_string());
+
+    aube_util::arm_age_gate_downgrade_collection();
+    let resolved = resolver.resolve(&manifest, None).await;
+    let downgrades = aube_util::take_age_gate_downgrades();
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+
+    let graph = resolved.expect("the signed 1.0.0 is still installable");
+    assert!(graph_has_package(&graph, NAME, "1.0.0"));
+    assert!(
+        !downgrades.iter().any(|d| d.name == NAME),
+        "the age gate admitted `latest`; only trust moved the pick: {downgrades:?}"
+    );
 }
 
 #[test]
@@ -7197,4 +7446,204 @@ async fn required_dep_with_no_matching_version_still_fails() {
         .await
         .expect_err("a required dep with no matching version must fail the resolve");
     assert!(matches!(err, Error::NoMatch(_)), "got {err:?}");
+}
+
+#[test]
+fn sparse_pick_refetches_only_when_a_dropped_version_could_outrank_it() {
+    // lodash after the age prune: 4.16.6 and 4.17.21 are the highest of
+    // their lines and stay, 4.17.0..4.17.20 are dropped. The full
+    // packument picks 4.17.20 for every range in the first group; the
+    // seed picked 4.16.6.
+    let seed = make_packument("lodash", &["3.10.1", "4.16.6", "4.17.21"], "4.17.21");
+    let refetch = |range: &str, picked: &str| {
+        crate::semver_util::sparse_pick_needs_refetch(&seed, picked, range, false, None)
+    };
+    assert!(refetch("<4.17.21", "4.16.6"));
+    assert!(refetch("4.10.0 - 4.17.20", "4.16.6"));
+    assert!(refetch(">=4.16.0 <4.17.5", "4.16.6"));
+    // A pick at the top of its line has nothing dropped above it.
+    assert!(!refetch("^4.0.0", "4.17.21"));
+    assert!(!refetch("*", "4.17.21"));
+    assert!(!refetch("~4.16.0", "4.16.6"));
+    assert!(!refetch("4.16.6", "4.16.6"));
+    assert!(!refetch("^3.0.0", "3.10.1"));
+
+    // A dist-tag target held below its line's highest: the versions
+    // between them may be dropped.
+    let seed = make_packument("foo", &["1.2.0", "1.2.5"], "1.2.0");
+    let refetch = |range: &str, picked: &str, lowest: bool, locked: Option<&str>| {
+        crate::semver_util::sparse_pick_needs_refetch(&seed, picked, range, lowest, locked)
+    };
+    assert!(refetch("<1.2.5", "1.2.0", false, None));
+    // The floor of a range, and a locked version the seed lacks, are
+    // exactly what the prune drops.
+    assert!(refetch("^1.2.0", "1.2.0", true, None));
+    assert!(refetch("^1.2.0", "1.2.5", false, Some("1.2.3")));
+    assert!(!refetch("^1.2.0", "1.2.5", false, Some("1.2.5")));
+
+    // A deprecated line end loses to a dropped live version below it
+    // (`outranks` prefers live over deprecated before comparing versions),
+    // so it is not authoritative even with nothing above it. An exact pin
+    // has no other candidate.
+    let mut seed = make_packument("baz", &["1.0.1"], "1.0.1");
+    seed.versions.get_mut("1.0.1").unwrap().deprecated = Some("use 2.x".to_string());
+    let refetch = |range: &str, picked: &str| {
+        crate::semver_util::sparse_pick_needs_refetch(&seed, picked, range, false, None)
+    };
+    assert!(refetch("^1.0.0", "1.0.1"));
+    assert!(!refetch("1.0.1", "1.0.1"));
+
+    // Prereleases sit on their own line. A stable pick ignores a held
+    // next-major beta unless the range names a prerelease of that line;
+    // an exact prerelease pin the seed holds is final; a prerelease range
+    // below its line's highest may have lost a candidate to the prune.
+    let seed = make_packument(
+        "bar",
+        &["7.21.4-esm.4", "7.21.8", "8.0.0-beta.1", "8.0.0-beta.3"],
+        "7.21.8",
+    );
+    let refetch = |range: &str, picked: &str| {
+        crate::semver_util::sparse_pick_needs_refetch(&seed, picked, range, false, None)
+    };
+    assert!(!refetch("^7.21.0", "7.21.8"));
+    assert!(!refetch("=7.21.4-esm.4", "7.21.4-esm.4"));
+    assert!(refetch(">=8.0.0-beta.1 <8.0.0-beta.3", "8.0.0-beta.1"));
+    assert!(refetch("^7.21.0 || 8.0.0-beta.2", "7.21.8"));
+}
+
+/// A range whose best match the age prune dropped must not settle on the
+/// older version the seed still holds: the resolver refetches the full
+/// packument and picks from it. Uses the bundled primer, so it looks for
+/// a sparse seed with a stable line end `lower` and a higher line of the
+/// same major whose highest `upper` has a patch above 0 — then
+/// `<upper` resolves to `upper - 1 patch` on the registry and to `lower`
+/// on the seed. Skips honestly when the primer has no such entry.
+#[tokio::test]
+async fn primer_sparse_pick_refetches_when_a_dropped_version_outranks_it() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let Some((name, lower, dropped, upper)) = crate::primer::names().find_map(|name| {
+        let seed = crate::primer::get(name)?;
+        if !seed.sparse {
+            return None;
+        }
+        let pkt = seed.packument();
+        let mut stable: Vec<node_semver::Version> = pkt
+            .versions
+            .keys()
+            .filter_map(|v| node_semver::Version::parse(v).ok())
+            .filter(|v| v.pre_release.is_empty())
+            .collect();
+        stable.sort();
+        stable.iter().find_map(|lower| {
+            let line_end = !stable
+                .iter()
+                .any(|h| h > lower && h.major == lower.major && h.minor == lower.minor);
+            let meta = pkt.versions.get(&lower.to_string())?;
+            let standalone = meta.dependencies.is_empty()
+                && meta.optional_dependencies.is_empty()
+                && meta.peer_dependencies.is_empty();
+            if !line_end || !standalone {
+                return None;
+            }
+            let upper = stable.iter().find(|h| {
+                h.major == lower.major
+                    && h.minor > lower.minor
+                    && h.patch > 0
+                    && !stable
+                        .iter()
+                        .any(|o| o.major == h.major && o.minor == h.minor && o.patch == h.patch - 1)
+            })?;
+            let dropped = format!("{}.{}.{}", upper.major, upper.minor, upper.patch - 1);
+            Some((
+                name.to_string(),
+                lower.to_string(),
+                dropped,
+                upper.to_string(),
+            ))
+        })
+    }) else {
+        return;
+    };
+
+    fn spawn_counting_registry(
+        full_body: Vec<u8>,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let registry = format!("http://{addr}/");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                seen.fetch_add(1, Ordering::Relaxed);
+                let full_body = full_body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 8192];
+                    let _ = socket.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        full_body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.write_all(&full_body).await;
+                });
+            }
+        });
+        (registry, hits, server)
+    }
+
+    let full = make_packument(&name, &[&lower, &dropped, &upper], &upper);
+    let (registry, hits, server) = spawn_counting_registry(serde_json::to_vec(&full).unwrap());
+
+    let resolve = |range: String| {
+        let name = name.clone();
+        let registry = registry.clone();
+        async move {
+            let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+            let mut resolver = Resolver::new(client)
+                .with_force_metadata_primer(true)
+                .with_registry_supports_time_field(true);
+            let mut manifest = PackageJson::default();
+            manifest.dependencies.insert(name.clone(), range);
+            let graph = resolver.resolve(&manifest, None).await.expect("resolve");
+            graph
+                .packages
+                .values()
+                .find(|p| p.name == name)
+                .map(|p| p.version.clone())
+                .expect("package resolved")
+        }
+    };
+
+    // The seed alone would answer `lower`; the registry holds `dropped`.
+    let picked = resolve(format!("<{upper}")).await;
+    assert_eq!(
+        picked, dropped,
+        "{name}: sparse seed pick was served without a refetch"
+    );
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        1,
+        "{name}: expected one live refetch"
+    );
+
+    // A tilde range lands on the line's highest, which the prune keeps:
+    // served from the seed, no registry traffic.
+    let line = node_semver::Version::parse(&lower).unwrap();
+    let picked = resolve(format!("~{}.{}.0", line.major, line.minor)).await;
+    assert_eq!(picked, lower, "{name}: tilde pick must come from the seed");
+    assert_eq!(
+        hits.load(Ordering::Relaxed),
+        1,
+        "{name}: tilde pick must not refetch"
+    );
+
+    server.abort();
 }

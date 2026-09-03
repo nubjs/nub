@@ -312,11 +312,21 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // Skip the probe for a Node nub provisioned or embedded itself, matching why
     // `accepted_env_flags` is skipped above: its accepted flags follow from its version,
     // and the launcher is the hot path.
-    let argv_probe_path = match origin {
-        NodeOrigin::Managed => None,
-        NodeOrigin::Discovered => Some(node_path.as_path()),
+    //
+    // A sealed graph skips these rows entirely. They enable in-progress JS
+    // syntax in files Node PARSES at runtime; a payload with no `--external`
+    // and no retained computed `import()` has no such files, and a non-default
+    // V8 flag costs ~6 ms of warm start by invalidating the snapshot fast path
+    // (see `Manifest::sealed_module_graph`).
+    let argv_only = if view.manifest.sealed_module_graph {
+        Vec::new()
+    } else {
+        let argv_probe_path = match origin {
+            NodeOrigin::Managed => None,
+            NodeOrigin::Discovered => Some(node_path.as_path()),
+        };
+        flags::argv_inject_flags(argv_probe_path, &version, &[])
     };
-    let argv_only = flags::argv_inject_flags(argv_probe_path, &version, &[]);
     inject.extend(argv_only.iter().copied());
 
     let mut cmd = Command::new(node_path.as_os_str());
@@ -370,9 +380,6 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
 
-    // Own process group + terminating/diagnostic-signal forwarding + TTY
-    // foreground handoff + macOS SIGKILL backstop — the same faithful spawn
-    // `nub run`'s file path uses. NODE_OPTIONS is inherited untouched (honored).
     phase_with(|| {
         let args: Vec<String> = cmd
             .get_args()
@@ -395,10 +402,32 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
             envs.join(" ")
         )
     });
-    let status = spawn::status_forwarding_signals(&mut cmd)
-        .map_err(|error| node_spawn_error(&node_path, &base, error));
-    phase("node exited");
-    status
+    // Unix: REPLACE this process with Node rather than spawning it as a child.
+    // Everything the spawn-and-wait shape needed machinery for — terminating- and
+    // diagnostic-signal forwarding, the TTY foreground handoff, Linux's pdeathsig,
+    // the macOS SIGKILL-backstop watcher process (#480), exit-status relay — exists
+    // to keep TWO processes behaving as one. With one process image it is all
+    // native: the terminal delivers signals straight to Node, killing the artifact
+    // IS killing Node, and the exit status is Node's own. It is also the warm-start
+    // win: no second (macOS: third) process is created or torn down per run.
+    // Launcher work that must follow Node's exit does not exist on this path —
+    // every cache write, marker, and notice completes before this line.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Returns only on failure; success never comes back.
+        let error = cmd.exec();
+        Err(node_spawn_error(&node_path, &base, error))
+    }
+    // Windows has no exec(2): CreateProcess always makes a child, so the faithful
+    // spawn — job-object grouping, signal relay, status forwarding — stays.
+    #[cfg(not(unix))]
+    {
+        let status = spawn::status_forwarding_signals(&mut cmd)
+            .map_err(|error| node_spawn_error(&node_path, &base, error));
+        phase("node exited");
+        status
+    }
 }
 
 fn node_spawn_error(node_path: &Path, base: &Path, error: std::io::Error) -> anyhow::Error {
@@ -1123,10 +1152,24 @@ fn acquire_embedded_node(
 /// what the user sees without this is the linker's own line, which names a
 /// filename and says nothing about nub, the binary they ran, or the fix.
 ///
-/// Only on the COLD path, where the ~107 MB decompression above already dominates,
-/// so the extra process is not measurable. It cannot be done on the warm path at
-/// all: the launcher execs Node with inherited stdio, so the child's failure text
-/// goes straight to the terminal and is never seen here.
+/// Only on the COLD path. It cannot be done on the warm path at all: the launcher
+/// execs Node with inherited stdio, so the child's failure text goes straight to
+/// the terminal and is never seen here.
+///
+/// This spawn is the LARGEST single phase of a cold embed start — measured at
+/// 1059-1276 ms on macOS, four to seven times the decompression above — and it is
+/// still nearly free, for a reason worth writing down because the raw number says
+/// the opposite. What it pays for is the FIRST execution of a newly written,
+/// ad-hoc-signed ~107 MB Mach-O, which macOS validates once and then caches: a
+/// standalone control on a freshly copied and re-signed 145 MB `node` measured
+/// 1.52 s on the first exec and 0.02 s on each of the next three. The launcher's
+/// own exec follows immediately and would pay that validation itself if this
+/// did not. So the net cost here is the second spawn, ~20 ms — not the second
+/// that a phase trace attributes to it.
+///
+/// An earlier version of this comment claimed the decompression dominates and the
+/// spawn "is not measurable". Both halves are false on macOS, and the sentence
+/// sent one investigation looking for a regression that was never here.
 fn explain_if_node_cannot_start(node_bin: &Path) -> Result<()> {
     let Ok(out) = Command::new(node_bin).arg("--version").output() else {
         // Could not run it at all — the caller's own spawn will produce a better
@@ -1204,8 +1247,10 @@ fn alpine_package_for(lib: &str) -> String {
 /// version-manager layouts → PATH → shell-out provision. Legacy payloads accept
 /// any Node at or above their target; new payloads enforce exact targets and
 /// explicit ranges. Provisioning prefers `provision_version` — the newest release
-/// the COMPILER resolved for the pin — and falls back to the manifest version when
-/// the payload names none. Acceptance is unaffected either way.
+/// the COMPILER resolved for the pin AND judged able to run the payload — and
+/// falls back to the manifest version when the payload names none, which covers a
+/// legacy manifest and one whose newest match could not run its shim alike.
+/// Acceptance is unaffected either way.
 fn acquire_smol_node(
     m: &Manifest,
     base: &Path,
@@ -1213,6 +1258,7 @@ fn acquire_smol_node(
     external_smol: Option<(PathBuf, NodeVersion)>,
 ) -> Result<(PathBuf, NodeVersion, NodeOrigin)> {
     let target = smol_target(m)?;
+    let probes = cache::ProbeStore::resolve();
 
     // 1. nub's Node store, then every version manager's install root. nub's store
     //    is checked first (it is the one nub itself provisioned into), but WITHIN
@@ -1228,7 +1274,7 @@ fn acquire_smol_node(
             return Ok((path, ver, NodeOrigin::Discovered));
         }
         for (path, _) in candidates {
-            if let Some(actual) = probe_node_version(&path) {
+            if let Some(actual) = probe_node_version(&probes, &path) {
                 if smol_candidate_matches(&actual, &target) {
                     return Ok((path, actual, NodeOrigin::Discovered));
                 }
@@ -1243,9 +1289,11 @@ fn acquire_smol_node(
     }
 
     // 3. Provision via shell-out. Prefer the version the COMPILER resolved as the
-    // newest satisfying the pin: the target's floor may be the oldest release this
-    // binary tolerates — `--target 26` landing on 26.0.0. Legacy manifests name no
-    // preference and still get the floor.
+    // newest satisfying the pin THAT CAN RUN THIS PAYLOAD: the target's floor may
+    // be the oldest release this binary tolerates — `--target 26` landing on
+    // 26.0.0. Two payloads name no preference and get the floor instead: a legacy
+    // manifest, and one whose newest match lacked the API its shim needs, where
+    // the floor is the capability the build gate already proved.
     let fetch = smol_provision_version(m).unwrap_or_else(|| target.floor.clone());
     if !target.matches(&fetch) {
         bail!("compiled provision version {fetch} does not satisfy its runtime target");
@@ -1272,6 +1320,9 @@ struct SmolTarget {
     floor: NodeVersion,
     exact: bool,
     range: Option<VersionPin>,
+    /// The payload installs a `module.registerHooks` shim, so a candidate that
+    /// lacks the API cannot run it whatever the version policy says.
+    requires_augmentation: bool,
 }
 
 impl SmolTarget {
@@ -1281,10 +1332,14 @@ impl SmolTarget {
             floor,
             exact,
             range: None,
+            requires_augmentation: false,
         }
     }
 
-    fn matches(&self, candidate: &NodeVersion) -> bool {
+    /// The VERSION half alone. Split out so a caller can tell the two rejection
+    /// reasons apart: a candidate this accepts and `matches` rejects was refused
+    /// on capability, which is the one a user cannot read off the version number.
+    fn version_policy_admits(&self, candidate: &NodeVersion) -> bool {
         if let Some(range) = &self.range {
             candidate.satisfies(range)
         } else if self.exact {
@@ -1292,6 +1347,18 @@ impl SmolTarget {
         } else {
             candidate >= &self.floor
         }
+    }
+
+    /// Version policy AND capability. The two are separate questions and the
+    /// version one cannot answer the capability one: 23.0–23.4 sorts above a
+    /// 22.15 floor and satisfies a `>=22.15` range, yet predates `registerHooks`
+    /// on the 23.x line. Accepting such a candidate produced a binary that built
+    /// clean and threw `registerHooks is not a function` on the user's machine.
+    fn matches(&self, candidate: &NodeVersion) -> bool {
+        if self.requires_augmentation && !candidate.supports_augmentation() {
+            return false;
+        }
+        self.version_policy_admits(candidate)
     }
 }
 
@@ -1326,6 +1393,7 @@ fn smol_target(m: &Manifest) -> Result<SmolTarget> {
         floor,
         exact: m.smol_exact_target,
         range,
+        requires_augmentation: m.requires_augmentation,
     })
 }
 
@@ -1366,11 +1434,17 @@ fn discover_external_smol_node(m: &Manifest) -> Result<Option<(PathBuf, NodeVers
         return Ok(trusted);
     }
     ranked.sort_by(|(_, left), (_, right)| right.cmp(left));
+    // Gate-checked once for the whole pass rather than once per candidate: this
+    // loop runs to the END of the ranked list whenever no external Node satisfies
+    // the payload (an exact `--target` the user has not installed is the ordinary
+    // way to hit that), so the per-lookup cost is multiplied by every Node on the
+    // machine.
+    let probes = cache::ProbeStore::resolve();
     let verified = ranked.into_iter().find_map(|(path, _)| {
-        let actual = probe_node_version(&path)?;
+        let actual = probe_node_version(&probes, &path)?;
         smol_candidate_matches(&actual, &target).then_some((path, actual))
     });
-    Ok(verified.or_else(|| probe_path_node(&target)))
+    Ok(verified.or_else(|| probe_path_node(&probes, &target)))
 }
 
 /// Node stores to READ, nearest first: the probed cache base, then the location
@@ -1525,22 +1599,74 @@ fn version_manager_dirs() -> Vec<NodeDir> {
         ),
     ];
 
-    candidates
-        .into_iter()
-        .filter_map(|(base, rel, inner)| {
-            let root = base?.join(rel);
-            root.is_dir().then_some(NodeDir {
-                root,
-                inner,
-                cache_owned: false,
+    dedupe_node_dirs(
+        candidates
+            .into_iter()
+            .filter_map(|(base, rel, inner)| {
+                let root = base?.join(rel);
+                root.is_dir().then_some(NodeDir {
+                    root,
+                    inner,
+                    cache_owned: false,
+                })
             })
+            .collect(),
+    )
+}
+
+/// Drop a root already in the list, keeping the FIRST — which preserves the
+/// precedence the table above documents.
+///
+/// Every manager is listed twice on purpose, once from its own environment
+/// variable and once from its default location, and on an ordinary machine those
+/// name the SAME directory: nvm's installer writes `NVM_DIR="$HOME/.nvm"`. Without
+/// this the tree is read, filtered and ranked twice, so every candidate reaches
+/// [`discover_external_smol_node`]'s ranked list twice — and on a cold probe cache
+/// that is two `node --version` execs per candidate to learn one answer, which is
+/// the exact cost that function exists to avoid. Measured on a host with 91 nvm
+/// installs: 180 probe lookups for 91 binaries, 19 ms of a 26 ms pre-spawn.
+///
+/// Keyed on the interior path too, so a manager that shares a root with another
+/// layout is not silently dropped.
+///
+/// Lexical rather than canonical: a trailing slash or a `.` segment already
+/// compares equal component-wise, and resolving symlinks would spend a syscall per
+/// root to catch a shape no manager's default layout produces.
+fn dedupe_node_dirs(dirs: Vec<NodeDir>) -> Vec<NodeDir> {
+    let mut seen: Vec<(PathBuf, &'static str)> = Vec::new();
+    dirs.into_iter()
+        .filter(|dir| {
+            let key = (dir.root.clone(), dir.inner);
+            let fresh = !seen.contains(&key);
+            if fresh {
+                seen.push(key);
+            }
+            fresh
         })
         .collect()
 }
 
 /// Does a discovered `candidate` satisfy this smol payload's version policy?
 /// Kept as one predicate so managed-layout scans and PATH discovery cannot drift.
+///
+/// A CAPABILITY refusal is reported, once; an ordinary version miss stays quiet.
+/// The asymmetry is the point: a user can read "needs >= 26, found 22" off the
+/// numbers, but 23.4 looks strictly newer than a 22.15 floor and is refused
+/// anyway, so silence there reads as a ~50 MB download for no reason at all.
 fn smol_candidate_matches(candidate: &NodeVersion, target: &SmolTarget) -> bool {
+    if target.requires_augmentation
+        && !candidate.supports_augmentation()
+        && target.version_policy_admits(candidate)
+    {
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| {
+            eprintln!(
+                "nub: found Node {candidate}, but this program needs module.registerHooks, \
+                 which arrived in {} — looking for another",
+                candidate.fast_tier_floor_for_line()
+            );
+        });
+    }
     target.matches(candidate)
 }
 
@@ -1626,9 +1752,12 @@ fn select_path_node(
 
 /// Resolve `node` on PATH to its path + version, or `None` if absent, unparseable,
 /// or unsuitable for this payload.
-fn probe_path_node(target: &SmolTarget) -> Option<(PathBuf, NodeVersion)> {
+fn probe_path_node(
+    probes: &cache::ProbeStore,
+    target: &SmolTarget,
+) -> Option<(PathBuf, NodeVersion)> {
     let path = which_on_path(node_exe_name())?;
-    let ver = probe_node_version(&path)?;
+    let ver = probe_node_version(probes, &path)?;
     select_path_node((path, ver), target)
 }
 
@@ -1644,10 +1773,10 @@ fn probe_path_node(target: &SmolTarget) -> Option<(PathBuf, NodeVersion)> {
 ///
 /// A stale or untrusted entry simply means another exec, so every failure path here
 /// is the slow answer rather than a wrong one.
-fn probe_node_version(path: &Path) -> Option<NodeVersion> {
+fn probe_node_version(probes: &cache::ProbeStore, path: &Path) -> Option<NodeVersion> {
     let stamp = node_binary_stamp(path);
     if let Some(stamp) = &stamp {
-        if let Some(version) = cache::read_node_version(path, stamp) {
+        if let Some(version) = probes.read_node_version(path, stamp) {
             if let Ok(parsed) = version.parse() {
                 phase_with(|| format!("  probe cache HIT: {}", path.display()));
                 return Some(parsed);
@@ -1695,35 +1824,7 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn which_in_path(path: Option<&std::ffi::OsStr>, name: &str) -> Option<PathBuf> {
-    let path = path?;
-    for dir in std::env::split_paths(path) {
-        for candidate in command_candidates(&dir, name) {
-            if is_executable_file(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    let candidate = dir.join(name);
-    if Path::new(name).extension().is_some() {
-        return vec![candidate];
-    }
-
-    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    extensions
-        .split(';')
-        .filter(|extension| !extension.is_empty())
-        .map(|extension| dir.join(format!("{name}{extension}")))
-        .collect()
-}
-
-#[cfg(not(windows))]
-fn command_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    vec![dir.join(name)]
+    nub_core::find_on_path_in(path, &[name])
 }
 
 /// Provision `version` for the host from nodejs.org. The launcher keeps TLS out
@@ -2845,6 +2946,49 @@ mod tests {
 
     use super::*;
 
+    /// The version-manager table lists every manager twice — its environment
+    /// variable and its default location — and on an ordinary machine those are the
+    /// same directory, so the whole tree was scanned and ranked twice.
+    ///
+    /// Hermetic on purpose: the real `version_manager_dirs` reads process-global
+    /// environment and the home directory, so it cannot be driven from a test
+    /// without env mutation. The deduplication is the part that can be wrong, and
+    /// it is pure.
+    #[test]
+    fn a_manager_reached_by_env_and_by_default_path_is_scanned_once() {
+        let at = |root: &str, inner: &'static str| NodeDir {
+            root: PathBuf::from(root),
+            inner,
+            cache_owned: false,
+        };
+        let kept: Vec<(PathBuf, &str)> = dedupe_node_dirs(vec![
+            at("/home/u/.nvm/versions/node", ""),
+            // NVM_DIR carrying a trailing slash is the same directory: `Path`
+            // compares by component, so no separate normalization is needed.
+            at("/home/u/.nvm/versions/node/", ""),
+            at("/home/u/.fnm/node-versions", "installation"),
+            // Same root, different interior layout — a real distinction, so this
+            // one survives and the key is not just the root.
+            at("/home/u/.fnm/node-versions", ""),
+            at("/home/u/.nvm/versions/node", ""),
+        ])
+        .into_iter()
+        .map(|d| (d.root, d.inner))
+        .collect();
+
+        assert_eq!(
+            kept,
+            vec![
+                (PathBuf::from("/home/u/.nvm/versions/node"), ""),
+                (PathBuf::from("/home/u/.fnm/node-versions"), "installation"),
+                (PathBuf::from("/home/u/.fnm/node-versions"), ""),
+            ],
+            "a repeated root must be dropped, the first occurrence must win so the \
+             table's precedence survives, and a shared root with a different interior \
+             must be kept"
+        );
+    }
+
     #[test]
     fn compile_bootstrap_require_precedes_injected_flags_and_entry() {
         let app_dir = Path::new("/absolute/cache/compile-app/key");
@@ -2940,7 +3084,7 @@ mod tests {
         let (owned, candidates) = best_node_in(dir, target, triple);
         owned.or_else(|| {
             candidates.into_iter().find_map(|(path, _)| {
-                let actual = probe_node_version(&path)?;
+                let actual = probe_node_version(&cache::ProbeStore::resolve(), &path)?;
                 smol_candidate_matches(&actual, target).then_some((path, actual))
             })
         })
@@ -2959,6 +3103,24 @@ mod tests {
         fs::canonicalize(dir).unwrap()
     }
 
+    /// Stage a fixture file the way the extraction path stages a real one — mode
+    /// pinned, never taken from the ambient umask.
+    ///
+    /// `cache_metadata_is_trusted` refuses a group- or other-writable file, and a
+    /// bare `fs::write` yields 0o664 under a umask of 002 against the 0o644 a 022
+    /// umask gives. A fixture written the bare way therefore passes on one machine
+    /// and fails on another for a reason that has nothing to do with what it tests.
+    /// Production never has the problem: it writes through `create_private_file`,
+    /// which pins 0o600 at open time and again afterwards.
+    fn write_staged_fixture(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     fn test_manifest() -> Manifest {
         use sha2::{Digest, Sha256};
         Manifest {
@@ -2968,6 +3130,7 @@ mod tests {
             provision_version: String::new(),
             smol_exact_target: false,
             smol_version_range: String::new(),
+            requires_augmentation: false,
             triple: "darwin-arm64".to_string(),
             node_sha256: format!("{:x}", Sha256::digest(b"node")),
             node_blake3: String::new(),
@@ -2977,6 +3140,7 @@ mod tests {
             minify: false,
             install_message: None,
             node_flags: Vec::new(),
+            sealed_module_graph: false,
         }
     }
 
@@ -4104,6 +4268,7 @@ mod tests {
             floor: NodeVersion::new(22, 0, 0),
             exact: false,
             range: Some(parse_target_spec(">=22 <23").unwrap()),
+            requires_augmentation: false,
         };
         assert!(smol_candidate_matches(&NodeVersion::new(22, 23, 1), &range));
         assert!(!smol_candidate_matches(&NodeVersion::new(21, 7, 3), &range));
@@ -4112,6 +4277,84 @@ mod tests {
         assert!(
             select_path_node((PathBuf::from("node"), NodeVersion::new(26, 5, 0)), &range).is_none(),
             "PATH must apply the range ceiling too"
+        );
+    }
+
+    /// A payload carrying a `registerHooks` shim must refuse a discovered Node that
+    /// lacks the API, whatever the version policy says about it.
+    ///
+    /// 23.0–23.4 is the band that makes this more than bookkeeping: it sorts above a
+    /// 22.15 floor and satisfies a `>=22.15` range, so every version-shaped check
+    /// admits it, and `registerHooks` did not reach the 23.x line until 23.5. A
+    /// `--smol --external` artifact built against a 22.15 floor therefore shipped
+    /// clean and threw `registerHooks is not a function` on a box running 23.2.
+    #[test]
+    fn a_shim_bearing_smol_artifact_refuses_a_node_without_register_hooks() {
+        let floor = NodeVersion::new(22, 15, 0);
+        let in_band = NodeVersion::new(23, 2, 0);
+        let above_band = NodeVersion::new(23, 5, 0);
+
+        let shimmed = SmolTarget {
+            floor: floor.clone(),
+            exact: false,
+            range: None,
+            requires_augmentation: true,
+        };
+        assert!(
+            !smol_candidate_matches(&in_band, &shimmed),
+            "23.2 clears the 22.15 floor but predates registerHooks, so the shim cannot run"
+        );
+        assert!(
+            smol_candidate_matches(&above_band, &shimmed),
+            "23.5 has the API and must still be accepted"
+        );
+        assert!(smol_candidate_matches(&floor, &shimmed));
+
+        // A carried range admits the same band, so the capability term has to
+        // survive the range arm rather than only the floor arm.
+        let shimmed_range = SmolTarget {
+            floor: floor.clone(),
+            exact: false,
+            range: Some(parse_target_spec(">=22.15").unwrap()),
+            requires_augmentation: true,
+        };
+        assert!(!smol_candidate_matches(&in_band, &shimmed_range));
+
+        // Without a shim the band is perfectly runnable and must not be refused —
+        // this is what keeps the fix from becoming a blanket 23.x ban.
+        let plain = SmolTarget::legacy(floor, false);
+        assert!(
+            smol_candidate_matches(&in_band, &plain),
+            "a payload with no shim has no reason to reject 23.2"
+        );
+    }
+
+    /// The capability term has to arrive from the MANIFEST, not from a hand-built
+    /// `SmolTarget`. Every other test of this rule constructs the target directly,
+    /// so `requires_augmentation: m.requires_augmentation` in `smol_target` could
+    /// be replaced with a literal `false` — deleting the fix on the reading side —
+    /// and stay green. This is the test that goes red for that.
+    #[test]
+    fn the_shim_requirement_reaches_the_target_from_the_manifest() {
+        let mut manifest = test_manifest();
+        manifest.shape = Shape::Smol;
+        manifest.node_version = "22.15.0".to_string();
+        manifest.requires_augmentation = true;
+        let target = smol_target(&manifest).unwrap();
+        assert!(
+            !target.matches(&NodeVersion::new(23, 2, 0)),
+            "23.2 clears the 22.15 floor but predates registerHooks on the 23.x line, \
+             so a payload that says it needs the API must not accept it"
+        );
+
+        // Same manifest, one field flipped: without it 23.2 is a fine runtime, which
+        // is what proves the refusal above came from the field and not the floor.
+        manifest.requires_augmentation = false;
+        assert!(
+            smol_target(&manifest)
+                .unwrap()
+                .matches(&NodeVersion::new(23, 2, 0)),
+            "a payload with no shim has no claim on registerHooks"
         );
     }
 
@@ -4228,7 +4471,7 @@ mod tests {
         let base = fresh_cache_dir("node-size-check");
         let node = base.join("node");
         let bytes = b"#!/bin/sh\nprintf 'v26.5.0\\n'\n";
-        fs::write(&node, bytes).unwrap();
+        write_staged_fixture(&node, bytes);
 
         let mut manifest = test_view().manifest;
         // Digests that can never match, so any fallback to hashing fails BOTH halves
@@ -4242,13 +4485,13 @@ mod tests {
             "an intact extraction whose length matches the manifest must be accepted"
         );
 
-        fs::write(&node, &bytes[..bytes.len() - 1]).unwrap();
+        write_staged_fixture(&node, &bytes[..bytes.len() - 1]);
         assert!(
             !embedded_node_file_is_ready(&node, &manifest),
             "a truncated extraction must be rejected — this is the field failure the \
              size check replaced the per-launch digest to catch"
         );
-        fs::write(&node, bytes).unwrap();
+        write_staged_fixture(&node, bytes);
         manifest.node_size = 0;
         manifest.node_blake3 = blake3::hash(bytes).to_hex().to_string();
         assert!(
@@ -4274,15 +4517,18 @@ mod tests {
         let base = fresh_cache_dir("compile-cache-outside-app");
         let view = test_view();
         let app_dir = app_cache_dir(&base, &view.manifest);
-        fs::create_dir_all(&app_dir).unwrap();
+        // Staged through the production helper, not `create_dir_all`: the readiness
+        // check trusts a directory only while it is not group- or other-writable,
+        // and `create_dir_all` takes its mode from the umask (0o775 under 002).
+        create_staging_subdirs(&base, &app_dir).unwrap();
         for file in &view.app_files {
             let dest = app_dir.join(&file.name);
-            fs::create_dir_all(dest.parent().unwrap()).unwrap();
-            fs::write(&dest, file.bytes).unwrap();
+            create_staging_subdirs(&base, dest.parent().unwrap()).unwrap();
+            write_staged_fixture(&dest, file.bytes);
         }
         // The marker is an EMPTY regular file — `completion_marker_is_ready`
         // requires len == 0, so any content here would fail the control below.
-        fs::write(app_dir.join(CACHE_COMPLETE_MARKER), b"").unwrap();
+        write_staged_fixture(&app_dir.join(CACHE_COMPLETE_MARKER), b"");
         assert!(
             app_cache_is_ready(&view, &app_dir),
             "control: a freshly written extraction must be ready, or the assertion \
@@ -4358,7 +4604,7 @@ mod tests {
         // And the control for the claim above: these fixtures really are unprobeable,
         // so the assertions cannot be passing because probing happens to succeed.
         assert!(
-            probe_node_version(&ranked[0].0).is_none(),
+            probe_node_version(&cache::ProbeStore::resolve(), &ranked[0].0).is_none(),
             "the fixture must be unprobeable, otherwise this test proves nothing"
         );
         let _ = fs::remove_dir_all(&base);
@@ -4478,6 +4724,7 @@ mod tests {
             floor: NodeVersion::new(22, 0, 0),
             exact: false,
             range: Some(parse_target_spec(">=22 <23").unwrap()),
+            requires_augmentation: false,
         };
         assert_eq!(
             best_node_in_policy_probed(&NodeDir::plain(plain.clone()), &bounded, "darwin-arm64")

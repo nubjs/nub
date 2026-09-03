@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[allow(dead_code)]
 mod primer_schema {
     include!("src/primer_schema.rs");
 }
@@ -20,6 +21,17 @@ const RELEASE_TOP: usize = 2000;
 // cleanly via `PickResult::NoMatch` in resolve.rs — one extra packument
 // fetch per long-tail version pick, typically old `react-is`, hoisted
 // `@typescript-eslint/*`, or stale `core-js@2.x` style versions.
+//
+// On top of the cap, `generate-primer.mjs` prunes versions older than 3
+// years unless they are the highest of their `major.minor` line or a dist-tag
+// target (`--prune-age-days`), and flags such a seed `sparse` so the resolver
+// refetches any pick a dropped version could outrank
+// (`semver_util::sparse_pick_needs_refetch`). Measured 2026-09-03 on the
+// top-2000 primer: 97,292 -> 58,806 versions, compressed 10.05 MB -> 6.35 MB,
+// and a cold resolve of the 84-dependency bench fixture (1,120 packuments)
+// served the same 862 from the primer with and without the prune — zero extra
+// fetches. The per-version SHA-512 is the primer's dominant byte cost and does
+// not compress, so version count, not compression level, is the size lever.
 const DEFAULT_VERSION_CAP: usize = 100;
 const FAST_COMPRESSION_LEVEL: i32 = 10;
 const RELEASE_CI_COMPRESSION_LEVEL: i32 = 19;
@@ -29,7 +41,7 @@ const POPULAR_NAMES_FORMAT: u32 = 1;
 // in a layout-breaking way. The on-disk `primer-topN-vM-sK.rkyv.zst`
 // artifact is gitignored, so older `sK` files orphan harmlessly and
 // the new `sK+1` is regenerated on the next build.
-const PRIMER_DATA_SCHEMA: u32 = 2;
+const PRIMER_DATA_SCHEMA: u32 = 4;
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());

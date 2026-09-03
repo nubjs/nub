@@ -433,6 +433,20 @@ pre .line[data-output] span {
   background-color: #2a2620;
 }
 
+/* A backtick token in a frontmatter title (blog h1, blog index h2) renders
+   outside the prose scope, so it gets the tint above but no chip: no padding,
+   no radius. At display sizes the 0.95em token also reads a touch large next
+   to the heading's medium weight, so take it down another notch. em-relative
+   throughout, so the 5xl post title and the 3xl index title scale together.
+   The selector mirrors the base rule's shape on purpose: `code.title-code`
+   alone is (0,1,1) and loses `font-size` to the (0,1,2) rule above; this form
+   ties it and wins by order. */
+:not(pre) > code.title-code {
+  font-size: 0.85em;
+  padding: 0.06em 0.28em;
+  border-radius: 0.22em;
+}
+
 /* Constrain the home navbar's row to the content column so the search/theme/
    GitHub controls sit at the content's right edge instead of floating against
    the viewport edge. The header itself stays full-bleed (border + backdrop). */

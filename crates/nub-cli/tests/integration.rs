@@ -224,9 +224,14 @@ fn run_compiled_artifact_with_timeout(artifact: &Path, cwd: &Path) -> std::proce
     run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(10))
 }
 
+/// Covers the TEST HARNESS, not a compiled artifact: nothing here is compiled.
+/// `run_compiled_artifact_command_with_timeout` is what every artifact e2e runs
+/// through, so a deadlock in its stdio drain would hang those tests rather than
+/// fail them. Driving it with a plain `node -e` writing 1 MB to each stream is
+/// the cheapest way to prove it drains concurrently.
 #[cfg(feature = "compile")]
 #[test]
-fn large_compiled_artifact_output_does_not_block_process_exit() {
+fn artifact_runner_drains_large_output_without_deadlock() {
     let runtime = compile_test_runtime();
     let mut command = Command::new(runtime.node_exec_path);
     command.args([
@@ -240,9 +245,12 @@ fn large_compiled_artifact_output_does_not_block_process_exit() {
     assert_eq!(output.stderr.len(), 1_000_000);
 }
 
+/// Also the harness, not an artifact. On Windows a grandchild inheriting stdio
+/// keeps the pipe open after the child exits, so a naive read-to-end never
+/// returns; the timeout has to fire on the CHILD rather than on end-of-stream.
 #[cfg(all(feature = "compile", windows))]
 #[test]
-fn timeout_returns_after_a_descendant_inherits_stdio() {
+fn artifact_runner_timeout_survives_a_descendant_holding_stdio() {
     let runtime = compile_test_runtime();
     let mut command = Command::new(runtime.node_exec_path);
     command.args([
@@ -276,6 +284,76 @@ setInterval(() => {}, 1000);"#,
 /// `__toCommonJS(namespace)` operand. The call then returned `undefined` with no
 /// error. A block body or any surrounding expression escapes the misread, so this
 /// fixture must keep the concise form to discriminate.
+/// The payload must TELL the launcher it needs `module.registerHooks`, because the
+/// launcher's refusal of an incapable Node keys on that manifest field and nothing
+/// else. The wiring is one expression in `compile::run`, and until this existed it
+/// could be replaced with a literal `false` — deleting the whole fix — with every
+/// other test still green.
+///
+/// Both directions are asserted, and the second is what makes the first mean
+/// something: a field hardwired `true` would satisfy the shim case and fail the
+/// plain one, so neither constant passes.
+///
+/// `--external` rather than `--allow-dynamic-import`, so the two compiles differ
+/// in exactly one thing. `--external`'s requirement applies unconditionally, while
+/// `--allow-dynamic-import` only installs the shim when a computed `import()`
+/// actually survives into the bundle — so testing it needs a different ENTRY too,
+/// and a two-variable comparison would not isolate the flag.
+#[cfg(feature = "compile")]
+#[test]
+fn a_smol_payload_records_whether_it_needs_the_register_hooks_shim() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.mjs");
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    std::fs::write(&entry, "console.log('ok');\n").expect("write entry");
+
+    // Read off the artifact rather than a return value: the manifest is what the
+    // launcher on a user's machine actually parses, so that is the surface worth
+    // pinning. It is stored as uncompressed JSON inside the payload.
+    let compile = |extra: &[&str], name: &str| -> String {
+        let artifact = work.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        let output = Command::new(nub_binary())
+            .args([
+                "compile",
+                "--smol",
+                "--target",
+                &runtime.node_target,
+                "--out",
+            ])
+            .arg(&artifact)
+            .arg(&entry)
+            .args(extra)
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            output.status.success(),
+            "compile {extra:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(&artifact).expect("read the compiled artifact");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    let shimmed = compile(&["--external", "some-pkg"], "shimmed");
+    assert!(
+        shimmed.contains(r#""requires_augmentation":true"#),
+        "--external installs the registerHooks shim, so the manifest must demand it; \
+         without that the launcher accepts a Node that cannot run the payload"
+    );
+
+    let plain = compile(&[], "plain");
+    assert!(
+        plain.contains(r#""requires_augmentation":false"#),
+        "a smol build with no shim must not demand registerHooks — doing so would refuse \
+         every 18.19-22.14 Node the compat tier still supports"
+    );
+}
+
 #[cfg(feature = "compile")]
 #[test]
 fn compile_resolves_commonjs_requires_of_esm() {
@@ -3201,6 +3279,69 @@ fn node_compat_flag_disables_augmentation() {
     );
 }
 
+/// `--experimental-webstorage` must ride ARGV and never the inherited NODE_OPTIONS.
+/// The flag does not exist before Node 22.4 — above nub's 18.19 support floor — and
+/// NODE_OPTIONS is inherited by the whole process subtree, so a descendant on an older
+/// Node aborts at startup with exit 9 on a flag it cannot parse. That is reachable, not
+/// theoretical: a host on the 22.4–24 band running Electron 34 or older (embedded Node
+/// 20.18.1) hit exactly this, and issue #7 was the same flag reaching an older child
+/// through a nested `.nvmrc`. Argv reaches the spawned process and nothing below it.
+///
+/// This is the WIRING test: the version-band unit tests in `feature_matrix` and the
+/// `flags::should_inject_experimental_webstorage` policy tests all pass just as well
+/// with the injection wired to the wrong channel, because none of them observe which
+/// channel a real spawn actually used. Both halves are asserted together — absent from
+/// NODE_OPTIONS is only meaningful alongside present on argv, since a flag that stopped
+/// being injected at all would satisfy the first half on its own.
+#[test]
+fn webstorage_flag_rides_argv_and_never_node_options() {
+    if !node_at_least((22, 4, 0)) {
+        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
+        return;
+    }
+    let (maj, _, _) = target_node_version();
+    if maj >= 25 {
+        eprintln!("skipping: 25+ has Web Storage native, so nub injects no flag to place");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("nub-ws-channel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"ws-channel"}"#).unwrap();
+    std::fs::write(
+        dir.join("probe.js"),
+        "console.log('OPTS=' + (process.env.NODE_OPTIONS || ''));\n\
+         console.log('ARGV=' + process.execArgv.join(' '));",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["probe.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let opts = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("OPTS="))
+        .unwrap_or_else(|| panic!("probe printed no OPTS line; stdout={stdout:?}"));
+    let argv = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("ARGV="))
+        .unwrap_or_else(|| panic!("probe printed no ARGV line; stdout={stdout:?}"));
+
+    assert!(
+        argv.contains("--experimental-webstorage"),
+        "nub must still inject the flag on the 22.4–24 band, on argv; argv={argv:?}"
+    );
+    assert!(
+        !opts.contains("--experimental-webstorage"),
+        "the flag must NOT be in NODE_OPTIONS — that string is inherited by the whole \
+         subtree and aborts any descendant below Node 22.4; NODE_OPTIONS={opts:?}"
+    );
+}
+
 /// sessionStorage works OUT OF THE BOX (the maintainer, 2026-06-15): nub always injects
 /// `--experimental-webstorage` on the 22.4–24 flag-needed band (and 25+ has it
 /// native), so `sessionStorage` is a working global with no opt-in. localStorage
@@ -3447,16 +3588,18 @@ fn user_node_options_localstorage_file_is_not_clobbered() {
 }
 
 /// The localStorage neutralization must reach GRANDCHILDREN, not just the direct
-/// child (F1). nub injects `--experimental-webstorage` via NODE_OPTIONS, which
-/// inherits to the whole process subtree — so a `node`-spawned grandchild
-/// re-installs Node's throwing `localStorage` getter. The neutralize signal
-/// (`__NUB_NEUTRALIZE_LOCALSTORAGE`) is a plain env var that also inherits, so the
-/// preload re-runs and re-neutralizes at every level. Before the fix the preload
-/// DELETED that var after reading it, so the child and grandchild inherited the
-/// throwing getter with no neutralize signal → `typeof localStorage` threw two
-/// levels down. This fixture has nub run a parent that spawns a plain `node` child
-/// that spawns a plain `node` grandchild, all without `--localstorage-file`, and
-/// asserts `typeof localStorage === "undefined"` (no throw) at all three levels.
+/// child (F1). Each `node` in the chain re-installs Node's throwing `localStorage`
+/// getter, because each receives `--experimental-webstorage` itself: the flag rides
+/// ARGV (never NODE_OPTIONS, whose 22.4 floor aborted below-floor descendants), so a
+/// plain `node` picks it up by re-entering nub through the PATH shim. The neutralize
+/// signal (`__NUB_NEUTRALIZE_LOCALSTORAGE`) is a plain env var that inherits, and nub
+/// re-sets it wherever it sets the flag, so the preload re-neutralizes at every level.
+/// Two regressions this pins: the preload once DELETED that var after reading it, so
+/// the child and grandchild inherited the throwing getter with no signal; and the flag
+/// and its signal must move together, since a level that gets one without the other
+/// throws. This fixture has nub run a parent that spawns a plain `node` child that
+/// spawns a plain `node` grandchild, all without `--localstorage-file`, and asserts
+/// `typeof localStorage === "undefined"` (no throw) at all three levels.
 #[test]
 fn localstorage_neutralization_reaches_grandchildren() {
     if !node_at_least((22, 4, 0)) {
@@ -3474,7 +3617,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // neutralize ran here too. Tag the level so a failure is self-debugging.
     std::fs::write(
         dir.join("grandchild.js"),
-        "console.log('GRANDCHILD:' + typeof localStorage);",
+        "console.log('GRANDCHILD:' + typeof localStorage + ':' + typeof sessionStorage);",
     )
     .unwrap();
     // child.js: prints its own level, then spawns the grandchild as a plain `node`
@@ -3482,7 +3625,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // preload via inherited NODE_OPTIONS — exactly the subtree we must cover).
     std::fs::write(
         dir.join("child.js"),
-        "console.log('CHILD:' + typeof localStorage);\n\
+        "console.log('CHILD:' + typeof localStorage + ':' + typeof sessionStorage);\n\
          const cp = require('node:child_process');\n\
          const r = cp.spawnSync('node', [require('node:path').join(__dirname, 'grandchild.js')], { stdio: 'inherit' });\n\
          process.exit(r.status ?? 1);",
@@ -3491,7 +3634,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // parent.js: top level run by nub. Spawns the child as a plain `node`.
     std::fs::write(
         dir.join("parent.js"),
-        "console.log('PARENT:' + typeof localStorage);\n\
+        "console.log('PARENT:' + typeof localStorage + ':' + typeof sessionStorage);\n\
          const cp = require('node:child_process');\n\
          const r = cp.spawnSync('node', [require('node:path').join(__dirname, 'child.js')], { stdio: 'inherit' });\n\
          process.exit(r.status ?? 1);",
@@ -3512,9 +3655,15 @@ fn localstorage_neutralization_reaches_grandchildren() {
         "grandchild chain must not throw at any level: stdout={stdout:?} stderr={stderr:?}"
     );
     for level in ["PARENT", "CHILD", "GRANDCHILD"] {
+        // `localStorage` neutralized AND `sessionStorage` live, asserted together at
+        // each level. The second half is a POSITIVE CONTROL and is what makes the
+        // first half mean anything: on this band a process that never received
+        // `--experimental-webstorage` also reports `localStorage` as "undefined", so
+        // the neutralize assertion alone passes just as well when the flag failed to
+        // arrive at all. `sessionStorage` is "object" only when the flag DID arrive.
         assert!(
-            stdout.contains(&format!("{level}:undefined")),
-            "`typeof localStorage` must be \"undefined\" (not throw) at the {level} level with no --localstorage-file; stdout={stdout:?} stderr={stderr:?}"
+            stdout.contains(&format!("{level}:undefined:object")),
+            "at the {level} level `typeof localStorage` must be \"undefined\" (neutralized, not thrown) and `typeof sessionStorage` must be \"object\" (proving --experimental-webstorage actually reached this level); stdout={stdout:?} stderr={stderr:?}"
         );
     }
 
@@ -4415,6 +4564,35 @@ fn worker_blob_wrapping_preserves_file_instanceof_blob() {
     assert!(
         stdout.contains("blob-instanceof-blob:true") && stdout.contains("blob-size:5"),
         "a Blob made through the wrapper must keep instanceof + the full Blob API: {stdout}"
+    );
+}
+
+#[test]
+fn worker_blob_url_revoke_forwards_caller_arity() {
+    // Regression: the revokeObjectURL wrap called the native function with a fixed
+    // arity of one, so `URL.revokeObjectURL()` passed `undefined` through instead of
+    // reaching Node's zero-arg ERR_MISSING_ARGS check — nub returned silently where
+    // vanilla Node throws.
+    let (stdout, stderr, code) = run_nub("worker", "blob-url-revoke-arity.ts");
+    assert_eq!(
+        code, 0,
+        "revoke-arity fixture should run: {stderr}\n{stdout}"
+    );
+    // Node's own zero-arg guard landed in v20.12.0; on the 18.19 floor and the
+    // 20.11 compat leg plain Node returns silently, so forwarding real arity
+    // must return silently there too.
+    let expected = if node_at_least((20, 12, 0)) {
+        "revoke-no-args:ERR_MISSING_ARGS"
+    } else {
+        "revoke-no-args:no-throw"
+    };
+    assert!(
+        stdout.contains(expected),
+        "URL.revokeObjectURL() with no arguments must match plain Node ({expected}): {stdout}"
+    );
+    assert!(
+        stdout.contains("revoke-one-arg:ok"),
+        "the ordinary one-argument revoke must still succeed: {stdout}"
     );
 }
 
@@ -5428,6 +5606,50 @@ fn env_file_flag_preserves_unquoted_json_value_without_auto_dotenv() {
 
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
     assert_eq!(stdout.trim(), r#""{\"field\":\"line1\\nline2\"}""#);
+}
+
+#[test]
+fn env_file_flag_delivers_dollar_values_unexpanded_like_node() {
+    // The deliberate asymmetry (wiki/research/env-file-loading.md, Synthesis):
+    // auto-discovered `.env*` expand `${VAR}`, the Node-compat `--env-file` flag
+    // does NOT — Node's own parser never expands, and `test/parallel/test-dotenv.js`
+    // asserts the literal value. Expanding here silently truncated any value
+    // holding a literal `$` (the `PASSWORD=foo$bar` footgun).
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // UNSET covers the undefined reference (expansion would erase it); DEFINED
+    // covers a reference to a key this same file sets (expansion would resolve
+    // it), which is the case a same-file-only expander still gets wrong.
+    std::fs::write(
+        dir.join("literal.env"),
+        "DEFINED=hello\nUNSET=\"{ port: $MISSING_VAR}\"\nUSES_DEFINED=\"port $DEFINED end\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.js"),
+        "console.log(JSON.stringify([process.env.UNSET, process.env.USES_DEFINED]));\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("--env-file=literal.env")
+        .arg("app.js")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        r#"["{ port: $MISSING_VAR}","port $DEFINED end"]"#,
+        "--env-file values must arrive byte-for-byte as Node delivers them, \
+         with no ${{VAR}} expansion; got {stdout:?}"
+    );
 }
 
 #[test]

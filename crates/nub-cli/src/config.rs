@@ -108,6 +108,7 @@ pub(crate) const PROJECT_INIT_TEMPLATE: &str = r#"{
   // "nodeOptions": ["--enable-source-maps"],
   // "v8Flags": ["--stack-size=2000"],
   // "nodeCompat": true, // plain Node behavior, with Nub's version selection
+  // "nodeExecutable": "$(mise which node)", // a path, or a command printing one
   // "envFile": [".env", ".env.local"], // true | false | path | paths
   // "loader": { ".graphql": "text" },
   // "conditions": ["development"],
@@ -141,6 +142,7 @@ pub(crate) const GLOBAL_INIT_TEMPLATE: &str = r#"{
   // "nodeOptions": ["--enable-source-maps"],
   // "v8Flags": ["--stack-size=2000"],
   // "nodeCompat": true, // plain Node behavior, with Nub's version selection
+  // "nodeExecutable": "$(mise which node)", // a path, or a command printing one
   // "envFile": [".env", ".env.local"], // true | false | path | paths
   // "loader": { ".graphql": "text" },
   // "conditions": ["development"],

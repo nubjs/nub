@@ -160,6 +160,33 @@ pub fn set_pre_summary_hook(hook: PreSummaryHook) {
     let _ = PRE_SUMMARY_HOOK.set(hook);
 }
 
+/// Resolve `preferFrozenLockfile` for the current project, the way the engine's
+/// own CLI does before [`InstallArgs::into_options`].
+///
+/// The embedder seam for a host that builds `InstallOptions` itself: the
+/// resolution needs a `ResolveCtx`, which needs `commands::FileSources`, and
+/// that is crate-private — so an embedder had no way to reach this setting and
+/// passed `None`, silently defaulting every project to the env-aware mode
+/// whatever its config said. Returns `None` when no source sets the setting,
+/// which is [`FrozenMode::from_override`]'s "fall back to the default" input, so
+/// an unset project resolves exactly as before.
+///
+/// Resolves from the WORKSPACE root when there is one, matching the engine's own
+/// call site: the workspace yaml lives there rather than in the member. A tree
+/// with no root at all reads from the cwd instead of failing — a config lookup
+/// must never be what ends a command.
+pub fn resolve_prefer_frozen_lockfile() -> Option<bool> {
+    let cwd = match crate::dirs::workspace_or_project_root() {
+        Ok(root) => root,
+        Err(_) => std::env::current_dir().ok()?,
+    };
+    let files = super::FileSources::load(&cwd);
+    let raw_ws = aube_manifest::workspace::load_raw(&cwd).unwrap_or_default();
+    let env = aube_settings::values::capture_env();
+    let ctx = files.ctx(&raw_ws, &env, &[]);
+    aube_settings::resolved::prefer_frozen_lockfile(&ctx)
+}
+
 pub(crate) fn emit_pre_summary(cwd: &std::path::Path, uses_shared_store: bool, is_noop: bool) {
     if let Some(hook) = PRE_SUMMARY_HOOK.get() {
         hook(PreSummary {
@@ -782,7 +809,39 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     if !opts.dry_run {
         apply_force_state_reset(&cwd, &opts)?;
     }
+    // The pnpmfiles this install will run, resolved once here because
+    // the `preResolution` gate below needs them before the settings
+    // context exists. Re-derived (not threaded) at the hook call site,
+    // which has the shared workspace config; both use the same
+    // `ordered_paths(global, local)` contract.
+    //
+    // The workspace load is not new I/O on the fast path: `hash_settings`
+    // — which `try_install_fast_path` calls a few lines down — already
+    // does `load_both` AND reads the pnpmfile's bytes to fold them into
+    // the settings hash. This reads the same warm files a second time.
+    let early_pnpmfile_paths = if opts.ignore_pnpmfile || opts.pre_resolution_hook_already_ran {
+        Vec::new()
+    } else {
+        let (ws, _) = aube_manifest::workspace::load_both(&cwd).unwrap_or_default();
+        crate::pnpmfile::ordered_paths(
+            crate::pnpmfile::detect_global(&cwd, opts.global_pnpmfile.as_deref()).as_deref(),
+            crate::pnpmfile::detect(&cwd, opts.pnpmfile.as_deref(), ws.pnpmfile_path.as_deref())
+                .as_deref(),
+        )
+    };
+    // pnpm calls `preResolution` on every install, before it decides
+    // whether the lockfile is up to date — the hook is how a pnpmfile
+    // observes (and logs) the lockfile it is about to resolve against.
+    // The warm fast path reads neither the manifest nor the lockfile,
+    // so it cannot hand the hook a truthful context; the only honest
+    // way to keep the contract is to decline the fast path when a hook
+    // is declared. Bounded to projects that opted into one — a pnpmfile
+    // without `preResolution`, and every project without a pnpmfile at
+    // all, keeps the fast path untouched.
+    let pre_resolution_hook_declared =
+        crate::pnpmfile::any_declares_hook(&early_pnpmfile_paths, "preResolution").await;
     if !opts.dry_run
+        && !pre_resolution_hook_declared
         && let Some(total) =
             try_install_fast_path(&cwd, &opts, mode, modules_cache_sweep_is_default(&cwd))?
     {
@@ -1138,6 +1197,63 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         lockfile_pre_parse.as_ref().map(|(g, _)| g)
     };
 
+    // `preResolution` runs here — once, on every install, before any
+    // branch on frozen mode or lockfile freshness, which is where pnpm
+    // calls it (`mutateModules` fires the hook before `tryFrozenInstall`).
+    // Every downstream path is covered from this one site: the
+    // `--lockfile-only` / `--dry-run` short-circuit below, the
+    // lockfile-reuse arm, and the cold resolve.
+    //
+    // The hook is handed the lockfile as it is ON DISK. `lockfile_pre_parse`
+    // is deliberately `None` under `--frozen-lockfile` and
+    // `--no-frozen-lockfile` — neither mode reuses locked picks — but
+    // `wantedLockfile` is the file, not the subset the resolver is willing
+    // to reuse, so parse for the hook when one is declared and nothing has
+    // been parsed yet. Under `lockfile=false` there is deliberately no
+    // lockfile to show, and pnpm passes an empty one there too.
+    {
+        let hook_lockfile = if pre_resolution_hook_declared
+            && lockfile_enabled
+            && lockfile_pre_parse.is_none()
+        {
+            parse_lockfile_dir_remapped_with_kind_and_options(
+                &lockfile_dir,
+                &lockfile_importer_key,
+                &manifest,
+                lockfile_parse_options,
+            )
+            .ok()
+            .map(|(g, _)| g)
+        } else {
+            None
+        };
+        let pnpmfile_paths = if opts.ignore_pnpmfile || opts.pre_resolution_hook_already_ran {
+            Vec::new()
+        } else {
+            crate::pnpmfile::ordered_paths(
+                crate::pnpmfile::detect_global(&cwd, opts.global_pnpmfile.as_deref()).as_deref(),
+                crate::pnpmfile::detect(
+                    &cwd,
+                    opts.pnpmfile.as_deref(),
+                    ws_config_shared.pnpmfile_path.as_deref(),
+                )
+                .as_deref(),
+            )
+        };
+        let importer_ids: Vec<String> = manifests.iter().map(|(path, _)| path.clone()).collect();
+        super::run_pnpmfile_pre_resolution(
+            &pnpmfile_paths,
+            &cwd,
+            lockfile_pre_parse
+                .as_ref()
+                .map(|(g, _)| g)
+                .or(hook_lockfile.as_ref()),
+            &manifest,
+            &importer_ids,
+        )
+        .await?;
+    }
+
     // The project's effective packageExtensions checksum, for the lockfile
     // drift check. Computed only under an enforcing embedder (nub); standalone
     // aube leaves it `None` and the drift check (gated on the same posture) is
@@ -1430,6 +1546,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // allowlist without a per-install OSV run — see
     // `wiki/commands/pm/supply-chain-posture.md` Decision 2.
     let lockfile_vetted;
+    // Per-package counterpart to `lockfile_vetted`, for the floor's
+    // cooling-window waiver. The boolean above is a whole-graph fact and
+    // the waiver is not — see `default_trust::InheritedPicks`.
+    let inherited_picks;
     // The cold-install lockfile write runs on a `spawn_blocking` task so it
     // overlaps `filter_graph` + the link phase (see
     // `lockfile_write_overlap`). The handle escapes the resolve match arm
@@ -1573,6 +1693,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // `defaultTrust` floor inherits it rather than requiring a
             // (correctly skipped) per-install OSV run.
             lockfile_vetted = true;
+            // Nothing was re-resolved, so every pick is inherited.
+            inherited_picks = default_trust::InheritedPicks::All;
 
             // Check index cache, fetch missing tarballs. Tarball client
             // is lazy because eager construction costs ~20ms even when
@@ -1800,8 +1922,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     .as_deref(),
                 )
             };
-            super::run_pnpmfile_pre_resolution(&pnpmfile_paths, &cwd, existing_for_resolver)
-                .await?;
+            // `preResolution` already ran, up where every install path
+            // passes through it. Only the `readPackage` host is started
+            // here, because it belongs to the resolve that follows.
             control::check_cancelled()?;
             let (read_package_host, read_package_forwarders) =
                 match crate::pnpmfile::ReadPackageHostChain::spawn(&pnpmfile_paths, &cwd)
@@ -1960,8 +2083,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 // resolves packages one at a time, so it reads each binding
                 // by its tarball URL on the fly rather than projecting a
                 // batch map (the frozen/warm batch path does the latter).
-                let fetch_no_integrity_dir = crate::state::no_integrity_dir(&fetch_project_root);
-                let fetch_no_integrity_present = fetch_no_integrity_dir.exists();
+                let fetch_no_integrity_dirs =
+                    crate::state::no_integrity_read_dirs(&fetch_project_root);
+                let fetch_no_integrity_present = !fetch_no_integrity_dirs.is_empty();
 
                 while let Some(pkg) = resolved_rx.recv().await {
                     if let Some(ref msg) = pkg.deprecated {
@@ -2099,8 +2223,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     // on demand for this one coordinate.
                     let no_integrity_key = (pkg.integrity.is_none() && fetch_no_integrity_present)
                         .then(|| {
-                            crate::state::read_no_integrity_binding(
-                                &fetch_no_integrity_dir,
+                            crate::state::read_no_integrity_binding_in(
+                                &fetch_no_integrity_dirs,
                                 &fetch_local_client.tarball_url(&pkg_registry_name, &pkg.version),
                             )
                         })
@@ -2220,11 +2344,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                                 .map_err(|e| {
                                     let throttled = e.is_throttle();
                                     (
-                                        miette!(
-                                            "failed to fetch {}@{}: {e}{}",
-                                            pkg.name,
-                                            pkg.version,
-                                            crate::dep_chain::format_chain_for(&pkg.name, &pkg.version)
+                                        fetch::fetch_failure(
+                                            &e,
+                                            format!(
+                                                "failed to fetch {}@{}: {e}{}",
+                                                pkg.name,
+                                                pkg.version,
+                                                crate::dep_chain::format_chain_for(&pkg.name, &pkg.version)
+                                            ),
                                         ),
                                         throttled,
                                     )
@@ -2233,11 +2360,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                             client.fetch_tarball_bytes(&url).await.map(|b| (b, None)).map_err(|e| {
                                 let throttled = e.is_throttle();
                                 (
-                                    miette!(
-                                        "failed to fetch {}@{}: {e}{}",
-                                        pkg.name,
-                                        pkg.version,
-                                        crate::dep_chain::format_chain_for(&pkg.name, &pkg.version)
+                                    fetch::fetch_failure(
+                                        &e,
+                                        format!(
+                                            "failed to fetch {}@{}: {e}{}",
+                                            pkg.name,
+                                            pkg.version,
+                                            crate::dep_chain::format_chain_for(&pkg.name, &pkg.version)
+                                        ),
                                     ),
                                     throttled,
                                 )
@@ -2424,6 +2554,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let prior_lockfile = lockfile_pre_parse.as_ref().map(|(g, _)| g);
             let fresh_resolution =
                 super::add_supply_chain::lockfile_has_new_picks(&cwd, prior_lockfile, &graph);
+            // Computed here, while `prior_lockfile` is still borrowed.
+            // `fresh_resolution` collapses this to one bit for the
+            // advisory gate; the cooling-window waiver needs the
+            // per-package answer, because an `aube add` graph is a
+            // mixture and the bit says only that a mixture exists.
+            inherited_picks = default_trust::InheritedPicks::from_prior(prior_lockfile);
             let osv_settings = resolve_osv_routing_settings(&cwd);
             // Fire the OSV gate as a concurrent task that overlaps the
             // tail of the in-flight tarball downloads (`fetch_handle`,
@@ -3065,6 +3201,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         opts.minimum_release_age_override,
         osv_gate_active,
         lockfile_vetted,
+        inherited_picks,
     );
     let link::LinkPhaseOutput {
         stats,

@@ -303,17 +303,32 @@ pub enum Workspaces {
         // includes `packages`, so this doesn't lock out the catalog use
         // case.
         packages: Vec<String>,
-        #[serde(default)]
-        nohoist: Vec<String>,
+        // The three optional fields below are PRESENCE-AWARE — `Option`
+        // around an already-emptiable collection — because npm copies a
+        // manifest's `workspaces` verbatim into `packages[""]` of
+        // `package-lock.json` and so distinguishes a field that was never
+        // authored from one authored empty. Measured, npm 11.19.0:
+        // `{"packages":[…]}` comes back without `nohoist`, and
+        // `{"packages":[…],"nohoist":[]}` comes back WITH `"nohoist": []`.
+        //
+        // Collapsing the two (a bare `Vec` plus `skip_serializing_if`)
+        // reproduces the absent case and silently drops the empty one, so
+        // a project authoring `"nohoist": []` churned that key out of its
+        // lockfile on every alternating npm/nub install. `Option` is what
+        // makes the round-trip faithful in both directions; the accessors
+        // below still hand out an empty collection either way, so no
+        // caller has to care which it was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nohoist: Option<Vec<String>>,
         /// Bun-style default catalog nested under `workspaces.catalog`.
         /// Aube reads it in addition to `pnpm-workspace.yaml`'s `catalog:`
         /// so bun projects that migrated config into package.json keep
         /// working.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        catalog: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalog: Option<BTreeMap<String, String>>,
         /// Bun-style named catalogs nested under `workspaces.catalogs`.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        catalogs: BTreeMap<String, BTreeMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalogs: Option<BTreeMap<String, BTreeMap<String, String>>>,
     },
 }
 
@@ -332,7 +347,12 @@ impl Workspaces {
         static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
         match self {
             Workspaces::String(_) | Workspaces::Array(_) => EMPTY.get_or_init(BTreeMap::new),
-            Workspaces::Object { catalog, .. } => catalog,
+            // An authored-empty catalog and an absent one are the same
+            // thing to a caller; only the serializer needs to tell them
+            // apart, to copy npm's verbatim round-trip.
+            Workspaces::Object { catalog, .. } => catalog
+                .as_ref()
+                .unwrap_or_else(|| EMPTY.get_or_init(BTreeMap::new)),
         }
     }
 
@@ -342,7 +362,9 @@ impl Workspaces {
             std::sync::OnceLock::new();
         match self {
             Workspaces::String(_) | Workspaces::Array(_) => EMPTY.get_or_init(BTreeMap::new),
-            Workspaces::Object { catalogs, .. } => catalogs,
+            Workspaces::Object { catalogs, .. } => catalogs
+                .as_ref()
+                .unwrap_or_else(|| EMPTY.get_or_init(BTreeMap::new)),
         }
     }
 }

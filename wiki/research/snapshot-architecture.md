@@ -1,16 +1,16 @@
 ---
 **Scope:** Whether Nub should pre-bake its `--import` preload via Node's `--build-snapshot` / `--snapshot-blob` to cut cold-start tax and sidestep `--permission` grants for the preload path.
-**Status:** v1, 2026-05-18. Empirically tested on Node v24.14.0, macOS arm64. Findings supersede the speculative open questions in the existing snapshot decision record on hook persistence, addon-in-snapshot viability, and perf delta. That record's decision — don't auto-inject snapshot flags, document as not-warranted for default mode — stands; this research strengthens it with the addon-impossible and dynamic-import-broken findings, and by showing the cold-start math does not justify the architecture cost.
+**Status:** v1, 2026-05-18. Empirically tested on Node v24.14.0, macOS arm64. Findings supersede earlier speculation about a snapshot-based preload. That record's decision — don't auto-inject snapshot flags, document as not-warranted for default mode — stands; this research strengthens it with the addon-impossible and dynamic-import-broken findings, and by showing the cold-start math does not justify the architecture cost.
 **Builds on:** [[research/snapshot-env-reads]] — `process.env` semantics in snapshotted JS; [[research/cold-start]] — Node cold-start phase breakdown.
 ---
 
 # Snapshot-based preload — architecture evaluation
 
-An empirical evaluation of pre-baking Nub's preload into a V8 startup snapshot, run against Node v24.14.0 on macOS arm64. The verdict is no for v0.x, and the addon route is dead outright.
+An empirical evaluation of pre-baking Nub's preload into a V8 startup snapshot, run against Node v24.14.0 on macOS arm64. The verdict is no, and the addon route is dead outright.
 
 ## 1. TL;DR
 
-**Verdict: not viable for v0.x. Possibly viable for a narrow slice of v0.x+ (snapshot-only-the-hook-registration, leave all FS work lazy) with material caveats. Not viable at all as a way to sidestep `--allow-addons` under `--permission`.**
+**Verdict: not viable today. Possibly viable later for a narrow slice (snapshot-only-the-hook-registration, leave all FS work lazy) with material caveats. Not viable at all as a way to sidestep `--allow-addons` under `--permission`.**
 
 The five vectors:
 
@@ -22,7 +22,7 @@ The five vectors:
 
 The vectors pushing away — addon-impossible, dynamic-import-broken, marginal perf, cache-invalidation complexity, opaque failures — are stronger than they looked before testing, and the ones pushing toward are weaker.
 
-**Recommendation: do not pursue snapshot for v0.x. Document this research, close the open questions in the existing decision record with the empirical findings, and reconsider only if (a) a future `nub compile` command needs it for its own bundling pipeline, or (b) Node ships `--build-snapshot` work that fixes the dynamic-import and `node:module` warnings.**
+**Recommendation: do not pursue snapshot. Reconsider only if (a) a future `nub compile` command needs it for its own bundling pipeline, or (b) Node ships `--build-snapshot` work that fixes the dynamic-import and `node:module` warnings.**
 
 ## 2. Verified behaviors
 
@@ -235,7 +235,6 @@ Three options:
 2. **Lazy generate at first run.** Spawn `node --build-snapshot --snapshot-blob=... preload-anchor.js` once on first Nub invocation. Adds ~500-1000ms to the first run, $0 after. Need a lock file to handle concurrent first-invocations. Workable but adds a "first run is slow" footgun.
 3. **Generate at install time.** `npm install -g @nubjs/nub` postinstall hook runs the snapshot build. Adds ~1s to install but warm from first run. Risks: postinstall scripts are often disabled (`npm install --ignore-scripts`); Node version may change after install (nvm switch) and invalidate the snapshot; permission model on the install target may not allow writing the cache dir.
 
-If we were doing this: option 2 plus a `nub prep` command for users who want to warm the cache explicitly.
 
 ### Cache busting
 
@@ -303,7 +302,6 @@ Net delta: snapshot saves ~9ms. But this is a degenerate case — the entire poi
 
 The realistic Nub preload sits between "noop" and "heavy" — closer to noop because we don't eagerly walk filesystems or pre-parse JSON in the preload. Savings expected: ~1-3ms.
 
-For context, Nub's headline benchmark target is the `nub run` script-runner path vs `pnpm run`, where the win is **~150-300ms → ~5-15ms** (10-30× speedup). A ~1-3ms snapshot win on top of that is below the user-perceptible threshold and not worth the architecture cost.
 
 Bun's startup advantage over Node (~22ms) comes from JSC vs V8 macOS dyld characteristics, static linking, and skipping `pre_execution.js`. None of those are capturable by a snapshot mechanism on top of the user's installed Node. See [[research/cold-start]] for the full breakdown.
 
@@ -353,59 +351,37 @@ Surfaces the non-snapshot path does not have:
 
 ## 9. Recommendation
 
-**Do not pursue snapshot for v0.x. Reconsider in v0.x+ only if specific conditions are met.**
+**Do not pursue snapshot. Reconsider only if specific conditions are met.**
 
-### v0.x: no snapshot
+### Today: no snapshot
 
-The posture stays as it is today: pass the flags through, generate nothing, ship no blobs — and close the decision record's open question with the findings above.
+The posture stays as it is today: pass the flags through, generate nothing, ship no blobs.
 
-- Close the "Does our preload still run on snapshot-load?" open question in the decision record: hook registrations persist; dynamic `import()` is broken; `createRequire` usage must be re-constructed post-deserialize; addons are impossible.
+- The "Does our preload still run on snapshot-load?" question is settled: hook registrations persist; dynamic `import()` is broken; `createRequire` usage must be re-constructed post-deserialize; addons are impossible.
 - Continue the existing posture: pass `--build-snapshot` / `--snapshot-blob` through to Node unchanged; recommend `--node` / `NODE_COMPAT=1` for users who actually need snapshots.
 - Don't auto-generate snapshots from the Nub CLI. Don't ship blob files. Don't add a `~/.cache/nub/snapshots/` directory.
 
-### Conditions under which to reconsider (v0.x+ or later)
+### Conditions under which to reconsider
 
-Three triggers, all conditional on work that has not happened: a `nub compile` command that needs a snapshot internally, an upstream fix for the `node:module` warning, or cold-start pressure that no lazier preload design can relieve.
+Three triggers: a `nub compile` pipeline that needs a snapshot internally, an upstream fix for the `node:module` warning, or cold-start pressure that no lazier preload design can relieve.
 
-1. **A `nub compile` command lands** that produces a SEA-wrapped single-binary output. SEA can embed a snapshot blob, and the compile-time environment is controlled. Internal snapshot use as part of `nub compile`'s output is a different question — evaluate when that command is designed.
+1. **`nub compile` needs a snapshot internally** for a SEA-wrapped output. SEA can embed a snapshot blob, and the compile-time environment is controlled. Internal snapshot use as part of `nub compile`'s output is a different question — evaluate when that command is designed.
 2. **Node fixes the snapshot warning for `node:module`.** The warning text — *"It's not yet fully verified whether built-in module 'node:module' works in user snapshot builder scripts. It may still work in some cases, but in other cases certain run-time states may be out-of-sync after snapshot deserialization."* — indicates that the Node team is aware this is broken and hasn't fixed it yet. When the warning is removed and the dynamic-import and createRequire issues are resolved upstream, revisit.
 3. **A specific cold-start budget pressure forces it.** If `nub <file.ts>` cold-start becomes the bottleneck (it won't — the bottleneck is V8 isolate construction, not the preload), and we've exhausted lazier preload designs, snapshot could shave 1-3ms. Not before.
-
-### Implementation milestones (if we ever do this)
-
-- M0: snapshot-build a noop preload, verify the blob loads cleanly.
-- M1: snapshot the actual Nub preload (hook registration). Verify hooks fire post-deserialize via `createRequire(anchor)`. Replace any `await import(...)` usage in the preload with require-based paths (this may not be feasible if the preload needs to lazy-load an ESM-only transpiler entry).
-- M2: build a cache invalidation key (Nub version × Node version × V8 version × arch × platform × preload hash). Test nvm-switch invalidation, Nub-upgrade invalidation.
-- M3: lazy-generation logic at first run, with concurrent-invocation lock. Test permission-mode interaction (skip generation under `--permission`).
-- M4: blob tampering mitigation (decide: filesystem permissions alone, or active hash verification?).
-- M5: measure end-to-end perf. If the win is still <5ms after all this complexity, kill the feature.
-
-Realistic estimate: 2-3 weeks engineering for a feature that saves ~2ms in steady state, breaks if Node changes anything in `pre_execution.js`, and introduces a new RCE-via-cache attack surface. Cost/benefit is bad.
 
 ## 10. Open questions
 
 Five questions left open, none of them blocking the recommendation. Each becomes relevant only if the snapshot direction is reconsidered.
 
 - **Worker threads + snapshot.** All testing here was main-thread. Workers re-bootstrap via the embedded snapshot with a per-thread Realm. Whether a user-snapshot-built script can register hooks that fire for worker-thread imports is untested, and becomes relevant only if we reconsider snapshot.
-- **SEA + snapshot interaction for a hypothetical `nub compile`.** SEA can embed a snapshot blob via the `useSnapshot: true` config. Whether the combination simplifies or complicates the Nub preload story is a question for when `nub compile` is designed.
+- **SEA + snapshot interaction for `nub compile`.** SEA can embed a snapshot blob via the `useSnapshot: true` config. Whether the combination simplifies or complicates the Nub preload story is a question for when `nub compile` is designed.
 - **PR/issue history for dynamic-import-callback-missing under snapshot.** Worth a sweep of nodejs/node issues for `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` + `snapshot` keywords to confirm this is a known-unfixed limitation rather than a misuse on our part. Not blocking the recommendation, but useful context if we re-investigate.
-- **Snapshot + `--inspect-brk`.** Untested. If snapshot mangles the source map / script-id mapping, the debugger could attach to a process that has no recognizable user scripts. Relevant to a `nub inspect` story.
+- **Snapshot + `--inspect-brk`.** Untested. If snapshot mangles the source map / script-id mapping, the debugger could attach to a process that has no recognizable user scripts. Relevant to any future debugger integration.
 - **Whether Node 25/26 fixes any of this.** The `node:module` warning suggests upstream work is in progress. A quick check of the Node 25 nightlies (if/when available) for snapshot-related PRs would be worth doing before re-evaluating in 6+ months.
-
-## Test artifacts
-
-All test scripts and blob files live in `/tmp/nub-snap-test/` during the research session. Notable files:
-
-- `entry-perm.js` / `perm.blob` — permission-interaction test (§2.1)
-- `test-cr.js` / `cr.blob` — addon-fatal repro (§2.2), createRequire stale-closure repro (§2.6)
-- `entry-hook5.js` / `hook5.blob` — hook-fires-post-deserialize positive test (§2.3)
-- `dyn-test.js` / `dyn.blob` — dynamic-import-broken repro (§2.5)
-- `noop.js` / `noop.blob`, `heavy-preload.js` / `heavy.blob` — perf benchmarks (§7)
-
-These scratch artifacts are not checked in; recreate them from the snippets above if needed.
 
 ## Changelog
 
-Revision history for this document. The single entry records its migration out of the internal research corpus.
+Revision history for this document.
 
-- 2026-07-30 — Migrated from the internal research corpus. Internal planning links and reference-checkout paths were rewritten; findings and measured values are unchanged.
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

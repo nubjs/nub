@@ -5270,3 +5270,79 @@ snapshots:
         Some("is-odd")
     );
 }
+
+// pnpm's resolver drops a `peerDependenciesMeta` entry that is not
+// `optional: true` (`peerDependenciesWithoutOwn`), so its lockfile type is
+// `{ optional: true }` and pnpm 12's reader models `optional` as a required
+// field. Emitting the non-optional entry as an empty mapping — the real case
+// is vitest declaring `vite: { optional: false }` — makes pnpm 12 reject the
+// whole file with ERR_PNPM_BROKEN_LOCKFILE.
+#[test]
+fn write_omits_non_optional_peer_dependencies_meta_entries() {
+    let yaml = r#"lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      peer-host:
+        specifier: 1.0.0
+        version: 1.0.0
+
+packages:
+
+  peer-host@1.0.0:
+    resolution: {integrity: sha512-peer}
+    peerDependencies:
+      jsdom: '*'
+      vite: ^7.0.0
+    peerDependenciesMeta:
+      jsdom:
+        optional: true
+      vite: {}
+
+snapshots:
+
+  peer-host@1.0.0: {}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, yaml).unwrap();
+    let graph = parse(&path).unwrap();
+
+    // The reader stays lenient so a lockfile already carrying the broken
+    // shape still loads; the writer is what normalizes it.
+    let pkg = graph.packages.get("peer-host@1.0.0").unwrap();
+    assert!(pkg.peer_dependencies_meta["jsdom"].optional);
+    assert!(!pkg.peer_dependencies_meta["vite"].optional);
+
+    let manifest = PackageJson {
+        name: Some("peer-meta".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("peer-host".to_string(), "1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let out = dir.path().join("out.yaml");
+    write(&out, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out).unwrap();
+
+    assert!(
+        !written.contains("vite: {}"),
+        "an empty peerDependenciesMeta mapping is rejected by pnpm 12:\n{written}"
+    );
+    assert!(
+        written.contains("      jsdom:\n        optional: true\n"),
+        "the optional peer must keep its entry:\n{written}"
+    );
+    assert!(
+        !written.contains("      vite:\n"),
+        "the non-optional peer must be dropped from peerDependenciesMeta:\n{written}"
+    );
+    // Dropping the meta entry must not drop the declared peer range.
+    assert!(
+        written.contains("      vite: ^7.0.0\n"),
+        "peerDependencies must still carry the non-optional peer:\n{written}"
+    );
+}

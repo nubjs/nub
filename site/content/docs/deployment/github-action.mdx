@@ -1,9 +1,9 @@
 ---
 title: GitHub Action
-description: A drop-in replacement for the official setup-node action. Swap one line in your workflow and Nub installs itself, provisions the project's pinned Node, and fronts it on PATH so every step keeps working unchanged.
+description: A drop-in replacement for the official setup-node action. Swap one line in your workflow and Nub installs itself, provisions the project's pinned Node, and fronts it on PATH.
 ---
 
-A drop-in for [`actions/setup-node`](https://github.com/actions/setup-node). Swap one line and your workflow keeps working:
+A drop-in for [`actions/setup-node`](https://github.com/actions/setup-node) — swap one line:
 
 ```diff
 steps:
@@ -29,7 +29,7 @@ Read the [full docs](https://github.com/actions/setup-node#readme) on github.com
 
 ## How it works
 
-The action installs the `nub` CLI, then eagerly provisions the project's pinned Node into Nub's cache during the setup step — downloaded and ready before any of your steps run, never lazily mid-build. The pin is resolved from the project's Node-version sources, in this order:
+The action installs the `nub` CLI, then provisions the project's pinned Node into Nub's cache during the setup step, before any of your steps run. The pin is resolved from the project's Node-version sources, in this order:
 
 1. `package.json#/devEngines/runtime`
 2. `.node-version`
@@ -37,11 +37,9 @@ The action installs the `nub` CLI, then eagerly provisions the project's pinned 
 4. `.tool-versions` (the asdf/mise file's `nodejs` or `node` line)
 5. `package.json#/engines/node`
 
-That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version — the same PATH guarantee setup-node gives. With no pin declared, the eager step skips and Nub provisions at runtime.
+That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version. With no pin declared, the eager step skips and Nub provisions at runtime.
 
 Because the pin lives in the repository, `actions/checkout` must run before this action.
-
-Every `actions/setup-node` input is accepted, so the swap is always mechanical.
 
 ## Inputs
 
@@ -60,7 +58,7 @@ Every `actions/setup-node` input is accepted, so the swap is always mechanical.
 | `always-auth` | `false` | Authenticate on every registry request. |
 | `token` | `github.token` | Token for GitHub-API rate-limit relief when resolving Nub's version range. |
 
-The setup-node inputs `check-latest`, `architecture`, `mirror`, and `mirror-token` are accepted and ignored — present so a swap never errors, with no effect. The `version` input is a deprecated alias for `nub-version` and emits a warning.
+The setup-node inputs `check-latest`, `architecture`, `mirror`, and `mirror-token` are accepted and ignored. The `version` input is a deprecated alias for `nub-version` and emits a warning.
 
 ### `nub-version`
 
@@ -96,7 +94,7 @@ Read a Node version from a file, then provision and front it on PATH. Accepts `.
 
 ### `cache`
 
-Caching is on by default — it auto-enables when the project looks installable, mirroring setup-node. The auto-detection triggers on a lockfile or a `package.json` that declares `packageManager` or `devEngines`. Set the input explicitly to override:
+Caching is on by default when the project has a lockfile or a `package.json` that declares `packageManager` or `devEngines`, mirroring setup-node. Set the input explicitly to override:
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -116,7 +114,7 @@ The cache key is derived from the project's lockfile and the Node pin, with the 
 
 ### `package-manager-cache`
 
-The disable knob for the automatic caching above. Set false to turn caching off without setting `cache`:
+Turns the automatic caching above off without setting `cache`:
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -188,7 +186,7 @@ Read the [full docs](https://docs.github.com/en/packages/working-with-a-github-p
 
 ### `scope`
 
-Scope for a scoped registry. Falls back to the repository owner for `npm.pkg.github.com`. The `.npmrc` written by `registry-url` follows the same contract as setup-node, so existing auth setups port over unchanged.
+Scope for a scoped registry. Falls back to the repository owner for `npm.pkg.github.com`. The `.npmrc` written by `registry-url` follows the same contract as setup-node.
 
 ### `always-auth`
 
@@ -196,7 +194,7 @@ Write `always-auth=true` into the `.npmrc` to authenticate on every registry req
 
 ### `token`
 
-Token for GitHub-API rate-limit relief when resolving Nub's version range (and Node downloads on GHES). Defaults to `github.token` on github.com — most workflows don't need to set this explicitly.
+Token for GitHub-API rate-limit relief when resolving Nub's version range (and Node downloads on GHES). Defaults to `github.token` on github.com.
 
 ## Outputs
 

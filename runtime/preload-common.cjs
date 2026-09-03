@@ -1,11 +1,11 @@
 // Shared preload machinery for BOTH tiers — CommonJS, zero top-level await.
 //
-// The fast tier (Node 22.15+) loads this from a `--require` CJS preload
-// (preload.cjs) so Node keeps its synchronous `Module.runMain` CJS entry path
+// The fast tier (Node 22.15+, minus 23.0–23.4) loads this from a `--require` CJS
+// preload (preload.cjs) so Node keeps its synchronous `Module.runMain` CJS entry path
 // (top-level `executionAsyncId()===1`, sync exception origin, `require.main.id`
 // `'.'`, `module.parent` `null`) — all of which the old `--import` ESM preload
 // broke by forcing eager ESM-loader init that routed even a CJS entry through the
-// async ESM module-job (R1). The compat tier (18.19–22.14) loads this from its
+// async ESM module-job (R1). The compat tier (18.19–22.14 and 23.0–23.4) loads this from its
 // async `--import` preload.mjs and reuses the same hook/require/watch/Temporal
 // logic; only hook REGISTRATION differs (sync `module.registerHooks` on the fast
 // tier vs async `module.register` loader worker on compat), which each entry owns.
@@ -35,13 +35,32 @@ const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 // startup, so dropping them here keeps the feature ON while restoring the execArgv a
 // plain-Node user would have seen. Only flags NUB injected are removed; a user's own
 // `v8Flags` stay visible, because those are the user's choice to reason about.
+// The flags have to be hidden on two boundaries, and no single channel spans both.
+//
+// The ENV VAR crosses a PROCESS boundary: the Rust spawn layer sets it on a Node it
+// starts. Deleting it after use is what stops a descendant from hiding a flag its own
+// user passed, so that hygiene stays.
+//
+// WORKER ENVIRONMENT DATA crosses a THREAD boundary, which the env var cannot. Node
+// starts a worker from the process's REAL exec argv — flags and all — whatever the main
+// thread filtered, so the worker has to filter again, and this preload runs there to do
+// it. Three measured properties make this the right channel and an env copy the wrong
+// one (verified on 18.19 and 26.7): it survives `new Worker(…, { env: {} })`, which
+// REPLACES the environment outright and would otherwise strand that worker with the flags
+// visible; it is transitive to nested workers; and it does NOT cross a process boundary,
+// so a thread of this process is separated from a descendant structurally rather than by
+// guesswork.
+const ARGV_ONLY_FLAGS_KEY = "nub.argv-only-flags";
 try {
-  const injectedArgvFlags = process.env.__NUB_ARGV_ONLY_FLAGS;
+  const workerThreads = getBuiltin("node:worker_threads");
+  const fromEnv = process.env.__NUB_ARGV_ONLY_FLAGS;
+  const injectedArgvFlags = fromEnv || workerThreads.getEnvironmentData(ARGV_ONLY_FLAGS_KEY);
   if (injectedArgvFlags) {
-    // Delete rather than propagate: a descendant that nub augments gets its own
-    // signal, and one that nub does not never had the flags on argv anyway.
-    delete process.env.__NUB_ARGV_ONLY_FLAGS;
-    const injected = new Set(injectedArgvFlags.split(" ").filter(Boolean));
+    if (fromEnv) {
+      delete process.env.__NUB_ARGV_ONLY_FLAGS;
+      workerThreads.setEnvironmentData(ARGV_ONLY_FLAGS_KEY, fromEnv);
+    }
+    const injected = new Set(String(injectedArgvFlags).split(" ").filter(Boolean));
     if (Array.isArray(process.execArgv)) {
       process.execArgv = process.execArgv.filter((arg) => !injected.has(arg));
     }
@@ -547,6 +566,52 @@ function annotateError(err, hint) {
   }
 }
 
+// Upstream Node bug: CJS `require()` of a SCHEME-ONLY builtin (`node:test`,
+// `node:sqlite`, `node:sea`, `node:test/reporters`) throws
+// ERR_INVALID_RETURN_PROPERTY_VALUE ("… but got null") whenever ANY sync resolve
+// hook is registered. Measured per-release: broken on 22.15.0–22.17.1,
+// 23.5.0–23.11.1 and 24.0.0–24.3.0; fixed in 22.18.0+, 24.4.0+ and 25+ by
+// nodejs/node#58612 (bfc68c8ae8, for nodejs/node#58607). The 23.x
+// line reached end-of-life without the backport, and below 22.15/23.5
+// `module.registerHooks` does not exist at all, so the bug is unreachable there. A
+// plain-Node pass-through hook reproduces it exactly — nub only makes it
+// unconditional, by always hooking on the fast tier.
+//
+// Mechanism: with hooks present, `resolveForCJSWithHooks` leaves its fast path and
+// recomputes the URL as `convertCJSFilenameToURL(<normalized id>)`. The old helper
+// keyed on `BuiltinModule.normalizeRequirableId(id)`, which is FALSE for a bare
+// scheme-only id — `require("test")` is not legal — so `test` matched neither the
+// builtin branch nor `isAbsolute` and came back VERBATIM. That bare id then rides
+// into the load chain, where `validateLoad` waives the string-source requirement
+// only for a `node:`-prefixed url, so the default step's own correct
+// `{ format: "builtin", source: null }` is rejected. Upstream's fix was to strip any
+// `node:` prefix and test `canBeRequiredByUsers` instead. A REGULAR builtin was
+// never affected: `normalizeRequirableId("fs")` is truthy, so it already round-
+// tripped to `node:fs`.
+//
+// Re-prefixing reproduces the fixed helper's output at the one place nub can reach.
+// It is a provable no-op on a fixed Node, where the url already starts with `node:`
+// and the guard cannot fire, and `isBuiltin("node:" + url)` selects exactly the
+// scheme-only set — a `file:`/`data:` url, a Windows path and a bare regular builtin
+// all fail it.
+//
+// This hook is SHARED with ESM: a `registerHooks` resolve hook fires for `import`
+// too, on every version (verified on 22.15.0, 24.3.0 and 26.7.0 — both
+// `import("node:test")` and a relative `import` reach it). What keeps ESM safe is
+// not unreachability but the colon guard: ESM resolution always yields a
+// scheme-bearing URL (`node:test`, `file:///…`), so the rewrite short-circuits
+// before it can apply. Only the CJS `require()` path ever produces a bare id.
+function restoreSchemeOnlyBuiltinURL(result) {
+  try {
+    const url = result && result.url;
+    if (typeof url !== "string" || url === "" || url.includes(":")) return result;
+    if (!module_.isBuiltin(`node:${url}`)) return result;
+    return { ...result, url: `node:${url}` };
+  } catch {
+    return result;
+  }
+}
+
 function makeHooks(core, watchReporting) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
@@ -569,7 +634,7 @@ function makeHooks(core, watchReporting) {
       } catch { /* fall through to Node's resolver */ }
     }
     try {
-      return nextResolve(specifier, context);
+      return restoreSchemeOnlyBuiltinURL(nextResolve(specifier, context));
     } catch (err) {
       if (isAsyncLoaderSyncStub(err)) {
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
@@ -646,7 +711,15 @@ function makeHooks(core, watchReporting) {
     // 22.14, below every flag-bearing release, so native import-text is never reachable
     // there.
     // (Node 18.20+ parses the `with` syntax; the 18.19.x floor cannot.)
-    if (context?.importAttributes?.type === "text") {
+    // The scheme gate applies only to the POLYFILL leg: this branch precedes
+    // extension dispatch, so `extname`'s gate does not cover it, and the polyfill
+    // reads the bytes off disk — only a `file:` URL has bytes there. The native
+    // leg needs no scheme restriction: it hands the URL straight back to the
+    // chain, and gating it would drop `data:text/plain` + `type: "text"` into
+    // the unknown-data-URL-format trap below instead of Node's own text answer.
+    // A non-`file:` URL on the polyfill tier falls through to `nextLoad` with
+    // every other unclaimed URL.
+    if (context?.importAttributes?.type === "text" && (NATIVE_IMPORT_TEXT || core.isFileUrl(url))) {
       return NATIVE_IMPORT_TEXT ? nextLoad(url, context) : core.loadTextImport(url);
     }
 
@@ -836,6 +909,27 @@ function makeHooks(core, watchReporting) {
   return { resolve, load };
 }
 
+// Give a Node internal we are about to wrap the name its own frame used to print.
+// V8 derives a CallSite's method name by finding the function as a property of its
+// receiver, so once `Module._resolveFilename` points at our wrapper, delegating to
+// the saved original through `.call()` prints `Module.<anonymous>` instead of
+// `Module._resolveFilename`, and `CallSite.getFunctionName()` goes null (these
+// internals carry no own name). The null is what breaks the REPL: node:repl cuts a
+// trace at the LAST null-named frame — normally its own `REPL1:1` eval frame — and
+// the frames nub adds to a CJS resolve push that one past the default
+// `Error.stackTraceLimit` of 10, leaving the delegated original as the only
+// null-named frame, so `require("./missing")` prints with no trace at all. Naming
+// the original restores Node's exact frame text. The REPL's own frame is still past
+// the capture limit, so no null-named frame remains and node:repl's `findLastIndex`
+// returns -1 — `slice(0, -1)` then drops just the outermost frame instead of the
+// whole trace.
+function nameInternalFrame(fn, name) {
+  try {
+    Object.defineProperty(fn, "name", { value: name, configurable: true });
+  } catch { /* frozen/exotic: leave verbatim */ }
+  return fn;
+}
+
 // ── CommonJS require() augmentation (BOTH tiers) ────────────────────
 // `module.registerHooks`' CJS-`require()` coverage is INCOMPLETE before ~Node 24:
 // on Node 22.15 a `require()` from a `.cts` parent (which Node loads via the ESM
@@ -878,7 +972,7 @@ function requireEsmError(filename) {
 // `require("./esm.ts")`), and the resolve shim below plus the tier's load hook
 // already cover resolution + transpile.
 function installCjsRequireHooks(core, withClassicTranspile) {
-  const origResolveFilename = module_._resolveFilename;
+  const origResolveFilename = nameInternalFrame(module_._resolveFilename, "_resolveFilename");
 
   // The classic transpile handlers registered below put `.ts`/`.cts`/`.mts`/`.tsx`/
   // `.jsx` into `Module._extensions`, and Node's `_findPath` runs `tryExtensions` over
@@ -1331,7 +1425,7 @@ function armChildProcessCompileCacheWrap() {
   if (__cpWrapArmed || __cpWrapped) return;
   __cpWrapArmed = true;
   if (typeof module_._load !== "function") return;
-  const origLoad = module_._load;
+  const origLoad = nameInternalFrame(module_._load, "_load");
   module_._load = function (request, parent, isMain) {
     const exports = origLoad.call(this, request, parent, isMain);
     if (request === "child_process" || request === "node:child_process") {
@@ -1634,6 +1728,10 @@ module.exports = {
   registerLoaderWorker,
   makeHooks,
   shouldAutoAsyncTierAtPreload,
+  // Consumed by the standalone loader entry (loader-entry.mjs), whose foreign-
+  // loader scan must be value-aware (its own delivery IS an `--import`) and so
+  // cannot reuse shouldAutoAsyncTierAtPreload directly.
+  nodeHookComposeBroken,
   installCjsRequireHooks,
   preloadPolyfillPackages,
   installTemporalGlobal,

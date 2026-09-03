@@ -266,48 +266,16 @@ fn resolve_from<T>(
 /// verdict then costs one launch on a mislabelled Node, not a safety property.
 const PROBE_DIR: &str = "smol-probe";
 
-/// A remembered probe verdict for `node_bin`, if one exists and still applies.
-///
-/// Returns `None` on any doubt — a missing, untrusted, malformed, or stale entry
-/// all mean "probe it again", which is always correct and merely slower.
-pub fn read_node_version(node_bin: &Path, stamp: &str) -> Option<String> {
-    for candidate in candidates() {
-        let Some(base) = candidate.path else { continue };
-        let path = probe_path(&base, node_bin);
-        // The namespace gate walks DIRECTORIES, so it is applied to the directory
-        // holding the entry; the entry itself is then checked directly. Handing it
-        // the file made every read miss, silently — the cache wrote and never hit.
-        let Some(parent) = path.parent() else {
-            continue;
-        };
-        if inspect_existing(parent).is_err() {
-            continue;
-        }
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        // symlink_metadata, so a symlink planted at this name is rejected rather
-        // than followed to whatever it points at.
-        if !metadata.is_file() || !owner_only(&metadata) {
-            continue;
-        }
-        let Ok(body) = fs::read_to_string(&path) else {
-            continue;
-        };
-        // `<stamp>\n<version>`: the stamp must match the binary as it is NOW, or
-        // this entry describes a different file that happened to sit at this path.
-        let Some((recorded, version)) = body.split_once('\n') else {
-            continue;
-        };
-        if recorded == stamp {
-            return Some(version.trim().to_string());
-        }
-    }
-    None
-}
-
 /// Remember a probe verdict. Best effort: a cache that cannot be written is a
 /// slower launch, never a failed one, so every error here is discarded.
+///
+/// The probe directory is made by `create`, never `create_dir_all`, and the two
+/// are not interchangeable here: `create_dir_all` takes the directory's mode from
+/// the ambient umask, and [`ProbeStore::resolve`] runs the same leaf gate that
+/// rejects any group- or other-writable directory. Under a umask of 002 that
+/// `create_dir_all` yields 0o775, so every write lands in a directory every read
+/// then refuses — the cache writes and never hits, silently, exactly the failure
+/// the parent-vs-leaf note on the read path already records once.
 pub fn write_node_version(node_bin: &Path, stamp: &str, version: &str) {
     for candidate in candidates() {
         let Some(base) = candidate.path else { continue };
@@ -315,7 +283,7 @@ pub fn write_node_version(node_bin: &Path, stamp: &str, version: &str) {
         let Some(parent) = path.parent() else {
             continue;
         };
-        if fs::create_dir_all(parent).is_err() {
+        if create(parent).is_err() {
             continue;
         }
         if fs::write(&path, format!("{stamp}\n{version}\n")).is_ok() {
@@ -328,8 +296,89 @@ pub fn write_node_version(node_bin: &Path, stamp: &str, version: &str) {
 /// One file per probed binary, named by the hash of its path so an arbitrary
 /// filesystem path becomes a fixed-width name that cannot escape the directory.
 fn probe_path(base: &Path, node_bin: &Path) -> PathBuf {
-    let name = blake3::hash(node_bin.to_string_lossy().as_bytes()).to_hex();
-    base.join(PROBE_DIR).join(name.as_str())
+    base.join(PROBE_DIR).join(probe_entry_name(node_bin))
+}
+
+/// The entry filename for `node_bin`, independent of which cache root holds it.
+fn probe_entry_name(node_bin: &Path) -> String {
+    blake3::hash(node_bin.to_string_lossy().as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+/// The probe directories one discovery pass may READ, gate-checked once.
+///
+/// The gate walks an ancestor chain — roughly six `symlink_metadata` calls per
+/// root — and the read path used to run it for every candidate root on every
+/// lookup. `--smol` discovery looks up once per installed Node, so a machine
+/// carrying 91 of them ran the walk ~720 times to read at most one small file:
+/// the walk, not the verdict, was the cost.
+///
+/// Its guarantee is per-pass exactly as [`resolve`]'s is — that function
+/// validates one root and threads it through the whole run rather than
+/// re-checking before each use — so this is resolved once and threaded the same
+/// way. Deliberately NOT a process-global memo: `candidates()` reads the
+/// environment, and a `OnceLock` over it would freeze whichever test happened to
+/// call first, which is the shared-mutable-state shape that makes a suite
+/// order-dependent.
+///
+/// ORDER and fall-through are unchanged — a root whose gate fails is dropped
+/// here instead of inside the loop, and a root holding no entry for a given Node
+/// still falls through to the next one.
+pub struct ProbeStore {
+    dirs: Vec<PathBuf>,
+}
+
+impl ProbeStore {
+    /// Gate-check every candidate probe directory, once.
+    pub fn resolve() -> Self {
+        Self {
+            dirs: candidates()
+                .into_iter()
+                .filter_map(|candidate| {
+                    let dir = candidate.path?.join(PROBE_DIR);
+                    // A directory that does not exist yet passes the gate, so a
+                    // pass that writes its first verdict can still read it back.
+                    inspect_existing(&dir).ok()?;
+                    Some(dir)
+                })
+                .collect(),
+        }
+    }
+
+    /// A remembered probe verdict for `node_bin`, if one exists and still applies.
+    ///
+    /// Returns `None` on any doubt — a missing, untrusted, malformed, or stale
+    /// entry all mean "probe it again", which is always correct and merely slower.
+    pub fn read_node_version(&self, node_bin: &Path, stamp: &str) -> Option<String> {
+        // One hash per lookup rather than one per candidate root: the entry name
+        // is a function of the Node path alone.
+        let name = probe_entry_name(node_bin);
+        for base in &self.dirs {
+            let path = base.join(&name);
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            // symlink_metadata, so a symlink planted at this name is rejected
+            // rather than followed to whatever it points at.
+            if !metadata.is_file() || !owner_only(&metadata) {
+                continue;
+            }
+            let Ok(body) = fs::read_to_string(&path) else {
+                continue;
+            };
+            // `<stamp>\n<version>`: the stamp must match the binary as it is NOW,
+            // or this entry describes a different file that happened to sit at
+            // this path.
+            let Some((recorded, version)) = body.split_once('\n') else {
+                continue;
+            };
+            if recorded == stamp {
+                return Some(version.trim().to_string());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(unix)]
@@ -1226,12 +1275,14 @@ mod tests {
 
         write_node_version(&node, "stamp-A", "26.5.0");
         assert_eq!(
-            read_node_version(&node, "stamp-A").as_deref(),
+            ProbeStore::resolve()
+                .read_node_version(&node, "stamp-A")
+                .as_deref(),
             Some("26.5.0"),
             "a verdict written for this stamp must come back"
         );
         assert_eq!(
-            read_node_version(&node, "stamp-B"),
+            ProbeStore::resolve().read_node_version(&node, "stamp-B"),
             None,
             "a DIFFERENT stamp means the binary changed — the old verdict must not \
              be reused, or a replaced Node inherits a version nobody verified"
@@ -1242,10 +1293,34 @@ mod tests {
         let other = base.join("other-node");
         fs::write(&other, b"#!/bin/sh\nexit 0\n").unwrap();
         assert_eq!(
-            read_node_version(&other, "stamp-A"),
+            ProbeStore::resolve().read_node_version(&other, "stamp-A"),
             None,
             "verdicts are per binary path, never shared"
         );
+
+        // The DIRECTORY's mode is pinned, never inherited from the umask. The read
+        // path runs the leaf gate on it, so a `create_dir_all` under a umask of 002
+        // (0o775) would make every write unreadable — the cache writing and never
+        // hitting, on every machine with that umask, invisible from a 022 one.
+        // Asserted here rather than in a test of its own because this one already
+        // owns `__NUB_COMPILE_CACHE_DIR`, and a second writer of that process global
+        // would race it under the parallel runner.
+        //
+        // The assertion pins the EXACT mode rather than testing `& 0o022 == 0`, and
+        // that difference is the whole value of it: `create_dir_all` yields
+        // `0o777 & !umask`, so the weaker form holds at the 0o755 a 022 umask gives
+        // and stays green on CI — passing on the very environment that hid the bug.
+        // Only 0o700 discriminates, and it is umask-independent precisely because it
+        // has no group or other bits left for a umask to clear.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = probe_path(&base, &node).parent().unwrap().to_path_buf();
+            let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "the probe directory's mode must be pinned, not taken from the umask: {mode:o}"
+            );
+        }
 
         // A group-writable entry is somebody else's to edit, so it is not believed.
         {
@@ -1253,7 +1328,7 @@ mod tests {
             let entry = probe_path(&base, &node);
             fs::set_permissions(&entry, fs::Permissions::from_mode(0o666)).unwrap();
             assert_eq!(
-                read_node_version(&node, "stamp-A"),
+                ProbeStore::resolve().read_node_version(&node, "stamp-A"),
                 None,
                 "a world-writable verdict must be refused"
             );

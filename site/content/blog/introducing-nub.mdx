@@ -33,7 +33,7 @@ Bun and Deno proved there's enormous appetite for an all-in-one toolkit that rep
 
 ## Introducing Nub
 
-Nub embraces it instead. It's a single Rust binary that transpiles your code and executes it on the stock `node` your project pins — so the runtime underneath *is* Node. On Deno's own cross-runtime Node-compatibility corpus it clears 98.6% of what real Node passes, versus 78.5% for Deno 2.9 and 66.8% for Bun 1.4. It combines:
+Nub embraces it instead. It's a single Rust binary that transpiles your code and executes it on the stock `node` your project pins — so the runtime underneath *is* Node. On Node 26.7's own test suite, scored the way Deno's compatibility corpus scores it, it clears 98.5% of what real Node passes, versus 74.2% for Deno 2.9 and 70.1% for Bun 1.4. It combines:
 
 ```console
 $ nub index.ts             # file runner — full TypeScript, on stock Node
@@ -512,7 +512,7 @@ Remove Nub tomorrow and your code keeps working, unchanged.
 ## FAQ
 
 - [Is it faster than Node.js?](/docs/faq#is-it-faster-than-nodejs)
-- [Why not just use Node's built-in TypeScript support?](/docs/faq#why-not-just-use-nodes-built-in-typescript-support)
+- [Why not Node's built-in TypeScript support?](/docs/faq#why-not-nodes-built-in-typescript-support)
 - [Why hasn't anyone else done this?](/docs/faq#why-hasnt-anyone-else-done-this)
 - [Is Nub a replacement for Node?](/docs/faq#is-nub-a-replacement-for-node)
 - [What can I stop using once I install Nub?](/docs/faq#what-npm-packages-can-i-stop-using-once-i-install-nub)

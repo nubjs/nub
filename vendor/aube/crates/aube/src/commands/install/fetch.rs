@@ -15,6 +15,21 @@ use miette::{Context, IntoDiagnostic, miette};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 
+/// `failed to fetch …` as a report, carrying the sandbox help when the
+/// registry client classified the failure as a network deny — the one case
+/// where the remedy is environmental and "check auth" would mislead an agent.
+pub(crate) fn fetch_failure(e: &aube_registry::Error, message: String) -> miette::Report {
+    match e {
+        aube_registry::Error::NetworkDenied(_) => {
+            miette!(
+                help = aube_util::agent_sandbox::network_denied_help(),
+                "{message}"
+            )
+        }
+        _ => miette!("{message}"),
+    }
+}
+
 /// Materialize a local-source package into the store.
 ///
 /// `Directory` walks the target and hash-imports every file; `Tarball`
@@ -352,9 +367,12 @@ pub(super) async fn import_local_source(
                 )
             })?;
             let bytes = client.fetch_tarball_bytes(&t.url).await.map_err(|e| {
-                miette!(
-                    "failed to fetch {}: {e}{chain}",
-                    aube_util::url::redact_url(&t.url)
+                fetch_failure(
+                    &e,
+                    format!(
+                        "failed to fetch {}: {e}{chain}",
+                        aube_util::url::redact_url(&t.url)
+                    ),
                 )
             })?;
             if t.integrity.is_empty() {
@@ -949,9 +967,12 @@ where
                         .map_err(|e| {
                             let throttled = e.is_throttle();
                             (
-                                miette!(
-                                    "failed to fetch {display_name}@{version}: {e}{}",
-                                    crate::dep_chain::format_chain_for(&display_name, &version)
+                                fetch_failure(
+                                    &e,
+                                    format!(
+                                        "failed to fetch {display_name}@{version}: {e}{}",
+                                        crate::dep_chain::format_chain_for(&display_name, &version)
+                                    ),
                                 ),
                                 throttled,
                             )
@@ -960,9 +981,12 @@ where
                     client.fetch_tarball_bytes(&url).await.map(|b| (b, None)).map_err(|e| {
                         let throttled = e.is_throttle();
                         (
-                            miette!(
-                                "failed to fetch {display_name}@{version}: {e}{}",
-                                crate::dep_chain::format_chain_for(&display_name, &version)
+                            fetch_failure(
+                                &e,
+                                format!(
+                                    "failed to fetch {display_name}@{version}: {e}{}",
+                                    crate::dep_chain::format_chain_for(&display_name, &version)
+                                ),
                             ),
                             throttled,
                         )

@@ -29,7 +29,7 @@ use crate::package_ext::{
 };
 use crate::semver_util::{
     AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
-    version_satisfies,
+    sparse_pick_needs_refetch, version_satisfies,
 };
 use crate::workspace_spec::workspace_range_binds;
 use crate::{
@@ -197,6 +197,11 @@ pub(crate) struct ResolveDriver<'a> {
     /// doesn't crash the wrong task. Checked after the fetch-wait loop
     /// to decide skip (optional) vs propagate (required).
     failed_fetches: FxHashMap<String, Error>,
+    /// `name@refused -> substitute` for every pick the trust gate refused and
+    /// the resolver then backtracked past, so the substitution notice is
+    /// printed once per outcome rather than once per parent that depends on
+    /// the package.
+    trust_repicks: FxHashSet<String>,
     /// Catalog picks gathered as the BFS rewrites `catalog:` task
     /// ranges. Outer key: catalog name. Inner: package name → spec.
     catalog_picks: BTreeMap<String, BTreeMap<String, String>>,
@@ -386,6 +391,7 @@ impl<'a> ResolveDriver<'a> {
             resolved_times: BTreeMap::new(),
             skipped_optional_dependencies: BTreeMap::new(),
             failed_fetches: FxHashMap::default(),
+            trust_repicks: FxHashSet::default(),
             catalog_picks: BTreeMap::new(),
             deferred_transitives: Vec::new(),
             deferred_auto_peers: Vec::new(),
@@ -585,13 +591,18 @@ impl<'a> ResolveDriver<'a> {
     /// fail-open hazard). Returns `false` (accept the offline pick) for
     /// frozen picks whose history is settled. See the big comment on the
     /// matching arm in the pick loop for the full rationale.
+    #[allow(clippy::too_many_arguments)]
     fn primer_pick_needs_refetch(
         &self,
         packument: &aube_registry::Packument,
         picked_version: &str,
+        range_str: &str,
         cutoff_for_pkg: Option<&str>,
-        range_is_dist_tag: bool,
+        pick_lowest: bool,
+        locked_version: Option<&str>,
+        sparse_seed: bool,
     ) -> bool {
+        let range_is_dist_tag = range_resolves_via_dist_tag(packument, range_str);
         // A dist-tag (`latest`, `next`, a custom tag) is a MUTABLE pointer
         // the publisher can repoint between builds. The primer bakes the
         // tag's value at build time, and `classify_regime` — which keys
@@ -607,6 +618,21 @@ impl<'a> ResolveDriver<'a> {
         // fresh-resolve refetched, so the two diverged and `update`
         // downgraded). Refetch unconditionally so the tag is re-read live.
         if range_is_dist_tag {
+            return true;
+        }
+        // An age-pruned seed has holes in settled history, so the regime
+        // argument below ("a refetch could never surface a newer
+        // satisfying version") does not hold when the range could match
+        // a version the prune dropped above the pick.
+        if sparse_seed
+            && sparse_pick_needs_refetch(
+                packument,
+                picked_version,
+                range_str,
+                pick_lowest,
+                locked_version,
+            )
+        {
             return true;
         }
         match classify_regime(packument, picked_version) {
@@ -717,10 +743,10 @@ impl<'a> ResolveDriver<'a> {
         {
             self.ensure_fetch(&fetch_name);
             match self.fetcher.join_next().await {
-                Some(Ok(Ok((name, packument, from_primer)))) => {
+                Some(Ok(Ok((name, packument, primer_seed)))) => {
                     self.fetcher.release_in_flight(&name);
-                    if from_primer {
-                        self.fetcher.note_primer_seeded(name.clone());
+                    if let Some(seed) = primer_seed {
+                        self.fetcher.note_primer_seeded(name.clone(), seed);
                     }
                     self.resolver.cache.insert(name, packument);
                     self.packument_fetch_count += 1;
@@ -960,8 +986,11 @@ impl<'a> ResolveDriver<'a> {
                         && self.primer_pick_needs_refetch(
                             packument,
                             &meta.version,
+                            &task.range,
                             cutoff_for_pkg,
-                            range_resolves_via_dist_tag(packument, &task.range),
+                            pick_lowest,
+                            locked_version,
+                            self.fetcher.primer_seed_is_sparse(&registry_name),
                         ) =>
                 {
                     // Consume the seed flag (one refetch per package,
@@ -1113,7 +1142,7 @@ impl<'a> ResolveDriver<'a> {
         let packument = self.resolver.cache.get(&registry_name).ok_or_else(|| {
             Error::Registry(registry_name.clone(), "packument not in cache".to_string())
         })?;
-        let picked_ref = prefer_non_vulnerable_pick(
+        let mut picked_ref = prefer_non_vulnerable_pick(
             task.registry_name(),
             packument,
             &task.range,
@@ -1131,20 +1160,81 @@ impl<'a> ResolveDriver<'a> {
         // compare. The check needs the live packument's `time`
         // map and all version metadata, both of which are still
         // in scope here from L1191.
-        if self.resolver.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade {
-            crate::trust::check_no_downgrade(
+        if self.resolver.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade
+            && let Err(err) = crate::trust::check_no_downgrade(
                 packument,
                 &picked_ref.version,
                 picked_ref,
                 &self.resolver.dependency_policy.trust_policy_exclude,
                 self.resolver.dependency_policy.trust_policy_ignore_after,
             )
-            .map_err(|e| match e {
-                crate::trust::TrustCheckError::Downgrade(d) => Error::TrustDowngrade(Box::new(d)),
+        {
+            let downgrade = match err {
+                crate::trust::TrustCheckError::Downgrade(d) => d,
+                // A packument with no `time` entry for the picked version is a
+                // metadata anomaly, not a refused candidate: there is nothing
+                // to backtrack THROUGH, since the same missing-time shape is
+                // what every other candidate would be judged on. Stays fatal.
                 crate::trust::TrustCheckError::MissingTime(d) => {
-                    Error::TrustCheckMissingTime(Box::new(d))
+                    return Err(Error::TrustCheckMissingTime(Box::new(d)));
                 }
-            })?;
+            };
+            // Backtrack the way the age gate already does. `pick_version`
+            // treats a too-new release as "keep looking down the range", so a
+            // package that publishes one version manually between two attested
+            // ones deadlocks the two gates against each other: the age gate
+            // walks down to the manual publish and the trust gate refuses it,
+            // while a fully-signed release one version lower satisfies the
+            // range and is never considered. Refusing is still the outcome
+            // when NO satisfying version clears both gates, so neither gate is
+            // weakened — only the order of "refuse" and "keep looking" changes.
+            match crate::trust::repick_past_downgrade(
+                packument,
+                task.registry_name(),
+                &task.range,
+                &downgrade.picked_version,
+                pick_lowest,
+                cutoff_for_pkg,
+                exempt_cutoff,
+                strict,
+                &self.resolver.dependency_policy.trust_policy_exclude,
+                self.resolver.dependency_policy.trust_policy_ignore_after,
+                &self.resolver.vulnerable_ranges,
+                is_age_exempt,
+            ) {
+                Some(meta) => {
+                    // Never silent: the user asked for a range and is getting
+                    // something other than its head, for a supply-chain reason
+                    // they may want to act on. Deduped per refusal AND
+                    // substitute, because the same package resolves once per
+                    // parent that depends on it and two disjunctive ranges can
+                    // share a refused head while landing on different
+                    // substitutes — keying on the refusal alone would suppress
+                    // the second and leave the printed line naming a version
+                    // one of the parents is not on.
+                    if self.trust_repicks.insert(format!(
+                        "{}@{} -> {}",
+                        downgrade.name, downgrade.picked_version, meta.version
+                    )) {
+                        tracing::warn!(
+                            code = aube_codes::warnings::WARN_AUBE_TRUST_DOWNGRADE_SKIPPED,
+                            "skipped {}@{} (trustPolicy=no-downgrade): earlier published version \
+                             {} had {} but this version has {}; resolved to {}@{} instead",
+                            downgrade.name,
+                            downgrade.picked_version,
+                            downgrade.prior_version,
+                            downgrade.prior_evidence.label(),
+                            downgrade
+                                .current_evidence
+                                .map_or("no trust evidence", |e| e.label()),
+                            downgrade.name,
+                            meta.version,
+                        );
+                    }
+                    picked_ref = meta;
+                }
+                None => return Err(Error::TrustDowngrade(Box::new(downgrade))),
+            }
         }
 
         // Clone the picked metadata into an owned value so we can
@@ -1179,6 +1269,20 @@ impl<'a> ResolveDriver<'a> {
             && task.range == "latest"
             && let Some(latest) = packument.dist_tags.get("latest")
             && latest != &picked_ref.version
+            // The trust gate can move a pick below `latest` too, and this
+            // notice names `minimumReleaseAge` by wording. Fire it only when
+            // `latest` genuinely fails the age cutoff, so a trust re-pick does
+            // not get reported as an age-gate fallback.
+            && !crate::semver_util::version_clears_cutoff(
+                packument,
+                latest,
+                if is_age_exempt(latest, None) {
+                    exempt_cutoff
+                } else {
+                    cutoff_for_pkg
+                },
+                strict,
+            )
         {
             aube_util::record_age_gate_downgrade(task.registry_name(), &picked_ref.version, latest);
         }

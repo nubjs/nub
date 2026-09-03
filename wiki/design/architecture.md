@@ -16,7 +16,7 @@ Everything Nub adds reaches the process through a mechanism Node already publish
 > [!NOTE]
 > The test that decides whether a feature is in scope: would a user on plain Node, plus the corresponding `module.register()` call, preload, or addon, get the same result? If not, the feature needs a different mechanism or it is dropped.
 
-Why the user's Node is spawned rather than embedded is measured in [[research/node-embedding-vs-spawn]]; the abandoned fork direction is in [[research/forking-node]]; the choice of per-file hooks over a bundler pass is in [[research/augmentation-layers]].
+The choice of per-file hooks over a bundler pass is in [[research/augmentation-layers]].
 
 ## Feature support across Node versions
 
@@ -32,24 +32,26 @@ All of it lives in one table, 47 features deep. Each carries sorted, non-overlap
 | Storage file | Passes a workspace-keyed `--localstorage-file` path, for Web Storage only |
 | Unflag on argv | Injects a V8 flag Node accepts only on the command line, never through `NODE_OPTIONS` |
 
-Twelve distinct flags are injected this way, covering `node:sqlite`, EventSource, WebSocket, Web Storage, and the vm, wasm, addon and text-import module kinds. A thirteenth, `--js-defer-import-eval` for `import defer`, takes the argv-only route: Node rejects it in `NODE_OPTIONS`, so it can travel no other way. The polyfilled set is web and TC39 globals: Temporal, URLPattern, Worker, `navigator`, Float16Array, the disposable stack types, and the iterator, promise and collection helpers.
+Twelve distinct flags are injected this way, covering `node:sqlite`, EventSource, WebSocket, Web Storage, and the vm, wasm, addon and text-import module kinds. A thirteenth, `--js-defer-import-eval` for `import defer`, differs only in why the other channel is closed to it: Node refuses that one in `NODE_OPTIONS` by name, while the rest are kept off it by Nub's own choice, for the reason below. The polyfilled set is web and TC39 globals: Temporal, URLPattern, Worker, `navigator`, Float16Array, the disposable stack types, and the iterator, promise and collection helpers.
 
 Below a feature's floor no band matches and Nub does nothing — the feature is unavailable rather than half-present.
 
-Banding is exact because it has to be. Injecting an experimental flag on a version that does not have it is a hard startup abort, not a warning. Several rows carry two disjoint bands where a backport reached one release line and not another; `node:sqlite` is the clearest case, having been unflagged, re-flagged, and unflagged again. ShadowRealm is never injected at all, because the flag crashes embedded Node through a snapshot hash mismatch. That hazard is what separates the two unflag shapes: a flag in `NODE_OPTIONS` is inherited by every process below, including an embedded Node booting from a V8 snapshot, while an argv flag reaches only the process Nub spawns.
+Banding is exact because it has to be. Injecting an experimental flag on a version that does not have it is a hard startup abort, not a warning. Several rows carry two disjoint bands where a backport reached one release line and not another; `node:sqlite` is the clearest case, having been unflagged, re-flagged, and unflagged again. ShadowRealm is never injected at all, because the flag crashes embedded Node through a snapshot hash mismatch. That hazard generalizes, and it is why no version-gated flag rides `NODE_OPTIONS`. That string is inherited by every process below, including an embedded Node booting from a V8 snapshot, and the set Nub builds is matched to the version of the Node it resolved — so a descendant running an older Node meets a flag it cannot parse and aborts at startup. Every injected flag travels on argv instead, reaching the process Nub spawns and nothing beneath it; a child `node` gets its own copy by re-entering Nub through the PATH shim. What stays in `NODE_OPTIONS` is the preload, which every Node accepts, and flags whose floor sits at or below Nub's own support floor.
 
-The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. A band that runs to infinity would eventually inject a flag the running Node has dropped, so both unflag shapes are checked against the real binary before injection: the `NODE_OPTIONS` set against what Node reports as accepted there, and the argv set by spawning the binary with the flag once and caching the verdict. A flag the binary no longer takes is dropped rather than aborting it at startup. Surveys behind the bands: [[research/experimental-flags-unflagging]], [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
+The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. A band that runs to infinity would eventually inject a flag the running Node has dropped, so both unflag shapes are checked against the real binary before injection, by different probes. The ordinary set is filtered against the list Node reports as accepted in `NODE_OPTIONS` — a cheap read that stays a valid existence check even though the flags themselves travel on argv. The argv-only set cannot use that list, since a flag Node refuses there is absent from it by construction, so each is checked by spawning the binary with it once and caching the verdict. A flag the binary no longer takes is dropped rather than aborting it at startup. Surveys behind the bands: [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
 
 ## Two tiers
 
-The runtime exists in two shapes, chosen by the availability of the synchronous hooks API and carried as [[crates/nub-core/src/node/version.rs#SupportTier]]. The floor of 18.19 is set by what the extension mechanisms permit — see [[research/node-version-floor]].
+The runtime exists in two shapes, chosen by the availability of the synchronous hooks API and carried as [[crates/nub-core/src/node/version.rs#SupportTier]]. The floor of 18.19 is set by what the extension mechanisms permit.
 
 | | Fast tier | Compat tier |
 | --- | --- | --- |
-| Node | 22.15 and above | 18.19 to 22.14 |
+| Node | 22.15 and above, except 23.0 to 23.4 | 18.19 to 22.14, and 23.0 to 23.4 |
 | Preload channel | `--require` | `--import` |
 | Hooks | `module.registerHooks`, synchronous, in-thread | `module.register`, in a loader worker |
 | Polyfills | Lazy getters | Eager import |
+
+The 23.x exclusion is not a special case, it is the tier definition applied correctly. `module.registerHooks` is a semver-minor that reached the 23.x Current line at 23.5.0 and the 22.x LTS line only later, at 22.15.0, so 23.0 to 23.4 sorts above the 22.x floor while carrying no synchronous hooks API. A version comparison against 22.15 alone therefore claims a capability those releases do not have.
 
 Using `--require` on the fast tier is a correctness mechanism, not an optimization. An `--import` preload forces eager ESM loader initialization, which routes even a CommonJS entry point through the async module job and breaks `executionAsyncId`, sync exception origin, `require.main.id` and `module.parent`. Coverage and composition behavior of the hooks API is measured in [[research/registerhooks-coverage-matrix]].
 
@@ -86,7 +88,7 @@ Four files load in precedence order, with the real process environment always wi
 - `.env.<mode>`
 - `.env`
 
-Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [[research/env-file-loading]] and [[research/env-autoload-security]].
+Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [[research/env-file-loading]].
 
 ## How the code is laid out
 

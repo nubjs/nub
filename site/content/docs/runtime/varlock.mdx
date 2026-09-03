@@ -33,7 +33,7 @@ nub run dev
 ```
 
 <Callout title="Monorepos">
-If you're in a monorepo sub-package, Nub checks the package root for `.env.schema` first, then the workspace root.
+Nub looks for `.env.schema` at the package you're running, then walks up to the workspace root. The nearest one wins, so a package that ships its own schema keeps it. Nub hands that directory to Varlock.
 </Callout>
 
 Nub does not vendor Varlock — it uses the copy already on your machine, checking the local project first and falling back to `PATH`. Finding neither is an error:
@@ -43,11 +43,11 @@ $ nub index.ts
 Error: .env.schema needs varlock, which isn't installed. Run `nub add -D varlock`.
 ```
 
-Only the commands that launch your code are gated this way. Installing still works, so `nub add -D varlock` fixes it in place.
+Only the commands that launch your code are gated; `nub add -D varlock` resolves it.
 
 ## Overriding the hand-over
 
-A `.env.schema` file is a signal Nub infers ownership from. Setting [`envFile`](/docs/config#envfile) is a project stating what it wants, so `envFile` takes precedence and Varlock stays out of the chain.
+A `.env.schema` file is a signal Nub infers ownership from; an explicit [`envFile`](/docs/config#envfile) setting wins, and Varlock stays out of the chain.
 
 ```jsonc title="nub.jsonc"
 {
@@ -65,7 +65,7 @@ The `--env-file` and `--no-env-file` flags do the same for a single run, and eit
 
 Precedence works at every scope, your global config included. A `.env.schema` decides the environment only when nothing else does, so a machine-wide `nub config set --global envFile false` reaches schema projects too.
 
-Setting `"envFile": "varlock"` goes the other way and selects Varlock. That is how one project keeps the hand-over when your global config turns environment files off.
+Setting `"envFile": "varlock"` selects Varlock explicitly. That is how one project keeps the hand-over when your global config turns environment files off.
 
 ```jsonc title="nub.jsonc"
 {
@@ -73,7 +73,7 @@ Setting `"envFile": "varlock"` goes the other way and selects Varlock. That is h
 }
 ```
 
-One exception to all of this. [dotenv-extended](https://www.npmjs.com/package/dotenv-extended) has used the `.env.schema` name for its own incompatible format since 2016, so a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
+The exception is [dotenv-extended](https://www.npmjs.com/package/dotenv-extended), which has used the `.env.schema` name for its own incompatible format since 2016 — a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
 
 <Callout>
 Read the [full docs](https://varlock.dev) for Varlock on varlock.dev.
