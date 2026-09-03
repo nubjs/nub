@@ -97,6 +97,12 @@ leaves=":(exclude)crates/nub-cli :(exclude)crates/nub-native :(exclude)crates/nu
 # Both checks are deliberately broad (any path under a depended-on crate, not just
 # *.rs): over-isolating on an irrelevant file costs one cold build; under-isolating
 # risks the clobber. Depended-on = every workspace/vendored crate except nub-cli.
+# `vendor/libsui` is one of them and was missing until 2026-09-02: it reaches the
+# build through `[patch.crates-io]` rather than a workspace member entry, so it
+# reads like a registry crate and was not obviously "ours". A worktree editing it
+# therefore keyed to the same bucket as one that had not, and reused the sibling's
+# rlib — surfacing as `E0599: no method named ... found` for a method sitting right
+# there in the source, on a build whose `--profile fast` clippy had just passed.
 # `runtime/` is in the set for a different reason than the crates: the binary
 # resolves `runtime/*.cjs` at run time from the tree that compiled nub-core (its
 # baked CARGO_MANIFEST_DIR), so a shared-bucket binary loads whichever SHARER
@@ -112,17 +118,17 @@ diverged=""
 if [ -n "$base" ]; then
   # shellcheck disable=SC2086  # $leaves must word-split into separate pathspecs
   diverged=$(git -C "$root" diff --name-only "$base" -- \
-    vendor/aube crates runtime $leaves 2>/dev/null || true)
+    vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null || true)
 fi
 # shellcheck disable=SC2086
 untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
-  vendor/aube crates runtime $leaves 2>/dev/null || true)
+  vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null || true)
 
 # The content key names the bucket AND, when isolating, names the seed to clone
 # from — so it is computed unconditionally. `ls-files -s` emits the staged blob
 # OIDs, so this is a pure content hash of the depended-on crates. ~0.2s.
 # shellcheck disable=SC2086
-key=$(git -C "$root" ls-files -s -- vendor/aube crates runtime $leaves 2>/dev/null \
+key=$(git -C "$root" ls-files -s -- vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null \
   | shasum 2>/dev/null | cut -c1-12 || true)
 if [ "$keyed" = 1 ]; then
   bucket="$shared${key:+-$key}"
