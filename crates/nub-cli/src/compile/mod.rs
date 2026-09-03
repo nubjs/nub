@@ -1675,11 +1675,7 @@ fn node_runs(node: &Path) -> bool {
 ///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
 ///    the scan but was never executed is a weaker guarantee, and the user should
 ///    know which one they got.
-fn verify_artifact(
-    bin: &Path,
-    target: &TargetPlatform,
-    version_info: Option<&[u8]>,
-) -> Result<()> {
+fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u8]>) -> Result<()> {
     let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
     let payload = inject::find_payload(target.format(), &bytes)
         .with_context(|| format!("scanning {} for its payload", bin.display()))?
