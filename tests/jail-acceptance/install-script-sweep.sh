@@ -43,6 +43,39 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -x "$NUB" ] || { echo "no nub binary at $NUB" >&2; exit 2; }
+
+# ⛔⛔ STAGE THE BUSYBOX SIDECAR, OR THIS HARNESS MEASURES THE WRONG SHELL ENTIRELY.
+# On Windows nub runs dependency lifecycle scripts under a bundled busybox `sh` that
+# release.yml lays beside `nub.exe`. A `cargo build` target dir has none, and
+# `apply_lifecycle_script_shell` (pm_engine/mod.rs) DOWNGRADES the missing sidecar to a
+# `tracing::warn!` and leaves the engine on `cmd.exe` — deliberately, so read-only verbs
+# like `nub list` still work, and therefore INVISIBLY at default log level.
+#
+# ⛔ THE COST OF NOT DOING THIS IS A FALSE `JAIL-CAUSED` VERDICT, MEASURED. Under cmd.exe a
+# postinstall of `chmod u+x ffmpeg` resolves `chmod` to git-bash's MSYS2 build, which dies
+# in `msys-2.0.dll` init under the AppContainer token (exit -1073741502 / 0xC0000142) — a
+# failure a shipped nub can never hit, because under busybox `sh` `chmod` is a builtin
+# APPLET and no MSYS2 process is ever spawned. `@ffmpeg-installer/linux-x64` was scored
+# JAIL-CAUSED on that basis and flips to OK with the sidecar staged. Any package whose
+# postinstall shells out to coreutils was mis-scored the same way.
+#
+# Six workflows already stage it (release, ci, sandbox-conformance, the two busybox probes,
+# build-jail-corpus-agent); this harness was the one that missed it. Copy it beside the
+# binary rather than setting `__NUB_BUSYBOX_EXE`, so the real `current_exe()` sidecar
+# resolution is exercised exactly as the win32 package does it.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*)
+    _bb_dst="$(dirname "$NUB")/busybox.exe"
+    if [ ! -f "$_bb_dst" ]; then
+      _bb_src="$ROOT/vendor/busybox-w32/busybox64.exe"
+      # ⛔ FAIL LOUDLY. Continuing without it is the exact silent degradation this block
+      # exists to end — it would score cmd.exe failures as jail failures.
+      [ -f "$_bb_src" ] || { echo "no busybox at $_bb_src; the sweep would measure cmd.exe, not nub's lifecycle shell" >&2; exit 2; }
+      cp "$_bb_src" "$_bb_dst" || { echo "could not stage busybox at $_bb_dst" >&2; exit 2; }
+    fi
+    echo "busybox sidecar: $_bb_dst" >&2
+    ;;
+esac
 OUT="${OUT:-/tmp/install-script-sweep.tsv}"
 : > "$OUT"
 [ -n "$KEEP" ] && mkdir -p "$KEEP"
