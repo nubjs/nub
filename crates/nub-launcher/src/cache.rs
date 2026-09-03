@@ -271,7 +271,7 @@ const PROBE_DIR: &str = "smol-probe";
 ///
 /// The probe directory is made by `create`, never `create_dir_all`, and the two
 /// are not interchangeable here: `create_dir_all` takes the directory's mode from
-/// the ambient umask, and [`read_node_version`] runs the same leaf gate that
+/// the ambient umask, and [`ProbeStore::resolve`] runs the same leaf gate that
 /// rejects any group- or other-writable directory. Under a umask of 002 that
 /// `create_dir_all` yields 0o775, so every write lands in a directory every read
 /// then refuses — the cache writes and never hits, silently, exactly the failure
