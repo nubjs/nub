@@ -706,6 +706,142 @@ fn test_write_leaves_workspace_member_links_to_the_workspace_pass() {
     assert_eq!(packages["node_modules/@w/a"]["link"], true);
 }
 
+/// A NON-root importer's local dep is keyed in the project-root frame,
+/// not the importer's. `LocalSource` paths arrive project-root-relative
+/// (`rebase_local`) and npm's keys are project-root-relative, so the two
+/// already agree — prepending the importer produced
+/// `packages/app/vendor/local-pkg`, a path matching nothing on disk,
+/// where npm 10 writes `vendor/local-pkg` (measured).
+#[test]
+fn test_write_keys_a_member_local_dep_in_the_project_root_frame() {
+    let local = LocalSource::Directory(PathBuf::from("vendor/local-pkg"));
+    let dep_path = local.dep_path("local-utils");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        dep_path.clone(),
+        LockedPackage {
+            name: "local-utils".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: dep_path.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(".".to_string(), vec![]);
+    graph.importers.insert(
+        "packages/app".to_string(),
+        vec![DirectDep {
+            name: "local-utils".to_string(),
+            dep_path,
+            dep_type: DepType::Production,
+            specifier: Some("file:../../vendor/local-pkg".to_string()),
+        }],
+    );
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    // `write` recovers a member's identity from its `package.json` on
+    // disk, so the importer needs to exist for the member pass to run.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
+    std::fs::write(
+        dir.path().join("packages/app/package.json"),
+        r#"{"name":"@w/app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(packages["vendor/local-pkg"]["version"], "1.0.0");
+    assert!(
+        packages.get("packages/app/vendor/local-pkg").is_none(),
+        "the importer prefix must not be prepended to an already-root-relative \
+         path, got {packages}"
+    );
+    assert_eq!(
+        packages["node_modules/local-utils"]["resolved"],
+        "vendor/local-pkg"
+    );
+}
+
+/// Two members depending on the same NAME at different paths: npm hoists
+/// the first to the root and NESTS the conflicting one under the importer
+/// that wants it. Measured, npm 10 — `node_modules/shared` →
+/// `vendor/one`, `packages/b/node_modules/shared` → `vendor/two`.
+///
+/// Keying every link at the root made the last writer win, so the first
+/// member silently resolved to the other's package: no error, a wrong
+/// module. That is the failure this pins.
+#[test]
+fn test_write_nests_a_conflicting_member_local_dep() {
+    let one = LocalSource::Directory(PathBuf::from("vendor/one"));
+    let two = LocalSource::Directory(PathBuf::from("vendor/two"));
+    let (one_path, two_path) = (one.dep_path("shared"), two.dep_path("shared"));
+    let mut graph = LockfileGraph::default();
+    for (dp, src, ver) in [(&one_path, one, "1.0.0"), (&two_path, two, "2.0.0")] {
+        graph.packages.insert(
+            dp.clone(),
+            LockedPackage {
+                name: "shared".to_string(),
+                version: ver.to_string(),
+                dep_path: dp.clone(),
+                local_source: Some(src),
+                ..Default::default()
+            },
+        );
+    }
+    graph.importers.insert(".".to_string(), vec![]);
+    for (importer, dp, spec) in [
+        ("packages/a", &one_path, "file:../../vendor/one"),
+        ("packages/b", &two_path, "file:../../vendor/two"),
+    ] {
+        graph.importers.insert(
+            importer.to_string(),
+            vec![DirectDep {
+                name: "shared".to_string(),
+                dep_path: dp.clone(),
+                dep_type: DepType::Production,
+                specifier: Some(spec.to_string()),
+            }],
+        );
+    }
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (d, n) in [("packages/a", "@w/a"), ("packages/b", "@w/b")] {
+        std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        std::fs::write(
+            dir.path().join(d).join("package.json"),
+            format!(r#"{{"name":"{n}","version":"1.0.0"}}"#),
+        )
+        .unwrap();
+    }
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(packages["node_modules/shared"]["resolved"], "vendor/one");
+    assert_eq!(
+        packages["packages/b/node_modules/shared"]["resolved"], "vendor/two",
+        "the conflicting target nests under its own importer rather than \
+         overwriting the root slot, got {packages}"
+    );
+}
+
 #[test]
 fn test_parse_file_resolved_without_link() {
     // npm writes `resolved: "file:..."` without `link: true` for

@@ -773,7 +773,7 @@ fn emit_file_dep_links<'a>(
             Some(
                 local
                 @ (LocalSource::Directory(_) | LocalSource::Tarball(_) | LocalSource::Link(_)),
-            ) => npm_file_dep_path(importer_path, &local.path_posix()),
+            ) => npm_file_dep_path(&local.path_posix()),
             _ => continue,
         };
         packages.insert(
@@ -784,8 +784,33 @@ fn emit_file_dep_links<'a>(
                 ..Default::default()
             },
         );
+
+        // npm hoists the first target to the root and NESTS a conflicting
+        // one under the importer that wants it, which is the only way the
+        // format can express two members depending on the same NAME at
+        // different paths. Measured, npm 10, members `a`→`vendor/one` and
+        // `b`→`vendor/two`:
+        //
+        //     "node_modules/shared":            { resolved: "vendor/one" }
+        //     "packages/b/node_modules/shared": { resolved: "vendor/two" }
+        //
+        // Keying every link at the root unconditionally made the last
+        // writer win, so `a` silently resolved to `b`'s package — no error,
+        // a wrong module. Take the root slot only if it is free or already
+        // points at this exact target; otherwise nest.
+        let root_key = format!("node_modules/{}", dep.name);
+        let key = match packages.get(&root_key) {
+            Some(existing) if existing.resolved.as_deref() != Some(resolved.as_str()) => {
+                if importer_path == "." || importer_path.is_empty() {
+                    root_key
+                } else {
+                    format!("{importer_path}/node_modules/{}", dep.name)
+                }
+            }
+            _ => root_key,
+        };
         packages.insert(
-            format!("node_modules/{}", dep.name),
+            key,
             WriteNpmPackage {
                 resolved: Some(resolved),
                 link: true,
@@ -795,19 +820,30 @@ fn emit_file_dep_links<'a>(
     }
 }
 
-/// Render the lockfile path key for a `file:` dep's package entry the
-/// way npm does: drop a leading `./` (npm normalizes `file:./local-pkg`
-/// to `local-pkg`) but preserve `../` climbs verbatim
-/// (`file:../sib` → `../sib`). For a non-root importer the stored path is
-/// importer-relative, so re-anchor it to the project root the way npm's
-/// keys are project-relative.
-fn npm_file_dep_path(importer_path: &str, path_posix: &str) -> String {
-    let normalized = path_posix.strip_prefix("./").unwrap_or(path_posix);
-    if importer_path == "." || importer_path.is_empty() {
-        normalized.to_string()
-    } else {
-        format!("{importer_path}/{normalized}")
-    }
+/// Render the lockfile path key for a local dep's package entry the way
+/// npm does: drop a leading `./` (npm normalizes `file:./local-pkg` to
+/// `local-pkg`) but preserve `../` climbs verbatim (`file:../sib` →
+/// `../sib`).
+///
+/// The path arrives PROJECT-ROOT-relative whichever importer declared
+/// it — `aube_resolver::local_source::rebase_local` rewrites every
+/// variant that way precisely so downstream code can resolve it with one
+/// `project_root.join(rel)` — and npm's keys are project-root-relative
+/// too, so the two frames already agree and nothing needs re-anchoring.
+///
+/// This used to take an `importer_path` and prepend it, on the stated
+/// belief that "for a non-root importer the stored path is
+/// importer-relative". That belief contradicted `rebase_local`, and the
+/// result was a doubled prefix: a member `packages/app` declaring
+/// `file:../../vendor/local-pkg` was keyed `packages/app/vendor/local-pkg`,
+/// a path matching nothing on disk, where npm writes `vendor/local-pkg`
+/// (measured, npm 10). Root importers were unaffected, which is why it
+/// went unnoticed.
+fn npm_file_dep_path(path_posix: &str) -> String {
+    path_posix
+        .strip_prefix("./")
+        .unwrap_or(path_posix)
+        .to_string()
 }
 
 type DepSections<'a> = (
