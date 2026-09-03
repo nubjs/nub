@@ -24,7 +24,7 @@ repository = "https://github.com/nubjs/nub"
 # bytes — HashMap ordering would make two builds of one input differ.
 serde_json = { version = "1", features = ["preserve_order"] }
 yaml-rust2 = "0.9"
-toml = "0.8"
+toml = "1.1"
 json5 = "0.4"
 jsonc-parser = { version = "0.32.4", features = ["serde"] }
 nub-json-guard = { path = "../nub-json-guard" }

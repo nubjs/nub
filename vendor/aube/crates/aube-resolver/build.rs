@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[allow(dead_code)]
 mod primer_schema {
     include!("src/primer_schema.rs");
 }
@@ -29,7 +30,7 @@ const POPULAR_NAMES_FORMAT: u32 = 1;
 // in a layout-breaking way. The on-disk `primer-topN-vM-sK.rkyv.zst`
 // artifact is gitignored, so older `sK` files orphan harmlessly and
 // the new `sK+1` is regenerated on the next build.
-const PRIMER_DATA_SCHEMA: u32 = 2;
+const PRIMER_DATA_SCHEMA: u32 = 3;
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());

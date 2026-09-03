@@ -203,7 +203,7 @@ clap.workspace = true
 # Same major as vendor/aube: `nubx -q` switches the engine's progress UI to
 # text mode via clx::progress::set_output, the same knob aube's own startup
 # flips for --silent (vendor/aube/crates/aube/src/startup.rs).
-clx = "2"
+clx = "3"
 # Same major as vendor/aube: `nub init`'s prompts (src/init.rs) use the same
 # clack-style prompt crate the engine already ships, so the dep graph carries
 # one copy and the prompt aesthetic matches the engine's own pickers.
@@ -238,8 +238,9 @@ pathdiff = { version = "0.2", optional = true }
 # (pm_engine/use_nub.rs). serde_yaml is archived/unmaintained; serde_yaml_ng
 # is the maintained, API-compatible fork, aliased as `serde_yaml` so the
 # source paths are unchanged.
-serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+serde_yaml = { package = "yaml_serde", version = "0.10" }
 sha2.workspace = true
+hex = "0.4"
 # Records the embedded Node's optional BLAKE3 format-headroom field. The launcher
 # does not hash the extracted runtime on its current warm path.
 blake3 = "1"

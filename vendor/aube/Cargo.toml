@@ -65,13 +65,10 @@ yaml_serde = "0.10.4"
 # aube to surgically rewrite user-authored workspace YAML files
 # (catalogs, allowBuilds, patchedDependencies) without stripping
 # comments — yaml_serde's round-trip would otherwise destroy them.
-# yamlpatch uses yaml_serde for patch payloads; serde_yaml remains only
-# for the manual block injector that works around nested Add formatting.
 yamlpatch = "1.25"
 # yamlpath 1.28 does not declare the Rust 1.97 requirement it inherits
 # from tree-sitter-iter 1.28, so resolver 3 cannot avoid it.
 yamlpath = ">=1.25, <1.28"
-serde_yaml = "0.9"
 sonic-rs = "0.5"
 serde_path_to_error = "0.1"
 toml = "1.1"

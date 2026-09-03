@@ -23,6 +23,9 @@ const top = Number(args.get('top') ?? 2000)
 // documented in the build.rs comment.
 const versionsArg = args.get('versions') ?? '100'
 const versions = versionsArg === 'all' ? Infinity : Number(versionsArg)
+// Age prune on top of the count cap — see `selectVersions`. `none` disables.
+const pruneAgeArg = args.get('prune-age-days') ?? '1095'
+const pruneAgeDays = pruneAgeArg === 'none' ? Infinity : Number(pruneAgeArg)
 const out = resolve(args.get('out') ?? `crates/aube-resolver/data/primer-top${top}.json`)
 const namesFile = args.get('names')
 const namesUrl = args.get('names-url') ?? 'https://raw.githubusercontent.com/jdx/aube-primer-packages/main/data/packages.json'
@@ -35,6 +38,9 @@ const popularNamesUrl =
 if (!Number.isInteger(top) || top < 1) throw new Error('--top must be a positive integer')
 if (versions !== Infinity && (!Number.isInteger(versions) || versions < 1)) {
   throw new Error('--versions must be a positive integer or "all"')
+}
+if (pruneAgeDays !== Infinity && (!Number.isInteger(pruneAgeDays) || pruneAgeDays < 1)) {
+  throw new Error('--prune-age-days must be a positive integer or "none"')
 }
 if (popularNamesOnly && !popularNamesOut) {
   throw new Error('--popular-names-only requires --popular-names-out')
@@ -94,7 +100,7 @@ async function packumentSeed(name, keepVersions) {
     console.error(`  skipped: HTTP ${res.status}`)
     return null
   }
-  const selected = selectVersions(full, keepVersions)
+  const selected = selectVersions(full, keepVersions, pruneAgeDays)
   const packument = {
     n: full.name ?? name,
     m: full.modified,
@@ -112,14 +118,34 @@ async function packumentSeed(name, keepVersions) {
   }
 }
 
-function selectVersions(packument, keepVersions) {
+// The newest `keepVersions` by publish time, minus anything older than
+// `pruneAgeDays` that is neither the newest of its `major.minor` line nor a
+// dist-tag target. A fresh resolve takes the newest version a range admits, so
+// an old version only wins when its whole line is old — and both `^x` and
+// `~x.y` land on the newest of a line, which stays. A pinned old exact version
+// misses the primer and refetches its packument: correct, merely slower. The
+// per-version SHA-512 is the primer's dominant byte cost and does not
+// compress, so every pruned version is ~100 bytes off the shipped binary.
+function selectVersions(packument, keepVersions, pruneAgeDays) {
+  const time = packument.time ?? {}
   const versions = Object.keys(packument.versions ?? {})
-  const byTime = versions
-    .filter((v) => packument.time?.[v])
-    .sort((a, b) => packument.time[a].localeCompare(packument.time[b]))
+  const byTime = versions.filter((v) => time[v]).sort((a, b) => time[a].localeCompare(time[b]))
   const ordered = byTime.length ? byTime : versions
-  if (keepVersions === Infinity) return ordered
-  return ordered.slice(-keepVersions)
+  const kept = keepVersions === Infinity ? ordered : ordered.slice(-keepVersions)
+  if (pruneAgeDays === Infinity || !byTime.length) return kept
+  const cutoff = Date.now() - pruneAgeDays * 86_400_000
+  // Ascending publish order, so the last write per line is its newest.
+  const newestOfLine = new Map()
+  for (const v of ordered) newestOfLine.set(versionLine(v), v)
+  const pinned = new Set([...newestOfLine.values(), ...Object.values(packument['dist-tags'] ?? {})])
+  return kept.filter((v) => pinned.has(v) || Date.parse(time[v]) >= cutoff)
+}
+
+// `major.minor`, with prereleases on their own line so a newer `-beta` never
+// evicts the stable release a caret range actually resolves to.
+function versionLine(version) {
+  const m = /^(\d+)\.(\d+)\.\d+(-)?/.exec(version)
+  return m ? `${m[1]}.${m[2]}${m[3] ? '-pre' : ''}` : version
 }
 
 function trimDistTags(tags = {}, selected) {

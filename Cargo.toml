@@ -62,6 +62,51 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+# Size-optimize the COLD crates only. Whole-binary `opt-level = "z"` measured
+# −10.5 MB (48.6 → 38.1 MB, linux-x64, 2026-09-03) but de-optimizes the hot
+# paths, so the resolver, linker, lockfile, manifest, transpiler, JSON and TLS
+# crates keep `opt-level = 3` and only latency-irrelevant code takes "z": CLI
+# dispatch and command glue, arg parsing, prompts, templating, diagnostics, DNS
+# config, and the publish-provenance stack. Add a crate here only after
+# checking cargo-bloat shows it cold; never a crate on the install or startup
+# path.
+[profile.release.package]
+aube = { opt-level = "z" }
+nub-cli = { opt-level = "z" }
+clap = { opt-level = "z" }
+clap_builder = { opt-level = "z" }
+clx = { opt-level = "z" }
+demand = { opt-level = "z" }
+tera = { opt-level = "z" }
+miette = { opt-level = "z" }
+regex = { opt-level = "z" }
+regex-automata = { opt-level = "z" }
+regex-syntax = { opt-level = "z" }
+aho-corasick = { opt-level = "z" }
+hickory-resolver = { opt-level = "z" }
+hickory-proto = { opt-level = "z" }
+hickory-net = { opt-level = "z" }
+toml = { opt-level = "z" }
+sigstore-sign = { opt-level = "z" }
+sigstore-oidc = { opt-level = "z" }
+sigstore-fulcio = { opt-level = "z" }
+sigstore-rekor = { opt-level = "z" }
+sigstore-tsa = { opt-level = "z" }
+sigstore-tuf = { opt-level = "z" }
+sigstore-bundle = { opt-level = "z" }
+sigstore-crypto = { opt-level = "z" }
+sigstore-merkle = { opt-level = "z" }
+sigstore-trust-root = { opt-level = "z" }
+sigstore-types = { opt-level = "z" }
+ambient-id = { opt-level = "z" }
+x509-cert = { opt-level = "z" }
+x509-tsp = { opt-level = "z" }
+cms = { opt-level = "z" }
+cmpv2 = { opt-level = "z" }
+crmf = { opt-level = "z" }
+der = { opt-level = "z" }
+spki = { opt-level = "z" }
+
 # Fast local-iteration profile for `nub-dev` / `make install-dev`. NOT a ship
 # profile — the release block above is untouched. Inherits `dev` (debug
 # assertions + overflow checks stay on), but drops everything the release build
@@ -139,7 +184,7 @@ oxc = { version = "=0.140.0", features = ["full"] }
 oxc_napi = "=0.140.0"
 oxc_sourcemap = { version = "=8.1.0", features = ["napi"] }
 rustc-hash = "2"
-toml = "0.8"
+toml = "1.1"
 # Interactive terminal primitive (raw-mode key reads, cursor control) for the
 # dlx consent radio in nubx_consent.rs. Already compiled in via `demand` (aube's
 # build-approval picker) → direct dep reuses the same crate (no new build).
@@ -147,7 +192,7 @@ console = "0.16"
 yaml-rust2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 # blake3 content hash for the transpile-cache key + integrity prefix (SIMD,
 # replaced SHA-256 on the warm path; schema v4).
 blake3 = "1"
