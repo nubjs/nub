@@ -15,7 +15,10 @@ Nub 0.9 adds `nub compile`, which bundles a TypeScript or JavaScript entrypoint 
 $ nub compile cli.ts
 Bundling cli.ts …
 Signing embedded Node.js
-Compiled cli — embed shape, Node 26.8.1, darwin-arm64, 29.5 MB
+
+  output   cli  (29.5 MB)
+  runtime  Node 26.8.1, embedded — from package.json#engines.node
+  target   darwin-arm64 (this machine)
 
 $ ./cli --name nub
 ✔ hello, nub
@@ -70,7 +73,11 @@ $ du -sh node_modules
 8.6M	node_modules
 
 $ nub compile cli.ts --smol --target lts --out cli
-Compiled cli — smol shape, Node 24.20.0, darwin-arm64, 1.0 MB
+Bundling cli.ts …
+
+  output   cli  (1.0 MB)
+  runtime  Node lts, not embedded — from --target; floor enforced at runtime
+  target   darwin-arm64 (this machine)
 
 $ ls -l cli
 -rwxr-xr-x  1  1007138  cli        # 941,090 baseline + 66,048 bytes of app
@@ -140,7 +147,10 @@ Bundling app.ts …
 Shipping 1 package unbundled, in its own installed layout:
   @napi-rs/nice — it declares 16 per-platform binary packages (napi-rs layout)
 Signing embedded Node.js
-Compiled app — embed shape, Node 26.8.1, darwin-arm64, 29.6 MB
+
+  output   app  (29.6 MB)
+  runtime  Node 26.8.1, embedded — from package.json#engines.node
+  target   darwin-arm64 (this machine)
 ```
 
 Packages like `sharp` and `@napi-rs/nice` publish one binary package per platform — 24 of them, in sharp's case — and pick between them at load time with a `process.platform` check. Compiling replaces `process.platform` and `process.arch` with the target's values; the check becomes a constant, and only that platform's addon goes into the executable.
@@ -221,7 +231,10 @@ $ nub compile app.ts --smol --out app
 Bundling app.ts …
 Shipping 1 package unbundled, in its own installed layout:
   jsdom — it reads a data file from a path built at run time
-Compiled app — smol shape, Node 26.0.0, darwin-arm64, 2.8 MB
+
+  output   app  (2.8 MB)
+  runtime  Node 26.0.0, not embedded — from package.json#engines.node; required exactly at runtime
+  target   darwin-arm64 (this machine)
 ```
 
 For that jsdom program, npm writes 1,834 files to `node_modules` and the compiled binary extracts 1,006. The package that needed its own files keeps all 657 of them. The clean packages around it collapse: parse5 goes from 33 files to 2, whatwg-url from 19 to 3, mdn-data from 25 to 4. The launcher byte-verifies the whole extracted tree before every run, so each of those 828 files would otherwise be an integrity check on every start.
@@ -252,7 +265,10 @@ $ bun build --compile --target=bun-windows-x64 --windows-icon=icon.ico app.ts
 error: Using --windows-icon is only available when compiling on Windows      # ❌
 
 $ nub compile app.ts --platform win32-x64 --icon icon.ico                    # ✅
-Compiled app.exe — embed shape, Node 26.8.1, win32-x64, 30.0 MB
+
+  output   app.exe  (30.0 MB)
+  runtime  Node 26.8.1, embedded — from package.json#engines.node
+  target   win32-x64
 ```
 
 The produced PE carries real `RT_ICON` and `RT_GROUP_ICON` resources, verified on Windows against an icon-less control. Nub decodes the `.ico` you supply and regenerates the standard set of sizes from it, so the source artwork should scale cleanly.
@@ -329,7 +345,11 @@ Error: no Node version could be inferred for this project.                    # 
   version must be intentional and reproducible.)
 
 $ nub compile cli.ts --smol --target lts                                      # ✅
-Compiled cli — smol shape, Node 24.20.0, darwin-arm64, 0.9 MB
+Bundling cli.ts …
+
+  output   cli  (0.9 MB)
+  runtime  Node lts, not embedded — from --target; floor enforced at runtime
+  target   darwin-arm64 (this machine)
 ```
 
 A range lets the binary use any qualifying Node already on the machine instead of downloading one:
