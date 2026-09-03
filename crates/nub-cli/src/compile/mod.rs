@@ -41,6 +41,7 @@ mod loaders;
 mod native;
 mod native_layout;
 mod unbundlable;
+mod version_info;
 
 pub use bundle::{BundleOptions, SourcemapMode};
 
@@ -78,6 +79,10 @@ pub struct CompileOptions {
     /// macOS reads one from the surrounding `.app` bundle and Linux from a
     /// `.desktop` entry, and neither is part of a single-file artifact.
     pub icon: Option<PathBuf>,
+    /// `--metadata KEY=VALUE`: Windows version-resource fields, overriding what
+    /// the nearest `package.json` supplies. Windows-only for the same reason as
+    /// [`CompileOptions::icon`] — no other container format carries them.
+    pub metadata: Vec<String>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
 }
@@ -121,6 +126,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Read before the expensive work, so a bad path or a mislabelled file fails in
     // the first second rather than after a ~100 MB Node download.
     let icon = load_icon(opts.icon.as_deref(), &target)?;
+    let version_info = load_version_info(
+        &opts.metadata,
+        entry_abs.parent().unwrap_or(Path::new(".")),
+        &out_path,
+        &target,
+    )?;
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -325,11 +336,18 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // never truncate a previously good executable at `--out`.
     let staged_maps = stage_detached_maps(&bundled, &out_path)?;
     let staged = StagedArtifact::new(&out_path, "artifact")?;
-    inject::inject(&target, &template, &payload, icon.as_deref(), staged.path())
-        .with_context(|| format!("writing {}", staged.path().display()))?;
+    inject::inject(
+        &target,
+        &template,
+        &payload,
+        icon.as_deref(),
+        version_info.as_deref(),
+        staged.path(),
+    )
+    .with_context(|| format!("writing {}", staged.path().display()))?;
     set_executable(staged.path())?;
     sync_file(staged.path())?;
-    verify_artifact(staged.path(), &target)?;
+    verify_artifact(staged.path(), &target, version_info.as_deref())?;
     staged.publish(&out_path)?;
 
     // Detached maps are optional debugging companions rather than part of the
@@ -452,6 +470,139 @@ fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<
         );
     }
     Ok(Some(bytes))
+}
+
+/// Build the Windows version resource — the fields Explorer's Details tab shows
+/// and `(Get-Item app.exe).VersionInfo` reads.
+///
+/// The defaults are the point. A compiled binary with no version resource is what
+/// installers and antivirus heuristics treat as anonymous, and the information
+/// they want is already in `package.json`, so it is taken from there and the
+/// common case needs no flags. `--metadata` only overrides: `Key=value` sets a
+/// field and `Key=` drops one, the same spelling by which an empty
+/// `--install-message` suppresses the first-run notice.
+///
+/// Refused rather than ignored on a non-Windows target, matching `--icon`: no
+/// other container format carries these fields, so accepting the flag would
+/// silently produce a binary without them. The package.json DEFAULTS are not
+/// refused — they are implicit, and erroring on a Linux build because a project
+/// has a `name` would be absurd.
+fn load_version_info(
+    metadata: &[String],
+    entry_dir: &Path,
+    out_path: &Path,
+    target: &TargetPlatform,
+) -> Result<Option<Vec<u8>>> {
+    if !metadata.is_empty() && target.format() != ContainerFormat::Pe {
+        bail!(
+            "--metadata sets Windows executable metadata, and this build targets {}.\n\
+             \x20\x20Only the PE format carries these fields inside the executable.",
+            target.triple()
+        );
+    }
+    if target.format() != ContainerFormat::Pe {
+        return Ok(None);
+    }
+
+    let mut strings = nearest_package_metadata(entry_dir);
+    // The field means the name the file was built under, so it is derived from
+    // the output rather than defaulted from the manifest — a rename is exactly
+    // what it lets a program detect.
+    if let Some(name) = out_path.file_name().and_then(|n| n.to_str()) {
+        strings.insert("OriginalFilename".to_string(), name.to_string());
+    }
+    for assignment in metadata {
+        let (key, value) = version_info::parse_assignment(assignment)?;
+        if value.is_empty() {
+            strings.remove(key);
+        } else {
+            strings.insert(key.to_string(), value);
+        }
+    }
+
+    // The numeric block is derived from the strings so the two can never
+    // disagree; a prerelease tag survives in the string and is truncated only in
+    // the four-u16 block, which has nowhere to put it.
+    let file_version =
+        version_info::parse_version(strings.get("FileVersion").map(String::as_str).unwrap_or(""))?;
+    let product_version = version_info::parse_version(
+        strings
+            .get("ProductVersion")
+            .map(String::as_str)
+            .unwrap_or(""),
+    )?;
+    let info = version_info::VersionInfo {
+        file_version,
+        product_version,
+        strings,
+    };
+    // OriginalFilename alone is not worth a resource: it would put an otherwise
+    // blank Details tab on every Windows build that never asked for one.
+    if info.strings.len() <= 1 && info.file_version == [0; 4] && info.product_version == [0; 4] {
+        return Ok(None);
+    }
+    Ok(Some(info.encode()))
+}
+
+/// Version-resource defaults from the nearest `package.json`, walking up from the
+/// entry's directory — the same boundary Node itself resolves against.
+fn nearest_package_metadata(entry_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut dir = Some(entry_dir);
+    while let Some(current) = dir {
+        let manifest = current.join("package.json");
+        if let Ok(text) = fs::read_to_string(&manifest)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            let field = |name: &str| {
+                json.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let mut set = |key: &str, value: Option<String>| {
+                if let Some(value) = value {
+                    out.insert(key.to_string(), value);
+                }
+            };
+            set("ProductName", field("name"));
+            set("InternalName", field("name"));
+            set(
+                "FileDescription",
+                field("description").or_else(|| field("name")),
+            );
+            set("FileVersion", field("version"));
+            set("ProductVersion", field("version"));
+            set("CompanyName", package_author(&json));
+            return out;
+        }
+        dir = current.parent();
+    }
+    out
+}
+
+/// The `author` field's display name. npm allows either a `{ name, email, url }`
+/// object or the shorthand `"Name <email> (url)"`, and only the name belongs in
+/// CompanyName — an email address in Explorer's Company column is noise.
+fn package_author(json: &serde_json::Value) -> Option<String> {
+    let author = json.get("author")?;
+    let name = match author {
+        serde_json::Value::String(s) => s
+            .split(['<', '('])
+            .next()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string(),
+        serde_json::Value::Object(_) => author
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        _ => return None,
+    };
+    (!name.is_empty()).then_some(name)
 }
 
 /// Refuse an output that names the source entry before fetching a launcher,
@@ -1524,7 +1675,11 @@ fn node_runs(node: &Path) -> bool {
 ///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
 ///    the scan but was never executed is a weaker guarantee, and the user should
 ///    know which one they got.
-fn verify_artifact(bin: &Path, target: &TargetPlatform) -> Result<()> {
+fn verify_artifact(
+    bin: &Path,
+    target: &TargetPlatform,
+    version_info: Option<&[u8]>,
+) -> Result<()> {
     let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
     let payload = inject::find_payload(target.format(), &bytes)
         .with_context(|| format!("scanning {} for its payload", bin.display()))?
@@ -1532,6 +1687,43 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform) -> Result<()> {
     let view = nub_core::compile::decode(payload)
         .context("the produced executable's payload does not decode")?;
     verify_payload_shape(&view)?;
+
+    // The version resource is re-read here for the same reason the payload is,
+    // and it needs it more. A cross-compiled Windows binary cannot be executed
+    // on this host, so this parse is the only evidence the resource is REACHABLE
+    // rather than merely written — and an unreachable one fails silently, with
+    // Explorer showing nothing and no error anywhere. The concrete way to lose it
+    // is the resource directory's ascending-id rule (see `set_version_info` in
+    // vendor/libsui), which takes the icon down with it.
+    if let Some(encoded) = version_info {
+        let found = inject::find_version_resource(&bytes)
+            .with_context(|| format!("scanning {} for its version resource", bin.display()))?
+            .context(
+                "the produced executable carries no version resource, so its metadata \
+                 would not appear in Explorer — the injection did not take",
+            )?;
+        // Compared as PARSED values rather than as bytes. The walk is the point:
+        // it navigates by the declared lengths and the alignment rule, so a
+        // resource whose root header survived while its StringTable or Var
+        // children were truncated compares unequal here, where a byte compare
+        // would only catch a change and a bare parse would accept the header
+        // alone. Both sides go through the same reader so the comparison is of
+        // what Windows would see, not of what nub meant.
+        let intended = version_info::parse(encoded)
+            .context("the version resource nub encoded does not parse")?;
+        let carried = version_info::parse(found)
+            .context("the produced executable's version resource does not parse")?;
+        if carried != intended {
+            bail!(
+                "the produced executable's version resource is not the one that was \
+                 encoded — {} fields and {} translations survived, out of {} and {}",
+                carried.strings.len(),
+                carried.translations.len(),
+                intended.strings.len(),
+                intended.translations.len()
+            );
+        }
+    }
 
     if !target.is_host() {
         eprintln!(
@@ -2087,6 +2279,108 @@ mod tests {
         assert!(load_icon(None, &mac).unwrap().is_none());
     }
 
+    /// The defaults are the feature: a Windows build with no version resource is
+    /// what installers and antivirus heuristics treat as anonymous, and everything
+    /// they want is already in `package.json`. So the manifest path is asserted
+    /// first, then the two override spellings, then the target gate.
+    ///
+    /// Read back through [`version_info::parse`] rather than compared against the
+    /// map that went in — the bytes are what ships, and a resource that encodes
+    /// but does not walk is the failure mode nothing else here would catch.
+    #[test]
+    fn version_metadata_defaults_to_the_manifest_and_metadata_overrides_it() {
+        let dir = fresh_dir("versioninfo");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"acme-tool","version":"2.5.1","description":"Does a thing","author":{"name":"Acme Inc."}}"#,
+        )
+        .unwrap();
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let out = dir.join("acme.exe");
+
+        let bytes = load_version_info(&[], &dir, &out, &win)
+            .unwrap()
+            .expect("a manifest with a name and a version earns a resource");
+        let parsed = version_info::parse(&bytes).unwrap();
+        assert_eq!(
+            parsed.strings.get("ProductName").map(String::as_str),
+            Some("acme-tool")
+        );
+        assert_eq!(
+            parsed.strings.get("CompanyName").map(String::as_str),
+            Some("Acme Inc.")
+        );
+        assert_eq!(
+            parsed.strings.get("FileDescription").map(String::as_str),
+            Some("Does a thing")
+        );
+        assert_eq!(parsed.file_version, [2, 5, 1, 0]);
+        // Derived from --out, not the manifest: the field means the name the file
+        // was built under, which is exactly what a rename should change.
+        assert_eq!(
+            parsed.strings.get("OriginalFilename").map(String::as_str),
+            Some("acme.exe")
+        );
+
+        // `Key=value` overrides; `Key=` drops, the same spelling by which an empty
+        // --install-message suppresses the first-run notice.
+        let overridden = load_version_info(
+            &[
+                "ProductName=Renamed".to_string(),
+                "CompanyName=".to_string(),
+            ],
+            &dir,
+            &out,
+            &win,
+        )
+        .unwrap()
+        .unwrap();
+        let parsed = version_info::parse(&overridden).unwrap();
+        assert_eq!(
+            parsed.strings.get("ProductName").map(String::as_str),
+            Some("Renamed")
+        );
+        assert!(
+            !parsed.strings.contains_key("CompanyName"),
+            "an empty value drops the field rather than writing a blank one"
+        );
+
+        // A project with nothing to say earns no resource at all: OriginalFilename
+        // alone would put a near-blank Details tab on every Windows build. The
+        // empty manifest is what makes this deterministic — the lookup walks UP
+        // from the entry, so a bare directory would otherwise inherit whatever
+        // package.json happens to sit above the temp dir on the runner.
+        let bare = fresh_dir("versioninfo-bare");
+        fs::write(bare.join("package.json"), "{}").unwrap();
+        assert!(load_version_info(&[], &bare, &out, &win).unwrap().is_none());
+
+        // Refused on a target whose container cannot carry the fields — accepting
+        // it would ship a binary silently missing them. The manifest DEFAULTS are
+        // not refused, because they are implicit: erroring on a Linux build
+        // because the project has a name would be absurd.
+        let linux = TargetPlatform {
+            os: TargetOs::Linux,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let err = load_version_info(&["ProductName=x".to_string()], &dir, &out, &linux)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("linux-x64"),
+            "must name the target, got: {err}"
+        );
+        assert!(
+            load_version_info(&[], &dir, &out, &linux)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// exists, so the build used to run to completion and die on the rename with
     /// `Is a directory (os error 21)` over an internal staging path.
     #[test]
@@ -2535,6 +2829,7 @@ mod tests {
             entry: "main.ts".into(),
             out: None,
             icon: None,
+            metadata: Vec::new(),
             smol: false,
             target: None,
             platform: None,

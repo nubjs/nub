@@ -1164,6 +1164,21 @@ pub enum Command {
         #[arg(long = "icon", value_name = "FILE")]
         icon: Option<PathBuf>,
 
+        /// Windows version-resource field, as `Key=value`; repeatable. These are
+        /// the fields Explorer's Details tab shows. Defaults come from
+        /// `package.json` (name, version, description, author), so most builds
+        /// need no flag; `Key=` drops a defaulted field. Known keys: Comments,
+        /// CompanyName, FileDescription, FileVersion, InternalName,
+        /// LegalCopyright, LegalTrademarks, OriginalFilename, PrivateBuild,
+        /// ProductName, ProductVersion, SpecialBuild. Works when cross-compiling,
+        /// and is refused for a non-Windows target rather than ignored.
+        #[arg(
+            long = "metadata",
+            value_name = "KEY=VALUE",
+            action = ArgAction::Append
+        )]
+        metadata: Vec<String>,
+
         /// Custom message the compiled binary shows on a terminal while it sets
         /// itself up on first run. Default: `Initializing...`.
         #[arg(long, value_name = "TEXT")]
@@ -3124,6 +3139,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             install_message,
             node_options,
             icon,
+            metadata,
             no_keep_names,
             no_treeshake,
             ignore_annotations,
@@ -3148,6 +3164,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             define_file,
             node_options,
             icon,
+            metadata,
             bundle: crate::compile::BundleOptions {
                 minify: !no_minify,
                 keep_names: !no_keep_names,
