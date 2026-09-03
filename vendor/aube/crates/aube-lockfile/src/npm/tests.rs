@@ -3806,6 +3806,32 @@ fn test_write_npm_root_entry_mirrors_workspaces_in_npms_key_order() {
         at(&object, "\"engines\"") < at(&object, "\"workspaces\""),
         "an object `workspaces` sorts with the objects, last:\n{object}"
     );
+
+    // The other half of verbatim: npm distinguishes a field that was never
+    // authored from one authored EMPTY, and keeps the empty one. Measured,
+    // npm 11.19.0 — `{"packages":[…],"nohoist":[]}` round-trips with the
+    // empty list intact, as do `catalog: {}` and `catalogs: {}`. Skipping
+    // them on emptiness reproduces the absent case and silently drops this
+    // one, which churns the key out of the lockfile on every alternating
+    // install; hence the presence-aware `Option`s on the manifest type.
+    let explicit_empties = write_root(
+        r#"{
+            "name": "root", "version": "1.0.0",
+            "workspaces": {
+                "packages": ["packages/*"],
+                "nohoist": [], "catalog": {}, "catalogs": {}
+            }
+        }"#,
+    );
+    let doc: serde_json::Value = serde_json::from_str(&explicit_empties).unwrap();
+    assert_eq!(
+        doc["packages"][""]["workspaces"],
+        serde_json::json!({
+            "packages": ["packages/*"],
+            "nohoist": [], "catalog": {}, "catalogs": {}
+        }),
+        "an authored-empty field is kept, not collapsed into absence, got {explicit_empties}"
+    );
 }
 
 /// npm strips the leading `./` off every bin path — and strips it repeatedly,
