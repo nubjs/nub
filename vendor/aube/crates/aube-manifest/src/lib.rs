@@ -114,6 +114,33 @@ pub struct UpdateConfig {
     pub ignore_dependencies: Vec<String>,
 }
 
+/// The manifest-ROOT (un-branded) key holding the lifecycle-script allowlist,
+/// for embedders whose `manifest_namespace` is empty. npm 12 reads the same
+/// top-level `allowScripts` map out of `package.json` (RFC npm/rfcs#868), with
+/// the same `name`/`name@version` → `true`/`false` shape and the same
+/// deny-wins fold, so sharing the field means one allowlist per project rather
+/// than two competing maps in one file. The pnpm-branded `pnpm.allowBuilds`
+/// map keeps its own spelling — that surface belongs to pnpm.
+pub const ROOT_ALLOW_SCRIPTS_KEY: &str = "allowScripts";
+
+/// The pre-cutover manifest-root spelling of [`ROOT_ALLOW_SCRIPTS_KEY`]. No
+/// package manager reads a top-level `allowBuilds` — pnpm reads it from
+/// `pnpm-workspace.yaml` or `package.json#pnpm`, npm reads `allowScripts`, bun
+/// reads `trustedDependencies` — so a project still carrying it is refused
+/// with a rename remedy rather than silently losing its whole build policy.
+pub const LEGACY_ROOT_ALLOW_BUILDS_KEY: &str = "allowBuilds";
+
+/// The allowlist field name to NAME in user-facing text on the active surface:
+/// the neutral root key for a manifest-root embedder, pnpm's spelling
+/// otherwise.
+pub fn allow_scripts_field_name() -> &'static str {
+    if aube_util::embedder().manifest_namespace.is_empty() {
+        ROOT_ALLOW_SCRIPTS_KEY
+    } else {
+        LEGACY_ROOT_ALLOW_BUILDS_KEY
+    }
+}
+
 /// Parsed `package.json`.
 ///
 /// Deserializes via [`PackageJsonRaw`] (`#[serde(from = ...)]`) so a
@@ -468,14 +495,16 @@ impl PackageJson {
     /// Extract the `pnpm.allowBuilds` / `aube.allowBuilds` object from
     /// the raw `package.json` payload, if present. For embedders whose native
     /// manifest config lives at root (`manifest_namespace == ""`), the
-    /// top-level `allowBuilds` map is *always* read — it is the embedder's own
-    /// un-branded key (not a foreign brand's surface), so it is honored on
-    /// every config surface (nub identity, npm/bun/yarn compat, pnpm/fresh),
-    /// not only the root-native one. This is what makes `approve-builds`
-    /// effective under an npm/bun/yarn incumbent: the approval it writes at the
-    /// top level is read back here regardless of incumbent. Standalone aube
-    /// keeps a non-empty `manifest_namespace`, so this branch never fires for
-    /// it — its behavior is unchanged. Returns a map keyed by the raw
+    /// top-level [`ROOT_ALLOW_SCRIPTS_KEY`] map is *always* read — it is the
+    /// embedder's own un-branded key (not a foreign brand's surface), so it is
+    /// honored on every config surface (nub identity, npm/bun/yarn compat,
+    /// pnpm/fresh), not only the root-native one. This is what makes
+    /// `approve-builds` effective under an npm/bun/yarn incumbent: the approval
+    /// it writes at the top level is read back here regardless of incumbent —
+    /// and under an npm incumbent it is the very field npm 12 itself gates on,
+    /// so one map serves both tools. Standalone aube keeps a non-empty
+    /// `manifest_namespace`, so this branch never fires for it — its behavior
+    /// is unchanged. Returns a map keyed by the raw
     /// pattern string (e.g. `"esbuild"`, `"@swc/core@1.3.0"`) with `bool`
     /// values preserved as `bool` and any other shape captured verbatim so the
     /// caller can warn about it. The tool's own namespace/root surface wins
@@ -493,13 +522,30 @@ impl PackageJson {
             }
         }
         if aube_util::embedder().manifest_namespace.is_empty()
-            && let Some(map) = self.extra.get("allowBuilds").and_then(|v| v.as_object())
+            && let Some(map) = self
+                .extra
+                .get(ROOT_ALLOW_SCRIPTS_KEY)
+                .and_then(|v| v.as_object())
         {
             for (k, v) in map {
                 out.insert(k.clone(), AllowBuildRaw::from_json(v));
             }
         }
         out
+    }
+
+    /// Whether this manifest still carries the pre-cutover top-level
+    /// [`LEGACY_ROOT_ALLOW_BUILDS_KEY`] map. Only meaningful for a
+    /// manifest-root embedder — for a namespaced tool the same top-level key
+    /// was never read, so it is somebody else's field and not ours to refuse.
+    /// The caller turns a hit into a hard error: silently ignoring the map
+    /// would drop every approval AND every explicit denial it records.
+    pub fn has_legacy_root_allow_builds(&self) -> bool {
+        aube_util::embedder().manifest_namespace.is_empty()
+            && self
+                .extra
+                .get(LEGACY_ROOT_ALLOW_BUILDS_KEY)
+                .is_some_and(serde_json::Value::is_object)
     }
 
     /// Extract `pnpm.onlyBuiltDependencies` / `aube.onlyBuiltDependencies`

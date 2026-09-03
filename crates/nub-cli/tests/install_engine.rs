@@ -1167,6 +1167,47 @@ fn wildcard_peer_binds_resolved_major_not_registry_highest() {
 /// the node-gyp path. Holds whether or not the host happens to have a node-gyp
 /// on PATH: with one, no shim is written; without, the shim is written but never
 /// invoked. Either way the bootstrap bucket must not appear.
+/// The build allowlist moved from a top-level `allowBuilds` map to
+/// `allowScripts` (npm 12's own field). Honoring neither would silently drop
+/// the old map's explicit `false` denials, so the stale key is a hard refusal
+/// naming the rename. The paired positive control is the test below, which
+/// runs a build off an `allowScripts` entry.
+#[test]
+fn a_stale_top_level_allow_builds_map_is_refused_with_the_rename() {
+    let dir = pm_tmpdir("legacy-allow-builds");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,"allowBuilds":{"esbuild":false}}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("install")
+        .current_dir(&dir)
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a stale allowBuilds map must fail the install: {output}"
+    );
+    assert!(
+        output.contains("ERR_NUB_ALLOW_BUILDS_RENAMED"),
+        "the refusal must carry its code: {output}"
+    );
+    assert!(
+        output.contains("allowScripts"),
+        "the refusal must name the field to rename to: {output}"
+    );
+}
+
 #[test]
 fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
     let dir = pm_tmpdir("no-gyp-bootstrap");
@@ -1182,7 +1223,7 @@ fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
     .unwrap();
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowScripts":{"plainbuild@file:./plainbuild":true}}"#,
     )
     .unwrap();
     // `fetch-retries=0` so a regression fails fast instead of burning the
@@ -1245,7 +1286,7 @@ fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
     .unwrap();
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowScripts":{"plainbuild@file:./plainbuild":true}}"#,
     )
     .unwrap();
     std::fs::write(
@@ -1922,7 +1963,7 @@ fn an_owed_dependency_build_stops_the_next_install_reporting_up_to_date() {
     // bare-name entry never authorizes a source-backed build.
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowScripts":{"plainbuild@file:./plainbuild":true}}"#,
     )
     .unwrap();
     // Dead registry + no retries: the fixture is entirely local, so any

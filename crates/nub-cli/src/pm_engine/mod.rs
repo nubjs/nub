@@ -1363,6 +1363,16 @@ fn apply_config_scope(
     });
 
     if noise == ConfigScopeNoise::Warn {
+        // Renamed-field hard-error. The build allowlist moved from a top-level
+        // `allowBuilds` map to `allowScripts`, the field npm 12 gates its own
+        // install scripts on. Proceeding would silently drop every approval AND
+        // every explicit `false` denial the old map records — a security-
+        // relevant miss in the permissive direction for the denials — so refuse
+        // instead. Role-independent: the top-level map is nub's own key, read on
+        // every surface, and no other PM reads it either.
+        if manifest.has_legacy_root_allow_builds() {
+            return Err(legacy_allow_builds_error());
+        }
         // Catalog hard-error: a role that doesn't honor `catalog:` specifiers
         // (npm/yarn/bun, pnpm<9) must mirror the real PM and refuse, rather
         // than silently mis-resolve. nub-branded, role-named.
@@ -1491,6 +1501,19 @@ fn first_catalog_in_dep_maps(manifest: &aube_manifest::PackageJson) -> Option<St
 
 /// Hard error mirroring the active PM's refusal of a `catalog:` specifier —
 /// nub-branded, role-named, with the remedy.
+/// The refusal for a project still carrying the pre-cutover top-level
+/// `allowBuilds` map. Names the mechanical fix, because that is the whole
+/// migration: the key is renamed and the entries are unchanged.
+fn legacy_allow_builds_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "nub: package.json sets a top-level `allowBuilds` map — that field was renamed to \
+         `allowScripts`, which is also the field npm reads. Rename the key in package.json; \
+         the entries are unchanged. (`pnpm.allowBuilds` and a `pnpm-workspace.yaml` \
+         `allowBuilds:` block are pnpm's own surface and still read as-is.) \
+         [ERR_NUB_ALLOW_BUILDS_RENAMED]"
+    )
+}
+
 fn catalog_unsupported_error(role: config_scope::Role, spec: &str) -> anyhow::Error {
     let pm = role.display();
     anyhow::anyhow!(

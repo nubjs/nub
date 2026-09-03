@@ -279,19 +279,19 @@
     {
       "name": "ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE",
       "category": "Scripts / build",
-      "description": "An entry in `allowBuilds` had a value that wasn't `true`/`false`.",
+      "description": "An entry in the build allowlist had a value that wasn't `true`/`false`.",
       "exit_code": null
     },
     {
       "name": "ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION",
       "category": "Scripts / build",
-      "description": "An `allowBuilds` pattern's version union was unparseable.",
+      "description": "A build-allowlist pattern's version union was unparseable.",
       "exit_code": null
     },
     {
       "name": "ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION",
       "category": "Scripts / build",
-      "description": "An `allowBuilds` pattern combined a wildcard name with a version union.",
+      "description": "A build-allowlist pattern combined a wildcard name with a version union.",
       "exit_code": null
     },
     {
@@ -635,13 +635,13 @@
     {
       "name": "WARN_AUBE_IGNORED_BUILD_SCRIPTS",
       "category": "Install lifecycle",
-      "description": "Dep had `preinstall`/`install`/`postinstall` scripts but isn't on the `allowBuilds` allowlist. Run `aube approve-builds`.",
+      "description": "Dep had `preinstall`/`install`/`postinstall` scripts but isn't on the build allowlist. Run `aube approve-builds`.",
       "exit_code": null
     },
     {
       "name": "WARN_AUBE_DEFAULT_TRUST_BUILDS",
       "category": "Install lifecycle",
-      "description": "The `defaultTrust` floor let listed packages run build scripts without an explicit `allowBuilds` entry. Disclosure, not an error — set `defaultTrust=false` or an explicit `allowBuilds: false` entry to opt out.",
+      "description": "The `defaultTrust` floor let listed packages run build scripts without an explicit build-allowlist entry. Disclosure, not an error — set `defaultTrust=false` or an explicit `false` allowlist entry to opt out.",
       "exit_code": null
     },
     {
@@ -659,7 +659,7 @@
     {
       "name": "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT",
       "category": "Install lifecycle",
-      "description": "A dependency's lifecycle script matched a dangerous-shape heuristic (curl|sh, eval+atob, credential-file read, secret-env exfil, exfil endpoint, bare-IP HTTP). Advisory only; the `allowBuilds` allowlist still gates execution. Inspect the script before approving the build.",
+      "description": "A dependency's lifecycle script matched a dangerous-shape heuristic (curl|sh, eval+atob, credential-file read, secret-env exfil, exfil endpoint, bare-IP HTTP). Advisory only; the build allowlist still gates execution. Inspect the script before approving the build.",
       "exit_code": null
     },
     {

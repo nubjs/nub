@@ -446,19 +446,19 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE,
         category: category::SCRIPTS,
-        description: "An entry in `allowBuilds` had a value that wasn't `true`/`false`.",
+        description: "An entry in the build allowlist had a value that wasn't `true`/`false`.",
         exit_code: None,
     },
     CodeMeta {
         name: ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION,
         category: category::SCRIPTS,
-        description: "An `allowBuilds` pattern's version union was unparseable.",
+        description: "A build-allowlist pattern's version union was unparseable.",
         exit_code: None,
     },
     CodeMeta {
         name: ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION,
         category: category::SCRIPTS,
-        description: "An `allowBuilds` pattern combined a wildcard name with a version union.",
+        description: "A build-allowlist pattern combined a wildcard name with a version union.",
         exit_code: None,
     },
     // Linker

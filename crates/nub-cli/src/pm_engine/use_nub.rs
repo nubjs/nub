@@ -15,7 +15,7 @@
 //! - resolution-bearing keys → `package.json` under ecosystem-standard
 //!   top-level names (`workspaces` incl. the object form,
 //!   `workspaces.catalog(s)`, `overrides`, `patchedDependencies`, the
-//!   three-state `allowBuilds` map, `auditConfig`);
+//!   three-state `allowScripts` map, `auditConfig`);
 //! - settings → `.npmrc` (the same vocabulary, kebab spellings — one engine
 //!   reads both homes, so this is a mechanical move, not a translation);
 //! - engine-unsupported keys → warn-drop naming each (the three repo-wide
@@ -377,10 +377,10 @@ pub(crate) struct YamlMigration {
     /// and package.json live in the same directory, so relative patch paths
     /// stay correct).
     pub patched_dependencies: Option<Map<String, Value>>,
-    /// Top-level three-state `allowBuilds` map. Folds the legacy trio:
-    /// `onlyBuiltDependencies` → `true`, `neverBuiltDependencies` /
-    /// `ignoredBuiltDependencies` → `false` (asked-and-answered, not
-    /// security denial). Explicit `allowBuilds` entries win the fold.
+    /// Entries for the top-level three-state `allowScripts` map. Folds the
+    /// legacy trio: `onlyBuiltDependencies` → `true`, `neverBuiltDependencies`
+    /// / `ignoredBuiltDependencies` → `false` (asked-and-answered, not
+    /// security denial). Explicit pnpm `allowBuilds` entries win the fold.
     pub allow_builds: Option<Map<String, Value>>,
     /// Top-level `auditConfig` (aube's existing extension home).
     pub audit_config: Option<Value>,
@@ -601,9 +601,10 @@ pub(crate) fn write_nub_identity_fields(
 /// - `workspaces` membership + catalogs: the yaml was authoritative under
 ///   pnpm (it shadows `package.json#workspaces`), so yaml values overwrite —
 ///   any differing pre-existing value is named in the returned notes.
-/// - `overrides` / `patchedDependencies` / `allowBuilds` / `auditConfig`:
+/// - `overrides` / `patchedDependencies` / `allowScripts` / `auditConfig`:
 ///   per-key insert; an existing top-level entry wins (the engine's merge
-///   already ranked top-level above the yaml), conflicts named.
+///   already ranked top-level above the yaml), conflicts named. pnpm's
+///   `allowBuilds` map lands under the neutral `allowScripts` name.
 /// - `pnpm` namespace: removed (migrated through the same table by the
 ///   caller; unread under nub identity).
 ///
@@ -668,7 +669,7 @@ pub(crate) fn apply_manifest_edits(
     for (key, entries) in [
         ("overrides", &m.overrides),
         ("patchedDependencies", &m.patched_dependencies),
-        ("allowBuilds", &m.allow_builds),
+        (aube_manifest::ROOT_ALLOW_SCRIPTS_KEY, &m.allow_builds),
     ] {
         let Some(entries) = entries else { continue };
         let target = obj.entry(key).or_insert_with(|| Value::Object(Map::new()));
@@ -938,7 +939,10 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
             "patchedDependencies",
             migration.patched_dependencies.is_some(),
         ),
-        ("allowBuilds", migration.allow_builds.is_some()),
+        (
+            aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
+            migration.allow_builds.is_some(),
+        ),
         ("auditConfig", migration.audit_config.is_some()),
     ] {
         if present {
@@ -1096,8 +1100,10 @@ fn remove_strays(paths: &[std::path::PathBuf], why: &str) -> Result<()> {
 /// The yaml-regeneration half of `nub pm use pnpm` — the exact reverse of
 /// [`run_use_nub`]'s migration: collect the nub-mode homes out of
 /// `package.json` (`workspaces` membership + catalogs, top-level `overrides`
-/// / `patchedDependencies` / `allowBuilds` / `auditConfig`), write them into
-/// `pnpm-workspace.yaml` (merging into an existing yaml, package.json values
+/// / `patchedDependencies` / `allowScripts` / `auditConfig`), write them into
+/// `pnpm-workspace.yaml` under pnpm's own key names (`allowScripts` →
+/// `allowBuilds`; the rest keep their spelling), merging into an existing yaml
+/// with package.json values
 /// winning — they were the live config under nub), and remove the migrated
 /// keys from `package.json`. Settings already in `.npmrc` stay there — pnpm
 /// reads them too. Returns the summary lines; empty when there was nothing
@@ -1121,7 +1127,12 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
     };
     let overrides = manifest.get("overrides").cloned();
     let patched = manifest.get("patchedDependencies").cloned();
-    let allow_builds = manifest.get("allowBuilds").cloned();
+    // The nub-mode home is the neutral top-level `allowScripts`; pnpm's home
+    // for the same map is `allowBuilds`, so this one entry is renamed on the
+    // way out rather than moved verbatim.
+    let allow_builds = manifest
+        .get(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY)
+        .cloned();
     let audit_config = manifest.get("auditConfig").cloned();
 
     if packages.is_none()
@@ -1162,7 +1173,7 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
             "workspaces",
             "overrides",
             "patchedDependencies",
-            "allowBuilds",
+            aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
             "auditConfig",
         ] {
             obj.remove(key);
@@ -1416,7 +1427,7 @@ mod tests {
                 "packageManager": "nub@0.1.0",
                 "workspaces": { "packages": ["packages/*"], "catalog": { "react": "^18.0.0" } },
                 "overrides": { "lodash": "4.17.21" },
-                "allowBuilds": { "esbuild": true, "fsevents": false }
+                "allowScripts": { "esbuild": true, "fsevents": false }
             }))
             .unwrap(),
         )
@@ -1432,13 +1443,15 @@ mod tests {
         assert_eq!(yaml["packages"][0], "packages/*");
         assert_eq!(yaml["catalog"]["react"], "^18.0.0");
         assert_eq!(yaml["overrides"]["lodash"], "4.17.21");
+        // The map is renamed on the way out: nub's neutral `allowScripts`
+        // lands under pnpm's own `allowBuilds` key in the yaml.
         assert_eq!(yaml["allowBuilds"]["esbuild"], true);
 
         let manifest: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
         )
         .unwrap();
-        for key in ["workspaces", "overrides", "allowBuilds"] {
+        for key in ["workspaces", "overrides", "allowScripts"] {
             assert!(
                 manifest.get(key).is_none(),
                 "{key} must move back into the yaml"

@@ -314,7 +314,15 @@ fn prune_sidecar_entries_json(obj: &mut serde_json::Map<String, serde_json::Valu
         }
     }
 
-    for top_key in ["overrides", "resolutions"] {
+    // The manifest-root build allowlist is a map keyed by package name, so a
+    // removed dep must lose its entry here too — otherwise the grant outlives
+    // the dependency and silently re-applies if the name comes back.
+    let top_keys: [&str; 3] = [
+        "overrides",
+        "resolutions",
+        aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
+    ];
+    for top_key in top_keys {
         let remove_top = if let Some(top) = obj.get_mut(top_key).and_then(|v| v.as_object_mut()) {
             top.shift_remove(name);
             top.is_empty()
@@ -330,7 +338,8 @@ fn prune_sidecar_entries_json(obj: &mut serde_json::Map<String, serde_json::Valu
 /// Prune aube/pnpm sidecar metadata entries that reference `name`.
 /// Covers pnpm.allowBuilds, pnpm.onlyBuiltDependencies,
 /// pnpm.neverBuiltDependencies, pnpm.overrides, aube.* mirrors,
-/// top-level overrides, yarn resolutions. Also removes the whole
+/// top-level overrides, yarn resolutions, and the manifest-root build
+/// allowlist. Also removes the whole
 /// namespace block if its last entry was the one we just dropped.
 /// Safe no-op if the manifest has none of these fields.
 fn prune_sidecar_entries(manifest: &mut aube_manifest::PackageJson, name: &str) {
@@ -408,6 +417,20 @@ fn prune_sidecar_entries(manifest: &mut aube_manifest::PackageJson, name: &str) 
         top.remove(name);
         if top.is_empty() {
             manifest.extra.remove("resolutions");
+        }
+    }
+    // The manifest-root build allowlist, for the same reason as above: a grant
+    // must not outlive the dependency it was written for.
+    if let Some(top) = manifest
+        .extra
+        .get_mut(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY)
+        .and_then(|v| v.as_object_mut())
+    {
+        top.remove(name);
+        if top.is_empty() {
+            manifest
+                .extra
+                .remove(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY);
         }
     }
 }

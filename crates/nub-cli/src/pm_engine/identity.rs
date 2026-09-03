@@ -43,7 +43,7 @@
 ///   The shared `pnpm-workspace.yaml` compat surface is gated separately on the
 ///   `EngineContext` (`read_branded_pnpm_config`), per the role.
 /// - `manifest_namespace` = `""` — nub reads its config from the manifest
-///   ROOT (top-level `workspaces`/`overrides`/`allowBuilds`), not a branded
+///   ROOT (top-level `workspaces`/`overrides`/`allowScripts`), not a branded
 ///   `"nub"` object.
 /// - `env_prefix` = `None` — nub exposes NONE of aube's internal debug /
 ///   perf-bisect toggle family (`AUBE_DISABLE_*`, `AUBE_CAS_*`, `AUBE_INTERNAL_*`,

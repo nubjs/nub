@@ -213,13 +213,13 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: WARN_AUBE_IGNORED_BUILD_SCRIPTS,
         category: category::INSTALL_LIFECYCLE,
-        description: "Dep had `preinstall`/`install`/`postinstall` scripts but isn't on the `allowBuilds` allowlist. Run `aube approve-builds`.",
+        description: "Dep had `preinstall`/`install`/`postinstall` scripts but isn't on the build allowlist. Run `aube approve-builds`.",
         exit_code: None,
     },
     CodeMeta {
         name: WARN_AUBE_DEFAULT_TRUST_BUILDS,
         category: category::INSTALL_LIFECYCLE,
-        description: "The `defaultTrust` floor let listed packages run build scripts without an explicit `allowBuilds` entry. Disclosure, not an error — set `defaultTrust=false` or an explicit `allowBuilds: false` entry to opt out.",
+        description: "The `defaultTrust` floor let listed packages run build scripts without an explicit build-allowlist entry. Disclosure, not an error — set `defaultTrust=false` or an explicit `false` allowlist entry to opt out.",
         exit_code: None,
     },
     CodeMeta {
@@ -243,7 +243,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT,
         category: category::INSTALL_LIFECYCLE,
-        description: "A dependency's lifecycle script matched a dangerous-shape heuristic (curl|sh, eval+atob, credential-file read, secret-env exfil, exfil endpoint, bare-IP HTTP). Advisory only; the `allowBuilds` allowlist still gates execution. Inspect the script before approving the build.",
+        description: "A dependency's lifecycle script matched a dangerous-shape heuristic (curl|sh, eval+atob, credential-file read, secret-env exfil, exfil endpoint, bare-IP HTTP). Advisory only; the build allowlist still gates execution. Inspect the script before approving the build.",
         exit_code: None,
     },
     CodeMeta {

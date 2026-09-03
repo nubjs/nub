@@ -300,12 +300,13 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         .unreviewed;
         if !unreviewed.is_empty() {
             return Err(miette!(
-                "dependencies with build scripts must be reviewed before install:\n{}\nhelp: add the package(s) to `allowBuilds` with `true`/`false`, or set `strictDepBuilds=false`",
+                "dependencies with build scripts must be reviewed before install:\n{}\nhelp: add the package(s) to `{}` with `true`/`false`, or set `strictDepBuilds=false`",
                 unreviewed
                     .into_iter()
                     .map(|b| format!("  - {}", b.spec_key))
                     .collect::<Vec<_>>()
-                    .join("\n")
+                    .join("\n"),
+                aube_manifest::allow_scripts_field_name(),
             ));
         }
     }
