@@ -20,14 +20,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # One job, three binaries from two incremental rebuilds: main, main+secretfast,
+          # main+secretfast+entropy. The visibility/atexit/hasher variants were measured in
+          # earlier runs (see README.md).
           - variant: baseline
-            second: atexit
-          - variant: inlines-hidden
-            second: ''
-          - variant: pr65526
-            second: atexit
-          - variant: hasher
-            second: ''
+            second: secretfast
+            third: entropy
     runs-on: macos-15
     timeout-minutes: 355
     steps:
@@ -78,6 +76,21 @@ jobs:
         run: |
           tests/node-startup-probe/measure-macos.sh "$RUNNER_TEMP/node/out/Release/node" "${{ matrix.variant }}+${{ matrix.second }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}+${{ matrix.second }}.txt"
           cp "$RUNNER_TEMP/node/out/Release/node" "bins/node-${{ matrix.variant }}+${{ matrix.second }}"
+
+      - name: Apply third-phase patch (${{ matrix.third }}) and rebuild incrementally
+        if: matrix.third != ''
+        run: |
+          tests/node-startup-probe/apply-variant.sh "${{ matrix.third }}" "$RUNNER_TEMP/node"
+          cd "$RUNNER_TEMP/node"
+          t0=$SECONDS
+          ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja3.log 2>&1 || { tail -30 ninja3.log; exit 1; }
+          echo "incremental rebuild took $((SECONDS - t0))s"
+
+      - name: Measure (${{ matrix.variant }}+${{ matrix.second }}+${{ matrix.third }})
+        if: matrix.third != ''
+        run: |
+          tests/node-startup-probe/measure-macos.sh "$RUNNER_TEMP/node/out/Release/node" "${{ matrix.variant }}+${{ matrix.second }}+${{ matrix.third }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}+${{ matrix.second }}+${{ matrix.third }}.txt"
+          cp "$RUNNER_TEMP/node/out/Release/node" "bins/node-${{ matrix.variant }}+${{ matrix.second }}+${{ matrix.third }}"
 
       - uses: actions/upload-artifact@v4
         if: always()

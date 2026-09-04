@@ -12,12 +12,14 @@ Builds Node.js at a pinned `main` SHA on a real macOS arm64 runner in several bu
 | `baseline` | pinned `main`, default `./configure --ninja` |
 | `inlines-hidden` | `-fvisibility-inlines-hidden` only, for node/ada/icu/abseil (every non-inline symbol stays exported) |
 | `pr65526` | nodejs/node#65526 as-is: `-fvisibility=hidden` plus `-fvisibility-inlines-hidden` |
-| `hasher` | `V8_USE_DEFAULT_HASHER_SECRET=1` in `tools/v8_gypfiles/features.gypi`: V8's own default, which Node's gyp build omits, so every isolate start runs a Miller-Rabin search for three random 64-bit primes (`rapidhash_make_secret`), the top symbol in a Linux `perf` profile of Node 25 and 26 at 12-14% of samples |
+| `hasher` | `V8_USE_DEFAULT_HASHER_SECRET=1` in `tools/v8_gypfiles/features.gypi`: prices the per-isolate Miller-Rabin search for three random 64-bit primes (`rapidhash_make_secret`, 12-14% of a Linux `perf` profile of Node 25 and 26). A measurement only: Node's CVE-2026-21717 fix derives its array-index hash multipliers from those secrets, so this is not a shippable configuration |
 | `+atexit` | the `src/node.cc` half of nodejs/node#65549 applied on top as an incremental rebuild (the lazy cipher-table half already landed on main) |
+| `+secretfast` | `deps/v8/third_party/rapidhash-v8/secret.h`: `mul_mod` computed with a 128-bit multiply and modulo instead of a 64-iteration shift-add loop with two 64-bit `%` per iteration. Same secrets, ~17x faster generation; the fix the `hasher` row's measurement points at |
+| `+entropy` | `src/node.cc`: V8's entropy source reads `uv_random()` instead of OpenSSL's DRBG, and the eager `CSPRNG(nullptr, 0)` seeding check runs only when FIPS is in effect, so OpenSSL's default provider is not constructed before `v8Start` |
 
 ## Running it
 
-Push to `probe/node-startup`; the workflow runs one job per variant (~2-3 h each on the 3-core runner) and uploads `results-<variant>` (text) and `bins-<variant>` (the built binaries) as artifacts.
+Push to `probe/node-startup`; the workflow runs one job per matrix entry (~65-75 min per cold build on the 3-core runner, a few minutes per incremental phase) and uploads `results-<variant>` (text) and `bins-<variant>` (the built binaries) as artifacts. The current matrix builds `baseline`, then `+secretfast`, then `+entropy` as two incremental rebuilds in one job.
 
 Locally, `measure-macos.sh <node-binary> <label> harness/` runs the same measurement against any binary.
 
