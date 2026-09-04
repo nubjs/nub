@@ -16,30 +16,29 @@
 //! All edits go through [`super::update_manifest_json_object`], which
 //! preserves top-level key order and writes atomically.
 
-use clap::Args;
 use miette::miette;
 use serde_json::Value;
 
 use super::property_path;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PkgArgs {
     /// Subcommand: `get`, `set`, `delete`, or `fix`.
     pub subcommand: String,
 
     /// Arguments for the subcommand: keys for `get`/`delete`, `key=value`
     /// pairs for `set`, none for `fix`.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[usage(arg, double_dash = "automatic")]
     pub args: Vec<String>,
 
     /// For `set`, parse each value as JSON. For `get` of a single key,
     /// return its JSON-encoded form instead of the raw string.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 
     /// Operate on the package.json in this directory (default: the
     /// nearest project root, or the cwd).
-    #[arg(short = 'C', long, value_name = "DIR")]
+    #[usage(short = 'C', long, value_name = "DIR")]
     pub dir: Option<std::path::PathBuf>,
 }
 

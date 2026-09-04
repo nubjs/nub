@@ -8,6 +8,12 @@ project:
   errors: miette (user-facing, top-level), thiserror (per-library crate)
   error_codes: every error/warning carries a stable ERR_AUBE_*/WARN_AUBE_* identifier from aube-codes crate; bespoke exit codes for a curated subset; see error_codes section below for conventions
 
+mbx:
+  policy: mise install installs mbx 1.4; mise run activates the project wrapper, and standalone cargo commands require an activated mise shell
+  fallback: prefix the exact equivalent cargo command from CONTRIBUTING.md with MBX_DISABLE=1 without weakening or skipping the check
+  report: if bypassed Cargo succeeds, surface the mismatch and recommend https://github.com/jdx/mr-boxington/discussions with repository and commit, OS, mbx --version, mbx doctor, and both commands and outputs; redact secrets, absolute cache paths, remote URLs, namespaces, and other sensitive or identifying details
+  agent_boundary: do not permanently disable the wrapper and do not post externally without user authorization
+
 layout:
   global_store: $XDG_DATA_HOME/aube/store/v1/ (contains files/ for CAS shards + index/ for cached package indexes; falls back to ~/.local/share/aube/store/v1/). `aube store path` prints this v1/ dir, matching `pnpm store path` granularity. The legacy index location at $XDG_CACHE_HOME/aube/index/ is migrated in-place on the first store open after upgrade.
   store_hashing: BLAKE3 content addressed, 2-char sharding
@@ -233,6 +239,9 @@ security[5]:
 
 deps:
   policy: minimize, prefer std over external, every added dep must justify >=20 LOC saved
+  version_requirements: use the lowest compatibility-significant specificity (for example, "1" for stable 1.x dependencies)
+  routine_updates: update Cargo.lock only when the existing Cargo.toml requirement already accepts the new version
+  lockfile_scope: keep dependency lockfile updates focused; avoid unrelated transitive churn
   tls: rustls (no OpenSSL / native-tls)
   reqwest_features: minimal (rustls-tls + http2 + json + stream + charset + system-proxy)
   supply_chain[2]:

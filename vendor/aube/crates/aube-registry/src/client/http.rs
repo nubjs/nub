@@ -101,6 +101,25 @@ pub(super) fn load_node_extra_ca_certs() -> Vec<reqwest::Certificate> {
     }
 }
 
+/// Trust roots for the auxiliary probe clients — live OSV
+/// (`api.osv.dev`), the OSV bloom/mirror dumps, and the npmjs
+/// downloads API (`api.npmjs.org`).
+///
+/// Those clients are built outside [`RegistryClient`], so they miss
+/// the `NODE_EXTRA_CA_CERTS` roots every registry client gets from
+/// `from_config_with_policy`. Behind a TLS-terminating proxy that is
+/// the difference between a working probe and a handshake failure —
+/// and under the default `advisoryCheck = on` a probe failure fails
+/// *open*, so the `MAL-*` gate silently stops running on a host that
+/// is configured correctly and online.
+pub(crate) fn probe_client_builder() -> reqwest::ClientBuilder {
+    let mut builder = aube_util::http::with_webpki_root_fallback(reqwest::Client::builder());
+    for cert in load_node_extra_ca_certs() {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder
+}
+
 /// HTTP/1.1-only variant for tarball downloads. Tarballs are large
 /// opaque blobs where h2 multiplexing buys nothing: there are no
 /// compressible headers, and a single slow tarball stream causes
@@ -374,7 +393,15 @@ pub(super) fn force_full_packument() -> bool {
 mod tests {
     use super::{build_http_client, load_node_extra_ca_certs};
     use crate::config::{FetchPolicy, NpmConfig};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose,
+        IsCa, KeyPair, KeyUsagePurpose,
+    };
     use std::ffi::{OsStr, OsString};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::TlsAcceptor;
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
     /// A minimal self-signed certificate. Lives in
     /// `tests/fixtures/test-ca.pem` so the base64 body stays out of the
@@ -472,5 +499,213 @@ mod tests {
         env.set("/aube/does-not-exist.pem");
         assert!(load_node_extra_ca_certs().is_empty());
         // `env` restores NODE_EXTRA_CA_CERTS on drop, even on panic.
+    }
+
+    /// Smallest valid HTTP/1.1 reply. The trust test only cares that the
+    /// handshake completed, so the response carries no body.
+    const HTTP_OK: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+    /// A throwaway CA plus a loopback HTTPS listener whose leaf chains
+    /// only to it. Neither the OS trust store nor the webpki bundle
+    /// `with_webpki_root_fallback` merges in issued this chain, so a
+    /// completed handshake against the listener is proof that the CA
+    /// reached the client through `NODE_EXTRA_CA_CERTS`.
+    struct PrivateCaServer {
+        /// PEM bundle holding the CA certificate — the file the test
+        /// points `NODE_EXTRA_CA_CERTS` at.
+        ca_bundle: std::path::PathBuf,
+        url: String,
+        /// Owns `ca_bundle`'s parent; dropping it removes the bundle.
+        _dir: tempfile::TempDir,
+        /// The accept loop runs until the test's runtime is dropped.
+        _accept_loop: tokio::task::JoinHandle<()>,
+    }
+
+    impl PrivateCaServer {
+        async fn start() -> Self {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let (ca_pem, leaf_chain, leaf_key) = issue_private_chain();
+
+            let ca_bundle = dir.path().join("private-ca.pem");
+            std::fs::write(&ca_bundle, ca_pem).expect("write ca bundle");
+
+            let mut config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(leaf_chain, leaf_key)
+                .expect("server tls config");
+            // reqwest offers h2 first; pin h1 so `HTTP_OK` is a valid
+            // reply on whatever ALPN negotiates.
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let acceptor = TlsAcceptor::from(std::sync::Arc::new(config));
+
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind loopback listener");
+            let port = listener.local_addr().expect("listener address").port();
+
+            let accept_loop = tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    let acceptor = acceptor.clone();
+                    tokio::spawn(async move {
+                        // A refused handshake is the untrusted arm doing
+                        // its job, not a harness failure.
+                        let Ok(mut tls) = acceptor.accept(tcp).await else {
+                            return;
+                        };
+                        let mut request = [0u8; 1024];
+                        let _ = tls.read(&mut request).await;
+                        let _ = tls.write_all(HTTP_OK).await;
+                        let _ = tls.shutdown().await;
+                    });
+                }
+            });
+
+            PrivateCaServer {
+                ca_bundle,
+                // `localhost`, not the bare IP: every platform verifier
+                // matches a dNSName SAN, IP SAN support is spottier.
+                url: format!("https://localhost:{port}/"),
+                _dir: dir,
+                _accept_loop: accept_loop,
+            }
+        }
+    }
+
+    /// Mint a throwaway CA and a `localhost` leaf signed by it, in the
+    /// shapes the two sides need: the CA as a PEM bundle for
+    /// `NODE_EXTRA_CA_CERTS`, the leaf chain and key as DER for rustls.
+    fn issue_private_chain() -> (String, Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "aube probe-client test ca");
+        let ca_key = KeyPair::generate().expect("ca key");
+        let ca = CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-signed ca");
+
+        let mut leaf_params =
+            CertificateParams::new(vec!["localhost".to_string()]).expect("leaf params");
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        leaf_params.use_authority_key_identifier_extension = true;
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, "localhost");
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let leaf = leaf_params.signed_by(&leaf_key, &ca).expect("leaf cert");
+
+        (
+            pem_block(ca.der()),
+            vec![leaf.der().clone()],
+            PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+        )
+    }
+
+    /// PEM-wrap a DER certificate. rcgen's `pem` feature does this, but
+    /// it costs a dependency for six lines and `base64` is already one.
+    fn pem_block(der: &CertificateDer<'_>) -> String {
+        use base64::Engine as _;
+
+        let body = base64::engine::general_purpose::STANDARD.encode(der);
+        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for line in body.as_bytes().chunks(64) {
+            pem.push_str(&String::from_utf8_lossy(line));
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+        pem
+    }
+
+    /// Every probe-client constructor in the crate, built fresh so each
+    /// reads the `NODE_EXTRA_CA_CERTS` currently in the environment.
+    /// Naming the three constructors instead of testing
+    /// `probe_client_builder` once is the point: a constructor that
+    /// stops routing through the shared builder is the regression this
+    /// guards. Construction is also the non-fatal check — an unreadable
+    /// bundle must still yield a client, matching `build_http_client`.
+    fn probe_clients() -> Vec<(&'static str, reqwest::Client)> {
+        vec![
+            (
+                "supply_chain::build_probe_client",
+                crate::supply_chain::build_probe_client().expect("probe client"),
+            ),
+            (
+                "OsvMirror::build_client",
+                crate::osv_mirror::OsvMirror::build_client().expect("osv mirror client"),
+            ),
+            (
+                "OsvBloomClient::build_client",
+                crate::osv_bloom_client::OsvBloomClient::build_client().expect("osv bloom client"),
+            ),
+        ]
+    }
+
+    /// Flatten an error and its `source` chain into one string. reqwest
+    /// hides the rustls reason (`invalid peer certificate: UnknownIssuer`)
+    /// two layers down, so the top-level message alone can't tell a
+    /// certificate rejection from a connection refusal.
+    fn error_chain(error: &dyn std::error::Error) -> String {
+        let mut chain = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            chain.push_str(": ");
+            chain.push_str(&cause.to_string());
+            source = cause.source();
+        }
+        chain
+    }
+
+    /// Each probe client reaches a host behind a private CA only when
+    /// `NODE_EXTRA_CA_CERTS` names that CA — the trust propagation
+    /// `probe_client_builder` exists to guarantee.
+    ///
+    /// Constructing the clients proves nothing here: that succeeds with
+    /// or without the roots. So all three constructors make a real
+    /// HTTPS request against a listener whose leaf chains only to a
+    /// throwaway CA, and the request has to fail with a certificate
+    /// error before the bundle is configured and succeed after. Revert
+    /// any constructor to a bare `reqwest::Client::builder()` and the
+    /// second arm fails.
+    #[test]
+    fn probe_clients_trust_the_ca_named_by_node_extra_ca_certs() {
+        let env = EnvVarGuard::acquire();
+        // `block_on` rather than `#[tokio::test]`: `EnvVarGuard` holds a
+        // std mutex, which must not be held across an await point.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        rt.block_on(async {
+            let server = PrivateCaServer::start().await;
+
+            // Nothing in the default trust store issued this leaf, so
+            // every probe client has to reject it.
+            env.set("/aube/does-not-exist.pem");
+            for (name, client) in probe_clients() {
+                let error = client
+                    .get(&server.url)
+                    .send()
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{name} trusted a CA it was never given"));
+                let reason = error_chain(&error);
+                assert!(
+                    reason.to_lowercase().contains("certificate"),
+                    "{name} failed for the wrong reason: {reason}"
+                );
+            }
+
+            // Same request, same listener, bundle configured: the
+            // handshake now has to complete.
+            env.set(&server.ca_bundle);
+            for (name, client) in probe_clients() {
+                let response = client.get(&server.url).send().await.unwrap_or_else(|e| {
+                    panic!("{name} rejected the configured CA: {}", error_chain(&e))
+                });
+                assert_eq!(response.status(), reqwest::StatusCode::OK, "{name}");
+            }
+        });
     }
 }

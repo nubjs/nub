@@ -1,21 +1,21 @@
 use super::{DepSelection, FrozenMode, FrozenOverride, GlobalVirtualStoreFlags};
 
-#[derive(Debug, clap::Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct InstallArgs {
-    /// Install only devDependencies
-    #[arg(short = 'D', long, conflicts_with = "prod")]
+    /// Install only devDependencies.
+    #[usage(short = 'D', long, conflicts = "--prod")]
     pub dev: bool,
-    /// Skip devDependencies; install only production deps
-    #[arg(short = 'P', long, visible_alias = "production")]
+    /// Skip devDependencies; install only production deps.
+    #[usage(short = 'P', long, long = "production")]
     pub prod: bool,
     /// Allow every dependency's lifecycle scripts to run.
     ///
     /// Bypasses the `allowBuilds` allowlist. Do not use in CI.
-    #[arg(long)]
+    #[usage(long)]
     pub dangerously_allow_all_builds: bool,
     /// Resolve and report what would happen without writing the lockfile
     /// or linking node_modules.
-    #[arg(long, conflicts_with = "lockfile_only")]
+    #[usage(long, conflicts = "--lockfile-only")]
     pub dry_run: bool,
     /// Re-resolve lockfile entries whose spec drifted from package.json.
     ///
@@ -23,14 +23,21 @@ pub struct InstallArgs {
     /// specs keep their existing version and integrity hash; only
     /// drifted entries (and any new transitives they pull in) get
     /// re-resolved.
-    #[arg(long, conflicts_with_all = ["frozen_lockfile", "no_frozen_lockfile", "prefer_frozen_lockfile"])]
+    #[usage(
+        long,
+        conflicts(
+            "--frozen-lockfile",
+            "--no-frozen-lockfile",
+            "--prefer-frozen-lockfile"
+        )
+    )]
     pub fix_lockfile: bool,
     /// Force reinstall, ignoring lockfile/state freshness.
     ///
     /// Bypasses the `node_modules/.aube-state` freshness check and
     /// re-resolves the lockfile even when nothing has drifted. Mirrors
     /// pnpm's `install --force`.
-    #[arg(long)]
+    #[usage(long)]
     pub force: bool,
     /// Add a global pnpmfile that runs before the local one.
     ///
@@ -38,26 +45,26 @@ pub struct InstallArgs {
     /// resolve against the project root. The global hook runs first
     /// and the local hook (if any) runs second, so local mutations
     /// win on conflicts — matching pnpm's composition order.
-    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    #[usage(long, value_name = "PATH", conflicts = "--ignore-pnpmfile")]
     pub global_pnpmfile: Option<std::path::PathBuf>,
-    /// Skip running `.pnpmfile.mjs` / `.pnpmfile.cjs` hooks for this install
-    #[arg(long)]
+    /// Skip running `.pnpmfile.mjs` / `.pnpmfile.cjs` hooks for this install.
+    #[usage(long)]
     pub ignore_pnpmfile: bool,
-    /// Skip lifecycle scripts (no-op; aube already skips by default)
-    #[arg(long)]
+    /// Skip lifecycle scripts (no-op; aube already skips by default).
+    #[usage(long)]
     pub ignore_scripts: bool,
     /// Read and write the lockfile in the given directory.
     ///
     /// Instead of placing the lockfile alongside `package.json`, the
     /// project becomes an importer keyed by its relative path from the
     /// lockfile directory. Mirrors pnpm's `--lockfile-dir`.
-    #[arg(long, value_name = "PATH")]
+    #[usage(long, value_name = "PATH")]
     pub lockfile_dir: Option<String>,
     /// Resolve dependencies and write the lockfile, but don't link
     /// `node_modules`.
     ///
     /// Useful for CI workflows that only update the lockfile.
-    #[arg(long, conflicts_with = "frozen_lockfile")]
+    #[usage(long, conflicts = "--frozen-lockfile")]
     pub lockfile_only: bool,
     /// Merge per-branch lockfiles into the main `aube-lock.yaml`.
     ///
@@ -67,26 +74,28 @@ pub struct InstallArgs {
     /// `mergeGitBranchLockfilesBranchPattern` is set in
     /// `pnpm-workspace.yaml`, this happens automatically on matching
     /// branches; the flag forces it regardless.
-    #[arg(long)]
+    #[usage(long)]
     pub merge_git_branch_lockfiles: bool,
-    /// Cap concurrent tarball downloads.
+    /// Set the starting concurrency for registry requests.
     ///
     /// Overrides `network-concurrency` from `.npmrc` /
-    /// `aube-workspace.yaml` when set. Falls back to an auto-scaled
-    /// default of worker count x3, clamped to 16-64.
-    #[arg(long, value_name = "N")]
+    /// `aube-workspace.yaml` when set. Seeds aube's adaptive limiter
+    /// rather than capping it: concurrency still grows and shrinks in
+    /// response to registry throttling. Falls back to an auto-scaled
+    /// default of worker count x3, clamped to 16-128.
+    #[usage(long, value_name = "N")]
     pub network_concurrency: Option<u64>,
-    /// Skip optionalDependencies; don't install optional native modules
-    #[arg(long)]
+    /// Skip optionalDependencies; don't install optional native modules.
+    #[usage(long)]
     pub no_optional: bool,
     /// Inverse of `--side-effects-cache`.
-    #[arg(long, overrides_with = "side_effects_cache")]
+    #[usage(long, overrides = "--side-effects-cache")]
     pub no_side_effects_cache: bool,
     /// Inverse of `--verify-store-integrity`.
     ///
     /// Skips the SHA-512 verify step for every tarball aube pulls
     /// into the store during this install.
-    #[arg(long, overrides_with = "verify_store_integrity")]
+    #[usage(long, overrides = "--verify-store-integrity")]
     pub no_verify_store_integrity: bool,
     /// Which layout to materialize `node_modules/` as.
     ///
@@ -94,23 +103,23 @@ pub struct InstallArgs {
     /// `hoisted` builds an npm-style flat tree with conflict nesting.
     /// Overrides `node-linker` / `nodeLinker` from `.npmrc` /
     /// `aube-workspace.yaml` when set. `pnp` is not supported.
-    #[arg(long, value_name = "MODE")]
+    #[usage(long, value_name = "MODE")]
     pub node_linker: Option<String>,
     /// Fail if any metadata or tarball isn't already in the local cache.
     ///
     /// Never hits the network.
-    #[arg(long, conflicts_with = "prefer_offline")]
+    #[usage(long, conflicts = "--prefer-offline")]
     pub offline: bool,
     /// How to import package files from the global store into the
     /// virtual store.
     ///
     /// One of `auto` (default: detect the fastest strategy),
-    /// `hardlink`, `copy`, `clone` (reflink; falls back to copy
-    /// pending strict enforcement), or `clone-or-copy` (reflink with
-    /// a copy fallback). Overrides `package-import-method` /
+    /// `hardlink`, `copy`, `clone` (reflink; falls back to copy), or
+    /// `clone-or-copy` (reflink with a copy fallback). Overrides
+    /// `package-import-method` /
     /// `packageImportMethod` from `.npmrc` / `aube-workspace.yaml`
     /// when set.
-    #[arg(long, value_name = "METHOD")]
+    #[usage(long, value_name = "METHOD")]
     pub package_import_method: Option<String>,
     /// Override the local pnpmfile location.
     ///
@@ -119,15 +128,15 @@ pub struct InstallArgs {
     /// over `pnpmfilePath` from `pnpm-workspace.yaml`. A typo (target
     /// missing) is a hard miss with a warning rather than a silent
     /// fallback to the default.
-    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    #[usage(long, value_name = "PATH", conflicts = "--ignore-pnpmfile")]
     pub pnpmfile: Option<std::path::PathBuf>,
     /// Prefer cached metadata over revalidation; only hit the network on a miss.
-    #[arg(long, conflicts_with = "offline")]
+    #[usage(long, conflicts = "--offline")]
     pub prefer_offline: bool,
     /// Selectively hoist matching transitive deps to the root node_modules.
     ///
     /// Repeatable; comma-separated values are also accepted.
-    #[arg(long, value_name = "GLOB", value_delimiter = ',')]
+    #[usage(long, value_name = "GLOB", delimiter = ',')]
     pub public_hoist_pattern: Vec<String>,
     /// How to resolve version ranges.
     ///
@@ -136,40 +145,40 @@ pub struct InstallArgs {
     /// publish-date cutoff). Accepts pnpm's aliases `time` and
     /// `lowest-direct`. When omitted, falls back to the
     /// `resolution-mode` key in `.npmrc` / `aube-workspace.yaml`.
-    #[arg(long, value_name = "MODE")]
+    #[usage(long, value_name = "MODE")]
     pub resolution_mode: Option<String>,
     /// Hoist every non-local transitive dep to the top-level
     /// `node_modules/`.
     ///
     /// Overrides `shamefully-hoist` / `shamefullyHoist` from
     /// `.npmrc` / `aube-workspace.yaml` when set.
-    #[arg(long)]
+    #[usage(long)]
     pub shamefully_hoist: bool,
     /// Cache post-build side effects for dependency packages.
     ///
     /// Defaults to on and only applies to packages allowed by
     /// `allowBuilds` / `onlyBuiltDependencies`. Pair with
     /// `--no-side-effects-cache` to opt out.
-    #[arg(long, overrides_with = "no_side_effects_cache")]
+    #[usage(long, overrides = "--no-side-effects-cache")]
     pub side_effects_cache: bool,
     /// Verify tarball SHA-512 before importing into the store.
     ///
     /// Checks each tarball against the lockfile integrity. Defaults to
     /// `true` (pnpm parity); pair with `--no-verify-store-integrity`
     /// to skip.
-    #[arg(long, overrides_with = "no_verify_store_integrity")]
+    #[usage(long, overrides = "--no-verify-store-integrity")]
     pub verify_store_integrity: bool,
     /// Short alias for the global `--workspace-root` flag.
     ///
     /// Runs install from the workspace root regardless of cwd (`pnpm
     /// install -w`).
-    #[arg(short = 'w', hide = true)]
+    #[usage(short = 'w', hide)]
     pub workspace_root_short: bool,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub lockfile: crate::cli_args::LockfileArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub virtual_store: crate::cli_args::VirtualStoreArgs,
 }
 
@@ -303,6 +312,8 @@ impl InstallArgs {
             // chained-call constructor (`with_mode`) is where commands
             // with package args opt into skipping them.
             skip_root_lifecycle: false,
+            run_dev_preinstall: true,
+            script_command: "install",
             // Argumentless `aube install` doesn't force the live-API
             // transitive gate by itself. `install::run` still runs
             // the gate when it detects fresh resolution (no
@@ -313,6 +324,31 @@ impl InstallArgs {
             osv_transitive_check: false,
             control: super::InstallControl::default(),
             embedder_runtime: None,
+        }
+    }
+}
+
+/// Host-owned setting overrides for one embedded install.
+///
+/// The materialization toggle is injected at explicit-command precedence.
+/// Storage paths remain native `PathBuf`s in an invocation task-local so Unix
+/// paths do not lose filesystem identity. Standalone CLI commands leave this
+/// empty.
+#[derive(Debug, Clone, Default)]
+pub struct EmbedderInstallOverrides {
+    /// Use aube's shared global virtual store. `Some(false)` materializes
+    /// packages inside the project so the host owns their complete lifecycle.
+    pub use_global_virtual_store: Option<bool>,
+    /// Directory for regenerable metadata caches.
+    pub cache_dir: Option<std::path::PathBuf>,
+    /// Root of the content-addressable package store.
+    pub store_dir: Option<std::path::PathBuf>,
+}
+
+impl EmbedderInstallOverrides {
+    pub(crate) fn append_to(&self, settings: &mut Vec<(String, String)>) {
+        if let Some(enabled) = self.use_global_virtual_store {
+            settings.push(("enableGlobalVirtualStore".to_string(), enabled.to_string()));
         }
     }
 }
@@ -455,6 +491,14 @@ pub struct InstallOptions {
     /// git-prepare install — that one's "root" IS the git dep itself and
     /// running its `prepare` is the whole point.
     pub skip_root_lifecycle: bool,
+    /// Run the root-only `pnpm:devPreinstall` hook before resolution.
+    /// Unlike ordinary root lifecycle hooks, pnpm also runs this for
+    /// `add` and `update`; other chained install callers leave it disabled.
+    pub run_dev_preinstall: bool,
+    /// Top-level package-manager command exposed to lifecycle scripts as
+    /// `npm_command`. Chained callers override the install default so hooks
+    /// can distinguish `add` and `update`.
+    pub script_command: &'static str,
     /// Run the post-resolve transitive OSV `MAL-*` gate against
     /// the live OSV API (not the mirror). Flipped on by commands
     /// whose whole point is fresh resolution — `aube add` and
@@ -518,6 +562,10 @@ impl InstallOptions {
             // the only construction path that runs them and it goes
             // through `InstallArgs::into_options`, not here.
             skip_root_lifecycle: true,
+            // Chained callers opt in individually. pnpm runs this hook for
+            // add/update, but not for unrelated internal installs.
+            run_dev_preinstall: false,
+            script_command: "install",
             // Default `false`. `aube add` and `aube update` flip
             // this on at construction. Other chained callers
             // (remove, dedupe, patch_commit, ...) leave it off so
@@ -534,5 +582,56 @@ impl InstallOptions {
 impl From<FrozenMode> for InstallOptions {
     fn from(mode: FrozenMode) -> Self {
         Self::with_mode(mode)
+    }
+}
+
+#[cfg(test)]
+mod embedder_override_tests {
+    use super::EmbedderInstallOverrides;
+
+    #[test]
+    fn overrides_beat_environment_and_project_settings() {
+        let cache_dir = std::path::PathBuf::from("/host/cache");
+        let store_dir = std::path::PathBuf::from("/host/store");
+        let overrides = EmbedderInstallOverrides {
+            use_global_virtual_store: Some(false),
+            cache_dir: Some(cache_dir.clone()),
+            store_dir: Some(store_dir.clone()),
+        };
+        let mut cli = Vec::new();
+        overrides.append_to(&mut cli);
+        let env = vec![
+            (
+                "npm_config_enable_global_virtual_store".to_string(),
+                "true".to_string(),
+            ),
+            ("npm_config_cache_dir".to_string(), "/env/cache".to_string()),
+            ("npm_config_store_dir".to_string(), "/env/store".to_string()),
+        ];
+        let npmrc = vec![
+            ("enableGlobalVirtualStore".to_string(), "true".to_string()),
+            ("cacheDir".to_string(), "/project/cache".to_string()),
+            ("storeDir".to_string(), "/project/store".to_string()),
+        ];
+        let workspace = std::collections::BTreeMap::new();
+        let empty_yaml = std::collections::BTreeMap::new();
+        let ctx = aube_settings::ResolveCtx {
+            managed_aube_config: &[],
+            project_aube_config: &[],
+            project_npmrc: &npmrc,
+            project_config: &[],
+            user_aube_config: &[],
+            user_npmrc: &[],
+            workspace_yaml: &workspace,
+            global_config_yaml: &empty_yaml,
+            env: &env,
+            cli: &cli,
+            embedder_defaults: &[],
+        };
+
+        assert_eq!(
+            aube_settings::resolved::enable_global_virtual_store(&ctx),
+            Some(false)
+        );
     }
 }

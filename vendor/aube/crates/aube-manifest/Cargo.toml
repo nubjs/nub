@@ -18,9 +18,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 yaml_serde = { workspace = true }
-yamlpatch = { workspace = true }
-yamlpath = { workspace = true }
+yamlpatch = { workspace = true, optional = true }
+yamlpath = { workspace = true, optional = true }
 thiserror = { workspace = true }
+
+[features]
+default = ["workspace-yaml-preserve"]
+# Preserve comments and formatting when mutating existing workspace YAML.
+# Embedders can omit this to avoid the tree-sitter dependency chain; writes
+# then fall back to serializing the complete document with canonical layout.
+workspace-yaml-preserve = ["dep:yamlpatch", "dep:yamlpath"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -73,6 +73,7 @@ pub fn pick_version_for_add<'a>(
     minimum_release_age: Option<&crate::MinimumReleaseAge>,
 ) -> PickResult<'a> {
     let cutoff = minimum_release_age.and_then(|m| m.cutoff());
+    let range = registry_alias_range(range);
     let strict = minimum_release_age.is_some_and(|m| m.strict);
     let exclude = minimum_release_age.map(|m| &m.exclude);
     let is_age_exempt = |ver: &str, parsed: Option<&node_semver::Version>| {
@@ -94,6 +95,20 @@ pub fn pick_version_for_add<'a>(
         strict,
         is_age_exempt,
     )
+}
+
+/// Return the version tail from an `npm:` alias spec. Resolution preprocesses
+/// this protocol before picking; report-only callers use this entry point
+/// directly, so normalize it here as well.
+fn registry_alias_range(range: &str) -> &str {
+    if let Some(rest) = range.strip_prefix("npm:") {
+        match rest.rfind('@') {
+            Some(at) if at > 0 => &rest[at + 1..],
+            _ => "latest",
+        }
+    } else {
+        range
+    }
 }
 
 /// Does `ver` clear `effective`, the publish-age cutoff that applies to it?

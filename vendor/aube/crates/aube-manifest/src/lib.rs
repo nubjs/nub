@@ -996,11 +996,22 @@ impl PackageJson {
         unresolved
     }
 
+    /// Return every raw `packageExtensions` value in precedence order so
+    /// callers can validate the enclosing shape before object extraction.
+    pub fn package_extension_values(&self) -> Vec<&serde_json::Value> {
+        let mut out = self
+            .pnpm_aube_objects()
+            .filter_map(|ns| ns.get("packageExtensions"))
+            .collect::<Vec<_>>();
+        if let Some(value) = self.extra.get("packageExtensions") {
+            out.push(value);
+        }
+        out
+    }
+
     /// Extract `packageExtensions` from root package.json. Supports
     /// top-level `packageExtensions`, `pnpm.packageExtensions`, and
-    /// `aube.packageExtensions`. Precedence (low → high):
-    /// `pnpm.packageExtensions`, `aube.packageExtensions`, top-level
-    /// `packageExtensions` — later writes win for duplicate selectors.
+    /// `aube.packageExtensions`. Later values win for duplicate selectors.
     pub fn package_extensions(&self) -> BTreeMap<String, serde_json::Value> {
         // Embedder seam: a host that scopes which packageExtensions home
         // applies per active PM (e.g. honoring the top-level home only under
@@ -1010,20 +1021,11 @@ impl PackageJson {
             return scoped;
         }
         let mut out = BTreeMap::new();
-        for ns in self.pnpm_aube_objects() {
-            if let Some(obj) = ns.get("packageExtensions").and_then(|v| v.as_object()) {
+        for value in self.package_extension_values() {
+            if let Some(obj) = value.as_object() {
                 for (k, v) in obj {
                     out.insert(k.clone(), v.clone());
                 }
-            }
-        }
-        if let Some(obj) = self
-            .extra
-            .get("packageExtensions")
-            .and_then(|v| v.as_object())
-        {
-            for (k, v) in obj {
-                out.insert(k.clone(), v.clone());
             }
         }
         out
@@ -1539,9 +1541,96 @@ fn line_col_to_byte_offset(content: &str, line: usize, column: usize) -> usize {
     content.len()
 }
 
+/// Detect the indentation style used in a JSON string.
+///
+/// Returns a slice of `raw` representing one level of indentation
+/// (e.g. `"  "`, `"   "`, `"    "`, `"\t"`), or `"  "` if no indentation
+/// could be detected.
+pub fn detect_json_indent(raw: &str) -> &str {
+    let mut root_indent: Option<&str> = None;
+    let mut detected: Option<&str> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        let indent_len = line.len() - trimmed.len();
+        let current_indent = &line[..indent_len];
+
+        match root_indent {
+            None => {
+                root_indent = Some(current_indent);
+            }
+            Some(root) => {
+                if current_indent.len() > root.len() && current_indent.starts_with(root) {
+                    let candidate = &current_indent[root.len()..];
+                    if detected.is_none_or(|indent| candidate.len() < indent.len()) {
+                        detected = Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    detected.unwrap_or("  ")
+}
+
+/// Serialize `value` as pretty JSON using `indent` for indentation.
+pub fn serialize_json_with_indent<T: serde::Serialize>(
+    value: &T,
+    indent: &str,
+) -> Result<String, serde_json::Error> {
+    let mut buf = Vec::with_capacity(128);
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+    let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value.serialize(&mut serializer)?;
+    String::from_utf8(buf)
+        .map_err(|e| serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_detect_json_indent() {
+        assert_eq!(detect_json_indent("{\n  \"name\": \"foo\"\n}"), "  ");
+        assert_eq!(detect_json_indent("{\n   \"name\": \"foo\"\n}"), "   ");
+        assert_eq!(detect_json_indent("{\n    \"name\": \"foo\"\n}"), "    ");
+        assert_eq!(detect_json_indent("{\n\t\"name\": \"foo\"\n}"), "\t");
+        assert_eq!(
+            detect_json_indent("\u{FEFF}{\n\t\"name\": \"foo\"\n}"),
+            "\t"
+        );
+        assert_eq!(detect_json_indent("  {\n    \"name\": \"foo\"\n  }"), "  ");
+        assert_eq!(detect_json_indent("{\"name\":\"foo\"}"), "  ");
+    }
+
+    #[test]
+    fn detect_json_indent_uses_shallowest_indented_line() {
+        assert_eq!(
+            detect_json_indent("{\"dependencies\": {\n    \"foo\": \"1.0.0\"\n  }\n}"),
+            "  "
+        );
+    }
+
+    #[test]
+    fn test_serialize_json_with_indent() {
+        let val = serde_json::json!({
+            "name": "foo",
+            "version": "1.0.0"
+        });
+        assert_eq!(
+            serialize_json_with_indent(&val, "   ").unwrap(),
+            "{\n   \"name\": \"foo\",\n   \"version\": \"1.0.0\"\n}"
+        );
+        assert_eq!(
+            serialize_json_with_indent(&val, "\t").unwrap(),
+            "{\n\t\"name\": \"foo\",\n\t\"version\": \"1.0.0\"\n}"
+        );
+    }
 
     fn parse(json: &str) -> PackageJson {
         serde_json::from_str(json).unwrap()

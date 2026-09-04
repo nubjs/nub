@@ -5,8 +5,6 @@
 //! the root holding global package installs. That is NOT the bin directory:
 //! bins link into the shared user-binary dir on PATH, which `bin -g` prints.
 
-use clap::Args;
-
 pub const AFTER_LONG_HELP: &str = "\
 Examples:
 
@@ -17,10 +15,10 @@ Examples:
   /home/user/.local/share/aube
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PrefixArgs {
     /// Print the global prefix directory instead of the project's root
-    #[arg(short, long)]
+    #[usage(short, long)]
     pub global: bool,
 }
 

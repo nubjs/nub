@@ -25,7 +25,7 @@ tarball URLs:
 aube add react@latest
 aube add alias-name@npm:actual-name@^1
 aube add jsr:@std/collections@^1.0.0
-aube add workspace:*
+aube add @acme/ui@workspace:*
 aube add file:../local-package
 aube add link:../linked-package
 aube add https://registry.example.test/pkg/-/pkg-1.0.0.tgz

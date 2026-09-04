@@ -200,7 +200,7 @@ pub struct Embedder {
     /// unaffected. Embedder-fixed.
     pub self_engines_check: bool,
     /// When `true` (aube's default), this tool owns its own self-update:
-    /// the update notifier (and its `aube.jdx.dev` endpoints) runs. An
+    /// the update notifier (and its `aube.sh` endpoints) runs. An
     /// embedder that owns its own upgrade path sets this `false` so those
     /// code paths never run. Embedder-fixed.
     pub self_update_enabled: bool,

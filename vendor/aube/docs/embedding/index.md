@@ -43,4 +43,4 @@ Every error and warning emitted by aube carries a stable identifier. See the
 [error code reference](../error-codes.md) for the compatibility policy.
 
 For questions and integration discussion, use
-[GitHub Discussions](https://github.com/jdx/aube/discussions).
+[GitHub Discussions](https://github.com/aubepkg/aube/discussions).

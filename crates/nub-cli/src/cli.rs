@@ -7,9 +7,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use anyhow::{Context, Result, bail};
-#[cfg(feature = "compile")]
-use clap::ArgAction;
-use clap::{Parser, Subcommand, ValueEnum};
 
 /// Stable, branded error codes for nub-cli's own (non-engine) failure paths.
 /// The engine's `ERR_AUBE_*` codes are rewritten to `ERR_NUB_*` at presentation
@@ -84,10 +81,35 @@ pub struct NubxDlxFlags {
     pub yes: bool,
 }
 
+/// Print a response the parser produced instead of a parse, on the stream and
+/// with the status the standalone process would have used: help and version to
+/// stdout at 0, a usage error to stderr at 2.
+fn print_parser_response(exit: &usage_rs::embedded::Exit) {
+    if exit.stderr {
+        eprintln!("{}", exit.text.trim_end());
+    } else {
+        println!("{}", exit.text.trim_end());
+    }
+}
+
+/// Parse an argv whose first word is the program name. A help/version request
+/// or a usage error prints the rendered response and exits with its status.
+fn parse_cli_or_exit(argv: &[String]) -> Cli {
+    let words: Vec<std::ffi::OsString> =
+        argv.iter().skip(1).map(std::ffi::OsString::from).collect();
+    match Cli::embedded_outcome(&words) {
+        usage_rs::embedded::Outcome::Parsed(cli) => cli,
+        usage_rs::embedded::Outcome::Exit(exit) => {
+            print_parser_response(&exit);
+            std::process::exit(exit.code)
+        }
+    }
+}
+
 /// `--reporter <MODE>` for `nub run`. `default` is the existing prefixed /
 /// streamed / aggregated human output; `silent` is `-s`; `ndjson` is machine
 /// output (see [`emit_ndjson`]).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, usage_rs::ValueEnum)]
 pub enum ReporterMode {
     Default,
     Silent,
@@ -715,71 +737,78 @@ pub fn normalize_invocation_environment() {
 /// auto-flag injection, .env loading, and more. Drop-in replacement
 /// for `node` — anything `node <args>` accepts, `nub <args>` also
 /// accepts, plus subcommands.
-#[derive(Parser, Debug)]
-#[command(
+#[derive(usage_rs::Cli, Debug)]
+#[usage(
     name = "nub",
     about = "The all-in-one Node.js toolkit",
-    long_about = None,
-    disable_help_subcommand = true,
-    disable_version_flag = true,
-    args_conflicts_with_subcommands = true,
+    disable_help_subcommand,
+    disable_version_flag,
+    unknown_flags = "error",
+    args_override_self = false
 )]
 pub struct Cli {
     /// Print version.
-    #[arg(short = 'v', short_alias = 'V', long)]
+    #[usage(short = 'v', short = 'V', long)]
     pub version: bool,
 
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: Option<Command>,
 
     /// Run as if started in <DIR>.
-    #[arg(long, global = true, value_name = "DIR")]
+    #[usage(long, global, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
 
     /// Suppress Nub's non-error output.
-    #[arg(short = 's', long, global = true)]
+    #[usage(short = 's', long, global)]
     pub silent: bool,
 
     /// Increase Nub's log verbosity (repeatable).
-    #[arg(long, global = true, action = clap::ArgAction::Count)]
+    #[usage(long, global, count)]
     pub verbose: u8,
 
     /// Color mode for Nub's output.
-    #[arg(long, global = true, default_value = "auto", default_missing_value = "always", num_args = 0..=1, require_equals = true)]
+    #[usage(
+        long,
+        global,
+        value_enum,
+        default = "auto",
+        default_missing = "always",
+        require_equals
+    )]
     pub color: ColorWhen,
 
-    // Declared to clap as well as caught by the pre-subcommand argv scan, because
+    // Declared to the parser as well as caught by the pre-subcommand argv scan, because
     // pnpm accepts it in BOTH positions and the scan only sees tokens before the
     // verb: without this, `nub run -r --no-color build` was refused by the parser
     // while the pre-verb spelling worked.
     //
-    // Kept as a plain comment, NOT a doc comment: clap renders a doc comment into
+    // Kept as a plain comment, NOT a doc comment: the parser renders a doc comment into
     // `--help`, and a `global` arg's text lands in EVERY subcommand's help — where
     // `cli_grammar_parity` greps for the parser's rejection wording to decide
     // whether a form was refused. Quoting that wording here made every probe in
     // that suite read as a rejection.
     /// Disable color. The pnpm-compatible spelling of `--color=never`.
-    #[arg(long = "no-color", global = true, conflicts_with = "color")]
+    #[usage(long = "no-color", global, conflicts("--color"))]
     pub no_color: bool,
 
     /// Enable watch mode (alias for `nub watch`).
-    #[arg(long)]
+    #[usage(long)]
     pub watch: bool,
 
     /// File to execute, or `-` for stdin. When no subcommand matches,
     /// the first positional is treated as a file path and everything
     /// after it passes through to Node.
-    #[arg(trailing_var_arg = true)]
+    #[usage(arg, double_dash = "automatic")]
     pub args: Vec<String>,
 }
 
 // One of these is built once per process, straight from argv, and matched
 // immediately — it is never held in a collection, moved in a hot loop, or sent
 // across a channel, so the size gap between the largest variant and the rest buys
-// nothing to fix. Boxing a clap `Subcommand` variant would also put an indirection
+// nothing to fix. Boxing a `Subcommands` variant would also put an indirection
 // in front of every field the parser writes and every match arm reads.
 #[allow(clippy::large_enum_variant)]
-#[derive(Subcommand, Debug)]
+#[derive(usage_rs::Subcommands, Debug)]
 pub enum Command {
     /// Run a package.json script (workspace-aware).
     Run {
@@ -787,109 +816,109 @@ pub enum Command {
         script: Option<String>,
 
         /// Disable Nub's runtime augmentation for this invocation.
-        #[arg(long)]
+        #[usage(long)]
         node: bool,
 
         /// Run in all workspace packages. `--workspaces` is the npm-style alias.
-        #[arg(short = 'r', long = "recursive", visible_alias = "workspaces")]
+        #[usage(short = 'r', long = "recursive", visible_alias = "workspaces")]
         recursive: bool,
 
         /// Filter workspace packages by name or glob. Repeatable: multiple
         /// `--filter`s union; `!`-prefixed filters subtract. `-F` is the alias.
-        #[arg(short = 'F', long)]
+        #[usage(short = 'F', long)]
         filter: Vec<String>,
 
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
-        #[arg(long = "workspace", value_name = "NAME")]
+        #[usage(long = "workspace", value_name = "NAME")]
         workspace: Vec<String>,
 
         /// Run from the workspace root regardless of cwd.
-        #[arg(short = 'w', long)]
+        #[usage(short = 'w', long)]
         workspace_root: bool,
 
         /// Add the workspace root package to the recursive set (npm-style;
         /// distinct from `--workspace-root`, which targets *only* the root).
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
         /// Error if the filter selects zero packages. (Nub also errors on a
         /// zero-match filter by default; this is the explicit form.)
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Skip `pre<x>` / `post<x>` lifecycle hooks for every script run.
-        #[arg(long)]
+        #[usage(long)]
         ignore_scripts: bool,
 
         /// Override the shell used to invoke the script command.
-        #[arg(long, value_name = "PATH")]
+        #[usage(long, value_name = "PATH")]
         script_shell: Option<String>,
 
         /// Buffer each package's output and flush it on completion (no
         /// interleaving). Default on CI / non-TTY.
-        #[arg(long)]
+        #[usage(long)]
         aggregate_output: bool,
 
         /// Skip topological predecessors of <pkg> (CI restart-after-failure).
-        #[arg(long, value_name = "PKG")]
+        #[usage(long, value_name = "PKG")]
         resume_from: Option<String>,
 
         /// Max concurrent packages per topological chunk.
-        #[arg(long, value_name = "N")]
+        #[usage(long, value_name = "N")]
         workspace_concurrency: Option<i32>,
 
         /// Run all packages concurrently with no topological ordering.
-        #[arg(long)]
+        #[usage(long)]
         parallel: bool,
 
         /// Stop the run on first failure. This is the default; the flag is
         /// accepted for explicitness/muscle-memory and is a no-op on its own.
-        #[arg(long)]
+        #[usage(long)]
         bail: bool,
 
         /// Don't stop on first failure; collect all results.
-        #[arg(long = "no-bail")]
+        #[usage(long = "no-bail")]
         no_bail: bool,
 
         /// Reverse topological order (dependents before dependencies).
-        #[arg(long)]
+        #[usage(long)]
         reverse: bool,
 
         /// Skip topological sort; treat all packages as one flat set.
-        #[arg(long = "no-sort")]
+        #[usage(long = "no-sort")]
         no_sort: bool,
 
         /// Run packages strictly one at a time, ignoring topological order
         /// (equivalent to `--no-sort --workspace-concurrency 1`).
-        #[arg(long, conflicts_with = "parallel")]
+        #[usage(long, conflicts("--parallel"))]
         sequential: bool,
 
         /// Stream output with package-name prefix.
-        #[arg(long)]
+        #[usage(long)]
         stream: bool,
 
         /// Output reporter: `default` (prefixed/aggregated), `silent` (= `-s`),
         /// or `ndjson` (one JSON object per line for CI parsing).
-        #[arg(long, value_enum, value_name = "MODE")]
+        #[usage(long, value_enum, value_name = "MODE")]
         reporter: Option<ReporterMode>,
 
         /// Drop the `<dir> <script>:` prefix from each streamed output line so CI
         /// annotation matchers see the child's raw output. Pairs with `--stream`.
-        #[arg(long = "reporter-hide-prefix")]
+        #[usage(long = "reporter-hide-prefix")]
         reporter_hide_prefix: bool,
 
         /// Skip packages that don't have the named script.
-        #[arg(long)]
+        #[usage(long)]
         if_present: bool,
 
         /// Skip the pre-run dependency-freshness check for this invocation
         /// (`--no-install` is the alias).
-        #[arg(long = "no-check", visible_alias = "no-install")]
+        #[usage(long = "no-check", visible_alias = "no-install")]
         no_check: bool,
 
         /// Remaining arguments forwarded to the script.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[usage(arg, double_dash = "automatic")]
         args: Vec<String>,
     },
 
@@ -899,7 +928,7 @@ pub enum Command {
         file: String,
 
         /// Remaining arguments forwarded to the script.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[usage(arg, double_dash = "automatic")]
         args: Vec<String>,
     },
 
@@ -909,53 +938,53 @@ pub enum Command {
         bin: String,
 
         /// Disable Nub's runtime augmentation for this invocation.
-        #[arg(long)]
+        #[usage(long)]
         node: bool,
 
         /// Run the bin in every workspace package. `--workspaces` is the npm-style alias.
-        #[arg(short = 'r', long = "recursive", visible_alias = "workspaces")]
+        #[usage(short = 'r', long = "recursive", visible_alias = "workspaces")]
         recursive: bool,
 
         /// Filter workspace packages by name or glob. Repeatable: multiple
         /// `--filter`s union; `!`-prefixed filters subtract. `-F` is the alias.
-        #[arg(short = 'F', long)]
+        #[usage(short = 'F', long)]
         filter: Vec<String>,
 
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
-        #[arg(long = "workspace", value_name = "NAME")]
+        #[usage(long = "workspace", value_name = "NAME")]
         workspace: Vec<String>,
 
         /// Run from the workspace root regardless of cwd.
-        #[arg(short = 'w', long)]
+        #[usage(short = 'w', long)]
         workspace_root: bool,
 
         /// Add the workspace root package to the recursive set (npm-style;
         /// distinct from `--workspace-root`, which targets *only* the root).
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
         /// Error if the filter selects zero packages. (Nub also errors on a
         /// zero-match filter by default; this is the explicit form.)
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Max concurrent packages per topological chunk.
-        #[arg(long, value_name = "N")]
+        #[usage(long, value_name = "N")]
         workspace_concurrency: Option<i32>,
 
         /// Run the bin in all packages concurrently with no topological ordering.
-        #[arg(long)]
+        #[usage(long)]
         parallel: bool,
 
         /// Skip the pre-run dependency-freshness check for this invocation.
         /// (Spelled `--no-check` — `--no-install` is reserved for the npx
         /// fetch semantics on `nubx`, so `nub exec` does not accept it.)
-        #[arg(long = "no-check")]
+        #[usage(long = "no-check")]
         no_check: bool,
 
         /// Remaining arguments forwarded to the binary.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[usage(arg, double_dash = "automatic")]
         args: Vec<String>,
     },
 
@@ -965,100 +994,100 @@ pub enum Command {
     /// fetch-path flags (`-p`, `--no-install`, `-q`, …) that only make sense
     /// when a tool may be fetched. Hidden from `nub`'s own subcommand list —
     /// it is reachable only as the `nubx` argv0.
-    #[command(hide = true)]
+    #[usage(hide)]
     Nubx {
         /// Binary (or package, with `-p`) name to execute.
         bin: String,
 
         /// Disable Nub's runtime augmentation for this invocation.
-        #[arg(long)]
+        #[usage(long)]
         node: bool,
 
         // ── workspace fan-out flags (preserved from `nub exec`) ──
         /// Run the bin in every workspace package. `--workspaces` is the npm-style alias.
-        #[arg(short = 'r', long = "recursive", visible_alias = "workspaces")]
+        #[usage(short = 'r', long = "recursive", visible_alias = "workspaces")]
         recursive: bool,
 
         /// Filter workspace packages by name or glob. Repeatable: multiple
         /// `--filter`s union; `!`-prefixed filters subtract. `-F` is the alias.
-        #[arg(short = 'F', long)]
+        #[usage(short = 'F', long)]
         filter: Vec<String>,
 
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
-        #[arg(long = "workspace", value_name = "NAME")]
+        #[usage(long = "workspace", value_name = "NAME")]
         workspace: Vec<String>,
 
         /// Run from the workspace root regardless of cwd.
-        #[arg(short = 'w', long)]
+        #[usage(short = 'w', long)]
         workspace_root: bool,
 
         /// Add the workspace root package to the recursive set (npm-style;
         /// distinct from `--workspace-root`, which targets *only* the root).
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
         /// Error if the filter selects zero packages.
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Max concurrent packages per topological chunk.
-        #[arg(long, value_name = "N")]
+        #[usage(long, value_name = "N")]
         workspace_concurrency: Option<i32>,
 
         /// Run the bin in all packages concurrently with no topological ordering.
-        #[arg(long)]
+        #[usage(long)]
         parallel: bool,
 
         // ── npx fetch-path flags ──
         /// Fetch package SPEC and run a bin from it (the bin name may differ
         /// from the package). Repeatable. Forces the fetch path; `npx -p`.
-        #[arg(short = 'p', long = "package", value_name = "SPEC")]
+        #[usage(short = 'p', long = "package", value_name = "SPEC")]
         package: Vec<String>,
 
         /// Never fetch: if the tool isn't installed locally, error instead of
         /// fetching it (`npx --no-install` / `--yes=false`).
-        #[arg(long = "no-install")]
+        #[usage(long = "no-install")]
         no_install: bool,
 
         /// Alias of `--no-install`: refuse to fetch a missing tool (`npx --no`).
-        #[arg(long = "no")]
+        #[usage(long = "no")]
         no_fetch: bool,
 
         /// Suppress the fetch progress output (`npx -q`/`--quiet`).
-        #[arg(short = 'q', long)]
+        #[usage(short = 'q', long)]
         quiet: bool,
 
         /// Consent up-front to the implicit registry fetch (`npx -y`): skips the
         /// first-fetch prompt and is the escape hatch out of the CI / non-TTY
         /// fail-closed default.
-        #[arg(short = 'y', long)]
+        #[usage(short = 'y', long)]
         yes: bool,
 
         /// Accepted for `npx` parity. Removed from npm v9+; nubx warns and ignores it.
-        #[arg(long = "ignore-existing")]
+        #[usage(long = "ignore-existing")]
         ignore_existing: bool,
 
         /// Skip the pre-run dependency-freshness check for this invocation.
         /// (Spelled `--no-check` here — `--no-install` already means "don't
         /// fetch a missing tool" on this surface.)
-        #[arg(long = "no-check")]
+        #[usage(long = "no-check")]
         no_check: bool,
 
         /// Per-invocation `minimumReleaseAge` overrides for the fetch path.
         /// `nubx <just-published-tool>` is the common way to hit the age gate,
         /// so the escape hatch belongs on this surface.
-        #[command(flatten)]
+        #[usage(flatten)]
         age_gate: crate::pm_engine::AgeGateFlags,
 
         /// Which platforms' optional dependencies to install
         /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
         /// run only. Mirrors pnpm's flags of the same names.
-        #[command(flatten)]
+        #[usage(flatten)]
         platform: crate::pm_engine::PlatformFlags,
 
         /// Remaining arguments forwarded to the binary.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[usage(arg, double_dash = "automatic")]
         args: Vec<String>,
     },
 
@@ -1081,28 +1110,28 @@ pub enum Command {
         entry: String,
 
         /// Output path. Default: ./<entry-stem> (plus `.exe` for a Windows target).
-        #[arg(long, value_name = "PATH")]
+        #[usage(long, value_name = "PATH")]
         out: Option<String>,
 
         /// No embedded Node: discover or provision one at runtime.
-        #[arg(long)]
+        #[usage(long)]
         smol: bool,
 
         /// Node version to target (overrides the project's pin chain). Accepts a
         /// concrete version, a major, a range, or an alias (`lts`/`latest`).
         /// Omitted → inferred from `.node-version` / `engines.node` / etc.
-        #[arg(long, value_name = "VERSION")]
+        #[usage(long, value_name = "VERSION")]
         target: Option<String>,
 
         /// Target platform. Default: the host. One of `darwin-arm64`,
         /// `darwin-x64`, `linux-arm64`, `linux-arm64-musl`, `linux-x64`,
         /// `linux-x64-musl`, `win32-arm64`, `win32-x64`. A foreign platform's
         /// launcher is fetched from this release and cached.
-        #[arg(long, value_name = "PLATFORM")]
+        #[usage(long, value_name = "PLATFORM")]
         platform: Option<String>,
 
         /// Disable minification (default: minify on).
-        #[arg(long = "no-minify")]
+        #[usage(long = "no-minify")]
         no_minify: bool,
 
         /// Languages to keep in the embedded Node's ICU data, comma-separated:
@@ -1111,49 +1140,43 @@ pub enum Command {
         /// `full`. A region is accepted and narrows nothing (`en-US` keeps `en`),
         /// and `root` is always retained. Dropped languages fall back silently,
         /// so name every one the app formats for. No effect under `--smol`.
-        #[arg(
-            long,
-            value_name = "LOCALES",
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "full"
-        )]
+        #[usage(long, value_name = "LOCALES", require_equals, default_missing = "full")]
         icu: Option<String>,
 
         /// Where the source map goes: `none` (default), `linked`, `inline`, or
         /// `external`. Written `--sourcemap=<MODE>`; bare `--sourcemap` is inline.
-        #[arg(
+        #[usage(
             long,
             value_name = "MODE",
-            num_args = 0..=1,
-            require_equals = true,
-            default_missing_value = "inline"
+            value_enum,
+            require_equals,
+            default_missing = "inline"
         )]
         sourcemap: Option<SourcemapArg>,
 
         /// Replace an expression at build time, repeatable. Values are JavaScript
         /// expressions, so a string needs its own quotes:
         /// `--define 'API="https://example.com"'`.
-        #[arg(long, value_name = "KEY=VALUE", action = ArgAction::Append)]
+        #[usage(long, value_name = "KEY=VALUE")]
         define: Vec<String>,
 
         /// Replace an expression at build time with a file's contents, repeatable.
         /// The file holds the JavaScript expression `--define` would take, for a
         /// value too big for a command line:
         /// `--define-file MODELS=./models.json`.
-        #[arg(long = "define-file", value_name = "KEY=PATH", action = ArgAction::Append)]
+        #[usage(long = "define-file", value_name = "KEY=PATH")]
         define_file: Vec<String>,
 
         /// Embed a file or directory in the executable, byte for byte, repeatable.
         /// Accepts globs. Embedded files are extracted beside the compiled entry,
         /// keeping the layout they had in your source tree, so the app reads them
         /// through the same relative paths it always did.
-        #[arg(long, value_name = "PATH", action = ArgAction::Append)]
+        #[usage(long, value_name = "PATH")]
         include: Vec<String>,
 
         /// Leave a path out of what `--include` embeds, repeatable. Accepts globs.
         /// A pattern that matches nothing is ignored.
-        #[arg(long, value_name = "PATH", action = ArgAction::Append)]
+        #[usage(long, value_name = "PATH")]
         exclude: Vec<String>,
 
         /// Start the binary's Node with these options, spelled like the
@@ -1163,12 +1186,7 @@ pub enum Command {
         /// `--node-options "--experimental-vm-modules --max-old-space-size=4096"`.
         /// Whoever runs the binary can still set `NODE_OPTIONS` themselves; the
         /// two are additive.
-        #[arg(
-            long = "node-options",
-            value_name = "OPTIONS",
-            action = ArgAction::Append,
-            allow_hyphen_values = true
-        )]
+        #[usage(long = "node-options", value_name = "OPTIONS", allow_hyphen_values)]
         node_options: Vec<String>,
 
         /// Icon to show on a Windows executable, as a `.ico` file. Works when
@@ -1176,7 +1194,7 @@ pub enum Command {
         /// icon too. Windows carries the icon inside the executable; macOS and
         /// Linux read one from a bundle or desktop entry, so the flag is refused
         /// for those targets rather than silently ignored.
-        #[arg(long = "icon", value_name = "FILE")]
+        #[usage(long = "icon", value_name = "FILE")]
         icon: Option<PathBuf>,
 
         /// Windows version-resource field, as `Key=value`; repeatable. These are
@@ -1187,11 +1205,7 @@ pub enum Command {
         /// LegalCopyright, LegalTrademarks, OriginalFilename, PrivateBuild,
         /// ProductName, ProductVersion, SpecialBuild. Works when cross-compiling,
         /// and is refused for a non-Windows target rather than ignored.
-        #[arg(
-            long = "metadata",
-            value_name = "KEY=VALUE",
-            action = ArgAction::Append
-        )]
+        #[usage(long = "metadata", value_name = "KEY=VALUE")]
         metadata: Vec<String>,
 
         /// Start a Windows executable without a console window, for a GUI app, a
@@ -1199,62 +1213,67 @@ pub enum Command {
         /// binary still writes to it; launched from Explorer it shows nothing.
         /// Works when cross-compiling, and is refused for a non-Windows target
         /// rather than ignored.
-        #[arg(long = "hide-console")]
+        #[usage(long = "hide-console")]
         hide_console: bool,
 
         /// Custom message the compiled binary shows on a terminal while it sets
         /// itself up on first run. Default: `Initializing...`.
-        #[arg(long, value_name = "TEXT")]
+        #[usage(long, value_name = "TEXT")]
         install_message: Option<String>,
 
         /// Remove a category of call at build time, repeatable:
         /// `--drop console --drop debugger`. A dropped call is not evaluated, so
         /// an argument with a side effect goes with it. Needs minification, which
         /// is on by default.
-        #[arg(long, value_name = "NAME", action = ArgAction::Append)]
+        #[usage(long, value_name = "NAME", value_enum)]
         drop: Vec<DropArg>,
 
         /// Write a build report to this path, in esbuild's metafile JSON schema:
         /// every module the bundler read, every file it emitted, and what each
         /// module contributed to each. Reads in esbuild's `analyzeMetafile`,
         /// esbuild-visualizer, and bundle-buddy.
-        #[arg(long, value_name = "PATH")]
+        #[usage(long, value_name = "PATH")]
         metafile: Option<String>,
 
+        // Everything below is `nub compile`'s power set. Grouping it under its
+        // own `--help` heading (the shape esbuild uses) is what keeps the common
+        // six flags readable while the bundler knobs stay discoverable. The
+        // heading is spelled per field rather than hoisted to a constant because
+        // `help_heading` takes a literal — it travels in the portable spec.
         /// Let minification rename functions and classes. Names are preserved by
         /// default: minified class names break frameworks that key on them
         /// (dependency injection, ORM entities, class registries).
-        #[arg(long = "no-keep-names", help_heading = COMPILE_ADVANCED)]
+        #[usage(long = "no-keep-names", help_heading = "Advanced options")]
         no_keep_names: bool,
 
         /// Keep every module's side effects, for a dependency that declares
         /// itself pure and is not. Tree-shaking is on by default.
-        #[arg(long = "no-treeshake", help_heading = COMPILE_ADVANCED)]
+        #[usage(long = "no-treeshake", help_heading = "Advanced options")]
         no_treeshake: bool,
 
         /// Ignore `/*@__PURE__*/` annotations while tree-shaking.
-        #[arg(long = "ignore-annotations", help_heading = COMPILE_ADVANCED)]
+        #[usage(long = "ignore-annotations", help_heading = "Advanced options")]
         ignore_annotations: bool,
 
         /// Resolve one specifier as another, repeatable: `--alias lodash=lodash-es`.
-        #[arg(long, value_name = "FROM=TO", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        #[usage(long, value_name = "FROM=TO", help_heading = "Advanced options")]
         alias: Vec<String>,
 
         /// Choose what importing a file extension evaluates to, repeatable:
         /// `--loader .html=file`. Types: `file` (embeds the file and yields its
         /// path), `text`, `json`, `base64`, `dataurl`, `binary`, `empty`.
-        #[arg(long, value_name = "EXT=TYPE", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        #[usage(long, value_name = "EXT=TYPE", help_heading = "Advanced options")]
         loader: Vec<String>,
 
         /// Extra `exports` condition to honor, repeatable. Added to the
         /// defaults rather than replacing them.
-        #[arg(long, value_name = "NAME", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        #[usage(long, value_name = "NAME", help_heading = "Advanced options")]
         conditions: Vec<String>,
 
         /// Leave a package out of the bundle and resolve it at run time from the
         /// directory the binary is run in, repeatable. Covers the package and
         /// its subpaths. The package must be installed on the target machine.
-        #[arg(long, value_name = "PKG", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        #[usage(long, value_name = "PKG", help_heading = "Advanced options")]
         external: Vec<String>,
 
         /// Ship a package unbundled INSIDE the binary, in its own installed
@@ -1264,7 +1283,7 @@ pub enum Command {
         ///
         /// Distinct from `--external`, which leaves the package OUT of the binary
         /// to be resolved on the target machine. This one still carries it.
-        #[arg(long, value_name = "PKG", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        #[usage(long, value_name = "PKG", help_heading = "Advanced options")]
         unbundled: Vec<String>,
 
         /// Bundle a package that would otherwise ship unbundled, repeatable.
@@ -1272,7 +1291,7 @@ pub enum Command {
         /// The escape hatch for detection firing on a package that does not need
         /// it — a false positive costs that package its tree-shaking, and waiting
         /// on a nub release to correct it is worse than a flag.
-        #[arg(long, value_name = "PKG", action = ArgAction::Append, help_heading = COMPILE_ADVANCED)]
+        #[usage(long, value_name = "PKG", help_heading = "Advanced options")]
         bundled: Vec<String>,
 
         /// Keep a dynamic `import()` whose specifier the program computes at run
@@ -1284,78 +1303,76 @@ pub enum Command {
         /// are written in, so one plugin directory can be excused without excusing
         /// the whole program: `--allow-dynamic-import 'src/plugins/**'`.
         /// Repeatable. Bare, it allows every one.
-        #[arg(
+        #[usage(
             long = "allow-dynamic-import",
             value_name = "GLOB",
-            num_args = 0..=1,
-            default_missing_value = "",
-            action = ArgAction::Append,
-            help_heading = COMPILE_ADVANCED
+            default_missing = "",
+            help_heading = "Advanced options"
         )]
         allow_dynamic_import: Vec<String>,
 
         /// Use this tsconfig.json instead of the one discovered from the entry.
-        #[arg(long, value_name = "PATH", help_heading = COMPILE_ADVANCED)]
+        #[usage(long, value_name = "PATH", help_heading = "Advanced options")]
         tsconfig: Option<String>,
 
         /// Exclude the original source text from the source map.
-        #[arg(long = "sourcemap-exclude-sources", help_heading = COMPILE_ADVANCED)]
+        #[usage(long = "sourcemap-exclude-sources", help_heading = "Advanced options")]
         sourcemap_exclude_sources: bool,
     },
 
     /// Scaffold a new TypeScript-first project.
     Init {
         /// Non-interactive: skip all prompts and take the defaults.
-        #[arg(short = 'y', long)]
+        #[usage(short = 'y', long)]
         yes: bool,
 
         /// JavaScript variant: `index.js`, no tsconfig.json, no type devDeps.
-        #[arg(long)]
+        #[usage(long)]
         js: bool,
 
         /// Project name (default: the directory name, sanitized).
-        #[arg(long, value_name = "NAME")]
+        #[usage(long, value_name = "NAME")]
         name: Option<String>,
 
         /// Skip `git init`.
-        #[arg(long = "no-git")]
+        #[usage(long = "no-git")]
         no_git: bool,
 
         /// Skip the `nub install` step.
-        #[arg(long = "no-install")]
+        #[usage(long = "no-install")]
         no_install: bool,
 
         /// Overwrite existing files (default: refuse and list conflicts).
-        #[arg(long)]
+        #[usage(long)]
         force: bool,
 
         /// Rejected with a `nubx create-<template>` hint — `init` takes no
         /// positionals (pnpm parity).
-        #[arg(trailing_var_arg = true, hide = true)]
+        #[usage(arg, double_dash = "automatic", hide)]
         args: Vec<String>,
     },
 
     /// Upgrade Nub to the latest version.
     Upgrade {
         /// Target version (default: latest).
-        #[arg(long, conflicts_with_all = ["canary", "stable"])]
+        #[usage(long, conflicts("--canary", "--stable"))]
         version: Option<String>,
 
         /// Upgrade to the latest canary build (rebuilt nightly from main).
-        #[arg(long, conflicts_with = "stable")]
+        #[usage(long, conflicts("--stable"))]
         canary: bool,
 
         /// Upgrade to the latest stable release — the default on stable
         /// builds; on a canary build this opts back out of the canary channel.
-        #[arg(long)]
+        #[usage(long)]
         stable: bool,
 
         /// Show what would happen without performing the upgrade.
-        #[arg(long)]
+        #[usage(long)]
         dry_run: bool,
 
         /// Accepted for scripted use; `nub upgrade` never prompts.
-        #[arg(long, short)]
+        #[usage(long, short)]
         yes: bool,
     },
 
@@ -1369,8 +1386,12 @@ pub enum Command {
     ///
     /// `nub node <file>` is NOT a passthrough — to run a file use `nub <file>`.
     /// The `--node` compat flag lives only on `run` / `nubx`, never here.
+    // The verb is routed by the hand-written matcher in `run_node` before
+    // the parser sees it; this variant exists for `nub node --help` and the
+    // grammar only, so nothing reads its fields.
     Node {
-        #[command(subcommand)]
+        #[usage(subcommand)]
+        #[allow(dead_code)]
         command: NodeCommand,
     },
 
@@ -1379,113 +1400,110 @@ pub enum Command {
     /// Respects the project's existing lockfile (pnpm-lock.yaml,
     /// package-lock.json, …) for both resolution and layout; see
     /// src/pm_engine/ for the layout policy and the yarn write gate.
-    #[command(visible_alias = "i")]
+    #[usage(visible_alias = "i")]
     Install {
         /// Hard-fail if the lockfile is out of date (default in CI).
-        #[arg(long)]
+        #[usage(long)]
         frozen_lockfile: bool,
 
         /// Re-resolve and rewrite the lockfile even when it's stale.
-        #[arg(long, conflicts_with = "frozen_lockfile")]
+        #[usage(long, conflicts("--frozen-lockfile"))]
         no_frozen_lockfile: bool,
 
         /// Use the lockfile when fresh, re-resolve when stale (default outside CI).
-        #[arg(
-            long,
-            conflicts_with_all = ["frozen_lockfile", "no_frozen_lockfile"]
-        )]
+        #[usage(long, conflicts("--frozen-lockfile", "--no-frozen-lockfile"))]
         prefer_frozen_lockfile: bool,
 
         /// Skip devDependencies; install only production deps.
-        #[arg(short = 'P', long, visible_alias = "production")]
+        #[usage(short = 'P', long, visible_alias = "production")]
         prod: bool,
 
         /// Install only devDependencies.
-        #[arg(short = 'D', long, conflicts_with = "prod")]
+        #[usage(short = 'D', long, conflicts("--prod"))]
         dev: bool,
 
         /// Skip all lifecycle scripts (root and dependency).
-        #[arg(long)]
+        #[usage(long)]
         ignore_scripts: bool,
 
         /// Run this pnpmfile instead of the project's own one. Relative
         /// paths resolve against the project root. Naming a path this way
         /// is what loads hooks in a project whose incumbent is not pnpm.
-        #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+        #[usage(long, value_name = "PATH", conflicts("--ignore-pnpmfile"))]
         pnpmfile: Option<PathBuf>,
 
         /// Run this pnpmfile before the project's own one.
-        #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+        #[usage(long, value_name = "PATH", conflicts("--ignore-pnpmfile"))]
         global_pnpmfile: Option<PathBuf>,
 
         /// Skip `.pnpmfile.cjs` / `.pnpmfile.mjs` hooks for this install.
-        #[arg(long)]
+        #[usage(long)]
         ignore_pnpmfile: bool,
 
         /// Skip optionalDependencies.
-        #[arg(long)]
+        #[usage(long)]
         no_optional: bool,
 
         /// Never hit the network; fail if a package isn't cached.
-        #[arg(long)]
+        #[usage(long)]
         offline: bool,
 
         /// Use cached packages when available, network otherwise.
-        #[arg(long, conflicts_with = "offline")]
+        #[usage(long, conflicts("--offline"))]
         prefer_offline: bool,
 
         /// Resolve and write the lockfile, but skip linking node_modules.
-        #[arg(long)]
+        #[usage(long)]
         lockfile_only: bool,
 
         /// Re-resolve and relink even when the install state says up-to-date.
-        #[arg(long)]
+        #[usage(long)]
         force: bool,
 
         /// node_modules layout: `isolated` (pnpm-style) or `hoisted` (npm-style).
         /// Overrides the lockfile-derived default.
-        #[arg(long, value_name = "MODE")]
+        #[usage(long, value_name = "MODE")]
         node_linker: Option<String>,
 
         /// Registry URL for this invocation (metadata, tarballs, audit).
         /// Overrides `registry` from `.npmrc`.
-        #[arg(long, value_name = "URL")]
+        #[usage(long, value_name = "URL")]
         registry: Option<String>,
 
         /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
-        #[arg(short = 'C', long = "dir", value_name = "DIR")]
+        #[usage(short = 'C', long = "dir", value_name = "DIR")]
         dir: Option<PathBuf>,
 
         /// Scope to workspace packages matching PATTERN (repeatable). `-F` alias.
-        #[arg(short = 'F', long, value_name = "PATTERN")]
+        #[usage(short = 'F', long, value_name = "PATTERN")]
         filter: Vec<String>,
 
         /// Production-only variant of `--filter`.
-        #[arg(long, value_name = "PATTERN")]
+        #[usage(long, value_name = "PATTERN")]
         filter_prod: Vec<String>,
 
         /// Run across every workspace package (same as `--filter=*`).
-        #[arg(short = 'r', long)]
+        #[usage(short = 'r', long)]
         recursive: bool,
 
         /// Error when a workspace selector matches no packages.
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Include the workspace root in recursive operations.
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
-        #[command(flatten)]
+        #[usage(flatten)]
         output: crate::pm_engine::OutputFlags,
 
-        #[command(flatten)]
+        #[usage(flatten)]
         age_gate: crate::pm_engine::AgeGateFlags,
 
         /// Which platforms' optional dependencies to install
         /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
         /// run only. Mirrors pnpm's flags of the same names.
-        #[command(flatten)]
+        #[usage(flatten)]
         platform: crate::pm_engine::PlatformFlags,
     },
 
@@ -1493,60 +1511,60 @@ pub enum Command {
     /// lockfile (drift or a missing lockfile is a hard error).
     Ci {
         /// Skip devDependencies; install only production deps.
-        #[arg(short = 'P', long, visible_alias = "production")]
+        #[usage(short = 'P', long, visible_alias = "production")]
         prod: bool,
 
         /// Install only devDependencies.
-        #[arg(short = 'D', long, conflicts_with = "prod")]
+        #[usage(short = 'D', long, conflicts("--prod"))]
         dev: bool,
 
         /// Skip all lifecycle scripts (root and dependency).
-        #[arg(long)]
+        #[usage(long)]
         ignore_scripts: bool,
 
         /// Skip optionalDependencies.
-        #[arg(long)]
+        #[usage(long)]
         no_optional: bool,
 
         /// Registry URL for this invocation (metadata, tarballs, audit).
         /// Overrides `registry` from `.npmrc`.
-        #[arg(long, value_name = "URL")]
+        #[usage(long, value_name = "URL")]
         registry: Option<String>,
 
         /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
-        #[arg(short = 'C', long = "dir", value_name = "DIR")]
+        #[usage(short = 'C', long = "dir", value_name = "DIR")]
         dir: Option<PathBuf>,
 
         /// Scope to workspace packages matching PATTERN (repeatable). `-F` alias.
-        #[arg(short = 'F', long, value_name = "PATTERN")]
+        #[usage(short = 'F', long, value_name = "PATTERN")]
         filter: Vec<String>,
 
         /// Production-only variant of `--filter`.
-        #[arg(long, value_name = "PATTERN")]
+        #[usage(long, value_name = "PATTERN")]
         filter_prod: Vec<String>,
 
         /// Run across every workspace package (same as `--filter=*`).
-        #[arg(short = 'r', long)]
+        #[usage(short = 'r', long)]
         recursive: bool,
 
         /// Error when a workspace selector matches no packages.
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Include the workspace root in recursive operations.
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
-        #[command(flatten)]
+        #[usage(flatten)]
         output: crate::pm_engine::OutputFlags,
 
-        #[command(flatten)]
+        #[usage(flatten)]
         age_gate: crate::pm_engine::AgeGateFlags,
 
         /// Which platforms' optional dependencies to install
         /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
         /// run only. Mirrors pnpm's flags of the same names.
-        #[command(flatten)]
+        #[usage(flatten)]
         platform: crate::pm_engine::PlatformFlags,
     },
 }
@@ -1554,7 +1572,8 @@ pub enum Command {
 /// The `nub node` version-management verbs. Spec: `internal/commands/node-versions.md`.
 /// Every verb wraps existing `nub-core` machinery (resolver / cache / downloader)
 /// — no new runtime engine.
-#[derive(Subcommand, Debug)]
+#[derive(usage_rs::Subcommands, Debug)]
+#[allow(dead_code)]
 pub enum NodeCommand {
     /// Provision one or more versions into nub's cache. Bare form reads the
     /// project pin. A version already on PATH (system/nvm) is reported + skipped.
@@ -1577,7 +1596,7 @@ pub enum NodeCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, usage_rs::ValueEnum)]
 pub enum ColorWhen {
     Auto,
     Always,
@@ -1585,7 +1604,7 @@ pub enum ColorWhen {
 }
 
 /// Record the resolved `--color` choice. Called from the pre-subcommand argv scan
-/// and again from the parsed clap `Cli`, so either spelling position takes effect.
+/// and again from the parsed `Cli`, so either spelling position takes effect.
 pub(crate) fn set_color_mode(when: ColorWhen) {
     let raw = match when {
         ColorWhen::Auto => COLOR_AUTO,
@@ -1655,14 +1674,8 @@ fn force_color_enables(v: &std::ffi::OsStr) -> bool {
     )
 }
 
-/// `nub compile`'s power set. Grouping it under its own `--help` heading (the
-/// shape esbuild uses) is what keeps the common six flags readable while the
-/// bundler knobs stay discoverable.
 #[cfg(feature = "compile")]
-const COMPILE_ADVANCED: &str = "Advanced options";
-
-#[cfg(feature = "compile")]
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, usage_rs::ValueEnum)]
 pub enum SourcemapArg {
     /// A `.map` shipped inside the executable, referenced by the bundle.
     Linked,
@@ -1677,7 +1690,7 @@ pub enum SourcemapArg {
 /// what the bundler's compress pass can remove, and an unrecognised name would
 /// otherwise be a build that silently drops nothing.
 #[cfg(feature = "compile")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, usage_rs::ValueEnum)]
 pub enum DropArg {
     /// Every `console.*()` call.
     Console,
@@ -1781,7 +1794,7 @@ pub fn run() -> Result<i32> {
     }
 }
 
-/// Workspace execution options extracted from clap flags. The field set is
+/// Workspace execution options extracted from the parsed flags. The field set is
 /// pnpm's recursive-execution surface, not a nub invention — selector parsing,
 /// graph traversal, topological chunking and the flag interactions between
 /// `--parallel` / `--no-sort` / `--workspace-concurrency` all mirror it.
@@ -1827,7 +1840,7 @@ struct ScriptExecOpts<'a> {
     script_shell: Option<&'a str>,
 }
 
-/// Known subcommand names that clap should handle. `install`/`i`/`ci` route
+/// Known subcommand names the parser should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
     "run",
@@ -1851,9 +1864,9 @@ const SUBCOMMANDS: &[&str] = &[
 
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
 /// pnpm routes `install` with a package positional (or `-g`) through its `add`
-/// command. Nub's argumentless `install` is a native clap command (no
+/// command. Nub's argumentless `install` is a native parser command (no
 /// positionals), and the global form `install -g <pkg>` is an add too, so detect
-/// that compatibility shape before clap rejects the package positional / `-g` /
+/// that compatibility shape before the parser rejects the package positional / `-g` /
 /// save flags as unknown and translate it into an engine `add` invocation.
 ///
 /// nub's CLI frontend targets pnpm compatibility ONLY (not npm), so this routing
@@ -1902,9 +1915,10 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
             "--node-linker",
             // Output-control flags: their space-separated value would otherwise
             // be read as a package positional and trigger a wrong route to `add`.
-            // (`--loglevel silent` is the canonical misroute case.) The install
-            // clap variant accepts them via the flattened `OutputFlags`; listing
-            // them here prevents the space-separated value from looking like a pkg.
+            // (`--loglevel silent` is the canonical misroute case.) The native
+            // install variant accepts them via the flattened `OutputFlags`;
+            // listing them here prevents the space-separated value from looking
+            // like a pkg.
             "--loglevel",
             "--reporter",
             // Same shape: `nub install --minimum-release-age 0` would otherwise
@@ -2006,7 +2020,7 @@ const PM_VERBS: &[&str] = &[
 /// workspace flag, or the two surfaces disagree (the install family worked only
 /// because it was hand-listed here; the info family crashed purely because it
 /// was absent). Verbs that don't actually accept `-r`/`--filter` are still safe
-/// to reorder — clap (or the engine) rejects the unsupported flag downstream
+/// to reorder — the parser (or the engine) rejects the unsupported flag downstream
 /// with a proper non-zero error, exactly as pnpm does.
 fn is_normalizable_leading_flag_verb(verb: &str) -> bool {
     SUBCOMMANDS.contains(&verb) || crate::pm_engine::lookup_verb(verb).is_some()
@@ -2091,8 +2105,8 @@ fn run_nub() -> Result<i32> {
     // Accept pnpm's `nub -r run build` order (run-flags before the subcommand).
     let raw_args = normalize_leading_run_flags(&raw_args).unwrap_or(raw_args);
 
-    // Pre-parse: extract nub-owned flags before clap sees them.
-    // Everything clap doesn't own passes through to Node verbatim.
+    // Pre-parse: extract nub-owned flags before the parser sees them.
+    // Everything the parser doesn't own passes through to Node verbatim.
     let mut cwd: Option<PathBuf> = None;
     let mut version = false;
     let mut watch = false;
@@ -2137,8 +2151,9 @@ fn run_nub() -> Result<i32> {
         let arg = &raw_args[i];
         // Once a subcommand (`run`/`exec`/`watch`/…) has been seen, stop matching
         // Nub's own flags: everything after it is that subcommand's argv and is
-        // handed to clap verbatim, whose `trailing_var_arg` forwards post-
-        // positional flags to the script/bin. Without this, `nub exec tsc
+        // handed to the parser verbatim, whose `double_dash = "automatic"`
+        // trailing positional forwards post-positional flags to the script/bin.
+        // Without this, `nub exec tsc
         // --version` would print Nub's version instead of tsc's, and
         // `nub run build --watch` would steal `--watch` from the script (the
         // three-position rule — see internal/commands/run.md).
@@ -2179,28 +2194,28 @@ fn run_nub() -> Result<i32> {
             // here so they never reach Node as unknown flags, and RECORDED so the
             // choice actually takes effect. Dropping the value on the floor left
             // `--color=always` a documented no-op (#685): it is listed in
-            // `nub --help`, and the only test covering it drove clap directly, which
+            // `nub --help`, and the only test covering it drove the parser directly, which
             // never sees these tokens because this scan strips them first.
             s if s == "--color" || s.starts_with("--color=") || s == "--no-color" => {
                 color_when = Some(if s == "--no-color" {
                     ColorWhen::Never
                 } else {
                     match s.split_once('=').map(|(_, v)| v) {
-                        // Bare `--color` means always, matching clap's
-                        // `default_missing_value` for the same flag.
+                        // Bare `--color` means always, matching the parser's
+                        // `default_missing` for the same flag.
                         None | Some("always") => ColorWhen::Always,
                         Some("never") => ColorWhen::Never,
                         // `auto`, and anything unrecognized: fall back to the
                         // default rather than failing. This scan runs before the
                         // command is even known and has no error channel, and the
-                        // post-verb spelling still gets clap's value validation.
+                        // post-verb spelling still gets the parser's value validation.
                         _ => ColorWhen::Auto,
                     }
                 });
             }
             // Pre-verb PM output flags. `--reporter`/`--loglevel` only appear
             // here BEFORE a subcommand (after the verb they belong to the
-            // verb's own clap surface and never reach this scan). Captured, not
+            // verb's own parser surface and never reach this scan). Captured, not
             // forwarded to Node; recorded as process defaults below. The value
             // is validated where it's recorded (clean usage error on a bad
             // spelling) — a separate concern from grabbing the token here.
@@ -2423,10 +2438,10 @@ fn run_nub() -> Result<i32> {
 
     // Record the pre-verb PM output flags as process defaults so a PM verb
     // dispatched below (`nub --silent install`, `nub --reporter=silent add foo`)
-    // honors them — the per-verb clap flag still wins. A `run`/file-run path
+    // honors them — the per-verb flag still wins. A `run`/file-run path
     // simply doesn't read these defaults (run carries its own `--reporter`), so
     // they're inert there. Invalid `--reporter`/`--loglevel` values get the same
-    // clean usage error clap gives for the per-verb form.
+    // clean usage error the parser gives for the per-verb form.
     if silent {
         crate::pm_engine::output::set_global_silent();
     }
@@ -2505,7 +2520,7 @@ fn run_nub() -> Result<i32> {
         return run_watch(&file, &rest[1..]);
     }
 
-    // If a subcommand was found, delegate to clap for structured parsing.
+    // If a subcommand was found, delegate to the parser for structured parsing.
     if subcommand_found {
         return dispatch_subcommand(rest);
     }
@@ -2598,7 +2613,7 @@ fn run_nub() -> Result<i32> {
             // External-subcommand fallthrough (git `git-foo` / cargo `cargo-foo`):
             // an unknown bareword that isn't a built-in, a redirected PM/init verb,
             // or a likely script resolves to an executable named `nub-<verb>` and
-            // runs it with the remaining argv forwarded verbatim (no clap, so every
+            // runs it with the remaining argv forwarded verbatim (no parsing, so every
             // flag passes through). Built-ins always win — they match in the
             // pre-verb scan above, so a plugin can never shadow one. We probe ONLY
             // the prefixed name (never the bare `first`), so a verb typo can't exec
@@ -2644,7 +2659,7 @@ fn run_nub() -> Result<i32> {
 /// is recognized as the filter's value, not the script. Flags that only take an
 /// attached value (`--color=never`, via `require_equals`) are NOT listed here —
 /// they never swallow the next token. Globals (`--cwd`) appear under every
-/// subcommand because clap accepts them anywhere before the positional.
+/// subcommand because the parser accepts them anywhere before the positional.
 ///
 /// Every separate-token value flag on `run` is listed here. The run-flag set
 /// adds `--workspace <name>`, `--resume-from <pkg>`, `--script-shell <path>`,
@@ -2706,15 +2721,15 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
     }
 }
 
-/// Split a subcommand's argv into the clap-parseable *prefix* (subcommand name +
+/// Split a subcommand's argv into the parseable *prefix* (subcommand name +
 /// position-1/2 Nub flags + the positional) and the *verbatim suffix* (position 3
 /// — everything after the positional, forwarded to the script/bin unchanged).
 ///
-/// This is the load-bearing fix for clap leading-flag theft: clap's global args
+/// This is the load-bearing fix for leading-flag theft: the parser's global args
 /// and auto-`--help` match anywhere in argv, so re-parsing the whole remainder
 /// let `nub exec eslint --help` print Nub's help and `nub run build --node`
 /// enable compat (both wrong — the flag is in position 3, the script's). By
-/// finding the positional boundary ourselves and feeding clap only the prefix
+/// finding the positional boundary ourselves and feeding the parser only the prefix
 /// (which has nothing *after* the positional to steal), every post-positional
 /// token reaches the script/bin verbatim. Mirrors `run_nubx`'s manual split,
 /// generalized to all three forwarding subcommands.
@@ -2723,7 +2738,7 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
 /// flag (`-…`) nor the value of a preceding value-consuming flag. `--` (the
 /// explicit separator) forces it: the token after `--` is the positional. If no
 /// positional is present (`nub run`, `nub exec --help` with no bin), the suffix
-/// is empty and the prefix is the whole input — clap then handles the help /
+/// is empty and the prefix is the whole input — the parser then handles the help /
 /// no-script cases as before.
 fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
     let subcommand = rest[0].as_str();
@@ -2734,7 +2749,7 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
         let arg = &rest[i];
         if arg == "--" {
             // Explicit separator: the next token is the positional; everything
-            // after that is the verbatim suffix. Keep `--` in the prefix so clap
+            // after that is the verbatim suffix. Keep `--` in the prefix so the parser
             // still binds the positional, and forward from the token after it.
             // (`nub run -- build --flag` → script `build`, args `["--flag"]`.)
             let positional_idx = i + 1;
@@ -2768,14 +2783,14 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
         return (prefix, suffix);
     }
     // No positional found (e.g. `nub run`, `nub exec --help`): hand the whole
-    // input to clap, which lists scripts / shows help as appropriate.
+    // input to the parser, which lists scripts / shows help as appropriate.
     (rest, Vec::new())
 }
 
 /// Parse a forwarding subcommand (`run`/`exec`/`watch`) by splitting off the
-/// verbatim position-3 suffix first, clap-parsing only the prefix, then
+/// verbatim position-3 suffix first, parsing only the prefix, then
 /// appending the suffix to the parsed `args`. `upgrade`/`help` have no
-/// positional-forwarding semantics and go straight to clap.
+/// positional-forwarding semantics and go straight to the parser.
 fn run_global(rest: &[String]) -> Result<i32> {
     const USAGE: &str = "Usage: nub global config <COMMAND> [OPTIONS]\n\n\
 Commands:\n\
@@ -2821,9 +2836,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 
     // `node` is a non-forwarding command group with bespoke bare-usage + invalid-
     // positional messages (spec: internal/commands/node-versions.md). Handle it with a
-    // manual sub-verb match rather than clap's generic "invalid subcommand" error,
+    // manual sub-verb match rather than the parser's generic "invalid subcommand" error,
     // so `nub node script.ts` yields the exact "use 'nub <file>'" guidance and bare
-    // `nub node` prints the verb list instead of a clap usage error.
+    // `nub node` prints the verb list instead of a parser usage error.
     // No snapshot here, and none for `pm` below: neither group reads project
     // config, and the sub-verbs that need an engine session build one
     // themselves. Initializing would let a malformed `nub.jsonc` in any
@@ -2835,8 +2850,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 
     // `pm` is the package-manager management group (`which`/`switch`/`update`/
     // `cache`). Like `node`, it's a non-forwarding manual sub-verb match rather
-    // than a clap `Command` variant, so its bare-usage / invalid-verb messages
-    // read like `nub node`'s and it never reaches clap dispatch.
+    // than a `Command` variant, so its bare-usage / invalid-verb messages
+    // read like `nub node`'s and it never reaches parser dispatch.
     if subcommand == "pm" {
         return run_pm(&rest[1..]);
     }
@@ -2845,7 +2860,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // offline fallbacks for the homepage prompt's fetch of start.md/skill.md).
     // Like `node`/`pm`, it's a non-forwarding manual sub-verb match — its
     // bare-usage and invalid-verb messages read consistently and it never reaches
-    // clap dispatch. Spec: .fray/ai-friendliness.md. Print-only, so it reads no
+    // parser dispatch. Spec: .fray/ai-friendliness.md. Print-only, so it reads no
     // project config and never initializes the snapshot — a malformed `nub.jsonc`
     // in some ancestor must not silence the offline docs.
     if subcommand == "agent" {
@@ -2861,7 +2876,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     }
 
     // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
-    // with this hidden verb mid-lifecycle-script; intercept it before clap
+    // with this hidden verb mid-lifecycle-script; intercept it before the parser
     // (it's internal plumbing, not a documented verb) and dispatch straight
     // to the engine's bootstrap entry point.
     if subcommand == "__node-gyp-bootstrap" {
@@ -2872,7 +2887,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // Compatibility alias: npm and pnpm treat `install <pkg>` / `i <pkg>` (and
     // the global form `install -g <pkg>`) as a package add. Route that shape
     // through the engine's `add` implementation, translating npm save/spec/
-    // workspace spellings, before the native argumentless-install clap variant
+    // workspace spellings, before the native argumentless-install variant
     // rejects the positional / `-g` / unknown save flags. Plain `nub install`
     // and `nub install <native-flags>` stay on the native install path.
     if let Some(add_argv) = install_to_add_args(&rest)
@@ -2887,10 +2902,10 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 
     // Verbs registered to the embedded PM engine (the aube verb surface minus
     // nub-reserved and tool-identity verbs — see pm_engine::ENGINE_VERBS).
-    // Dispatched before clap: these aren't clap variants; each family module
+    // Dispatched before the parser: these aren't parser variants; each family module
     // owns its own args parsing (today: stubs that error with the user's
     // real-PM fallback). `install`/`i`/`ci` are NOT in the registry — they
-    // are live clap verbs handled below.
+    // are live parser verbs handled below.
     if let Some(spec) = crate::pm_engine::lookup_verb(&subcommand) {
         // The PM hint is only consumed by the unwired-verb stub fallback
         // (`{pm} {verb}`); use the nub-identity-aware suggestion so a fresh /
@@ -2909,9 +2924,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         (rest, Vec::new())
     };
 
-    let mut clap_args = vec!["nub".to_string()];
-    clap_args.extend(prefix);
-    let cli = Cli::parse_from(&clap_args);
+    let mut parser_argv = vec!["nub".to_string()];
+    parser_argv.extend(prefix);
+    let cli = parse_cli_or_exit(&parser_argv);
 
     // Position-2 global flags (e.g. `nub run --silent build`) parse into the top-
     // level `Cli` fields; apply the ones with observable effects. `--cwd` is
@@ -2923,7 +2938,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         SHOW_WARNINGS.store(true, Ordering::Relaxed);
     }
     // Only a non-default value, so `nub --color=never run build` (recorded by the
-    // position-1 scan) isn't reset to Auto by clap's default on this second pass.
+    // position-1 scan) isn't reset to Auto by the parser's default on this second pass.
     if cli.no_color {
         set_color_mode(ColorWhen::Never);
     } else if cli.color != ColorWhen::Auto {
@@ -3429,8 +3444,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             })
         }
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
-        // sub-verb match in `run_node`) and never reaches clap here.
-        Some(Command::Node { .. }) => unreachable!("`node` is handled before clap dispatch"),
+        // sub-verb match in `run_node`) and never reaches the parser here.
+        Some(Command::Node { .. }) => unreachable!("`node` is handled before parser dispatch"),
         None => unreachable!(),
     }
 }
@@ -3469,8 +3484,8 @@ fn run_nubx() -> Result<i32> {
         }
     }
 
-    // `--no-env-file` in the LEADING region. The `Nubx` clap grammar carries no
-    // env-file flags, so this family has to be consumed here or clap rejects it as
+    // `--no-env-file` in the LEADING region. The `Nubx` grammar carries no
+    // env-file flags, so this family has to be consumed here or the parser rejects it as
     // unknown. `--no-env-file` WINS over `--env-file`, so the whole `--env-file*`
     // family is stripped alongside it. Both scans account for the space-form value
     // token so a flag's value is never mistaken for the bin; the leading-only scope
@@ -4669,7 +4684,7 @@ fn run_script(
     let project =
         nub_core::workspace::detect::detect_project(&cwd).ok_or_else(|| no_manifest_error(&cwd))?;
 
-    // No script name (`nub run`): list available scripts instead of a raw clap
+    // No script name (`nub run`): list available scripts instead of a raw parser
     // "required argument" error — same shape as the missing-named-script path.
     let Some(script) = script else {
         // `nub run` with no script name mirrors `pnpm run` with no args: it is
@@ -9004,7 +9019,7 @@ fn print_version() {
     }
 }
 
-/// Native clap subcommands whose `--help` is rendered by clap directly.
+/// Native subcommands whose `--help` the parser renders directly.
 const CLAP_HELP_COMMANDS: &[&str] = &[
     "run",
     "watch",
@@ -9020,7 +9035,7 @@ const CLAP_HELP_COMMANDS: &[&str] = &[
 ];
 
 /// True for any word `nub <word> -h` / `nub help <word>` can route to a real help
-/// page: a native clap command, the `node`/`pm`/`agent` groups, or an engine verb
+/// page: a native subcommand, the `node`/`pm`/`agent` groups, or an engine verb
 /// (canonical or alias). Unknown words fall through to the top-level page instead
 /// of exiting silently — the routing inconsistency the help-router fix addresses.
 fn is_help_routable(word: &str) -> bool {
@@ -9030,7 +9045,7 @@ fn is_help_routable(word: &str) -> bool {
 }
 
 /// True when a non-forwarding command group was asked for its help. The three
-/// are `nub pm`, `nub node` and `nub agent` — the groups that bypass clap for a
+/// are `nub pm`, `nub node` and `nub agent` — the groups that bypass the parser for a
 /// manual sub-verb match, so each has to recognize its own help.
 ///
 /// A help FLAG counts ANYWHERE in the group's argv, not just at argv[0]: the
@@ -9057,7 +9072,7 @@ pub(crate) fn group_help_requested(args: &[String]) -> bool {
 /// `--help` verbose); a command routes to its own help, consistently across the
 /// `nub <cmd> -h`, `nub help <cmd>`, and leaf forms. Engine verbs dispatch their
 /// real `--help` through the embedded engine; `node`/`pm`/`agent` use their
-/// bespoke usage; native verbs render clap's help.
+/// bespoke usage; native verbs render the parser's help.
 fn run_help(command: Option<&str>, verbose: bool) {
     let Some(cmd) = command else {
         print!(
@@ -9106,12 +9121,16 @@ fn run_help(command: Option<&str>, verbose: bool) {
         return;
     }
 
-    // Native clap commands (and any other word): clap renders the help. For a word
-    // clap doesn't recognize this still falls back to the top-level help via the
-    // `is_help_routable` gate at the call sites, so this only sees real commands.
-    let result = Cli::try_parse_from(["nub", cmd, "--help"]);
-    if let Err(e) = result {
-        let _ = e.print();
+    // Native subcommands (and any other word): the parser renders the help. For a
+    // word it doesn't recognize this still falls back to the top-level help via
+    // the `is_help_routable` gate at the call sites, so this only sees real
+    // commands.
+    let words = [
+        std::ffi::OsString::from(cmd),
+        std::ffi::OsString::from("--help"),
+    ];
+    if let usage_rs::embedded::Outcome::Exit(exit) = Cli::embedded_outcome(&words) {
+        print_parser_response(&exit);
     }
 }
 
@@ -11387,8 +11406,26 @@ fn resolution_source(cwd: &Path, node: &nub_core::node::discovery::ResolvedNode)
 mod tests {
     use super::*;
 
-    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(args)
+    fn parse<'a>(args: &[&'a str]) -> Result<Cli, usage_rs::Error<'static, 'a>> {
+        let v: Vec<&'a std::ffi::OsStr> = args.iter().map(|s| std::ffi::OsStr::new(*s)).collect();
+        Cli::try_parse_from(&v)
+    }
+
+    /// The text a process would print for `args` (help page or failure).
+    fn rendered(args: &[&str]) -> String {
+        let words: Vec<std::ffi::OsString> =
+            args.iter().skip(1).map(std::ffi::OsString::from).collect();
+        match Cli::embedded_outcome(&words) {
+            usage_rs::embedded::Outcome::Parsed(_) => {
+                panic!("{args:?} parsed; expected a response")
+            }
+            usage_rs::embedded::Outcome::Exit(exit) => exit.text,
+        }
+    }
+
+    fn parse_owned(args: Vec<String>) -> Cli {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        parse(&refs).unwrap_or_else(|e| panic!("{args:?}: {e:?}"))
     }
 
     // A streaming drain must retain NOTHING. The collected `Vec` lives as long as
@@ -12196,8 +12233,7 @@ mod tests {
 
     #[test]
     fn install_help_does_not_advertise_unapproved_gvs_flags() {
-        let err = parse(&["nub", "install", "--help"]).expect_err("--help exits through clap");
-        let help = err.render().to_string();
+        let help = rendered(&["nub", "install", "--help"]);
         assert!(
             help.contains("--node-linker") && help.contains("--registry"),
             "sanity-check install help rendered: {help}"
@@ -12221,7 +12257,7 @@ mod tests {
 
     #[test]
     fn subcommand_run_without_script_parses_to_none() {
-        // `nub run` (no script) must parse — not a clap "required arg" error —
+        // `nub run` (no script) must parse — not a parser "required arg" error —
         // so run_script can list available scripts (A46).
         let cli = parse(&["nub", "run"]).unwrap();
         assert!(matches!(
@@ -12262,7 +12298,7 @@ mod tests {
 
     #[test]
     fn subcommand_run_collects_repeated_filters() {
-        // Each `--filter` appends; clap must not let the last one win (A29).
+        // Each `--filter` appends; the parser must not let the last one win (A29).
         let cli = parse(&["nub", "run", "--filter", "a", "--filter", "!b", "build"]).unwrap();
         match cli.command {
             Some(Command::Run {
@@ -12328,7 +12364,7 @@ mod tests {
         // prefix ends at the positional (`build`); `--extra` forwards verbatim.
         assert_eq!(prefix, ["run", "--workspace", "foo", "build"]);
         assert_eq!(suffix, ["--extra"]);
-        let cli = Cli::parse_from(std::iter::once("nub".to_string()).chain(prefix)).command;
+        let cli = parse_owned(std::iter::once("nub".to_string()).chain(prefix).collect()).command;
         match cli {
             Some(Command::Run {
                 script, workspace, ..
@@ -13134,7 +13170,7 @@ mod tests {
     #[test]
     fn global_color_flag() {
         // `--color` uses the optional-value idiom (require_equals + a
-        // default_missing_value of "always"), so a value must be attached with
+        // default_missing of "always"), so a value must be attached with
         // `=`; bare `--color` means "always". Space-separated `--color never`
         // would parse `never` as a positional, not the flag's value.
         let cli = parse(&["nub", "--color=never", "run", "dev"]).unwrap();
@@ -13190,7 +13226,7 @@ mod tests {
     #[test]
     fn help_flag_short_circuits() {
         let err = parse(&["nub", "--help"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(matches!(err, usage_rs::Error::Help { .. }), "{err:?}");
     }
 
     #[test]
@@ -13401,7 +13437,7 @@ mod tests {
 
     #[test]
     fn pm_verbs_and_reserved_verbs_stay_disjoint() {
-        // Three verb sets, three dispatch paths: SUBCOMMANDS (clap natives),
+        // Three verb sets, three dispatch paths: SUBCOMMANDS (parser natives),
         // the engine verb registry (pm_engine::ENGINE_VERBS, family
         // dispatch), and PM_VERBS (redirect-only rump). Any overlap makes a
         // later arm unreachable. `install`/`i`/`ci` graduated from PM_VERBS
@@ -13478,7 +13514,7 @@ mod tests {
 
     // `init`: the engine-registry exclusion is asserted in
     // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs;
-    // the command itself (src/init.rs, a clap subcommand since it shipped) is
+    // the command itself (src/init.rs, a parser subcommand since it shipped) is
     // covered through the spawned binary in tests/init_cmd.rs and
     // tests/pm_verbs.rs.
 
@@ -14411,14 +14447,14 @@ mod tests {
     // ── nubx argv0 dispatch ─────────────────────────────────────────
 
     /// Parse a `nubx <args...>` invocation exactly as `run_nubx` does: prepend
-    /// the `nubx` subcommand, split off the verbatim post-bin suffix, clap-parse
+    /// the `nubx` subcommand, split off the verbatim post-bin suffix, parse
     /// the prefix, then fold the suffix back into `args`. Returns the settled
     /// `Command::Nubx { .. }` for assertions.
     fn parse_nubx(args: &[&str]) -> Command {
         let mut rest = vec!["nubx".to_string()];
         rest.extend(args.iter().map(|s| s.to_string()));
         let (prefix, suffix) = split_subcommand_argv(rest);
-        let cmd = Cli::parse_from(std::iter::once("nub".to_string()).chain(prefix)).command;
+        let cmd = parse_owned(std::iter::once("nub".to_string()).chain(prefix).collect()).command;
         match cmd {
             Some(mut nubx @ Command::Nubx { .. }) => {
                 if let Command::Nubx { args, .. } = &mut nubx {

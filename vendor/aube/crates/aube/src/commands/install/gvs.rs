@@ -36,7 +36,7 @@ pub(super) fn resolve_global_virtual_store_override(
                  enableGlobalVirtualStore false --local` — or set \
                  `disableGlobalVirtualStoreForPackages=[]` to opt out of this \
                  auto-detection entirely. \
-                 Details: https://aube.jdx.dev/package-manager/global-virtual-store"
+                 Details: https://aube.sh/package-manager/global-virtual-store"
             );
             let code = aube_codes::warnings::WARN_AUBE_GVS_INCOMPATIBLE;
             if aube_util::embedder().gvs_incompatible_warning {
@@ -403,7 +403,7 @@ pub(super) fn modules_metadata_is_current<'a>(
         })
 }
 
-pub(super) fn detect_existing_global_virtual_store(
+pub(crate) fn detect_existing_global_virtual_store(
     workspace_root: &Path,
     aube_dir: &Path,
     modules_dir_name: &str,
@@ -662,8 +662,10 @@ pub(super) fn reset_on_mode_change(
     aube_dir: &Path,
     modules_dir_name: &str,
     planned_gvs: bool,
+    settings_ctx: &aube_settings::ResolveCtx<'_>,
 ) -> miette::Result<()> {
-    let global_virtual_store = crate::commands::global_virtual_store_dir(cwd);
+    let global_virtual_store =
+        crate::commands::global_virtual_store_dir_with_ctx(cwd, settings_ctx);
     let Some(existing_gvs) = detect_existing_global_virtual_store(
         cwd,
         aube_dir,

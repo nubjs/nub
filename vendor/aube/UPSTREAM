@@ -7,6 +7,6 @@
 #
 # UPDATE THIS IN THE SAME COMMIT that changes the vendored tree's upstream base.
 
-commit = fff2bb681a
-tag    = v1.35.0
+commit = 79906840d9
+tag    = v2.2.9
 venue  = derived at bump time from this tree via `git commit-tree` — nothing stored

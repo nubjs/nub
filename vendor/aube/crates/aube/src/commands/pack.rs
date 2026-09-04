@@ -23,7 +23,6 @@
 //! the `files` field.
 
 use aube_manifest::PackageJson;
-use clap::Args;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use ignore::WalkBuilder;
@@ -34,21 +33,21 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PackArgs {
     /// Don't write the tarball; print what would be packed
-    #[arg(long)]
+    #[usage(long)]
     pub dry_run: bool,
     /// Skip `prepack` / `prepare` / `postpack` lifecycle scripts.
-    #[arg(long)]
+    #[usage(long)]
     pub ignore_scripts: bool,
     /// Print the result as a JSON object
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
     /// Directory to write the tarball into (default: current directory)
-    #[arg(long, value_name = "DIR")]
+    #[usage(long, value_name = "DIR")]
     pub pack_destination: Option<PathBuf>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
@@ -238,7 +237,126 @@ pub(crate) struct BuiltArchive {
 /// `aube pack` (writes the bytes to disk) and the forthcoming
 /// `aube publish` (hashes and uploads them).
 pub(crate) fn build_archive(project_dir: &Path) -> miette::Result<BuiltArchive> {
-    build_archive_with_package_json(project_dir, None)
+    let package_json = catalog_rewritten_package_json(project_dir)?;
+    build_archive_with_package_json(project_dir, package_json)
+}
+
+/// Return an in-memory `package.json` with publish-time catalog protocol
+/// references replaced by their concrete catalog ranges. The source manifest
+/// stays untouched. `None` means no catalog references were present, so the
+/// archive can copy the original bytes without reformatting them.
+fn catalog_rewritten_package_json(project_dir: &Path) -> miette::Result<Option<Vec<u8>>> {
+    let manifest_path = project_dir.join("package.json");
+    let raw = std::fs::read_to_string(&manifest_path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read {}", manifest_path.display()))?;
+    let mut manifest_json: serde_json::Value =
+        aube_manifest::parse_json(&manifest_path, raw.clone()).map_err(miette::Report::new)?;
+    if !rewrite_catalog_dependencies(project_dir, &mut manifest_json)? {
+        return Ok(None);
+    }
+
+    let indent = aube_manifest::detect_json_indent(&raw);
+    let mut rewritten = aube_manifest::serialize_json_with_indent(&manifest_json, indent)
+        .into_diagnostic()
+        .wrap_err("failed to serialize packed package.json")?;
+    let line_ending = raw
+        .find('\n')
+        .map(|index| {
+            if index > 0 && raw.as_bytes()[index - 1] == b'\r' {
+                "\r\n"
+            } else {
+                "\n"
+            }
+        })
+        .unwrap_or("\n");
+    if line_ending == "\r\n" {
+        rewritten = rewritten.replace('\n', "\r\n");
+    }
+    if raw.ends_with(line_ending) {
+        rewritten.push_str(line_ending);
+    }
+    Ok(Some(rewritten.into_bytes()))
+}
+
+/// Rewrite `catalog:` / `catalog:<name>` references in every dependency field
+/// pnpm exports. Shared with directory-based publish so the two archive paths
+/// cannot drift. Catalog discovery is deliberately lazy: packages without
+/// catalog references keep packing even if an unrelated ancestor workspace
+/// manifest is malformed.
+pub(crate) fn rewrite_catalog_dependencies(
+    project_dir: &Path,
+    manifest_json: &mut serde_json::Value,
+) -> miette::Result<bool> {
+    const DEP_FIELDS: &[&str] = &[
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ];
+
+    let Some(root) = manifest_json.as_object() else {
+        return Ok(false);
+    };
+    let has_catalog_refs = DEP_FIELDS.iter().any(|field| {
+        root.get(*field)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|deps| {
+                deps.values()
+                    .any(|spec| spec.as_str().is_some_and(aube_util::pkg::is_catalog_spec))
+            })
+    });
+    if !has_catalog_refs {
+        return Ok(false);
+    }
+
+    let catalogs = super::catalog_discovery::discover_catalogs(project_dir)?;
+    let manifest_path = project_dir.join("package.json");
+    let root = manifest_json
+        .as_object_mut()
+        .ok_or_else(|| miette!("{} is not a JSON object", manifest_path.display()))?;
+    for field in DEP_FIELDS {
+        let Some(deps) = root
+            .get_mut(*field)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        for (package, spec_value) in deps {
+            let Some(spec) = spec_value.as_str() else {
+                continue;
+            };
+            let Some(catalog_name) = spec
+                .strip_prefix("catalog:")
+                .map(|name| if name.is_empty() { "default" } else { name })
+            else {
+                continue;
+            };
+            let Some(catalog) = catalogs.get(catalog_name) else {
+                return Err(miette!(
+                    code = aube_codes::errors::ERR_AUBE_UNKNOWN_CATALOG,
+                    help = "define the catalog in `pnpm-workspace.yaml` or under `pnpm.catalog` / `workspaces.catalog` in `package.json`",
+                    "{} declares `{package}: {spec}` but catalog `{catalog_name}` is not defined",
+                    manifest_path.display(),
+                ));
+            };
+            let Some(resolved) = catalog.get(package) else {
+                return Err(miette!(
+                    code = aube_codes::errors::ERR_AUBE_UNKNOWN_CATALOG_ENTRY,
+                    "{} declares `{package}: {spec}` but catalog `{catalog_name}` has no entry for {package:?}",
+                    manifest_path.display(),
+                ));
+            };
+            if aube_util::pkg::is_catalog_spec(resolved) {
+                return Err(miette!(
+                    code = aube_codes::errors::ERR_AUBE_UNKNOWN_CATALOG_ENTRY,
+                    "catalog `{catalog_name}` entry for {package:?} is itself a catalog reference ({resolved:?}); catalogs cannot chain",
+                ));
+            }
+            *spec_value = serde_json::Value::String(resolved.clone());
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) fn build_archive_with_package_json(
@@ -647,6 +765,24 @@ fn file_mode(path: &Path) -> u32 {
 mod tests {
     use super::*;
 
+    fn archived_package_json_bytes(archive: &BuiltArchive) -> Vec<u8> {
+        let gz = flate2::read::GzDecoder::new(archive.tarball.as_slice());
+        let mut tar = tar::Archive::new(gz);
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap() == Path::new("package/package.json") {
+                let mut contents = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut contents).unwrap();
+                return contents;
+            }
+        }
+        panic!("package.json missing from archive");
+    }
+
+    fn archived_package_json(archive: &BuiltArchive) -> serde_json::Value {
+        serde_json::from_slice(&archived_package_json_bytes(archive)).unwrap()
+    }
+
     #[test]
     fn tarball_filename_unscoped() {
         assert_eq!(tarball_filename("lodash", "4.17.21"), "lodash-4.17.21.tgz");
@@ -668,6 +804,62 @@ mod tests {
         assert!(is_npm_ignored("aube-lock.yaml"));
         assert!(is_npm_ignored("some-package-1.0.0.tgz"));
         assert!(!is_npm_ignored("src"));
+    }
+
+    #[test]
+    fn pack_archive_rewrites_default_and_named_catalog_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{
+  "name": "catalog-pack",
+  "version": "1.0.0",
+  "dependencies": {"regular": "catalog:"},
+  "devDependencies": {"development": "catalog:"},
+  "optionalDependencies": {"optional": "catalog:tools"},
+  "peerDependencies": {"peer": "catalog:peers"}
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "catalog:\n  regular: ^1.2.3\n  development: 4.5.6\ncatalogs:\n  tools:\n    optional: ~7.8.9\n  peers:\n    peer: '>=10'\n",
+        )
+        .unwrap();
+
+        let archive = build_archive(dir.path()).unwrap();
+        let package_json = archived_package_json(&archive);
+
+        assert_eq!(package_json["dependencies"]["regular"], "^1.2.3");
+        assert_eq!(package_json["devDependencies"]["development"], "4.5.6");
+        assert_eq!(package_json["optionalDependencies"]["optional"], "~7.8.9");
+        assert_eq!(package_json["peerDependencies"]["peer"], ">=10");
+
+        let on_disk = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
+        assert!(on_disk.contains("catalog:peers"));
+    }
+
+    #[test]
+    fn pack_archive_preserves_crlf_in_rewritten_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\r\n  \"name\": \"catalog-pack\",\r\n  \"version\": \"1.0.0\",\r\n  \"dependencies\": {\"foo\": \"catalog:\"}\r\n}\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "catalog:\n  foo: ^1.2.3\n",
+        )
+        .unwrap();
+
+        let archive = build_archive(dir.path()).unwrap();
+        let packed = String::from_utf8(archived_package_json_bytes(&archive)).unwrap();
+
+        assert!(packed.ends_with("\r\n"));
+        assert!(packed.contains("\r\n  \"dependencies\""));
+        assert!(!packed.replace("\r\n", "").contains('\n'));
     }
 
     fn write_tree(root: &Path, files: &[&str]) {

@@ -1,20 +1,34 @@
-use super::super::{packument_cache_dir, packument_full_cache_dir};
 use super::version_from_dep_path;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::BTreeMap;
 
+/// Curated manifest repairs shipped by Yarn and pnpm for standalone aube.
+///
+/// Keep these out of `packageExtensionsChecksum`: updates to bundled
+/// compatibility data must not invalidate an existing project lockfile.
+// Integer offsets keep the generated tables free of per-entry pointer
+// relocations, which otherwise add measurable work to every CLI startup.
+type BundledStringRef = (u32, u32);
+type BundledTableRef = (u32, u32);
+
+struct BundledPackageExtension {
+    selector: BundledStringRef,
+    dependencies: BundledTableRef,
+    optional_dependencies: BundledTableRef,
+    peer_dependencies: BundledTableRef,
+    peer_dependencies_meta: BundledTableRef,
+}
+
+include!(concat!(env!("OUT_DIR"), "/bundled_package_extensions.rs"));
+
 /// Accept pnpm's documented aliases (`highest`, `time-based`, `time`,
-/// `lowest-direct`) and map them to our enum. Unknown values fall back
-/// to `None` so the caller's `.npmrc` / default path still runs.
+/// `lowest-direct`). Unknown values fall back to `None` so the caller's
+/// `.npmrc` / default path still runs.
 fn parse_resolution_mode(s: &str) -> Option<aube_resolver::ResolutionMode> {
     match s.trim().to_ascii_lowercase().as_str() {
         "highest" => Some(aube_resolver::ResolutionMode::Highest),
-        // pnpm treats `lowest-direct` and `time-based` as distinct
-        // modes; aube folds them into `TimeBased` and skips the cutoff
-        // filter when there's no publish time to compare against, so
-        // `lowest-direct` behavior emerges naturally from `TimeBased`
-        // with `time:` absent. Close enough for the first pass.
-        "time-based" | "time" | "lowest-direct" => Some(aube_resolver::ResolutionMode::TimeBased),
+        "time-based" | "time" => Some(aube_resolver::ResolutionMode::TimeBased),
+        "lowest-direct" => Some(aube_resolver::ResolutionMode::LowestDirect),
         _ => None,
     }
 }
@@ -54,19 +68,17 @@ pub(crate) fn resolve_resolution_mode(
 }
 
 /// Translate the settings-side `ResolutionMode` enum into the
-/// resolver's runtime enum. pnpm treats `lowest-direct` and
-/// `time-based` as distinct modes, but aube folds them into
-/// `TimeBased` and lets the `time:` cutoff filter handle the
-/// difference — when publish times are missing the `lowest-direct`
-/// behavior emerges naturally. Close enough for the first pass.
+/// resolver's runtime enum.
 fn map_resolution_mode(
     m: aube_settings::resolved::ResolutionMode,
 ) -> aube_resolver::ResolutionMode {
     match m {
         aube_settings::resolved::ResolutionMode::Highest => aube_resolver::ResolutionMode::Highest,
-        aube_settings::resolved::ResolutionMode::TimeBased
-        | aube_settings::resolved::ResolutionMode::LowestDirect => {
+        aube_settings::resolved::ResolutionMode::TimeBased => {
             aube_resolver::ResolutionMode::TimeBased
+        }
+        aube_settings::resolved::ResolutionMode::LowestDirect => {
+            aube_resolver::ResolutionMode::LowestDirect
         }
     }
 }
@@ -273,8 +285,13 @@ mod gvs_mode_tests {
     }
 }
 
-/// Honor `cleanupUnusedCatalogs` by pruning declared-but-unreferenced
-/// catalog entries from the workspace yaml. No-op when the setting is
+pub(crate) fn resolve_catalog_prune(ctx: &aube_settings::ResolveCtx<'_>) -> bool {
+    aube_settings::resolved::catalog_prune(ctx)
+        .unwrap_or_else(|| aube_settings::resolved::cleanup_unused_catalogs(ctx))
+}
+
+/// Honor `catalogPrune` (or its deprecated `cleanupUnusedCatalogs` alias) by
+/// pruning declared-but-unreferenced catalog entries from the workspace yaml. No-op when the setting is
 /// off, when there is no workspace yaml file on disk, or when every
 /// declared entry was referenced by an importer.
 pub(super) fn maybe_cleanup_unused_catalogs(
@@ -286,7 +303,7 @@ pub(super) fn maybe_cleanup_unused_catalogs(
         std::collections::BTreeMap<String, aube_lockfile::CatalogEntry>,
     >,
 ) -> miette::Result<()> {
-    if !aube_settings::resolved::cleanup_unused_catalogs(ctx) {
+    if !resolve_catalog_prune(ctx) {
         return Ok(());
     }
     if declared.is_empty() {
@@ -302,7 +319,7 @@ pub(super) fn maybe_cleanup_unused_catalogs(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| ws_path.display().to_string());
         tracing::info!(
-            "cleanupUnusedCatalogs: pruned {} from {filename}",
+            "catalogPrune: pruned {} from {filename}",
             pluralizer::pluralize("entry", dropped.len() as isize, true)
         );
     }
@@ -481,14 +498,45 @@ pub(crate) fn resolve_force_metadata_primer(ctx: &aube_settings::ResolveCtx<'_>)
     aube_settings::resolved::force_metadata_primer(ctx)
 }
 
+fn is_standalone_aube(embedder: &aube_util::Embedder) -> bool {
+    // `AUBE` is a `const`, so references to it are not guaranteed to have a
+    // single stable address. The command-safe program name is the canonical
+    // value-level distinction between standalone aube and another embedder.
+    embedder.name == aube_util::identity::AUBE.name
+}
+
 pub(crate) fn resolve_dependency_policy(
     manifest: &aube_manifest::PackageJson,
     ctx: &aube_settings::ResolveCtx<'_>,
-) -> aube_resolver::DependencyPolicy {
+) -> miette::Result<aube_resolver::DependencyPolicy> {
     let mut policy = aube_resolver::DependencyPolicy::default();
 
+    validate_package_extension_containers(manifest, ctx)?;
     let package_extensions = effective_package_extensions(manifest, ctx);
-    policy.package_extensions = parse_package_extensions(package_extensions);
+    // User/project extensions first, then standalone and embedder-supplied
+    // bundled ecosystem defaults appended LAST. `apply_package_extensions`
+    // iterates this Vec in order and `extend_missing` is first-write-wins per
+    // dependency key, so user extensions take precedence over bundled ones.
+    // Bundled data is NEVER routed through `effective_package_extensions`,
+    // which feeds the lockfile
+    // `packageExtensionsChecksum`: routing bundled defaults through the
+    // checksum would drift every existing lockfile on each bundled-list bump
+    // and abort `--frozen-lockfile` under `enforce_package_extensions_checksum`.
+    let mut extensions = parse_package_extensions(package_extensions)?;
+    if !aube_settings::resolved::ignore_compatibility_db(ctx) {
+        if is_standalone_aube(aube_util::embedder()) {
+            // Catalog order is significant when semver selectors overlap: the
+            // first matching extension wins per dependency key.
+            extensions.extend(standalone_bundled_package_extensions());
+        }
+        if let Some(bundled) = aube_util::engine_context().bundled_package_extensions {
+            // Bundled extensions are embedder-supplied data, not user config.
+            // A malformed entry should warn and be skipped, not abort the install
+            // with an error naming a selector the user never wrote.
+            extensions.extend(parse_bundled_package_extensions(bundled));
+        }
+    }
+    policy.package_extensions = extensions;
 
     let mut allowed_deprecated = manifest.allowed_deprecated_versions();
     merge_string_map_setting(ctx, "allowedDeprecatedVersions", &mut allowed_deprecated);
@@ -529,7 +577,7 @@ pub(crate) fn resolve_dependency_policy(
         .or(aube_util::embedder().trust_policy_ignore_after_default);
     policy.block_exotic_subdeps = aube_settings::resolved::block_exotic_subdeps(ctx);
 
-    policy
+    Ok(policy)
 }
 
 /// Assemble the effective `packageExtensions` object — the root
@@ -720,14 +768,13 @@ pub(crate) async fn finalize_lockfile_graph(
     ignore_pnpmfile: bool,
     cli_pnpmfile: Option<&std::path::Path>,
 ) -> miette::Result<()> {
-    let write_kind = aube_lockfile::detect_existing_lockfile_kind(cwd)
-        .unwrap_or(aube_lockfile::LockfileKind::Aube);
     let files = crate::commands::FileSources::load(cwd);
     let (ws_config, raw_workspace) = aube_manifest::workspace::load_both(cwd)
         .into_diagnostic()
         .wrap_err("failed to load workspace config for lockfile finalization")?;
     let env = aube_settings::values::process_env();
     let ctx = files.ctx(&raw_workspace, env, &[]);
+    let write_kind = crate::commands::lockfile_kind_for_write_with_ctx(cwd, &ctx);
     let local_pnpmfile = if ignore_pnpmfile {
         None
     } else {
@@ -853,6 +900,77 @@ fn parse_json_object(raw: &str) -> Option<BTreeMap<String, serde_json::Value>> {
     Some(obj.into_iter().collect())
 }
 
+fn validate_package_extension_containers(
+    manifest: &aube_manifest::PackageJson,
+    ctx: &aube_settings::ResolveCtx<'_>,
+) -> miette::Result<()> {
+    for value in manifest.package_extension_values() {
+        if !value.is_object() {
+            return Err(invalid_package_extension(
+                "packageExtensions",
+                "setting must be an object",
+            ));
+        }
+    }
+
+    let meta = aube_settings::find("packageExtensions").ok_or_else(|| {
+        invalid_package_extension("packageExtensions", "setting is not registered")
+    })?;
+    for entries in [
+        ctx.user_npmrc,
+        ctx.user_aube_config,
+        ctx.project_npmrc,
+        ctx.project_aube_config,
+    ] {
+        for (key, raw) in entries.iter().rev() {
+            if !meta.npmrc_keys.contains(&key.as_str()) {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+                invalid_package_extension("packageExtensions", "setting must be valid JSON")
+            })?;
+            if !value.is_object() {
+                return Err(invalid_package_extension(
+                    "packageExtensions",
+                    "setting must be an object",
+                ));
+            }
+            break;
+        }
+    }
+    for key in meta.workspace_yaml_keys {
+        let Some(value) = aube_settings::workspace_yaml_value(ctx.workspace_yaml, key) else {
+            continue;
+        };
+        let value = serde_json::to_value(value).map_err(|_| {
+            invalid_package_extension("packageExtensions", "setting must be an object")
+        })?;
+        if !value.is_object() {
+            return Err(invalid_package_extension(
+                "packageExtensions",
+                "setting must be an object",
+            ));
+        }
+        break;
+    }
+    for (key, raw) in ctx.env.iter().rev() {
+        if !meta.env_vars.contains(&key.as_str()) {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+            invalid_package_extension("packageExtensions", "setting must be valid JSON")
+        })?;
+        if !value.is_object() {
+            return Err(invalid_package_extension(
+                "packageExtensions",
+                "setting must be an object",
+            ));
+        }
+        break;
+    }
+    Ok(())
+}
+
 fn json_string_map(map: BTreeMap<String, serde_json::Value>) -> BTreeMap<String, String> {
     map.into_iter()
         .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
@@ -860,53 +978,164 @@ fn json_string_map(map: BTreeMap<String, serde_json::Value>) -> BTreeMap<String,
 }
 
 fn parse_package_extensions(
-    raw: BTreeMap<String, serde_json::Value>,
+    raw: impl IntoIterator<Item = (String, serde_json::Value)>,
+) -> miette::Result<Vec<aube_resolver::PackageExtension>> {
+    raw.into_iter()
+        .map(|(selector, value)| parse_package_extension(selector, value))
+        .collect()
+}
+
+fn parse_bundled_package_extensions(
+    raw: impl IntoIterator<Item = (String, serde_json::Value)>,
 ) -> Vec<aube_resolver::PackageExtension> {
     raw.into_iter()
-        .filter_map(|(selector, value)| {
-            let obj = value.as_object()?;
-            Some(aube_resolver::PackageExtension {
-                selector,
-                dependencies: read_json_string_map(obj.get("dependencies")),
-                optional_dependencies: read_json_string_map(obj.get("optionalDependencies")),
-                peer_dependencies: read_json_string_map(obj.get("peerDependencies")),
-                peer_dependencies_meta: read_peer_dependencies_meta(
-                    obj.get("peerDependenciesMeta"),
-                ),
-            })
+        .filter_map(
+            |(selector, value)| match parse_package_extension(selector, value) {
+                Ok(extension) => Some(extension),
+                Err(err) => {
+                    tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_INVALID_BUNDLED_PACKAGE_EXTENSION,
+                        error = %err,
+                        "ignoring malformed bundled package extension"
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+fn standalone_bundled_package_extensions() -> Vec<aube_resolver::PackageExtension> {
+    STANDALONE_BUNDLED_PACKAGE_EXTENSIONS
+        .iter()
+        .map(|extension| aube_resolver::PackageExtension {
+            selector: bundled_string(extension.selector).to_owned(),
+            dependencies: bundled_string_map(extension.dependencies),
+            optional_dependencies: bundled_string_map(extension.optional_dependencies),
+            peer_dependencies: bundled_string_map(extension.peer_dependencies),
+            peer_dependencies_meta: bundled_peer_meta(extension.peer_dependencies_meta),
         })
         .collect()
 }
 
-fn read_json_string_map(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
-    value
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
+fn bundled_string(reference: BundledStringRef) -> &'static str {
+    let start = reference.0 as usize;
+    &BUNDLED_STRINGS[start..start + reference.1 as usize]
+}
+
+fn bundled_string_map(reference: BundledTableRef) -> BTreeMap<String, String> {
+    let start = reference.0 as usize;
+    let mut map = BTreeMap::new();
+    for &(name, value) in &BUNDLED_STRING_PAIRS[start..start + reference.1 as usize] {
+        map.insert(
+            bundled_string(name).to_owned(),
+            bundled_string(value).to_owned(),
+        );
+    }
+    map
+}
+
+fn bundled_peer_meta(reference: BundledTableRef) -> BTreeMap<String, aube_registry::PeerDepMeta> {
+    let start = reference.0 as usize;
+    let mut map = BTreeMap::new();
+    for &(name, optional) in &BUNDLED_PEER_META[start..start + reference.1 as usize] {
+        map.insert(
+            bundled_string(name).to_owned(),
+            aube_registry::PeerDepMeta { optional },
+        );
+    }
+    map
+}
+
+fn parse_package_extension(
+    selector: String,
+    value: serde_json::Value,
+) -> miette::Result<aube_resolver::PackageExtension> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| invalid_package_extension(&selector, "entry must be an object"))?;
+    let dependencies_path = format!("{selector}.dependencies");
+    let optional_dependencies_path = format!("{selector}.optionalDependencies");
+    let peer_dependencies_path = format!("{selector}.peerDependencies");
+    let peer_dependencies_meta_path = format!("{selector}.peerDependenciesMeta");
+    Ok(aube_resolver::PackageExtension {
+        selector,
+        dependencies: read_json_string_map(obj.get("dependencies"), &dependencies_path)?,
+        optional_dependencies: read_json_string_map(
+            obj.get("optionalDependencies"),
+            &optional_dependencies_path,
+        )?,
+        peer_dependencies: read_json_string_map(
+            obj.get("peerDependencies"),
+            &peer_dependencies_path,
+        )?,
+        peer_dependencies_meta: read_peer_dependencies_meta(
+            obj.get("peerDependenciesMeta"),
+            &peer_dependencies_meta_path,
+        )?,
+    })
+}
+
+fn read_json_string_map(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> miette::Result<BTreeMap<String, String>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let obj = value
+        .as_object()
+        .ok_or_else(|| invalid_package_extension(field, "field must be an object"))?;
+    obj.iter()
+        .map(|(name, value)| {
+            let range = value.as_str().ok_or_else(|| {
+                invalid_package_extension(
+                    &format!("{field}.{name}"),
+                    "dependency range must be a string",
+                )
+            })?;
+            Ok((name.clone(), range.to_string()))
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn read_peer_dependencies_meta(
     value: Option<&serde_json::Value>,
-) -> BTreeMap<String, aube_registry::PeerDepMeta> {
-    value
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .map(|(name, meta)| {
-                    let optional = meta
-                        .as_object()
-                        .and_then(|m| m.get("optional"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    (name.clone(), aube_registry::PeerDepMeta { optional })
-                })
-                .collect()
+    field: &str,
+) -> miette::Result<BTreeMap<String, aube_registry::PeerDepMeta>> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let obj = value
+        .as_object()
+        .ok_or_else(|| invalid_package_extension(field, "field must be an object"))?;
+    obj.iter()
+        .map(|(name, meta)| {
+            let meta = meta.as_object().ok_or_else(|| {
+                invalid_package_extension(
+                    &format!("{field}.{name}"),
+                    "peer metadata must be an object",
+                )
+            })?;
+            let optional = match meta.get("optional") {
+                Some(value) => value.as_bool().ok_or_else(|| {
+                    invalid_package_extension(
+                        &format!("{field}.{name}.optional"),
+                        "optional must be a boolean",
+                    )
+                })?,
+                None => false,
+            };
+            Ok((name.clone(), aube_registry::PeerDepMeta { optional }))
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+fn invalid_package_extension(path: &str, reason: &str) -> miette::Report {
+    miette::miette!(
+        code = aube_codes::errors::ERR_AUBE_INVALID_PACKAGE_EXTENSION,
+        "invalid packageExtensions entry at {path:?}: {reason}"
+    )
 }
 
 /// Apply the install-time resolver configuration that's shared between
@@ -949,7 +1178,7 @@ pub(crate) struct ResolverConfigInputs<'a> {
     /// — nothing consumes the extra resolutions. Callers compute this
     /// as `lockfile_enabled.then(|| source_kind_before.unwrap_or(Aube))`.
     pub(crate) target_lockfile_kind: Option<aube_lockfile::LockfileKind>,
-    pub(crate) dependency_policy: Option<aube_resolver::DependencyPolicy>,
+    pub(crate) dependency_policy: aube_resolver::DependencyPolicy,
     /// When `true`, the resolver caches full (non-corgi) packuments on
     /// disk so the next install/update can reuse them without a
     /// round-trip. Install opts in (`true`) to amortize the cost of
@@ -1057,8 +1286,6 @@ pub(crate) fn configure_resolver(
     if !effective_overrides.is_empty() {
         tracing::debug!("applying {} overrides", effective_overrides.len());
     }
-    let dependency_policy =
-        dependency_policy.unwrap_or_else(|| resolve_dependency_policy(manifest, settings_ctx));
     if !dependency_policy.package_extensions.is_empty() {
         tracing::debug!(
             "applying {} packageExtensions",
@@ -1086,11 +1313,12 @@ pub(crate) fn configure_resolver(
     }
     let git_shallow_hosts = resolve_git_shallow_hosts(settings_ctx);
     let packument_concurrency = resolve_network_concurrency(settings_ctx);
+    let cache_dir = crate::commands::resolved_cache_dir_with_ctx(cwd, settings_ctx);
     let mut resolver = resolver
         .with_packument_network_concurrency(packument_concurrency)
-        .with_packument_cache(packument_cache_dir());
+        .with_packument_cache(cache_dir.join("packuments-v1"));
     if cache_full_packuments {
-        resolver = resolver.with_packument_full_cache(packument_full_cache_dir());
+        resolver = resolver.with_packument_full_cache(cache_dir.join("packuments-full-v1"));
     }
     let mut resolver = resolver
         .with_auto_install_peers(auto_install_peers)
@@ -1280,6 +1508,127 @@ fn compile_peer_patterns(field: &str, raw: &[String]) -> Vec<glob::Pattern> {
 }
 
 #[cfg(test)]
+mod bundled_compat_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_detection_uses_embedder_value_not_const_address() {
+        assert!(is_standalone_aube(&aube_util::identity::AUBE));
+        let embedded = aube_util::Embedder {
+            name: "embedded-aube",
+            ..aube_util::identity::AUBE
+        };
+        assert!(!is_standalone_aube(&embedded));
+    }
+
+    #[test]
+    fn catalog_matches_curated_upstreams_and_preserves_order() {
+        let extensions = standalone_bundled_package_extensions();
+
+        assert_eq!(extensions.len(), 161);
+        let extension = |selector: &str| {
+            extensions
+                .iter()
+                .find(|extension| extension.selector == selector)
+                .unwrap_or_else(|| panic!("missing bundled selector {selector}"))
+        };
+        assert_eq!(
+            extension("@angular/build@*").dependencies["tslib"],
+            "^2.3.0"
+        );
+        assert_eq!(
+            extension("@nuxt/vite-builder@>=4.5.0").dependencies["unplugin"],
+            "^3.3.0"
+        );
+        let selector_position = |selector: &str| {
+            extensions
+                .iter()
+                .position(|extension| extension.selector == selector)
+                .unwrap_or_else(|| panic!("missing bundled selector {selector}"))
+        };
+        assert!(
+            selector_position("consolidate@<=0.16.0") < selector_position("consolidate@<0.16.0")
+        );
+    }
+
+    #[test]
+    fn catalog_does_not_inject_type_only_or_singleton_runtimes() {
+        // These are the bare runtime targets the reverted scanner rules
+        // injected. Their `@types/*` counterparts are legitimate packages and
+        // intentionally remain allowed in curated repairs.
+        let extensions = standalone_bundled_package_extensions();
+        for target in ["estree", "typescript", "react", "eslint"] {
+            for extension in &extensions {
+                assert!(
+                    !extension.dependencies.contains_key(target),
+                    "{} must not inject {target}",
+                    extension.selector
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_bundled_entry_does_not_discard_valid_entries() {
+        let raw = vec![
+            ("broken@*".to_string(), serde_json::Value::Null),
+            (
+                "valid@*".to_string(),
+                serde_json::json!({"dependencies": {"left-pad": "^1.3.0"}}),
+            ),
+        ];
+
+        let parsed = parse_bundled_package_extensions(raw);
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].selector, "valid@*");
+        assert_eq!(parsed[0].dependencies["left-pad"], "^1.3.0");
+    }
+
+    #[test]
+    fn ignore_compatibility_db_skips_bundled_but_keeps_project_extensions() {
+        let npmrc = [("ignoreCompatibilityDb".to_string(), "true".to_string())];
+        let workspace = BTreeMap::new();
+        let ctx = aube_settings::ResolveCtx::files_only(&npmrc, &workspace);
+        let manifest = serde_json::from_value(serde_json::json!({
+            "pnpm": {
+                "packageExtensions": {
+                    "project-extension@*": {"dependencies": {"left-pad": "^1.3.0"}}
+                }
+            }
+        }))
+        .expect("test manifest should parse");
+
+        let policy =
+            resolve_dependency_policy(&manifest, &ctx).expect("test policy should resolve");
+
+        assert_eq!(policy.package_extensions.len(), 1);
+        assert_eq!(policy.package_extensions[0].selector, "project-extension@*");
+    }
+}
+
+#[cfg(test)]
+mod resolution_mode_tests {
+    use super::*;
+
+    #[test]
+    fn lowest_direct_maps_to_the_public_resolver_mode() {
+        assert_eq!(
+            parse_resolution_mode("lowest-direct"),
+            Some(aube_resolver::ResolutionMode::LowestDirect)
+        );
+    }
+
+    #[test]
+    fn time_alias_keeps_time_based_mode() {
+        assert_eq!(
+            parse_resolution_mode("time"),
+            Some(aube_resolver::ResolutionMode::TimeBased)
+        );
+    }
+}
+
+#[cfg(test)]
 mod override_tests {
     use super::*;
 
@@ -1327,7 +1676,7 @@ mod yarn_package_extensions_tests {
         let workspace_yaml = std::collections::BTreeMap::new();
         let ctx = aube_settings::ResolveCtx::files_only(&yarnrc_entries, &workspace_yaml);
         let manifest = aube_manifest::PackageJson::default();
-        let policy = resolve_dependency_policy(&manifest, &ctx);
+        let policy = resolve_dependency_policy(&manifest, &ctx).unwrap();
 
         let ext = policy
             .package_extensions
@@ -1572,6 +1921,7 @@ mod finalize_lockfile_graph_tests {
     async fn finalize_stamps_generic_lock_checksum_only_when_embedder_enforces() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
+        std::fs::write(cwd.join("aube-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
         std::fs::write(
             cwd.join("package.json"),
             r#"{"name":"x","version":"1.0.0"}"#,
@@ -1615,6 +1965,10 @@ mod finalize_lockfile_graph_tests {
     /// The pnpmfile half of the same regression: a local pnpmfile that
     /// exports hooks gets its `pnpmfileChecksum` recorded on a pnpm-lock
     /// rewrite (matching pnpm + a fresh `aube install`).
+    // The pnpmfile default-gate lock is a std mutex held across the finalize
+    // await on purpose: this test binary is single-threaded per `.cargo/config`
+    // and the gate must stay held for the whole detect+finalize sequence.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn finalize_stamps_pnpmfile_checksum_on_pnpm_lock() {
         if !node_available() {

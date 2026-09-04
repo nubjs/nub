@@ -41,3 +41,11 @@ tempfile = "3"
 # Synthesize a napi `--compress` hybrid in the store-compression tests
 # (the gated import unwraps it back to the raw addon before CAS).
 zstd = { workspace = true }
+
+[[bench]]
+name = "index_serialization"
+harness = false
+
+[[bench]]
+name = "writer_lease"
+harness = false

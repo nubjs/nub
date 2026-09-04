@@ -143,6 +143,64 @@ EOF
 	refute_output --partial "UNKNOWN"
 }
 
+@test "aube licenses resolves packages from a hoisted install" {
+	_setup_basic_fixture
+	aube install --node-linker=hoisted
+
+	run aube licenses --long --json
+	assert_success
+	assert_output --partial '"name": "is-odd"'
+	assert_output --partial "/node_modules/is-odd"
+	assert_output --partial "/node_modules/is-even/node_modules/is-odd"
+	refute_output --partial "/node_modules/.aube/"
+	refute_output --partial '"license": "UNKNOWN"'
+}
+
+@test "aube licenses uses the recorded hoisted layout after settings change" {
+	_setup_basic_fixture
+	cat >.npmrc <<'EOF'
+node-linker=hoisted
+hoisting-limits=dependencies
+EOF
+	aube install
+
+	cat >.npmrc <<'EOF'
+node-linker=isolated
+modules-dir=other_modules
+hoisting-limits=none
+EOF
+	run aube licenses --long --json
+	assert_success
+	assert_output --partial "/node_modules/is-odd"
+	assert_output --partial "/node_modules/is-even/node_modules/is-odd"
+	refute_output --partial "/other_modules/"
+	refute_output --partial '"license": "UNKNOWN"'
+}
+
+@test "aube licenses infers legacy hoisted layout without current settings" {
+	_setup_basic_fixture
+	cat >.npmrc <<'EOF'
+node-linker=hoisted
+hoisting-limits=dependencies
+EOF
+	aube install
+	jq 'del(.layout.modules_dir_name, .layout.hoisting_limits)' \
+		node_modules/.aube-state/state.json >state.json.tmp
+	mv state.json.tmp node_modules/.aube-state/state.json
+
+	cat >.npmrc <<'EOF'
+node-linker=isolated
+modules-dir=other_modules
+hoisting-limits=none
+EOF
+	run aube licenses --long --json
+	assert_success
+	assert_output --partial "/node_modules/is-odd"
+	assert_output --partial "/node_modules/is-even/node_modules/is-odd"
+	refute_output --partial "/other_modules/"
+	refute_output --partial '"license": "UNKNOWN"'
+}
+
 @test "aube licenses with no lockfile is a friendly no-op" {
 	cat >package.json <<'EOF'
 { "name": "lic-empty", "version": "0.0.0" }

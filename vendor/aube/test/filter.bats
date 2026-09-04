@@ -189,6 +189,65 @@ _setup_filter_workspace() {
 	assert_output --partial "node_modules/is-odd"
 }
 
+@test "filtered production install materializes only selected packages on a cold store" {
+	cat >pnpm-workspace.yaml <<-'EOF'
+		packages:
+		  - packages/*
+	EOF
+	cat >package.json <<-'EOF'
+		{"name":"filter-materialize-root","version":"0.0.0","private":true}
+	EOF
+	mkdir -p packages/backend packages/backend-two packages/frontend
+	cat >packages/backend/package.json <<-'EOF'
+		{
+		  "name": "backend",
+		  "version": "1.0.0",
+		  "dependencies": { "is-number": "7.0.0" },
+		  "devDependencies": { "kind-of": "6.0.3" }
+		}
+	EOF
+	cat >packages/backend-two/package.json <<-'EOF'
+		{
+		  "name": "backend-two",
+		  "version": "1.0.0",
+		  "dependencies": { "picocolors": "1.1.1" }
+		}
+	EOF
+	cat >packages/frontend/package.json <<-'EOF'
+		{
+		  "name": "frontend",
+		  "version": "1.0.0",
+		  "dependencies": { "is-odd": "3.0.1" }
+		}
+	EOF
+
+	# Resolve the complete workspace without warming the package store.
+	run aube install --lockfile-only --recursive
+	assert_success
+
+	run aube install --frozen-lockfile --production \
+		--disable-global-virtual-store \
+		--filter ./packages/backend \
+		--filter ./packages/backend-two
+	assert_success
+
+	run bash -c 'find node_modules/.aube -mindepth 1 -maxdepth 1 ! -name node_modules -exec basename {} \; | sort'
+	assert_success
+	assert_output $'is-number@7.0.0\npicocolors@1.1.1'
+
+	# A warm-store reinstall must produce the identical project-local tree.
+	run aube clean
+	assert_success
+	run aube install --frozen-lockfile --production \
+		--disable-global-virtual-store \
+		--filter ./packages/backend \
+		--filter ./packages/backend-two
+	assert_success
+	run bash -c 'find node_modules/.aube -mindepth 1 -maxdepth 1 ! -name node_modules -exec basename {} \; | sort'
+	assert_success
+	assert_output $'is-number@7.0.0\npicocolors@1.1.1'
+}
+
 @test "aube install --filter <member>... scopes to the member and its workspace deps (sharedWorkspaceLockfile=false)" {
 	# Mirrors a per-project-lockfile monorepo. A plain `aube install` from
 	# anywhere installs every importer (recursiveInstall defaults to true,

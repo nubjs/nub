@@ -54,7 +54,7 @@ impl ResolvedPatch {
 /// prefixes, NUL bytes, and any `..` component. Used as a read-side
 /// guard so a hostile manifest cannot point the patch loader at
 /// arbitrary files (e.g. `/etc/passwd` or `\\server\share\secret`).
-fn is_safe_patch_rel(rel: &str) -> bool {
+pub(crate) fn is_safe_patch_rel(rel: &str) -> bool {
     if rel.is_empty() || rel.contains('\0') {
         return false;
     }
@@ -195,18 +195,11 @@ fn map_patch_resolve_err(e: aube_lockfile::patch_groups::PatchResolveError) -> m
     }
 }
 
-#[cfg(test)]
-fn load_patches(cwd: &Path) -> Result<BTreeMap<String, ResolvedPatch>> {
-    load_patches_with_lockfile_entries(cwd, &BTreeMap::new())
-}
-
-fn load_patches_with_lockfile_entries(
-    cwd: &Path,
-    lockfile_patched_dependencies: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, ResolvedPatch>> {
-    let mut entries: BTreeMap<String, String> = BTreeMap::new();
-    entries.extend(lockfile_patched_dependencies.clone());
-
+/// Read patch declarations from the project manifest and workspace config
+/// without touching their files. Deploy filters this map to each selected
+/// importer's closure before validating paths and loading content.
+pub(crate) fn load_declared_patch_paths(cwd: &Path) -> Result<BTreeMap<String, String>> {
+    let mut entries = BTreeMap::new();
     let manifest_path = cwd.join("package.json");
     if manifest_path.exists() {
         let manifest = aube_manifest::PackageJson::from_path(&manifest_path)
@@ -220,7 +213,35 @@ fn load_patches_with_lockfile_entries(
         .map_err(miette::Report::new)
         .wrap_err("failed to read pnpm-workspace.yaml")?;
     entries.extend(ws_config.patched_dependencies);
+    Ok(entries)
+}
 
+pub(crate) fn resolve_declared_patches(
+    cwd: &Path,
+    entries: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ResolvedPatch>> {
+    resolve_patch_entries(cwd, entries)
+}
+
+#[cfg(test)]
+fn load_patches(cwd: &Path) -> Result<BTreeMap<String, ResolvedPatch>> {
+    load_patches_with_lockfile_entries(cwd, &BTreeMap::new())
+}
+
+fn load_patches_with_lockfile_entries(
+    cwd: &Path,
+    lockfile_patched_dependencies: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ResolvedPatch>> {
+    let mut entries = BTreeMap::new();
+    entries.extend(lockfile_patched_dependencies.clone());
+    entries.extend(load_declared_patch_paths(cwd)?);
+    resolve_patch_entries(cwd, entries)
+}
+
+fn resolve_patch_entries(
+    cwd: &Path,
+    entries: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ResolvedPatch>> {
     let mut out = BTreeMap::new();
     for (key, rel) in entries {
         validate_patch_key(&key)?;
@@ -553,6 +574,7 @@ fn remove_bun_patched_dependency(cwd: &Path, key: &str) -> Result<bool> {
     let raw = std::fs::read_to_string(&path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read {}: {e}", path.display()))?;
+    let indent = aube_manifest::detect_json_indent(&raw).to_string();
     let mut value =
         aube_manifest::parse_json::<serde_json::Value>(&path, raw).map_err(miette::Report::new)?;
     let obj = value
@@ -580,7 +602,7 @@ fn remove_bun_patched_dependency(cwd: &Path, key: &str) -> Result<bool> {
         return Ok(removed);
     }
 
-    let mut out = serde_json::to_string_pretty(&value)
+    let mut out = aube_manifest::serialize_json_with_indent(&value, &indent)
         .into_diagnostic()
         .map_err(|e| miette!("failed to serialize {}: {e}", path.display()))?;
     out.push('\n');
@@ -600,6 +622,59 @@ pub fn read_patched_dependencies(cwd: &Path) -> Result<BTreeMap<String, String>>
         .wrap_err("failed to read workspace yaml")?;
     out.extend(ws_config.patched_dependencies);
     Ok(out)
+}
+
+/// Compare pnpm's recorded patch-content hashes with the currently
+/// declared patch files. A pnpm lockfile keeps the content hash in its
+/// `patchedDependencies` values, while the manifest/workspace config
+/// keeps the path; checking both catches in-place edits that don't
+/// otherwise change dependency resolution.
+pub fn pnpm_patch_hash_drift(
+    cwd: &Path,
+    recorded: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
+    let declared = read_patched_dependencies(cwd)?;
+    for (selector, rel) in &declared {
+        let Some(expected) = recorded.get(selector) else {
+            return Ok(Some(format!(
+                "patched dependency {selector} is missing from pnpm-lock.yaml"
+            )));
+        };
+        // Legacy path-only pnpm entries carry no hash to validate. Leave
+        // them fresh when the declaration still names the same path.
+        if expected == rel {
+            continue;
+        }
+        if !is_safe_patch_rel(rel) {
+            return Err(miette!(
+                "refusing unsafe patch path for {selector}: {rel:?} (absolute, UNC, or contains `..`)"
+            ));
+        }
+        let path = cwd.join(rel);
+        let content = std::fs::read_to_string(&path)
+            .into_diagnostic()
+            .map_err(|e| {
+                miette!(
+                    "failed to read patch file {} for {selector}: {e}",
+                    path.display()
+                )
+            })?;
+        let normalized = content.replace("\r\n", "\n");
+        let mut hasher = Sha256::new();
+        hasher.update(normalized.as_bytes());
+        let actual = hex::encode(hasher.finalize());
+        if !expected.eq_ignore_ascii_case(&actual) {
+            return Ok(Some(format!(
+                "patched dependency {selector} has changed content"
+            )));
+        }
+    }
+    if let Some(selector) = recorded.keys().find(|key| !declared.contains_key(*key)) {
+        return Ok(Some(format!(
+            "patched dependency {selector} is no longer declared"
+        )));
+    }
+    Ok(None)
 }
 
 fn read_package_json_patched_dependencies(cwd: &Path) -> Result<BTreeMap<String, String>> {

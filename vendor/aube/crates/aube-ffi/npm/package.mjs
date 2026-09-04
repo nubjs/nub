@@ -59,7 +59,7 @@ if (process.env.AUBE_FFI_BINARY) {
   writeFileSync(resolve(stage, "package.json"), JSON.stringify({
     name: name(os, cpu, libc), version,
     description: "Platform library for @jdxcode/aube-ffi; install the root package instead",
-    license: "MIT", repository: "https://github.com/jdx/aube", main: "index.js",
+    license: "MIT", repository: "https://github.com/aubepkg/aube", main: "index.js",
     files: ["index.js", library, "README.md"], preferUnplugged: true,
     os: [os], cpu: [cpu], ...(libc ? { libc: [libc] } : {}),
   }, null, 2) + "\n")

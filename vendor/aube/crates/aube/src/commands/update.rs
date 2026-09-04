@@ -1,6 +1,5 @@
 use super::install;
 use super::update_picker;
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::IsTerminal;
@@ -13,12 +12,19 @@ struct CatalogUpdateTarget {
     source: super::CatalogSource,
 }
 
-#[derive(Debug, Clone, Args)]
+type RecursiveCatalogChoices = BTreeMap<(String, String), bool>;
+
+struct InteractiveSelection {
+    selected: BTreeSet<String>,
+    shown: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, usage_rs::Args)]
 pub struct UpdateArgs {
     /// Package(s) to update (all if empty)
     pub packages: Vec<String>,
     /// Update only devDependencies.
-    #[arg(short = 'D', long, conflicts_with = "prod")]
+    #[usage(short = 'D', long, conflicts = "--prod")]
     pub dev: bool,
     /// Pin manifest specifiers to the resolved version with no range
     /// prefix.
@@ -27,35 +33,32 @@ pub struct UpdateArgs {
     /// caret/tilde original, drop the prefix so the manifest carries an
     /// exact pin (`"1.2.3"`) instead of `"^1.2.3"`. Mirrors
     /// `pnpm update --save-exact`.
-    #[arg(short = 'E', long, visible_alias = "save-exact")]
+    #[usage(short = 'E', long, long = "save-exact")]
     pub exact: bool,
     /// Update globally installed packages.
     ///
     /// Parsed for pnpm compatibility.
-    #[arg(short = 'g', long)]
+    #[usage(short = 'g', long)]
     pub global: bool,
     /// Interactive update picker.
     ///
     /// Parsed for pnpm compatibility.
-    #[arg(short = 'i', long)]
+    #[usage(short = 'i', long)]
     pub interactive: bool,
-    /// Update past the manifest range.
+    /// Update past the manifest range unless paired with `--no-save`.
     ///
     /// Rewrites `package.json` specifiers to match the newly resolved
     /// versions (the registry's `latest` dist-tag, clamped by
-    /// `minimumReleaseAge` / `resolution-mode` as usual).
-    #[arg(short = 'L', long)]
+    /// `minimumReleaseAge` / `resolution-mode` as usual). With
+    /// `--no-save`, leaves the manifest range unchanged and resolves
+    /// only to the newest version that range allows.
+    #[usage(short = 'L', long)]
     pub latest: bool,
     /// Update only production dependencies.
-    #[arg(
-        short = 'P',
-        long,
-        conflicts_with = "dev",
-        visible_alias = "production"
-    )]
+    #[usage(short = 'P', long, long = "production", conflicts = "--dev")]
     pub prod: bool,
     /// Update dependencies in the current workspace package.
-    #[arg(short = 'w', long)]
+    #[usage(short = 'w', long)]
     pub workspace: bool,
     /// Dependency traversal depth.
     ///
@@ -64,56 +67,56 @@ pub struct UpdateArgs {
     /// the flag emits a one-line warning pointing at
     /// `rm aube-lock.yaml && aube install` for the
     /// `--depth Infinity` case.
-    #[arg(long)]
+    #[usage(long)]
     pub depth: Option<String>,
     /// Add a global pnpmfile that runs before the local one.
     ///
     /// Mirrors pnpm's `--global-pnpmfile <path>`. The global hook runs
     /// first and the local hook (if any) runs second.
-    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    #[usage(long, value_name = "PATH", conflicts = "--ignore-pnpmfile")]
     pub global_pnpmfile: Option<std::path::PathBuf>,
     /// Skip running `.pnpmfile.mjs` / `.pnpmfile.cjs` hooks for this update.
-    #[arg(long)]
+    #[usage(long)]
     pub ignore_pnpmfile: bool,
     /// Skip lifecycle scripts.
     ///
-    /// Accepted for pnpm parity — dep scripts are already gated by
-    /// `allowBuilds`, so the flag is currently a no-op, but scripts
-    /// that wrap `pnpm update --ignore-scripts` keep working without
-    /// complaint.
-    #[arg(long, hide = true)]
+    /// Skips the root `pnpm:devPreinstall` hook and all approved
+    /// dependency build scripts in the chained install.
+    #[usage(long, hide)]
     pub ignore_scripts: bool,
+    /// Internal recursive-update marker: the workspace root hook already ran.
+    #[usage(skip)]
+    dev_preinstall_already_run: bool,
     /// Refresh the lockfile without populating `node_modules`.
     ///
     /// Re-resolves the full graph (direct + transitive) and writes
     /// `aube-lock.yaml`, then skips the linker so `node_modules` is
     /// left untouched. Mirrors `npm update --package-lock-only`.
-    #[arg(long, conflicts_with = "frozen_lockfile")]
+    #[usage(long)]
     pub lockfile_only: bool,
     /// Skip optionalDependencies.
-    #[arg(long)]
+    #[usage(long)]
     pub no_optional: bool,
     /// Refresh the lockfile without rewriting `package.json` ranges.
     ///
-    /// Pair with `--latest` to pull a newer resolved version into the
-    /// lockfile while leaving the manifest's caret/tilde ranges
-    /// untouched. Without `--latest` this flag is a no-op (plain
-    /// `update` already doesn't touch the manifest). Mirrors
-    /// `pnpm update --no-save`.
-    #[arg(long)]
+    /// Pair with `--latest` to refresh the lockfile to the newest
+    /// version allowed by the unchanged manifest range. Without
+    /// `--latest`, it still suppresses manifest range rewrites enabled
+    /// by `updateRewritesSpecifier`. Mirrors `pnpm update --no-save`.
+    #[usage(long)]
     pub no_save: bool,
     /// Override the local pnpmfile location.
     ///
     /// Mirrors pnpm's `--pnpmfile <path>`. Relative paths resolve
     /// against the project root; absolute paths are used as-is. Wins
     /// over `pnpmfilePath` from `pnpm-workspace.yaml`.
-    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    #[usage(long, value_name = "PATH", conflicts = "--ignore-pnpmfile")]
     pub pnpmfile: Option<std::path::PathBuf>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub lockfile: crate::cli_args::LockfileArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub virtual_store: crate::cli_args::VirtualStoreArgs,
 }
 
@@ -141,12 +144,25 @@ fn pin_outranks(
 
 pub async fn run(
     args: UpdateArgs,
-    mut filter: aube_workspace::selector::EffectiveFilter,
+    filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
+    run_inner(args, filter, true, None).await
+}
+
+async fn run_inner(
+    args: UpdateArgs,
+    mut filter: aube_workspace::selector::EffectiveFilter,
+    chain_install: bool,
+    mut recursive_catalog_choices: Option<&mut RecursiveCatalogChoices>,
+) -> miette::Result<Option<i32>> {
+    if args.lockfile_only && args.lockfile.frozen_lockfile {
+        return Err(miette::miette!(
+            "--lockfile-only cannot be combined with --frozen-lockfile"
+        ));
+    }
     args.network.install_overrides();
     args.lockfile.install_overrides();
     args.virtual_store.install_overrides();
-    let _ = args.ignore_scripts; // parity no-op: dep scripts already gated by allowBuilds
     if let Some(depth) = args.depth.as_deref() {
         // pnpm's `--depth Infinity` is the only useful value; the
         // intermediate ones (`--depth 1`, `--depth 2`) have semantics
@@ -227,6 +243,16 @@ pub async fn run(
         cwd = root;
     }
     let lock = super::take_install_project_lock(&cwd)?;
+    if !args.dev_preinstall_already_run {
+        install::run_dev_preinstall(
+            &cwd,
+            args.ignore_scripts,
+            false,
+            args.lockfile_only,
+            Some("update"),
+        )
+        .await?;
+    }
     let manifest_path = cwd.join("package.json");
 
     let mut manifest = aube_manifest::PackageJson::from_path(&manifest_path)
@@ -602,22 +628,50 @@ pub async fn run(
                 }
             }
         } else {
-            let selected = match pick_update_interactively(
-                &manifest_keys_to_update,
-                &manifest,
-                &all_specifiers,
-                existing.as_ref(),
-                &existing_importers,
-                &preserve_pin,
-                &cwd,
-                latest,
-            )
-            .await?
-            {
-                Some(sel) => sel,
-                // Picker cancelled (Ctrl-C / Esc): exit 130 via the return path.
-                None => return Ok(Some(130)),
+            let mut picker_keys = manifest_keys_to_update.clone();
+            let previously_selected = recursive_catalog_choices
+                .as_deref()
+                .map(|choices| {
+                    apply_previous_catalog_choices(&mut picker_keys, &all_specifiers, choices)
+                })
+                .unwrap_or_default();
+            let selection = if picker_keys.is_empty() {
+                InteractiveSelection {
+                    selected: BTreeSet::new(),
+                    shown: BTreeSet::new(),
+                }
+            } else {
+                match pick_update_interactively(
+                    &picker_keys,
+                    &manifest,
+                    &all_specifiers,
+                    existing.as_ref(),
+                    &existing_importers,
+                    &preserve_pin,
+                    &cwd,
+                    latest,
+                )
+                .await?
+                {
+                    Some(sel) => sel,
+                    // Picker cancelled (Ctrl-C / Esc): exit 130 via the return
+                    // path.
+                    None => return Ok(Some(130)),
+                }
             };
+            if let Some(choices) = recursive_catalog_choices.as_mut() {
+                record_recursive_catalog_choices(
+                    choices,
+                    &all_specifiers,
+                    &selection.shown,
+                    &selection.selected,
+                );
+            }
+            let selected: BTreeSet<String> = selection
+                .selected
+                .into_iter()
+                .chain(previously_selected)
+                .collect();
             if selected.is_empty() && indirect_arg_names.is_empty() {
                 eprintln!("No packages selected.");
                 return Ok(None);
@@ -650,7 +704,7 @@ pub async fn run(
 
     let mut workspace_catalogs = super::load_workspace_catalogs(&cwd)?;
     let mut catalog_targets = Vec::new();
-    if effective_latest {
+    if effective_latest && !no_save {
         for key in &manifest_keys_to_update {
             if !should_rewrite_key(key) || preserve_pin.contains(key) {
                 continue;
@@ -696,7 +750,7 @@ pub async fn run(
     // pin alone. Both `--latest` (every direct dep) and `<pkg>@latest`
     // (only the named entries — see `should_rewrite_key`) flow
     // through this loop.
-    let resolver_manifest = if effective_latest {
+    let resolver_manifest = if effective_latest && !no_save {
         let mut m = manifest.clone();
         for key in &manifest_keys_to_update {
             if !should_rewrite_key(key) {
@@ -904,7 +958,19 @@ pub async fn run(
         .await
         .map_err(miette::Report::new)
         .wrap_err("failed to resolve dependencies")?;
+    let age_gated_updates = if args.interactive {
+        Vec::new()
+    } else {
+        resolver.age_gated_updates(&graph)
+    };
     drop(resolver);
+    let targeted: BTreeSet<&str> = manifest_keys_to_update.iter().map(String::as_str).collect();
+    let blocked_updates = age_gated_updates
+        .into_iter()
+        .filter(|update| targeted.contains(update.name.as_str()))
+        .map(|update| (update.name, update.version))
+        .collect();
+    super::warn_age_gated_updates(&blocked_updates);
     // Drain the readPackage stderr forwarders so resolve-time `ctx.log`
     // records flush to stdout before afterAllResolved emits its own.
     crate::pnpmfile::ReadPackageHostChain::drain_forwarders(read_package_forwarders).await;
@@ -1014,9 +1080,9 @@ pub async fn run(
     // they already had, so an idempotent rewrite doesn't churn the
     // manifest for no reason.
     //
-    // `--no-save` short-circuits the manifest rewrite: the resolver
-    // already pulled in the new versions for the lockfile above, so we
-    // just skip persisting any range bumps to `package.json`.
+    // `--no-save` short-circuits the manifest rewrite. The resolver kept
+    // the original range authoritative, so the refreshed lockfile cannot
+    // contradict the unchanged `package.json` specifier.
     if no_save && (effective_latest || rewrites_specifier_setting) {
         eprintln!("Skipping package.json update (--no-save)");
     } else if effective_latest || cosmetic_rewrite_eligible {
@@ -1108,29 +1174,15 @@ pub async fn run(
     // sync (drift, manual edits, future chained calls) the install would
     // re-resolve and re-attach the pnpmfile hook — silently overriding
     // the flags the user passed to `aube update`.
-    let mut chained =
-        install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Prefer));
-    chained.ignore_pnpmfile = args.ignore_pnpmfile;
-    chained.pnpmfile = args.pnpmfile.clone();
-    chained.global_pnpmfile = args.global_pnpmfile.clone();
-    // `preResolution` already ran above, before this command's own
-    // resolve. pnpm fires it once per install operation, so letting the
-    // chained install fire it again would run the user's hook twice for
-    // one `aube update`.
-    chained.pre_resolution_hook_already_ran = true;
-    // `aube update` is one of the canonical fresh-resolution
-    // entry points — by design it pulls newer versions than the
-    // lockfile pins. Route the post-resolve transitive set
-    // through the live OSV API so the freshest `MAL-*` advisories
-    // apply at the moment a human is changing what's installed,
-    // matching `aube add`'s behavior.
-    chained.osv_transitive_check = true;
-    // `--lockfile-only`: lockfile is already written above; tell the
-    // chained install to skip linking `node_modules` so the on-disk
-    // tree stays as-is. Mirrors `aube install --lockfile-only` and
-    // closes the gap with `npm update --package-lock-only`.
-    chained.lockfile_only = args.lockfile_only;
-    install::run_with_project_lock(chained, &lock).await?;
+    if chain_install {
+        let mut chained = chained_install_options(&args);
+        // `preResolution` already ran above, before this command's own
+        // resolve. pnpm fires it once per install operation, so letting the
+        // chained install fire it again would run the user's hook twice for
+        // one `aube update`.
+        chained.pre_resolution_hook_already_ran = true;
+        install::run_with_project_lock(chained, &lock).await?;
+    }
 
     Ok(None)
 }
@@ -1309,11 +1361,12 @@ fn workspace_members(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Interactively pick which dependencies to update. `Ok(Some(set))` is the
-/// selection (possibly empty); `Ok(None)` means the user cancelled the picker
-/// (Ctrl-C / Esc), which the caller maps to exit code 130 — returned up to the
-/// binary's single `std::process::exit` rather than terminating here, keeping
-/// the command embed-safe.
+/// Interactively pick which dependencies to update. The successful result
+/// carries both the selected keys and the keys actually shown to the user;
+/// recursive mode uses the latter to distinguish a rejection from an entry
+/// hidden because it had no drift or its packument could not be fetched.
+/// `Ok(None)` means the user cancelled the picker (Ctrl-C / Esc), which the
+/// caller maps to exit code 130.
 async fn pick_update_interactively(
     keys: &[String],
     manifest: &aube_manifest::PackageJson,
@@ -1323,7 +1376,7 @@ async fn pick_update_interactively(
     preserve_pin: &BTreeSet<String>,
     cwd: &std::path::Path,
     latest: bool,
-) -> miette::Result<Option<BTreeSet<String>>> {
+) -> miette::Result<Option<InteractiveSelection>> {
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err(miette!(
             "`{} --interactive` requires stdin and stderr to be TTYs; pass package names explicitly to update non-interactively",
@@ -1356,16 +1409,63 @@ async fn pick_update_interactively(
         })
         .collect();
     if registry_keys.is_empty() {
-        return Ok(Some(BTreeSet::new()));
+        return Ok(Some(InteractiveSelection {
+            selected: BTreeSet::new(),
+            shown: BTreeSet::new(),
+        }));
     }
 
-    let packuments = fetch_packuments(&registry_keys, specifiers, cwd).await?;
-    let gate = super::outdated::age_gate_for(cwd);
+    let client = std::sync::Arc::new(super::make_client(cwd));
+    let (minimum_release_age, registry_supports_time) = super::with_settings_ctx(cwd, |ctx| {
+        (
+            super::install::resolve_minimum_release_age(ctx, None),
+            aube_settings::resolved::registry_supports_time_field(ctx),
+        )
+    });
+    let needs_time = minimum_release_age.is_some() && !registry_supports_time;
+    let cache_dir = if needs_time {
+        super::packument_full_cache_dir_for_cwd(cwd)
+    } else {
+        super::packument_cache_dir_for_cwd(cwd)
+    };
+    let mut set = tokio::task::JoinSet::new();
+    for key in &registry_keys {
+        let real_name = real_name_from_spec(key, specifiers.get(key.as_str()));
+        let key_owned = (*key).clone();
+        let client = client.clone();
+        let cache_dir = cache_dir.clone();
+        set.spawn(async move {
+            let result = if needs_time {
+                client
+                    .fetch_packument_with_time_cached(&real_name, &cache_dir)
+                    .await
+            } else {
+                client.fetch_packument_cached(&real_name, &cache_dir).await
+            };
+            (key_owned, result)
+        });
+    }
+    let mut packuments: HashMap<String, aube_registry::Packument> =
+        HashMap::with_capacity(registry_keys.len());
+    while let Some(joined) = set.join_next().await {
+        let (key, result) = joined
+            .into_diagnostic()
+            .wrap_err("packument fetch panicked")?;
+        match result {
+            Ok(p) => {
+                packuments.insert(key, p);
+            }
+            Err(e) => {
+                tracing::warn!("failed to fetch packument for {key}: {e}");
+            }
+        }
+    }
 
     let mut picker = demand::MultiSelect::new("Choose which dependencies to update")
         .description("Space to toggle, Enter to confirm")
         .filterable(true);
-    let mut shown = 0usize;
+    let mut shown = BTreeSet::new();
+    let mut blocked_updates = BTreeMap::new();
     let mut warned = std::collections::HashSet::new();
     for key in &registry_keys {
         let spec = specifiers
@@ -1379,45 +1479,49 @@ async fn pick_update_interactively(
         let current = existing
             .and_then(|g| lookup_pkg(g, existing_importers, key, &real_name))
             .map(|p| p.version.as_str());
-        // Same floor as the rich picker: offer what an install would land on,
-        // not the raw tag, so a release-age window cannot present a cell that
-        // resolves BELOW the installed version once selected. A dep with no
-        // current version has nothing to floor against, and the empty string
-        // fails to parse as semver, so the pick passes through unclamped.
-        let gated_latest = super::outdated::latest_pick(
-            packument,
-            &real_name,
-            gate.as_ref(),
-            current.unwrap_or_default(),
-        );
-        let registry_latest = gated_latest.as_deref();
-        // Gated for the same reason as the rich picker's in-range cell above.
-        // The fallback is the `ungated` argument rather than an `or_else` on
-        // the result: a refusal must stay refused, and an `or_else` outside
-        // would hand the cell back the very value the window declined.
-        let (wanted, wanted_undated) = super::outdated::gated_pick(
+        let wanted_info = super::policy_version_info(
             packument,
             &real_name,
             spec,
-            gate.as_ref(),
-            super::wanted_version(packument, spec).or_else(|| current.map(str::to_owned)),
+            minimum_release_age.as_ref(),
+            current,
         );
-        // The registry dated nothing in range, so no version is installable and
-        // the cell is gone. Say so rather than let the package drop out of the
-        // list looking current — same warning, same reason, as the report.
+        // A registry that served no publish times admits no version at all,
+        // so the row is gone and `install`/`update` will hard-error for it.
+        // Say so rather than let the package drop out looking current — same
+        // warning, same reason, as the report. Only the manifest range is
+        // warned on, since only that one predicts plain `update`.
+        let (_, wanted_undated) = super::outdated::gated_pick(
+            packument,
+            &real_name,
+            spec,
+            minimum_release_age.as_ref(),
+            None,
+        );
         if wanted_undated && warned.insert(real_name.clone()) {
             super::outdated::warn_undatable(&real_name);
         }
         // `--latest` rewrites past the manifest range, so the picker
-        // shows the dist-tag latest as the target. Without `--latest`
+        // shows the newest policy-eligible release. Without `--latest`
         // we only refresh inside the range, so target = wanted.
-        let target = if latest {
-            registry_latest
-                .map(str::to_owned)
-                .or_else(|| wanted.clone())
+        let target_info = if latest {
+            super::policy_version_info(
+                packument,
+                &real_name,
+                "latest",
+                minimum_release_age.as_ref(),
+                current,
+            )
         } else {
-            wanted.clone()
+            wanted_info.clone()
         };
+        if let Some(blocked) = target_info.blocked {
+            blocked_updates.insert((*key).clone(), blocked);
+        }
+        let target = target_info
+            .selected
+            .or(wanted_info.selected)
+            .or_else(|| current.map(str::to_owned));
         let (Some(current), Some(target)) = (current, target.as_deref()) else {
             continue;
         };
@@ -1425,15 +1529,20 @@ async fn pick_update_interactively(
             continue;
         }
         let label = format!("{} {key} {current} → {target}", dep_bucket(manifest, key),);
+        let label = aube_util::terminal::sanitize_inline(&label);
         picker = picker.option(
             demand::DemandOption::new((*key).clone())
-                .label(&label)
+                .label(label.as_ref())
                 .selected(true),
         );
-        shown += 1;
+        shown.insert((*key).clone());
     }
-    if shown == 0 {
-        return Ok(Some(BTreeSet::new()));
+    super::warn_age_gated_updates(&blocked_updates);
+    if shown.is_empty() {
+        return Ok(Some(InteractiveSelection {
+            selected: BTreeSet::new(),
+            shown,
+        }));
     }
 
     let picked: Vec<String> = match picker.run() {
@@ -1448,7 +1557,10 @@ async fn pick_update_interactively(
                 .wrap_err("failed to read update selection");
         }
     };
-    Ok(Some(picked.into_iter().collect()))
+    Ok(Some(InteractiveSelection {
+        selected: picked.into_iter().collect(),
+        shown,
+    }))
 }
 
 /// Concurrently fetch (cache-aware) packuments for the picker rows. A
@@ -1794,19 +1906,31 @@ fn with_update_settings_ctx<T>(
 }
 
 async fn run_filtered(
-    args: UpdateArgs,
+    mut args: UpdateArgs,
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
     reject_unsupported_pkg_specs(&args.packages)?;
     let cwd = crate::dirs::cwd()?;
     let (root, matched) = super::select_workspace_packages(&cwd, filter, "update")?;
+    install::run_dev_preinstall(
+        &root,
+        args.ignore_scripts,
+        false,
+        args.lockfile_only,
+        Some("update"),
+    )
+    .await?;
+    args.dev_preinstall_already_run = true;
     let shared_workspace_lockfile = resolve_shared_workspace_lockfile(&root)?;
     let root_manifest = if shared_workspace_lockfile {
         Some(super::load_manifest_or_default(&root)?)
     } else {
         None
     };
+    let mut exit_code = None;
+    let mut completed_update = false;
     let result = async {
+        let mut catalog_choices = RecursiveCatalogChoices::new();
         for pkg in matched {
             let root_graph = if let Some(root_manifest) = root_manifest.as_ref() {
                 Some(read_workspace_lockfile(&root, root_manifest)?)
@@ -1927,11 +2051,16 @@ async fn run_filtered(
                     continue;
                 }
             }
-            Box::pin(run(
+            exit_code = Box::pin(run_inner(
                 per_pkg,
                 aube_workspace::selector::EffectiveFilter::default(),
+                !shared_workspace_lockfile,
+                args.interactive.then_some(&mut catalog_choices),
             ))
             .await?;
+            if exit_code.is_some() {
+                break;
+            }
             if let (Some(root_manifest), Some(root_graph)) = (root_manifest.as_ref(), root_graph) {
                 merge_filtered_update_lockfile(
                     &root,
@@ -1944,12 +2073,88 @@ async fn run_filtered(
                 )
                 .await?;
             }
+            completed_update = true;
+        }
+        // A later picker cancellation does not roll back importer updates the
+        // user already confirmed, so materialize those completed updates before
+        // returning 130. Cancellation remains the command's exit status even if
+        // this best-effort install fails, but keep that failure visible.
+        if shared_workspace_lockfile && completed_update {
+            super::retarget_cwd(&root)?;
+            let lock = super::take_install_project_lock(&root)?;
+            if let Err(error) =
+                install::run_with_project_lock(chained_install_options(&args), &lock).await
+            {
+                if exit_code == Some(130) {
+                    tracing::error!(
+                        code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
+                        %error,
+                        "deferred install failed while finalizing updates before cancellation"
+                    );
+                } else {
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
     .await;
     super::finish_filtered_workspace(&cwd, result)?;
-    Ok(None)
+    Ok(exit_code)
+}
+
+fn chained_install_options(args: &UpdateArgs) -> install::InstallOptions {
+    let mut chained =
+        install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Prefer));
+    chained.ignore_pnpmfile = args.ignore_pnpmfile;
+    chained.pnpmfile = args.pnpmfile.clone();
+    chained.global_pnpmfile = args.global_pnpmfile.clone();
+    chained.ignore_scripts = args.ignore_scripts;
+    chained.script_command = "update";
+    // Fresh update resolutions should receive the same live OSV check
+    // whether the install is per-project or deferred to the workspace root.
+    chained.osv_transitive_check = true;
+    // `--lockfile-only` keeps the post-update install from linking modules.
+    chained.lockfile_only = args.lockfile_only;
+    chained
+}
+
+fn apply_previous_catalog_choices(
+    picker_keys: &mut Vec<String>,
+    specifiers: &BTreeMap<String, String>,
+    choices: &RecursiveCatalogChoices,
+) -> BTreeSet<String> {
+    let mut selected = BTreeSet::new();
+    picker_keys.retain(|key| {
+        let original = specifiers.get(key).map(String::as_str).unwrap_or("");
+        let Some(catalog) = catalog_name_from_spec(original) else {
+            return true;
+        };
+        match choices.get(&(catalog.to_string(), key.clone())) {
+            Some(true) => {
+                selected.insert(key.clone());
+                false
+            }
+            Some(false) => false,
+            None => true,
+        }
+    });
+    selected
+}
+
+fn record_recursive_catalog_choices(
+    choices: &mut RecursiveCatalogChoices,
+    specifiers: &BTreeMap<String, String>,
+    shown: &BTreeSet<String>,
+    selected: &BTreeSet<String>,
+) {
+    for key in shown {
+        let original = specifiers.get(key).map(String::as_str).unwrap_or("");
+        let Some(catalog) = catalog_name_from_spec(original) else {
+            continue;
+        };
+        choices.insert((catalog.to_string(), key.clone()), selected.contains(key));
+    }
 }
 
 fn resolve_shared_workspace_lockfile(cwd: &std::path::Path) -> miette::Result<bool> {
@@ -2052,6 +2257,7 @@ async fn write_update_lockfile(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn merge_update_graph_into_workspace_lockfile(
     workspace_root: &std::path::Path,
     pkg_dir: &std::path::Path,
@@ -2097,7 +2303,13 @@ async fn merge_update_graph_into_workspace_lockfile(
     }
     root_graph.packages.extend(pkg_graph.packages);
     root_graph.times.extend(pkg_graph.times);
-    root_graph.catalogs.extend(pkg_graph.catalogs);
+    for (catalog, entries) in pkg_graph.catalogs {
+        root_graph
+            .catalogs
+            .entry(catalog)
+            .or_default()
+            .extend(entries);
+    }
     root_graph
         .patched_dependencies
         .extend(pkg_graph.patched_dependencies);
@@ -2328,6 +2540,58 @@ fn exact_pin_version(spec: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recursive_catalog_choice_is_reused_without_reprompting() {
+        let mut picker_keys = vec!["lighthouse".to_string(), "local-only".to_string()];
+        let specifiers = BTreeMap::from([
+            ("lighthouse".to_string(), "catalog:".to_string()),
+            ("local-only".to_string(), "^1.0.0".to_string()),
+        ]);
+        let choices = RecursiveCatalogChoices::from([(
+            ("default".to_string(), "lighthouse".to_string()),
+            true,
+        )]);
+
+        let selected = apply_previous_catalog_choices(&mut picker_keys, &specifiers, &choices);
+
+        assert_eq!(selected, BTreeSet::from(["lighthouse".to_string()]));
+        assert_eq!(picker_keys, vec!["local-only"]);
+    }
+
+    #[test]
+    fn rejected_recursive_catalog_choice_stays_rejected() {
+        let mut picker_keys = vec!["lighthouse".to_string()];
+        let specifiers = BTreeMap::from([("lighthouse".to_string(), "catalog:".to_string())]);
+        let choices = RecursiveCatalogChoices::from([(
+            ("default".to_string(), "lighthouse".to_string()),
+            false,
+        )]);
+
+        let selected = apply_previous_catalog_choices(&mut picker_keys, &specifiers, &choices);
+
+        assert!(selected.is_empty());
+        assert!(picker_keys.is_empty());
+    }
+
+    #[test]
+    fn recursive_catalog_choices_record_only_shown_options() {
+        let specifiers = BTreeMap::from([
+            ("shown".to_string(), "catalog:".to_string()),
+            ("hidden".to_string(), "catalog:".to_string()),
+        ]);
+        let shown = BTreeSet::from(["shown".to_string()]);
+        let selected = BTreeSet::new();
+        let mut choices = RecursiveCatalogChoices::new();
+
+        record_recursive_catalog_choices(&mut choices, &specifiers, &shown, &selected);
+
+        assert_eq!(
+            choices.get(&("default".to_string(), "shown".to_string())),
+            Some(&false)
+        );
+        assert!(!choices.contains_key(&("default".to_string(), "hidden".to_string())));
+    }
 
     #[test]
     fn canonical_update_ignores_replace_package_json_legacy_values() {

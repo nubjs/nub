@@ -1193,6 +1193,83 @@ fn test_parse_file_resolved_without_link() {
 }
 
 #[test]
+fn test_parse_remote_tarball_from_declared_url() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz";
+    let content = format!(
+        r#"{{
+            "lockfileVersion": 3,
+            "packages": {{
+                "": {{
+                    "dependencies": {{
+                        "xlsx": "{url}",
+                        "semver": "^7.7.0"
+                    }}
+                }},
+                "node_modules/xlsx": {{
+                    "version": "0.20.3",
+                    "resolved": "{url}",
+                    "integrity": "sha512-sheetjs"
+                }},
+                "node_modules/semver": {{
+                    "version": "7.7.2",
+                    "resolved": "https://registry.npmjs.org/semver/-/semver-7.7.2.tgz",
+                    "integrity": "sha512-semver"
+                }}
+            }}
+        }}"#
+    );
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let direct = graph.importers["."]
+        .iter()
+        .find(|dep| dep.name == "xlsx")
+        .unwrap();
+    let pkg = &graph.packages[&direct.dep_path];
+
+    assert_eq!(pkg.version, "0.20.3");
+    assert!(pkg.tarball_url.is_none());
+    let Some(LocalSource::RemoteTarball(source)) = &pkg.local_source else {
+        panic!("expected remote tarball source, got {:?}", pkg.local_source);
+    };
+    assert_eq!(source.url, url);
+    assert_eq!(source.integrity, "sha512-sheetjs");
+    let registry_pkg = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "semver")
+        .unwrap();
+    assert!(registry_pkg.local_source.is_none());
+
+    let manifest = aube_manifest::PackageJson {
+        dependencies: [
+            ("xlsx".to_string(), url.to_string()),
+            ("semver".to_string(), "^7.7.0".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+    let reparsed = parse(out.path()).unwrap();
+    let reparsed_direct = reparsed.importers["."]
+        .iter()
+        .find(|dep| dep.name == "xlsx")
+        .unwrap();
+    let reparsed_pkg = &reparsed.packages[&reparsed_direct.dep_path];
+    let Some(LocalSource::RemoteTarball(reparsed_source)) = &reparsed_pkg.local_source else {
+        panic!(
+            "expected remote tarball source, got {:?}",
+            reparsed_pkg.local_source
+        );
+    };
+    assert_eq!(reparsed_source.url, url);
+    assert_eq!(reparsed_source.integrity, "sha512-sheetjs");
+}
+
+#[test]
 fn test_parse_scoped_package() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let content = r#"{
@@ -1262,6 +1339,69 @@ fn test_parse_multi_version_nested() {
     let root = graph.importers.get(".").unwrap();
     let root_bar = root.iter().find(|d| d.name == "bar").unwrap();
     assert_eq!(root_bar.dep_path, "bar@2.0.0");
+}
+
+#[test]
+fn test_write_preserves_reachable_existing_root_version() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+        "lockfileVersion": 3,
+        "packages": {
+            "": { "dependencies": { "app": "1.0.0" } },
+            "node_modules/app": {
+                "version": "1.0.0",
+                "dependencies": { "a-newer": "1.0.0", "z-older": "1.0.0" }
+            },
+            "node_modules/a-newer": {
+                "version": "1.0.0",
+                "dependencies": { "shared": "^2.0.0" }
+            },
+            "node_modules/a-newer/node_modules/shared": { "version": "2.0.0" },
+            "node_modules/shared": { "version": "1.0.0" },
+            "node_modules/z-older": {
+                "version": "1.0.0",
+                "dependencies": { "shared": "^1.0.0" }
+            }
+        }
+    }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let mut graph = parse(tmp.path()).unwrap();
+    let manifest = aube_manifest::PackageJson {
+        dependencies: [("app".to_string(), "1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    write(tmp.path(), &graph, &manifest).unwrap();
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
+    assert_eq!(json["packages"]["node_modules/shared"]["version"], "1.0.0");
+    assert_eq!(
+        json["packages"]["node_modules/a-newer/node_modules/shared"]["version"],
+        "2.0.0"
+    );
+
+    // Once the last edge to the preferred version disappears, it must not be
+    // kept merely because the previous lockfile had hoisted it.
+    graph
+        .packages
+        .get_mut("app@1.0.0")
+        .unwrap()
+        .dependencies
+        .remove("z-older");
+    graph.packages.remove("z-older@1.0.0");
+    write(tmp.path(), &graph, &manifest).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
+    assert_eq!(json["packages"]["node_modules/shared"]["version"], "2.0.0");
+    assert!(
+        json["packages"]
+            .get("node_modules/a-newer/node_modules/shared")
+            .is_none(),
+        "the stale preferred root must be replaced instead of nested"
+    );
 }
 
 /// Regression: a package reachable from both a dev root and
@@ -2986,7 +3126,7 @@ fn test_parse_funding_all_shapes() {
 /// object / array-of-objects shapes for `license:` (npm copies
 /// whatever's in the package's `package.json` verbatim, and older
 /// packages like `tv4` still ship the deprecated forms). Regression
-/// guard for https://github.com/jdx/aube/discussions/510.
+/// guard for https://github.com/aubepkg/aube/discussions/510.
 #[test]
 fn test_parse_license_all_shapes() {
     let tmp = tempfile::NamedTempFile::new().unwrap();

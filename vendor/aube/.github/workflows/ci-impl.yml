@@ -1,0 +1,382 @@
+name: ci implementation
+
+# Full CI matrix for aube — linux, macos, and windows build/test + BATS
+# integration shards. This workflow is the canonical CI entry point;
+# .buildkite/ is left in place but is expected to be disabled at the
+# GitHub-App level so it doesn't double-run or consume vCPU minutes.
+
+on:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MBX_DISABLE: "1"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Build debug artifacts for every OS that runs BATS or needs a binary
+  # downstream. Linux + macOS use mise so tool pins and env parity with
+  # `mise run build` are guaranteed. Windows ships no BATS run (BATS is
+  # bash-only, junction-links kick in on NTFS) so its build + test live
+  # in the dedicated `windows` job below.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
+        with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: mise run build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aube-${{ matrix.os }}
+          path: target/debug/aube
+          retention-days: 1
+          if-no-files-found: error
+
+  # Linux-only test + lint + render + docs:build. Matches the
+  # `linux / test` step in .buildkite/pipeline.sh. Split from `build` so
+  # lint failures don't block the BATS jobs from starting against a
+  # known-good binary.
+  test-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
+        with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: node benchmarks/validate-results.mts
+      - run: mise run test
+      - run: mise run lint
+      - run: cargo-machete
+      - run: mise x cargo:cargo-audit@0.22.1 -- cargo-audit audit --deny warnings
+      - run: mise x cargo:cargo-deny@0.19.6 -- cargo-deny check bans licenses sources
+      - run: mise exec -- cargo msrv --manifest-path crates/aube/Cargo.toml verify --output-format minimal
+      - run: mise run render
+      - name: assert render produces no diff
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::'mise run render' produced changes. Run it locally and commit."
+            git status
+            git diff
+            exit 1
+          fi
+      - run: mise run docs:build
+
+  # Check every published Rust library against main and guard the C ABI export
+  # set against the frozen crates/aube-ffi/abi-symbols.txt manifest. Any failure
+  # makes this job red, while `final` treats the job as advisory.
+  api-stability:
+    # PR-time gate only. `final` treats the resulting skipped job as a pass on
+    # push/tag/dispatch runs.
+    if: github.event_name == 'pull_request'
+    continue-on-error: true
+    outputs:
+      results_present: ${{ steps.report.outputs.results_present }}
+      checks_passed: ${{ steps.report.outputs.checks_passed }}
+    runs-on: ubuntu-latest
+    # cargo-semver-checks builds both revisions of every published crate. A
+    # cold cache can exceed 20 minutes, especially alongside the C ABI build.
+    timeout-minutes: 30
+    env:
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
+        with:
+          cache_save: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Both parallel API checks invoke Cargo. Complete rustup's lazy toolchain
+      # installation first so they cannot race while installing components.
+      - name: Prepare Rust toolchain
+        run: rustc --version
+      - name: Fetch semver baseline
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      # Run the independent Rust and C ABI checks concurrently, preserving both
+      # results so the final step can report every failure before failing the job.
+      - parallel:
+          - name: Published Rust APIs — cargo-semver-checks
+            run: |
+              set +e
+              ./bin/cargo-semver-checks semver-checks \
+                --baseline-rev origin/main \
+                --package aube \
+                --package aube-codes \
+                --package aube-linker \
+                --package aube-lockfile \
+                --package aube-manifest \
+                --package aube-registry \
+                --package aube-resolver \
+                --package aube-runtime \
+                --package aube-scripts \
+                --package aube-settings \
+                --package aube-store \
+                --package aube-util \
+                --package aube-workspace
+              semver_status=$?
+              set -e
+              printf '%s\n' "$semver_status" > /tmp/semver-status
+          - name: C ABI — frozen export set
+            run: |
+              set +e
+              (
+                mise exec -- cargo build --locked --profile ffi -p aube-ffi &&
+                grep -vE '^[[:space:]]*(#|$)' crates/aube-ffi/abi-symbols.txt | sort -u > /tmp/abi-expected.txt &&
+                nm -D --defined-only --extern-only target/ffi/libaube_ffi.so \
+                  | awk '{ print $3 }' | grep '^aube_' | sort -u > /tmp/abi-actual.txt &&
+                diff -u /tmp/abi-expected.txt /tmp/abi-actual.txt
+              )
+              ffi_status=$?
+              set -e
+              printf '%s\n' "$ffi_status" > /tmp/ffi-status
+      - name: Report API stability
+        id: report
+        if: always()
+        run: |
+          if [ ! -s /tmp/semver-status ] || [ ! -s /tmp/ffi-status ]; then
+            echo "results_present=false" >> "$GITHUB_OUTPUT"
+            echo "checks_passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::one or more API stability checks did not report a result"
+            exit 1
+          fi
+          echo "results_present=true" >> "$GITHUB_OUTPUT"
+          SEMVER=$(cat /tmp/semver-status)
+          FFI=$(cat /tmp/ffi-status)
+          fail=0
+          if [ "$SEMVER" -ne 0 ]; then
+            echo "::error::Rust API compatibility check failed. Inspect the cargo-semver-checks output above."
+            fail=1
+          fi
+          if [ "$FFI" -ne 0 ]; then
+            echo "::error::C ABI exports drifted from crates/aube-ffi/abi-symbols.txt."
+            fail=1
+          fi
+          if [ "$fail" -eq 0 ]; then
+            echo "checks_passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "checks_passed=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit $fail
+
+  # BATS integration shards. Linux runs 4 shards (matches Buildkite),
+  # macOS runs 2. The jail-build tests assert native OS sandbox behavior,
+  # so these stay on the matching GitHub-hosted operating systems.
+  # Each shard downloads the OS-matched debug binary from `build` and
+  # invokes mise-task ci:bats:nonserial with its shard index. mise provisions
+  # rush as the parallel driver on both platforms.
+  #
+  # retry handles the rare BATS flake (process teardown racing npm
+  # cache writes, etc.); the Buildkite side has the same retry:1.
+  bats:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runner: ubuntu-latest
+            shard: 0
+            count: 4
+          - os: ubuntu-latest
+            runner: ubuntu-latest
+            shard: 1
+            count: 4
+          - os: ubuntu-latest
+            runner: ubuntu-latest
+            shard: 2
+            count: 4
+          - os: ubuntu-latest
+            runner: ubuntu-latest
+            shard: 3
+            count: 4
+          - os: macos-latest
+            runner: macos-latest
+            shard: 0
+            count: 2
+          - os: macos-latest
+            runner: macos-latest
+            shard: 1
+            count: 2
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      AUBE_CI_OS: ${{ startsWith(matrix.os, 'ubuntu') && 'linux' || 'macos' }}
+      AUBE_BATS_SHARD_INDEX: ${{ matrix.shard }}
+      AUBE_BATS_SHARD_COUNT: ${{ matrix.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
+        with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: aube-${{ matrix.os }}
+          path: target/debug
+      - run: chmod +x target/debug/aube
+      - name: Run BATS shard ${{ matrix.shard }}/${{ matrix.count }}
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
+        with:
+          timeout_minutes: 20
+          max_attempts: 2
+          command: mise run ci:bats:nonserial
+
+  # Serial BATS jobs — tests tagged `serial` that can't run under
+  # parallel (e.g. stateful store-lock tests, global env mutation).
+  # Keep these paired with the non-serial BATS jobs on GitHub-hosted
+  # runners for the same jail-build compatibility reasons.
+  bats-serial:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runner: ubuntu-latest
+          - os: macos-latest
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      AUBE_CI_OS: ${{ startsWith(matrix.os, 'ubuntu') && 'linux' || 'macos' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0 # zizmor: ignore[cache-poisoning] PRs restore only; saves are restricted to main
+        with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: aube-${{ matrix.os }}
+          path: target/debug
+      - run: chmod +x target/debug/aube
+      - name: Run serial BATS
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
+        with:
+          timeout_minutes: 20
+          max_attempts: 2
+          command: mise run ci:bats:serial
+
+  # Windows parity: build + unit tests + Rust-native e2e smoke. No BATS
+  # on Windows — BATS is bash-only and the linker uses NTFS junctions
+  # rather than real symlinks (matching pnpm), so we just exercise the
+  # cargo test suite to catch platform regressions. Developer Mode is
+  # not required on GitHub-hosted windows-latest runners.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      MISE_EXEC_AUTO_INSTALL: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install: false
+          cache: false
+          add_shims_to_path: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          shared-key: windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: mise exec -- cargo build --workspace
+      - run: mise exec -- cargo test --workspace
+
+  # Aggregator that required-status-checks can target. If any upstream job
+  # failed, was cancelled, or was skipped, this step exits non-zero so the PR is
+  # blocked. Lets the branch-protection rule depend on one name instead of ten.
+  # Exception: the PR-only API job may skip outside pull requests, and any
+  # failure in that job is advisory even though the job itself remains red.
+  final:
+    needs:
+      - build
+      - test-linux
+      - bats
+      - bats-serial
+      - windows
+      - api-stability
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    # Run on success or upstream failure but skip when the workflow is cancelled
+    # — `always()` would override `cancel-in-progress` and waste a runner.
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Gate on upstream job results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          # Jobs whose `if:` legitimately skips them in this event. A skip
+          # here is a pass; every other job must actually succeed.
+          SKIP_OK = {"api-stability"}
+          ADVISORY_FAILURE = {"api-stability"}
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = False
+          for name, data in sorted(needs.items()):
+              result = data.get("result", "unknown")
+              outputs = data.get("outputs", {})
+              if name == "api-stability" and result != "skipped" and outputs.get("results_present") != "true":
+                  print(f"::error::{name}: one or more checks did not report a result")
+                  failed = True
+              elif name == "api-stability" and outputs.get("checks_passed") == "false":
+                  print(f"::warning::{name}: compatibility check failed (advisory; inspect for an unintended major bump)")
+              elif result == "success":
+                  print(f"::notice::{name}: {result}")
+              elif result == "failure" and name in ADVISORY_FAILURE:
+                  print(f"::warning::{name}: {result} (advisory; inspect for an unintended major bump)")
+              elif result == "skipped" and name in SKIP_OK:
+                  print(f"::notice::{name}: {result} (allowed to skip)")
+              else:
+                  print(f"::error::{name}: {result}")
+                  failed = True
+
+          if failed:
+              print("One or more upstream jobs did not complete successfully.")
+              sys.exit(1)
+
+          print("All CI jobs completed successfully.")
+          PY

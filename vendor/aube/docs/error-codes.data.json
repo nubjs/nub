@@ -9,7 +9,7 @@
     {
       "name": "ERR_AUBE_LOCKFILE_PARSE",
       "category": "Lockfile",
-      "description": "Lockfile is structurally invalid — version guard failed, YAML shape is wrong, or `yaml_serde` couldn't round-trip the contents.",
+      "description": "Lockfile is structurally invalid — version guard failed, YAML shape is wrong, or the contents couldn't be parsed.",
       "exit_code": 11
     },
     {
@@ -19,34 +19,28 @@
       "exit_code": 12
     },
     {
-      "name": "ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE",
-      "category": "Lockfile",
-      "description": "A lockfile entry's dependency source (protocol) can't be resolved from that lockfile — e.g. a git or jsr source in a yarn.lock — so the installed tree would silently diverge from the incumbent's. Install with the original package manager, or remove the dependency.",
-      "exit_code": 14
-    },
-    {
       "name": "ERR_AUBE_RESOLUTION_SHAPE_MISMATCH",
       "category": "Lockfile",
       "description": "A registry-style lockfile dependency path is backed by a git, local directory, or direct tarball resolution.",
       "exit_code": 13
     },
     {
-      "name": "ERR_AUBE_OUTDATED_LOCKFILE",
+      "name": "ERR_AUBE_LOCKFILE_CONFIG_MISMATCH",
       "category": "Lockfile",
-      "description": "A `--frozen-lockfile` install found the lockfile out of date with `package.json` / `pnpm-workspace.yaml` (same condition as pnpm's `ERR_PNPM_OUTDATED_LOCKFILE`).",
+      "description": "A frozen install found configuration, such as patch-file content, that no longer matches the lockfile.",
+      "exit_code": 14
+    },
+    {
+      "name": "ERR_AUBE_UNSUPPORTED_NAMED_REGISTRY",
+      "category": "Lockfile",
+      "description": "A pnpm lockfile contains registry-qualified package identities that aube cannot safely resolve yet.",
+      "exit_code": 15
+    },
+    {
+      "name": "ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION",
+      "category": "Lockfile",
+      "description": "A pnpm lockfile aube cannot read: a `lockfileVersion` older than 9 (the pnpm 8.x and earlier formats), a malformed version, or a v9 header over a pre-v9 body.",
       "exit_code": 16
-    },
-    {
-      "name": "ERR_AUBE_LOCKFILE_DECLARATION_MISMATCH",
-      "category": "Lockfile",
-      "description": "`package.json` declares a package manager (`packageManager` or `devEngines.packageManager`) but the only lockfile(s) on disk belong to other tools. Regenerate the declared tool's lockfile, convert with `aube import`, or fix the declaration.",
-      "exit_code": 17
-    },
-    {
-      "name": "ERR_AUBE_LOCKFILE_AMBIGUOUS",
-      "category": "Lockfile",
-      "description": "Lockfiles from two or more package managers coexist and `package.json` doesn't declare which tool owns the project. Remove the stale lockfile(s) or add a `packageManager` declaration.",
-      "exit_code": 18
     },
     {
       "name": "ERR_AUBE_NO_MATCHING_VERSION",
@@ -59,12 +53,6 @@
       "category": "Resolver",
       "description": "A version satisfying the range exists but every candidate was younger than `minimumReleaseAge` and `minimumReleaseAgeStrict=true`.",
       "exit_code": 21
-    },
-    {
-      "name": "ERR_AUBE_RELEASE_AGE_MISSING_TIME",
-      "category": "Resolver",
-      "description": "The registry served no publish time for any version satisfying the range, so `minimumReleaseAge` could not be evaluated (`minimumReleaseAgeStrict=true`). Distinct from `ERR_AUBE_NO_MATURE_MATCHING_VERSION` so CI tooling can tell a registry serving no `time` metadata from a genuinely too-new release.",
-      "exit_code": 28
     },
     {
       "name": "ERR_AUBE_BLOCKED_EXOTIC_SUBDEP",
@@ -99,7 +87,7 @@
     {
       "name": "ERR_AUBE_PEER_CONTEXT_NOT_CONVERGED",
       "category": "Resolver",
-      "description": "Peer-context resolution repeated a graph state or exhausted its graph-sized convergence bound.",
+      "description": "Peer-dependency resolution didn't converge after 16 passes — usually mutually-recursive peers.",
       "exit_code": 27
     },
     {
@@ -157,6 +145,30 @@
       "exit_code": null
     },
     {
+      "name": "ERR_AUBE_STORE_INDEX_SCAN_FAILED",
+      "category": "Tarball / store",
+      "description": "A store maintenance command couldn't completely read or parse the cached package indexes.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_GVS_PRUNE_FAILED",
+      "category": "Tarball / store",
+      "description": "The global virtual store project registry or prune walk failed.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_STORE_PRUNE_LOCK_FAILED",
+      "category": "Tarball / store",
+      "description": "aube couldn't acquire the store-wide maintenance lock for pruning.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_STORE_PRUNE_FAILED",
+      "category": "Tarball / store",
+      "description": "A planned content-store file couldn't be removed during pruning.",
+      "exit_code": null
+    },
+    {
       "name": "ERR_AUBE_PACKAGE_NOT_FOUND",
       "category": "Registry / network",
       "description": "Registry returned 404 for the package name.",
@@ -177,20 +189,8 @@
     {
       "name": "ERR_AUBE_UNAUTHORIZED",
       "category": "Registry / network",
-      "description": "Registry returned 401 — missing or invalid auth. Run `aube login`.",
+      "description": "Registry returned 401/403 — missing or invalid auth. Run `aube login`.",
       "exit_code": 42
-    },
-    {
-      "name": "ERR_AUBE_METADATA_DECODE",
-      "category": "Registry / network",
-      "description": "A registry response body failed to decode. Carries the package it belongs to and an excerpt of the payload around the offending field.",
-      "exit_code": null
-    },
-    {
-      "name": "ERR_AUBE_FORBIDDEN",
-      "category": "Registry / network",
-      "description": "Registry returned 403 — authenticated but forbidden (insufficient permissions, token scope, or blocked by policy). The registry's message is included.",
-      "exit_code": null
     },
     {
       "name": "ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE",
@@ -207,7 +207,7 @@
     {
       "name": "ERR_AUBE_INVALID_PACKAGE_NAME",
       "category": "Registry / network",
-      "description": "A name doesn't match npm's grammar — rejected before any I/O so a hostile manifest can't use the cache-path builder as a write primitive.",
+      "description": "A name doesn't match npm's grammar — rejected before any I/O so a hostile manifest can't turn a package name into an arbitrary filesystem path.",
       "exit_code": 44
     },
     {
@@ -219,7 +219,7 @@
     {
       "name": "ERR_AUBE_MALICIOUS_PACKAGE",
       "category": "Registry / network",
-      "description": "`aube add` refused a package because OSV reports it as malicious (`MAL-*` advisory). Hard block — confirmed-malicious advisories aren't a judgement call.",
+      "description": "`aube add` or an install's OSV advisory check (`advisoryCheck`, `advisoryCheckOnInstall`, `advisoryBloomCheck`) refused a package because OSV reports it as malicious (`MAL-*` advisory). Hard block — confirmed-malicious advisories aren't a judgement call.",
       "exit_code": 46
     },
     {
@@ -249,7 +249,7 @@
     {
       "name": "ERR_AUBE_ADVISORY_CHECK_FAILED",
       "category": "Registry / network",
-      "description": "`aube add` couldn't reach the OSV advisory API and `advisoryCheck = required` is set. Distinct from `ERR_AUBE_MALICIOUS_PACKAGE` so CI tooling can tell a network outage from a confirmed malicious advisory.",
+      "description": "An OSV advisory check couldn't complete — the live API was unreachable, or the local mirror / bloom filter couldn't refresh — and the governing setting (`advisoryCheck`, `advisoryCheckOnInstall`, or `advisoryBloomCheck`) is `required`. Distinct from `ERR_AUBE_MALICIOUS_PACKAGE` so CI tooling can tell a network outage from a confirmed malicious advisory.",
       "exit_code": 49
     },
     {
@@ -279,19 +279,19 @@
     {
       "name": "ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE",
       "category": "Scripts / build",
-      "description": "An entry in the build allowlist had a value that wasn't `true`/`false`.",
+      "description": "An entry in `allowBuilds` had a value that wasn't `true`/`false`.",
       "exit_code": null
     },
     {
       "name": "ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION",
       "category": "Scripts / build",
-      "description": "A build-allowlist pattern's version union was unparseable.",
+      "description": "An `allowBuilds` pattern's version union was unparseable.",
       "exit_code": null
     },
     {
       "name": "ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION",
       "category": "Scripts / build",
-      "description": "A build-allowlist pattern combined a wildcard name with a version union.",
+      "description": "An `allowBuilds` pattern combined a wildcard name with a version union.",
       "exit_code": null
     },
     {
@@ -299,24 +299,6 @@
       "category": "Linker",
       "description": "Applying a `pnpm.patchedDependencies` patch failed.",
       "exit_code": 60
-    },
-    {
-      "name": "ERR_AUBE_PATCH_KEY_CONFLICT",
-      "category": "Linker",
-      "description": "Two `patchedDependencies` version ranges both match one resolved package.",
-      "exit_code": null
-    },
-    {
-      "name": "ERR_AUBE_PATCH_NON_SEMVER_RANGE",
-      "category": "Linker",
-      "description": "A `patchedDependencies` key's version selector is not a valid semver range.",
-      "exit_code": null
-    },
-    {
-      "name": "ERR_AUBE_UNUSED_PATCH",
-      "category": "Linker",
-      "description": "A declared `patchedDependencies` key matched no installed package. Set `allowUnusedPatches` to downgrade it to a warning.",
-      "exit_code": null
     },
     {
       "name": "ERR_AUBE_LINK_FAILED",
@@ -327,7 +309,7 @@
     {
       "name": "ERR_AUBE_MISSING_PACKAGE_INDEX",
       "category": "Linker",
-      "description": "Internal: a caller skipped `load_index` but the package wasn't already materialized.",
+      "description": "A package could not be linked because its store index was unavailable and the package was not already materialized. Re-run the install; if it persists, report it at https://github.com/aubepkg/aube/discussions.",
       "exit_code": 62
     },
     {
@@ -337,9 +319,15 @@
       "exit_code": 63
     },
     {
+      "name": "ERR_AUBE_UNSAFE_MODULES_DIR",
+      "category": "Linker",
+      "description": "The configured modules directory resolves to the project root or outside it, where linker cleanup could remove unrelated files.",
+      "exit_code": 64
+    },
+    {
       "name": "ERR_AUBE_MANIFEST_PARSE",
       "category": "Manifest / workspace",
-      "description": "A `package.json` had a syntax error. miette renders a pointer at the offending byte.",
+      "description": "A `package.json` had a syntax error. The diagnostic points at the offending byte.",
       "exit_code": 70
     },
     {
@@ -349,15 +337,15 @@
       "exit_code": 71
     },
     {
-      "name": "ERR_AUBE_WORKSPACE_PKG_NOT_FOUND",
-      "category": "Manifest / workspace",
-      "description": "A `workspace:` dependency named a package that is not a member of this workspace.",
-      "exit_code": null
-    },
-    {
       "name": "ERR_AUBE_MANIFEST_YAML_PARSE",
       "category": "Manifest / workspace",
       "description": "A workspace YAML helper file was structurally invalid (no source pointer available).",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_INVALID_PACKAGE_EXTENSION",
+      "category": "Manifest / workspace",
+      "description": "A `packageExtensions` entry had an invalid object shape or non-string dependency range.",
       "exit_code": null
     },
     {
@@ -393,7 +381,7 @@
     {
       "name": "ERR_AUBE_NPM_ONLY_COMMAND",
       "category": "Engine / CLI",
-      "description": "The user invoked an npm-only command (`whoami`, `token`, `owner`, `search`, `pkg`, `set-script`) — aube doesn't implement these; use npm.",
+      "description": "The user invoked an npm-only command (`whoami`, `token`, `owner`, `search`, `pkg`, `set-script`, `stage`) — aube doesn't implement these; run them with npm, or set `npmPath` to let aube delegate them.",
       "exit_code": 82
     },
     {
@@ -427,12 +415,6 @@
       "exit_code": null
     },
     {
-      "name": "ERR_AUBE_NO_BRANDED_CONFIG_FILE",
-      "category": "Engine / CLI",
-      "description": "A `config set` write targeted the tool's own user/project config file, but the active embedder profile has no branded config file (`config_namespace = None`) — it keeps settings on the neutral `.npmrc` + environment surface. Set the value in `.npmrc`, `pnpm-workspace.yaml`/`package.json`, or via an environment variable instead. Unreachable for standalone aube, which always has a `~/.config/aube/config.toml`.",
-      "exit_code": null
-    },
-    {
       "name": "ERR_AUBE_CONFLICTING_BUILD_FLAGS",
       "category": "Engine / CLI",
       "description": "`aube add` was passed the same package name in both `--allow-build` and `--deny-build`.",
@@ -442,6 +424,12 @@
       "name": "ERR_AUBE_ACCESS_INVALID_ARGUMENT",
       "category": "Engine / CLI",
       "description": "`aube access` received an invalid access setting, permission level, team, or package argument.",
+      "exit_code": null
+    },
+    {
+      "name": "ERR_AUBE_PUBLISH_SOURCE_NOT_FOUND",
+      "category": "Engine / CLI",
+      "description": "`aube publish` was given a package directory or tarball path that doesn't exist.",
       "exit_code": null
     },
     {
@@ -507,7 +495,7 @@
     {
       "name": "ERR_AUBE_SELF_UPDATE_UNSUPPORTED_PLATFORM",
       "category": "Engine / CLI",
-      "description": "`aube self-update` has no published aube release archive for this OS/architecture (e.g. FreeBSD, Intel macOS). Install aube via your system package manager or mise. Distinct from ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM, which is about the Node.js download.",
+      "description": "`aube self-update` has no published aube release archive for this OS/architecture (e.g. FreeBSD, Intel macOS). Install aube via your system package manager or mise. Distinct from `ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM`, which is about the Node.js download.",
       "exit_code": null
     },
     {
@@ -525,7 +513,7 @@
     {
       "name": "ERR_AUBE_UNSAFE_SHEBANG_INTERPRETER",
       "category": "Misc / safety",
-      "description": "A `#!` shebang named an unsafe interpreter when generating a shim — substituted with `node` instead. Surfaced as `tracing::error!` but install continues.",
+      "description": "A `#!` shebang named an unsafe interpreter when generating a shim — substituted with `node` instead. Reported as an error, but install continues.",
       "exit_code": 91
     },
     {
@@ -635,31 +623,25 @@
     {
       "name": "WARN_AUBE_IGNORED_BUILD_SCRIPTS",
       "category": "Install lifecycle",
-      "description": "Dep had `preinstall`/`install`/`postinstall` scripts but isn't on the build allowlist. Run `aube approve-builds`.",
+      "description": "Dep had `preinstall`/`install`/`postinstall` scripts but isn't on the `allowBuilds` allowlist. Run `aube approve-builds`.",
       "exit_code": null
     },
     {
-      "name": "WARN_AUBE_DEFAULT_TRUST_BUILDS",
+      "name": "WARN_AUBE_DEPRECATED_PACKAGE",
       "category": "Install lifecycle",
-      "description": "The `defaultTrust` floor let listed packages run build scripts without an explicit build-allowlist entry. Disclosure, not an error — set `defaultTrust=false` or an explicit `false` allowlist entry to opt out.",
+      "description": "An installed package version is deprecated.",
       "exit_code": null
     },
     {
-      "name": "WARN_AUBE_OPTIONAL_BUILD_FAILED",
+      "name": "WARN_AUBE_DEPRECATED_PACKAGE_SUMMARY",
       "category": "Install lifecycle",
-      "description": "A package reachable only through `optionalDependencies` failed to build. The install continues without it (npm and pnpm both treat an optional build failure as non-fatal). Anything importing it at runtime will fail — declare it a regular dependency if it is actually required. Emitted by the install that runs the build: a later up-to-date install skips the package and does not repeat this, so run `aube rebuild <pkg>` to attempt the build again.",
-      "exit_code": null
-    },
-    {
-      "name": "WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED",
-      "category": "Install lifecycle",
-      "description": "Jailed builds were requested but node-gyp could not be prepared for them (a jailed script cannot bootstrap it itself). The install continues: builds that don't use node-gyp are unaffected, and one that does will fail with node-gyp's own error.",
+      "description": "One or more installed package versions have deprecation warnings.",
       "exit_code": null
     },
     {
       "name": "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT",
       "category": "Install lifecycle",
-      "description": "A dependency's lifecycle script matched a dangerous-shape heuristic (curl|sh, eval+atob, credential-file read, secret-env exfil, exfil endpoint, bare-IP HTTP). Advisory only; the build allowlist still gates execution. Inspect the script before approving the build.",
+      "description": "A dependency's lifecycle script matched a dangerous-shape heuristic (curl|sh, eval+atob, credential-file read, secret-env exfil, exfil endpoint, bare-IP HTTP). Advisory only; the `allowBuilds` allowlist still gates execution. Inspect the script before approving the build.",
       "exit_code": null
     },
     {
@@ -689,7 +671,7 @@
     {
       "name": "WARN_AUBE_LTHASH_MISMATCH",
       "category": "Install lifecycle",
-      "description": "Incremental and full LtHash digests disagreed — homomorphic invariant broken. Real bug signal.",
+      "description": "aube's incremental install digest disagreed with a full recomputation. This indicates a bug in aube — please report it at https://github.com/aubepkg/aube/discussions.",
       "exit_code": null
     },
     {
@@ -707,19 +689,19 @@
     {
       "name": "WARN_AUBE_GVS_MODE_CHANGED",
       "category": "Install lifecycle",
-      "description": "Switching between gvs-on and gvs-off; removing `node_modules` and reinstalling from scratch.",
+      "description": "The global virtual store was switched on or off since the last install, so aube is removing `node_modules` and reinstalling from scratch.",
       "exit_code": null
     },
     {
       "name": "WARN_AUBE_GVS_CROSS_VOLUME",
       "category": "Install lifecycle",
-      "description": "`cacheDir` (global virtual store) and `storeDir` are on different volumes, so linking falls back to per-file copy.",
+      "description": "The global virtual store (`globalVirtualStoreDir`, by default under `cacheDir`) and `storeDir` are on different volumes, so linking falls back to per-file copy.",
       "exit_code": null
     },
     {
-      "name": "WARN_AUBE_QUARANTINE_STRIP_FAILED",
-      "category": "Install lifecycle",
-      "description": "macOS only: `com.apple.quarantine` could not be removed from a materialized native binary, so Gatekeeper may refuse to load or run it.",
+      "name": "WARN_AUBE_STORE_PRUNE_ENTRY_DISAPPEARED",
+      "category": "Store maintenance",
+      "description": "A global virtual-store entry disappeared while a prune plan was being built; the preview skipped it.",
       "exit_code": null
     },
     {
@@ -732,6 +714,12 @@
       "name": "WARN_AUBE_INVALID_TRUST_POLICY",
       "category": "Settings / config validation",
       "description": "A `trustPolicyExclude` entry was malformed and skipped.",
+      "exit_code": null
+    },
+    {
+      "name": "WARN_AUBE_INVALID_BUNDLED_PACKAGE_EXTENSION",
+      "category": "Settings / config validation",
+      "description": "A bundled package-extension entry was malformed and skipped.",
       "exit_code": null
     },
     {
@@ -750,12 +738,6 @@
       "name": "WARN_AUBE_OVERRIDE_DOLLAR_REF_DEPRECATED",
       "category": "Settings / config validation",
       "description": "An `overrides` entry used pnpm's deprecated `$` version reference syntax.",
-      "exit_code": null
-    },
-    {
-      "name": "WARN_AUBE_UNUSED_PATCH",
-      "category": "Settings / config validation",
-      "description": "A declared `patchedDependencies` key matched no installed package, downgraded from an error by `allowUnusedPatches`.",
       "exit_code": null
     },
     {
@@ -783,15 +765,15 @@
       "exit_code": null
     },
     {
-      "name": "WARN_AUBE_INVALID_NAMED_REGISTRY_URL",
-      "category": "Settings / config validation",
-      "description": "A `namedRegistries` alias mapped to a value that is not a valid http(s) URL. The alias was dropped.",
-      "exit_code": null
-    },
-    {
       "name": "WARN_AUBE_PRERELEASE_CHECK_SKIPPED",
       "category": "Update / prerelease",
       "description": "`aube update` couldn't fetch the packument or got a non-semver `latest` tag; preserved-prerelease check skipped for that package.",
+      "exit_code": null
+    },
+    {
+      "name": "WARN_AUBE_MINIMUM_RELEASE_AGE_BLOCKED_UPDATE",
+      "category": "Update / prerelease",
+      "description": "One or more newer package versions were hidden because they have not satisfied `minimumReleaseAge` yet.",
       "exit_code": null
     },
     {
@@ -957,12 +939,6 @@
       "exit_code": null
     },
     {
-      "name": "WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION",
-      "category": "Resolver",
-      "description": "No version of an optional dep matched its range, so the dep was skipped instead of failing the install.",
-      "exit_code": null
-    },
-    {
       "name": "WARN_AUBE_EXOTIC_SUBDEP_SKIPPED",
       "category": "Resolver",
       "description": "An optional or peer dep used an exotic specifier and was skipped under `blockExoticSubdeps=true`.",
@@ -999,12 +975,6 @@
       "exit_code": null
     },
     {
-      "name": "WARN_AUBE_LOCKFILE_UNSUPPORTED_SOURCE",
-      "category": "Lockfile",
-      "description": "An OPTIONAL dependency's source (protocol) can't be resolved from the lockfile (e.g. a git or jsr source). It was skipped; the install continues. A non-optional such dependency is a hard error (ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE) instead.",
-      "exit_code": null
-    },
-    {
       "name": "WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX",
       "category": "Lockfile",
       "description": "A pnpm dep_path peer suffix had unbalanced parentheses (a truncated or hand-corrupted lockfile entry). The key is preserved verbatim instead of silently dropping everything after the `(`, so a later install surfaces the bad entry rather than mis-resolving it.",
@@ -1017,9 +987,15 @@
       "exit_code": null
     },
     {
-      "name": "WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH",
-      "category": "Lockfile",
-      "description": "A legacy npm lockfile (lockfileVersion 1 / pre-2017 npm-shrinkwrap.json) hoists a package to the top level with no recorded dependency edge — pre-npm-5 shrinkwraps omit the `requires` links that record which package depends on it. The package is unreachable from the project's dependencies and will not be installed. Re-lock with npm 7+ (or `nub install` then commit the regenerated lockfile) for a complete graph.",
+      "name": "WARN_AUBE_GLOBAL_DIR_LEGACY_LOCATION",
+      "category": "Global installs",
+      "description": "Global packages were found under the pnpm-named directory aube used before it owned its own global layout (`$PNPM_HOME`, `$XDG_DATA_HOME/pnpm`, `~/Library/pnpm`, `%LOCALAPPDATA%\\pnpm`), while the current global directory holds none. Those installs are no longer visible to `aube list -g` / `remove -g`; reinstall them with `aube add -g`, or point `AUBE_HOME` at the old directory.",
+      "exit_code": null
+    },
+    {
+      "name": "WARN_AUBE_GLOBAL_BIN_DIR_NOT_ON_PATH",
+      "category": "Global installs",
+      "description": "`aube add -g` linked a bin into a directory that is not on `$PATH`, so the command it installed won't be found. Add the directory to `PATH`, or point `globalBinDir` / `AUBE_HOME` at one that already is.",
       "exit_code": null
     },
     {
@@ -1111,6 +1087,7 @@
     "warnings": [
       "pnpmfile / hooks",
       "Install lifecycle",
+      "Store maintenance",
       "Settings / config validation",
       "Update / prerelease",
       "Audit / npmrc",
@@ -1120,6 +1097,7 @@
       "Registry TLS / proxy",
       "Resolver",
       "Lockfile",
+      "Global installs",
       "Progress UI",
       "Workspace recursion",
       "Supply chain (add-time)",

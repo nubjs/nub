@@ -18,9 +18,9 @@
 //! by the rewrite policy like the global-links residual in the install
 //! family.
 //!
-//! Each wired verb parses its args with the engine's own clap `Args` struct
-//! (flattened into a thin per-verb wrapper that adds `-C/--dir` and, for the
-//! workspace-scoped verbs, the `-F/--filter`/`-r` globals aube hangs on its
+//! Each wired verb parses its args with the engine's own `usage_rs::Args`
+//! struct (flattened into a thin per-verb wrapper that adds `-C/--dir` and, for
+//! the workspace-scoped verbs, the `-F/--filter`/`-r` globals aube hangs on its
 //! top-level `Cli`), builds the shared [`super::engine_session`], runs the
 //! corresponding `aube::commands::*::run` on the session runtime, and routes
 //! every failure through [`super::present::emit_report`]. Stdout is the data
@@ -88,13 +88,14 @@
 //!   path but produce the correct stream content and exit codes.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use aube::commands::audit::FixMode;
 use aube_lockfile::LockfileKind;
 use aube_workspace::selector::EffectiveFilter;
-use clap::Parser;
 
+use super::publish_family::{Parsed, separate_value_flags, verb_cli};
 use super::{VerbSpec, present, stub_error};
 
 /// Family dispatcher. Wired verbs run the engine; the rest stub-error (see
@@ -119,11 +120,7 @@ pub(crate) fn run_verb(
         "check" => run_check(typed, args),
         "bin" => run_bin(typed, args),
         "root" => run_root(typed, args),
-        "search" => super::publish_family::run_async::<aube::commands::search::SearchArgs, _, _>(
-            typed,
-            args,
-            aube::commands::search::run,
-        ),
+        "search" => super::publish_family::run_search(typed, args),
         // Deliberately not wired: brand leak in the document body (module
         // doc has the seam analysis). Honest message, no generic stub text.
         "sbom" => Err(anyhow::anyhow!(
@@ -137,46 +134,47 @@ pub(crate) fn run_verb(
 
 // ── per-verb wrappers ───────────────────────────────────────────────────────
 //
-// Thin clap wrappers: the engine's own Args struct (flattened, so flags and
+// Thin usage-rs roots: the engine's own `Args` struct (flattened, so flags and
 // help stay byte-compatible with upstream), plus `-C/--dir` (aube's global)
 // and `FilterFlags` on the verbs whose engine `run` takes an
 // `EffectiveFilter`. Doc comments here become `--help` text — keep them
-// engine-neutral.
+// engine-neutral. The command NAME is the spelling the user typed; see
+// `publish_family`'s module doc for how the runtime identity is published.
 
 // The workspace-scope globals aube hangs on its top-level `Cli`, re-homed
-// per-verb (nub's engine verbs bypass nub's top-level clap). Mirrors
+// per-verb (nub's engine verbs bypass nub's own top-level parser). Mirrors
 // `vendor/aube/crates/aube/src/lib.rs::Cli` + `startup.rs::
 // compute_effective_filter`. aube's global `--workspace-root` spelling is
 // deliberately absent: it would collide with `outdated`'s own
 // `-w/--workspace-root`, and root inclusion is reachable via
 // `--include-workspace-root`. (Plain `//` comments: a rustdoc comment on a
-// flattened clap struct becomes the command's `--help` about-text.)
-#[derive(Debug, clap::Args)]
+// flattened `Args` struct becomes the command's `--help` about-text.)
+#[derive(Debug, usage_rs::Args)]
 struct FilterFlags {
     /// Scope to workspace packages matching PATTERN (repeatable).
     ///
     /// Supports exact names, globs (`@scope/*`), paths (`./packages/api`),
     /// graph selectors (`pkg...`, `...pkg`), git-ref selectors
     /// (`[origin/main]`), and exclusions (`!pkg`).
-    #[arg(short = 'F', long, value_name = "PATTERN")]
+    #[usage(short = 'F', long, value_name = "PATTERN")]
     filter: Vec<String>,
 
     /// Run across every workspace package (same as `--filter=*`).
-    #[arg(short = 'r', long)]
+    #[usage(short = 'r', long)]
     recursive: bool,
 
     /// Production-only variant of `--filter`: graph walks skip
     /// devDependencies.
-    #[arg(long, value_name = "PATTERN")]
+    #[usage(long, value_name = "PATTERN")]
     filter_prod: Vec<String>,
 
     /// Error when a workspace selector matches no packages (default: warn
     /// and exit 0).
-    #[arg(long)]
+    #[usage(long)]
     fail_if_no_match: bool,
 
     /// Include the workspace root alongside the selected packages.
-    #[arg(long)]
+    #[usage(long)]
     include_workspace_root: bool,
 }
 
@@ -195,79 +193,77 @@ fn effective_filter(flags: &FilterFlags) -> EffectiveFilter {
     }
 }
 
-macro_rules! verb_cli {
-    ($(#[$doc:meta])* $name:ident, $engine:ty $(, filter: $filter:ident)?) => {
-        $(#[$doc])*
-        #[derive(Parser)]
-        struct $name {
-            #[command(flatten)]
-            args: $engine,
-            $(
-                #[command(flatten)]
-                $filter: FilterFlags,
-            )?
-            /// Change to directory before running.
-            #[arg(short = 'C', long = "dir", value_name = "DIR")]
-            dir: Option<PathBuf>,
+/// The family's wrapper shape, on top of the shared root stamper: the engine
+/// args, optionally the selector flags, and `-C/--dir`.
+macro_rules! info_cli {
+    ($name:ident, $spec:tt, $engine:ty) => {
+        crate::pm_engine::publish_family::verb_cli! {
+            $name, $spec, {
+                #[usage(flatten)]
+                args: $engine,
+                /// Change to directory before running.
+                #[usage(short = 'C', long = "dir", value_name = "DIR")]
+                dir: Option<PathBuf>,
+            }
+        }
+    };
+    ($name:ident, $spec:tt, $engine:ty, filter) => {
+        crate::pm_engine::publish_family::verb_cli! {
+            $name, $spec, {
+                #[usage(flatten)]
+                args: $engine,
+                #[usage(flatten)]
+                filter: FilterFlags,
+                /// Change to directory before running.
+                #[usage(short = 'C', long = "dir", value_name = "DIR")]
+                dir: Option<PathBuf>,
+            }
         }
     };
 }
 
-verb_cli!(ListCli, aube::commands::list::ListArgs, filter: filter);
-verb_cli!(WhyCli, aube::commands::why::WhyArgs, filter: filter);
-verb_cli!(OutdatedCli, aube::commands::outdated::OutdatedArgs, filter: filter);
-verb_cli!(QueryCli, aube::commands::query::QueryArgs, filter: filter);
-verb_cli!(AuditCli, aube::commands::audit::AuditArgs);
-verb_cli!(LicensesCli, aube::commands::licenses::LicensesArgs);
-verb_cli!(
+info_cli!(ListCli, "nub list", aube::commands::list::ListArgs, filter);
+info_cli!(WhyCli, "nub why", aube::commands::why::WhyArgs, filter);
+info_cli!(
+    OutdatedCli,
+    "nub outdated",
+    aube::commands::outdated::OutdatedArgs,
+    filter
+);
+info_cli!(
+    QueryCli,
+    "nub query",
+    aube::commands::query::QueryArgs,
+    filter
+);
+info_cli!(AuditCli, "nub audit", aube::commands::audit::AuditArgs);
+info_cli!(
+    LicensesCli,
+    "nub licenses",
+    aube::commands::licenses::LicensesArgs
+);
+info_cli!(
     DeprecationsCli,
+    "nub deprecations",
     aube::commands::deprecations::DeprecationsArgs
 );
-verb_cli!(PeersCli, aube::commands::peers::PeersArgs);
-verb_cli!(ViewCli, aube::commands::view::ViewArgs);
-verb_cli!(CheckCli, aube::commands::check::CheckArgs);
-verb_cli!(BinCli, aube::commands::bin::BinArgs);
-verb_cli!(RootCli, aube::commands::root::RootArgs);
+info_cli!(ViewCli, "nub view", aube::commands::view::ViewArgs);
+info_cli!(CheckCli, "nub check", aube::commands::check::CheckArgs);
+info_cli!(BinCli, "nub bin", aube::commands::bin::BinArgs);
+info_cli!(RootCli, "nub root", aube::commands::root::RootArgs);
 
-/// Outcome of a wrapper parse: real args, or "already handled" (help was
-/// printed / a usage error was reported) with the exit code to return.
-enum Parsed<T> {
-    Args(T),
-    Done(i32),
-}
-
-/// Parse a verb's argv against its wrapper, named for the spelling the user
-/// typed (`nub ls --help` says `nub ls`). Help and usage errors carry the
-/// engine structs' doc text, so they are rendered *plain* (ANSI styling
-/// splitting a word would defeat the rewrite) and routed through the
-/// help-grade rewrite (brand pass + config-vocabulary map — help describes
-/// nub's configured contract, see [`present::rewrite_help`]).
-fn parse_verb<T: Parser>(typed: &str, args: &[String]) -> Result<Parsed<T>> {
-    parse_verb_with(typed, args, |cmd| cmd)
-}
-
-/// [`parse_verb`] with a pre-parse command tweak, for the one wrapper that
-/// widens an engine arg (`licenses`' subcommand spellings) without
-/// hand-mirroring the whole struct.
-fn parse_verb_with<T: Parser>(
-    typed: &str,
-    args: &[String],
-    tweak: impl FnOnce(clap::Command) -> clap::Command,
-) -> Result<Parsed<T>> {
-    let name = format!("nub {typed}");
-    let mut cmd = tweak(T::command()).name(name.clone()).bin_name(name);
-    let argv = std::iter::once("nub".to_string()).chain(args.iter().cloned());
-    match cmd.try_get_matches_from_mut(argv) {
-        Ok(matches) => Ok(Parsed::Args(T::from_arg_matches(&matches)?)),
-        Err(err) => {
-            let text = present::rewrite_help(err.render().to_string());
-            if err.use_stderr() {
-                eprintln!("{text}");
-            } else {
-                println!("{text}");
-            }
-            Ok(Parsed::Done(err.exit_code()))
-        }
+// `peers` is the family's one subcommand-bearing engine type, and usage
+// refuses to flatten a group that declares subcommands (the parent's tables
+// have nowhere to put them). The root re-declares the engine's own enum and
+// rebuilds `PeersArgs` at dispatch, so the flag surface still comes from
+// upstream.
+verb_cli! {
+    PeersCli, "nub peers", {
+        #[usage(subcommand)]
+        command: aube::commands::peers::PeersCommand,
+        /// Change to directory before running.
+        #[usage(short = 'C', long = "dir", value_name = "DIR")]
+        dir: Option<PathBuf>,
     }
 }
 
@@ -294,9 +290,9 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
 // ── wired verbs ─────────────────────────────────────────────────────────────
 
 fn run_list(typed: &str, args: &[String], force_long: bool) -> Result<i32> {
-    let mut cli: ListCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let mut cli = match ListCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     if force_long {
         // `la`/`ll` are aube's hidden list-long spellings (lib.rs forces
@@ -326,9 +322,9 @@ fn run_list(typed: &str, args: &[String], force_long: bool) -> Result<i32> {
 }
 
 fn run_why(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: WhyCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match WhyCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
     if let Some(code) =
@@ -345,9 +341,9 @@ fn run_why(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_outdated(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: OutdatedCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match OutdatedCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
     let filter = effective_filter(&cli.filter);
@@ -377,9 +373,9 @@ fn run_outdated(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_query(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: QueryCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match QueryCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
     if let Some(code) =
@@ -396,9 +392,9 @@ fn run_query(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_audit(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: AuditCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match AuditCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
     // Write gate: `--fix=update` rewrites the lockfile; a detected yarn.lock
@@ -428,9 +424,10 @@ fn run_audit(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_licenses(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: LicensesCli = match parse_verb_with(typed, args, licenses_cmd_tweak)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let args = widen_licenses_marker(args);
+    let cli = match LicensesCli::parse_argv(&format!("nub {typed}"), &args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
     if let Some(code) =
@@ -446,9 +443,9 @@ fn run_licenses(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_deprecations(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: DeprecationsCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match DeprecationsCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
     if let Some(code) =
@@ -468,23 +465,22 @@ fn run_deprecations(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_peers(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: PeersCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match PeersCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
+    let engine = aube::commands::peers::PeersArgs {
+        command: cli.command,
+    };
     // Missing lockfile is a miette error (`load_graph`) — rewrite covers it.
-    finish_code(
-        session
-            .runtime
-            .block_on(aube::commands::peers::run(cli.args)),
-    )
+    finish_code(session.runtime.block_on(aube::commands::peers::run(engine)))
 }
 
 fn run_view(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: ViewCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match ViewCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     // Pure registry query: no lockfile involvement at all, so identity
     // resolution is lenient (see `engine_session_global`) — a multi-lockfile
@@ -497,18 +493,51 @@ fn run_view(typed: &str, args: &[String]) -> Result<i32> {
     )
 }
 
-/// The `licenses` wrapper's pre-parse tweak: pnpm's documented spelling is
-/// `pnpm licenses list`, but the engine's hidden pnpm-compat positional only
-/// admits `ls`. Widen the wrapper to both — the engine ignores the marker's
-/// value, so no normalization is needed after parse.
-fn licenses_cmd_tweak(cmd: clap::Command) -> clap::Command {
-    cmd.mut_arg("subcommand", |arg| arg.value_parser(["ls", "list"]))
+/// Widen the `licenses` compat marker: pnpm's documented spelling is
+/// `pnpm licenses list`, but the engine's hidden positional declares
+/// `choices("ls")` alone.
+///
+/// usage builds its tables statically, so there is no `mut_arg` to widen the
+/// choice set at run time — the argv is normalized instead. The engine ignores
+/// the marker's value entirely (`let _ = args.subcommand`), so mapping `list`
+/// onto `ls` is invisible downstream, and it keeps the wrapper flattening
+/// upstream's struct rather than hand-mirroring its flags.
+///
+/// Only the token that would LAND on the positional is rewritten: the scan
+/// skips a value-taking flag's value, so `--registry list` is untouched.
+fn widen_licenses_marker(args: &[String]) -> Vec<String> {
+    let value_flags = licenses_separate_value_flags();
+    let mut out = args.to_vec();
+    let mut i = 0;
+    while i < out.len() {
+        if out[i] == "--" {
+            break;
+        }
+        if out[i].starts_with('-') {
+            let takes_value = value_flags.iter().any(|flag| flag == &out[i]);
+            i += if takes_value { 2 } else { 1 };
+            continue;
+        }
+        if out[i] == "list" {
+            out[i] = "ls".to_string();
+        }
+        break;
+    }
+    out
+}
+
+/// The `licenses` wrapper's separate-value flag spellings, derived from the
+/// same tables the parse uses so a new value-taking flag can't make the marker
+/// scan misread its value as the positional.
+fn licenses_separate_value_flags() -> &'static [String] {
+    static FLAGS: OnceLock<Vec<String>> = OnceLock::new();
+    FLAGS.get_or_init(|| separate_value_flags(LicensesCli::command()))
 }
 
 fn run_check(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: CheckCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match CheckCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
     // Reads the *resolved* virtual store (node_modules/.store under nub's
@@ -524,9 +553,9 @@ fn run_check(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_bin(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: BinCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match BinCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     // Pure path print (`<modulesDir>/.bin`, or the global bin dir under
     // `-g`); the directory need not exist and no lockfile is read, so identity
@@ -536,9 +565,9 @@ fn run_bin(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_root(typed: &str, args: &[String]) -> Result<i32> {
-    let cli: RootCli = match parse_verb(typed, args)? {
-        Parsed::Args(c) => c,
-        Parsed::Done(code) => return Ok(code),
+    let cli = match RootCli::parse_argv(&format!("nub {typed}"), args) {
+        Parsed::Ok(c) => c,
+        Parsed::Exit(code) => return Ok(code),
     };
     // Pure path print (`<modulesDir>`, or the global package dir under `-g`);
     // no lockfile is read, so identity resolution is lenient (see
@@ -701,12 +730,21 @@ fn home_boundary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory as _;
-
     use super::*;
 
-    fn parse<T: Parser>(argv: &[&str]) -> T {
-        T::try_parse_from(argv).expect("argv must parse")
+    /// Parse a wrapper's argv (the words AFTER the verb), panicking on any
+    /// outcome that is not a real parse.
+    macro_rules! parse {
+        ($root:ident, $argv:expr) => {
+            match $root::parse_argv(concat!("nub ", stringify!($root)), &owned($argv)) {
+                Parsed::Ok(cli) => cli,
+                Parsed::Exit(code) => panic!("argv must parse, settled with exit {code}"),
+            }
+        };
+    }
+
+    fn owned(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(|s| s.to_string()).collect()
     }
 
     /// One representative parse per wrapper: proves the engine flag surface
@@ -714,75 +752,74 @@ mod tests {
     /// nub-side additions (-C, filter flags) coexist on every verb.
     #[test]
     fn wrappers_parse_the_engine_arg_surface() {
-        let list: ListCli = parse(&["nub", "lodash", "--json", "-r", "--depth", "2"]);
+        let list = parse!(ListCli, &["lodash", "--json", "-r", "--depth", "2"]);
         assert_eq!(list.args.pattern.as_deref(), Some("lodash"));
         assert!(list.args.json && list.filter.recursive);
 
-        let why: WhyCli = parse(&["nub", "debug", "--parseable", "-F", "app..."]);
+        let why = parse!(WhyCli, &["debug", "--parseable", "-F", "app..."]);
         assert_eq!(why.args.package, "debug");
         assert!(why.args.parseable);
         assert_eq!(why.filter.filter, vec!["app..."]);
 
-        let outdated: OutdatedCli = parse(&["nub", "-w", "--json", "-C", "/tmp/x"]);
+        let outdated = parse!(OutdatedCli, &["-w", "--json", "-C", "/tmp/x"]);
         assert!(outdated.args.workspace_root && outdated.args.json);
         assert_eq!(outdated.dir.as_deref(), Some(Path::new("/tmp/x")));
 
-        let audit: AuditCli = parse(&["nub", "--audit-level", "high", "--fix=update"]);
+        let audit = parse!(AuditCli, &["--audit-level", "high", "--fix=update"]);
         assert_eq!(audit.args.fix, Some(FixMode::Update));
 
-        let licenses: LicensesCli = parse(&["nub", "ls", "--json"]);
+        let licenses = parse!(LicensesCli, &["ls", "--json"]);
         assert_eq!(licenses.args.subcommand.as_deref(), Some("ls"));
 
-        let deprecations: DeprecationsCli = parse(&["nub", "--exit-code", "--transitive"]);
+        let deprecations = parse!(DeprecationsCli, &["--exit-code", "--transitive"]);
         assert!(deprecations.args.exit_code && deprecations.args.transitive);
 
-        let peers: PeersCli = parse(&["nub", "check", "--json"]);
-        let aube::commands::peers::PeersCommand::Check(check) = peers.args.command;
+        let peers = parse!(PeersCli, &["check", "--json"]);
+        let aube::commands::peers::PeersCommand::Check(check) = peers.command;
         assert!(check.json);
 
-        let query: QueryCli = parse(&["nub", ":deprecated", "--parseable"]);
+        let query = parse!(QueryCli, &[":deprecated", "--parseable"]);
         assert_eq!(query.args.selector, ":deprecated");
 
-        let view: ViewCli = parse(&["nub", "react@next", "dist.tarball"]);
+        let view = parse!(ViewCli, &["react@next", "dist.tarball"]);
         assert_eq!(view.args.package.as_deref(), Some("react@next"));
         assert_eq!(view.args.field.as_deref(), Some("dist.tarball"));
 
-        let check: CheckCli = parse(&["nub", "--json"]);
+        let check = parse!(CheckCli, &["--json"]);
         assert!(check.args.json);
-        let bin: BinCli = parse(&["nub", "-g"]);
+        let bin = parse!(BinCli, &["-g"]);
         assert!(bin.args.global);
-        let root: RootCli = parse(&["nub", "--global", "-C", "/tmp/x"]);
+        let root = parse!(RootCli, &["--global", "-C", "/tmp/x"]);
         assert!(root.args.global);
         assert_eq!(root.dir.as_deref(), Some(Path::new("/tmp/x")));
     }
 
     /// The licenses wrapper admits pnpm's documented `list` spelling beside
-    /// the engine's `ls` (and still rejects arbitrary positionals).
+    /// the engine's `ls` (and still rejects arbitrary positionals). The
+    /// normalizer maps `list` onto the engine's only declared choice, and the
+    /// engine ignores the marker's value.
     #[test]
     fn licenses_wrapper_accepts_pnpms_list_spelling() {
         for sub in ["ls", "list"] {
-            let parsed = parse_verb_with::<LicensesCli>(
-                "licenses",
-                &[sub.to_string(), "--json".to_string()],
-                licenses_cmd_tweak,
-            )
-            .unwrap();
-            match parsed {
-                Parsed::Args(cli) => {
-                    assert_eq!(cli.args.subcommand.as_deref(), Some(sub));
+            let argv = widen_licenses_marker(&owned(&[sub, "--json"]));
+            match LicensesCli::parse_argv("nub licenses", &argv) {
+                Parsed::Ok(cli) => {
+                    assert_eq!(cli.args.subcommand.as_deref(), Some("ls"));
                     assert!(cli.args.json);
                 }
-                Parsed::Done(code) => panic!("licenses {sub} must parse, settled with {code}"),
+                Parsed::Exit(code) => panic!("licenses {sub} must parse, settled with {code}"),
             }
         }
-        let bad = parse_verb_with::<LicensesCli>(
-            "licenses",
-            &["everything".to_string()],
-            licenses_cmd_tweak,
-        )
-        .unwrap();
+        // The marker only claims the token that would land on the positional:
+        // a value-taking flag's value is left alone.
+        assert_eq!(
+            widen_licenses_marker(&owned(&["--registry", "list"])),
+            owned(&["--registry", "list"])
+        );
+
+        let bad = LicensesCli::parse_argv("nub licenses", &owned(&["everything"]));
         assert!(
-            matches!(bad, Parsed::Done(code) if code != 0),
+            matches!(bad, Parsed::Exit(code) if code != 0),
             "an unknown subcommand positional must stay a usage error"
         );
     }
@@ -816,25 +853,23 @@ mod tests {
     /// `aube-workspace.yaml`; `why --paths` names `.aube/<dep_path>`).
     #[test]
     fn help_text_is_rebranded_for_nub() {
-        let render = |mut cmd: clap::Command, name: &str| {
-            cmd = cmd.name(name.to_string()).bin_name(name.to_string());
-            present::rewrite_help(cmd.render_long_help().to_string())
-        };
-        for (cmd, name) in [
-            (ListCli::command(), "nub list"),
-            (WhyCli::command(), "nub why"),
-            (OutdatedCli::command(), "nub outdated"),
-            (QueryCli::command(), "nub query"),
-            (AuditCli::command(), "nub audit"),
-            (LicensesCli::command(), "nub licenses"),
-            (DeprecationsCli::command(), "nub deprecations"),
-            (PeersCli::command(), "nub peers"),
-            (ViewCli::command(), "nub view"),
-            (CheckCli::command(), "nub check"),
-            (BinCli::command(), "nub bin"),
-            (RootCli::command(), "nub root"),
+        for (help, name) in [
+            (ListCli::long_help("nub list"), "nub list"),
+            (WhyCli::long_help("nub why"), "nub why"),
+            (OutdatedCli::long_help("nub outdated"), "nub outdated"),
+            (QueryCli::long_help("nub query"), "nub query"),
+            (AuditCli::long_help("nub audit"), "nub audit"),
+            (LicensesCli::long_help("nub licenses"), "nub licenses"),
+            (
+                DeprecationsCli::long_help("nub deprecations"),
+                "nub deprecations",
+            ),
+            (PeersCli::long_help("nub peers"), "nub peers"),
+            (ViewCli::long_help("nub view"), "nub view"),
+            (CheckCli::long_help("nub check"), "nub check"),
+            (BinCli::long_help("nub bin"), "nub bin"),
+            (RootCli::long_help("nub root"), "nub root"),
         ] {
-            let help = render(cmd, name);
             assert!(help.contains(name), "usage must carry {name}: {help}");
             assert!(
                 !help.to_lowercase().contains("aube"),

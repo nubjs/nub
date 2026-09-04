@@ -322,8 +322,8 @@ impl Linker {
     /// copy via the root-level symlink, so consumer code is
     /// unaffected. Default false (pnpm parity). No-op under
     /// `virtualStoreOnly=true` (no per-importer symlink pass runs)
-    /// and under `NodeLinker::Hoisted` (each importer gets an
-    /// independent flat tree — no shared root to dedupe against).
+    /// and under `NodeLinker::Hoisted` (its workspace-wide placement
+    /// plan deduplicates compatible packages independently).
     pub fn with_dedupe_direct_deps(mut self, on: bool) -> Self {
         self.dedupe_direct_deps = on;
         self

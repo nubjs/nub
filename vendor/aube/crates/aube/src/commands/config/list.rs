@@ -2,10 +2,9 @@ use super::{
     ListLocation, literal_aliases, primary_entry_key, read_merged, read_project_entries,
     read_user_entries, setting_default_value, setting_for_key, settings_meta,
 };
-use clap::Args;
 use miette::miette;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ListArgs {
     /// Also list settings that have no value set.
     ///
@@ -14,21 +13,21 @@ pub struct ListArgs {
     ///
     /// Not valid with `--local` or `--global`, since a single-file view cannot
     /// distinguish "not set anywhere" from "set in the other file".
-    #[arg(long)]
+    #[usage(long)]
     pub all: bool,
 
     /// List only the user configuration.
-    #[arg(short = 'g', long, conflicts_with_all = ["local", "all"])]
+    #[usage(short = 'g', long, conflicts("--local", "--all"))]
     pub global: bool,
 
     /// Emit all entries as a JSON object keyed by setting name.
     ///
     /// Matches `pnpm config list --json`. Honors the selected scope.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 
     /// List only the project configuration.
-    #[arg(long, conflicts_with_all = ["global", "all"])]
+    #[usage(long, conflicts("--global", "--all"))]
     pub local: bool,
 }
 

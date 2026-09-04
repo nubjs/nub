@@ -73,6 +73,7 @@ fn build_age_gate_resolves_dist_tag_range() {
         parent: None,
         importer: ".".into(),
         original_specifier: None,
+        lockfile_override_specifier: None,
         real_name: None,
         ancestors: Arc::from([]),
         range_from_override: false,
@@ -102,6 +103,7 @@ fn builders_store_the_registry_name_for_an_aliased_task() {
         parent: None,
         importer: ".".into(),
         original_specifier: None,
+        lockfile_override_specifier: None,
         real_name: Some("real-pkg".into()),
         ancestors: Arc::from([]),
         range_from_override: false,
@@ -143,6 +145,7 @@ fn build_no_match_falls_back_to_prereleases() {
         parent: None,
         importer: ".".into(),
         original_specifier: None,
+        lockfile_override_specifier: None,
         real_name: None,
         ancestors: Arc::from([]),
         range_from_override: false,
@@ -436,6 +439,7 @@ fn age_gate_lists_only_versions_the_registry_dated() {
         parent: None,
         importer: ".".into(),
         original_specifier: None,
+        lockfile_override_specifier: None,
         real_name: None,
         ancestors: Arc::from([]),
         range_from_override: false,
@@ -577,6 +581,7 @@ fn exotic_subdeps_from_local_parents_are_allowed() {
         parent: Some("pi-web-ui@file+abc123".to_string()),
         importer: ".".to_string(),
         original_specifier: None,
+        lockfile_override_specifier: None,
         real_name: None,
         ancestors: Arc::from([]),
         range_from_override: false,
@@ -606,6 +611,7 @@ fn exotic_subdeps_from_unknown_parents_stay_blocked() {
         parent: Some("pi-web-ui@file+missing".to_string()),
         importer: ".".to_string(),
         original_specifier: None,
+        lockfile_override_specifier: None,
         real_name: None,
         ancestors: Arc::from([]),
         range_from_override: false,
@@ -624,6 +630,7 @@ fn exotic_subdeps_from_registry_parents_stay_blocked() {
         parent: Some("pi-web-ui@0.68.1".to_string()),
         importer: ".".to_string(),
         original_specifier: None,
+        lockfile_override_specifier: None,
         real_name: None,
         ancestors: Arc::from([]),
         range_from_override: false,
@@ -2633,6 +2640,431 @@ async fn primer_seeded_abbreviated_cache_does_not_strand_a_range_miss_behind_a_3
     let _ = std::fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn minimum_release_age_compacts_exact_optional_platform_history() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut packument = make_packument("darwin-only", &["1.0.0"], "1.0.0");
+    packument
+        .time
+        .insert("1.0.0".to_string(), "2024-01-01T00:00:00.000Z".to_string());
+    let mut exact = packument.versions["1.0.0"].clone();
+    let unsupported_os = if cfg!(target_os = "macos") {
+        "linux"
+    } else {
+        "darwin"
+    };
+    exact.os = vec![unsupported_os.to_string()];
+    packument.versions.insert("1.0.0".to_string(), exact);
+    let full_body = serde_json::to_vec(&packument).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let exact_requests = Arc::new(AtomicUsize::new(0));
+    let full_requests = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let exact_requests = exact_requests.clone();
+        let full_requests = full_requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let full_body = full_body.clone();
+                let exact_requests = exact_requests.clone();
+                let full_requests = full_requests.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 2048];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let path = std::str::from_utf8(&buf[..n])
+                        .ok()
+                        .and_then(|request| request.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let body = if path.ends_with("/1.0.0") {
+                        exact_requests.fetch_add(1, Ordering::Relaxed);
+                        full_body.clone()
+                    } else {
+                        full_requests.fetch_add(1, Ordering::Relaxed);
+                        full_body
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.write_all(&body).await.unwrap();
+                });
+            }
+        })
+    };
+
+    let base = std::env::temp_dir().join(format!(
+        "aube-resolver-exact-optional-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(base.join("packuments")).unwrap();
+    std::fs::create_dir_all(base.join("packuments-full")).unwrap();
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    let mut resolver = Resolver::new(client)
+        .with_packument_cache(base.join("packuments"))
+        .with_packument_full_cache(base.join("packuments-full"))
+        .with_minimum_release_age(Some(MinimumReleaseAge {
+            minutes: 60,
+            ..Default::default()
+        }));
+    let mut manifest = PackageJson::default();
+    manifest
+        .optional_dependencies
+        .insert("darwin-only".to_string(), "1.0.0".to_string());
+
+    let graph = resolver.resolve(&manifest, None).await.unwrap();
+
+    assert!(!graph_has_package(&graph, "darwin-only", "1.0.0"));
+    assert_eq!(
+        exact_requests.load(Ordering::Relaxed),
+        0,
+        "the compact path must not make a second exact-version request"
+    );
+    assert_eq!(full_requests.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        resolver.cache["darwin-only"].versions.len(),
+        1,
+        "the full history must not be retained in the resolver cache"
+    );
+    assert_eq!(
+        graph.skipped_optional_dependencies["."]["darwin-only"],
+        "1.0.0"
+    );
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn compact_fetch_augments_stale_full_cache_with_exact_optional_version() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stale = make_packument("fresh-optional", &["1.0.0"], "1.0.0");
+    stale
+        .time
+        .insert("1.0.0".to_string(), "2024-01-01T00:00:00.000Z".to_string());
+    let mut fresh = make_packument("fresh-optional", &["1.0.0", "2.0.0"], "2.0.0");
+    for version in fresh.versions.keys() {
+        fresh
+            .time
+            .insert(version.clone(), "2024-01-01T00:00:00.000Z".to_string());
+    }
+    let body = serde_json::to_vec(&fresh).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let requests = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let body = body.clone();
+                requests.fetch_add(1, Ordering::Relaxed);
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.write_all(&body).await.unwrap();
+                });
+            }
+        })
+    };
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    let mut resolver = Resolver::new(client).with_minimum_release_age(Some(MinimumReleaseAge {
+        minutes: 60,
+        ..Default::default()
+    }));
+    resolver.cache.insert("fresh-optional".to_string(), stale);
+    let mut manifest = PackageJson::default();
+    manifest
+        .optional_dependencies
+        .insert("fresh-optional".to_string(), "2.0.0".to_string());
+
+    let graph = resolver.resolve(&manifest, None).await.unwrap();
+
+    assert!(graph_has_package(&graph, "fresh-optional", "2.0.0"));
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    server.abort();
+}
+
+async fn resolve_compact_same_name_collision(
+    second_is_optional_exact: bool,
+) -> (LockfileGraph, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut compact_parent = make_packument("compact-parent", &["1.0.0"], "1.0.0");
+    compact_parent
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .optional_dependencies
+        .insert("shared-child".to_string(), "1.0.0".to_string());
+
+    let mut other_parent = make_packument("other-parent", &["1.0.0"], "1.0.0");
+    let other = other_parent.versions.get_mut("1.0.0").unwrap();
+    if second_is_optional_exact {
+        other
+            .optional_dependencies
+            .insert("shared-child".to_string(), "2.0.0".to_string());
+    } else {
+        other
+            .dependencies
+            .insert("shared-child".to_string(), "^2.0.0".to_string());
+    }
+
+    let mut shared = make_packument("shared-child", &["1.0.0", "2.0.0"], "2.0.0");
+    for packument in [&mut compact_parent, &mut other_parent, &mut shared] {
+        for version in packument.versions.keys() {
+            packument
+                .time
+                .insert(version.clone(), "2024-01-01T00:00:00.000Z".to_string());
+        }
+    }
+
+    let bodies = Arc::new(std::collections::HashMap::from([
+        (
+            "compact-parent".to_string(),
+            serde_json::to_vec(&compact_parent).unwrap(),
+        ),
+        (
+            "other-parent".to_string(),
+            serde_json::to_vec(&other_parent).unwrap(),
+        ),
+        (
+            "shared-child".to_string(),
+            serde_json::to_vec(&shared).unwrap(),
+        ),
+    ]));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let shared_requests = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let shared_requests = shared_requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let bodies = bodies.clone();
+                let shared_requests = shared_requests.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let path = std::str::from_utf8(&buf[..n])
+                        .ok()
+                        .and_then(|request| request.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let name = path.trim_start_matches('/').split('/').next().unwrap_or("");
+                    let Some(body) = bodies.get(name) else {
+                        socket
+                            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                            .await
+                            .unwrap();
+                        return;
+                    };
+                    if name == "shared-child" {
+                        shared_requests.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.write_all(body).await.unwrap();
+                });
+            }
+        })
+    };
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    let mut resolver = Resolver::new(client).with_minimum_release_age(Some(MinimumReleaseAge {
+        minutes: 60,
+        ..Default::default()
+    }));
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("compact-parent".to_string(), "1.0.0".to_string());
+    manifest
+        .dependencies
+        .insert("other-parent".to_string(), "1.0.0".to_string());
+
+    let graph = resolver.resolve(&manifest, None).await.unwrap();
+    let request_count = shared_requests.load(Ordering::Relaxed);
+    server.abort();
+    (graph, request_count)
+}
+
+#[tokio::test]
+async fn compact_fetch_keeps_two_exact_optional_versions_for_one_name() {
+    let (graph, requests) = resolve_compact_same_name_collision(true).await;
+
+    assert!(graph_has_package(&graph, "shared-child", "1.0.0"));
+    assert!(graph_has_package(&graph, "shared-child", "2.0.0"));
+    assert_eq!(requests, 2, "each exact version needs one compact fetch");
+}
+
+#[tokio::test]
+async fn compact_fetch_does_not_suppress_same_name_range_fetch() {
+    let (graph, requests) = resolve_compact_same_name_collision(false).await;
+
+    assert!(graph_has_package(&graph, "shared-child", "1.0.0"));
+    assert!(graph_has_package(&graph, "shared-child", "2.0.0"));
+    assert_eq!(requests, 2, "the exact and full fetches must both run");
+}
+
+#[tokio::test]
+async fn failed_exact_optional_version_does_not_suppress_sibling_version() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut first_parent = make_packument("first-parent", &["1.0.0"], "1.0.0");
+    first_parent
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .optional_dependencies
+        .insert("shared-child".to_string(), "1.0.0".to_string());
+    let mut second_parent = make_packument("second-parent", &["1.0.0"], "1.0.0");
+    second_parent
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .optional_dependencies
+        .insert("shared-child".to_string(), "2.0.0".to_string());
+    let mut shared = make_packument("shared-child", &["1.0.0", "2.0.0"], "2.0.0");
+    for packument in [&mut first_parent, &mut second_parent, &mut shared] {
+        for version in packument.versions.keys() {
+            packument
+                .time
+                .insert(version.clone(), "2024-01-01T00:00:00.000Z".to_string());
+        }
+    }
+
+    let bodies = Arc::new(std::collections::HashMap::from([
+        (
+            "first-parent".to_string(),
+            serde_json::to_vec(&first_parent).unwrap(),
+        ),
+        (
+            "second-parent".to_string(),
+            serde_json::to_vec(&second_parent).unwrap(),
+        ),
+    ]));
+    let shared_body = serde_json::to_vec(&shared).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let registry = format!("http://{}/", listener.local_addr().unwrap());
+    let shared_requests = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let shared_requests = Arc::clone(&shared_requests);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let bodies = Arc::clone(&bodies);
+                let shared_body = shared_body.clone();
+                let shared_requests = Arc::clone(&shared_requests);
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let path = std::str::from_utf8(&buf[..n])
+                        .ok()
+                        .and_then(|request| request.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let name = path.trim_start_matches('/').split('/').next().unwrap_or("");
+                    if name == "shared-child" {
+                        let request = shared_requests.fetch_add(1, Ordering::Relaxed) + 1;
+                        if request <= 2 {
+                            socket
+                                .write_all(
+                                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                                )
+                                .await
+                                .unwrap();
+                            return;
+                        }
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            shared_body.len()
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                        socket.write_all(&shared_body).await.unwrap();
+                        return;
+                    }
+                    let Some(body) = bodies.get(name) else {
+                        socket
+                            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                            .await
+                            .unwrap();
+                        return;
+                    };
+                    if name == "second-parent" {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                            while shared_requests.load(Ordering::Relaxed) < 2 {
+                                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                            }
+                        })
+                        .await;
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.write_all(body).await.unwrap();
+                });
+            }
+        })
+    };
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(&registry));
+    let mut resolver = Resolver::new(client).with_minimum_release_age(Some(MinimumReleaseAge {
+        minutes: 60,
+        ..Default::default()
+    }));
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("first-parent".to_string(), "1.0.0".to_string());
+    manifest
+        .dependencies
+        .insert("second-parent".to_string(), "1.0.0".to_string());
+
+    let graph = resolver.resolve(&manifest, None).await.unwrap();
+
+    assert!(
+        !graph_has_package(&graph, "shared-child", "1.0.0"),
+        "unexpected packages after {} shared requests: {:?}",
+        shared_requests.load(Ordering::Relaxed),
+        graph.packages.keys().collect::<Vec<_>>()
+    );
+    assert!(graph_has_package(&graph, "shared-child", "2.0.0"));
+    assert_eq!(shared_requests.load(Ordering::Relaxed), 3);
+    server.abort();
+}
+
 /// Regression: when both `minimumReleaseAge` and `trustPolicy=NoDowngrade`
 /// are active, the resolver must use a full packument with `time`;
 /// using an abbreviated corgi packument would make the trust check fail
@@ -4145,6 +4577,61 @@ fn dedupe_peers_cycle_break_still_converges() {
     }
 }
 
+#[test]
+fn peer_chain_deeper_than_legacy_limit_converges() {
+    const CHAIN_LEN: usize = 20;
+    let package_name = |index: usize| format!("package-{index:02}");
+    let mut packages = BTreeMap::new();
+
+    for index in 0..CHAIN_LEN {
+        let name = package_name(index);
+        let next = (index + 1 < CHAIN_LEN).then(|| package_name(index + 1));
+        let dependencies = next
+            .as_deref()
+            .map(|next| vec![(next, "1.0.0")])
+            .unwrap_or_default();
+        let peer_dependencies = next
+            .as_deref()
+            .map(|next| vec![(next, "^1")])
+            .unwrap_or_default();
+        packages.insert(
+            format!("{name}@1.0.0"),
+            mk_locked(&name, "1.0.0", &dependencies, &peer_dependencies),
+        );
+    }
+
+    let root_name = package_name(0);
+    let mut importers = BTreeMap::new();
+    importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: root_name.clone(),
+            dep_path: format!("{root_name}@1.0.0"),
+            dep_type: DepType::Production,
+            specifier: Some("^1".to_string()),
+        }],
+    );
+
+    let graph = LockfileGraph {
+        importers,
+        packages,
+        ..Default::default()
+    };
+    let out = apply_peer_contexts(graph, &PeerContextOptions::default())
+        .expect("peer chains deeper than 16 packages should converge");
+
+    for package in out.packages.values() {
+        for (child_name, child_tail) in &package.dependencies {
+            let child_key = format!("{child_name}@{child_tail}");
+            assert!(
+                out.packages.contains_key(&child_key),
+                "dangling dep_path {child_key} referenced from {}",
+                package.dep_path
+            );
+        }
+    }
+}
+
 // Regression: under `dedupe-peers=true`, a package whose canonical
 // version coincidentally matches a nested peer's version in an
 // unrelated subtree must NOT collide. Cycle detection runs against
@@ -4354,9 +4841,9 @@ fn contains_canonical_back_ref_respects_boundaries() {
 }
 
 // A package whose only dep is another package that declares a peer
-// should hoist that peer to the importer — matching pnpm's
-// `auto-install-peers=true` default. The hoisted DirectDep carries
-// the declared peer range as its specifier.
+// should hoist that peer to the importer. The hoisted DirectDep carries
+// the declared peer range as its specifier and inherits the requiring
+// direct dependency's section classification.
 #[test]
 fn hoist_auto_installed_peers_hoists_unmet_peers_to_importer() {
     // consumer declares `peer react: ^17 || ^18` and already has
@@ -4402,6 +4889,106 @@ fn hoist_auto_installed_peers_hoists_unmet_peers_to_importer() {
     assert_eq!(root[1].dep_type, DepType::Production);
     // Specifier carries the declared peer range verbatim.
     assert_eq!(root[1].specifier.as_deref(), Some("^17 || ^18"));
+}
+
+#[test]
+fn hoist_auto_installed_peers_preserves_requirer_dep_type() {
+    for dep_type in [DepType::Production, DepType::Dev, DepType::Optional] {
+        let mut consumer = mk_locked(
+            "consumer",
+            "1.0.0",
+            &[("react", "18.2.0")],
+            &[("react", "^18")],
+        );
+        consumer.dep_path = "consumer@1.0.0".to_string();
+
+        let mut packages = BTreeMap::new();
+        packages.insert("consumer@1.0.0".to_string(), consumer);
+        packages.insert(
+            "react@18.2.0".to_string(),
+            mk_locked("react", "18.2.0", &[], &[]),
+        );
+
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "consumer".to_string(),
+                dep_path: "consumer@1.0.0".to_string(),
+                dep_type,
+                specifier: Some("^1".to_string()),
+            }],
+        );
+
+        let graph = LockfileGraph {
+            importers,
+            packages,
+            ..Default::default()
+        };
+        let (hoisted, _) = hoist_auto_installed_peers(graph);
+        let root = hoisted.importers.get(".").unwrap();
+        let react = root.iter().find(|dep| dep.name == "react").unwrap();
+        assert_eq!(react.dep_type, dep_type);
+    }
+}
+
+#[test]
+fn hoist_auto_installed_peers_promotes_shared_peer_dep_type() {
+    for (first_type, second_type, expected) in [
+        (DepType::Dev, DepType::Optional, DepType::Production),
+        (DepType::Dev, DepType::Production, DepType::Production),
+        (DepType::Optional, DepType::Production, DepType::Production),
+    ] {
+        let first = mk_locked(
+            "first",
+            "1.0.0",
+            &[("react", "18.2.0")],
+            &[("react", "^18")],
+        );
+        let second = mk_locked(
+            "second",
+            "1.0.0",
+            &[("react", "18.2.0")],
+            &[("react", "^18")],
+        );
+
+        let mut packages = BTreeMap::new();
+        packages.insert("first@1.0.0".to_string(), first);
+        packages.insert("second@1.0.0".to_string(), second);
+        packages.insert(
+            "react@18.2.0".to_string(),
+            mk_locked("react", "18.2.0", &[], &[]),
+        );
+
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![
+                DirectDep {
+                    name: "first".to_string(),
+                    dep_path: "first@1.0.0".to_string(),
+                    dep_type: first_type,
+                    specifier: Some("^1".to_string()),
+                },
+                DirectDep {
+                    name: "second".to_string(),
+                    dep_path: "second@1.0.0".to_string(),
+                    dep_type: second_type,
+                    specifier: Some("^1".to_string()),
+                },
+            ],
+        );
+
+        let graph = LockfileGraph {
+            importers,
+            packages,
+            ..Default::default()
+        };
+        let (hoisted, _) = hoist_auto_installed_peers(graph);
+        let root = hoisted.importers.get(".").unwrap();
+        let react = root.iter().find(|dep| dep.name == "react").unwrap();
+        assert_eq!(react.dep_type, expected);
+    }
 }
 
 // Peers declared by transitive dependencies are still resolved and
@@ -4489,6 +5076,75 @@ fn hoist_auto_installed_peers_does_not_hoist_auto_peer_peers_to_importer() {
     assert_eq!(root[0].name, "consumer");
     assert_eq!(root[1].name, "plugin");
     assert_eq!(root[1].dep_path, "plugin@2.0.0");
+}
+
+// pnpm's `auto-install-peers` only fills in *required* peers — an
+// optional peer (`peerDependenciesMeta.optional = true`) is never
+// promoted to the importer, even when another dependency already
+// pulled a matching version into the graph. Without the skip, the
+// hoist pass would surface `node-sass` as an importer direct dep
+// (lockfile importers entry + top-level node_modules symlink) where
+// pnpm has none. The required peer alongside proves the skip is
+// targeted.
+#[test]
+fn hoist_auto_installed_peers_skips_optional_peers() {
+    let mut loader = mk_locked(
+        "loader",
+        "1.0.0",
+        &[("webpack", "5.0.0")],
+        &[("webpack", "^5"), ("node-sass", "^9")],
+    );
+    loader.peer_dependencies_meta.insert(
+        "node-sass".to_string(),
+        aube_lockfile::PeerDepMeta { optional: true },
+    );
+    // `node-sass` is in the graph anyway — a second direct dep
+    // depends on it as a regular dependency.
+    let legacy = mk_locked("legacy", "1.0.0", &[("node-sass", "9.0.0")], &[]);
+    let node_sass = mk_locked("node-sass", "9.0.0", &[], &[]);
+    let webpack = mk_locked("webpack", "5.0.0", &[], &[]);
+
+    let mut packages = BTreeMap::new();
+    packages.insert("loader@1.0.0".to_string(), loader);
+    packages.insert("legacy@1.0.0".to_string(), legacy);
+    packages.insert("node-sass@9.0.0".to_string(), node_sass);
+    packages.insert("webpack@5.0.0".to_string(), webpack);
+
+    let mut importers = BTreeMap::new();
+    importers.insert(
+        ".".to_string(),
+        vec![
+            DirectDep {
+                name: "loader".to_string(),
+                dep_path: "loader@1.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("^1".to_string()),
+            },
+            DirectDep {
+                name: "legacy".to_string(),
+                dep_path: "legacy@1.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("^1".to_string()),
+            },
+        ],
+    );
+
+    let graph = LockfileGraph {
+        importers,
+        packages,
+        ..Default::default()
+    };
+    let (hoisted, _) = hoist_auto_installed_peers(graph);
+    let root = hoisted.importers.get(".").unwrap();
+
+    // The required peer `webpack` hoists; the optional peer
+    // `node-sass` does not, despite being resolved in the graph.
+    assert_eq!(root.len(), 3);
+    assert!(root.iter().any(|d| d.name == "webpack"));
+    assert!(
+        root.iter().all(|d| d.name != "node-sass"),
+        "optional peer must not be hoisted to the importer"
+    );
 }
 
 // If the peer is already in the importer's direct deps, hoist is a
@@ -4872,6 +5528,71 @@ async fn auto_install_peers_installs_missing_required_peer() {
         graph_has_package(&graph, "react", "18.2.0"),
         "missing required peer should be auto-installed"
     );
+    let importer = graph.importers.get(".").unwrap();
+    assert_eq!(
+        importer
+            .iter()
+            .map(|dep| dep.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["consumer"],
+        "a dependency's peer stays in its peer context instead of becoming an importer dependency"
+    );
+}
+
+#[tokio::test]
+async fn auto_install_peers_installs_importers_own_required_peer() {
+    let react = make_packument("react", &["19.2.0"], "19.2.0");
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert("react".to_string(), react);
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .peer_dependencies
+        .insert("react".to_string(), "19.2.0".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect("resolve failed");
+
+    let importer = graph.importers.get(".").unwrap();
+    assert_eq!(importer.len(), 1);
+    assert_eq!(importer[0].name, "react");
+    assert_eq!(importer[0].specifier.as_deref(), Some("19.2.0"));
+    assert_eq!(importer[0].dep_type, DepType::Production);
+    assert!(graph_has_package(&graph, "react", "19.2.0"));
+}
+
+#[tokio::test]
+async fn auto_install_peers_skips_importers_own_optional_peer() {
+    let react = make_packument("react", &["19.2.0"], "19.2.0");
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert("react".to_string(), react);
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .peer_dependencies
+        .insert("react".to_string(), "19.2.0".to_string());
+    manifest.extra.insert(
+        "peerDependenciesMeta".to_string(),
+        serde_json::json!({"react": {"optional": true}}),
+    );
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect("resolve failed");
+
+    assert!(graph.importers.get(".").unwrap().is_empty());
+    assert!(!graph_has_package(&graph, "react", "19.2.0"));
 }
 
 #[tokio::test]
@@ -5872,6 +6593,88 @@ async fn fresh_resolve_handles_versionless_scoped_npm_alias_from_catalog() {
     let entry = catalog.get("popper2").unwrap();
     assert_eq!(entry.specifier, "npm:@popperjs/core");
     assert_eq!(entry.version, "2.11.8");
+    assert_eq!(
+        graph.importers["."][0].specifier.as_deref(),
+        Some("catalog:"),
+        "an ordinary catalog dependency keeps its manifest specifier"
+    );
+}
+
+#[tokio::test]
+async fn catalog_override_records_pnpm_resolved_lockfile_shape() {
+    let is_number = make_packument("is-number", &["7.0.0"], "7.0.0");
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let catalogs = BTreeMap::from([(
+        "default".to_string(),
+        BTreeMap::from([
+            ("is-number".to_string(), "7.0.0".to_string()),
+            ("123numeric".to_string(), "1.0.0".to_string()),
+        ]),
+    )]);
+    let overrides = BTreeMap::from([
+        ("is-number".to_string(), "catalog:".to_string()),
+        (
+            "parent/is-number@>=7.0.0".to_string(),
+            "catalog:".to_string(),
+        ),
+        ("parent@^1>123numeric".to_string(), "catalog:".to_string()),
+    ]);
+    let mut resolver = Resolver::new(client)
+        .with_catalogs(catalogs)
+        .with_overrides(overrides);
+    resolver.cache.insert("is-number".to_string(), is_number);
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dev_dependencies
+        .insert("is-number".to_string(), "catalog:".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect("catalog override should resolve");
+
+    assert_eq!(graph.overrides["is-number"], "7.0.0");
+    assert_eq!(graph.overrides["parent/is-number@>=7.0.0"], "7.0.0");
+    assert_eq!(graph.overrides["parent@^1>123numeric"], "1.0.0");
+    let dep = &graph.importers["."][0];
+    assert_eq!(dep.name, "is-number");
+    assert_eq!(dep.specifier.as_deref(), Some("7.0.0"));
+}
+
+#[tokio::test]
+async fn skipped_optional_override_keeps_raw_manifest_specifier() {
+    let mut optional = make_packument("platform-only", &["7.0.0"], "7.0.0");
+    let unsupported_os = if cfg!(target_os = "macos") {
+        "linux"
+    } else {
+        "darwin"
+    };
+    optional.versions.get_mut("7.0.0").unwrap().os = vec![unsupported_os.to_string()];
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let overrides = BTreeMap::from([("platform-only".to_string(), "7.0.0".to_string())]);
+    let mut resolver = Resolver::new(client).with_overrides(overrides);
+    resolver.cache.insert("platform-only".to_string(), optional);
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .optional_dependencies
+        .insert("platform-only".to_string(), "^6.0.0".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, None)
+        .await
+        .expect("platform-skipped override should resolve");
+
+    assert_eq!(
+        graph.skipped_optional_dependencies["."]["platform-only"], "^6.0.0",
+        "skipped-optional drift metadata must keep the manifest value"
+    );
 }
 
 // Catalog-aliased dep + selector override targeting the original
@@ -5930,6 +6733,11 @@ async fn override_with_bare_range_undoes_prior_catalog_alias() {
     );
     assert!(!graph.packages.contains_key("js-yaml@0.0.11"));
     assert!(!graph.packages.contains_key("@zkochan/js-yaml@0.0.11"));
+    assert_eq!(
+        graph.importers["."][0].specifier.as_deref(),
+        Some("^3.14.2"),
+        "version-keyed overrides rewrite direct importer specifiers"
+    );
 }
 
 #[tokio::test]
@@ -7220,6 +8028,39 @@ fn direct_dep_info_empty_when_no_packument_cached() {
 
     let info = resolver.direct_dep_info(&graph);
     assert!(info.is_empty(), "no packument cached → empty map");
+}
+
+#[test]
+fn age_gated_updates_reports_hidden_aliased_direct_release() {
+    let mut packument = make_packument("foo", &["1.0.0", "2.0.0"], "2.0.0");
+    packument
+        .time
+        .insert("1.0.0".to_string(), "2000-01-01T00:00:00.000Z".to_string());
+    packument
+        .time
+        .insert("2.0.0".to_string(), "2999-01-01T00:00:00.000Z".to_string());
+
+    let mut resolver =
+        direct_dep_info_resolver().with_minimum_release_age(Some(MinimumReleaseAge {
+            minutes: 1440,
+            ..Default::default()
+        }));
+    resolver.cache.insert("foo".to_string(), packument);
+
+    let mut pkg = mk_locked("foo-alias", "1.0.0", &[], &[]);
+    pkg.alias_of = Some("foo".to_string());
+    let graph = direct_dep_info_graph(
+        &[("foo-alias", "foo-alias@1.0.0", "npm:foo@latest")],
+        &[pkg],
+    );
+
+    assert_eq!(
+        resolver.age_gated_updates(&graph),
+        vec![AgeGatedUpdate {
+            name: "foo-alias".to_string(),
+            version: "2.0.0".to_string(),
+        }]
+    );
 }
 
 #[tokio::test]

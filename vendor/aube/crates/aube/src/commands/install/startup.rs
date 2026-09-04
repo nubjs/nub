@@ -45,7 +45,6 @@ pub(super) fn try_install_fast_path(
         return Ok(None);
     }
     opts.control.check_cancelled()?;
-    emit_up_to_date(cwd);
     let total = state::read_state_package_content_hashes(cwd)
         .map(|packages| packages.len())
         .or_else(|| {
@@ -84,16 +83,16 @@ fn install_fast_path_eligible(
     if !preconditions_met {
         return false;
     }
-    // Trust re-validation only blocks the short-circuit under embedders that opt
-    // into re-validating an already-satisfied tree (`warm_trust_revalidate`,
+    // Posture re-validation only blocks the short-circuit under embedders that
+    // opt into re-validating an already-satisfied tree (`warm_trust_revalidate`,
     // aube's default). When it does NOT (nub), the gate is skipped here and the
     // warm path is decided purely by `check_needs_install` below: only a
     // fully-satisfied no-op (`None`) short-circuits, and any real work
-    // (`Some(reason)`) falls through to the full pipeline where the trust check
-    // fires during resolution. So skipping this gate never lets an install that
-    // installs anything bypass the trust posture — it only drops the redundant
+    // (`Some(reason)`) falls through to the full pipeline where the posture
+    // checks fire during resolution. So skipping this gate never lets an install
+    // that installs anything bypass the posture — it only drops the redundant
     // re-validation of an unchanged, on-disk, previously-validated tree.
-    if aube_util::embedder().warm_trust_revalidate && trust_policy_requires_validation(cwd, opts) {
+    if aube_util::embedder().warm_trust_revalidate && paranoid_requires_full_pipeline(cwd, opts) {
         return false;
     }
     // Surface *why* the warm path was missed at debug level — the state
@@ -101,7 +100,7 @@ fn install_fast_path_eligible(
     // consulted), leaving `aube install -v` silent on repeat-install loops
     // that originate from state drift rather than lockfile drift.
     match state::check_needs_install_with_flags(cwd, &opts.cli_flags) {
-        None => compatibility_metadata_is_current(cwd),
+        None => compatibility_metadata_is_current(cwd, opts),
         Some(reason) => {
             tracing::debug!("install warm path skipped: {reason}");
             false
@@ -109,7 +108,7 @@ fn install_fast_path_eligible(
     }
 }
 
-fn compatibility_metadata_is_current(cwd: &Path) -> bool {
+fn compatibility_metadata_is_current(cwd: &Path, opts: &InstallOptions) -> bool {
     let Some(layout) = state::read_state_layout(cwd) else {
         return false;
     };
@@ -119,7 +118,10 @@ fn compatibility_metadata_is_current(cwd: &Path) -> bool {
     let expected = match layout.linker {
         state::InstallLayoutMode::Hoisted => Some(aube_dir),
         state::InstallLayoutMode::Isolated => {
-            let global_virtual_store = super::super::global_virtual_store_dir(cwd);
+            let files = super::super::FileSources::load(cwd);
+            let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
+            let ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
+            let global_virtual_store = super::super::global_virtual_store_dir_with_ctx(cwd, &ctx);
             match super::gvs::detect_existing_global_virtual_store(
                 cwd,
                 &aube_dir,
@@ -129,6 +131,18 @@ fn compatibility_metadata_is_current(cwd: &Path) -> bool {
                 Some(true) => {
                     legacy_vite_patches_current =
                         super::gvs::legacy_vite_patches_are_current(&aube_dir);
+                    if layout.gvs_nested_links.is_none() {
+                        tracing::debug!(
+                            "install warm path skipped: install state predates global virtual store link tracking"
+                        );
+                        return false;
+                    }
+                    if !state::gvs_nested_links_are_current(cwd, &layout) {
+                        tracing::debug!(
+                            "install warm path skipped: global virtual store links are stale"
+                        );
+                        return false;
+                    }
                     Some(global_virtual_store)
                 }
                 Some(false) => Some(aube_dir),
@@ -157,21 +171,20 @@ fn compatibility_metadata_is_current(cwd: &Path) -> bool {
     metadata_current
 }
 
-fn trust_policy_requires_validation(cwd: &Path, opts: &InstallOptions) -> bool {
+fn paranoid_requires_full_pipeline(cwd: &Path, opts: &InstallOptions) -> bool {
     if opts.network_mode == aube_registry::NetworkMode::Offline {
         return false;
     }
     let files = crate::commands::FileSources::load(cwd);
     let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
     let ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
+    // `paranoid` bundles strict advisory checks and store-integrity gates,
+    // so it always takes the full pipeline. A locked package is already a
+    // trust decision, so trustPolicy alone does not invalidate the fast path.
     aube_settings::resolved::paranoid(&ctx)
-        || matches!(
-            aube_settings::resolved::trust_policy(&ctx),
-            aube_settings::resolved::TrustPolicy::NoDowngrade
-        )
 }
 
-fn emit_up_to_date(cwd: &Path) {
+pub(super) fn emit_up_to_date(cwd: &Path) {
     super::unreviewed_builds::emit_warning(&super::unreviewed_builds::from_state(cwd));
     super::print_already_up_to_date();
 }

@@ -425,8 +425,8 @@ pub(in crate::commands) async fn fetch_packages(
 ) -> miette::Result<(BTreeMap<String, aube_store::PackageIndex>, usize, usize)> {
     // Eager-client caller (`aube fetch`): the command only exists to
     // download tarballs, so there's no point deferring construction.
-    // `skip_already_linked_shortcut=true` because `aube fetch`'s entire
-    // job is to verify/populate the global store — it must not be
+    // No already-linked shortcut because `aube fetch`'s entire job is
+    // to verify/populate the global store — it must not be
     // short-circuited by a stale `node_modules/.aube/<dep>` from a
     // prior install, which could leave the store empty on a setup
     // that wipes the global aube store but not `node_modules/` (e.g.
@@ -460,8 +460,9 @@ pub(in crate::commands) async fn fetch_packages(
         progress,
         &cwd,
         &aube_dir,
+        &packument_cache_dir(),
         /*materialize_tx=*/ None,
-        /*skip_already_linked_shortcut=*/ true,
+        /*already_linked_shortcut=*/ None,
         /*force_index_dep_paths=*/ &std::collections::BTreeSet::new(),
         virtual_store_dir_max_length,
         ignore_scripts,
@@ -496,29 +497,32 @@ pub(super) async fn fetch_packages_with_root<F>(
     progress: Option<&InstallProgress>,
     project_root: &std::path::Path,
     aube_dir: &std::path::Path,
+    packument_cache_dir: &std::path::Path,
     // Some streams every successful (dep_path, index) so a concurrent
     // GVS-prewarm materializer can start reflinks before the full
     // batch finishes. None keeps batch-then-return for `aube fetch`.
     // Sender drops on function exit so consumer sees channel close.
     materialize_tx: Option<tokio::sync::mpsc::Sender<(String, aube_store::PackageIndex)>>,
-    // When true, every package classifies as `Cached` or `NeedsFetch`
-    // based on `store.load_index`, regardless of whether
-    // `.aube/<dep>` already exists on disk. Callers pass true when
-    // either:
+    // The virtual-store layout the linker will produce, when the
+    // already-linked shortcut is in play. `Some` lets a package whose
+    // `.aube/<dep>` entry already matches what the linker expects skip
+    // the store index entirely; `None` disables the shortcut, so every
+    // package classifies as `Cached` or `NeedsFetch` through
+    // `store.load_index_verified` regardless of what is on disk.
     //
-    //   - the linker will wipe `node_modules/` before running
-    //     (`link_workspace`), so the `AlreadyLinked` classification
-    //     would be immediately invalidated; or
-    //   - the caller needs `load_index` to actually run as its store
-    //     verification step (`aube fetch`, which treats the act of
-    //     walking the store-file existence check as the operation's
-    //     primary side effect).
+    // Callers pass `None` when either:
     //
-    // Both cases share the same implementation: skip the `.aube/`
-    // existence check entirely so every package goes through
-    // `store.load_index` → either `Cached` (store has it) or
-    // `NeedsFetch` (store is missing the file, download fresh).
-    skip_already_linked_shortcut: bool,
+    //   - the shortcut has not been turned on for that install shape
+    //     yet. Workspaces are the live case: `link_workspace`'s step 1b
+    //     mirrors `link_all`'s state machine exactly, so the
+    //     classification below is as sound there as it is here, but
+    //     switching monorepos over is a perf change that wants its own
+    //     measurement rather than a ride on a correctness fix; or
+    //   - the caller needs the verified index load to actually run as
+    //     its store verification step (`aube fetch`, which treats the
+    //     act of walking the store-file existence check as the
+    //     operation's primary side effect).
+    already_linked_shortcut: Option<&super::materialize::VirtualStorePlan>,
     // Packages selected for project-local compatibility materialization
     // need an index even when their prior GVS entry still exists.
     force_index_dep_paths: &std::collections::BTreeSet<String>,
@@ -540,9 +544,10 @@ pub(super) async fn fetch_packages_with_root<F>(
 where
     F: FnOnce() -> std::sync::Arc<aube_registry::client::RegistryClient>,
 {
+    let packument_cache_dir = packument_cache_dir.to_path_buf();
     // No-op fast path: for every package whose per-project
-    // `node_modules/.aube/<dep_path>` entry already resolves to an
-    // existing target, skip the package-index load entirely. The
+    // `node_modules/.aube/<dep_path>` entry is already the one the
+    // linker will accept, skip the package-index load entirely. The
     // linker's only consumer of a `PackageIndex` is
     // `materialize_into` — if the package is already materialized
     // (either as a real directory here in per-project mode, or as a
@@ -553,35 +558,27 @@ where
     // fixture drops from ~38 ms of parallel index reads to a handful
     // of `stat(2)`s.
     //
-    // Two call sites disable the fast path entirely via
-    // `skip_already_linked_shortcut=true`:
+    // "The one the linker will accept" is what
+    // `VirtualStorePlan::entry_is_current` decides, and it is stricter
+    // than mere resolvability. Under the global virtual store the
+    // local `.aube/<dep_path>` name is keyed by dep_path alone while
+    // the shared subdir folds in graph hashes (`aube_dir_entry_name`
+    // vs `virtual_store_subdir`), so a build-state change moves the
+    // expected target while the entry keeps resolving to the old one.
+    // A shortcut keyed on resolvability alone would classify that
+    // package `AlreadyLinked`; `classify_entry_state` would then report
+    // `Stale`, the linker would need an index it was never handed, and
+    // its fallback is the *unverified* `store.load_index` — which
+    // happily returns a stale index whose CAS shards are gone, failing
+    // the link instead of re-fetching. Comparing against the expected
+    // subdir keeps that case self-healing: it misses the shortcut,
+    // takes the verified index load below, and a stale index drops to
+    // `NeedsFetch` so the tarball is re-downloaded while the network is
+    // still available. The linker has no such option — only fetch can
+    // re-download, which is why the check belongs here.
     //
-    //   - **Workspace installs.** `link_workspace` unconditionally
-    //     wipes `node_modules/` (including `.aube/`) before
-    //     rebuilding, so every `AlreadyLinked` classification would
-    //     be invalidated by the time the linker runs. With the fast
-    //     path enabled, the linker would then fall back to
-    //     `self.store.load_index` *serially* inside `link_workspace`'s
-    //     for-loop, which is strictly slower than loading them here
-    //     in parallel via rayon.
-    //
-    //   - **`aube fetch`.** The command exists to populate the
-    //     global store (typical use: Docker layer caching, warming
-    //     a CI mirror, or recovering from a wiped aube store).
-    //     If `node_modules/.aube/<dep>` happens to exist from a
-    //     previous install, the `AlreadyLinked` shortcut would skip
-    //     both `load_index` and the tarball fetch — which silently
-    //     leaves the store empty even though the user explicitly
-    //     asked for it to be repopulated. Disabling the shortcut
-    //     makes every package flow through `store.load_index`,
-    //     which does a first-file existence check on the CAS and
-    //     correctly downgrades to `NeedsFetch` when the store entry
-    //     has been wiped.
-    //
-    // `Path::exists` follows symlinks, so a per-project entry pointing
-    // at a global virtual-store target that no longer exists correctly
-    // falls through to the slow path. The linker re-derives the entry
-    // name through `aube_dir_entry_name(dep_path)`, which is just
+    // The linker re-derives the entry name through
+    // `aube_dir_entry_name(dep_path)`, which is just
     // `dep_path_to_filename(dep_path, max_length)` — we take the max
     // length as a parameter (instead of reaching for
     // `DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH`) so the fast path checks
@@ -620,9 +617,16 @@ where
         .par_iter()
         .filter(|(_, pkg)| pkg.local_source.is_none())
         .map(|(dep_path, pkg)| {
-            if !skip_already_linked_shortcut && !force_index_dep_paths.contains(dep_path) {
+            // `force_index_dep_paths` is the project-local closure the
+            // linker materializes as real directories rather than
+            // shared-store symlinks, so its freshness test is a
+            // different one; those always take the verified path.
+            if let Some(plan) = already_linked_shortcut
+                && !force_index_dep_paths.contains(dep_path)
+            {
                 let entry_name = dep_path_to_filename(dep_path, virtual_store_dir_max_length);
-                if aube_dir.join(&entry_name).exists() {
+                let entry = aube_dir.join(&entry_name);
+                if plan.entry_is_current(&entry, dep_path, virtual_store_dir_max_length) {
                     return (dep_path.clone(), pkg, CheckResult::AlreadyLinked);
                 }
             }
@@ -849,6 +853,7 @@ where
             let sem = semaphore.clone();
             let store = store.clone();
             let client = client.clone();
+            let packument_cache_dir = packument_cache_dir.clone();
             let row = progress.map(|p| p.start_fetch(&display_name, &version));
             let bytes_progress = progress.cloned();
 
@@ -886,6 +891,7 @@ where
                                 &registry_name,
                                 &version,
                                 lockfile_url,
+                                &packument_cache_dir,
                             )
                             .await?;
                         }
@@ -1155,9 +1161,10 @@ async fn verify_lockfile_tarball_url(
     registry_name: &str,
     version: &str,
     lockfile_url: &str,
+    packument_cache_dir: &std::path::Path,
 ) -> miette::Result<()> {
     let packument = client
-        .fetch_packument_cached(registry_name, &packument_cache_dir())
+        .fetch_packument_cached(registry_name, packument_cache_dir)
         .await
         .map_err(|e| {
             miette!(

@@ -2,10 +2,9 @@ use super::{
     ListLocation, is_protected_key, read_merged, read_project_entries, read_user_entries,
     resolve_aliases, setting_default_value, setting_for_key,
 };
-use clap::Args;
 use miette::miette;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct GetArgs {
     /// The setting key.
     ///
@@ -14,18 +13,18 @@ pub struct GetArgs {
     pub key: String,
 
     /// Read only the user configuration.
-    #[arg(short = 'g', long, conflicts_with = "local")]
+    #[usage(short = 'g', long, conflicts = "--local")]
     pub global: bool,
 
     /// Emit the value as JSON.
     ///
     /// Matches `pnpm config get --json`: a missing key renders as
     /// `undefined`, a found value is JSON-encoded.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 
     /// Read only the project configuration.
-    #[arg(long, conflicts_with = "global")]
+    #[usage(long, conflicts = "--global")]
     pub local: bool,
 }
 

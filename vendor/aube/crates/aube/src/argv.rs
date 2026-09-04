@@ -41,8 +41,10 @@ pub(crate) fn extract_config_overrides(args: &mut Vec<OsString>) -> Vec<(String,
     out
 }
 
-/// Inspect `argv[0]` and, when invoked as a multicall shim (`aubr`, `aubx`),
-/// rewrite the argv so clap sees the equivalent `aube run …` / `aube dlx …`.
+/// Normalize package-manager and runtime shims into aube's command surface.
+///
+/// `aubr` and `aubx` remain intact: usage-rs executable views dispatch those directly from
+/// argv0, so this compatibility layer only handles the broader npm/pnpm/yarn/node aliases.
 pub(crate) fn rewrite_multicall_argv(mut args: Vec<OsString>) -> Vec<OsString> {
     normalize_npm_interpreter_shim_argv(&mut args);
     normalize_dispatcher_shim_argv(&mut args);
@@ -51,8 +53,7 @@ pub(crate) fn rewrite_multicall_argv(mut args: Vec<OsString>) -> Vec<OsString> {
     };
     let stem = crate::tool_shims::stem_of_argv0(argv0);
     let rewritten = match stem.as_str() {
-        "aubr" => rewrite_simple_multicall(args, "run"),
-        "aubx" => rewrite_simple_multicall(args, "dlx"),
+        "aubr" | "aubx" => args,
         "node" => rewrite_tool_to_subcommand(args, "node"),
         "npx" | "pnpx" => rewrite_dlx_tool_argv(args),
         "npm" => rewrite_npm_argv(args),
@@ -75,21 +76,6 @@ fn normalize_dispatcher_shim_argv(args: &mut Vec<OsString>) {
     }
     args[0] = OsString::from(tool);
     args.drain(1..=2);
-}
-
-fn rewrite_simple_multicall(mut args: Vec<OsString>, subcommand: &str) -> Vec<OsString> {
-    args[0] = OsString::from("aube");
-    // `--version` / `-V` belong to the top-level `aube` command; `run` and
-    // `dlx` don't accept them, and for `dlx` the bare word would be parsed
-    // as a package name and trigger a registry lookup.
-    if matches!(
-        args.get(1).and_then(|s| s.to_str()),
-        Some("--version") | Some("-V")
-    ) {
-        return args;
-    }
-    args.insert(1, OsString::from(subcommand));
-    args
 }
 
 fn rewrite_tool_to_subcommand(mut args: Vec<OsString>, subcommand: &str) -> Vec<OsString> {
@@ -295,6 +281,17 @@ fn normalize_npm_interpreter_shim_argv(args: &mut Vec<OsString>) {
 /// `aube --registry=URL install`, etc. keep parsing after those flags
 /// moved into per-command Args groups.
 pub(crate) fn lift_per_subcommand_flags(mut args: Vec<OsString>) -> Vec<OsString> {
+    if args
+        .first()
+        .map(|argv0| crate::tool_shims::stem_of_argv0(argv0.as_os_str()))
+        .is_some_and(|stem| matches!(stem.as_str(), "aubr" | "aubx"))
+    {
+        // An executable view has already selected `run` or `dlx`; flags before its first
+        // positional are therefore in the selected command's scope. Looking for another
+        // subcommand would mistake that positional for one and move the flags past it, where
+        // the command intentionally forwards them.
+        return args;
+    }
     // (long_name_without_dashes, takes_value)
     const LIFTED_LONGS: &[(&str, bool)] = &[
         ("frozen-lockfile", false),

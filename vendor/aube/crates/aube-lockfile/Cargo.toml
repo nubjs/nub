@@ -10,6 +10,12 @@ homepage.workspace = true
 readme.workspace = true
 include = ["src/**/*.rs"]
 
+[package.metadata.cargo-semver-checks.lints]
+# Lockfile errors are intended to grow as more invalid formats are diagnosed.
+# Keep additions visible in semver-check output without forcing a workspace-wide
+# major release for every new diagnostic variant.
+enum_variant_added = "warn"
+
 [dependencies]
 aube-codes = { workspace = true }
 aube-manifest = { workspace = true }

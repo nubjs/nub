@@ -31,7 +31,7 @@ inherits = "release"
 panic = "unwind"
 
 [workspace.package]
-version = "1.35.0"
+version = "2.2.9"
 edition = "2024"
 # DELIBERATE NUB FORK DELTA — do not converge to upstream on a sync.
 # Upstream holds this at 1.91 so mise (which embeds aube's library crates and
@@ -43,8 +43,8 @@ edition = "2024"
 # tarball validation). Preserve this on every aube bump — see the aube-bump skill.
 rust-version = "1.95"
 license = "MIT"
-repository = "https://github.com/jdx/aube"
-homepage = "https://github.com/jdx/aube"
+repository = "https://github.com/aubepkg/aube"
+homepage = "https://github.com/aubepkg/aube"
 readme = "README.md"
 
 [workspace.dependencies]
@@ -53,29 +53,31 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Node-API bindings
-napi = { version = "3.10.5", default-features = false, features = ["napi8", "tokio_rt", "dyn-symbols"] }
-napi-derive = "3.5.10"
-napi-build = "2.3.2"
+napi = { version = "3", default-features = false, features = ["napi8", "tokio_rt", "dyn-symbols"] }
+napi-derive = "3"
+napi-build = "2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
-yaml_serde = "0.10.4"
+spdx = "0.13"
+yaml_serde = "0.10"
 # Comment- and format-preserving YAML edits. Used by aube-manifest /
 # aube to surgically rewrite user-authored workspace YAML files
 # (catalogs, allowBuilds, patchedDependencies) without stripping
 # comments — yaml_serde's round-trip would otherwise destroy them.
-yamlpatch = "1.25"
+yamlpatch = ">=1.25, <1.28"
 # yamlpath 1.28 does not declare the Rust 1.97 requirement it inherits
 # from tree-sitter-iter 1.28, so resolver 3 cannot avoid it.
 yamlpath = ">=1.25, <1.28"
 sonic-rs = "0.5"
 serde_path_to_error = "0.1"
 toml = "1.1"
+toml_edit = "0.25"
 rkyv = "0.8"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+usage-rs = { version = "6", features = ["diagnostics", "completions", "validation"] }
 
 # Enum derives (Display/FromStr/etc.)
 strum = { version = "0.28", features = ["derive"] }
@@ -139,7 +141,7 @@ foldhash = "0.2"
 smallvec = { version = "1", features = ["serde"] }
 
 # Encoding
-base64 = "0.22"
+base64 = "0.23"
 
 # Sigstore (provenance attestation on `publish`)
 sigstore-sign = "0.11"
@@ -195,19 +197,19 @@ diffy = "0.5"
 # Internal crates — `version` is required so `cargo publish` can resolve
 # transitive crate dependencies via crates.io. release-plz keeps these
 # versions in sync with [workspace.package].version during release PRs.
-aube = { path = "crates/aube", version = "1.35.0", default-features = false }
-aube-codes = { path = "crates/aube-codes", version = "1.35.0" }
-aube-settings = { path = "crates/aube-settings", version = "1.35.0" }
-aube-resolver = { path = "crates/aube-resolver", version = "1.35.0" }
-aube-registry = { path = "crates/aube-registry", version = "1.35.0" }
-aube-store = { path = "crates/aube-store", version = "1.35.0" }
-aube-linker = { path = "crates/aube-linker", version = "1.35.0" }
-aube-lockfile = { path = "crates/aube-lockfile", version = "1.35.0" }
-aube-manifest = { path = "crates/aube-manifest", version = "1.35.0" }
-aube-runtime = { path = "crates/aube-runtime", version = "1.35.0" }
-aube-scripts = { path = "crates/aube-scripts", version = "1.35.0" }
-aube-workspace = { path = "crates/aube-workspace", version = "1.35.0" }
-aube-util = { path = "crates/aube-util", version = "1.35.0" }
+aube = { path = "crates/aube", version = "2", default-features = false }
+aube-codes = { path = "crates/aube-codes", version = "2" }
+aube-settings = { path = "crates/aube-settings", version = "2" }
+aube-resolver = { path = "crates/aube-resolver", version = "2" }
+aube-registry = { path = "crates/aube-registry", version = "2" }
+aube-store = { path = "crates/aube-store", version = "2" }
+aube-linker = { path = "crates/aube-linker", version = "2" }
+aube-lockfile = { path = "crates/aube-lockfile", version = "2" }
+aube-manifest = { path = "crates/aube-manifest", version = "2", default-features = false }
+aube-runtime = { path = "crates/aube-runtime", version = "2" }
+aube-scripts = { path = "crates/aube-scripts", version = "2" }
+aube-workspace = { path = "crates/aube-workspace", version = "2" }
+aube-util = { path = "crates/aube-util", version = "2" }
 
 [profile.dev]
 debug = 1

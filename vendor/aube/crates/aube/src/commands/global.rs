@@ -70,14 +70,63 @@ impl GlobalLayout {
         // A `global` leaf under the resolved root, matching pnpm's
         // `<home>/global`. Under our own data namespace there is no sibling
         // install to collide with, so the directory does not need the
-        // embedder's name in it.
-        let pkg_dir = setting_pkg.map_or_else(
-            || prefix_dir().map(|h| h.join("global")),
-            |p| Ok(p.join("global")),
-        )?;
+        // embedder's name in it — unlike the pre-2.0 layout, whose
+        // `global-<embedder>` leaf is what the migration scan still looks for.
+        let pkg_dir =
+            setting_pkg.map_or_else(|| default_pkg_dir("global"), |p| Ok(p.join("global")))?;
 
+        let legacy_subdir = format!("global-{}", aube_util::embedder().name);
+        warn_on_legacy_global_dir(&pkg_dir, &legacy_subdir);
         Ok(Self { bin_dir, pkg_dir })
     }
+}
+
+/// The branded home override (standalone aube → `AUBE_HOME`). When set it
+/// *is* the PATH-visible bin dir, and package installs go in a subdir of
+/// it — the pre-existing contract for people who opted in explicitly. An
+/// embedder with no `env_prefix` (nub) skips the branded var and takes the
+/// conventional resolution below.
+fn branded_home() -> Option<PathBuf> {
+    let prefix = aube_util::embedder().env_prefix?;
+    std::env::var(format!("{prefix}_HOME"))
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The tool's own data root: `$XDG_DATA_HOME/<ns>`, falling back to
+/// `~/.local/share/<ns>` (`%LOCALAPPDATA%\<ns>` on Windows). Same
+/// resolution `aube_store::dirs::store_dir` uses, so global installs land
+/// beside `store/`, `nodejs/`, and `shims/` instead of in a directory
+/// named after another package manager. `<ns>` is the active embedder's
+/// `data_namespace` (standalone aube → `aube`).
+///
+/// XDG is honored on every Unix, macOS included — aube already does that
+/// for the store and the packument cache, and the previous `~/Library/pnpm`
+/// special case was the one place a macOS user's explicit `XDG_DATA_HOME`
+/// was ignored (Discussion #1219).
+///
+/// Precedence matches `store_dir` exactly, including `%LOCALAPPDATA%`
+/// winning over `XDG_DATA_HOME` on Windows: the global dir and the content
+/// store must not end up under different roots on the same machine.
+fn data_root() -> miette::Result<PathBuf> {
+    let ns = aube_util::embedder().data_namespace;
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA")
+        && !local.is_empty()
+    {
+        return Ok(PathBuf::from(local).join(ns));
+    }
+    // Reached on every Unix, and on Windows when `%LOCALAPPDATA%` is
+    // missing — where an explicitly-set `XDG_DATA_HOME` is a better answer
+    // than failing outright, again mirroring `store_dir`.
+    let data_home = match aube_util::env::xdg_data_home() {
+        Some(xdg) => xdg,
+        None => aube_util::env::home_dir()
+            .ok_or_else(|| miette!("HOME is not set; can't locate global directory"))?
+            .join(".local/share"),
+    };
+    Ok(data_home.join(ns))
 }
 
 /// Resolve the PATH-visible directory global bins link into.
@@ -85,6 +134,8 @@ impl GlobalLayout {
 /// This follows the shared user-binary convention rather than owning a
 /// directory of our own, in that order:
 ///
+/// - the branded `<PREFIX>_HOME`, when the embedder declares one and the
+///   user set it — an explicit instruction, not a default to second-guess
 /// - `XDG_BIN_HOME`
 /// - `$XDG_DATA_HOME/../bin`, so a relocated XDG root is respected
 /// - `~/.local/bin`
@@ -99,15 +150,8 @@ impl GlobalLayout {
 /// there, so nothing may be overwritten without proving we own it — see
 /// [`bin_slot_is_writable`].
 fn default_bin_dir() -> miette::Result<PathBuf> {
-    // A tool with its own home var keeps owning both roots when the user sets
-    // it — an explicit `<PREFIX>_HOME` is a deliberate instruction, not a
-    // default to be second-guessed. An embedder with no `env_prefix` (nub)
-    // skips this and takes the conventional chain below.
-    if let Some(prefix) = aube_util::embedder().env_prefix
-        && let Ok(v) = std::env::var(format!("{prefix}_HOME"))
-        && !v.is_empty()
-    {
-        return Ok(PathBuf::from(v));
+    if let Some(home) = branded_home() {
+        return Ok(home);
     }
     if let Ok(v) = std::env::var("XDG_BIN_HOME")
         && !v.is_empty()
@@ -128,6 +172,16 @@ fn default_bin_dir() -> miette::Result<PathBuf> {
     Ok(home.join(".local/bin"))
 }
 
+/// Default for `globalDir` — where the physical per-package install dirs
+/// and their hash pointers live. A sibling of the bin directory, never a
+/// child: the PATH entry stays a directory of executables.
+fn default_pkg_dir(pkg_subdir: &str) -> miette::Result<PathBuf> {
+    if let Some(home) = branded_home() {
+        return Ok(home.join(pkg_subdir));
+    }
+    data_root().map(|d| d.join(pkg_subdir))
+}
+
 /// Resolve the root holding global package installs — distinct from the bin
 /// directory, which is shared and lives on PATH.
 ///
@@ -137,36 +191,126 @@ fn default_bin_dir() -> miette::Result<PathBuf> {
 /// manager. No `PNPM_HOME` and no pnpm-named path: a global operation does not
 /// consult whatever tool a project happens to use.
 pub fn prefix_dir() -> miette::Result<PathBuf> {
-    let ns = aube_util::embedder().data_namespace;
-    if let Some(prefix) = aube_util::embedder().env_prefix
-        && let Ok(v) = std::env::var(format!("{prefix}_HOME"))
-        && !v.is_empty()
-    {
-        return Ok(PathBuf::from(v));
+    if let Some(home) = branded_home() {
+        return Ok(home);
     }
-    if let Some(xdg) = aube_util::env::xdg_data_home() {
-        return Ok(xdg.join(ns));
-    }
-    #[cfg(windows)]
-    if let Ok(local) = std::env::var("LOCALAPPDATA")
-        && !local.is_empty()
-    {
-        return Ok(PathBuf::from(local).join(ns));
-    }
-    let home = aube_util::env::home_dir()
-        .ok_or_else(|| miette!("HOME is not set; can't locate the global directory"))?;
-    Ok(home.join(".local/share").join(ns))
+    data_root()
 }
 
-/// Whether `dir` is already an entry in `PATH`. Compared canonically so a
-/// symlinked home or a trailing slash does not read as absent and produce a
-/// warning telling the user to add something they already have.
-pub fn dir_is_on_path(dir: &Path) -> bool {
-    let want = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let Some(path) = std::env::var_os("PATH") else {
+/// Directories a pre-2.0 aube used as its global root, in the order that
+/// version consulted them. Read only to warn: aube never installs into,
+/// reads packages out of, or deletes anything under a pnpm-owned path.
+fn legacy_home_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(v) = std::env::var("PNPM_HOME")
+        && !v.is_empty()
+    {
+        out.push(PathBuf::from(v));
+    }
+    if cfg!(windows) {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            out.push(PathBuf::from(local).join("pnpm"));
+        }
+    } else if cfg!(target_os = "macos")
+        && let Some(home) = aube_util::env::home_dir()
+    {
+        out.push(home.join("Library/pnpm"));
+    }
+    if !cfg!(windows) {
+        match aube_util::env::xdg_data_home() {
+            Some(xdg) => out.push(xdg.join("pnpm")),
+            None => {
+                if let Some(home) = aube_util::env::home_dir() {
+                    out.push(home.join(".local/share/pnpm"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// True when `pkg_dir` holds at least one hash pointer — i.e. at least one
+/// global package is installed there.
+fn has_global_installs(pkg_dir: &Path) -> bool {
+    std::fs::read_dir(pkg_dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_type().is_ok_and(|t| t.is_symlink()))
+    })
+}
+
+/// Warn once per process when the caller has global packages stranded in
+/// a pre-2.0 (pnpm-named) location and none in the current one. Without
+/// this, `aube list -g` just comes back empty and the bins already on
+/// `$PATH` keep working while `remove -g` claims they aren't installed —
+/// the failure mode is silent, so the warning is the migration path.
+///
+/// `legacy_subdir` is the leaf the OLD layout used (`global-<embedder>`),
+/// which is not the leaf the current layout writes.
+fn warn_on_legacy_global_dir(pkg_dir: &Path, legacy_subdir: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if has_global_installs(pkg_dir) {
+            return;
+        }
+        let Some(legacy) = legacy_home_candidates()
+            .into_iter()
+            .find(|home| has_global_installs(&home.join(legacy_subdir)))
+        else {
+            return;
+        };
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_GLOBAL_DIR_LEGACY_LOCATION,
+            legacy_dir = %legacy.display(),
+            current_dir = %pkg_dir.display(),
+            "global packages from an older aube are still in {}; aube now keeps its own global \
+             directory at {}. Reinstall them with `{}`, or set {}_HOME={} to keep using the old \
+             location.",
+            legacy.display(),
+            pkg_dir.display(),
+            aube_util::cmd("add -g <pkg>"),
+            aube_util::embedder().env_prefix.unwrap_or("AUBE"),
+            legacy.display(),
+        );
+    });
+}
+
+/// Whether `bin_dir` is one of the directories in `path_var`. Compared
+/// canonically so a `$PATH` entry that reaches the same directory through a
+/// symlink (or a `~`-relative vs absolute spelling) still counts as a
+/// match; entries that don't resolve are compared verbatim.
+///
+/// `None` (an unset `PATH`) is not on `PATH` — nothing is — so it answers
+/// `false` rather than being treated as "can't tell, assume fine".
+fn bin_dir_on_path(bin_dir: &Path, path_var: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path_var else {
         return false;
     };
-    std::env::split_paths(&path).any(|entry| std::fs::canonicalize(&entry).unwrap_or(entry) == want)
+    let want = std::fs::canonicalize(bin_dir).unwrap_or_else(|_| bin_dir.to_path_buf());
+    std::env::split_paths(path).any(|entry| std::fs::canonicalize(&entry).unwrap_or(entry) == want)
+}
+
+/// Whether `dir` is already an entry in `PATH`. The public form of
+/// [`bin_dir_on_path`], for an embedder that wires PATH itself and so owns
+/// both the decision and the message — see [`warn_if_bin_dir_not_on_path`],
+/// which is the answer for one that does not.
+pub fn dir_is_on_path(dir: &Path) -> bool {
+    bin_dir_on_path(dir, std::env::var_os("PATH").as_deref())
+}
+
+/// Warn when `bin_dir` is absent from `$PATH`.
+pub fn warn_if_bin_dir_not_on_path(bin_dir: &Path) {
+    if bin_dir_on_path(bin_dir, std::env::var_os("PATH").as_deref()) {
+        return;
+    }
+    tracing::warn!(
+        code = aube_codes::warnings::WARN_AUBE_GLOBAL_BIN_DIR_NOT_ON_PATH,
+        bin_dir = %bin_dir.display(),
+        "{} is not on your PATH, so globally installed commands won't be found. Add it to PATH \
+         (e.g. `export PATH=\"{}:$PATH\"`), or set globalBinDir to a directory that already is.",
+        bin_dir.display(),
+        bin_dir.display(),
+    );
 }
 
 /// Create a fresh install directory under `pkg_dir`. Matches pnpm's naming
@@ -534,9 +678,15 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bins: &[OwnedBin]) {
                     } else {
                         link_parent.join(target)
                     };
+                    // The literal target, checked before resolving: a bin
+                    // whose path textually sits inside this install is ours
+                    // even when canonicalizing escapes into the shared
+                    // virtual store and `bin.target` was never captured.
+                    let lex = aube_linker::normalize_path(&absolute);
                     match std::fs::canonicalize(&absolute) {
                         Ok(resolved) => {
                             let ours = bin.target.as_ref().is_some_and(|t| *t == resolved)
+                                || lex.starts_with(&install_lex)
                                 || install_canon
                                     .as_ref()
                                     .is_some_and(|canon| resolved.starts_with(canon));
@@ -550,7 +700,6 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bins: &[OwnedBin]) {
                         // `<bin> -> global-<embedder>/<removed>` strays a
                         // previous leak left behind.
                         Err(_) => {
-                            let lex = aube_linker::normalize_path(&absolute);
                             if lex.starts_with(&install_lex)
                                 || install_canon
                                     .as_ref()
@@ -756,6 +905,33 @@ mod tests {
         let a = cache_key(&["lodash".into(), "chalk".into()], &regs);
         let b = cache_key(&["chalk".into(), "lodash".into()], &regs);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn bin_dir_on_path_matches_a_listed_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = std::env::join_paths(["/usr/bin".as_ref(), bin.as_os_str()]).unwrap();
+        assert!(bin_dir_on_path(&bin, Some(&path)));
+    }
+
+    #[test]
+    fn bin_dir_on_path_rejects_an_absent_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = std::env::join_paths(["/usr/bin"]).unwrap();
+        assert!(!bin_dir_on_path(&bin, Some(&path)));
+    }
+
+    /// An unset `PATH` means the bin is unreachable, so `add -g` must still
+    /// warn — the check can't quietly pass because it has nothing to search.
+    #[test]
+    fn bin_dir_on_path_is_false_when_path_is_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!bin_dir_on_path(dir.path(), None));
+        assert!(!bin_dir_on_path(dir.path(), Some(std::ffi::OsStr::new(""))));
     }
 
     #[test]

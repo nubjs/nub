@@ -29,31 +29,30 @@ use crate::commands::{encode_package_name, ensure_registry_auth_for_package, spl
 use aube_manifest::PackageJson;
 use aube_registry::client::RegistryClient;
 use aube_registry::config::{NpmConfig, normalize_registry_url_pub};
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use serde_json::Value;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct UnpublishArgs {
     /// Don't talk to the registry; print what the command would do.
-    #[arg(long)]
+    #[usage(long)]
     pub dry_run: bool,
     /// Required for whole-package unpublish (no `@version` in the spec).
     ///
     /// Single-version unpublish works without it — matching npm,
     /// which is more permissive about dropping one version than
     /// nuking every version in one call.
-    #[arg(short, long)]
+    #[usage(short, long)]
     pub force: bool,
     /// One-time password for registries that require 2FA.
     ///
     /// Sent verbatim as the `npm-otp` header.
-    #[arg(long, value_name = "CODE")]
+    #[usage(long, value_name = "CODE")]
     pub otp: Option<String>,
     /// Package spec: `name`, `name@version`, or omitted to use the
     /// current project's `package.json`.
     pub spec: Option<String>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 

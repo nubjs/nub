@@ -3,7 +3,7 @@
   "version": "0.0.0-placeholder",
   "description": "Node-API bindings for embedding the aube package manager",
   "license": "MIT",
-  "repository": "https://github.com/jdx/aube",
+  "repository": "https://github.com/aubepkg/aube",
   "main": "index.js",
   "types": "index.d.ts",
   "exports": {

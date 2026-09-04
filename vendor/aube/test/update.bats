@@ -68,6 +68,109 @@ EOF
 	assert_file_exists node_modules/is-odd/index.js
 }
 
+@test "aube update warns when minimumReleaseAge hides a newer version" {
+	_setup_outdated_project
+	# Put the cutoff between is-odd@3.0.0 and 3.0.1.
+	age_minutes="$(node -e "console.log(Math.floor((Date.now() - Date.parse('2018-05-31T08:00:00.000Z')) / 60000))")"
+	cat >pnpm-workspace.yaml <<EOF
+packages:
+  - "."
+minimumReleaseAge: $age_minutes
+minimumReleaseAgeStrict: true
+EOF
+
+	run aube update --latest --lockfile-only is-odd
+	assert_success
+	assert_output --partial "updates hidden by minimumReleaseAge: is-odd@3.0.1"
+	run grep 'is-odd@3.0.0' aube-lock.yaml
+	assert_success
+}
+
+@test "aube update runs pnpm:devPreinstall before resolution" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-update",
+  "version": "0.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").mkdirSync(\"generated\"); require(\"fs\").writeFileSync(\"generated/package.json\", JSON.stringify({name:\"generated\",version:\"1.0.0\"}))'"
+  },
+  "dependencies": {
+    "generated": "file:./generated"
+  }
+}
+EOF
+
+	run aube update
+	assert_success
+	assert_file_exists generated/package.json
+}
+
+@test "aube update --ignore-scripts skips pnpm:devPreinstall" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-update",
+  "version": "0.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"dev.marker\", \"ran\")'"
+  }
+}
+EOF
+
+	run aube update --ignore-scripts
+	assert_success
+	assert_file_not_exists dev.marker
+}
+
+@test "aube update configures the devPreinstall script environment" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-update",
+  "version": "0.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"env.marker\", `${process.env.npm_command}\\n${process.env.npm_node_execpath}\\n`)'"
+  }
+}
+EOF
+
+	run aube update
+	assert_success
+	run sed -n '1p' env.marker
+	assert_output "update"
+	run sed -n '2p' env.marker
+	assert_output --regexp '.+node.*'
+}
+
+@test "aube update from a workspace member runs only the root pnpm:devPreinstall" {
+	mkdir -p packages/app
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+YAML
+	cat >package.json <<'JSON'
+{
+  "name": "root",
+  "version": "1.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"root.marker\", \"ran\")'"
+  }
+}
+JSON
+	cat >packages/app/package.json <<'JSON'
+{
+  "name": "app",
+  "version": "1.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"member.marker\", \"ran\")'"
+  }
+}
+JSON
+
+	run bash -c "cd packages/app && aube update"
+	assert_success
+	assert_file_exists root.marker
+	assert_file_not_exists packages/app/member.marker
+}
+
 @test "aube update: reports version change in output" {
 	_setup_outdated_project
 
@@ -166,6 +269,8 @@ EOF
 
 	run aube update -r --latest is-odd --lockfile-only
 	assert_success
+	install_runs="$(printf '%s\n' "$output" | grep -c 'Lockfile is up to date')"
+	[ "$install_runs" -eq 1 ]
 
 	run grep 'is-odd: 3.0.1' aube-workspace.yaml
 	assert_success
@@ -180,6 +285,43 @@ EOF
 	done
 }
 
+@test "aube update -r --latest preserves unrelated shared catalog entries" {
+	mkdir -p packages/a packages/b
+	cat >package.json <<'EOF'
+{"name":"catalog-update-root","private":true}
+EOF
+	cat >aube-workspace.yaml <<'EOF'
+packages:
+  - packages/*
+catalog:
+  is-odd: 0.1.2
+  is-even: 1.0.0
+EOF
+	cat >packages/a/package.json <<'EOF'
+{"name":"a","private":true,"dependencies":{"is-odd":"catalog:"}}
+EOF
+	cat >packages/b/package.json <<'EOF'
+{"name":"b","private":true,"dependencies":{"is-even":"catalog:"}}
+EOF
+	run aube install --lockfile-only
+	assert_success
+
+	run aube update -r --latest is-odd --lockfile-only
+	assert_success
+
+	run grep -A8 '^catalogs:' aube-lock.yaml
+	assert_output --partial 'is-odd:'
+	assert_output --partial 'is-even:'
+}
+
+@test "aube update -r skips deferred install when no importer updates" {
+	_setup_catalog_update_workspace
+
+	run aube update -r --latest does-not-exist --lockfile-only
+	assert_success
+	refute_output --partial 'Lockfile is up to date'
+}
+
 @test "aube update -r --latest --no-save leaves the catalog range unchanged" {
 	_setup_catalog_update_workspace
 
@@ -190,7 +332,7 @@ EOF
 	assert_success
 	run grep -A4 '^catalogs:' aube-lock.yaml
 	assert_output --partial 'specifier: 0.1.2'
-	assert_output --partial 'version: 3.0.1'
+	assert_output --partial 'version: 0.1.2'
 }
 
 @test "aube update -r --latest updates a named catalog and preserves its prefix" {
@@ -382,6 +524,23 @@ EOF
 	# The lockfile picked up a newer version than 0.1.2 (the seed pin).
 	run grep -c 'is-odd@3' aube-lock.yaml
 	assert_success
+}
+
+@test "aube update --latest --no-save: does not resolve past the kept range" {
+	_setup_outdated_project
+	sed -i.bak 's/>=0.1.0/^0.1.0/g' package.json
+	rm package.json.bak
+
+	run aube update --latest --no-save is-odd --lockfile-only
+	assert_success
+
+	run grep '"is-odd": "^0.1.0"' package.json
+	assert_success
+	run grep -A3 'is-odd:' aube-lock.yaml
+	assert_output --partial 'specifier: ^0.1.0'
+	assert_output --partial 'version: 0.1.2'
+	run grep -c 'is-odd@3' aube-lock.yaml
+	assert_failure
 }
 
 @test "aube update --lockfile-only: refreshes lockfile without populating node_modules" {

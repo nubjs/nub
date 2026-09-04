@@ -28,35 +28,35 @@
 //! "already published" error, leaving the registry itself to decide
 //! whether a republish is allowed.
 
-use crate::commands::pack::{
-    BuiltArchive, build_archive, build_archive_with_package_json, tarball_filename,
-};
+use crate::commands::pack::{BuiltArchive, build_archive_with_package_json, tarball_filename};
 use crate::commands::{encode_package_name, ensure_registry_auth_for_package};
 use aube_manifest::PackageJson;
 use aube_registry::client::RegistryClient;
 use aube_registry::config::{NpmConfig, normalize_registry_url_pub};
 use base64::Engine;
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use reqwest::Url;
 use serde::Deserialize;
 use sha2::Digest as _;
 use sha2::Sha512;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PublishArgs {
+    /// Tarball or package directory to publish (default: current package).
+    #[usage(arg, name = "TARBALL|FOLDER")]
+    pub package: Option<PathBuf>,
     /// Publish as `public` or `restricted`.
     ///
     /// Sent as the `access` field in the publish body; scoped
     /// packages default to `restricted` on the registry side, so
     /// pass `--access=public` to make a new scoped package
     /// world-readable.
-    #[arg(long, value_name = "LEVEL")]
+    #[usage(long, value_name = "LEVEL")]
     pub access: Option<String>,
     /// Don't upload; print what would be published.
-    #[arg(long)]
+    #[usage(long)]
     pub dry_run: bool,
     /// Republish even when the version is already on the registry.
     ///
@@ -68,31 +68,31 @@ pub struct PublishArgs {
     /// package is re-PUT. The registry must still accept the
     /// republish — npm's public registry rejects re-publishes
     /// outright; Verdaccio and most private mirrors allow them.
-    #[arg(long)]
+    #[usage(long)]
     pub force: bool,
     /// Skip publish lifecycle scripts.
     ///
     /// Suppresses `prepublishOnly`, `prepublish`, `prepack`, `prepare`,
     /// `postpack`, `publish`, and `postpublish` scripts for this
     /// publish.
-    #[arg(long)]
+    #[usage(long)]
     pub ignore_scripts: bool,
     /// Emit the publish result as JSON.
     ///
     /// Output matches `npm publish --json` / `pnpm publish --json`; recursive multi-package publishes emit an array.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
     /// Skip the "working tree must be clean" check.
     ///
     /// When unset, aube refuses to publish from a dirty git checkout
     /// (uncommitted tracked changes) or from a detached / non-release
     /// branch.
-    #[arg(long)]
+    #[usage(long)]
     pub no_git_checks: bool,
     /// One-time password for registries that require 2FA.
     ///
     /// Sent verbatim as the `npm-otp` header.
-    #[arg(long, value_name = "CODE")]
+    #[usage(long, value_name = "CODE")]
     pub otp: Option<String>,
     /// Generate a SLSA provenance attestation and attach it to the publish
     /// body.
@@ -103,12 +103,12 @@ pub struct PublishArgs {
     /// and attaches the resulting bundle so registries that honor
     /// npm's provenance protocol light up the "provenance" badge on
     /// the published version.
-    #[arg(long)]
+    #[usage(long)]
     pub provenance: bool,
     /// Default dist-tag to publish under (default: `latest`).
-    #[arg(long, value_name = "TAG")]
+    #[usage(long, value_name = "TAG")]
     pub tag: Option<String>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
@@ -117,26 +117,86 @@ pub async fn run(
     filter: aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
     args.network.install_overrides();
-    let cwd = crate::dirs::project_root()?;
-
-    if !args.no_git_checks {
-        enforce_git_checks(&cwd)?;
-    }
 
     if !filter.is_empty() {
-        return run_recursive(&cwd, &args, &filter, args.network.registry.as_deref()).await;
+        if args.package.is_some() {
+            return Err(miette!(
+                code = aube_codes::errors::ERR_AUBE_RECURSIVE_NOT_SUPPORTED,
+                "{}: an explicit tarball or folder cannot be combined with --recursive or --filter",
+                aube_util::cmd("publish")
+            ));
+        }
+        let project_root = crate::dirs::project_root()?;
+        if !args.no_git_checks {
+            enforce_git_checks(&project_root)?;
+        }
+        return run_recursive(
+            &project_root,
+            &args,
+            &filter,
+            args.network.registry.as_deref(),
+        )
+        .await;
     }
 
-    // Single-package mode: config_root == pkg_dir == cwd.
-    let config = super::load_npm_config(&cwd);
-    let policy = super::resolve_fetch_policy(&cwd);
+    let invocation_cwd = crate::dirs::cwd()?;
+    let package = args.package.as_deref();
+    let source = match package {
+        Some(path) => {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                invocation_cwd.join(path)
+            }
+        }
+        None => crate::dirs::project_root()?,
+    };
+
+    if source.is_dir() {
+        if !args.no_git_checks {
+            enforce_git_checks(&source)?;
+        }
+        let config = super::load_npm_config(&source);
+        let policy = super::resolve_fetch_policy(&source);
+        let client = RegistryClient::from_config_with_policy(config.clone(), policy);
+        let outcome = publish_one(
+            &source,
+            &config,
+            &client,
+            &args,
+            false,
+            args.network.registry.as_deref(),
+        )
+        .await?;
+        emit_outcome(&outcome, args.json)?;
+        return Ok(());
+    }
+
+    if !source.is_file() {
+        return Err(miette!(
+            code = aube_codes::errors::ERR_AUBE_PUBLISH_SOURCE_NOT_FOUND,
+            "publish source does not exist: {}",
+            source.display()
+        ));
+    }
+
+    let config_root = crate::dirs::project_root_or_cwd()?;
+    let config = super::load_npm_config(&config_root);
+    let policy = super::resolve_fetch_policy(&config_root);
     let client = RegistryClient::from_config_with_policy(config.clone(), policy);
-    let outcome = publish_one(
-        &cwd,
+    let tarball_path = source.clone();
+    let (archive, manifest) =
+        tokio::task::spawn_blocking(move || read_publish_tarball(&tarball_path))
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| format!("publish tarball task failed for {}", source.display()))??;
+    let outcome = publish_tarball(
+        archive,
+        manifest,
+        &source,
         &config,
         &client,
         &args,
-        false,
         args.network.registry.as_deref(),
     )
     .await?;
@@ -355,6 +415,14 @@ struct PublishOutcome {
     status: PublishStatus,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct PublishTarget {
+    name: String,
+    version: String,
+    registry_url: String,
+    tag: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishStatus {
     Published,
@@ -374,85 +442,40 @@ async fn publish_one(
     fanout: bool,
     registry_override: Option<&str>,
 ) -> miette::Result<PublishOutcome> {
-    // Read the manifest *first* so the name/version needed for the
-    // existence check are available without touching the filesystem
-    // for file collection or the CPU for gzip/SHA hashing. This is the
-    // whole reason re-running `aube publish -r` on a mostly-published
-    // workspace is cheap — the happy-path skip must not pay the cost
-    // of a packed tarball.
+    // Resolve the initial target before lifecycle hooks so an
+    // already-published package in a recursive fanout keeps its
+    // script-free, archive-free fast path, matching pnpm. A direct
+    // publish must still run hooks before deciding which final target
+    // is already published because a hook can rewrite that identity.
     let manifest = PackageJson::from_path(&pkg_dir.join("package.json"))
         .map_err(miette::Report::new)
         .wrap_err_with(|| format!("failed to read {}/package.json", pkg_dir.display()))?;
-    let name = manifest
-        .name
-        .as_deref()
-        .ok_or_else(|| miette!("publish: {}/package.json has no `name`", pkg_dir.display()))?
-        .to_string();
-    let version = normalize_publish_version(manifest.version.as_deref().ok_or_else(|| {
-        miette!(
-            "publish: {}/package.json has no `version`",
-            pkg_dir.display()
+    let initial_target =
+        resolve_publish_target(&manifest, pkg_dir, config, args, registry_override)?;
+    let initial_already_published = !args.dry_run
+        && !args.force
+        && version_on_registry(
+            client,
+            &initial_target.registry_url,
+            &initial_target.name,
+            &initial_target.version,
         )
-    })?);
-
-    // publishConfig in package.json overrides both registry and tag
-    // if the user has not passed CLI flags. pnpm and npm both honor
-    // this field, so without it migrating users would silently
-    // publish to the wrong place. Most common case: scoped private
-    // registries like `{"publishConfig": {"registry": "https://npm.pkg.github.com"}}`
-    // and `{"publishConfig": {"access": "public"}}` for first-time
-    // scoped-public publishes. CLI override still wins over the
-    // manifest setting, matching pnpm precedence.
-    let publish_config = manifest
-        .extra
-        .get("publishConfig")
-        .and_then(|v| v.as_object());
-    let pc_registry = publish_config
-        .and_then(|p| p.get("registry"))
-        .and_then(|v| v.as_str());
-    let pc_tag = publish_config
-        .and_then(|p| p.get("tag"))
-        .and_then(|v| v.as_str());
-
-    let registry_url = registry_override
-        .map(normalize_registry_url_pub)
-        .or_else(|| pc_registry.map(normalize_registry_url_pub))
-        .unwrap_or_else(|| config.registry_for(&name).to_string());
-
-    let tag = args
-        .tag
-        .as_deref()
-        .or(pc_tag)
-        .unwrap_or("latest")
-        .to_string();
-
-    if args.dry_run {
-        // Dry-run still runs the pre-publish chain so users can smoke-test
-        // their `prepublishOnly` / `prepack` / `prepare` scripts without
-        // hitting the registry, matching pnpm. `publish` / `postpublish`
-        // are skipped — nothing was actually uploaded.
-        run_publish_lifecycle_pre(pkg_dir, &manifest, args.ignore_scripts).await?;
-        let archive = build_archive_for_publish(pkg_dir)?;
-        super::pack::run_pack_lifecycle_post(pkg_dir, args.ignore_scripts).await?;
-        // `--dry-run --provenance` is a common "does my CI actually have
-        // OIDC wired up?" smoke test. Silently skipping the OIDC probe
-        // here would give a false green light — so we run the ambient
-        // detection even in dry-run mode. We stop short of the Fulcio /
-        // Rekor round-trip because (a) we don't want to spam the public
-        // tlog with throwaway entries and (b) dry-run should be cheap.
-        if args.provenance {
-            crate::commands::publish_provenance::probe_oidc_available()
-                .await
-                .wrap_err("--dry-run --provenance: OIDC probe failed")?;
-        }
+        .await;
+    if initial_already_published && fanout {
         return Ok(PublishOutcome {
-            name: archive.name.clone(),
-            version: archive.version.clone(),
-            registry_url,
-            archive: Some(archive),
-            status: PublishStatus::DryRun,
+            name: initial_target.name,
+            version: initial_target.version,
+            registry_url: initial_target.registry_url,
+            archive: None,
+            status: PublishStatus::AlreadyPublished,
         });
     }
+
+    // Hooks may rewrite name, version, registry, or tag. Re-resolve the
+    // complete target afterward and recheck the registry if it changed.
+    run_publish_lifecycle_pre(pkg_dir, &manifest, args.ignore_scripts).await?;
+    let manifest = super::pack::read_root_manifest(pkg_dir)?;
+    let target = resolve_publish_target(&manifest, pkg_dir, config, args, registry_override)?;
 
     // Pre-flight: ask the registry whether `name@version` is already
     // there. In fanout mode a hit is a silent skip (so `-r publish` is
@@ -461,42 +484,79 @@ async fn publish_one(
     // opts out of both: it turns the skip into a PUT and suppresses
     // the single-package error, leaving the registry to decide whether
     // a republish is allowed (npm refuses, Verdaccio usually accepts).
-    if !args.force && version_on_registry(client, &registry_url, &name, &version).await {
+    let already_published = if args.dry_run || args.force {
+        false
+    } else if target == initial_target {
+        initial_already_published
+    } else {
+        version_on_registry(client, &target.registry_url, &target.name, &target.version).await
+    };
+    if already_published {
         if fanout {
             return Ok(PublishOutcome {
-                name,
-                version,
-                registry_url,
+                name: target.name,
+                version: target.version,
+                registry_url: target.registry_url,
                 archive: None,
                 status: PublishStatus::AlreadyPublished,
             });
         }
-        return Err(miette!(
-            "{}: {name}@{version} is already on {}\n\
-             help: pass --force to republish (the registry must allow it; npm's public registry does not)",
-            aube_util::cmd("publish"),
-            aube_util::url::redact_url(&registry_url),
-        ));
+        return Err(already_published_error(&target));
     }
 
-    // Lifecycle hooks + tarball build only happen now that we know
-    // we're actually going to PUT. For a re-run of `-r publish` where
-    // every package is already on the registry, the loop never reaches
-    // this point and the whole fanout is script-free and gzip-free.
-    run_publish_lifecycle_pre(pkg_dir, &manifest, args.ignore_scripts).await?;
-    let archive = build_archive_for_publish(pkg_dir)?;
+    // The tarball build only happens now that we know we're actually
+    // going to PUT. A recursive no-op publish still avoids file
+    // collection, gzip, and body hashing.
+    let (archive, manifest) = build_archive_for_publish(pkg_dir)?;
     super::pack::run_pack_lifecycle_post(pkg_dir, args.ignore_scripts).await?;
 
-    // Re-read the manifest *after* the pre-pack chain. Publish-time
-    // hooks often rewrite `package.json` on the fly — `clean-package`
-    // strips `devDependencies`, build tools inject `exports`, a
-    // `prepublishOnly` might stamp a git SHA into the version. The
-    // tarball always reflects the on-disk state (`build_archive`
-    // reads it fresh), so the registry-visible metadata at
-    // `versions.<v>.*` and the env seen by `publish` / `postpublish`
-    // must agree with it or consumers get a mismatch between
-    // `npm info` output and the tarball they actually download.
-    let manifest = super::pack::read_root_manifest(pkg_dir)?;
+    publish_archive(archive, manifest, target, client, args, Some(pkg_dir)).await
+}
+
+async fn publish_tarball(
+    archive: BuiltArchive,
+    manifest: PackageJson,
+    tarball_path: &Path,
+    config: &NpmConfig,
+    client: &RegistryClient,
+    args: &PublishArgs,
+    registry_override: Option<&str>,
+) -> miette::Result<PublishOutcome> {
+    let target = resolve_publish_target(&manifest, tarball_path, config, args, registry_override)?;
+    if !args.dry_run
+        && !args.force
+        && version_on_registry(client, &target.registry_url, &target.name, &target.version).await
+    {
+        return Err(already_published_error(&target));
+    }
+
+    publish_archive(archive, manifest, target, client, args, None).await
+}
+
+async fn publish_archive(
+    archive: BuiltArchive,
+    manifest: PackageJson,
+    target: PublishTarget,
+    client: &RegistryClient,
+    args: &PublishArgs,
+    lifecycle_dir: Option<&Path>,
+) -> miette::Result<PublishOutcome> {
+    if args.dry_run {
+        // Verify ambient OIDC availability without contacting Fulcio/Rekor,
+        // keeping dry-run side-effect free while still validating CI setup.
+        if args.provenance {
+            crate::commands::publish_provenance::probe_oidc_available()
+                .await
+                .wrap_err("--dry-run --provenance: OIDC probe failed")?;
+        }
+        return Ok(PublishOutcome {
+            name: archive.name.clone(),
+            version: archive.version.clone(),
+            registry_url: target.registry_url,
+            archive: Some(archive),
+            status: PublishStatus::DryRun,
+        });
+    }
 
     // Sigstore signing is the one step here that can take seconds
     // (Fulcio + Rekor + optional TSA round-trips), so we do it *before*
@@ -534,22 +594,23 @@ async fn publish_one(
     let body = build_publish_body(
         &archive,
         &manifest,
-        &registry_url,
-        &tag,
+        &target.registry_url,
+        &target.tag,
         effective_access,
         provenance_bundle.as_deref(),
     )?;
 
-    let url = put_url(&registry_url, &archive.name);
-    let trusted_publish_token = trusted_publish_token(client, &registry_url, &archive.name).await?;
+    let url = put_url(&target.registry_url, &target.name);
+    let trusted_publish_token =
+        trusted_publish_token(client, &target.registry_url, &target.name).await?;
     if trusted_publish_token.is_none() {
-        ensure_registry_auth_for_package(client, &registry_url, &archive.name)?;
+        ensure_registry_auth_for_package(client, &target.registry_url, &target.name)?;
     }
     let body_bytes = serde_json::to_vec(&body).into_diagnostic()?;
     match send_publish_put(
         client,
         &url,
-        &registry_url,
+        &target.registry_url,
         &archive.name,
         body_bytes.clone(),
         trusted_publish_token.as_deref(),
@@ -563,7 +624,7 @@ async fn publish_one(
             if let Err(second) = send_publish_put(
                 client,
                 &url,
-                &registry_url,
+                &target.registry_url,
                 &archive.name,
                 body_bytes,
                 trusted_publish_token.as_deref(),
@@ -577,12 +638,14 @@ async fn publish_one(
         Err(failure) => return Err(publish_failure_report(failure)),
     }
 
-    run_publish_lifecycle_post(pkg_dir, &manifest, args.ignore_scripts).await?;
+    if let Some(pkg_dir) = lifecycle_dir {
+        run_publish_lifecycle_post(pkg_dir, &manifest, args.ignore_scripts).await?;
+    }
 
     Ok(PublishOutcome {
         name: archive.name.clone(),
         version: archive.version.clone(),
-        registry_url,
+        registry_url: target.registry_url,
         archive: Some(archive),
         status: PublishStatus::Published,
     })
@@ -590,36 +653,229 @@ async fn publish_one(
 
 fn normalize_archive_for_publish(archive: &mut BuiltArchive) {
     let version = normalize_publish_version(&archive.version);
-    if version != archive.version {
-        archive.version = version;
-        archive.filename = tarball_filename(&archive.name, &archive.version);
-    }
+    archive.version = version;
+    archive.filename = tarball_filename(&archive.name, &archive.version);
 }
 
-fn build_archive_for_publish(pkg_dir: &Path) -> miette::Result<BuiltArchive> {
+fn published_name(manifest: &PackageJson) -> miette::Result<String> {
+    let manifest_name = manifest
+        .name
+        .as_deref()
+        .ok_or_else(|| miette!("package.json has no `name`"))?;
+    Ok(manifest
+        .extra
+        .get("publishConfig")
+        .and_then(|value| value.as_object())
+        .and_then(|config| config.get("name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or(manifest_name)
+        .to_string())
+}
+
+fn resolve_publish_target(
+    manifest: &PackageJson,
+    pkg_dir: &Path,
+    config: &NpmConfig,
+    args: &PublishArgs,
+    registry_override: Option<&str>,
+) -> miette::Result<PublishTarget> {
+    let name = published_name(manifest)
+        .wrap_err_with(|| format!("publish: invalid {}/package.json", pkg_dir.display()))?;
+    let version = normalize_publish_version(manifest.version.as_deref().ok_or_else(|| {
+        miette!(
+            "publish: {}/package.json has no `version`",
+            pkg_dir.display()
+        )
+    })?);
+
+    // publishConfig overrides the published name and, when the user has
+    // not passed CLI flags, the registry and tag. The manifest name stays
+    // the workspace identity; only registry-facing operations use the
+    // published target.
+    let publish_config = manifest
+        .extra
+        .get("publishConfig")
+        .and_then(|value| value.as_object());
+    let registry_url = registry_override
+        .map(normalize_registry_url_pub)
+        .or_else(|| {
+            publish_config
+                .and_then(|config| config.get("registry"))
+                .and_then(|value| value.as_str())
+                .map(normalize_registry_url_pub)
+        })
+        .unwrap_or_else(|| config.registry_for(&name).to_string());
+    let tag = args
+        .tag
+        .as_deref()
+        .or_else(|| {
+            publish_config
+                .and_then(|config| config.get("tag"))
+                .and_then(|value| value.as_str())
+        })
+        .unwrap_or("latest")
+        .to_string();
+
+    Ok(PublishTarget {
+        name,
+        version,
+        registry_url,
+        tag,
+    })
+}
+
+fn already_published_error(target: &PublishTarget) -> miette::Report {
+    miette!(
+        "{}: {}@{} is already on {}\n\
+         help: pass --force to republish (the registry must allow it; npm's public registry does not)",
+        aube_util::cmd("publish"),
+        target.name,
+        target.version,
+        aube_util::url::redact_url(&target.registry_url),
+    )
+}
+
+const MAX_PUBLISH_TARBALL_DECOMPRESSED_BYTES: u64 = 1 << 30;
+const MAX_PUBLISH_TARBALL_ENTRIES: usize = 200_000;
+const MAX_PUBLISH_PACKAGE_JSON_BYTES: u64 = 8 << 20;
+
+fn invalid_publish_tarball(path: &Path, reason: impl std::fmt::Display) -> miette::Report {
+    miette!(
+        code = aube_codes::errors::ERR_AUBE_TARBALL_EXTRACT,
+        "invalid publish tarball {}: {reason}",
+        path.display()
+    )
+}
+
+/// Load a prebuilt npm tarball without rewriting it. Only metadata needed for
+/// the registry document and publish report is decoded; the original gzip
+/// bytes remain the attachment that gets hashed, signed, and uploaded.
+fn read_publish_tarball(path: &Path) -> miette::Result<(BuiltArchive, PackageJson)> {
+    let tarball = std::fs::read(path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read publish tarball {}", path.display()))?;
+    if !tarball.starts_with(&[0x1f, 0x8b]) {
+        return Err(invalid_publish_tarball(
+            path,
+            "input is not gzip-compressed",
+        ));
+    }
+    let gz = flate2::read::GzDecoder::new(tarball.as_slice());
+    let capped = gz.take(MAX_PUBLISH_TARBALL_DECOMPRESSED_BYTES);
+    let mut archive = tar::Archive::new(capped);
+    let entries = archive
+        .entries()
+        .map_err(|e| invalid_publish_tarball(path, e))?;
+
+    let mut files = Vec::new();
+    let mut unpacked_size = 0_u64;
+    let mut manifest_bytes = None;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_PUBLISH_TARBALL_ENTRIES {
+            return Err(invalid_publish_tarball(
+                path,
+                format_args!("archive exceeds {MAX_PUBLISH_TARBALL_ENTRIES} entries"),
+            ));
+        }
+        let mut entry = entry.map_err(|e| invalid_publish_tarball(path, e))?;
+        let entry_path = entry
+            .path()
+            .map_err(|e| invalid_publish_tarball(path, e))?
+            .into_owned();
+        let is_file = entry.header().entry_type().is_file();
+        if is_file {
+            unpacked_size = unpacked_size
+                .checked_add(entry.size())
+                .ok_or_else(|| invalid_publish_tarball(path, "unpacked size overflow"))?;
+            let relative = entry_path.components().skip(1).collect::<PathBuf>();
+            if !relative.as_os_str().is_empty() {
+                files.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+
+        let is_manifest = is_file
+            && entry_path.components().count() == 2
+            && entry_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "package.json");
+        if is_manifest && manifest_bytes.is_none() {
+            let mut bytes = Vec::new();
+            entry
+                .by_ref()
+                .take(MAX_PUBLISH_PACKAGE_JSON_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| invalid_publish_tarball(path, e))?;
+            if bytes.len() as u64 > MAX_PUBLISH_PACKAGE_JSON_BYTES {
+                return Err(invalid_publish_tarball(path, "package.json exceeds 8 MiB"));
+            }
+            manifest_bytes = Some(bytes);
+        }
+    }
+
+    let manifest_bytes = manifest_bytes
+        .ok_or_else(|| invalid_publish_tarball(path, "archive has no top-level package.json"))?;
+    let manifest: PackageJson = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| invalid_publish_tarball(path, format_args!("invalid package.json: {e}")))?;
+    let name = published_name(&manifest).map_err(|e| invalid_publish_tarball(path, e))?;
+    let version = normalize_publish_version(
+        manifest
+            .version
+            .as_deref()
+            .ok_or_else(|| invalid_publish_tarball(path, "package.json has no `version`"))?,
+    );
+
+    Ok((
+        BuiltArchive {
+            filename: tarball_filename(&name, &version),
+            name,
+            version,
+            files,
+            unpacked_size,
+            tarball,
+        },
+        manifest,
+    ))
+}
+
+fn build_archive_for_publish(pkg_dir: &Path) -> miette::Result<(BuiltArchive, PackageJson)> {
     let manifest_path = pkg_dir.join("package.json");
     let manifest_bytes = std::fs::read(&manifest_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest: PackageJson = serde_json::from_slice(&manifest_bytes)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to parse {}", manifest_path.display()))?;
+    let name = published_name(&manifest)
+        .wrap_err_with(|| format!("publish: invalid {}", manifest_path.display()))?;
     let mut manifest_json: serde_json::Value =
         serde_json::from_slice(&manifest_bytes).into_diagnostic()?;
+    super::pack::rewrite_catalog_dependencies(pkg_dir, &mut manifest_json)?;
+    if let Some(obj) = manifest_json.as_object_mut() {
+        obj.insert("name".into(), name.clone().into());
+    }
     let Some(raw_version) = manifest_json.get("version").and_then(|v| v.as_str()) else {
-        return build_archive(pkg_dir);
+        let rewritten_manifest = serde_json::from_value(manifest_json.clone()).into_diagnostic()?;
+        let mut archive = build_archive_with_package_json(
+            pkg_dir,
+            Some(serde_json::to_vec_pretty(&manifest_json).into_diagnostic()?),
+        )?;
+        archive.name = name;
+        archive.filename = tarball_filename(&archive.name, &archive.version);
+        return Ok((archive, rewritten_manifest));
     };
     let version = normalize_publish_version(raw_version);
-    if version == raw_version {
-        return build_archive(pkg_dir);
-    }
-
     if let Some(obj) = manifest_json.as_object_mut() {
         obj.insert("version".into(), version.into());
     }
+    let rewritten_manifest = serde_json::from_value(manifest_json.clone()).into_diagnostic()?;
     let mut package_json = serde_json::to_vec_pretty(&manifest_json).into_diagnostic()?;
     package_json.push(b'\n');
 
     let mut archive = build_archive_with_package_json(pkg_dir, Some(package_json))?;
+    archive.name = name;
     normalize_archive_for_publish(&mut archive);
-    Ok(archive)
+    Ok((archive, rewritten_manifest))
 }
 
 fn normalize_publish_version(version: &str) -> String {
@@ -854,9 +1110,9 @@ fn read_publish_otp(name: &str, version: &str) -> miette::Result<String> {
 }
 
 /// Pre-pack chain for publish: `prepublishOnly` → `prepublish` →
-/// `prepack` → `prepare`. Runs only for packages that are actually
-/// being uploaded — the "already on registry" skip path avoids all of
-/// this so `aube -r publish` remains idempotent. `prepublish` is
+/// `prepack` → `prepare`. The initial "already on registry" fast path
+/// returns before this chain. When hooks run they are followed by a
+/// second preflight if they rewrote the publish identity. `prepublish` is
 /// deprecated by npm but pnpm still runs it on publish, so we match
 /// pnpm for the common case the discussion in #253 flagged. The
 /// manifest is threaded through so the whole chain shares a single
@@ -1065,6 +1321,7 @@ fn build_publish_body(
     let obj = version_doc
         .as_object_mut()
         .ok_or_else(|| miette!("manifest did not serialize to a JSON object"))?;
+    obj.insert("name".into(), archive.name.clone().into());
     obj.insert("version".into(), archive.version.clone().into());
     obj.insert(
         "_id".into(),
@@ -1212,6 +1469,22 @@ fn archive_hashes(archive: &BuiltArchive) -> (String, String) {
 mod tests {
     use super::*;
     use aube_registry::config::registry_uri_key_pub;
+
+    fn write_test_tarball(path: &Path, entries: &[(&str, &[u8])]) {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        for (entry_path, contents) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, entry_path, *contents)
+                .unwrap();
+        }
+        let encoder = builder.into_inner().unwrap();
+        std::fs::write(path, encoder.finish().unwrap()).unwrap();
+    }
 
     #[test]
     fn put_url_encodes_scoped_slash() {
@@ -1621,7 +1894,7 @@ mod tests {
         .unwrap();
         std::fs::write(tmp.path().join("README.md"), "mise").unwrap();
 
-        let archive = build_archive_for_publish(tmp.path()).unwrap();
+        let (archive, _) = build_archive_for_publish(tmp.path()).unwrap();
         let gz = flate2::read::GzDecoder::new(archive.tarball.as_slice());
         let mut tar = tar::Archive::new(gz);
         let mut package_json = None;
@@ -1640,6 +1913,157 @@ mod tests {
         assert_eq!(archive.version, "2026.5.16");
         assert_eq!(archive.filename, "jdxcode-mise-linux-x64-2026.5.16.tgz");
         assert_eq!(package_json["version"], "2026.5.16");
+    }
+
+    #[test]
+    fn publish_archive_rewrites_catalog_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"catalog-publish","version":"1.0.0","dependencies":{"foo":"catalog:"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("pnpm-workspace.yaml"),
+            "catalog:\n  foo: ^2.3.4\n",
+        )
+        .unwrap();
+
+        let (archive, manifest) = build_archive_for_publish(tmp.path()).unwrap();
+        let gz = flate2::read::GzDecoder::new(archive.tarball.as_slice());
+        let mut tar = tar::Archive::new(gz);
+        let mut package_json = None;
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap() == std::path::Path::new("package/package.json") {
+                let mut contents = String::new();
+                std::io::Read::read_to_string(&mut entry, &mut contents).unwrap();
+                package_json = Some(contents);
+                break;
+            }
+        }
+        let package_json: serde_json::Value =
+            serde_json::from_str(&package_json.expect("package.json in tarball")).unwrap();
+
+        assert_eq!(package_json["dependencies"]["foo"], "^2.3.4");
+
+        let body = build_publish_body(
+            &archive,
+            &manifest,
+            "https://registry.example.test/",
+            "latest",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(body["versions"]["1.0.0"]["dependencies"]["foo"], "^2.3.4");
+    }
+
+    #[test]
+    fn prebuilt_publish_archive_preserves_original_tarball_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name":"prebuilt","version":"1.2.3","files":["index.js"]}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("index.js"), "module.exports = 1").unwrap();
+
+        let (packed, _) = build_archive_for_publish(tmp.path()).unwrap();
+        let tarball_path = tmp.path().join("prebuilt-1.2.3.tgz");
+        std::fs::write(&tarball_path, &packed.tarball).unwrap();
+        let (loaded, manifest) = read_publish_tarball(&tarball_path).unwrap();
+
+        assert_eq!(loaded.tarball, packed.tarball);
+        assert_eq!(loaded.name, "prebuilt");
+        assert_eq!(loaded.version, "1.2.3");
+        assert_eq!(manifest.name.as_deref(), Some("prebuilt"));
+        assert!(loaded.files.iter().any(|path| path == "package.json"));
+        assert!(loaded.files.iter().any(|path| path == "index.js"));
+    }
+
+    #[test]
+    fn prebuilt_publish_archive_requires_top_level_package_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tarball_path = tmp.path().join("missing-manifest.tgz");
+        write_test_tarball(&tarball_path, &[("package/index.js", b"export {}")]);
+
+        let err = read_publish_tarball(&tarball_path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("archive has no top-level package.json"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn prebuilt_publish_archive_requires_manifest_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tarball_path = tmp.path().join("missing-version.tgz");
+        write_test_tarball(
+            &tarball_path,
+            &[("package/package.json", br#"{"name":"missing-version"}"#)],
+        );
+
+        let err = read_publish_tarball(&tarball_path).unwrap_err();
+        assert!(
+            err.to_string().contains("package.json has no `version`"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn prebuilt_publish_archive_rejects_non_gzip_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tarball_path = tmp.path().join("plain-text.tgz");
+        std::fs::write(&tarball_path, "not a gzip archive").unwrap();
+
+        let err = read_publish_tarball(&tarball_path).unwrap_err();
+        assert!(
+            err.to_string().contains("input is not gzip-compressed"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn publish_config_name_renames_only_the_published_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{
+                "name": "workspace-name",
+                "version": "1.2.3",
+                "publishConfig": {"name": "@scope/published-name"}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("README.md"), "renamed").unwrap();
+
+        let manifest = PackageJson::from_path(&tmp.path().join("package.json")).unwrap();
+        assert_eq!(manifest.name.as_deref(), Some("workspace-name"));
+        assert_eq!(published_name(&manifest).unwrap(), "@scope/published-name");
+
+        let (archive, _) = build_archive_for_publish(tmp.path()).unwrap();
+        let gz = flate2::read::GzDecoder::new(archive.tarball.as_slice());
+        let mut tar = tar::Archive::new(gz);
+        let mut package_json = None;
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap() == std::path::Path::new("package/package.json") {
+                let mut contents = String::new();
+                std::io::Read::read_to_string(&mut entry, &mut contents).unwrap();
+                package_json = Some(contents);
+                break;
+            }
+        }
+        let package_json: serde_json::Value =
+            serde_json::from_str(&package_json.expect("package.json in tarball")).unwrap();
+
+        assert_eq!(archive.name, "@scope/published-name");
+        assert_eq!(archive.filename, "scope-published-name-1.2.3.tgz");
+        assert_eq!(package_json["name"], "@scope/published-name");
+        let on_disk = PackageJson::from_path(&tmp.path().join("package.json")).unwrap();
+        assert_eq!(on_disk.name.as_deref(), Some("workspace-name"));
     }
 
     #[test]

@@ -87,7 +87,7 @@ export const scanner: Security.Scanner = {
   (future-proof for additional levels).
 
 **Return shape**: Bun's docs specify the return value is
-`Advisory[]`. Aube also accepts `{ advisories: [...] }` as a
+`Advisory[]`. aube also accepts `{ advisories: [...] }` as a
 friendly fallback for scanners that wrap their result.
 
 The published `@types/bun` package ships the canonical

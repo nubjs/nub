@@ -43,6 +43,7 @@ pub use engine_context::{
 pub mod path;
 pub mod pkg;
 pub mod snapshot;
+pub mod terminal;
 pub mod url;
 
 use serde::{Deserialize, Deserializer};

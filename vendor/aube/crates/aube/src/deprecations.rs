@@ -12,10 +12,10 @@
 
 use aube_lockfile::LockfileGraph;
 use aube_settings::resolved::DeprecationWarnings;
-use clx::style;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::sync::Arc;
+
+use crate::commands::install::InstallOutputLevel;
 
 #[derive(Debug, Clone)]
 pub struct DeprecationRecord {
@@ -85,8 +85,9 @@ pub fn dedupe(records: Vec<DeprecationRecord>) -> Vec<DeprecationRecord> {
 }
 
 /// Render install-time warnings according to the user's `deprecationWarnings`
-/// setting. Writes to stderr. Must be called after the progress UI has been
-/// finished (see `InstallProgress::finish`).
+/// setting. Output is routed through the active install control so embedded
+/// hosts receive events instead of writes that can collide with their own
+/// progress UI.
 pub fn render_install_warnings(
     records: &[DeprecationRecord],
     graph: &LockfileGraph,
@@ -116,39 +117,111 @@ pub fn render_install_warnings(
 }
 
 fn write_warn_line(r: &DeprecationRecord) {
-    let line = format!(
-        "{} {}@{}: {}",
-        style::eyellow("WARN deprecated").bold(),
-        r.name,
-        r.version,
-        r.message
+    crate::commands::install::control::output(
+        InstallOutputLevel::Warning,
+        Some(aube_codes::warnings::WARN_AUBE_DEPRECATED_PACKAGE),
+        format!("deprecated {}@{}: {}", r.name, r.version, r.message),
     );
-    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 fn write_transitive_count_line(count: usize) {
     let pkgs = pluralizer::pluralize("transitive package", count as isize, true);
     let verb = if count == 1 { "has" } else { "have" };
-    // Product name from the active embedder (standalone aube → "aube"), not a
-    // literal: this hint streams to stderr mid-install, so it must be branded at
-    // the emit site — a host embedder's later output-capture rewrite never sees it.
-    let product = aube_util::embedder().name;
-    let msg = format!(
-        "{pkgs} {verb} deprecation warnings. Run `{product} deprecations --transitive` to see them."
+    let msg = append_command_hint(
+        format!("{pkgs} {verb} deprecation warnings."),
+        "aube deprecations --transitive",
+        is_standalone_aube(),
     );
-    let _ = writeln!(std::io::stderr(), "{}", style::edim(msg));
+    write_summary_line(msg);
 }
 
 fn write_count_line(count: usize, has_transitive: bool) {
     let pkgs = pluralizer::pluralize("package", count as isize, true);
     let verb = if count == 1 { "has" } else { "have" };
-    // See `write_transitive_count_line`: streamed line, brand at emit.
-    let product = aube_util::embedder().name;
     let cmd = if has_transitive {
-        format!("{product} deprecations --transitive")
+        "aube deprecations --transitive"
     } else {
-        format!("{product} deprecations")
+        "aube deprecations"
     };
-    let msg = format!("{pkgs} {verb} deprecation warnings. Run `{cmd}` to see them.");
-    let _ = writeln!(std::io::stderr(), "{}", style::edim(msg));
+    let msg = append_command_hint(
+        format!("{pkgs} {verb} deprecation warnings."),
+        cmd,
+        is_standalone_aube(),
+    );
+    write_summary_line(msg);
+}
+
+fn is_standalone_aube() -> bool {
+    aube_util::embedder().name == aube_util::AUBE.name
+}
+
+fn append_command_hint(message: String, command: &str, show_hint: bool) -> String {
+    if show_hint {
+        format!("{message} Run `{command}` to see them.")
+    } else {
+        message
+    }
+}
+
+fn write_summary_line(message: String) {
+    crate::commands::install::control::output(
+        InstallOutputLevel::Warning,
+        Some(aube_codes::warnings::WARN_AUBE_DEPRECATED_PACKAGE_SUMMARY),
+        message,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use crate::commands::install::{
+        InstallControl, InstallEvent, InstallOutputLevel, InstallReporter,
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingReporter(Mutex<Vec<InstallEvent>>);
+
+    impl InstallReporter for RecordingReporter {
+        fn report(&self, event: InstallEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    #[test]
+    fn command_hint_is_only_added_for_standalone_aube() {
+        let message = "1 transitive package has deprecation warnings.".to_string();
+        assert_eq!(
+            append_command_hint(message.clone(), "aube deprecations --transitive", true,),
+            "1 transitive package has deprecation warnings. Run `aube deprecations --transitive` to see them."
+        );
+        assert_eq!(
+            append_command_hint(message.clone(), "aube deprecations --transitive", false),
+            message
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_is_reported_as_a_structured_warning_event() {
+        let reporter = Arc::new(RecordingReporter::default());
+        let control = InstallControl::events(reporter.clone());
+
+        crate::commands::install::control::scope(control, async {
+            write_summary_line("1 package has deprecation warnings.".to_string());
+        })
+        .await;
+
+        let events = reporter.0.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [InstallEvent::Output {
+                level: InstallOutputLevel::Warning,
+                code: Some(code),
+                message,
+            }] if code == aube_codes::warnings::WARN_AUBE_DEPRECATED_PACKAGE_SUMMARY
+                && message == "1 package has deprecation warnings."
+        ));
+    }
 }

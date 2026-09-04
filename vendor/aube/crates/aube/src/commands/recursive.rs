@@ -1,11 +1,10 @@
 use aube_workspace::selector::EffectiveFilter;
-use clap::Args;
 use miette::miette;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct RecursiveArgs {
     /// Command and arguments to run recursively across workspace packages
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[usage(arg, double_dash = "automatic")]
     pub args: Vec<String>,
 }
 

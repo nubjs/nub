@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.8](https://github.com/aubepkg/aube/compare/aube-settings-v2.2.7...aube-settings-v2.2.8) - 2026-09-04
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [2.2.5](https://github.com/aubepkg/aube/compare/aube-settings-v2.2.4...aube-settings-v2.2.5) - 2026-09-03
+
+### Other
+
+- move routine workflows to GitHub-hosted runners ([#1469](https://github.com/aubepkg/aube/pull/1469))
+- move project to aubepkg and aube.sh ([#1460](https://github.com/aubepkg/aube/pull/1460))
+- fix prose and content in docs and cli help ([#1455](https://github.com/aubepkg/aube/pull/1455))
+- refresh benchmarks for v2.2.4 ([#1434](https://github.com/aubepkg/aube/pull/1434))
+
+## [2.2.4](https://github.com/jdx/aube/compare/aube-settings-v2.2.3...aube-settings-v2.2.4) - 2026-08-31
+
+### Fixed
+
+- *(install)* trust locked packages without revalidation ([#1418](https://github.com/jdx/aube/pull/1418))
+
+### Other
+
+- refresh benchmarks for v2.2.3 ([#1417](https://github.com/jdx/aube/pull/1417))
+
+## [2.2.1](https://github.com/jdx/aube/compare/aube-settings-v2.2.0...aube-settings-v2.2.1) - 2026-08-29
+
+### Fixed
+
+- *(resolver)* match pnpm importer peer semantics ([#1399](https://github.com/jdx/aube/pull/1399))
+
+### Other
+
+- *(install)* validate trustPolicy from compact trust histories ([#1403](https://github.com/jdx/aube/pull/1403))
+- refresh benchmarks for v2.2.0 ([#1384](https://github.com/jdx/aube/pull/1384))
+- *(sponsors)* replace 37signals with omacom foundation ([#1380](https://github.com/jdx/aube/pull/1380))
+
+## [2.2.0](https://github.com/jdx/aube/compare/aube-settings-v2.1.0...aube-settings-v2.2.0) - 2026-08-25
+
+### Fixed
+
+- *(install)* bundle curated package extensions ([#1369](https://github.com/jdx/aube/pull/1369))
+
+### Other
+
+- refresh benchmarks for v2.1.0 ([#1372](https://github.com/jdx/aube/pull/1372))
+
+## [2.1.0](https://github.com/jdx/aube/compare/aube-settings-v2.0.1...aube-settings-v2.1.0) - 2026-08-23
+
+### Other
+
+- refresh benchmarks for v2.0.1 ([#1350](https://github.com/jdx/aube/pull/1350))
+
+## [2.0.1](https://github.com/jdx/aube/compare/aube-settings-v2.0.0...aube-settings-v2.0.1) - 2026-08-23
+
+### Added
+
+- *(resolver)* [**breaking**] expose lowest-direct resolution mode ([#1345](https://github.com/jdx/aube/pull/1345))
+- *(global)* [**breaking**] keep aube's global dirs under its own data root ([#1231](https://github.com/jdx/aube/pull/1231))
+
+## [1.41.0](https://github.com/jdx/aube/compare/aube-settings-v1.40.0...aube-settings-v1.41.0) - 2026-08-16
+
+### Added
+
+- *(catalog)* support catalogPrune setting ([#1308](https://github.com/jdx/aube/pull/1308))
+
+### Fixed
+
+- *(resolver)* separate lowest-direct resolution ([#1307](https://github.com/jdx/aube/pull/1307))
+- *(install)* disable global virtual store for Metro apps ([#1297](https://github.com/jdx/aube/pull/1297))
+
+### Other
+
+- refresh benchmarks for v1.40.0 ([#1290](https://github.com/jdx/aube/pull/1290))
+
+## [1.40.0](https://github.com/jdx/aube/compare/aube-settings-v1.39.0...aube-settings-v1.40.0) - 2026-08-13
+
+### Other
+
+- refresh benchmarks for v1.39.0 ([#1285](https://github.com/jdx/aube/pull/1285))
+- Update Star History chart links with sealed tokens
+
+## [1.39.0](https://github.com/jdx/aube/compare/aube-settings-v1.38.1...aube-settings-v1.39.0) - 2026-08-12
+
+### Added
+
+- *(lockfile)* add configurable creation format ([#1271](https://github.com/jdx/aube/pull/1271))
+
+### Fixed
+
+- *(store)* prune unused global virtual store entries ([#1273](https://github.com/jdx/aube/pull/1273))
+
+### Other
+
+- refresh benchmarks for v1.38.1 ([#1257](https://github.com/jdx/aube/pull/1257))
+
+## [1.38.1](https://github.com/jdx/aube/compare/aube-settings-v1.38.0...aube-settings-v1.38.1) - 2026-08-10
+
+### Other
+
+- refresh benchmarks for v1.38.0 ([#1244](https://github.com/jdx/aube/pull/1244))
+
+## [1.38.0](https://github.com/jdx/aube/compare/aube-settings-v1.37.0...aube-settings-v1.38.0) - 2026-08-07
+
+### Fixed
+
+- *(linker)* share hoisted deps across workspace importers ([#1243](https://github.com/jdx/aube/pull/1243))
+
+### Other
+
+- refresh benchmarks for v1.37.0 ([#1211](https://github.com/jdx/aube/pull/1211))
+- refresh benchmarks for v1.37.0 ([#1206](https://github.com/jdx/aube/pull/1206))
+
+## [1.37.0](https://github.com/jdx/aube/compare/aube-settings-v1.36.0...aube-settings-v1.37.0) - 2026-07-31
+
+### Added
+
+- *(scripts)* use pnpm trusted dependency list ([#1199](https://github.com/jdx/aube/pull/1199))
+
+### Other
+
+- refresh benchmarks for v1.36.0 ([#1185](https://github.com/jdx/aube/pull/1185))
+
+## [1.36.0](https://github.com/jdx/aube/compare/aube-settings-v1.35.0...aube-settings-v1.36.0) - 2026-07-29
+
+### Other
+
+- refresh benchmarks for v1.35.0 ([#1172](https://github.com/jdx/aube/pull/1172))
+
 ## [1.35.0](https://github.com/jdx/aube/compare/aube-settings-v1.34.0...aube-settings-v1.35.0) - 2026-07-28
 
 ### Added

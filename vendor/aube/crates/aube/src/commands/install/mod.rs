@@ -24,9 +24,9 @@ mod lockfile_dir;
 mod lockfile_write_overlap;
 mod materialize;
 // `pub` (not `pub(crate)`) so an embedder whose `current_exe()` is the binary
-// the lazy node-gyp shim re-execs can reach `ensure_cached` /
-// `print_bootstrapped_binary` to service the bootstrap re-entry. Standalone
-// aube reaches them the same way; widening visibility changes no behavior.
+// the lazy node-gyp shim re-execs can reach `bootstrap_node_gyp` to service
+// the re-entry by module path as well as through `embed`. Standalone aube
+// reaches it the same way; widening visibility changes no behavior.
 pub mod node_gyp_bootstrap;
 mod resolve;
 pub(crate) mod settings;
@@ -37,13 +37,18 @@ mod sweep;
 mod unreviewed_builds;
 mod workspace;
 
+pub(crate) use resolve::check_patch_drift;
+
 use advisory::resolve_osv_routing_settings;
-pub use args::{InstallArgs, InstallOptions};
-pub(crate) use bin_linking::{PkgJsonCache, link_dep_bins, materialized_pkg_dir};
+pub use args::{EmbedderInstallOverrides, InstallArgs, InstallOptions};
+pub(crate) use bin_linking::{
+    LinkDepBinsInput, ManagedBinLinks, PkgJsonCache, dep_modules_dir_for, link_dep_bins,
+    materialized_pkg_dir, remove_managed_bin_links, remove_unclaimed_preserved_bin_links,
+};
 pub use control::{
-    InstallControl, InstallEvent, InstallOutputLevel, InstallOutputMode, InstallPhase,
-    InstallProgressSnapshot, InstallPrompt, InstallPromptFuture, InstallPromptHandler,
-    InstallReporter,
+    INSTALL_OUTPUT_CODE_LIFECYCLE_SCRIPT, InstallControl, InstallEvent, InstallOutputLevel,
+    InstallOutputMode, InstallPhase, InstallProgressSnapshot, InstallPrompt, InstallPromptFuture,
+    InstallPromptHandler, InstallReporter,
 };
 pub(crate) use default_trust::DefaultTrustFloor;
 pub use dep_selection::DepSelection;
@@ -53,12 +58,14 @@ use fetch::{
     strip_peer_context_suffix, version_from_dep_path,
 };
 pub use frozen::{FrozenMode, FrozenOverride, GlobalVirtualStoreFlags};
+pub(crate) use gvs::detect_existing_global_virtual_store;
 pub(crate) use lifecycle::{
     JailBuildPolicy, build_policy_from_manifest_sources, build_policy_from_sources,
     run_dep_lifecycle_scripts,
 };
 use lifecycle::{
-    resolve_link_strategy, run_import_on_blocking, run_root_lifecycle, validate_required_scripts,
+    resolve_link_strategy, run_import_on_blocking, run_root_lifecycle, run_root_lifecycle_script,
+    validate_required_scripts,
 };
 
 pub(crate) fn resolve_active_lockfile_dir(
@@ -72,25 +79,30 @@ use lockfile_dir::{
     parse_lockfile_dir_remapped_with_kind_and_options, write_lockfile_dir_remapped,
 };
 use materialize::{
-    GvsPrewarmInputs, combine_install_pipeline_errors, materialize_channel, spawn_gvs_prewarm,
+    GvsPrewarmInputs, VirtualStorePlanInputs, combine_install_pipeline_errors, materialize_channel,
+    plan_virtual_store, spawn_gvs_prewarm,
 };
 pub(crate) use settings::PeerDependencyRules;
+pub(crate) use settings::resolve_catalog_prune;
 pub(crate) use settings::resolve_minimum_release_age;
-pub(crate) use settings::{ResolverConfigInputs, configure_resolver, finalize_lockfile_graph};
+pub(crate) use settings::{
+    ResolverConfigInputs, configure_resolver, finalize_lockfile_graph, resolve_dependency_policy,
+};
 pub(crate) use side_effects_cache::{
     SideEffectsCacheConfig, SideEffectsCacheLocation, side_effects_cache_root,
 };
 
 use settings::{
     check_unmet_peers, default_lockfile_network_concurrency, default_streaming_network_concurrency,
-    maybe_cleanup_unused_catalogs, resolve_dependency_policy, resolve_git_shallow_hosts,
-    resolve_link_concurrency, resolve_network_concurrency, resolve_side_effects_cache,
-    resolve_side_effects_cache_readonly, resolve_strict_peer_dependencies,
-    resolve_strict_store_pkg_content_check, resolve_verify_store_integrity,
+    maybe_cleanup_unused_catalogs, resolve_git_shallow_hosts, resolve_link_concurrency,
+    resolve_network_concurrency, resolve_side_effects_cache, resolve_side_effects_cache_readonly,
+    resolve_strict_peer_dependencies, resolve_strict_store_pkg_content_check,
+    resolve_verify_store_integrity,
 };
 use startup::{
-    apply_force_state_reset, merge_branch_lockfiles_if_needed, modules_cache_sweep_is_default,
-    resolve_project_cwd, try_install_fast_path, warn_accepted_noop_install_settings,
+    apply_force_state_reset, emit_up_to_date, merge_branch_lockfiles_if_needed,
+    modules_cache_sweep_is_default, resolve_project_cwd, try_install_fast_path,
+    warn_accepted_noop_install_settings,
 };
 use summary::print_already_up_to_date;
 use workspace::{
@@ -799,10 +811,11 @@ async fn run_scoped(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Re
 
 async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Result<()> {
     opts.control.check_cancelled()?;
+    aube_scripts::set_output_reporter(opts.control.script_output_reporter());
     let mode = opts.mode;
     let start = std::time::Instant::now();
     let mut phase_timings = InstallPhaseTimings::from_env();
-    aube_util::diag::spawn_concurrency_sampler();
+    let _diag_sampler = aube_util::diag::spawn_concurrency_sampler().await;
     aube_util::diag::instant(aube_util::diag::Category::Install, "begin", None);
     let _diag_install = aube_util::diag::Span::new(aube_util::diag::Category::Install, "total");
 
@@ -840,35 +853,59 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // all, keeps the fast path untouched.
     let pre_resolution_hook_declared =
         crate::pnpmfile::any_declares_hook(&early_pnpmfile_paths, "preResolution").await;
-    if !opts.dry_run
-        && !pre_resolution_hook_declared
-        && let Some(total) =
-            try_install_fast_path(&cwd, &opts, mode, modules_cache_sweep_is_default(&cwd))?
-    {
-        // Register on the warm path too. This return is taken whenever the
-        // state hashes and `.modules.yaml` are current — exactly the state of
-        // a project installed by a pre-registry version — so without this the
-        // documented repair ("run an install, then prune again") would never
-        // register the projects it is written for, and `store prune` would
-        // sweep their entries as soon as any other project registered. The
-        // tree is known current here, and the write is one idempotent file.
-        //
-        // Under the sweep lock, and that is load-bearing rather than tidy.
-        // This return happens long before the shared guard the slow path
-        // takes, so an unlocked registration races a sweep that has already
-        // read the registry: the sweep does not see this project and removes
-        // the entries it is registering to protect. Measured on an unlocked
-        // build: 22 of 54 rounds left a broken `node_modules` with the
-        // install still exiting 0. The victim is by definition a project not
-        // yet registered — i.e. every project on the upgrade path.
-        if opts.register_in_store
-            && let Ok(store) = super::open_store(&cwd)
+
+    // The warm path historically tolerates workspace fields that cannot be
+    // deserialized into the typed config as long as the raw settings needed
+    // for freshness checks remain readable. Keep typed validation after the
+    // fast-path gate so an already-current install retains that behavior.
+    let files = crate::commands::FileSources::load(&cwd);
+    let fast_path_workspace = aube_manifest::workspace::load_raw(&cwd).unwrap_or_default();
+    let fast_path_settings_ctx =
+        files.ctx(&fast_path_workspace, &opts.env_snapshot, &opts.cli_flags);
+
+    let fast_path_total = if opts.dry_run || pre_resolution_hook_declared {
+        None
+    } else {
+        let global_virtual_store =
+            super::global_virtual_store_dir_with_ctx(&cwd, &fast_path_settings_ctx);
+        // The project registry lives under the global virtual store, and every
+        // project registers (see `link.rs`), so the lock is taken whenever a
+        // registration may follow, not only when the store already exists.
+        let gvs_lock = (global_virtual_store.exists() || opts.register_in_store)
+            .then(|| super::gvs_registry::lock_for_install(&global_virtual_store))
+            .transpose()?;
+        let total = try_install_fast_path(&cwd, &opts, mode, modules_cache_sweep_is_default(&cwd))?;
+        if total.is_some()
+            && let Some(lock) = gvs_lock.as_ref()
         {
-            let _sweep_guard = store.lock_for_link();
-            if let Err(e) = store.register_project(&cwd) {
-                tracing::debug!("could not register project against the store: {e}");
+            let aube_dir = super::resolve_virtual_store_dir(&fast_path_settings_ctx, &cwd);
+            // Register on the warm path too: this return is taken whenever
+            // the state hashes are current — exactly the state of a project
+            // installed by a pre-registry version — so without it the
+            // documented repair ("run an install, then prune again") would
+            // never register the projects it is written for. Under the lock,
+            // which is load-bearing: an unlocked registration races a sweep
+            // that has already read the registry and removes the entries it
+            // is registering to protect (measured on an unlocked build: 22 of
+            // 54 rounds left a broken `node_modules` with exit 0).
+            if opts.register_in_store {
+                super::gvs_registry::register_project(&global_virtual_store, &cwd, &aube_dir)
+            } else {
+                super::gvs_registry::register_fast_path_project(
+                    lock,
+                    &global_virtual_store,
+                    &cwd,
+                    &aube_dir,
+                )
             }
+            .wrap_err(
+                "install is current, but failed to register it with the global virtual store",
+            )?;
         }
+        total
+    };
+    if let Some(total) = fast_path_total {
+        emit_up_to_date(&cwd);
         control::complete(total);
         return Ok(());
     }
@@ -880,6 +917,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let release_policy_settings_drift = opts.revalidate_release_policy
         && crate::state::install_settings_changed_since_last_run(&cwd, &opts.cli_flags);
 
+    // Full installs require typed workspace fields. Load the raw and typed
+    // views together once the warm path has been ruled out, then use the same
+    // raw map for all remaining setting resolution.
+    let (ws_config_shared, raw_workspace) = aube_manifest::workspace::load_both(&cwd)
+        .into_diagnostic()
+        .wrap_err("failed to load workspace config")?;
+    let settings_ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
+
     // Yaml-only workspace roots (`pnpm-workspace.yaml` only, no root
     // `package.json`) install with a synthesized empty manifest so
     // every workspace member is installed without the root carrying
@@ -890,19 +935,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let manifest = super::load_manifest_or_default(&cwd)?;
     let project_name = manifest.name.as_deref().unwrap_or("(unnamed)");
 
-    // Load the workspace yaml *once* — both as the typed
-    // `WorkspaceConfig` (used below for `allow_builds_raw` and
-    // friends) and as a raw `BTreeMap` (used by
-    // `aube_settings::resolved::*` for metadata-driven lookups).
-    // Errors propagate here rather than silently defaulting later,
-    // so a malformed workspace file surfaces before we start
-    // resolving the dep graph. Also load `.npmrc` entries once so
-    // the same borrow feeds both the resolve-time settings and the
-    // later engine-check settings.
-    let files = crate::commands::FileSources::load(&cwd);
-    let (ws_config_shared, raw_workspace) = aube_manifest::workspace::load_both(&cwd)
-        .into_diagnostic()
-        .wrap_err("failed to load workspace config")?;
     // Catalog discovery walks up for the workspace yaml and also pulls
     // from package.json's `workspaces.catalog` / `pnpm.catalog`, so
     // `aube install` run from a monorepo subpackage still sees the root
@@ -913,8 +945,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // routes `<alias>:<spec>` deps to the aliased registry. Same discovery
     // shape as catalogs.
     let named_registries = super::discover_named_registries(&cwd);
-    let settings_ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
-    let dependency_policy = resolve_dependency_policy(&manifest, &settings_ctx);
+    let packument_cache_dir =
+        super::resolved_cache_dir_with_ctx(&cwd, &settings_ctx).join("packuments-v1");
+    let explicit_store_dir_override = has_explicit_store_dir_override(&opts.cli_flags);
+    let dependency_policy = resolve_dependency_policy(&manifest, &settings_ctx)?;
     // Resolve the project's Node runtime before anything can spawn
     // node: the root `preinstall` hooks below must already run on the
     // switched runtime, and the virtual-store keys downstream fold
@@ -945,7 +979,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         .await?;
     }
     if !opts.ignore_scripts {
-        super::configure_script_settings(&cwd, &settings_ctx, Some("install"));
+        super::configure_script_settings(&cwd, &settings_ctx, Some(opts.script_command));
     }
 
     let layout::InstallLayoutConfig {
@@ -1072,6 +1106,22 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         };
     let inherited_build_policy_for_git_prepare = Some(std::sync::Arc::new(build_policy.clone()));
 
+    // pnpm's root-only pre-resolution hook. Unlike the ordinary
+    // `preinstall` lifecycle below, this runs exactly once from the
+    // lockfile/workspace root and never fans out to member manifests.
+    // The warm fast path returned above, so an already-current repeat
+    // install naturally skips it.
+    if opts.run_dev_preinstall {
+        run_dev_preinstall(
+            &cwd,
+            opts.ignore_scripts,
+            opts.dry_run,
+            lockfile_only_effective,
+            None,
+        )
+        .await?;
+    }
+
     // 1b. Project `preinstall` lifecycle hooks.
     //     Workspace installs run the hook for every physical importer
     //     that will be linked, matching pnpm's recursive install
@@ -1126,6 +1176,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     } else {
         None
     };
+    let write_kind =
+        source_kind_before.unwrap_or_else(|| super::default_lockfile_kind(&settings_ctx));
 
     // Hand any parseable lockfile to the resolver as `existing` so
     // unchanged specs reuse their already-pinned versions and only
@@ -1212,21 +1264,19 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // been parsed yet. Under `lockfile=false` there is deliberately no
     // lockfile to show, and pnpm passes an empty one there too.
     {
-        let hook_lockfile = if pre_resolution_hook_declared
-            && lockfile_enabled
-            && lockfile_pre_parse.is_none()
-        {
-            parse_lockfile_dir_remapped_with_kind_and_options(
-                &lockfile_dir,
-                &lockfile_importer_key,
-                &manifest,
-                lockfile_parse_options,
-            )
-            .ok()
-            .map(|(g, _)| g)
-        } else {
-            None
-        };
+        let hook_lockfile =
+            if pre_resolution_hook_declared && lockfile_enabled && lockfile_pre_parse.is_none() {
+                parse_lockfile_dir_remapped_with_kind_and_options(
+                    &lockfile_dir,
+                    &lockfile_importer_key,
+                    &manifest,
+                    lockfile_parse_options,
+                )
+                .ok()
+                .map(|(g, _)| g)
+            } else {
+                None
+            };
         let pnpmfile_paths = if opts.ignore_pnpmfile || opts.pre_resolution_hook_already_ran {
             Vec::new()
         } else {
@@ -1330,7 +1380,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             revalidate_release_policy,
             lockfile_conflict_marker_warning_emitted,
             existing_for_resolver,
-            source_kind_before,
+            write_kind,
             lockfile_enabled,
             lockfile_include_tarball_url,
             shared_workspace_lockfile,
@@ -1396,7 +1446,16 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let gvs_hoist_decision = aube_util::embedder()
         .gvs_over_default_hoist
         .then_some(materialization);
-    gvs::reset_on_mode_change(&cwd, &aube_dir, &modules_dir_name, effective_gvs)?;
+    // `effective_gvs`, not the raw `planned_gvs`: the callee only compares its
+    // argument against the on-disk tree, so passing the raw request is what
+    // produced the spurious `disabled → enabled` wipe (#71).
+    gvs::reset_on_mode_change(
+        &cwd,
+        &aube_dir,
+        &modules_dir_name,
+        effective_gvs,
+        &settings_ctx,
+    )?;
 
     // The fetch-pipelined materializer (`spawn_gvs_prewarm`) must target the
     // SAME virtual store the link phase reads from, or its work is wasted and
@@ -1412,7 +1471,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
 
     // 3. Parse or resolve lockfile, streaming tarball fetches during resolution
     let phase_start = std::time::Instant::now();
-    let store = std::sync::Arc::new(super::open_store(&cwd)?);
+    let store = std::sync::Arc::new(super::open_store_with_ctx(&cwd, &settings_ctx)?);
+    let _gvs_lock = planned_gvs
+        .then(|| super::gvs_registry::lock_for_install(&store.virtual_store_dir()))
+        .transpose()?;
     // Pre-create all 256 two-char shard directories in the CAS root.
     // `import_bytes` is called once per stored file (~7.5k for a medium
     // install) and previously did `mkdirp(parent)` per call — a stat
@@ -1425,24 +1487,24 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     if let Err(e) = store.ensure_shards_exist() {
         tracing::debug!("ensure_shards_exist failed (slow path will cover): {e}");
     }
-    // macOS fast-path gate: take an exclusive `try_lock` on
+    // Linux/macOS fast-path gate: take an exclusive `try_lock` on
     // `<store>/v1/.install.lock`. If we get it, no other aube install is
     // running against this store right now, so the CAS write path can
     // skip the tempfile + persist_noclobber dance and write straight to
     // the final content-addressed path (`Store::enable_fast_path`). The
-    // guard is held in `_store_lock` for the rest of this `run` call;
-    // dropping it at function exit releases the lock. Contention falls
-    // back to the safe tempfile path — concurrent installers still
-    // proceed, just at the existing speed.
+    // `Store` takes ownership of the guard so blocking imports retain it
+    // even if their Tokio parent is aborted during error unwinding.
+    // Contention falls back to the safe tempfile path — concurrent
+    // installers still proceed, just at the existing speed.
     //
-    // Linux is unaffected: `create_cas_file` always uses O_TMPFILE+linkat
-    // there, which is already atomic-by-construction and faster than
-    // both options. Windows keeps the tempfile path; the fast-path branch
+    // Linux normally uses atomic O_TMPFILE+linkat, but direct writes save
+    // the anonymous-file publication syscall while this lock excludes other
+    // aube writers. Windows keeps the tempfile path; the fast-path branch
     // in `aube-store` is unix-only (`OpenOptionsExt::mode`), so gating
-    // the lock acquisition on macOS too avoids opening a lock file that
+    // the lock acquisition on Unix too avoids opening a lock file that
     // nothing would consult.
-    #[cfg(target_os = "macos")]
-    let _store_lock = {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
         let lock_dir = store
             .root()
             .parent()
@@ -1458,19 +1520,16 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         {
             Ok(file) => match file.try_lock() {
                 Ok(()) => {
-                    store.enable_fast_path();
+                    store.enable_fast_path(file);
                     tracing::debug!("CAS fast path enabled (exclusive store lock acquired)");
-                    Some(file)
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     tracing::debug!(
                         "another aube install is using this store; staying on tempfile path"
                     );
-                    None
                 }
                 Err(std::fs::TryLockError::Error(e)) => {
                     tracing::debug!("store lock probe failed ({e}); staying on tempfile path");
-                    None
                 }
             },
             Err(e) => {
@@ -1478,7 +1537,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     "could not open store lock at {} ({e}); staying on tempfile path",
                     lock_path.display()
                 );
-                None
             }
         }
     };
@@ -1579,6 +1637,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 &ws_config_shared,
                 &settings_ctx,
             )?;
+            control::check_cancelled()?;
             // Trust-policy (no-downgrade) validation. Previously this ran
             // serial-before-fetch and, on a cold lockfile install, was the
             // dominant cost — a full-packument fan-out over every unique
@@ -1716,19 +1775,45 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let (lock_supported_architectures, lock_ignored_optional) =
                 prewarm_host_filter_inputs(&manifest, &ws_config_shared, &settings_ctx);
             let (lock_materialize_tx, lock_materialize_rx) = materialize_channel();
+            let lock_materialize_graph = std::sync::Arc::new(filter_graph_for_install(
+                &cwd,
+                &workspace_packages,
+                &graph,
+                &opts,
+                has_workspace && !link_all_workspace_importers,
+                false,
+            )?);
+            // Hoisted out of the prewarm task (where it used to run
+            // concurrently with fetch) because the already-linked
+            // shortcut below cannot classify an entry without it. The
+            // prewarm and link phases reuse the same hashes.
+            let lock_virtual_store_plan = plan_virtual_store(VirtualStorePlanInputs {
+                graph: &lock_materialize_graph,
+                store: &store,
+                link_strategy: lock_strategy,
+                virtual_store_dir_max_length,
+                // The hoist-aware override, not the raw request: the plan is
+                // what both the prewarm and the already-linked shortcut compare
+                // against, so it has to name the layout the link phase produces.
+                use_global_virtual_store_override: prewarm_gvs_override,
+                patch_hashes: lock_patch_hashes,
+                node_version: lock_node_version,
+                build_policy: lock_build_policy,
+                default_trust_enabled,
+                supported_architectures: lock_supported_architectures.clone(),
+                ignored_optional_dependencies: lock_ignored_optional.clone(),
+            })
+            .await?;
             let lock_prewarm_inputs = GvsPrewarmInputs {
-                graph: std::sync::Arc::new(graph.clone()),
+                graph: lock_materialize_graph,
                 store: store.clone(),
                 cwd: cwd.clone(),
                 virtual_store_dir_max_length,
                 link_strategy: lock_strategy,
                 link_concurrency: link_concurrency_setting,
                 patches: lock_patches,
-                patch_hashes: lock_patch_hashes,
-                node_version: lock_node_version,
-                build_policy: lock_build_policy,
-                default_trust_enabled,
                 use_global_virtual_store_override: prewarm_gvs_override,
+                virtual_store_plan: lock_virtual_store_plan.clone(),
                 virtual_store_dir: aube_dir.clone(),
                 supported_architectures: lock_supported_architectures,
                 ignored_optional_dependencies: lock_ignored_optional,
@@ -1752,6 +1837,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 prog_ref,
                 &cwd,
                 &aube_dir,
+                &packument_cache_dir,
                 Some(lock_materialize_tx),
                 // Workspace installs disable the `AlreadyLinked` fast path
                 // under the upstream default (full warm-store-verify): the
@@ -1761,12 +1847,15 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 // entries across warm re-runs (Step 1b's Fresh/Missing/Stale
                 // state machine readlinks them; it does not wipe `.aube/`).
                 // So when an embedder opts into fast-trust
-                // (`warm_store_verify = false` on the embedder profile) we re-enable the shortcut
-                // for workspaces too, skipping a serial per-package
-                // `load_index` inside the linker. Default (verify on) keeps
-                // upstream behavior exactly.
-                /*skip_already_linked_shortcut=*/
-                has_workspace && warm_store_verify(),
+                // (`warm_store_verify = false` on the embedder profile) we
+                // re-enable the shortcut for workspaces too, skipping a serial
+                // per-package `load_index` inside the linker. Default (verify
+                // on) keeps upstream behavior exactly. An explicit `--store-dir`
+                // always disables it: the entry on disk was linked against a
+                // different store.
+                /*already_linked_shortcut=*/
+                (!(explicit_store_dir_override || has_workspace && warm_store_verify()))
+                    .then_some(&lock_virtual_store_plan),
                 &lock_project_local_dep_paths,
                 virtual_store_dir_max_length,
                 opts.ignore_scripts,
@@ -1950,11 +2039,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     // `None` only when no lockfile will be written, so
                     // widening to every common platform doesn't happen
                     // just to be discarded.
-                    target_lockfile_kind: lockfile_enabled.then(|| {
-                        source_kind_before
-                            .unwrap_or_else(|| super::default_lockfile_kind(&settings_ctx))
-                    }),
-                    dependency_policy: Some(dependency_policy.clone()),
+                    target_lockfile_kind: lockfile_enabled.then_some(write_kind),
+                    dependency_policy: dependency_policy.clone(),
                     cache_full_packuments: true,
                     ignore_scripts: opts.ignore_scripts,
                 },
@@ -2537,7 +2623,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // deleted patch from the stale lockfile is neither read during
             // materialization nor written back. This also prevents pnpm 11's
             // hash-only scalar entries from being mistaken for file paths.
-            if matches!(source_kind_before, Some(aube_lockfile::LockfileKind::Pnpm)) {
+            if matches!(write_kind, aube_lockfile::LockfileKind::Pnpm) {
                 graph.patched_dependencies = crate::patches::read_patched_dependencies(&cwd)?;
             }
             tracing::debug!("Resolved {} packages", graph.packages.len());
@@ -2648,12 +2734,36 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // below hits pkg_nm_dir.exists() fast path and only writes
             // the per-project .aube/<dep_path> symlink.
             let materialize_phase_start = std::time::Instant::now();
-            let materialize_graph_arc = std::sync::Arc::new(graph.clone());
+            let materialize_graph_arc = std::sync::Arc::new(filter_graph_for_install(
+                &cwd,
+                &workspace_packages,
+                &graph,
+                &opts,
+                has_workspace && !link_all_workspace_importers,
+                false,
+            )?);
             let materialize_strategy = resolve_link_strategy(&cwd, &settings_ctx, planned_gvs)?;
             let (materialize_patches, materialize_patch_hashes) =
                 crate::patches::load_patches_for_linker(&cwd, &graph)?;
             let (prewarm_supported_architectures, prewarm_ignored_optional) =
                 prewarm_host_filter_inputs(&manifest, &ws_config_shared, &settings_ctx);
+            // Shared with the catch-up fetch below, which needs it to
+            // classify already-linked packages the same way the linker
+            // will.
+            let materialize_virtual_store_plan = plan_virtual_store(VirtualStorePlanInputs {
+                graph: &materialize_graph_arc,
+                store: &store,
+                link_strategy: materialize_strategy,
+                virtual_store_dir_max_length,
+                use_global_virtual_store_override: prewarm_gvs_override,
+                patch_hashes: materialize_patch_hashes,
+                node_version: node_version_for_prewarm.clone(),
+                build_policy: build_policy_for_prewarm.clone(),
+                default_trust_enabled,
+                supported_architectures: prewarm_supported_architectures.clone(),
+                ignored_optional_dependencies: prewarm_ignored_optional.clone(),
+            })
+            .await?;
             let materialize_inputs = GvsPrewarmInputs {
                 graph: materialize_graph_arc.clone(),
                 store: store.clone(),
@@ -2662,11 +2772,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 link_strategy: materialize_strategy,
                 link_concurrency: link_concurrency_setting,
                 patches: materialize_patches,
-                patch_hashes: materialize_patch_hashes,
-                node_version: node_version_for_prewarm.clone(),
-                build_policy: build_policy_for_prewarm.clone(),
-                default_trust_enabled,
                 use_global_virtual_store_override: prewarm_gvs_override,
+                virtual_store_plan: materialize_virtual_store_plan.clone(),
                 virtual_store_dir: aube_dir.clone(),
                 supported_architectures: prewarm_supported_architectures,
                 ignored_optional_dependencies: prewarm_ignored_optional,
@@ -2758,11 +2865,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             persist_no_integrity_index(&cwd, &graph, &computed_integrities);
             apply_computed_integrities(&mut graph, &computed_integrities);
 
-            // Write the lockfile in whatever format the project was
-            // already using. If no lockfile existed, create aube's
-            // default `aube-lock.yaml`. Skipped entirely when
-            // `lockfile=false`.
-            let write_kind = source_kind_before.unwrap_or(aube_lockfile::LockfileKind::Aube);
+            // Write the lockfile in whatever format the project was already
+            // using, or the configured creation default when none existed.
+            // Skipped entirely when `lockfile=false`.
+            //
             // pnpm persists a top-level `time:` block only under
             // `resolution-mode=time-based`; every other mode writes a
             // `time:`-free lockfile even when the resolver kept publish
@@ -2983,13 +3089,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         prog_ref,
                         &cwd,
                         &aube_dir,
+                        &packument_cache_dir,
                         /*materialize_tx=*/ None,
                         // Same warm-store-verify gate as the primary fetch
                         // above: re-enable the workspace `AlreadyLinked`
-                        // shortcut only under fast-trust; default keeps the
-                        // upstream `has_workspace` value.
-                        /*skip_already_linked_shortcut=*/
-                        has_workspace && warm_store_verify(),
+                        // shortcut only under fast-trust.
+                        /*already_linked_shortcut=*/
+                        (!(explicit_store_dir_override || has_workspace && warm_store_verify()))
+                            .then_some(&materialize_virtual_store_plan),
                         &project_local_dep_paths,
                         virtual_store_dir_max_length,
                         opts.ignore_scripts,
@@ -3069,7 +3176,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
 
     tracing::debug!("Packages: {cached_count} cached, {fetch_count} fetched");
 
-    // `cleanupUnusedCatalogs` (gated by the setting) rewrites
+    // `catalogPrune` (gated by the setting) rewrites
     // `aube-workspace.yaml` / `pnpm-workspace.yaml` to drop entries no
     // importer references. Runs once after we have the final graph so
     // the same helper covers both lockfile-read and fresh-resolve
@@ -3104,39 +3211,14 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     //     only reachable through them. The filtered graph is what gets passed
     //     to the linker, so node_modules won't contain the excluded deps.
     //     The lockfile on disk is untouched.
-    let mut graph_for_link = if opts.dep_selection.is_filtered() {
-        let before = graph.packages.len();
-        let sel = opts.dep_selection;
-        let filtered = graph.filter_deps(|d| {
-            if sel.prod_only() && d.dep_type == aube_lockfile::DepType::Dev {
-                return false;
-            }
-            if sel.dev_only() && d.dep_type != aube_lockfile::DepType::Dev {
-                return false;
-            }
-            if sel.skip_optional() && d.dep_type == aube_lockfile::DepType::Optional {
-                return false;
-            }
-            true
-        });
-        let dropped = before - filtered.packages.len();
-        if dropped > 0 {
-            tracing::debug!("{}: skipping {dropped} packages", sel.label());
-        }
-        filtered
-    } else {
-        graph.clone()
-    };
-    if !opts.workspace_filter.is_empty() {
-        graph_for_link = filter_graph_to_workspace_selection(
-            &cwd,
-            &workspace_packages,
-            &graph_for_link,
-            &opts.workspace_filter,
-        )?;
-    } else if has_workspace && !link_all_workspace_importers {
-        graph_for_link = filter_graph_to_importers(&graph_for_link, ["."]);
-    }
+    let graph_for_link = filter_graph_for_install(
+        &cwd,
+        &workspace_packages,
+        &graph,
+        &opts,
+        has_workspace && !link_all_workspace_importers,
+        true,
+    )?;
 
     // 5c. Validate root + dependency `engines.node` constraints against
     //     the current Node version. Runs against `graph_for_link` so
@@ -3215,6 +3297,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         current_leaf_hashes,
         current_subtree_hashes,
         patch_hashes,
+        managed_bin_links,
     } = link::run_link_phase(link::LinkPhaseInput {
         cwd: &cwd,
         register_in_store: opts.register_in_store,
@@ -3257,10 +3340,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         store: store.as_ref(),
         graph: &graph,
         graph_for_link: &graph_for_link,
-        manifest: &manifest,
         ws_dirs: &ws_dirs,
-        has_workspace,
         manifests: &manifests,
+        manifest: &manifest,
         lifecycle_manifests: &lifecycle_manifests,
         direct_dep_info: &direct_dep_info,
         deprecations: &deprecations,
@@ -3268,7 +3350,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         default_trust_floor: &default_trust_floor,
         jail_policy: &jail_policy,
         stats: &stats,
+        managed_bin_links: &managed_bin_links,
         node_linker,
+        has_workspace,
         planned_gvs,
         virtual_store_only,
         current_leaf_hashes,
@@ -3660,6 +3744,87 @@ mod trust_policy_validation_cache_tests {
     }
 }
 
+fn filter_graph_for_install(
+    cwd: &std::path::Path,
+    workspace_packages: &[std::path::PathBuf],
+    graph: &aube_lockfile::LockfileGraph,
+    opts: &InstallOptions,
+    filter_to_root_importer: bool,
+    log_dropped_packages: bool,
+) -> miette::Result<aube_lockfile::LockfileGraph> {
+    let mut filtered = if opts.dep_selection.is_filtered() {
+        let sel = opts.dep_selection;
+        let selected = graph.filter_deps(|d| {
+            if sel.prod_only() && d.dep_type == aube_lockfile::DepType::Dev {
+                return false;
+            }
+            if sel.dev_only() && d.dep_type != aube_lockfile::DepType::Dev {
+                return false;
+            }
+            if sel.skip_optional() && d.dep_type == aube_lockfile::DepType::Optional {
+                return false;
+            }
+            true
+        });
+        let dropped = graph.packages.len() - selected.packages.len();
+        if log_dropped_packages && dropped > 0 {
+            tracing::debug!("{}: skipping {dropped} packages", sel.label());
+        }
+        selected
+    } else {
+        graph.clone()
+    };
+
+    if !opts.workspace_filter.is_empty() {
+        filtered = filter_graph_to_workspace_selection(
+            cwd,
+            workspace_packages,
+            &filtered,
+            &opts.workspace_filter,
+        )?;
+    } else if filter_to_root_importer {
+        filtered = filter_graph_to_importers(&filtered, ["."]);
+    }
+
+    Ok(filtered)
+}
+
+fn has_explicit_store_dir_override(cli_flags: &[(String, String)]) -> bool {
+    super::has_embedder_store_override()
+        || aube_settings::values::string_from_cli("storeDir", cli_flags).is_some()
+}
+
+/// Run pnpm's root-only pre-resolution hook from the workspace/lockfile root.
+///
+/// Kept as a command-level boundary because `update` resolves before chaining
+/// into the install pipeline and must invoke the same hook before its resolver.
+pub(crate) async fn run_dev_preinstall(
+    project_dir: &std::path::Path,
+    ignore_scripts: bool,
+    dry_run: bool,
+    lockfile_only: bool,
+    initialize_environment_for: Option<&str>,
+) -> miette::Result<()> {
+    if ignore_scripts || dry_run || lockfile_only {
+        return Ok(());
+    }
+    let root_dir =
+        crate::dirs::find_workspace_root(project_dir).unwrap_or_else(|| project_dir.to_path_buf());
+    if let Some(command) = initialize_environment_for {
+        crate::runtime::ensure_for_cwd(&root_dir).await?;
+        super::configure_script_settings_for_cwd(&root_dir, Some(command))?;
+    }
+    let root_manifest = super::load_manifest_or_default(&root_dir)?;
+    let modules_dir_name = super::resolve_modules_dir_name_for_cwd(&root_dir);
+    run_root_lifecycle_script(
+        &root_dir,
+        &modules_dir_name,
+        &root_manifest,
+        "pnpm:devPreinstall",
+    )
+    .await
+}
+
 #[cfg(test)]
 mod computed_integrity_tests {
     use super::*;
@@ -3703,5 +3868,26 @@ mod computed_integrity_tests {
             graph.packages["already@1.0.0"].integrity.as_deref(),
             Some("sha512-existing")
         );
+    }
+}
+
+#[cfg(test)]
+mod explicit_store_dir_override_tests {
+    use super::has_explicit_store_dir_override;
+
+    #[test]
+    fn recognizes_canonical_and_kebab_case_cli_keys() {
+        assert!(has_explicit_store_dir_override(&[(
+            "storeDir".into(),
+            "/store".into(),
+        )]));
+        assert!(has_explicit_store_dir_override(&[(
+            "store-dir".into(),
+            "/store".into(),
+        )]));
+        assert!(!has_explicit_store_dir_override(&[(
+            "cache-dir".into(),
+            "/cache".into(),
+        )]));
     }
 }
