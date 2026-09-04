@@ -150,7 +150,38 @@ export function installCompilePreamble() {
   // #region nub:polyfill:navigatorlocks
   installNavigatorLocks();
   // #endregion
-  if (bootstrap.needsWorker) installWorkerPolyfill();
+  if (bootstrap.needsWorker) {
+    installWorkerPolyfill();
+  } else {
+    // `globalThis.Worker` belongs to every compiled artifact's global surface, not
+    // only to artifacts whose source happens to spell it — computed access such as
+    // `globalThis["Work" + "er"]` must still find it. So the NAME goes on globalThis
+    // either way, and only the ~1.4 ms worker_threads load behind it is deferred.
+    // Global-surface parity is compared by own-property NAMES, which an accessor
+    // satisfies exactly.
+    //
+    // The getter removes itself BEFORE installing: `installWorkerPolyfill` opens by
+    // reading `typeof globalThis.Worker`, which would otherwise re-enter this getter
+    // forever. It then redefines the property as a data descriptor, so the accessor
+    // is replaced rather than shadowed.
+    Object.defineProperty(globalThis, "Worker", {
+      enumerable: false,
+      configurable: true,
+      get() {
+        delete globalThis.Worker;
+        installWorkerPolyfill();
+        return globalThis.Worker;
+      },
+      set(value) {
+        Object.defineProperty(globalThis, "Worker", {
+          value,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
+      },
+    });
+  }
   // #region nub:polyfill:temporal
   installTemporalGlobal({ Temporal, toTemporalInstant });
   // #endregion

@@ -1949,6 +1949,44 @@ fn strip_regions(source: &str, prefix: &str, drop: &[&str]) -> String {
     out
 }
 
+/// Can this module reach a builtin by a name the substring scan cannot read?
+///
+/// Compiled CommonJS deliberately PRESERVES a non-static `require(expr)` rather
+/// than failing the build (see [`Requires::classify_require`], which declines to
+/// flag them because every real instance measured was a guarded optional loader).
+/// That is correct for the bundler and fatal for a literal scan:
+/// `require(["child", "process"].join("_")).fork(...)` reaches the builtin naming
+/// neither marker, and stripping the fork identity patch there would let `fork()`
+/// silently re-run the artifact instead of real Node.
+///
+/// So a module that can compute a specifier counts as using EVERYTHING. The same
+/// applies to the indirect accessors, which take a specifier this scan never sees.
+/// A template literal counts as computed even when its body is constant — the
+/// distinction is not worth reading, and the cheap answer is the safe one.
+fn has_computed_module_access(code: &str) -> bool {
+    for accessor in ["createRequire", "getBuiltinModule", "process.binding"] {
+        if code.contains(accessor) {
+            return true;
+        }
+    }
+    for call in ["require(", "import("] {
+        let mut rest = code;
+        while let Some(at) = rest.find(call) {
+            rest = &rest[at + call.len()..];
+            // A specifier this scan CAN read starts with a plain quote once
+            // whitespace is skipped. Anything else — an identifier, a call, a
+            // concatenation, a template — is computed.
+            if !matches!(
+                rest.trim_start().as_bytes().first(),
+                Some(b'"') | Some(b'\'')
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Drop the bootstrap's eager builtin loads when the APP graph never names them.
 ///
 /// Loading `node:child_process` costs ~1.9 ms and `node:worker_threads` ~1.4 ms on
@@ -2060,6 +2098,14 @@ impl CompilePreamble {
         // on every payload and nothing is ever stripped. Its transitive imports are
         // real paths under the runtime tree and the second test covers those.
         if id.starts_with('\0') || Path::new(clean_url(id)).starts_with(&self.runtime_dir) {
+            return;
+        }
+        // A module that can COMPUTE a specifier defeats substring matching outright,
+        // so it counts as using everything. See [`has_computed_module_access`].
+        if has_computed_module_access(code) {
+            self.app_uses_child_process
+                .store(true, AtomicOrdering::Relaxed);
+            self.app_uses_worker.store(true, AtomicOrdering::Relaxed);
             return;
         }
         if code.contains("child_process") || code.contains("cluster") {
@@ -9904,6 +9950,59 @@ after
             uses(&app_worker),
             (false, true),
             "an application module naming Worker must keep only that load"
+        );
+    }
+
+    /// A module that can compute a specifier keeps every eager load.
+    ///
+    /// This is the hole a literal scan leaves: compiled CommonJS preserves a
+    /// non-static `require(expr)`, so `require(["child", "process"].join("_"))`
+    /// reaches the builtin naming neither marker. Stripping there would drop the
+    /// fork identity patch and let `fork()` re-run the artifact with no error
+    /// raised, which is the silent failure this whole scan is written around.
+    #[test]
+    fn a_computed_specifier_keeps_every_eager_load() {
+        for computed in [
+            r#"require(["child", "process"].join("_"))"#,
+            r#"const m = "fs"; require(m);"#,
+            r#"await import(specifier)"#,
+            r#"createRequire(import.meta.url)("child_process")"#,
+            r#"process.getBuiltinModule(name)"#,
+            "require(`fs`)", // a template is not read, and cheap-and-safe wins
+        ] {
+            assert!(
+                has_computed_module_access(computed),
+                "must be treated as computed: {computed}"
+            );
+        }
+
+        // The negative half is what keeps the optimisation alive at all: if every
+        // ordinary module read as computed, nothing would ever be stripped and the
+        // positive assertions above would still pass.
+        for literal in [
+            r#"import { readFile } from "node:fs/promises";"#,
+            r#"const fs = require("node:fs");"#,
+            r#"await import("./chunk.mjs")"#,
+            r#"console.log("plain");"#,
+        ] {
+            assert!(
+                !has_computed_module_access(literal),
+                "must stay readable: {literal}"
+            );
+        }
+
+        // And the whole point: a computed specifier forces BOTH loads, even though
+        // it names neither builtin.
+        let p = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        p.note_app_builtin_usage("/app/entry.ts", r#"require(["child","process"].join("_"))"#);
+        assert!(
+            p.app_uses_child_process.load(AtomicOrdering::Relaxed)
+                && p.app_uses_worker.load(AtomicOrdering::Relaxed),
+            "an unreadable specifier must keep every eager load"
         );
     }
 
