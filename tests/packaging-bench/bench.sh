@@ -159,18 +159,33 @@ done
 # A wrong-output artifact would time as fast and mean nothing, so every row is
 # checked against plain node's output BEFORE it is measured. `ulimit -u` is the
 # fork-bomb guard: a compiled artifact publishes ITSELF as process.execPath.
+#
+# `timeout` is GNU coreutils. macOS does not ship it and the GitHub macOS runner
+# image installs no coreutils, so hardcoding it made the guard itself the thing
+# that failed: every artifact resolved to "command not found", printed nothing,
+# and was dropped as an output mismatch. Both macOS legs produced zero rows that
+# way while the unguarded plain-node baselines ran fine. Resolve the guard once,
+# and accept having none rather than run the whole comparison against a command
+# that does not exist.
+# Deliberately an unquoted string, not an array: macOS ships bash 3.2, where
+# expanding an EMPTY array under `set -u` is itself an unbound-variable error.
+if command -v timeout >/dev/null 2>&1; then GUARD="timeout 30"
+elif command -v gtimeout >/dev/null 2>&1; then GUARD="gtimeout 30"
+else GUARD=""; fi
 echo
-echo "== verifying output and warming (ulimit -u 800, timeout 30)"
+echo "== verifying output and warming (ulimit -u 800, guard: ${GUARD:-none})"
 for F in hello cli; do
   EXPECTED=$(node "bundles/$F.cjs")
-  for A in "sea-$F" "pkg-$F" "caxa-$F" "nub-$F" "nubown-$F"; do
+  for A in "sea-$F" "seacc-$F" "pkg-$F" "caxa-$F" "nub-$F" "nubown-$F"; do
     [ -x "art/$A" ] || continue
-    GOT=$( (ulimit -u 800; timeout 30 "./art/$A") 2>/dev/null )
+    # Keep stderr. Discarding it is what hid "timeout: command not found" behind a
+    # bare "got []" for a whole run on both macOS legs.
+    GOT=$( (ulimit -u 800; $GUARD "./art/$A") 2>"err-$A.log" )
     if [ "$GOT" = "$EXPECTED" ]; then
-      (ulimit -u 800; timeout 30 "./art/$A") >/dev/null 2>&1   # second warm run
+      (ulimit -u 800; $GUARD "./art/$A") >/dev/null 2>&1   # second warm run
       echo "  ok   $A"
     else
-      note_drop "$A" "output mismatch: got [$GOT] want [$EXPECTED]"
+      note_drop "$A" "output mismatch: got [$GOT] want [$EXPECTED]; stderr: $(tr '\n' ' ' < "err-$A.log" | cut -c1-200)"
       mv "art/$A" "art/.bad-$A"
     fi
   done
