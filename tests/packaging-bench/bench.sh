@@ -44,6 +44,11 @@ export TMPDIR="$W/tmp"; mkdir -p "$TMPDIR" # caxa's extraction root, ours to wip
 
 # ---------------------------------------------------------------- 1. toolchain
 cp -R "$HERE/app" ./app
+# A TypeScript entry for the `nodets-*` / `nubts-*` rows, copied rather than
+# hand-written so it can never drift from the .mjs the other rows run. It carries
+# no annotations, so it measures the cost of Node's .ts LOADER path — which is the
+# thing `nub compile` removes — and not the cost of stripping dense types.
+cp app/cli.mjs app/cli.ts
 cat > package.json <<'EOF'
 { "name": "packaging-bench", "private": true, "version": "1.0.0" }
 EOF
@@ -153,6 +158,16 @@ EOF
        --out "art/nubown-$F" > "build-nubown-$F.log" 2>&1; then
     BUILT+=("nubown-$F")
   else note_drop "nubown-$F" "$(tail -5 "build-nubown-$F.log" | tr '\n' ' ')"; fi
+
+  # TypeScript entry, cli only — `nub compile` takes .ts directly, where the
+  # alternative is Node's own type-stripping loader (`nodets-*`).
+  if [ "$F" = cli ]; then
+    echo "== $F / nub compile (TypeScript entry)"
+    if "$NUB_BIN" compile "app/$F.ts" --target "$NODE_PIN" \
+         --out "art/nubts-$F" > "build-nubts-$F.log" 2>&1; then
+      BUILT+=("nubts-$F")
+    else note_drop "nubts-$F" "$(tail -5 "build-nubts-$F.log" | tr '\n' ' ')"; fi
+  fi
 done
 
 # ------------------------------------------------------- 4. correctness + warm
@@ -176,7 +191,7 @@ echo
 echo "== verifying output and warming (ulimit -u 800, guard: ${GUARD:-none})"
 for F in hello cli; do
   EXPECTED=$(node "bundles/$F.cjs")
-  for A in "sea-$F" "seacc-$F" "pkg-$F" "caxa-$F" "nub-$F" "nubown-$F"; do
+  for A in "sea-$F" "seacc-$F" "pkg-$F" "caxa-$F" "nub-$F" "nubown-$F" "nubts-$F"; do
     [ -x "art/$A" ] || continue
     # Keep stderr. Discarding it is what hid "timeout: command not found" behind a
     # bare "got []" for a whole run on both macOS legs.
@@ -195,6 +210,30 @@ for F in hello cli; do
   mkdir -p "$W/nodecc-$F.v8"
   NODE_COMPILE_CACHE="$W/nodecc-$F.v8" node "bundles/$F.cjs" > /dev/null 2>&1
   echo "  ok   nodecc-$F (plain node, warm V8 compile cache)"
+done
+
+# The two UNBUNDLED rows, cli only. Every other row in this benchmark — plain node
+# included — runs the same pre-bundled esbuild output, which is the right control
+# for isolating packaging overhead but is not what anyone ships. These run the CLI
+# from its real installed node_modules: 84 module resolutions and 84 file reads
+# that no packaged artifact pays. They are the "what does a user run today"
+# comparison; `baseline-*` stays the "same application" comparison. Both are kept,
+# because they answer different questions.
+#
+# They run DIFFERENT source from the bundle, so unlike nodecc-* the output check
+# here is load-bearing rather than a formality.
+UNBUNDLED_OK=""
+EXPECTED_CLI=$(node "bundles/cli.cjs")
+for U in "nodeunb-cli:$W/app/cli.mjs" "nodets-cli:$W/app/cli.ts"; do
+  UN="${U%%:*}"; UPATH="${U#*:}"
+  GOT=$( (ulimit -u 800; $GUARD node "$UPATH") 2>"err-$UN.log" )
+  if [ "$GOT" = "$EXPECTED_CLI" ]; then
+    (ulimit -u 800; $GUARD node "$UPATH") >/dev/null 2>&1   # second warm run
+    UNBUNDLED_OK="$UNBUNDLED_OK $UN"
+    echo "  ok   $UN (plain node, real node_modules — NOT the shared bundle)"
+  else
+    note_drop "$UN" "output mismatch: got [$GOT] want [$EXPECTED_CLI]; stderr: $(tr '\n' ' ' < "err-$UN.log" | cut -c1-200)"
+  fi
 done
 
 # Runner identity. Two ubuntu-latest runs of this exact harness (33925518838 and
@@ -239,6 +278,21 @@ echo "     bytecode that plain node and SEA do not have, so their margins over t
 echo "     baseline understate their true packaging overhead. The 'hello' fixture has"
 echo "     nothing to cache, which is why it is the clean apples-to-apples row, and"
 echo "     'caxa-nocc-*' below isolates the same effect directly."
+echo
+echo "== bundling — the two baselines answer DIFFERENT questions, do not conflate"
+echo "  baseline-*         plain node on the SHARED esbuild bundle. SEA and pkg cannot"
+echo "                     resolve from disk, so every packaged row is bundled by"
+echo "                     necessity. Holding the bundle constant is what isolates"
+echo "                     packaging overhead — but nobody ships a bundle they did not"
+echo "                     make, so this baseline is the artificial one."
+echo "  nodeunb-cli        plain node on the REAL node_modules tree: 84 module"
+echo "                     resolutions and 84 file reads no packaged row pays."
+echo "                     This is what a user runs today, and the honest thing to"
+echo "                     compare a compiled artifact against."
+echo "  nodets-cli         the same, entered at a .ts file through Node's own"
+echo "                     type-stripping loader."
+echo "  => a packaged row's margin over baseline-* is packaging OVERHEAD; its margin"
+echo "     over nodeunb-cli is what a user would actually feel. Report both."
 
 # ------------------------------------------------------------- 5. warm measure
 run_table() {
@@ -257,11 +311,17 @@ run_table() {
   # themselves. It is the row that makes the comparison separable: a packaged
   # row's margin over `baseline-*` is packaging overhead MINUS a cache saving,
   # while its margin over `nodecc-*` is the packaging overhead alone.
-  for A in "nodecc-$F" "sea-$F" "seacc-$F" "pkg-$F" "caxa-$F" "caxanocc-$F" "nub-$F" "nubown-$F"; do
+  # `nodeunb-*` / `nodets-*` / `nubts-*` exist for `cli` only: with one module there
+  # is nothing to unbundle, and no TypeScript question to ask.
+  local rows="nodecc-$F sea-$F seacc-$F pkg-$F caxa-$F caxanocc-$F nub-$F nubown-$F"
+  if [ "$F" = cli ]; then rows="$rows nodeunb-$F nodets-$F nubts-$F"; fi
+  for A in $rows; do
     local art="$A" pre="" full=""
     case "$A" in
       nodecc-*)   full="NODE_COMPILE_CACHE=$W/nodecc-$F.v8 node $W/bundles/$F.cjs" ;;
       caxanocc-*) art="caxa-$F"; pre="CAXA_DISABLE_COMPILE_CACHE=1 " ;;
+      nodeunb-*)  case " $UNBUNDLED_OK " in *" $A "*) full="node $W/app/cli.mjs" ;; *) continue ;; esac ;;
+      nodets-*)   case " $UNBUNDLED_OK " in *" $A "*) full="node $W/app/cli.ts"  ;; *) continue ;; esac ;;
     esac
     if [ -z "$full" ]; then
       [ -x "art/$art" ] || continue
