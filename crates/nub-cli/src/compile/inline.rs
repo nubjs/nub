@@ -339,7 +339,15 @@ fn reaches_cluster(source: &str) -> bool {
         match callee.get_inner_expression() {
             Expression::Identifier(id) => id.name.ends_with("require"),
             // `createRequire(import.meta.url)("cluster")`: the require is the value a
-            // call produced, so the callee is itself a call.
+            // call produced, so the callee is itself a call. ANY call, deliberately.
+            // Requiring the inner callee to name `createRequire` was tried and
+            // reverted: minification is on by default and renames the import, so the
+            // emitted chunk reads `i(import.meta.url)(`cluster`)` and the narrower
+            // rule let a real cluster payload inline — measured, and it crashes at
+            // `fork()`. The failure directions are not symmetric. Declining
+            // `makeLogger()("cluster")` by mistake costs an optimization on a payload
+            // that still runs; missing a real one ships a binary that dies on the
+            // first byte of its own executable.
             Expression::CallExpression(_) => true,
             other => other
                 .as_member_expression()
@@ -580,6 +588,14 @@ mod tests {
             decline_of("process.getBuiltinModule(\"node:cluster\").fork();"),
             Some(Decline::ClusterReentry),
             "getBuiltinModule hands back the builtin with no import at all"
+        );
+        assert_eq!(
+            decline_of("const make = () => (n) => n;make()(\"cluster\");"),
+            Some(Decline::ClusterReentry),
+            "an immediately-invoked call result is accepted without proving it is a \
+             require, because minification renames the createRequire binding out of \
+             reach — this over-declines, which only costs the no-write launch, where \
+             under-declining would ship a binary that crashes at fork()"
         );
         assert_eq!(
             decline_of("const msg = \"cluster failed\";console.log(msg);"),
