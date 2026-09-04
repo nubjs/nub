@@ -14,8 +14,8 @@ Builds Node.js at a pinned `main` SHA on a real macOS arm64 runner in several bu
 | `pr65526` | nodejs/node#65526 as-is: `-fvisibility=hidden` plus `-fvisibility-inlines-hidden` |
 | `hasher` | `V8_USE_DEFAULT_HASHER_SECRET=1` in `tools/v8_gypfiles/features.gypi`: prices the per-isolate Miller-Rabin search for three random 64-bit primes (`rapidhash_make_secret`, 12-14% of a Linux `perf` profile of Node 25 and 26). A measurement only: Node's CVE-2026-21717 fix derives its array-index hash multipliers from those secrets, so this is not a shippable configuration |
 | `+atexit` | the `src/node.cc` half of nodejs/node#65549 applied on top as an incremental rebuild (the lazy cipher-table half already landed on main) |
-| `+secretfast` | `deps/v8/third_party/rapidhash-v8/secret.h`: `mul_mod` computed with a 128-bit multiply and modulo instead of a 64-iteration shift-add loop with two 64-bit `%` per iteration. Same secrets, ~17x faster generation; the fix the `hasher` row's measurement points at |
-| `+entropy` | `src/node.cc`: V8's entropy source reads `uv_random()` instead of OpenSSL's DRBG, and the eager `CSPRNG(nullptr, 0)` seeding check runs only when FIPS is in effect, so OpenSSL's default provider is not constructed before `v8Start` |
+| `+secretfast` | `deps/v8/third_party/rapidhash-v8/secret.h`: `mul_mod` computed with a 128-bit multiply and modulo instead of a 64-iteration shift-add loop with two 64-bit `%` per iteration. Same secrets, 15-22x faster generation where the compiler runtime provides `__umodti3` (not clang on Windows: see `tests/node-mulmod-probe/`); the fix the `hasher` row's measurement points at |
+| `+entropy` | `src/node.cc`: V8's entropy source reads `uv_random()` instead of OpenSSL's DRBG, and the eager `CSPRNG(nullptr, 0)` seeding check runs only under FIPS or a user-supplied OpenSSL configuration, so OpenSSL's default provider is not constructed before `v8Start` |
 
 ## Running it
 

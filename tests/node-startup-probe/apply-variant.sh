@@ -18,8 +18,9 @@
 #                   mul_mod in deps/v8/third_party/rapidhash-v8/secret.h with a 128-bit multiply
 #                   instead of a 64-iteration shift-add loop: bit-identical secrets, ~17x faster.
 #   entropy         src/node.cc: seed V8 from uv_random() instead of OpenSSL's DRBG, and run the
-#                   eager CSPRNG seeding check only when FIPS is in effect, so the default provider
-#                   is not constructed before v8Start.
+#                   eager CSPRNG seeding check only under FIPS or a user-supplied OpenSSL config
+#                   (Node's own config always activates the default provider), so the provider's
+#                   algorithm tables are not constructed before v8Start.
 set -euo pipefail
 variant=$1; dir=$2
 here=$(cd "$(dirname "$0")" && pwd)
@@ -49,7 +50,7 @@ p = 'deps/v8/third_party/rapidhash-v8/secret.h'; s = open(p).read()
 head = "                                         unsigned long long m) {\n  unsigned long long r = 0;\n  while (b) {\n    if (b & 1) {\n      unsigned long long r2 = r + a;\n"
 tail = "      a = a2 % m;\n    }\n  }\n  return r;\n}\n"
 assert s.count(head) == 1 and s.count(tail) == 1, 'mul_mod anchors not found in secret.h'
-s = s.replace(head, head.replace("{\n  unsigned long long r = 0;", "{\n#if defined(__SIZEOF_INT128__)\n  return static_cast<unsigned long long>(\n      (static_cast<__uint128_t>(a) * b) % m);\n#else\n  unsigned long long r = 0;", 1), 1)
+s = s.replace(head, head.replace("{\n  unsigned long long r = 0;", "{\n#if defined(__SIZEOF_INT128__) && !defined(_WIN32)\n  return static_cast<unsigned long long>(\n      (static_cast<__uint128_t>(a) * b) % m);\n#else\n  unsigned long long r = 0;", 1), 1)
 s = s.replace(tail, tail.replace("  return r;\n}", "  return r;\n#endif\n}", 1), 1)
 open(p, 'w').write(s)
 PY2
@@ -69,11 +70,19 @@ old = """    // Ensure CSPRNG is properly seeded.
       return true;
     });
 """
-new = """    // With FIPS in effect, confirm the CSPRNG is seeded before V8 starts: a
-    // misconfigured FIPS provider makes RAND_status() fail forever, and an
-    // abort here beats a hang at the first crypto call. Otherwise leave
-    // OpenSSL's DRBG uninstantiated until crypto is actually used.
-    if (ncrypto::isFipsEnabled()) {
+    // Node's own OpenSSL configuration always activates the default provider,
+    // so the CSPRNG can only be unavailable when the user supplied a
+    // configuration or FIPS is in effect. Confirm it is seeded before V8 starts
+    // in those cases, where an abort beats a hang at the first crypto call;
+    // otherwise leave OpenSSL's DRBG uninstantiated until crypto is used.
+#if OPENSSL_VERSION_MAJOR >= 3
+    const bool check_csprng = ncrypto::isFipsEnabled() ||
+                              conf_file != nullptr ||
+                              per_process::cli_options->openssl_shared_config;
+#else
+    const bool check_csprng = true;
+#endif
+    if (check_csprng) {
       CHECK(ncrypto::CSPRNG(nullptr, 0));
     }
 
