@@ -24,11 +24,18 @@ const need = (n) => { const v = arg(n); if (!v) { console.error(`missing ${n}`);
 const [win, mac, linux, population, curated, sha, out] =
   ['--win', '--mac', '--linux', '--population', '--curated', '--sha', '--out'].map(need);
 
+// A sweep row's verdict, and the version it actually installed when the row records one.
+//
+// ⛔ THE VERSION IS `assumed:` UNLESS THE ROW ITSELF CARRIES IT. The sweep DISCOVERS its population,
+// so the version in the committed population file is what a run was expected to install, not what it
+// did — and those diverge (measured 21 of 180 names moved in two days, and one package's `latest`
+// was a prerelease that no ordinary install resolves). Rows written before `install-script-sweep.sh`
+// began recording `ver=` cannot say, and marking them keeps the guess visibly distinct from evidence.
 function verdicts(file) {
   const m = new Map();
   for (const line of fs.readFileSync(file, 'utf8').trim().split('\n')) {
     const p = line.split('\t');
-    if (p.length >= 2) m.set(p[0], p[1]);
+    if (p.length >= 2) m.set(p[0], { verdict: p[1], version: /(?:^|\t)ver=(.+)$/.exec(line)?.[1] });
   }
   // A truncated sweep would silently shrink coverage and inflate the "unmeasured" count, which is
   // the direction that looks like honest caution and is actually a broken instrument.
@@ -59,9 +66,13 @@ for (const known of ['pre-commit', 'cypress', '@prisma/client']) {
 
 const rows = [];
 for (const name of [...new Set(Object.values(sweeps).flatMap((m) => [...m.keys()]))].sort()) {
-  const v = Object.fromEntries(Object.entries(sweeps).map(([k, m]) => [k, m.get(name) ?? '(absent)']));
-  if (Object.values(v).every((x) => x === 'OK') && version.has(name)) {
-    rows.push([name, version.get(name), 'macos,linux,win', 'baseline-measured', sha]);
+  const v = Object.fromEntries(Object.entries(sweeps).map(([k, m]) => [k, m.get(name)?.verdict ?? '(absent)']));
+  // Every arm that recorded a version must agree, or we cannot say which one was measured.
+  const seen = [...new Set(Object.values(sweeps).map((m) => m.get(name)?.version).filter(Boolean))];
+  const measured = seen.length === 1 ? seen[0] : null;
+  const shown = measured ?? (version.has(name) ? `assumed:${version.get(name)}` : null);
+  if (Object.values(v).every((x) => x === 'OK') && shown) {
+    rows.push([name, shown, 'macos,linux,win', 'baseline-measured', sha]);
   } else if (v1.has(name)) {
     rows.push([name, version.get(name) ?? '-', '-', 'v1-curated', sha]);
   }

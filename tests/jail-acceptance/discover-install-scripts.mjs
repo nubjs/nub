@@ -60,21 +60,96 @@ const CANDIDATES = [
 ];
 
 const out = process.argv.includes('--out') ? process.argv[process.argv.indexOf('--out') + 1] : null;
-const found = [];
-for (const name of [...new Set(CANDIDATES)]) {
-  try {
-    const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name).replace('%40', '@')}/latest`);
-    if (!res.ok) continue;
-    const doc = await res.json();
-    const s = doc.scripts ?? {};
-    // `install`, `preinstall` or `postinstall` — the three the PM runs at install time, which is exactly
-    // what the jail confines. A `prepare` script runs only for a git dep or the root, so it is out of scope.
-    if (s.install || s.preinstall || s.postinstall) found.push(`${name}\t${doc.version}`);
-  } catch {
-    // A candidate that cannot be resolved is silently absent rather than fatal: this list is deliberately
-    // broad, and one unreachable name must not stop the sweep from being built.
+
+const url = (name, suffix = '') =>
+  `https://registry.npmjs.org/${encodeURIComponent(name).replace('%40', '@')}${suffix}`;
+
+/** Fetch with retries, so a transient blip cannot masquerade as "no install script". */
+async function getJson(u, accept) {
+  let last;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 400 * attempt));
+    try {
+      const res = await fetch(u, accept ? { headers: { accept } } : undefined);
+      if (res.status === 404) return null; // A genuinely absent package, not a failure.
+      if (!res.ok) { last = `http ${res.status}`; continue; }
+      return await res.json();
+    } catch (e) { last = String(e); }
   }
+  throw new Error(last ?? 'unknown');
 }
+
+const hooks = (scripts) => !!(scripts?.install || scripts?.preinstall || scripts?.postinstall);
+
+/**
+ * Highest non-prerelease version key, by numeric semver order. `null` when every version is one.
+ * Exported so its ordering can be pinned by a test — a comparator that silently picked the
+ * lexically-largest key would answer `9.9.9` over `10.0.0` and quietly re-introduce the drop.
+ */
+export function highestStable(versions) {
+  let best = null;
+  let bestParts = null;
+  for (const v of versions) {
+    if (v.includes('-')) continue;
+    const parts = v.split('.').map((n) => parseInt(n, 10));
+    if (parts.length < 3 || parts.some(Number.isNaN)) continue;
+    if (!bestParts || cmpSemver(parts, bestParts) > 0) {
+      best = v;
+      bestParts = parts;
+    }
+  }
+  return best;
+}
+function cmpSemver(a, b) {
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) - (b[i] ?? 0);
+  return 0;
+}
+
+const isMain = process.argv[1]
+  && import.meta.url === (await import('node:url')).pathToFileURL(process.argv[1]).href;
+if (isMain) {
+const found = [];
+const unresolved = [];
+const prereleaseFallbacks = [];
+for (const name of [...new Set(CANDIDATES)]) {
+  let doc;
+  try {
+    doc = await getJson(url(name, '/latest'));
+  } catch (e) {
+    // ⛔ A FAILED LOOKUP IS NOT "NO SCRIPT". This used to `continue` silently, so a rate-limited or
+    // flaky scan shrank the population and every downstream count read as better coverage — the
+    // failure mode this file's own header warns about (57 carriers reported against a known 87).
+    unresolved.push(`${name} (${e.message})`);
+    continue;
+  }
+  if (!doc) continue; // 404: the package does not exist.
+
+  // ⛔⛔ `latest` CAN BE A PRERELEASE, AND THEN IT DESCRIBES NOBODY'S INSTALL. Measured 2026-09-04:
+  // `prisma`'s latest was `8.0.0-rc.12`, which dropped the `preinstall` that `7.9.1` — the version an
+  // ordinary `npm install prisma` resolves — still carries. So a package the jail confines for every
+  // real user fell out of the population, and three same-commit sweeps measured it nowhere. When
+  // latest is a prerelease, judge by the newest STABLE version instead, which is what users get.
+  if (doc.version?.includes('-')) {
+    let packument;
+    try {
+      packument = await getJson(url(name), 'application/vnd.npm.install-v1+json');
+    } catch (e) {
+      unresolved.push(`${name} (prerelease latest, packument: ${e.message})`);
+      continue;
+    }
+    const stable = highestStable(Object.keys(packument?.versions ?? {}));
+    if (stable) {
+      // The abbreviated packument carries `hasInstallScript`, which is the registry's own answer to
+      // exactly this question and does not depend on `scripts` being present in the trimmed document.
+      const v = packument.versions[stable];
+      prereleaseFallbacks.push(`${name}: latest ${doc.version} -> stable ${stable}`);
+      if (v.hasInstallScript || hooks(v.scripts)) found.push(`${name}\t${stable}`);
+      continue;
+    }
+  }
+  if (hooks(doc.scripts)) found.push(`${name}\t${doc.version}`);
+}
+
 const text = `${found.join('\n')}\n`;
 if (out) {
   const { writeFileSync } = await import('node:fs');
@@ -82,4 +157,13 @@ if (out) {
   console.error(`${found.length} of ${new Set(CANDIDATES).size} candidates still carry an install script -> ${out}`);
 } else {
   process.stdout.write(text);
+}
+for (const f of prereleaseFallbacks) console.error(`  prerelease latest, judged by newest stable — ${f}`);
+if (unresolved.length) {
+  // ⛔ REFUSE RATHER THAN UNDER-REPORT. An incomplete population is a sweep that claims coverage it
+  // does not have, and the caller treats a non-zero exit as fatal, which is the correct outcome.
+  console.error(`⛔ ${unresolved.length} candidate(s) could not be resolved after retries; the population would be INCOMPLETE:`);
+  for (const u of unresolved) console.error(`   ${u}`);
+  process.exit(3);
+}
 }

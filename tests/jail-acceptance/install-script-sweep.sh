@@ -135,7 +135,7 @@ if [ -f "$BASELINE_POP" ]; then
   fi
 fi
 
-ran_total=0; ok=0; noscript=0; jailcaused=0; nubcaused=0; upstream=0
+ran_total=0; ok=0; noscript=0; blocked=0; jailcaused=0; nubcaused=0; upstream=0
 # ⛔⛔ THREE ARMS, BECAUSE TWO CANNOT TELL THE ONLY THING THIS SWEEP EXISTS TO SAY. Until now every
 # arm here ran nub with the jail ON, and a failure was classified by grepping the log for a
 # permission- or network-shaped string. That is a PROXY for a control, and it cannot separate the
@@ -278,7 +278,16 @@ for pkg in $PKGS; do
   # Arm A only ever answers PASS or NOT-PASS here. WHICH kind of failure it is, is not something a
   # log grep can decide — that is what arms B and C are for. The detector columns survive as
   # diagnostics, but they no longer set the verdict.
-  if [ "$ran" = 0 ]; then
+  # ⛔ "NO SCRIPT RAN" HAS TWO CAUSES AND THEY ARE NOT THE SAME FINDING. A package with no install
+  # script exits 0 having nothing to confine, which is fine. An install nub REFUSED never reaches a
+  # script at all, and folding it under the same verdict spells a hard failure as "measured nothing".
+  # Measured 2026-09-04 across all three platforms: `blake3` sat in this bucket at rc=20 beside
+  # `fsevents`, `hrtime` and `zlib` at rc=0, and the summary counted four of a kind. `prisma@7.10.0`
+  # is the same shape at rc=23 — nub's supply-chain trust policy declining a provenance regression,
+  # which is nub working correctly and still worth seeing. Neither fails the gate; both must be legible.
+  if [ "$ran" = 0 ] && [ "$rc" != 0 ]; then
+    verdict="BLOCKED"; blocked=$((blocked+1))
+  elif [ "$ran" = 0 ]; then
     verdict="NO-SCRIPT-RAN"; noscript=$((noscript+1))
   elif [ "$rc" = 0 ] && [ "$jail_lines" = 0 ] && [ "$net_err" = 0 ]; then
     verdict="OK"; ok=$((ok+1)); ran_total=$((ran_total+1))
@@ -334,11 +343,17 @@ for pkg in $PKGS; do
     rm -rf "$bhome"
   fi
 
-  # `jail-s` is APPENDED, never inserted: the two free-text error fields stay last-but-one and
-  # last-but-two so every existing positional reader of fields 1-11 keeps working unchanged.
-  printf '%s\t%s\trc=%s\tconfined-spawns=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\tnojail-rc=%s\tnpm-rc=%s\t%s\t%s\tjail-s=%s\n' \
+  # `jail-s` and `ver` are APPENDED, never inserted: the two free-text error fields stay in place so
+  # every existing positional reader of fields 1-11 keeps working unchanged.
+  #
+  # ⛔ THE VERSION IS RECORDED BECAUSE THE POPULATION IS DISCOVERED, SO A RESULTS FILE ALONE COULD NOT
+  # SAY WHAT WAS MEASURED. Reading the version back out of the population file is an ASSUMPTION, not a
+  # measurement — a sweep that discovered its own population may have installed something else
+  # entirely, and nothing in the row said so. Anything that records "package X was measured OK" needs
+  # this field to be evidence rather than a guess.
+  printf '%s\t%s\trc=%s\tconfined-spawns=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\tnojail-rc=%s\tnpm-rc=%s\t%s\t%s\tjail-s=%s\tver=%s\n' \
     "$pkg" "$verdict" "$rc" "$ran" "$jail_lines" "$net_err" "${deny_lines:-0}" \
-    "$nojail_rc" "$npm_rc" "${err:-—}" "${ctl_err:-—}" "${jail_s:-0}" >> "$OUT"
+    "$nojail_rc" "$npm_rc" "${err:-—}" "${ctl_err:-—}" "${jail_s:-0}" "$ver" >> "$OUT"
   echo "  $pkg -> $verdict (rc=$rc, ran=$ran, ${jail_s:-0}s)"
   [ -n "$KEEP" ] && cp "$log" "$KEEP/$(echo "$pkg" | tr '/' '_').log" 2>/dev/null
   rm -rf "$home"
@@ -354,6 +369,7 @@ echo "  OK          $ok"
 echo "  JAIL-CAUSED $jailcaused   <- nub failed jailed, PASSED unjailed. The only count that indicts the jail."
 echo "  NUB-CAUSED  $nubcaused   <- failed both ways, npm succeeded. nub's PM, not the jail."
 echo "  UPSTREAM    $upstream   <- nub and npm both failed. The package is broken for everyone."
+echo "  BLOCKED     $blocked   <- nub refused the install before any script ran (trust policy, resolution). Not the jail; not a pass either."
 # ⛔ THE GATE MOVED FROM A PROXY TO THE DIFFERENTIAL, AND IT IS DELIBERATELY LOOSER IN ONE DIRECTION.
 # It used to fail on JAIL-SUSPECT, i.e. on any failure whose LOG looked permission- or network-shaped
 # — which fires on ecosystem rot that has nothing to do with confinement. It now fails only when a
