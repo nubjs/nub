@@ -2054,7 +2054,12 @@ impl CompilePreamble {
     /// whose `fork` is never identity-corrected, which is the failure that silently
     /// bypassed the policy for every cluster worker before it was fixed.
     fn note_app_builtin_usage(&self, id: &str, code: &str) {
-        if Path::new(clean_url(id)).starts_with(&self.runtime_dir) {
+        // A leading NUL is Rollup's plugin-only namespace, which here means one of
+        // this compiler's own virtual roots — and the PREAMBLE is served from one.
+        // Its source names every marker, so without this the scan sets both flags
+        // on every payload and nothing is ever stripped. Its transitive imports are
+        // real paths under the runtime tree and the second test covers those.
+        if id.starts_with('\0') || Path::new(clean_url(id)).starts_with(&self.runtime_dir) {
             return;
         }
         if code.contains("child_process") || code.contains("cluster") {
@@ -9837,6 +9842,65 @@ after
                 "the stripper must only remove its own regions"
             );
         }
+    }
+
+    /// The usage scan counts application modules and ignores the compiler's own.
+    ///
+    /// Written after shipping the inverse by accident: the preamble is served from
+    /// a virtual id rather than a path under the runtime tree, so excluding only
+    /// the runtime tree let the preamble's own source — which names every marker —
+    /// set both flags on every payload, and nothing was ever stripped. The failure
+    /// was silent, because over-detection only costs startup.
+    #[test]
+    fn the_builtin_scan_ignores_the_compilers_own_modules() {
+        let every_marker = "child_process cluster worker_threads Worker";
+        let fresh = || {
+            CompilePreamble::from_source(
+                Path::new("/app/entry.ts"),
+                PathBuf::from("/nub/runtime"),
+                String::new(),
+            )
+        };
+        let uses = |p: &CompilePreamble| {
+            (
+                p.app_uses_child_process.load(AtomicOrdering::Relaxed),
+                p.app_uses_worker.load(AtomicOrdering::Relaxed),
+            )
+        };
+
+        let virtual_root = fresh();
+        virtual_root.note_app_builtin_usage(COMPILE_PREAMBLE_ID, every_marker);
+        assert_eq!(
+            uses(&virtual_root),
+            (false, false),
+            "the preamble's own virtual module must not count as application usage"
+        );
+
+        let runtime_file = fresh();
+        runtime_file.note_app_builtin_usage("/nub/runtime/worker-polyfill.mjs", every_marker);
+        assert_eq!(
+            uses(&runtime_file),
+            (false, false),
+            "a file in nub's runtime tree must not count as application usage"
+        );
+
+        // The positive control. Without it the assertions above would pass just as
+        // well against a scan that never records anything at all.
+        let app = fresh();
+        app.note_app_builtin_usage("/app/entry.ts", "import { fork } from 'node:child_process';");
+        assert_eq!(
+            uses(&app),
+            (true, false),
+            "an application module naming child_process must keep only that load"
+        );
+
+        let app_worker = fresh();
+        app_worker.note_app_builtin_usage("/app/entry.ts", "const w = new Worker(url);");
+        assert_eq!(
+            uses(&app_worker),
+            (false, true),
+            "an application module naming Worker must keep only that load"
+        );
     }
 
     /// The bootstrap keeps an eager builtin load exactly when the app graph names
