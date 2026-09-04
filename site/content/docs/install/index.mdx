@@ -666,7 +666,7 @@ WARN skipped fastq@1.20.2 (trustPolicy=no-downgrade): earlier published version 
 
 The substitution stays inside the declared range and never crosses the refused version — down to an older release for an ordinary pick, and up to a newer one when `resolution-mode=time-based` resolves a direct dependency to its range floor. When nothing the range admits clears the check, the install stops with `ERR_NUB_TRUST_DOWNGRADE`.
 
-A lockfile names one exact version rather than a range, so there is nothing to walk. Any install that reuses an undrifted lockfile — `nub ci`, `--frozen-lockfile`, or a plain `nub install` — still aborts on a pin the check refuses, because only a fresh resolve has a range to substitute within. The remedy is `nub install --no-frozen-lockfile`.
+A lockfile names one exact version rather than a range, so there is nothing to walk. The check runs when a version is newly resolved, and the lockfile is the trust boundary from there: an install that reuses an undrifted lockfile — `nub ci`, `--frozen-lockfile`, or a plain `nub install` — trusts the recorded pin without re-fetching its publishing evidence.
 
 The comparison is by publish date, so a legitimate maintenance release on an older major — shipped after a newer major adopted provenance — can trigger it. Nub exempts any version older than 14 days, so an aged, un-yanked backport resolves while a freshly published downgrade is still checked against the full history. Widen the window, clear a single package, or turn the check off in `.npmrc`:
 

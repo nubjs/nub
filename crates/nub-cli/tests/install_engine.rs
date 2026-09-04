@@ -1019,15 +1019,14 @@ fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -
 
 /// A second `nub install` on an unchanged, fully-satisfied tree short-circuits
 /// to the instant "Already up to date" exit — even online under the default
-/// `trustPolicy=no-downgrade`. Before the fix the trust posture disabled the
-/// warm short-circuit on any online install (gated in `install_fast_path_eligible`
-/// before `check_needs_install` ran), so the second install re-ran the full
-/// resolve/fetch/link pipeline every time; nub's `warm_trust_revalidate=false`
-/// profile now lets a no-op skip the redundant re-validation. The short-circuit
-/// is the load-independent signal: `emit_up_to_date` fires ONLY on the fast path,
-/// and it does so here with a fresh (empty) packument cache, proving nothing was
-/// re-resolved or re-fetched. The security half (real work still trips the gate)
-/// is covered by `frozen_install_with_trust_downgrade_still_aborts`.
+/// `trustPolicy=no-downgrade`. The lockfile is the trust boundary: the policy is
+/// enforced when a version is NEWLY resolved, and a version already recorded in
+/// the lockfile is trusted without re-fetching its publishing evidence. The
+/// short-circuit is the load-independent signal: `emit_up_to_date` fires ONLY on
+/// the fast path, and it does so here with a fresh (empty) packument cache,
+/// proving nothing was re-resolved or re-fetched. The security half (a new pick
+/// still trips the gate) is covered by
+/// `cold_install_with_trust_downgrade_still_aborts`.
 #[test]
 #[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn warm_satisfied_install_short_circuits_under_no_downgrade() {
@@ -1066,19 +1065,17 @@ fn warm_satisfied_install_short_circuits_under_no_downgrade() {
     );
 }
 
-/// SECURITY INVARIANT: the warm short-circuit must NOT weaken the trust gate on
-/// an install that does real work. A fresh install of a package whose picked
-/// version dropped the trust evidence an earlier version carried
-/// (`node-gyp@10.3.0` lost the provenance attestation `10.3.1` had) is real work
-/// — `check_needs_install` returns `Some`, so the fast path is bypassed and the
-/// full pipeline runs, where `trustPolicy=no-downgrade` aborts during
-/// resolution. The short-circuit is reachable only on a no-op, never on this.
-/// (Depends on `node-gyp@10.3.0`'s live registry provenance metadata staying a
-/// downgrade vs `10.3.1`; the canonical case is recorded in
+/// SECURITY INVARIANT: trusting versions already in the lockfile must NOT weaken
+/// the gate on a version this install NEWLY resolves. There is no lockfile here,
+/// so every pick is new — including `node-gyp@10.3.0`, which dropped the
+/// provenance attestation `10.3.1` carried — and `trustPolicy=no-downgrade`
+/// aborts during resolution, before anything is linked. (Depends on
+/// `node-gyp@10.3.0`'s live registry provenance metadata staying a downgrade vs
+/// `10.3.1`; the canonical case is recorded in
 /// `.fray/install-warm-fastpath-trust-gate.md`.)
 #[test]
 #[ignore = "network: resolves node-gyp@10.3.0 from the npm registry to assert the trust-downgrade abort"]
-fn frozen_install_with_trust_downgrade_still_aborts() {
+fn cold_install_with_trust_downgrade_still_aborts() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
         return;

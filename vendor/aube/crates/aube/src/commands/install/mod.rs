@@ -93,9 +93,9 @@ pub(crate) use side_effects_cache::{
 };
 
 use settings::{
-    check_unmet_peers, default_lockfile_network_concurrency, default_streaming_network_concurrency,
-    maybe_cleanup_unused_catalogs, resolve_git_shallow_hosts, resolve_link_concurrency,
-    resolve_network_concurrency, resolve_side_effects_cache, resolve_side_effects_cache_readonly,
+    check_unmet_peers, default_streaming_network_concurrency, maybe_cleanup_unused_catalogs,
+    resolve_git_shallow_hosts, resolve_link_concurrency, resolve_network_concurrency,
+    resolve_side_effects_cache, resolve_side_effects_cache_readonly,
     resolve_strict_peer_dependencies, resolve_strict_store_pkg_content_check,
     resolve_verify_store_integrity,
 };
@@ -242,10 +242,6 @@ pub(crate) fn warm_load_index(
     }
 }
 
-const TRUST_POLICY_VALIDATION_CACHE_DIR: &str = "trust-policy-v1";
-const TRUST_POLICY_VALIDATION_CACHE_TTL: std::time::Duration =
-    std::time::Duration::from_secs(5 * 60);
-
 #[cfg(test)]
 mod reentrancy_tests {
     use super::*;
@@ -341,12 +337,6 @@ pub(crate) fn build_may_key_engine(
             && pkg.local_source.is_none()
             && !pkg.registry_git_hosted
             && aube_scripts::is_default_trusted(pkg.registry_name()))
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct TrustPolicyValidationStamp {
-    key: String,
-    validated_at_secs: u64,
 }
 
 #[derive(Default)]
@@ -508,244 +498,6 @@ fn apply_computed_integrities(
             pkg.integrity = Some(integrity.clone());
         }
     }
-}
-
-async fn validate_lockfile_trust_policy(
-    cwd: &std::path::Path,
-    graph: &aube_lockfile::LockfileGraph,
-    network_mode: aube_registry::NetworkMode,
-    policy: &aube_resolver::DependencyPolicy,
-) -> miette::Result<()> {
-    let Some(cache_key) = trust_policy_validation_cache_key(cwd, graph, network_mode, policy)
-    else {
-        return Ok(());
-    };
-    if trust_policy_validation_cache_hit(cwd, &cache_key) {
-        tracing::debug!("trustPolicy=no-downgrade: reused lockfile validation cache");
-        return Ok(());
-    }
-
-    let client = std::sync::Arc::new(make_client(cwd).with_network_mode(network_mode));
-    let full_cache_dir = super::packument_full_cache_dir();
-    let concurrency = default_lockfile_network_concurrency().max(1);
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let mut seen = std::collections::BTreeSet::new();
-    let mut checks: tokio::task::JoinSet<Result<(), aube_resolver::Error>> =
-        tokio::task::JoinSet::new();
-
-    for dep_path in reachable_package_dep_paths(graph) {
-        let Some(pkg) = graph.packages.get(&dep_path) else {
-            continue;
-        };
-        if pkg.local_source.is_some() {
-            continue;
-        }
-        let name = pkg.registry_name().to_string();
-        let version = pkg.version.clone();
-        if !seen.insert((name.clone(), version.clone())) {
-            continue;
-        }
-
-        let client = client.clone();
-        let full_cache_dir = full_cache_dir.clone();
-        let exclude = policy.trust_policy_exclude.clone();
-        let ignore_after = policy.trust_policy_ignore_after;
-        let semaphore = semaphore.clone();
-        checks.spawn(async move {
-            let _permit = semaphore.acquire_owned().await.map_err(|e| {
-                aube_resolver::Error::Registry(name.clone(), format!("trust check cancelled: {e}"))
-            })?;
-            let packument = client
-                .fetch_packument_with_time_cached(&name, &full_cache_dir)
-                .await
-                .map_err(|e| aube_resolver::Error::Registry(name.clone(), e.to_string()))?;
-            let picked = packument.versions.get(&version).ok_or_else(|| {
-                aube_resolver::Error::Registry(
-                    name.clone(),
-                    format!("registry packument has no metadata for {name}@{version}"),
-                )
-            })?;
-            aube_resolver::check_no_downgrade(&packument, &version, picked, &exclude, ignore_after)
-                .map_err(|e| match e {
-                    aube_resolver::TrustCheckError::Downgrade(d) => {
-                        aube_resolver::Error::TrustDowngrade(Box::new(d))
-                    }
-                    aube_resolver::TrustCheckError::MissingTime(d) => {
-                        aube_resolver::Error::TrustCheckMissingTime(Box::new(d))
-                    }
-                })
-        });
-    }
-
-    while let Some(result) = checks.join_next().await {
-        let result = result.map_err(|e| miette!("trust-policy validation task failed: {e}"))?;
-        result.map_err(miette::Report::new)?;
-    }
-
-    record_lockfile_trust_policy_validation(cwd, &cache_key);
-    Ok(())
-}
-
-fn trust_policy_validation_cache_key(
-    cwd: &std::path::Path,
-    graph: &aube_lockfile::LockfileGraph,
-    network_mode: aube_registry::NetworkMode,
-    policy: &aube_resolver::DependencyPolicy,
-) -> Option<String> {
-    if policy.trust_policy != aube_resolver::TrustPolicy::NoDowngrade
-        || matches!(network_mode, aube_registry::NetworkMode::Offline)
-    {
-        return None;
-    }
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"aube:trust-policy-validation:v1\0");
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
-    hasher.update(b"\0network=");
-    hasher.update(format!("{network_mode:?}").as_bytes());
-    hasher.update(b"\0ignore_after=");
-    hasher.update(format!("{:?}", policy.trust_policy_ignore_after).as_bytes());
-    hasher.update(b"\0exclude=");
-    hasher.update(format!("{:?}", policy.trust_policy_exclude).as_bytes());
-
-    let config = super::load_npm_config(cwd);
-    hasher.update(b"\0registry=");
-    hasher.update(config.registry.as_bytes());
-    hasher.update(b"\0scoped_registries=");
-    for (scope, url) in config.scoped_registries {
-        hasher.update(scope.as_bytes());
-        hasher.update(b"\x1f");
-        hasher.update(url.as_bytes());
-        hasher.update(b"\x1e");
-    }
-
-    for dep_path in reachable_package_dep_paths(graph) {
-        let Some(pkg) = graph.packages.get(&dep_path) else {
-            continue;
-        };
-        if pkg.local_source.is_some() {
-            continue;
-        }
-        hasher.update(b"\0pkg=");
-        hasher.update(dep_path.as_bytes());
-        hasher.update(b"\x1f");
-        hasher.update(pkg.name.as_bytes());
-        hasher.update(b"\x1f");
-        hasher.update(pkg.registry_name().as_bytes());
-        hasher.update(b"\x1f");
-        hasher.update(pkg.version.as_bytes());
-        hasher.update(b"\x1f");
-        if let Some(alias_of) = &pkg.alias_of {
-            hasher.update(alias_of.as_bytes());
-        }
-        hasher.update(b"\x1f");
-        if let Some(integrity) = &pkg.integrity {
-            hasher.update(integrity.as_bytes());
-        }
-        hasher.update(b"\x1f");
-        if let Some(tarball_url) = &pkg.tarball_url {
-            hasher.update(tarball_url.as_bytes());
-        }
-    }
-
-    Some(hasher.finalize().to_hex().to_string())
-}
-
-fn trust_policy_validation_cache_path(cwd: &std::path::Path, key: &str) -> std::path::PathBuf {
-    super::resolved_cache_dir(cwd)
-        .join(TRUST_POLICY_VALIDATION_CACHE_DIR)
-        .join(format!("{key}.json"))
-}
-
-fn trust_policy_validation_cache_hit(cwd: &std::path::Path, key: &str) -> bool {
-    let path = trust_policy_validation_cache_path(cwd, key);
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
-    let Ok(stamp) = serde_json::from_slice::<TrustPolicyValidationStamp>(&bytes) else {
-        return false;
-    };
-    if stamp.key != key {
-        return false;
-    }
-    let Some(now) = unix_time_secs() else {
-        return false;
-    };
-    let Some(age_secs) = now.checked_sub(stamp.validated_at_secs) else {
-        return false;
-    };
-    age_secs <= TRUST_POLICY_VALIDATION_CACHE_TTL.as_secs()
-}
-
-fn record_lockfile_trust_policy_validation(cwd: &std::path::Path, cache_key: &str) {
-    let Some(validated_at_secs) = unix_time_secs() else {
-        return;
-    };
-    let stamp = TrustPolicyValidationStamp {
-        key: cache_key.to_string(),
-        validated_at_secs,
-    };
-    let Ok(bytes) = serde_json::to_vec(&stamp) else {
-        return;
-    };
-    let path = trust_policy_validation_cache_path(cwd, cache_key);
-    if let Err(e) = aube_util::fs_atomic::atomic_write(&path, &bytes) {
-        tracing::debug!("failed to write trust-policy validation cache: {e}");
-    }
-}
-
-fn maybe_record_lockfile_trust_policy_validation(
-    cwd: &std::path::Path,
-    graph: &aube_lockfile::LockfileGraph,
-    network_mode: aube_registry::NetworkMode,
-    policy: &aube_resolver::DependencyPolicy,
-) {
-    if let Some(cache_key) = trust_policy_validation_cache_key(cwd, graph, network_mode, policy) {
-        record_lockfile_trust_policy_validation(cwd, &cache_key);
-    }
-}
-
-fn can_seed_trust_policy_validation_from_resolve(
-    lockfile_enabled: bool,
-    had_existing_lockfile_for_resolver: bool,
-) -> bool {
-    lockfile_enabled && !had_existing_lockfile_for_resolver
-}
-
-fn unix_time_secs() -> Option<u64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
-}
-
-fn reachable_package_dep_paths(
-    graph: &aube_lockfile::LockfileGraph,
-) -> std::collections::BTreeSet<String> {
-    let mut reachable = std::collections::BTreeSet::new();
-    let mut stack = graph
-        .importers
-        .values()
-        .flat_map(|deps| deps.iter().map(|dep| dep.dep_path.clone()))
-        .collect::<Vec<_>>();
-
-    while let Some(dep_path) = stack.pop() {
-        if !reachable.insert(dep_path.clone()) {
-            continue;
-        }
-        let Some(pkg) = graph.packages.get(&dep_path) else {
-            continue;
-        };
-        for (name, tail) in &pkg.dependencies {
-            if let Some(child) =
-                aube_lockfile::resolve_dep_edge(name, tail, |k| graph.packages.contains_key(k))
-            {
-                stack.push(child);
-            }
-        }
-    }
-
-    reachable
 }
 
 /// The `(supported architectures, ignoredOptionalDependencies)` pair for
@@ -1637,38 +1389,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 &ws_config_shared,
                 &settings_ctx,
             )?;
+            // The lockfile is the trust boundary: trustPolicy is enforced when
+            // a version is selected, then the recorded version is trusted on
+            // frozen and reused-lockfile installs. Re-fetching publishing
+            // evidence here would turn a cold install into a metadata resolve.
             control::check_cancelled()?;
-            // Trust-policy (no-downgrade) validation. Previously this ran
-            // serial-before-fetch and, on a cold lockfile install, was the
-            // dominant cost — a full-packument fan-out over every unique
-            // package, all ahead of the first downloaded byte. It has no
-            // data dependency on the tarball bytes (it checks each picked
-            // version's publish-trust against registry metadata, not file
-            // contents), so it now runs as a concurrent task overlapping
-            // the download phase and is `await`ed at the gate below,
-            // strictly before the link/finalize phase. A genuine
-            // no-downgrade violation still aborts the install (via `?` on
-            // the awaited result) before any package is linked into
-            // `node_modules` or any lifecycle script runs: identical
-            // validation, identical gate, only the `await` point moved
-            // later to hide the metadata round-trip behind the download
-            // tail. Single-task `JoinSet` (abort-on-drop) so an early `?`
-            // between here and the gate cancels the in-flight probe.
-            let trust_cwd = cwd.clone();
-            let trust_graph = graph.clone();
-            let trust_network_mode = opts.network_mode;
-            let trust_policy = dependency_policy.clone();
-            let mut lock_trust_set: tokio::task::JoinSet<miette::Result<()>> =
-                tokio::task::JoinSet::new();
-            lock_trust_set.spawn(async move {
-                validate_lockfile_trust_policy(
-                    &trust_cwd,
-                    &trust_graph,
-                    trust_network_mode,
-                    &trust_policy,
-                )
-                .await
-            });
             let source_label = resolve::lockfile_source_label(kind);
             tracing::debug!(
                 "{source_label}: {} packages for {project_name}",
@@ -1877,28 +1602,16 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 Ok(t) => t,
                 Err(e) => {
                     // Fetch failed: the install is aborting, so no build
-                    // script will run. Dropping the OSV and trust-policy
-                    // sets aborts the in-flight probes so they don't keep
-                    // doing network I/O after the CLI has errored.
+                    // script will run. Dropping the OSV set aborts the
+                    // in-flight probe so it doesn't keep doing network I/O
+                    // after the CLI has errored.
                     drop(lock_osv_set);
-                    drop(lock_trust_set);
                     return Err(combine_install_pipeline_errors(lock_materialize_handle, e).await);
                 }
             };
             // Materializer stats roll into link via GVS-already-linked
             // fast path. Errors abort install.
             let _ = lock_materialize_handle.await.into_diagnostic()??;
-            // Gate: consume the trust-policy verdict that ran concurrently
-            // with the download phase above. This `await` is strictly
-            // before the link + finalize phases, so a no-downgrade
-            // violation aborts the install (via `?`) before any package is
-            // linked or any lifecycle script runs — the security posture is
-            // unchanged, the validation simply overlapped the download tail
-            // instead of serializing ahead of the fetch.
-            match lock_trust_set.join_next().await {
-                Some(joined) => joined.into_diagnostic()??,
-                None => unreachable!("trust-policy JoinSet had exactly one spawned task"),
-            }
             control::check_cancelled()?;
             // Gate: consume the OSV verdict that ran concurrently with
             // the download phase above. This `await` is strictly before
@@ -3378,22 +3091,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         phase_timings: &mut phase_timings,
     })
     .await?;
-    // A fresh resolve enforces trustPolicy=no-downgrade while picking
-    // versions from packuments. If an existing lockfile fed the resolver,
-    // `try_lockfile_reuse` may carry locked packages forward without
-    // fetching their packuments, so only the explicit lockfile validator
-    // may seed the cache in that path.
-    if can_seed_trust_policy_validation_from_resolve(
-        lockfile_enabled,
-        existing_for_resolver.is_some(),
-    ) {
-        maybe_record_lockfile_trust_policy_validation(
-            &cwd,
-            &graph,
-            opts.network_mode,
-            &dependency_policy,
-        );
-    }
     Ok(())
 }
 
@@ -3575,172 +3272,6 @@ mod engine_fold_agreement_tests {
             dep_path: format!("{name}@1.0.0"),
             ..Default::default()
         }
-    }
-}
-
-#[cfg(test)]
-mod trust_policy_validation_cache_tests {
-    use super::*;
-
-    fn write_project_npmrc(dir: &std::path::Path, registry: &str) {
-        std::fs::write(
-            dir.join(".npmrc"),
-            format!("cache-dir=.cache\nregistry={registry}\n"),
-        )
-        .unwrap();
-    }
-
-    fn graph_with_integrity(integrity: &str) -> aube_lockfile::LockfileGraph {
-        let mut graph = aube_lockfile::LockfileGraph::default();
-        graph.importers.insert(
-            ".".into(),
-            vec![aube_lockfile::DirectDep {
-                name: "left-pad".into(),
-                dep_path: "left-pad@1.3.0".into(),
-                dep_type: aube_lockfile::DepType::Production,
-                specifier: Some("1.3.0".into()),
-            }],
-        );
-        graph.packages.insert(
-            "left-pad@1.3.0".into(),
-            aube_lockfile::LockedPackage {
-                name: "left-pad".into(),
-                version: "1.3.0".into(),
-                integrity: Some(integrity.into()),
-                dep_path: "left-pad@1.3.0".into(),
-                tarball_url: Some(
-                    "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into(),
-                ),
-                ..Default::default()
-            },
-        );
-        graph
-    }
-
-    fn no_downgrade_policy() -> aube_resolver::DependencyPolicy {
-        aube_resolver::DependencyPolicy {
-            trust_policy: aube_resolver::TrustPolicy::NoDowngrade,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn trust_policy_validation_key_tracks_graph_policy_and_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        write_project_npmrc(dir.path(), "https://registry.npmjs.org/");
-        let graph = graph_with_integrity("sha512-one");
-        let policy = no_downgrade_policy();
-        let key = trust_policy_validation_cache_key(
-            dir.path(),
-            &graph,
-            aube_registry::NetworkMode::Online,
-            &policy,
-        )
-        .unwrap();
-
-        let changed_graph = graph_with_integrity("sha512-two");
-        let changed_graph_key = trust_policy_validation_cache_key(
-            dir.path(),
-            &changed_graph,
-            aube_registry::NetworkMode::Online,
-            &policy,
-        )
-        .unwrap();
-        assert_ne!(key, changed_graph_key);
-
-        let mut changed_policy = policy.clone();
-        changed_policy.trust_policy_ignore_after = Some(1);
-        let changed_policy_key = trust_policy_validation_cache_key(
-            dir.path(),
-            &graph,
-            aube_registry::NetworkMode::Online,
-            &changed_policy,
-        )
-        .unwrap();
-        assert_ne!(key, changed_policy_key);
-
-        write_project_npmrc(dir.path(), "https://registry.example.test/");
-        let changed_registry_key = trust_policy_validation_cache_key(
-            dir.path(),
-            &graph,
-            aube_registry::NetworkMode::Online,
-            &policy,
-        )
-        .unwrap();
-        assert_ne!(key, changed_registry_key);
-    }
-
-    #[test]
-    fn trust_policy_validation_key_skips_disabled_modes() {
-        let dir = tempfile::tempdir().unwrap();
-        write_project_npmrc(dir.path(), "https://registry.npmjs.org/");
-        let graph = graph_with_integrity("sha512-one");
-        let mut policy = no_downgrade_policy();
-        policy.trust_policy = aube_resolver::TrustPolicy::Off;
-
-        assert!(
-            trust_policy_validation_cache_key(
-                dir.path(),
-                &graph,
-                aube_registry::NetworkMode::Online,
-                &policy,
-            )
-            .is_none()
-        );
-        assert!(
-            trust_policy_validation_cache_key(
-                dir.path(),
-                &graph,
-                aube_registry::NetworkMode::Offline,
-                &no_downgrade_policy(),
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn trust_policy_validation_cache_hit_checks_key_and_ttl() {
-        let dir = tempfile::tempdir().unwrap();
-        write_project_npmrc(dir.path(), "https://registry.npmjs.org/");
-
-        record_lockfile_trust_policy_validation(dir.path(), "fresh");
-        assert!(trust_policy_validation_cache_hit(dir.path(), "fresh"));
-        assert!(!trust_policy_validation_cache_hit(dir.path(), "other"));
-
-        let stale_stamp = TrustPolicyValidationStamp {
-            key: "stale".into(),
-            validated_at_secs: unix_time_secs()
-                .unwrap()
-                .saturating_sub(TRUST_POLICY_VALIDATION_CACHE_TTL.as_secs() + 1),
-        };
-        let stale_bytes = serde_json::to_vec(&stale_stamp).unwrap();
-        aube_util::fs_atomic::atomic_write(
-            &trust_policy_validation_cache_path(dir.path(), "stale"),
-            &stale_bytes,
-        )
-        .unwrap();
-        assert!(!trust_policy_validation_cache_hit(dir.path(), "stale"));
-
-        let future_stamp = TrustPolicyValidationStamp {
-            key: "future".into(),
-            validated_at_secs: unix_time_secs()
-                .unwrap()
-                .saturating_add(TRUST_POLICY_VALIDATION_CACHE_TTL.as_secs() + 1),
-        };
-        let future_bytes = serde_json::to_vec(&future_stamp).unwrap();
-        aube_util::fs_atomic::atomic_write(
-            &trust_policy_validation_cache_path(dir.path(), "future"),
-            &future_bytes,
-        )
-        .unwrap();
-        assert!(!trust_policy_validation_cache_hit(dir.path(), "future"));
-    }
-
-    #[test]
-    fn resolve_seeds_trust_policy_cache_only_without_existing_lockfile() {
-        assert!(can_seed_trust_policy_validation_from_resolve(true, false));
-        assert!(!can_seed_trust_policy_validation_from_resolve(true, true));
-        assert!(!can_seed_trust_policy_validation_from_resolve(false, false));
     }
 }
 
