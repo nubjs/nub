@@ -6930,11 +6930,10 @@
    "default": {
     "write": {
      "deps": true,
-     "project": true,
-     "userHome": true
+     "project": true
     },
     "network": true,
-    "notes": "latest measured 1.12.2"
+    "notes": "measured 1.12.2. A former write.userHome was withdrawn on evidence: the one write is napi-postinstall mkdiring a sibling inside its own store entry, which deps covers. Three-arm probe on macOS, Linux and Windows - narrow matches wide, and dropping deps as a control fails with EPERM/EACCES on exactly that path."
    }
   },
   "ursa-optional": {

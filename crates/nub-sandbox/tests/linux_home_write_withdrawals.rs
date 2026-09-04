@@ -524,11 +524,11 @@ fn every_measured_linux_withdrawal_is_still_enumerated() {
 /// Two independent halves, because they fail for different reasons. WINDOWS: every withdrawn cell
 /// holds exactly the `write.userHome` its OWN Windows measurement settled on -- one of the ten
 /// still grant it, and a blanket removal would satisfy the assertion above while silently widening
-/// the change to cells nothing measured on that platform. LINUX: two
-/// siblings must STILL grant the home there, which is what proves the Linux accessor reports one
-/// when a cell has it. `unrs-resolver` is the contested cell held back from this withdrawal, and
-/// `windows-build-tools` carries `write:"disk"`, so it also exercises the `Reach::Disk` arm of
-/// `covers` rather than only the scope-set arm.
+/// the change to cells nothing measured on that platform. LINUX: a
+/// sibling must STILL grant the home there, which is what proves the Linux accessor reports one
+/// when a cell has it. `windows-build-tools` carries `write:"disk"`, so it also exercises the
+/// `Reach::Disk` arm of `covers` rather than only the scope-set arm. (`unrs-resolver` was the
+/// second such sibling until its grant was withdrawn on three-platform evidence.)
 #[test]
 fn windows_matches_its_own_measurement_and_the_held_siblings_keep_their_grants() {
     let catalog = shipped();
@@ -556,19 +556,16 @@ fn windows_matches_its_own_measurement_and_the_held_siblings_keep_their_grants()
         }
     }
 
-    for (pkg, version, why) in [
-        (
-            "unrs-resolver",
-            "1.12.2",
-            "its Linux arms read as a narrowing but the macOS run refuted the same package, so it \
-             is held until that is settled",
-        ),
-        (
-            "windows-build-tools",
-            "0.1.8",
-            "it carries `write:\"disk\"`, which no measurement has touched",
-        ),
-    ] {
+    // `unrs-resolver` WAS held here and is now WITHDRAWN -- the grant was measured unnecessary on
+    // all three platforms (see this module's doc), so holding it would pin a grant nothing needs.
+    // That leaves ONE sibling, which still exercises the Linux accessor exactly as before; if a
+    // future withdrawal takes `windows-build-tools` too, this loop goes vacuous and needs a
+    // replacement row rather than deletion.
+    for (pkg, version, why) in [(
+        "windows-build-tools",
+        "0.1.8",
+        "it carries `write:\"disk\"`, which no measurement has touched",
+    )] {
         if !catalog
             .packages
             .get(pkg)

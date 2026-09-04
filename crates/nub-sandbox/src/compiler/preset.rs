@@ -3085,18 +3085,55 @@ mod tests {
         // unfalsifiable arms. When it is finally narrowed there will be no fixture left, and the
         // right answer then is a synthetic catalog entry compiled through the production lookup —
         // not a hand-built grant, which is what this comment's first paragraph exists to forbid.
-        const HOME_READ_PKG: &str = "unrs-resolver";
+        // ⛔ A SYNTHETIC CATALOG ENTRY, COMPILED THROUGH THE PRODUCTION LOWERING. This test used to
+        // name a real package the shipped catalog granted `userHome`, which was stronger — it proved
+        // the SHIPPED grants were safe, not merely the mechanism. That fixture is gone: measured
+        // across 13 catalog entries carrying `write.userHome`, only `unrs-resolver` actually
+        // materialised a home rule, and narrowing it (it never needed the home — `deps` carries its
+        // one write) left none. Re-pointing was tried and there is nothing to re-point AT.
+        //
+        // What is preserved: the grant is PARSED from catalog JSON and lowered by
+        // `curated::apply_v2_grant`, the same call production makes at `compile_build_jail`'s v2 arm
+        // — NOT a hand-built `FsRule`, which the paragraph above forbids. `Scope::UserHome` lowers
+        // through `defaults::home_minus_secrets_allows` on both axes, so this exercises the real
+        // exclusion.
+        //
+        // ⛔ WHY APPENDING THE GRANT AFTER THE COMPILE IS FAITHFUL, and the one thing that would
+        // break it: production applies the v2 grant partway through `compile_build_jail`, and the
+        // matcher is LAST-MATCH-WINS, so appending would be wrong if any fs rule were added after
+        // that point. Verified none is — the only later mutation is `relax_fs_to_full_disk`, which
+        // fires solely for a `"disk"`-tier grant and is exactly what the first control below
+        // detects. **If a future change adds an fs rule after the v2 arm, this test silently stops
+        // matching production — re-check that before trusting it.**
         let (interpreter, extra_reads) = POSIX_LAYOUT;
-        let policy = compile_build_jail(
+        let mut policy = compile_build_jail(
             homes.clone(),
-            &homes.project.join("node_modules").join(HOME_READ_PKG),
-            Some(HOME_READ_PKG),
-            Some("1.0.0"),
+            &homes
+                .project
+                .join("node_modules")
+                .join("synthetic-home-grant"),
+            None,
+            None,
             vec![PathBuf::from(interpreter)],
             extra_reads.iter().map(PathBuf::from).collect(),
             BTreeMap::new(),
         )
         .expect("build-jail compiles");
+        let catalog = crate::catalog_v2::parse(
+            r#"{"packages":{"p":{"default":{"write":{"userHome":true},"notes":"synthetic fixture: the secret floor under an explicit userHome grant"}}}}"#,
+        )
+        .expect("synthetic userHome entry must parse");
+        crate::compiler::curated::apply_v2_grant(
+            &mut policy,
+            &homes,
+            &homes
+                .project
+                .join("node_modules")
+                .join("synthetic-home-grant"),
+            &catalog.packages["p"]
+                .default
+                .on(crate::catalog_v2::Platform::current()),
+        );
         let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
 
         // FIRST CONTROL, and it has to come first: a `read`/`write` of `"disk"` compiles to
@@ -3107,15 +3144,12 @@ mod tests {
             policy.fs.rules.default_effect,
             Effect::Deny,
             "the fixture package resolved to an UNCONFINED (disk-tier) grant on this platform, so \
-             every assertion below would pass without confining anything — re-point \
-             {HOME_READ_PKG} at a package whose grant is `userHome` on all three platforms"
+             every assertion below would pass without confining anything — the synthetic entry below stopped resolving to a confined grant"
         );
         assert_eq!(
             m.decide(&homes.home.join("Documents/notes.txt")).effect,
             Effect::Allow,
-            "the userHome grant did not materialise, so the denials below prove nothing — if the \
-             catalog stopped granting {HOME_READ_PKG} userHome ON THIS PLATFORM, re-point this at a \
-             package that does"
+            "the userHome grant did not materialise, so the denials below prove nothing — the synthetic userHome entry stopped lowering to a home allow on this platform"
         );
 
         for secret in [".npmrc", ".aws/credentials", ".ssh"] {
