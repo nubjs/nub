@@ -208,8 +208,20 @@ for pkg in $PKGS; do
   [ -n "$ver" ] || ver="latest"
   write_fixture "$proj" "$pkg" "$ver" jail
   log="$home/install.log"
+  # ⛔ TIME THE JAILED ARM. This sweep is a CORRECTNESS gate and was BLIND to overhead: a catalog
+  # `userHome` write grant costs a full-profile ACE walk on Windows — measured 86 s of grant+revoke
+  # for ONE confined spawn — and against the 1200 s per-arm timeout that reads as a comfortable OK.
+  # Recording seconds per package puts an outlier like that in the results file instead of leaving
+  # it visible only to whoever thinks to profile by hand.
+  #
+  # ⛔ `SECONDS`, NEVER `date +%s%3N`. BSD `date` has no `%N`, so `%3N` yields a literal `3N` on
+  # macOS and every later arithmetic expansion silently produces garbage — this sweep runs on all
+  # three platforms. Second resolution is what this is for: finding multi-second outliers, not
+  # micro-benchmarking. Sub-second packages correctly read 0.
+  _jail_t0=$SECONDS
   install_arm "$home" "$proj" "$log" "$NUB" install
   rc=$?
+  jail_s=$(( SECONDS - _jail_t0 ))
 
   # ⛔⛔ COUNT THE JAIL'S OWN PER-SPAWN DUMP, NOT A WARNING. The first version counted
   # `running build scripts`, which is emitted only on the defaultTrust path — so with an explicit
@@ -298,10 +310,12 @@ for pkg in $PKGS; do
     rm -rf "$bhome"
   fi
 
-  printf '%s\t%s\trc=%s\tconfined-spawns=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\tnojail-rc=%s\tnpm-rc=%s\t%s\t%s\n' \
+  # `jail-s` is APPENDED, never inserted: the two free-text error fields stay last-but-one and
+  # last-but-two so every existing positional reader of fields 1-11 keeps working unchanged.
+  printf '%s\t%s\trc=%s\tconfined-spawns=%s\tjail-lines=%s\tnet-err=%s\tdeny=%s\tnojail-rc=%s\tnpm-rc=%s\t%s\t%s\tjail-s=%s\n' \
     "$pkg" "$verdict" "$rc" "$ran" "$jail_lines" "$net_err" "${deny_lines:-0}" \
-    "$nojail_rc" "$npm_rc" "${err:-—}" "${ctl_err:-—}" >> "$OUT"
-  echo "  $pkg -> $verdict (rc=$rc, ran=$ran)"
+    "$nojail_rc" "$npm_rc" "${err:-—}" "${ctl_err:-—}" "${jail_s:-0}" >> "$OUT"
+  echo "  $pkg -> $verdict (rc=$rc, ran=$ran, ${jail_s:-0}s)"
   [ -n "$KEEP" ] && cp "$log" "$KEEP/$(echo "$pkg" | tr '/' '_').log" 2>/dev/null
   rm -rf "$home"
 done
