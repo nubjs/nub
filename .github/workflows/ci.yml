@@ -921,20 +921,27 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp target/release/nub dist/nub
-          # arm64 macOS SIGKILLs an unsigned binary, and the signature does not survive
-          # the artifact zip round-trip either — hence the re-sign note below.
+          # arm64 macOS SIGKILLs an unsigned binary, so verify rather than let a
+          # developer discover it as what looks like a build bug.
           codesign --verify --verbose=1 dist/nub || codesign -s - dist/nub
           file dist/nub
           (cd dist && shasum -a 256 nub | tee SHA256SUMS)
           ./dist/nub --version
-          # A browser download also carries com.apple.quarantine, which Gatekeeper
-          # enforces before anything else. Both fixes are one line each, and finding
-          # that out the hard way reads exactly like a broken build.
+          # The one step a download really does need. A BROWSER download carries
+          # com.apple.quarantine, which Gatekeeper enforces before anything else, and
+          # an ad-hoc signature can never satisfy Gatekeeper — only notarization can.
+          # `gh run download` sets no quarantine, so that path needs nothing at all.
+          #
+          # The ad-hoc signature itself SURVIVES the artifact zip (measured on the
+          # pr867 artifact: `codesign -dv` reports adhoc, linker-signed, and the
+          # checksum matches), so re-signing is a fallback for a broken signature
+          # rather than a routine step. `spctl` rejecting the binary is expected and
+          # is not that: it assesses against notarization, which no dev build has.
           cat > dist/HOW-TO-RUN.txt <<'EOF'
           shasum -a 256 -c SHA256SUMS
           xattr -d com.apple.quarantine nub 2>/dev/null || true
-          codesign -s - nub
           chmod +x nub && ./nub --version
+          # if macOS kills it, the signature did not survive: codesign -s - nub
           EOF
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
