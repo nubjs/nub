@@ -3257,6 +3257,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             },
             metafile: metafile.as_deref().map(PathBuf::from),
             bundle: crate::compile::BundleOptions {
+                module_mirror: Default::default(),
                 minify: !no_minify,
                 keep_names: !no_keep_names,
                 // Off by default: a compiled artifact is something you SHIP, and a

@@ -178,6 +178,26 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let entry_dir = entry_abs.parent().unwrap_or(Path::new("."));
     let cwd = std::env::current_dir().context("resolving the current directory")?;
     let layout = assets::plan(entry_dir, &cwd, &opts.include, &opts.exclude)?;
+    // A bundled CommonJS module's `__dirname` has to land where the extraction dir
+    // actually puts that module's directory, which only the layout knows.
+    //
+    // Both paths are `canonicalize`d, which on Windows yields the VERBATIM
+    // `\\?\C:\...` spelling while rolldown's module ids carry the ordinary one.
+    // `Path::strip_prefix` compares prefixes by variant and `VerbatimDisk != Disk`,
+    // so leaving them verbatim makes every offset silently `None` on a Windows
+    // build host. `canonicalize_for_bundler` exists for the same mismatch.
+    let mut mirror = bundle::ModuleMirror {
+        anchor: bundle::strip_verbatim_prefix(layout.anchor.clone(), cfg!(windows)),
+        entry_dir: bundle::strip_verbatim_prefix(entry_dir.to_path_buf(), cfg!(windows)),
+        materialized: Default::default(),
+    };
+    // Bundle output lands under the entry prefix, and each asset creates its own
+    // parents; nothing else in the payload makes a directory.
+    mirror.materialize(&layout.entry_prefix);
+    for asset in &layout.assets {
+        mirror.materialize(asset.rel.rsplit_once('/').map_or("", |(dir, _)| dir));
+    }
+    opts.bundle.module_mirror = mirror;
 
     // The exact target Node must be known BEFORE bundling: it decides which
     // polyfills the preamble carries, and a static import cannot be tree-shaken
@@ -2007,6 +2027,42 @@ fn assemble_app(
             .with_context(|| format!("reading {}", asset.source.display()))?;
         files.push(AppFile::from_source_mode(asset.rel.clone(), bytes, mode));
         origins.push(Origin::Included);
+    }
+
+    // A ROOT MANIFEST, SO A WALK-UP STOPS INSIDE THE APP.
+    //
+    // The `getRoot` idiom — climb from `__dirname` until a directory holds
+    // `package.json` or `node_modules`, throw at the filesystem root — is how
+    // `bindings` and a long tail of packages find their own installed root. A pure
+    // bundle's extraction dir held neither, so the climb walked straight out of it:
+    // with the cache under `$HOME` it returned the user's home directory, silently
+    // and at exit 0, and with the cache elsewhere it threw. Verified on macOS and
+    // Linux against two independently built binaries, and `--include package.json`
+    // was already the accidental cure — which is the evidence that the absent
+    // manifest is the whole cause.
+    //
+    // NO `"type"` FIELD, deliberately. The chunks carry `.mjs`/`.cjs` and settle
+    // their own format, but a bare `.js` `--include`d at the root is loaded by
+    // Node's module-syntax detection, and detection only runs while no nearer
+    // manifest names a type. A synthesized `"type": "commonjs"` would break exactly
+    // that file in a `type: module` project; omitting the field changes nothing.
+    // (A user who `--include`s their real `package.json` gets theirs — this only
+    // fills a gap, and never overwrites.)
+    // Keyed the way the collision gate keys, not by bytes: on darwin and win32
+    // `Package.json` and `package.json` are the SAME file, so a byte compare would
+    // miss an included one, synthesize a second, and fail a build that used to
+    // succeed -- with a message telling the user to rename a file they did not
+    // duplicate.
+    let manifest_key = collision_key("package.json", target.os);
+    if !files
+        .iter()
+        .any(|f| collision_key(&f.name, target.os) == manifest_key)
+    {
+        files.push(AppFile::plain(
+            "package.json".to_string(),
+            b"{\"private\":true}\n".to_vec(),
+        ));
+        origins.push(Origin::Generated);
     }
 
     reject_colliding_names(&files, &origins, target)?;
@@ -3992,6 +4048,7 @@ mod tests {
             define_file: Vec::new(),
             metafile: None,
             bundle: BundleOptions {
+                module_mirror: Default::default(),
                 minify: true,
                 keep_names: true,
                 sourcemap: SourcemapMode::Inline,
@@ -4949,6 +5006,7 @@ mod tests {
             metafile: None,
         };
         let layout = assets::Layout {
+            anchor: PathBuf::new(),
             entry_prefix: String::new(),
             assets: vec![assets::Asset {
                 source,
@@ -4991,11 +5049,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A user manifest is a verbatim asset, not compile-time metadata. Chunks
-    /// now name their ESM format directly with `.mjs`, so no entry-adjacent
-    /// manifest is needed to alter Node's package-type lookup.
+    /// A user manifest is a verbatim asset, not compile-time metadata: it is
+    /// embedded exactly as written and never rewritten or replaced. Chunks name
+    /// their ESM format directly with `.mjs`, so nothing here is trying to alter
+    /// Node's package-type lookup. Distinct from the ROOT manifest `assemble_app`
+    /// synthesizes when the payload has none, which exists to stop a `getRoot`
+    /// walk-up climbing out of the extraction dir and carries no `"type"` field
+    /// for exactly the reason above.
     #[test]
-    fn included_commonjs_manifest_is_verbatim_and_no_manifest_is_synthesized() {
+    fn an_included_manifest_is_embedded_verbatim_rather_than_replaced() {
         let dir = fresh_dir("included-manifest");
         let target = TargetPlatform::parse("linux-x64").unwrap();
         let manifest = b"{\n  \"type\": \"commonjs\",\n  \"private\": true\n}\n";
@@ -5019,6 +5081,7 @@ mod tests {
             metafile: None,
         };
         let layout = assets::Layout {
+            anchor: PathBuf::new(),
             entry_prefix: "dist/bun".into(),
             assets: vec![assets::Asset {
                 source,
@@ -5072,6 +5135,7 @@ mod tests {
         let files = assemble_app(
             &bundled,
             &assets::Layout {
+                anchor: PathBuf::new(),
                 entry_prefix: "src/app".into(),
                 assets: Vec::new(),
             },
@@ -5088,6 +5152,11 @@ mod tests {
                     "src/app/worker-blob-url.cjs",
                     b"module.exports = {};".to_vec()
                 ),
+                // Synthesized because this payload includes no manifest of its own,
+                // and at the ROOT even though the entry sits under `src/app/` --
+                // which is the point: a walk-up from a chunk has to terminate at the
+                // app dir, not at the entry's directory.
+                AppFile::plain("package.json", b"{\"private\":true}\n".to_vec()),
             ]
         );
     }
@@ -5136,6 +5205,7 @@ mod tests {
         let err = assemble_app(
             &bundled,
             &assets::Layout {
+                anchor: PathBuf::new(),
                 entry_prefix: String::new(),
                 assets: Vec::new(),
             },
@@ -5179,6 +5249,7 @@ mod tests {
         let files = assemble_app(
             &bundled,
             &assets::Layout {
+                anchor: PathBuf::new(),
                 entry_prefix: String::new(),
                 assets: Vec::new(),
             },
@@ -5220,6 +5291,7 @@ mod tests {
                 metafile: None,
             },
             assets::Layout {
+                anchor: PathBuf::new(),
                 entry_prefix: String::new(),
                 assets: vec![assets::Asset {
                     source,

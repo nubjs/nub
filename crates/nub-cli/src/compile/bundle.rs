@@ -84,6 +84,10 @@ pub enum SourcemapMode {
 
 /// Everything the bundler front end needs, and nothing about the artifact shape.
 pub struct BundleOptions {
+    /// Where the extracted app dir mirrors the source tree, for the per-module
+    /// `__dirname` in [`CjsPathGlobals`]. Default (both paths empty) disables the
+    /// offset entirely, which is what every caller outside `compile` wants.
+    pub module_mirror: ModuleMirror,
     pub minify: bool,
     /// Preserve `fn.name` / `Class.name` under minification. Default ON: minify
     /// silently renames a class, and the frameworks that key on `Class.name`
@@ -435,7 +439,9 @@ fn bundle_inner(
         Arc::new(loaders::DataPlugin::new(&loader_plan)) as SharedPluginable,
         Arc::clone(&new_urls) as SharedPluginable,
         Arc::clone(&prelude) as SharedPluginable,
-        Arc::new(CjsPathGlobals) as SharedPluginable,
+        Arc::new(CjsPathGlobals {
+            mirror: opts.module_mirror.clone(),
+        }) as SharedPluginable,
     ]);
     if let Some(plugin) = &native_plugin {
         plugins.push(Arc::clone(plugin) as SharedPluginable);
@@ -822,15 +828,29 @@ fn absolutize(path: &Path) -> PathBuf {
 /// and fail to parse. The transform hook is the only one of the three that can
 /// scope the shim to CJS-origin code.
 ///
-/// WHAT THE VALUE IS, AND WHY THAT IS THE HONEST ANSWER. `__dirname` resolves to
-/// the directory of the running chunk — the extracted app dir — not to the
-/// module's old `node_modules` path. Bundling fuses every module into one chunk,
-/// so a per-module directory no longer exists at runtime, and the entry's own
-/// directory is the one every other runtime path here already resolves against —
-/// `import.meta.dirname` in bundled code lands in exactly the same place. Deriving
-/// it from `import.meta.url` rather than `process.cwd()` is what keeps it correct
-/// from any cwd and inside a content-hashed cache dir, exactly as the `file` loader
-/// and [`NewUrlAssets`] already do.
+/// WHAT THE VALUE IS. `__dirname` is the module's own directory INSIDE the
+/// extracted app dir — the same place its source-tree directory maps to, because
+/// [`assets::Layout`] makes that dir a mirror of the anchor. Derived from
+/// `import.meta.url` rather than `process.cwd()`, so it stays correct from any cwd
+/// and inside a content-hashed cache dir, exactly as the `file` loader and
+/// [`NewUrlAssets`] already do.
+///
+/// WHY IT IS NOT SIMPLY THE CHUNK'S DIRECTORY, WHICH IS WHAT IT USED TO BE.
+/// Bundling fuses every module into one chunk, so the flat answer — every module
+/// gets the entry's directory — looked like the only honest one. It is not, and
+/// the cost was silent: `--include` extracts an asset at its own path relative to
+/// the anchor, so a module in `sub/` reading `path.join(__dirname, "data/x")` got
+/// the app ROOT's `data/x` when one existed, and `ENOENT` when it did not, while
+/// its real asset sat unreachable at `sub/data/x`. Exit 0, no warning, wrong file.
+/// That directly contradicted the promise in [`assets`]' header, which this now
+/// makes true. The offset is applied as a relative step from the chunk's own
+/// directory, so the entry keeps the exact value it had before.
+///
+/// SCOPED TO THE PROJECT'S OWN TREE. A module under `node_modules` keeps the
+/// chunk's directory. Nothing lays a bundled dependency's directory out in the
+/// extraction dir, so an offset there would only turn one path that does not exist
+/// into another — while breaking the dependency that writes a scratch file beside
+/// `__dirname` and today finds a real directory there.
 ///
 /// WHY THE URL COMES FROM A VIRTUAL MODULE INSTEAD OF `import.meta.url` INLINE.
 /// Rolldown parses a `.cjs`/`.cts` module with `with_commonjs(true)`
@@ -851,7 +871,94 @@ fn absolutize(path: &Path) -> PathBuf {
 /// emitted at chunk ROOT, outside every closure, so its own `__filename` is always
 /// Rolldown's and never a shadow — there is no cycle.
 #[derive(Debug)]
-struct CjsPathGlobals;
+struct CjsPathGlobals {
+    mirror: ModuleMirror,
+}
+
+/// Where a module's authored directory maps to inside the extracted app dir.
+///
+/// Both paths come from [`assets::plan`]. `anchor` is what the extraction dir is a
+/// mirror of, and is used only to decide whether a module is IN the mirror at all;
+/// `entry_dir` is what bundle output is emitted under, so it is what a relative
+/// step has to start from.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleMirror {
+    pub anchor: PathBuf,
+    pub entry_dir: PathBuf,
+    /// Anchor-relative, `/`-separated directories the payload ACTUALLY creates,
+    /// with every ancestor. Membership is what makes an offset safe to emit.
+    ///
+    /// The launcher creates a directory only as the parent of a file it writes, so
+    /// a source directory holding nothing but code — `src/`, in a project with no
+    /// assets under it — has no counterpart in the extracted app dir at all.
+    /// Offsetting into one would hand `__dirname` a path that does not exist and
+    /// turn `readdirSync(__dirname)` or a scratch write beside it from working code
+    /// into `ENOENT`. That is the same objection this already applies to
+    /// `node_modules`, and it applies here for the same reason.
+    pub materialized: BTreeSet<String>,
+}
+
+impl ModuleMirror {
+    /// The `/`-separated step from the chunk's directory to `module`'s own, or
+    /// `None` to leave `__dirname` at the chunk's directory.
+    ///
+    /// `None` covers everything the mirror does not describe: a module outside the
+    /// anchor, and a bundled dependency, which is laid out nowhere. A module that
+    /// sits in the entry's own directory yields `Some("")`, which the caller reads
+    /// as "no offset" — the pre-existing behavior, and the overwhelmingly common
+    /// case, so it costs no generated code.
+    /// Record `dir` and every ancestor as a directory the payload creates. `dir` is
+    /// anchor-relative and `/`-separated; `""` is the app root.
+    pub fn materialize(&mut self, dir: &str) {
+        self.materialized.insert(String::new());
+        let mut acc = String::new();
+        for part in dir.split('/').filter(|p| !p.is_empty()) {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(part);
+            self.materialized.insert(acc.clone());
+        }
+    }
+
+    fn offset_to(&self, module: &Path) -> Option<String> {
+        // The default (no mirror) must reject everything, and `strip_prefix` will
+        // not do it: an EMPTY prefix succeeds and hands back the whole path, so an
+        // absolute module id would come back through here as its own offset and be
+        // spliced in as one. Every caller outside `compile` uses the default.
+        if self.anchor.as_os_str().is_empty() {
+            return None;
+        }
+        let dir = module.parent()?;
+        let rel = dir.strip_prefix(&self.anchor).ok()?;
+        if rel.components().any(|c| c.as_os_str() == "node_modules") {
+            return None;
+        }
+        // Only into a directory the payload really has. Everything else keeps the
+        // chunk's directory, which always exists.
+        if !self.materialized.contains(&slash_path(rel)) {
+            return None;
+        }
+        let from = self.entry_dir.strip_prefix(&self.anchor).ok()?;
+        let mut from = from.components().peekable();
+        let mut to = rel.components().peekable();
+        while from.peek().is_some() && from.peek() == to.peek() {
+            from.next();
+            to.next();
+        }
+        let mut step: Vec<String> = from.map(|_| "..".to_string()).collect();
+        step.extend(to.map(|c| c.as_os_str().to_string_lossy().into_owned()));
+        Some(step.join("/"))
+    }
+}
+
+/// A relative path as the payload spells it: `/`-separated, whatever the host uses.
+fn slash_path(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 /// The module both spliced declarations read from. Rollup's `\0` prefix marks an id
 /// as plugin-owned, so it can never collide with a package a user could install.
@@ -862,9 +969,12 @@ const PATH_GLOBALS_ID: &str = "\0nub-path-globals";
 /// hook's own cheap reject skips it.
 const PATH_GLOBALS_SOURCE: &str = concat!(
     "const { fileURLToPath: __nubToPath } = process[Symbol.for(\"nub.compile.bootstrap\")].getBuiltin(\"node:url\");\n",
-    "const { dirname: __nubDirname } = process[Symbol.for(\"nub.compile.bootstrap\")].getBuiltin(\"node:path\");\n",
+    "const { dirname: __nubDirname, join: __nubJoin } = process[Symbol.for(\"nub.compile.bootstrap\")].getBuiltin(\"node:path\");\n",
     "export const file = __nubToPath(import.meta.url);\n",
     "export const dir = __nubDirname(file);\n",
+    // The offset form. `rel` is `/`-separated and may lead with `..`; `join`
+    // normalizes both, so one helper serves a module above or below the entry.
+    "export const at = (rel) => __nubJoin(dir, rel);\n",
 );
 
 impl Plugin for CjsPathGlobals {
@@ -910,7 +1020,7 @@ impl Plugin for CjsPathGlobals {
             ModuleType::Js | ModuleType::Jsx | ModuleType::Ts | ModuleType::Tsx
         );
         let inserts = if scannable {
-            commonjs_source_inserts(clean_url(args.id), args.code)
+            commonjs_source_inserts(clean_url(args.id), args.code, &self.mirror)
         } else {
             Vec::new()
         };
@@ -937,23 +1047,187 @@ impl Plugin for CjsPathGlobals {
 /// Every correction a module needs before Rolldown scans it, as `(byte offset,
 /// text)` pairs. Both are pure insertions and neither reads the other's output, so
 /// they are independent and order-free.
-fn commonjs_source_inserts(path: &str, source: &str) -> Vec<(usize, String)> {
-    let mut inserts = concise_arrow_require_inserts(path, source);
-    if let Some((at, decls)) = cjs_path_globals_edit(path, source) {
-        inserts.push((at, decls));
+fn commonjs_source_inserts(path: &str, source: &str, mirror: &ModuleMirror) -> Vec<SourceEdit> {
+    let mut inserts: Vec<SourceEdit> = concise_arrow_require_inserts(path, source)
+        .into_iter()
+        .map(|(at, text)| SourceEdit::insert(at, text))
+        .collect();
+    if let Some((at, decls)) = cjs_path_globals_edit(path, source, mirror) {
+        inserts.push(SourceEdit::insert(at, decls));
+    } else {
+        // Only when the CJS shim did NOT apply, which is nearly but not exactly
+        // "this module is an ES module": that shim also declines a module that
+        // never names `__dirname`/`__filename`, one that binds either itself, and
+        // one with no positive CommonJS evidence. So this arm can see a
+        // CommonJS-classified module — but only one that uses `import.meta`, which
+        // Node rejects outright in CommonJS, so there is no valid source it can
+        // reach. The `.cjs`/`.cts` and parse-diagnostic guards below hold the line.
+        inserts.extend(esm_meta_dirname_edits(path, source, mirror));
     }
     inserts
 }
 
+/// Rewrite an ES module's `import.meta.dirname` / `import.meta.filename` to the
+/// module's own directory inside the extracted app dir.
+///
+/// The ESM half of the `__dirname` fix, and it exists so the two halves agree. A
+/// project's own helper under `sub/` reading `join(import.meta.dirname, "data/x")`
+/// had exactly the CommonJS defect — Rolldown resolves the pair against the CHUNK,
+/// so a nested module silently read the app root's copy of an asset that
+/// `--include` had extracted at `sub/data/x`. Fixing one module system and not the
+/// other would leave the same source failing or passing according to how it spells
+/// the same idea.
+///
+/// `import.meta.url` is deliberately untouched: it is what the `new URL(…)` asset
+/// rewrite resolves against, and those assets are re-emitted at the chunk root, so
+/// moving it would break the one idiom that already worked.
+///
+/// ONLY THE STATIC-MEMBER SPELLING. `import.meta["dirname"]`, and a module that
+/// copies `import.meta` into a variable first, keep the chunk's directory. Those
+/// are rewritable in principle — the scan would have to follow the binding — but
+/// the direct spelling is what real code writes, and the untouched forms degrade
+/// to the behavior every module had before this existed rather than to something
+/// wrong in a new way.
+fn esm_meta_dirname_edits(path: &str, source: &str, mirror: &ModuleMirror) -> Vec<SourceEdit> {
+    use oxc_allocator::Allocator;
+    use oxc_ast_visit::Visit;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // Cheap reject first, as the CJS half opens with: this hook sees every module
+    // and almost none of them name either.
+    if !source.contains("import.meta") {
+        return Vec::new();
+    }
+    // Node settles the format by extension before anything else, and `import.meta`
+    // is a syntax error in a CommonJS source — so a `.cjs` naming it is already
+    // broken and must not have an `import` statement spliced into it on top.
+    if matches!(
+        Path::new(path).extension().and_then(|e| e.to_str()),
+        Some("cjs" | "cts")
+    ) {
+        return Vec::new();
+    }
+    let Some(offset) = mirror.offset_to(Path::new(path)).filter(|o| !o.is_empty()) else {
+        return Vec::new();
+    };
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    // Any diagnostic at all, not merely a panic: the rewrite adds an `import`
+    // statement, which is valid ONLY in a module. A source this parse could not
+    // agree was one is left exactly as it is, so a build that used to succeed
+    // cannot start failing on a file this was never meant to touch.
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return Vec::new();
+    }
+    let mut scan = MetaDirnameScan {
+        offset: &offset,
+        path,
+        edits: Vec::new(),
+    };
+    scan.visit_program(&parsed.program);
+    if scan.edits.is_empty() {
+        return Vec::new();
+    }
+    // The binding the rewrites read, spliced only once something needs it. A static
+    // import, not a dynamic one: `import.meta.dirname` is legal inside an ordinary
+    // function, where `await` is a syntax error, so the value has to already be in
+    // scope. `splice_point` keeps a hashbang at byte 0.
+    scan.edits.push(SourceEdit::insert(
+        splice_point(&parsed.program, source),
+        format!(
+            ";import {{ at as {META_AT} }} from {};",
+            serde_json::to_string(PATH_GLOBALS_ID).expect("a virtual id serializes")
+        ),
+    ));
+    scan.edits
+}
+
+/// The name the ESM rewrite binds. Long and nub-private because, unlike the
+/// CommonJS splice, this one cannot check for a clashing declaration first — the
+/// rewrite is driven by expression spans, not by a whole-module scan for bindings.
+const META_AT: &str = "__nub_meta_at__";
+
+/// Collects the spans of `import.meta.dirname` / `import.meta.filename`.
+struct MetaDirnameScan<'s> {
+    offset: &'s str,
+    path: &'s str,
+    edits: Vec<SourceEdit>,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for MetaDirnameScan<'_> {
+    fn visit_static_member_expression(&mut self, it: &oxc_ast::ast::StaticMemberExpression<'a>) {
+        let is_meta = matches!(
+            &it.object,
+            oxc_ast::ast::Expression::MetaProperty(m)
+                if m.meta.name == "import" && m.property.name == "meta"
+        );
+        if is_meta {
+            let rel = match it.property.name.as_str() {
+                "dirname" => Some(self.offset.to_string()),
+                "filename" => Path::new(self.path)
+                    .file_name()
+                    .map(|n| format!("{}/{}", self.offset, n.to_string_lossy())),
+                _ => None,
+            };
+            if let Some(rel) = rel {
+                let at = it.span.start as usize;
+                // A call expression, not a declaration: an ES module can hold
+                // `import.meta.dirname` anywhere an expression goes, including
+                // before any statement this could declare a binding ahead of.
+                let text = format!(
+                    "{META_AT}({})",
+                    serde_json::to_string(&rel).expect("a path offset serializes"),
+                );
+                self.edits.push(SourceEdit {
+                    at,
+                    replacing: it.span.end as usize - at,
+                    text,
+                });
+                return;
+            }
+        }
+        oxc_ast_visit::walk::walk_static_member_expression(self, it);
+    }
+}
+
 /// Applying from the highest offset down keeps every lower offset valid, so no
 /// insertion has to be rebased against the ones before it.
-fn apply_source_inserts(source: &str, mut inserts: Vec<(usize, String)>) -> String {
-    inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+fn apply_source_inserts(source: &str, mut inserts: Vec<SourceEdit>) -> String {
+    // Descending, and STABLE, which is load-bearing where two edits share an offset.
+    // A module whose very first token is `import.meta.dirname` gets both a rewrite
+    // of that expression at 0 and the `import` declaration spliced at 0, and only
+    // the order below puts the declaration in front of the rewrite rather than
+    // inside it. Producers therefore push replacements before the insertion that
+    // supports them; `sort_by_key` keeps that order for equal keys.
+    inserts.sort_by_key(|e| std::cmp::Reverse(e.at));
     let mut out = source.to_string();
-    for (at, text) in inserts {
-        out.insert_str(at, &text);
+    for edit in inserts {
+        out.replace_range(edit.at..edit.at + edit.replacing, &edit.text);
     }
     out
+}
+
+/// One correction to a module's source. `replacing == 0` is a pure insertion,
+/// which is what every edit was until `import.meta.dirname` needed rewriting — a
+/// property access cannot be shadowed by a declaration, so it is the one global
+/// here that has to be overwritten rather than declared around.
+#[derive(Debug)]
+struct SourceEdit {
+    at: usize,
+    replacing: usize,
+    text: String,
+}
+
+impl SourceEdit {
+    fn insert(at: usize, text: String) -> Self {
+        Self {
+            at,
+            replacing: 0,
+            text,
+        }
+    }
 }
 
 /// Give a `require()` written as the entire concise body of an arrow function an
@@ -1047,7 +1321,11 @@ fn is_static_require_call(expr: &Expression<'_>) -> bool {
 /// breaks its exports. `import.meta.url` survives verbatim because Rolldown
 /// rewrites it only for a CJS output format, and is NOT one of the signals that
 /// classification reads — both confirmed against a compiled binary.
-fn cjs_path_globals_edit(path: &str, source: &str) -> Option<(usize, String)> {
+fn cjs_path_globals_edit(
+    path: &str,
+    source: &str,
+    mirror: &ModuleMirror,
+) -> Option<(usize, String)> {
     use oxc_allocator::Allocator;
     use oxc_ast_visit::Visit;
     use oxc_parser::Parser;
@@ -1097,16 +1375,55 @@ fn cjs_path_globals_edit(path: &str, source: &str) -> Option<(usize, String)> {
     if !scan.commonjs && !extension_is_commonjs {
         return None;
     }
-    let bindings = match (scan.filename, scan.dirname) {
-        (true, true) => "{ file: __filename, dir: __dirname }",
-        (true, false) => "{ file: __filename }",
-        (false, true) => "{ dir: __dirname }",
-        (false, false) => return None,
+    if !scan.filename && !scan.dirname {
+        return None;
+    }
+    let id = &PATH_GLOBALS_ID[1..];
+    // An empty offset means the module sits in the entry's own directory, where the
+    // chunk already is. Emitting the plain destructuring there keeps the generated
+    // text — and every existing build's output — byte-identical.
+    let decls = match mirror.offset_to(Path::new(path)).filter(|o| !o.is_empty()) {
+        None => {
+            let bindings = match (scan.filename, scan.dirname) {
+                (true, true) => "{ file: __filename, dir: __dirname }",
+                (true, false) => "{ file: __filename }",
+                (false, true) => "{ dir: __dirname }",
+                (false, false) => unreachable!("guarded above"),
+            };
+            format!(";const {bindings} = require(\"\\0{id}\");")
+        }
+        Some(offset) => {
+            // Declared together so `path.dirname(__filename) === __dirname` holds,
+            // which is an invariant real CJS code reads even when it only names one
+            // of the two. A module's own basename is the only part of `__filename`
+            // that survives bundling meaningfully.
+            //
+            // This makes `__filename` asymmetric on purpose: an unmoved module keeps
+            // the CHUNK's path, because the empty-offset branch above is what leaves
+            // its generated text byte-identical, while a moved one reports its own
+            // source basename. Neither names a file that exists — the module was
+            // bundled away — so the asymmetry costs nothing a real program reads.
+            let mut out = format!(";const {{ at: __nubAt }} = require(\"\\0{id}\");");
+            if scan.dirname {
+                out.push_str(&format!(
+                    ";const __dirname = __nubAt({});",
+                    serde_json::to_string(&offset).expect("a path offset serializes")
+                ));
+            }
+            if scan.filename {
+                let base = Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    ";const __filename = __nubAt({});",
+                    serde_json::to_string(&format!("{offset}/{base}"))
+                        .expect("a path offset serializes")
+                ));
+            }
+            out
+        }
     };
-    let decls = format!(
-        ";const {bindings} = require(\"\\0{}\");",
-        &PATH_GLOBALS_ID[1..]
-    );
     Some((splice_point(&parsed.program, source), decls))
 }
 
@@ -1716,7 +2033,7 @@ impl CompilePreamble {
 /// Rolldown resolves the absolute id only while building and never emits it.
 /// Drop a Windows verbatim (`\\?\`) prefix. Pure over `windows` so both branches
 /// test on any host.
-fn strip_verbatim_prefix(path: PathBuf, windows: bool) -> PathBuf {
+pub fn strip_verbatim_prefix(path: PathBuf, windows: bool) -> PathBuf {
     if !windows {
         return path;
     }
@@ -5097,6 +5414,7 @@ mod tests {
 
     fn opts() -> BundleOptions {
         BundleOptions {
+            module_mirror: ModuleMirror::default(),
             minify: true,
             keep_names: true,
             sourcemap: SourcemapMode::Inline,
@@ -5683,6 +6001,104 @@ mod tests {
         }
     }
 
+    /// The step from the chunk's directory to a module's own. This is the whole of
+    /// the `__dirname` fix: a nested module used to get the entry's directory, so
+    /// `path.join(__dirname, "data/x")` read the app ROOT's copy of an asset that
+    /// `--include` had extracted at `sub/data/x`.
+    #[test]
+    fn a_modules_dirname_offset_mirrors_its_place_in_the_source_tree() {
+        let mirror = |anchor: &str, entry_dir: &str, dirs: &[&str]| {
+            let mut m = ModuleMirror {
+                anchor: PathBuf::from(anchor),
+                entry_dir: PathBuf::from(entry_dir),
+                materialized: Default::default(),
+            };
+            for d in dirs {
+                m.materialize(d);
+            }
+            m
+        };
+        let flat = mirror("/p", "/p", &["", "sub", "deep"]);
+        assert_eq!(
+            flat.offset_to(Path::new("/p/index.js")).as_deref(),
+            Some(""),
+            "the entry's own directory IS the chunk's, so it must produce no offset \
+             and leave the generated text byte-identical to before"
+        );
+        assert_eq!(
+            flat.offset_to(Path::new("/p/sub/reader.js")).as_deref(),
+            Some("sub"),
+            "the defect itself: this module's assets extract under sub/"
+        );
+
+        // The entry below the anchor, which is what any --include above it produces.
+        // Bundle output carries the entry prefix, so reaching a sibling tree is a
+        // step UP first — the case a chunk-relative offset gets wrong if it assumes
+        // the chunk sits at the app root.
+        let nested = mirror("/p", "/p/src", &["src", "lib", "src/deep"]);
+        assert_eq!(
+            nested.offset_to(Path::new("/p/src/a.js")).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            nested.offset_to(Path::new("/p/lib/b.js")).as_deref(),
+            Some("../lib")
+        );
+        assert_eq!(
+            nested.offset_to(Path::new("/p/src/deep/c.js")).as_deref(),
+            Some("deep")
+        );
+
+        // Both directions of "the mirror does not describe this module", which must
+        // keep the chunk's directory rather than inventing a path.
+        assert_eq!(
+            flat.offset_to(Path::new("/p/node_modules/dep/lib/x.js")),
+            None,
+            "nothing lays a bundled dependency's directory out in the extraction dir"
+        );
+        assert_eq!(
+            flat.offset_to(Path::new("/elsewhere/x.js")),
+            None,
+            "a module outside the anchor would need an offset that escapes the app dir"
+        );
+
+        // The regression this gate exists for. A source directory holding only code
+        // is never created in the extracted app dir -- the launcher makes a
+        // directory only as the parent of a file it writes -- so offsetting into one
+        // would turn `readdirSync(__dirname)` and a scratch write beside it from
+        // working code into ENOENT.
+        assert_eq!(
+            flat.offset_to(Path::new("/p/codeonly/helper.js")),
+            None,
+            "no payload file lives under codeonly/, so the app dir has no such directory"
+        );
+
+        // The default, which every caller outside `compile` uses. `strip_prefix`
+        // does NOT reject an empty prefix — it succeeds and returns the whole path
+        // — so without an explicit guard this produced `//p/sub` as an "offset".
+        assert_eq!(
+            ModuleMirror::default().offset_to(Path::new("/p/sub/reader.js")),
+            None,
+            "no mirror means no offset, whatever the module's path looks like"
+        );
+
+        // The generated text, so the offset is provably reaching the splice and not
+        // merely computed. `dirname(__filename)` must equal `__dirname`.
+        let src = "module.exports = () => [__dirname, __filename];\n";
+        let (_, decls) =
+            cjs_path_globals_edit("/p/sub/reader.js", src, &flat).expect("a CJS shim applies");
+        assert!(
+            decls.contains("__nubAt(\"sub\")") && decls.contains("__nubAt(\"sub/reader.js\")"),
+            "the splice must carry the offset for both names, got:\n{decls}"
+        );
+        let (_, root) =
+            cjs_path_globals_edit("/p/index.js", src, &flat).expect("a CJS shim applies");
+        assert!(
+            !root.contains("__nubAt"),
+            "an unmoved module must keep the plain destructuring, got:\n{root}"
+        );
+    }
+
     // Where the declarations land, for the two module shapes where byte 0 would
     // change what the module means: a directive prologue that stops being one, and
     // a hashbang that stops being at byte 0. Asserted on the spliced TEXT rather
@@ -5691,7 +6107,8 @@ mod tests {
     #[test]
     fn the_declarations_splice_after_a_directive_prologue_and_after_a_hashbang() {
         let splice = |src: &str| {
-            let (at, decls) = cjs_path_globals_edit("dep.js", src).expect("a CJS shim applies");
+            let (at, decls) = cjs_path_globals_edit("dep.js", src, &ModuleMirror::default())
+                .expect("a CJS shim applies");
             format!("{}{decls}{}", &src[..at], &src[at..])
         };
 
@@ -5770,7 +6187,8 @@ mod tests {
         ];
         for (tag, pkg_json, body, why) in cases {
             assert!(
-                cjs_path_globals_edit("node_modules/dep/index.js", body).is_none(),
+                cjs_path_globals_edit("node_modules/dep/index.js", body, &ModuleMirror::default())
+                    .is_none(),
                 "{why}"
             );
             // The real bundle is the second half of the assertion: a duplicate

@@ -41,6 +41,15 @@ pub struct Asset {
 /// Where the app dir is rooted and what lands in it.
 #[derive(Debug)]
 pub struct Layout {
+    /// The deepest source-tree directory holding the entry and every `--include`d
+    /// path — the directory the extracted app dir is a mirror of.
+    ///
+    /// Exposed because the mirror only holds for code that knows where it sits in
+    /// it. A bundled CommonJS module's `__dirname` is derived from this: its own
+    /// directory relative to the anchor is the same relative step the extraction
+    /// dir reproduces, which is what makes the `path.join(__dirname, …)` promise
+    /// in this file's header true for a nested module and not only for the entry.
+    pub anchor: PathBuf,
     /// The entry's directory relative to the anchor, as a `/`-separated prefix
     /// (`""` when the entry sits at the anchor). Bundle output carries this
     /// prefix, so the prefix IS the observable form of where the anchor landed.
@@ -126,6 +135,7 @@ pub fn plan(
 
     let entry_prefix = relative_slash(&anchor, entry_dir).unwrap_or_default();
     Ok(Layout {
+        anchor,
         entry_prefix,
         assets: collected
             .into_iter()
