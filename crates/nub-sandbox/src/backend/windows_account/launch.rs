@@ -418,10 +418,22 @@ pub(crate) struct WindowAceGuard {
 ///
 /// So nothing is snapshotted. A grant is an additive read-modify-write under this lock, and
 /// teardown removes exactly the aces naming this guard's SID — also under this lock, against
-/// the DACL as it stands at that moment. The refcount is what makes the shared-SID case safe:
-/// the AppContainer backend mints a fresh container SID per run, but the dedicated-account
-/// backend grants ONE account SID for every run, so a strip on first drop would revoke an ace
-/// a sibling's child still needs. Only the last live guard for a SID strips it.
+/// the DACL as it stands at that moment. Ordering between two DIFFERENT SIDs is the LOCK's
+/// job, not the refcount's: the map is keyed per SID but there is one lock for all of them,
+/// held across the whole grant and the whole strip, and the strip copies every foreign ace
+/// through verbatim. The refcount orders the SHARED-SID case — the AppContainer backend mints
+/// a fresh container SID per run, but the dedicated-account backend grants ONE account SID for
+/// every run, so a strip on first drop would revoke an ace a sibling's child still needs. Only
+/// the last live guard for a SID strips it.
+///
+/// ⛔ THAT REFCOUNT IS PROCESS-LOCAL, WHICH LEAVES A RESIDUAL ON ONE BACKEND. This is a
+/// `static`, so it counts guards inside ONE nub process. The AppContainer build jail is not
+/// exposed: a per-run container SID means two processes never name the same trustee. The
+/// dedicated-account backend shares one account SID across every run on the machine, so a
+/// SECOND nub process's last guard can strip an ace this process's child still needs. Narrower
+/// than what it replaced, which lost aces inside a single process as well, and the same bound
+/// the shared-account item in LIMITATIONS.md already carries. A named kernel mutex would close
+/// it and does not earn its cost here.
 static WINDOW_ACES: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 

@@ -15,6 +15,19 @@
 > starts no proxy on any platform, so the proxy, the bridge and the allow-list rows here do not
 > describe a dependency's lifecycle script.
 
+> **⛔ THE WINDOWS BACKENDS ARE NOT COVERED BY THIS CRATE'S TEST GATES, AND NEVER HAVE BEEN.**
+> `backend/windows_account/` is `#![cfg(target_os = "windows")]`, so a macOS or Linux
+> `cargo clippy -p nub-sandbox --all-targets` and a macOS `cargo test -p nub-sandbox` compile
+> none of it. They pass identically whether the Windows code is correct, broken, or absent, so a
+> green run there carries no information about it either way. `cargo fmt --check` is the ONE
+> host-local gate that genuinely reads these files — established by putting a deliberately
+> mis-formatted function into `windows_account/launch.rs` and watching `--check` go from 0 to 1,
+> rather than by assuming it. As of 2026-09-04 this crate's suite had never been run on Windows
+> at all, and the first run failed four tests in `esm_binding_seam_semantics.rs` — a fixture that
+> wants a directory symlink and falls back to a junction without Developer Mode or elevation.
+> This is a standing verification gap, not a fact about any one change: when you touch a Windows
+> backend here, run the suite on a Windows host and treat the local gates as silent.
+
 An honest record of what the engine does NOT close, why each residual is bounded, and
 where the fix lives. The sandbox fails safe, not silent: an **axis-level** degradation a
 policy reaches (a per-host net policy with no proxy → coarse deny; per-host Windows egress
@@ -379,10 +392,25 @@ mask is load-bearing: without it the child HANGS in loader init rather than fail
   EXITWINDOWS`, desktop `READ_CONTROL | READOBJECTS | WRITEOBJECTS | CREATEWINDOW`. Not done
   here: the broad set is the one actually verified to work, and `READ_CONTROL`'s hang-vs-fail
   behavior already shows this surface punishes guessing.
-- **Cost while the child runs:** concurrent runs share the station too — the restore puts back
-  the DACL the FIRST of them saw, so a second run's ace can be removed while its child is still
-  alive, and that run's own restore then re-writes the first's ace permanently. Same shape as
-  the shared-account bound below.
+- **Cost while the child runs, ACROSS PROCESSES only.** Concurrent runs share the station, and
+  teardown now removes exactly the aces naming that run's own SID against the DACL as it stands,
+  so runs inside one nub process no longer delete each other's. The refcount that orders the
+  shared-SID case is a process-local `static`, so the residual is narrower but not gone: the
+  AppContainer build jail is not exposed at all (a fresh container SID per run means two
+  processes never name the same trustee), while the dedicated-account backend shares one account
+  SID across every run on the machine, so a SECOND nub process's teardown can strip an ace a live
+  child still needs. Same shape as the shared-account bound below.
+- **The teardown removes an explicit DENY nub did not author.** The strip matches the sandbox SID
+  on allow AND deny aces, so an administrator's explicit DENY naming the sandbox account on the
+  caller's own window station is removed with it — the snapshot restore this replaced would have
+  put it back. Reachable on the dedicated-account backend only, whose account SID is stable; the
+  build jail's per-run container SID cannot have carried an admin-authored ace. Stated plainly
+  because it is not the usual prefer-over-grant trade: that one is about not breaking packages,
+  and this is nub overriding machine-wide policy on a shared object.
+- **Where fixed (both of the above):** a named kernel mutex would close the cross-process half.
+  Not done: the DENY half would need an allow-only rebuild, and that rebuild is shared with the
+  filesystem ace strip, so narrowing it changes behavior well outside this bound for a case the
+  build jail cannot reach.
 
 ### Whole-tree kill is best-effort
 

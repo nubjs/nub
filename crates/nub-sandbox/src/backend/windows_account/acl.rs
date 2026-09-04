@@ -344,6 +344,24 @@ pub(crate) fn grant_window_object(handle: HANDLE, sid: &str, mask: u32) -> io::R
 /// no snapshot to go stale. Its own hazard — the dedicated-account backend grants ONE shared
 /// account SID for every run, so the first teardown would strip an ace the others still need
 /// — is handled by the refcount in that guard, not here.
+///
+/// ⛔ ACCEPTED DELTA: THIS REMOVES AN EXPLICIT DENY NUB DID NOT AUTHOR. [`rebuild_without_sid`]
+/// matches `ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE`, so an administrator's explicit
+/// DENY naming the sandbox SID on the caller's own station goes with the strip, where the old
+/// snapshot would have put it back. Two things bound it, and neither is the project's usual
+/// prefer-over-grant rule — that rule is about not breaking packages, and this is about
+/// overriding machine-wide policy on a shared object, which needs its own argument:
+///
+///   - The BUILD JAIL CANNOT REACH IT. AppContainer mints a fresh container SID per run, so no
+///     admin can have authored a DENY for a trustee that did not exist until the run started.
+///     The delta exists only for the dedicated-account backend, whose account SID is stable.
+///   - Narrowing it here is the wrong trade. [`rebuild_without_sid`] is shared with the
+///     filesystem [`strip`] path, so an allow-only variant would change behaviour well outside
+///     this defect, for a case the build jail cannot hit. Documented rather than fixed.
+///
+/// Stated plainly for whoever reads this next: on the dedicated-account backend nub removes an
+/// explicit DENY it did not write, so an admin who set one to keep the sandbox account off a
+/// window station would find it gone.
 pub(crate) fn strip_window_object(handle: HANDLE, sid: &str) -> io::Result<()> {
     let sid = OwnedSid::parse(sid)?;
     let read = ReadWindowDacl::open(handle)?;
