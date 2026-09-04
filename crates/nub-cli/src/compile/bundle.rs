@@ -1963,6 +1963,44 @@ fn strip_regions(source: &str, prefix: &str, drop: &[&str]) -> String {
 /// applies to the indirect accessors, which take a specifier this scan never sees.
 /// A template literal counts as computed even when its body is constant — the
 /// distinction is not worth reading, and the cheap answer is the safe one.
+/// Is the text after a `require(` / `import(` a WHOLE static specifier?
+///
+/// Opening with a quote proves nothing: `require("child" + "_process")` starts
+/// like a literal, names no contiguous marker, and is preserved by the compiler as
+/// a real runtime load — so accepting it on its first byte strips the fork identity
+/// patch for a payload that genuinely forks. The specifier must therefore END the
+/// argument: the string closes, and the next thing is the call's own `)` or a
+/// second argument (`import(spec, options)`), never an operator.
+///
+/// An immediately-closing paren is accepted because `import()` takes no specifier
+/// at all and is a SyntaxError, so it can reach nothing. That case is worth
+/// spelling out: the sequence occurs in PROSE, and one zod comment reading "an
+/// inline `import()` of an ESM path" was enough to keep both eager loads for every
+/// artifact depending on zod.
+fn argument_is_one_static_string(after_paren: &str) -> bool {
+    let arg = after_paren.trim_start();
+    let bytes = arg.as_bytes();
+    let quote = match bytes.first() {
+        Some(b')') => return true,
+        Some(&q @ (b'"' | b'\'')) => q,
+        _ => return false,
+    };
+    let mut i = 1;
+    let close = loop {
+        match bytes.get(i) {
+            // Unterminated within this slice — unreadable, so treat it as computed.
+            None => return false,
+            Some(b'\\') => i += 2,
+            Some(&c) if c == quote => break i + 1,
+            _ => i += 1,
+        }
+    };
+    matches!(
+        arg[close..].trim_start().as_bytes().first(),
+        Some(b')') | Some(b',')
+    )
+}
+
 fn has_computed_module_access(code: &str) -> bool {
     for accessor in ["createRequire", "getBuiltinModule", "process.binding"] {
         if code.contains(accessor) {
@@ -1973,13 +2011,7 @@ fn has_computed_module_access(code: &str) -> bool {
         let mut rest = code;
         while let Some(at) = rest.find(call) {
             rest = &rest[at + call.len()..];
-            // A specifier this scan CAN read starts with a plain quote once
-            // whitespace is skipped. Anything else — an identifier, a call, a
-            // concatenation, a template — is computed.
-            if !matches!(
-                rest.trim_start().as_bytes().first(),
-                Some(b'"') | Some(b'\'')
-            ) {
+            if !argument_is_one_static_string(rest) {
                 return true;
             }
         }
@@ -9969,6 +10001,12 @@ after
             r#"createRequire(import.meta.url)("child_process")"#,
             r#"process.getBuiltinModule(name)"#,
             "require(`fs`)", // a template is not read, and cheap-and-safe wins
+            // A QUOTED PREFIX is not a static specifier. This one opens with a
+            // quote and names no contiguous marker, so reading only the first byte
+            // stripped the fork patch for a payload that really does fork.
+            r#"require("child" + "_process")"#,
+            r#"await import("node:" + name)"#,
+            r#"require("fs".concat(""))"#,
         ] {
             assert!(
                 has_computed_module_access(computed),
@@ -9984,6 +10022,10 @@ after
             r#"const fs = require("node:fs");"#,
             r#"await import("./chunk.mjs")"#,
             r#"console.log("plain");"#,
+            // Prose, not code. A zod comment shaped exactly like this kept both
+            // eager loads for every artifact depending on zod until empty parens
+            // were excluded — `import()` takes no specifier, so it reaches nothing.
+            "// emits an indexed access rather than an inline `import()` of a path",
         ] {
             assert!(
                 !has_computed_module_access(literal),
@@ -10003,6 +10045,20 @@ after
             p.app_uses_child_process.load(AtomicOrdering::Relaxed)
                 && p.app_uses_worker.load(AtomicOrdering::Relaxed),
             "an unreadable specifier must keep every eager load"
+        );
+
+        // The same, for a specifier that merely BEGINS like a literal. This is the
+        // shape that reached the builtin while both flags stayed false.
+        let split = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        split.note_app_builtin_usage("/app/entry.ts", r#"require("child" + "_process").fork(m)"#);
+        assert!(
+            split.app_uses_child_process.load(AtomicOrdering::Relaxed)
+                && split.app_uses_worker.load(AtomicOrdering::Relaxed),
+            "a quoted-prefix concatenation must keep every eager load"
         );
     }
 
