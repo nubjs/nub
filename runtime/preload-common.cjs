@@ -61,8 +61,9 @@ const ARGV_ONLY_FLAGS_KEY = "nub.argv-only-flags";
 // every run. This module's EVALUATION is part of the compile preamble's static
 // import graph, so no call-gating reaches that cost; the same signal and the same
 // deliberately over-detecting build-time scan gate the preamble's own Worker branch.
-// The record is published by the bootstrap's `--require`, ahead of any ESM here.
-// Undefined outside a compiled artifact, where the load stays eager.
+// The record is published by the bootstrap's `--require`, ahead of any ESM here,
+// and is absent outside a compiled artifact — so this reads false there and the
+// load stays eager, which is the only behaviour an ordinary run ever had.
 const workerless = compileBootstrap?.needsWorker === false;
 try {
   const workerThreads = workerless ? null : getBuiltin("node:worker_threads");
