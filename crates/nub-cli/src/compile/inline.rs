@@ -120,18 +120,18 @@ pub enum Rewritten {
     Extract(AppFiles, Decline),
 }
 
-/// Rewrite `files` for inline launch, or say why the payload has to extract.
-///
-/// On success every `.mjs` chunk has been given its virtual identity and had its
-/// cross-chunk specifiers replaced, and the bootstrap entry carries the loader that
-/// reads them back out of the executable. The caller compresses the result with
-/// brotli and sets `Manifest::inline_app`.
 /// The root manifest `assemble_app` synthesizes for the extracted tree. Spelled
 /// here rather than shared, because the two uses are independent: that one exists
 /// so a walk-up finds a package boundary on disk, and this one drops it again
 /// because an inline payload has no disk to walk.
 const ROOT_MANIFEST_NAME: &str = "package.json";
 
+/// Rewrite `files` for inline launch, or say why the payload has to extract.
+///
+/// On success every `.mjs` chunk has been given its virtual identity and had its
+/// cross-chunk specifiers replaced, and the bootstrap entry carries the loader that
+/// reads them back out of the executable. The caller compresses the result with
+/// brotli and sets `Manifest::inline_app`.
 pub fn rewrite(files: AppFiles, inputs: &Inputs<'_>) -> Result<Rewritten> {
     match classify(&files, inputs)? {
         Err(decline) => Ok(Rewritten::Extract(files, decline)),
