@@ -197,6 +197,24 @@ for F in hello cli; do
   echo "  ok   nodecc-$F (plain node, warm V8 compile cache)"
 done
 
+# Runner identity. Two ubuntu-latest runs of this exact harness (33925518838 and
+# 33926407075) produced plain-node minimums of 13.90 ms and 22.79 ms for the same
+# 22-byte script — the runner varies by ~1.6x. Every row inside ONE run scales
+# with it, so the RATIO column reproduces across runners where the absolute
+# milliseconds do not. Record what we ran on so a reader can see which is which.
+echo
+echo "== runner"
+echo "  uname              $(uname -srm)"
+if [ "$OS" = linux ]; then
+  echo "  cpus               $(nproc)"
+  echo "  model              $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+  echo "  memtotal           $(grep -m1 MemTotal /proc/meminfo | awk '{printf "%.1f GB", $2/1048576}')"
+else
+  echo "  cpus               $(sysctl -n hw.ncpu)"
+  echo "  model              $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo '?')"
+  echo "  memtotal           $(sysctl -n hw.memsize | awk '{printf "%.1f GB", $1/1073741824}')"
+fi
+
 echo
 echo "== versions"
 echo "  host node          $(node -v)   ($OS-$ARCH)"
