@@ -105,7 +105,7 @@ Time to first output, measured warm — after the one-time extraction on first r
   ]}
 />
 
-Nub is slowest in this chart. A stock `node` takes 34 ms on this machine before any user code runs, and a compiled binary adds about 12 ms on top. The launcher's own share is under 2 ms: it decodes the payload, checks the extracted tree, and replaces itself with Node, so the binary you launched is the process you end up with. The rest is Node loading Nub's bootstrap, the preload that wires up the runtime augmentations, before the app.
+Nub is slowest in this chart. A stock `node` takes 34 ms on this machine before any user code runs, and a compiled binary adds about 12 ms on top. The launcher's own share is under 2 ms: it decodes the payload, checks the extracted tree, and replaces itself with Node, so the binary you launched is the process you end up with. The rest is Nub's runtime augmentation. The bootstrap preload and the preamble the bundler places ahead of your code install the same globals and polyfills that a file run through `nub` gets, which is the difference between a compiled binary and a plain `node` process.
 
 ### Assets
 
