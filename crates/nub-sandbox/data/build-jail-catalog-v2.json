@@ -5,42 +5,14 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    },
    "versions": {
     "<1.2.8": {
      "write": {
       "deps": true
      },
-     "macos": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "linux": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "win": {
-      "network": true
-     }
+     "network": true
     }
    }
   },
@@ -174,21 +146,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "@clerk/shared": {
@@ -306,11 +264,6 @@
      },
      "network": true
     },
-    "linux": {
-     "write": {
-      "userHome": true
-     }
-    },
     "win": {
      "network": true,
      "write": {
@@ -406,21 +359,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "@heroui/shared-utils": {
@@ -428,42 +367,14 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    },
    "versions": {
     "<2.1.12": {
      "write": {
       "deps": true
      },
-     "macos": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "linux": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "win": {
-      "network": true
-     }
+     "network": true
     }
    }
   },
@@ -703,8 +614,7 @@
       "writePaths": [
        ".cache/esbuild",
        ".config/configstore"
-      ],
-      "write": null
+      ]
      },
      "win": {
       "writePaths": [
@@ -826,10 +736,7 @@
   },
   "@pdftron/pdfnet-node": {
    "default": {
-    "network": true,
-    "linux": {
-     "write": null
-    }
+    "network": true
    }
   },
   "@playwright/browser-chromium": {
@@ -1370,21 +1277,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "@syncfusion/ej2-angular-base": {
@@ -1392,21 +1285,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "@team-plain/typescript-sdk": {
@@ -1961,21 +1840,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "cld": {
@@ -2031,21 +1896,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "contentlayer": {
@@ -2554,8 +2405,7 @@
       "writePaths": [
        ".cache/esbuild",
        ".config/configstore"
-      ],
-      "write": null
+      ]
      },
      "win": {
       "writePaths": [
@@ -3133,21 +2983,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "isolated-vm": {
@@ -3343,7 +3179,6 @@
       "write": {
        "userHome": true
       },
-      "network": true,
       "writePaths": null
      },
      "win": {
@@ -3377,21 +3212,7 @@
      "write": {
       "deps": true
      },
-     "macos": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "linux": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "win": {
-      "network": true
-     }
+     "network": true
     }
    }
   },
@@ -4511,8 +4332,7 @@
      "linux": {
       "writePaths": [
        ".config/configstore"
-      ],
-      "write": null
+      ]
      }
     }
    }
@@ -4553,18 +4373,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "registry-js": {
@@ -4594,21 +4403,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "samlify": {
@@ -4902,21 +4697,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "storybook-addon-remix-react-router": {
@@ -4956,42 +4737,14 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    },
    "versions": {
     "<2.18.0": {
      "write": {
       "deps": true
      },
-     "macos": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "linux": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "win": {
-      "network": true
-     }
+     "network": true
     }
    }
   },
@@ -5000,21 +4753,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "supabase": {
@@ -5083,21 +4822,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "tree-sitter-c-sharp": {
@@ -5105,21 +4830,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    },
    "versions": {
     "<0.23.5": {
@@ -5133,16 +4844,10 @@
       "network": true
      },
      "linux": {
-      "write": {
-       "deps": true
-      },
       "network": true,
       "writePaths": null
      },
      "win": {
-      "write": {
-       "deps": true
-      },
       "network": true,
       "writePaths": null
      }
@@ -5159,21 +4864,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "tree-sitter-go": {
@@ -5267,9 +4958,6 @@
       "network": true
      },
      "linux": {
-      "write": {
-       "deps": true
-      },
       "network": true,
       "writePaths": null
      },
@@ -5309,21 +4997,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    },
    "versions": {
     "<0.23.1": {
@@ -5337,9 +5011,6 @@
       "network": true
      },
      "linux": {
-      "write": {
-       "deps": true
-      },
       "network": true,
       "writePaths": null
      },
@@ -5558,30 +5229,11 @@
      }
     },
     "<2.0.3": {
-     "writePaths": [
-      "Library/Caches/node-gyp"
-     ],
+     "writePaths": null,
      "write": {
       "deps": true
      },
-     "macos": {
-      "write": {
-       "deps": true
-      },
-      "network": true,
-      "writePaths": null
-     },
-     "linux": {
-      "write": {
-       "deps": true
-      },
-      "network": true,
-      "writePaths": null
-     },
-     "win": {
-      "network": true,
-      "writePaths": null
-     }
+     "network": true
     }
    }
   },
@@ -5735,21 +5387,7 @@
      "write": {
       "deps": true
      },
-     "macos": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "linux": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "win": {
-      "network": true
-     }
+     "network": true
     }
    }
   },
@@ -5760,21 +5398,7 @@
      "write": {
       "deps": true
      },
-     "macos": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "linux": {
-      "write": {
-       "deps": true
-      },
-      "network": true
-     },
-     "win": {
-      "network": true
-     }
+     "network": true
     }
    }
   },
@@ -5785,9 +5409,6 @@
      "project": true
     },
     "network": true,
-    "macos": {
-     "network": true
-    },
     "linux": {
      "write": {
       "deps": true
@@ -5803,21 +5424,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "wdeasync": {
@@ -5851,18 +5458,7 @@
     "write": {
      "deps": true
     },
-    "macos": {
-     "network": true
-    },
-    "linux": {
-     "write": {
-      "deps": true
-     },
-     "network": true
-    },
-    "win": {
-     "network": true
-    }
+    "network": true
    }
   },
   "windows-build-tools": {
@@ -5887,9 +5483,6 @@
     },
     "linux": {
      "write": null
-    },
-    "win": {
-     "network": true
     }
    }
   },

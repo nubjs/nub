@@ -1,5 +1,10 @@
 //! Shape rules for the shipped catalog: no redundant per-OS overlays, and no prose.
 //!
+//! "Redundant" has two shapes and both are guarded here, because the second HIDES the first: an
+//! overlay field that merely restates the base's value is dead on its own, and removing 64 of them
+//! exposed 27 further cells whose three overlays were then identical. A single pass over either
+//! shape alone leaves the other behind.
+//!
 //! Both are byte-size rules with a correctness edge. The catalog is `include_str!`d into every
 //! binary that links this crate, so anything carried here is carried by every user.
 
@@ -37,7 +42,7 @@ const OVERLAY_KEYS: [&str; 3] = ["macos", "linux", "win"];
 
 /// ⛔ THREE IDENTICAL OVERLAYS SAY NOTHING THE BASE CANNOT. An overlay overrides per FIELD with
 /// fallback to the base, so when all three platforms carry the same block the base's value for
-/// those fields is unobservable and the block is pure weight — 62 cells carried one, and hoisting
+/// those fields is unobservable and the block is pure weight — 89 cells carried one, and hoisting
 /// them into the base cut nothing but bytes (proved by comparing all 1,299 resolved grants before
 /// and after). Two overlays are NOT this: the third platform still reads the base.
 #[test]
@@ -71,6 +76,89 @@ fn no_cell_carries_the_same_overlay_on_all_three_platforms() {
          delete the overlays:\n  {}",
         redundant.len(),
         redundant.join("\n  ")
+    );
+}
+
+/// The value an overlay or a base actually resolves to for one field, canonicalised so two
+/// spellings of one meaning compare equal.
+///
+/// ⛔ THIS MIRRORS `parse_overlay`, AND THE ABSENT/NULL DISTINCTION IS THE WHOLE POINT. In an
+/// OVERLAY, an absent key means "inherit the base" while an explicit `null` means "withdraw the
+/// outer grant on this OS" — so `{"write": null}` is a real narrowing and must never be mistaken
+/// for dead weight. In the BASE, an absent key means the `Caps` default, which is the same value
+/// `null` denotes. That is why a base which simply omits `network` and an overlay that writes
+/// `"network": null` are redundant, while the raw JSON for the two looks nothing alike.
+fn effective(obj: &serde_json::Value, key: &str) -> String {
+    let v = obj.get(key);
+    match key {
+        "network" => match v {
+            Some(serde_json::Value::Bool(true)) => "true".to_string(),
+            _ => "false".to_string(),
+        },
+        "writePaths" => match v {
+            Some(serde_json::Value::Array(a)) => a
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            _ => String::new(),
+        },
+        // `read` / `write`: a reach. Scope order is not meaning, so sort before comparing.
+        _ => match v {
+            None | Some(serde_json::Value::Null) => "none".to_string(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Object(m)) => {
+                let mut on: Vec<&str> = m
+                    .iter()
+                    .filter(|(_, val)| val.as_bool() == Some(true))
+                    .map(|(k, _)| k.as_str())
+                    .collect();
+                on.sort_unstable();
+                on.join("+")
+            }
+            Some(other) => other.to_string(),
+        },
+    }
+}
+
+/// ⛔ AN OVERLAY FIELD THAT RESTATES THE BASE IS DEAD, AND IT HIDES THE REDUNDANCY ABOVE. `Grant::on`
+/// falls back to the base per field, so an overlay naming a value the base already resolves to
+/// changes nothing on that platform. 64 such fields shipped, 4 of them accounting for an overlay's
+/// entire contents; deleting them left every one of the 1,299 resolved grants identical AND made 27
+/// more cells collapse under the three-way rule, which is why this guard exists rather than a note
+/// to look again later.
+#[test]
+fn no_overlay_field_restates_the_base() {
+    let d = doc();
+    let mut dead = Vec::new();
+    let mut examined = 0usize;
+    for (name, band, cell) in cells(&d) {
+        for key in OVERLAY_KEYS {
+            let Some(overlay) = cell.get(key).and_then(|v| v.as_object()) else {
+                continue;
+            };
+            for field in overlay.keys() {
+                examined += 1;
+                if effective(&serde_json::Value::Object(overlay.clone()), field)
+                    == effective(&cell, field)
+                {
+                    dead.push(format!("{name} [{band}] {key}.{field}"));
+                }
+            }
+        }
+    }
+    // CONTROL — a catalog whose overlays all vanished would otherwise pass by examining nothing.
+    assert!(
+        examined > 300,
+        "control: only {examined} overlay field(s) examined, so this test is not looking at the \
+         shape it guards"
+    );
+    assert!(
+        dead.is_empty(),
+        "{} overlay field(s) resolve to exactly what the base already gives; delete them (and the \
+         overlay, if that empties it):\n  {}",
+        dead.len(),
+        dead.join("\n  ")
     );
 }
 
