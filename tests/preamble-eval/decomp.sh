@@ -88,3 +88,18 @@ for (const b of r) {
   const t = m(b);
   console.log(`${b.command.padEnd(10)} min ${t.toFixed(2).padStart(7)} ms   over-node ${(t - b0).toFixed(2).padStart(6)}   saves ${(full - t).toFixed(2).padStart(6)}`);
 }' "$D/r.json"
+
+# The same variants again, priced in CHILD CPU rather than wall clock. On every
+# runner this has been given, the hyperfine table above could not resolve terms
+# under ~1 ms while its own baselines drifted 0.50-1.16 ms; the CPU instrument
+# separates the same terms against a 0.115 ms in-run control. `control` repeats
+# arm 1 on purpose — its gap IS the error bar, and a run whose control exceeds the
+# effect gets thrown away.
+echo "--- measuring again, in child CPU time ---"
+PER=5 ROUNDS="${ROUNDS:-40}" bash "$REPO/tests/preamble-eval/cpu-ab.sh" \
+  "full=$D/art-full" \
+  "ungate=$D/art-ungate" \
+  "nowp=$D/art-nowp" \
+  "nopc=$D/art-nopc" \
+  "min=$D/art-min" \
+  "control=$D/art-full"
