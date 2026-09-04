@@ -40,8 +40,30 @@
 //! package was REFUTED on macOS -- the fixture never installed the platform optionalDependency, so
 //! the install script took its missing-dependency workaround branch and died fetching from the
 //! registry, which proves the fallback needs egress rather than that the package needs the home.
-//! Whether the Linux fixture has the same flaw is unresolved, an under-grant is worse than an
-//! over-grant, and the control below asserts it keeps the grant until that is settled.
+//! An under-grant is worse than an over-grant, and the control below asserts it keeps the grant
+//! until that is settled.
+//!
+//! ⛔ RESOLVED 2026-09-04, AND THE ANSWER IS YES: THE LINUX FIXTURE HAS THE SAME FLAW. Measured on
+//! all three platforms at `5d987facc2` with the sweep harness (`--only unrs-resolver --keep-logs`),
+//! the child log carries the identical three lines everywhere -- darwin-arm64, linux-x64-gnu and
+//! win32-x64-msvc alike:
+//!
+//! ```text
+//! [napi-postinstall] Trying to install package "@unrs/resolver-binding-<platform>" using npm
+//! [napi-postinstall] Failed to install ... Cannot find module 'unrs-resolver/package.json'
+//! [napi-postinstall] Trying to download "https://registry.npmjs.org/@unrs/resolver-binding-..."
+//! ```
+//!
+//! So the script takes the missing-dependency workaround branch and falls through to a registry
+//! DOWNLOAD on every platform; it never reaches whatever the home write exists for.
+//!
+//! ⛔⛔ WHAT THAT DOES TO THE OBVIOUS EXPERIMENT, AND WHY IT IS A TRAP RATHER THAN A NULL RESULT.
+//! A two-arm catalog-override run (`write.userHome` present vs OMITTED -- `false` is rejected by
+//! the schema) verdicts `OK` on BOTH arms on ALL THREE platforms, with the grant-set diff showing
+//! the home grant removed and NOTHING else moving. That reads exactly like a clean narrowing and
+//! it is worthless: both arms ran the fallback branch, so neither one tested the grant. **A valid
+//! experiment must first make the fixture install the platform `optionalDependency`, so the script
+//! takes its REAL branch.** Until someone does that, this package keeps its grant.
 //!
 //! ⛔ A SECOND, DIFFERENTLY-SHAPED MEASUREMENT LIVES HERE TOO, and conflating the two would put a
 //! claim on rows that never earned it. `WITHDRAWN` above is the five-arm ladder. `WITHDRAWN_BANDS`
