@@ -2063,7 +2063,8 @@ impl CompilePreamble {
             return;
         }
         if code.contains("child_process") || code.contains("cluster") {
-            self.app_uses_child_process.store(true, AtomicOrdering::Relaxed);
+            self.app_uses_child_process
+                .store(true, AtomicOrdering::Relaxed);
         }
         if code.contains("worker_threads") || code.contains("Worker") {
             self.app_uses_worker.store(true, AtomicOrdering::Relaxed);
@@ -9887,7 +9888,10 @@ after
         // The positive control. Without it the assertions above would pass just as
         // well against a scan that never records anything at all.
         let app = fresh();
-        app.note_app_builtin_usage("/app/entry.ts", "import { fork } from 'node:child_process';");
+        app.note_app_builtin_usage(
+            "/app/entry.ts",
+            "import { fork } from 'node:child_process';",
+        );
         assert_eq!(
             uses(&app),
             (true, false),
@@ -9943,8 +9947,7 @@ after
         // Independence: stripping one region must not disturb the other.
         let cp_only = text(strip_unused_bootstrap_regions(src, true, false));
         assert!(
-            cp_only.contains("needsChildProcess = true")
-                && !cp_only.contains("needsWorker = true"),
+            cp_only.contains("needsChildProcess = true") && !cp_only.contains("needsWorker = true"),
             "child_process usage alone must keep only that region"
         );
         let worker_only = text(strip_unused_bootstrap_regions(src, false, true));
