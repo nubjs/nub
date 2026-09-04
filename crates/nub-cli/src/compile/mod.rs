@@ -110,8 +110,8 @@ type AppFiles = Vec<AppFile<Vec<u8>>>;
 
 pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Started before anything that can touch the network or the disk, so the
-    // `elapsed` row measures the wait the user actually sat through rather than
-    // the part of it this function happens to bracket.
+    // closing success line reports the wait the user actually sat through rather
+    // than the part of it this function happens to bracket.
     let started = std::time::Instant::now();
     let target = resolve_platform(opts.platform.as_deref())?;
 
@@ -164,6 +164,18 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         &target,
     )?;
     reject_non_windows_hide_console(opts.hide_console, &target)?;
+
+    // Printed here — after the cheap rejections, before the first step that can
+    // take a visible amount of time. Everything above fails in the first second,
+    // so an intro above them would announce a build that never started.
+    eprintln!(
+        "{}",
+        intro_line(
+            &opts.entry,
+            &out_path,
+            crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        )
+    );
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -580,6 +592,109 @@ fn report_resolved_build(
             eprintln!("{line}");
         }
     }
+    eprintln!();
+    eprintln!("{}", success_line(out_path, facts.elapsed, color));
+}
+
+/// The line that opens a compile, and the one thing here that survives in the
+/// scrollback from before the build.
+///
+/// The live line cannot do this job: it is `ProgressJobDoneBehavior::Hide`, so
+/// the only pre-block line a compile printed erased itself, and a build that had
+/// scrolled past left no record of what was even being compiled. It is also off
+/// entirely when stderr is not a terminal, which is exactly the run — a CI log —
+/// where the record matters most. So this is a plain `eprintln!` rather than a
+/// kept final frame: it prints identically in both modes, and the spinner keeps
+/// being purely transient.
+///
+/// `entry → out` and nothing else. The platform and the size are on the block
+/// eight lines below, and a cross-compile carries its target in the default
+/// output name anyway; an intro repeating the block is a second, worse copy of
+/// it. What the block cannot say is what the reader is waiting FOR, because it
+/// prints when the waiting is over.
+fn intro_line(entry: &str, out_path: &Path, color: bool) -> String {
+    format!(
+        "{} {} compiling {entry} {} {}",
+        banner(color),
+        paint("·", Ink::Muted, color),
+        paint("→", Ink::Muted, color),
+        paint(&out_path.display().to_string(), Ink::Accent, color),
+    )
+}
+
+/// The line that closes a successful compile.
+///
+/// A build that worked used to end on its own last fact — `elapsed  3.5s`, or
+/// whichever optional row happened to sort last — so nothing in the output said
+/// the thing had actually succeeded. This says it, in the vocabulary the rest of
+/// the CLI already spends on exactly that: a green bold check mark, then the
+/// noun, then a dim duration. It is the same line `nub install` signs off with
+/// (`✓ installed 2 packages in 1.2s`), which is what makes it legible without
+/// being read.
+///
+/// It carries the elapsed time, and the `elapsed` block row was removed when it
+/// did. One fact stated twice, three lines apart, is worse than either placement
+/// on its own — and the duration belongs with the success cue, where it answers
+/// "that worked, and it took this long" as one sentence.
+///
+/// No banner, unlike the install summary. That summary is frequently the ONLY
+/// persistent line an install prints, so it has to identify who is speaking; a
+/// compile always prints [`intro_line`] first, and stamping the version twice
+/// into a seven-line output is noise.
+fn success_line(out_path: &Path, elapsed: std::time::Duration, color: bool) -> String {
+    format!(
+        "{} compiled {} in {}",
+        paint_success(color),
+        paint(&out_path.display().to_string(), Ink::Accent, color),
+        paint(&format_elapsed(elapsed), Ink::Muted, color),
+    )
+}
+
+/// The product banner: magenta-bold `nub`, then the dim version.
+///
+/// One definition, because it is drawn on two surfaces — the live line's header
+/// and [`intro_line`] — and the two drifting apart would be invisible until
+/// someone put them side by side. Byte-compatible with the banner the engine
+/// prints, which is what makes an install and a compile look like one CLI.
+fn banner(color: bool) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    if !color {
+        return format!("nub {version}");
+    }
+    format!("\x1b[35m\x1b[1mnub\x1b[22m\x1b[39m \x1b[2m{version}\x1b[22m")
+}
+
+/// The green check mark, in the one place a build says it worked.
+///
+/// Not an [`Ink`], deliberately: `Ink` is the block's three-tier vocabulary and
+/// adding a fourth for a glyph one line uses would put a color in it that the
+/// block itself never draws.
+fn paint_success(color: bool) -> String {
+    if color {
+        "\x1b[32m\x1b[1m✓\x1b[22m\x1b[39m".to_string()
+    } else {
+        "✓".to_string()
+    }
+}
+
+/// An elapsed build, in the three bands the engine's install summary uses
+/// (`aube::progress::ci::format_duration`): sub-second `240ms`, sub-minute
+/// `4.0s`, otherwise `3m12s`.
+///
+/// Reimplemented rather than called because that function is private to the
+/// engine. The bands matter here more than they do for an install: a `--target`
+/// that has to download and recompress a ~100 MB Node routinely runs past a
+/// minute, and the flat `{:.1}s` this replaces rendered that as `92.4s`.
+fn format_elapsed(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", d.as_secs_f64())
+    } else {
+        let total = d.as_secs();
+        format!("{}m{:02}s", total / 60, total % 60)
+    }
 }
 
 /// Assumed terminal width when stderr cannot be measured — a pipe, a log file, a
@@ -873,10 +988,8 @@ fn resolved_build_rows(
         ));
     }
 
-    rows.push((
-        "elapsed",
-        vec![(format!("{:.1}s", facts.elapsed.as_secs_f64()), Ink::Plain)],
-    ));
+    // No `elapsed` row: the closing success line carries the duration, and
+    // stating it in both places three lines apart reads as two measurements.
     rows
 }
 
@@ -1215,13 +1328,9 @@ impl LiveLine {
         if !crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr())) {
             return Self(None);
         }
-        let header = format!(
-            "\x1b[35m\x1b[1mnub\x1b[22m\x1b[39m \x1b[2m{}\x1b[22m",
-            env!("CARGO_PKG_VERSION")
-        );
         let job = clx::progress::ProgressJobBuilder::new()
             .body("{{header}}  {{ spinner() }} {{phase}}{{detail}}")
-            .prop("header", &header)
+            .prop("header", &banner(true))
             .prop("phase", &Self::phase_field("bundling"))
             .prop("detail", &String::new())
             // The line is transient by construction: at teardown the job flips to
@@ -4500,7 +4609,6 @@ mod tests {
                 "deferred=3 dynamic import sites  resolved where the binary runs".to_string(),
                 "app=extracted on first run  it resolves modules at run time".to_string(),
                 "report=report.json  esbuild schema".to_string(),
-                "elapsed=8.9s".to_string(),
             ]
         );
     }
@@ -4563,7 +4671,6 @@ mod tests {
                 "runtime=Node >=22 <23, not embedded  (--target)".to_string(),
                 format!("platform={}", host.triple()),
                 "app=run from the executable  nothing is written to disk".to_string(),
-                "elapsed=2.4s".to_string(),
             ]
         );
     }
@@ -4613,7 +4720,6 @@ mod tests {
                 ("deferred", vec![Ink::Plain, Ink::Muted]),
                 ("app", vec![Ink::Plain, Ink::Muted]),
                 ("report", vec![Ink::Plain, Ink::Muted]),
-                ("elapsed", vec![Ink::Plain]),
             ],
             "exactly one Accent in the whole block, on the path the reader runs next"
         );
@@ -4624,6 +4730,67 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The two lines that bracket the block, in both the modes they print in.
+    ///
+    /// The colorless spelling is the load-bearing half. Both lines print on a
+    /// redirected build — where the live line is off entirely — so a CI log is
+    /// the one place they are the ONLY record that a compile started and that it
+    /// worked, and an escape sequence leaking into that log is exactly what a
+    /// TTY-only assertion would miss.
+    #[test]
+    fn the_intro_and_success_lines_bracket_the_block_in_both_modes() {
+        let out = Path::new("dist/cli");
+        let took = std::time::Duration::from_millis(3_540);
+
+        assert_eq!(
+            intro_line("cli.ts", out, false),
+            format!(
+                "nub {} · compiling cli.ts → dist/cli",
+                env!("CARGO_PKG_VERSION")
+            ),
+            "the intro names what the reader is waiting for, which is the one \
+             thing the closing block cannot say"
+        );
+        assert_eq!(
+            success_line(out, took, false),
+            "✓ compiled dist/cli in 3.5s",
+            "a build that worked has to say so in words, not by ending"
+        );
+
+        // The artifact path is the block's Accent and stays it on both lines, so
+        // the path a reader runs next is one color from the first line to the
+        // last. The green check mark is the only ink here the block never draws.
+        let intro = intro_line("cli.ts", out, true);
+        let success = success_line(out, took, true);
+        assert!(
+            intro.contains(&paint("dist/cli", Ink::Accent, true))
+                && success.contains(&paint("dist/cli", Ink::Accent, true)),
+            "intro={intro:?} success={success:?}"
+        );
+        assert!(
+            success.starts_with("\x1b[32m\x1b[1m✓"),
+            "the success cue is the engine's green bold check mark: {success:?}"
+        );
+        assert_eq!(
+            strip_sgr(&success),
+            success_line(out, took, false),
+            "color must add nothing but color"
+        );
+    }
+
+    /// The bands exist because an embed build that downloads a ~100 MB Node
+    /// routinely runs past a minute, and the flat `{:.1}s` this replaced rendered
+    /// that as `92.4s`.
+    #[test]
+    fn an_elapsed_build_is_reported_in_the_band_it_lands_in() {
+        let ms = |n| format_elapsed(std::time::Duration::from_millis(n));
+        assert_eq!(ms(240), "240ms");
+        assert_eq!(ms(999), "999ms");
+        assert_eq!(ms(1_000), "1.0s");
+        assert_eq!(ms(59_940), "59.9s");
+        assert_eq!(ms(92_400), "1m32s");
     }
 
     /// A row too wide for the terminal wraps to the value column, not to zero.
@@ -4920,7 +5087,7 @@ mod tests {
     fn every_value_starts_in_one_column_and_the_slack_is_on_the_left() {
         let spans = vec![("x".to_string(), Ink::Plain)];
         let width = 8;
-        let rendered: Vec<String> = ["output", "runtime", "platform", "elapsed"]
+        let rendered: Vec<String> = ["output", "runtime", "platform", "shipped"]
             .iter()
             .map(|label| render_row(label, &spans, width, 80, false).join(""))
             .collect();
