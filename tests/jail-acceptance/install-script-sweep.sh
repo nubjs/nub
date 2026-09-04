@@ -42,6 +42,17 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg $1" >&2; exit 2 ;;
   esac
 done
+# ⛔ A BACKSLASH `NUB` PATH MANUFACTURES FALSE `JAIL-CAUSED` ROWS ON WINDOWS, SILENTLY. The sweep
+# derives nub's busybox sidecar location with `dirname "$NUB"`, and `dirname` cannot split a
+# backslash path -- it returns `.`, so the sidecar is looked for in the CWD, is not found, the script
+# engine silently stays on `cmd.exe`, and packages fail for a reason that has nothing to do with
+# confinement. Measured: rows that pass under a mixed path failed under a `cygpath -w` one. Pass
+# `cygpath -m` (C:/...) rather than `cygpath -w` (C:\...). Refused rather than warned, because the
+# failure it causes is indistinguishable from a real jail regression in the results file.
+case "$NUB" in
+  *\\*) echo "NUB contains a backslash ($NUB) — pass a mixed path (cygpath -m), not cygpath -w" >&2; exit 2 ;;
+esac
+
 [ -x "$NUB" ] || { echo "no nub binary at $NUB" >&2; exit 2; }
 
 # ⛔⛔ STAGE THE BUSYBOX SIDECAR, OR THIS HARNESS MEASURES THE WRONG SHELL ENTIRELY.
