@@ -2926,6 +2926,7 @@ dependencies = [
  "aube-workspace",
  "base64",
  "blake3",
+ "brotli",
  "clap",
  "clx",
  "console",

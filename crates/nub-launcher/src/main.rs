@@ -47,6 +47,11 @@ const INTERNAL_MODE_ENV: &str = "__NUB_COMPILED_LAUNCHER_MODE";
 /// Private process-identity channel. The launcher always overwrites this on the
 /// child Command, so an inherited value can never spoof the compiled executable.
 const COMPILED_EXEC_PATH_ENV: &str = "__NUB_COMPILED_EXEC_PATH";
+
+/// The flags an INLINE artifact would have had in `process.execArgv`, as a JSON
+/// array. `-e` puts the script itself there instead, and the compiled bootstrap
+/// consumes this and restores the real set before application code runs.
+const COMPILED_EXEC_ARGV_ENV: &str = "__NUB_COMPILED_EXEC_ARGV";
 /// Interrupted staging trees are never current after this age. The bounded
 /// cleanup is deliberately limited to the launcher's own temp prefixes.
 const ORPHAN_STAGE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -202,80 +207,115 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         Shape::Smol => discover_external_smol_node(&view.manifest)?,
         Shape::Embed => None,
     };
-    let cache_use = cache_use_for(
-        &view.manifest.shape,
-        external_smol.is_some(),
-        view.has_executable_file(),
-    );
 
-    // Resolved ONCE and threaded through: every write this process makes lands
-    // under the one directory that was proven writable, and the probe (a mkdir
-    // plus a zero-byte file) is not repeated per payload. A candidate already
-    // holding this payload's artifacts skips the write half of that probe.
-    let resolved = cache::resolve(cache_use, &|dir: &Path| {
-        if external_smol.is_some() {
-            app_cache_is_ready(view, &app_cache_dir(dir, &view.manifest))
-                .then_some(CacheWarm::AppOnly)
-        } else {
-            verify_warm_cache(view, dir).map(CacheWarm::Managed)
-        }
-    })?;
-    phase("cache::resolve (incl. warm verify)");
-    let base = resolved.path;
-    cleanup_launcher_orphans(&base, &view.manifest);
-    phase("orphan cleanup");
-    let notice = FirstRun::new(view.manifest.install_message.as_deref());
-
-    let ((node_path, version, origin), app_dir) = match (external_smol, resolved.warm) {
-        (Some((node_path, version)), Some(CacheWarm::AppOnly)) => (
-            (node_path, version, NodeOrigin::Discovered),
-            app_cache_dir(&base, &view.manifest),
-        ),
-        (Some((node_path, version)), None) => (
-            (node_path, version, NodeOrigin::Discovered),
-            ensure_app(view, &base)?,
-        ),
-        (None, Some(CacheWarm::Managed(warm))) => {
-            phase("ARM: warm managed (fast path)");
-            let version = view
-                .manifest
-                .node_version
-                .parse()
-                .unwrap_or_else(|_| NodeVersion::new(22, 15, 0));
-            ((warm.node_path, version, NodeOrigin::Managed), warm.app_dir)
-        }
-        (None, None) => {
-            phase("ARM: COLD — acquire_node + ensure_app");
-            let n = acquire_node(view, &base, &notice, None)?;
-            phase("  acquire_node done");
-            let a = ensure_app(view, &base)?;
-            phase("  ensure_app done");
-            (n, a)
-        }
-        // The warm callback ties its variant to `external_smol`; retaining this
-        // arm makes a future callback refactor fail closed rather than executing
-        // a cache Node from a data-only cache.
-        _ => bail!("cache warm state did not match the selected Node source"),
+    // An INLINE payload materializes no app files at all — the bootstrap arrives as
+    // `-e` and every chunk is served to `import()` straight out of this executable
+    // — so a `--smol` build whose Node was already on the machine needs no writable
+    // directory, not even to probe for one. That is the case the mode exists for: a
+    // distroless image, a `noexec` mount, a read-only `HOME`, where resolving a
+    // cache is itself the failure. Every other combination still resolves one,
+    // because the Node has to be unpacked or provisioned into it.
+    let inline_discovered = match (view.manifest.inline_app, &external_smol) {
+        (true, Some(found)) => Some(found.clone()),
+        _ => None,
     };
-    // Resolution proves the whole cache namespace cannot be renamed by another
-    // principal. Repeat the read-only gate after extraction and immediately
-    // before handing its paths to Command so deployment-time ACL/mode changes
-    // cannot turn a validated cache into a cross-principal execution handoff.
-    phase("node + app resolved");
-    cache::revalidate(&base).context("revalidating the executable cache namespace")?;
-    phase("cache revalidated");
-    // Hand the terminal back BEFORE anything the app might print — the box lives
-    // on the alternate screen, so this restores the user's scrollback intact.
-    notice.finish();
+    let ((node_path, version, origin), base, app_dir) = match inline_discovered {
+        Some((node_path, node_version)) => {
+            phase("ARM: inline payload + discovered Node — no cache resolved");
+            // No first-run notice: nothing is being unpacked or downloaded. The
+            // notice exists to explain a multi-second silent startup, and this path
+            // has none.
+            (
+                (node_path, node_version, NodeOrigin::Discovered),
+                None,
+                None,
+            )
+        }
+        None => {
+            let cache_use = cache_use_for(
+                &view.manifest.shape,
+                external_smol.is_some(),
+                view.has_executable_file(),
+            );
+
+            // Resolved ONCE and threaded through: every write this process makes
+            // lands under the one directory that was proven writable, and the probe
+            // (a mkdir plus a zero-byte file) is not repeated per payload. A
+            // candidate already holding this payload's artifacts skips the write
+            // half of that probe.
+            let resolved = cache::resolve(cache_use, &|dir: &Path| {
+                if external_smol.is_some() {
+                    app_cache_is_ready(view, &app_cache_dir(dir, &view.manifest))
+                        .then_some(CacheWarm::AppOnly)
+                } else {
+                    verify_warm_cache(view, dir).map(CacheWarm::Managed)
+                }
+            })?;
+            phase("cache::resolve (incl. warm verify)");
+            let base = resolved.path;
+            cleanup_launcher_orphans(&base, &view.manifest);
+            phase("orphan cleanup");
+            let notice = FirstRun::new(view.manifest.install_message.as_deref());
+
+            let (node, app_dir) = match (external_smol, resolved.warm) {
+                (Some((node_path, version)), Some(CacheWarm::AppOnly)) => (
+                    (node_path, version, NodeOrigin::Discovered),
+                    Some(app_cache_dir(&base, &view.manifest)),
+                ),
+                (Some((node_path, version)), None) => (
+                    (node_path, version, NodeOrigin::Discovered),
+                    ensure_app_unless_inline(view, &base)?,
+                ),
+                (None, Some(CacheWarm::Managed(warm))) => {
+                    phase("ARM: warm managed (fast path)");
+                    let version = view
+                        .manifest
+                        .node_version
+                        .parse()
+                        .unwrap_or_else(|_| NodeVersion::new(22, 15, 0));
+                    (
+                        (warm.node_path, version, NodeOrigin::Managed),
+                        (!view.manifest.inline_app).then_some(warm.app_dir),
+                    )
+                }
+                (None, None) => {
+                    phase("ARM: COLD — acquire_node + ensure_app");
+                    let n = acquire_node(view, &base, &notice, None)?;
+                    phase("  acquire_node done");
+                    let a = ensure_app_unless_inline(view, &base)?;
+                    phase("  ensure_app done");
+                    (n, a)
+                }
+                // The warm callback ties its variant to `external_smol`; retaining
+                // this arm makes a future callback refactor fail closed rather than
+                // executing a cache Node from a data-only cache.
+                _ => bail!("cache warm state did not match the selected Node source"),
+            };
+            // Resolution proves the whole cache namespace cannot be renamed by
+            // another principal. Repeat the read-only gate after extraction and
+            // immediately before handing its paths to Command so deployment-time
+            // ACL/mode changes cannot turn a validated cache into a cross-principal
+            // execution handoff.
+            phase("node + app resolved");
+            cache::revalidate(&base).context("revalidating the executable cache namespace")?;
+            phase("cache revalidated");
+            // Hand the terminal back BEFORE anything the app might print — the box
+            // lives on the alternate screen, so this restores the user's scrollback
+            // intact.
+            notice.finish();
+            (node, Some(base), app_dir)
+        }
+    };
     // `cache::resolve` canonicalizes `app_dir`'s root, so these are absolute paths
     // to files already covered by the exact payload-cache verification. They are
     // the only two cache paths that leave Rust and become Node arguments, so the
     // verbatim spelling stops here (see `node_argument`).
-    let entry = node_argument(&app_dir.join(&view.manifest.entry), cfg!(windows));
-    let bootstrap = node_argument(
-        &app_dir.join(compile::COMPILE_BOOTSTRAP_NAME),
-        cfg!(windows),
-    );
+    let extracted = app_dir.as_ref().map(|dir| {
+        (
+            node_argument(&dir.join(&view.manifest.entry), cfg!(windows)),
+            node_argument(&dir.join(compile::COMPILE_BOOTSTRAP_NAME), cfg!(windows)),
+        )
+    });
 
     let user_args: Vec<String> = std::env::args().skip(1).collect();
     let node_options = std::env::var("NODE_OPTIONS").ok();
@@ -342,10 +382,12 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     phase("  flags: argv_inject_flags");
 
     let mut cmd = Command::new(node_path.as_os_str());
-    // Node runs CommonJS preloads before ESM `--import` hooks, including ones
-    // inherited through NODE_OPTIONS. Keep this absolute payload preload ahead
-    // of Nub's injected flags and the compiled entry on every supported Node.
-    cmd.arg(compiled_bootstrap_require_arg(&bootstrap));
+    if let Some((_, bootstrap)) = &extracted {
+        // Node runs CommonJS preloads before ESM `--import` hooks, including ones
+        // inherited through NODE_OPTIONS. Keep this absolute payload preload ahead
+        // of Nub's injected flags and the compiled entry on every supported Node.
+        cmd.arg(compiled_bootstrap_require_arg(bootstrap));
+    }
     // argv0 fidelity: process.argv0 / process.title report "node", matching
     // nub-core's spawn path. The compile preamble separately restores execPath
     // to this outer artifact.
@@ -354,8 +396,13 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         use std::os::unix::process::CommandExt;
         cmd.arg0("node");
     }
+    // The flags a compiled artifact was always going to run with, kept in one list
+    // so the inline shape can publish them: under `-e` Node fills `process.execArgv`
+    // with the script itself, and a program that forwards execArgv to a Worker would
+    // otherwise hand it a megabyte of JavaScript where a flag belongs.
+    let mut execargv: Vec<&str> = Vec::new();
     for flag in &inject {
-        cmd.arg(flag);
+        execargv.push(flag);
     }
     // `--node-flag`, baked in at compile time. AFTER nub's own injected flags,
     // because Node takes the last occurrence of a repeated flag — so a publisher
@@ -369,12 +416,32 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         if inject.iter().any(|injected| injected == flag) {
             continue;
         }
+        execargv.push(flag);
+    }
+    for flag in &execargv {
         cmd.arg(flag);
     }
-    cmd.arg(&entry);
-    cmd.args(&user_args);
+    match &extracted {
+        Some((entry, _)) => {
+            cmd.arg(entry);
+            cmd.args(&user_args);
+        }
+        None => {
+            // The inline shape: the bootstrap IS the script, and it imports the app
+            // out of this executable's own bytes. `--` is not optional — Node parses
+            // everything after `-e`'s value as its OWN options until it sees one, so
+            // a program argument that looks like a flag (`--port 3000`) aborts
+            // startup with `node: bad option`.
+            cmd.arg("-e").arg(inline_bootstrap_source(view)?);
+            cmd.arg("--");
+            cmd.args(&user_args);
+            cmd.env(COMPILED_EXEC_ARGV_ENV, serde_execargv(&execargv));
+        }
+    }
     configure_compiled_process_identity(&mut cmd, launcher_path);
-    configure_compiled_compile_cache(&mut cmd, &base, &view.manifest);
+    if let Some(base) = &base {
+        configure_compiled_compile_cache(&mut cmd, base, &view.manifest);
+    }
     if neutralize_localstorage {
         // The compile preamble consumes this internal signal before application
         // code runs, removing Node 22.4–24's throwing localStorage getter. A
@@ -446,20 +513,74 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         use std::os::unix::process::CommandExt;
         // Returns only on failure; success never comes back.
         let error = cmd.exec();
-        Err(node_spawn_error(&node_path, &base, error))
+        Err(node_spawn_error(&node_path, base.as_deref(), error))
     }
     // Windows has no exec(2): CreateProcess always makes a child, so the faithful
     // spawn — job-object grouping, signal relay, status forwarding — stays.
     #[cfg(not(unix))]
     {
         let status = spawn::status_forwarding_signals(&mut cmd)
-            .map_err(|error| node_spawn_error(&node_path, &base, error));
+            .map_err(|error| node_spawn_error(&node_path, base.as_deref(), error));
         phase("node exited");
         status
     }
 }
 
-fn node_spawn_error(node_path: &Path, base: &Path, error: std::io::Error) -> anyhow::Error {
+/// The `-e` script for an inline payload: the compiled bootstrap plus the loader
+/// `nub compile` appended to it, stored UNCOMPRESSED in the payload for exactly
+/// this reason — the launcher would otherwise need a brotli decoder, and it is a
+/// deliberately minimal binary. Roughly 13 KB, against a `getconf ARG_MAX` of 1 MB
+/// on macOS and Windows' 32,767-character command line.
+fn inline_bootstrap_source(view: &PayloadView<'_>) -> Result<String> {
+    let file = view
+        .app_files
+        .iter()
+        .find(|file| file.name == compile::COMPILE_BOOTSTRAP_NAME)
+        .context("this inline compiled payload carries no bootstrap")?;
+    String::from_utf8(file.bytes.to_vec()).context("the compiled bootstrap is not valid UTF-8")
+}
+
+/// The published `execArgv`, as JSON.
+///
+/// Hand-written rather than pulled through serde: the launcher carries no JSON
+/// dependency, the input is a flag list, and the only characters JSON requires
+/// escaping that a Node flag can contain are the quote and the backslash — both of
+/// which a flag `nub compile` accepted cannot hold, so this escapes them and stops.
+fn serde_execargv(flags: &[&str]) -> String {
+    let mut out = String::from("[");
+    for (i, flag) in flags.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        for ch in flag.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c if (c as u32) < 0x20 => out.push(' '),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+    out.push(']');
+    out
+}
+
+/// Extraction, skipped entirely for an inline payload.
+///
+/// `None` means there is no app directory and never will be — the caller passes no
+/// entry path to Node and writes no compile cache beside it.
+fn ensure_app_unless_inline(view: &PayloadView<'_>, base: &Path) -> Result<Option<PathBuf>> {
+    if view.manifest.inline_app {
+        return Ok(None);
+    }
+    ensure_app(view, base).map(Some)
+}
+
+/// `base` is `None` for an inline payload that resolved no cache at all, where the
+/// Node came from the host and no cache path can be implicated in the failure.
+fn node_spawn_error(node_path: &Path, base: Option<&Path>, error: std::io::Error) -> anyhow::Error {
     #[cfg(not(unix))]
     let _ = base;
     // Checked first: this failure also presents as a plain OS error about a path
@@ -473,7 +594,10 @@ fn node_spawn_error(node_path: &Path, base: &Path, error: std::io::Error) -> any
     // error. Other Unix hosts use this exec-time fallback when no mount query is
     // available; Linux/macOS normally reject the mount during cache resolution.
     #[cfg(unix)]
-    if cache::exec_denied(&error) && node_path.starts_with(base) {
+    if let Some(base) = base
+        && cache::exec_denied(&error)
+        && node_path.starts_with(base)
+    {
         return anyhow!(cache::noexec_remedy(base));
     }
     anyhow::Error::new(error).context("spawning Node")
@@ -652,7 +776,12 @@ struct VerifiedWarmCache {
 fn verify_warm_cache(view: &PayloadView<'_>, dir: &Path) -> Option<VerifiedWarmCache> {
     let m = &view.manifest;
     let app_dir = app_cache_dir(dir, m);
-    if m.shape != Shape::Embed || !app_cache_is_ready(view, &app_dir) {
+    if m.shape != Shape::Embed {
+        return None;
+    }
+    // An inline payload has no app directory to verify — its chunks never leave the
+    // executable — so the embedded Node is the whole warm check.
+    if !m.inline_app && !app_cache_is_ready(view, &app_dir) {
         return None;
     }
 
@@ -3202,6 +3331,7 @@ mod tests {
             node_flags: Vec::new(),
             sealed_module_graph: false,
             hide_console: false,
+            inline_app: false,
         }
     }
 
@@ -3493,7 +3623,7 @@ mod tests {
         let base = Path::new("/tmp/nub-cache");
         let error = node_spawn_error(
             &base.join("compile-node/node"),
-            base,
+            Some(base),
             std::io::Error::from_raw_os_error(libc::EACCES),
         );
         assert!(format!("{error:#}").contains("mounted noexec"));

@@ -34,6 +34,7 @@ compile = [
     "dep:rolldown_utils",
     "dep:libsui",
     "dep:zstd",
+    "dep:brotli",
     "dep:oxc_allocator",
     "dep:oxc_ast",
     "dep:oxc_ast_visit",
@@ -94,6 +95,10 @@ libsui = { version = "0.16", optional = true }
 # zstd-19 compression of the embedded Node (encode side; the launcher decodes with
 # pure-Rust ruzstd).
 zstd = { version = "0.13", optional = true }
+# The inline (`no-extract`) payload's codec. Brotli rather than the zstd beside it
+# because the artifact's own JavaScript is what decompresses those bytes, and
+# `zlib.zstdDecompressSync` is absent on Node 23.5 and 23.6.
+brotli = { version = "8", optional = true }
 # `--include`/`--exclude` matching. Already in the tree at this version as a
 # nub-core dependency, so the compile feature adds no build cost — declared here
 # rather than reached through nub-core, which does not re-export it.

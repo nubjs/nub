@@ -3,7 +3,12 @@
 // plumbing, not a security boundary.
 const earlyRequire = require;
 const key = Symbol.for("nub.compile.bootstrap");
-const requireArg = `--require=${__filename}`;
+// `undefined` in the inline (no-extract) shape, where this whole script arrives as
+// Node's `-e` argument: there is no file, so `__filename` is Node's `[eval]`
+// placeholder and nothing can be required by path. Every consumer treats a missing
+// value as "do not prepend a preload", which is the truth there — a Worker started
+// from such an artifact runs without this bootstrap.
+const requireArg = __filename === "[eval]" ? undefined : `--require=${__filename}`;
 const descriptor = Object.getOwnPropertyDescriptor(process, key);
 const existing = descriptor?.value;
 let validExisting = false;
@@ -82,6 +87,9 @@ function installCompiledForkIdentity(childProcess, realNodeExecPath) {
     if (execArgv && !Array.isArray(execArgv)) return execArgv;
     const args = execArgv || process.execArgv;
     if (!Array.isArray(args)) return args;
+    // No bootstrap path to prepend in the inline shape; the rest of the identity
+    // fix-up below still applies, because it is `execPath` that a fork gets wrong.
+    if (requireArg === undefined) return args;
     return [requireArg, ...args.filter((arg) => arg !== requireArg)];
   };
 

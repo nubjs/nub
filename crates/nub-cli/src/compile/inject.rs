@@ -663,6 +663,7 @@ mod tests {
             node_flags: Vec::new(),
             sealed_module_graph: false,
             hide_console: false,
+            inline_app: false,
         };
         nub_core::compile::encode(
             &manifest,

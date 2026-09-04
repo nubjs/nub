@@ -1616,13 +1616,6 @@ impl CompilePreamble {
         let source = std::fs::read_to_string(&prelude)
             .with_context(|| format!("reading the compile prelude at {}", prelude.display()))?;
         let source = strip_native_polyfills(&source, target_node);
-        let worker_blob = runtime_dir.join("worker-blob-url.cjs");
-        let worker_blob_bytes = std::fs::read(&worker_blob).with_context(|| {
-            format!(
-                "reading compile runtime support at {}",
-                worker_blob.display()
-            )
-        })?;
         // Two distinct names, deliberately: the runtime tree ships this as its own
         // source filename, while the payload publishes it under the `__nub_`-prefixed
         // fixed root name so it cannot collide with an application file. Reading by
@@ -1635,9 +1628,6 @@ impl CompilePreamble {
             )
         })?;
         let mut prelude = Self::from_source(entry, runtime_dir, source);
-        prelude
-            .support_files
-            .push(("worker-blob-url.cjs".to_string(), worker_blob_bytes));
         prelude.root_support_files.push((
             nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
             bootstrap_bytes,
@@ -1782,6 +1772,18 @@ fn compile_runtime_dir() -> Result<PathBuf> {
         bail!("the embedded nub runtime failed integrity verification; refusing to compile")
     }
     Ok(runtime_dir)
+}
+
+/// Read one file out of the public runtime directory `nub compile` bundles from.
+///
+/// The same seam [`compile_runtime_dir`] establishes, exposed for compile stages
+/// that need a runtime file without going through the prelude plugin — the
+/// no-extract loader is the one caller. Going through this rather than a path of
+/// its own is what keeps a released binary reading its EXTRACTED embedded runtime
+/// instead of a Cargo checkout that is not there.
+pub fn compile_runtime_file(name: &str) -> Result<Vec<u8>> {
+    let path = compile_runtime_dir()?.join(name);
+    std::fs::read(&path).with_context(|| format!("reading compile runtime at {}", path.display()))
 }
 
 impl Plugin for CompilePreamble {

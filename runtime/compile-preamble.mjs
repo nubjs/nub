@@ -90,8 +90,18 @@ import { installNavigatorLocks } from "./navigator-locks.mjs";
 import {
   installWorkerPolyfill,
   setBootstrapCreateRequire as setWorkerCreateRequire,
+  setBlobUrlModule,
   setCompiledBootstrapRequireArg,
 } from "./worker-polyfill.mjs";
+// Statically imported so it is BUNDLED rather than resolved beside the emitted
+// chunk. worker-polyfill reaches this module through
+// `createRequire(import.meta.url)("./worker-blob-url.cjs")` — correct for an
+// ordinary nub run, where the eager CommonJS preload must share the one registry
+// instance, but in a compiled artifact it is the only reason the payload has to
+// ship a sibling file at all. Importing it here keeps the whole preamble inside
+// the bundle, which is what lets a pure-JavaScript payload run straight from the
+// executable with nothing on disk.
+import { blobUrlSource, installBlobUrlSupport } from "./worker-blob-url.cjs";
 
 export function installCompilePreamble() {
   // Node 18/20 lack process.getBuiltinModule, so keep builtin lookup tied to the
@@ -100,6 +110,7 @@ export function installCompilePreamble() {
   setNavigatorCreateRequire(bootstrap.createRequire);
   // #endregion
   setWorkerCreateRequire(bootstrap.createRequire);
+  setBlobUrlModule({ blobUrlSource, installBlobUrlSupport });
   setCompiledBootstrapRequireArg(bootstrap.requireArg);
 
   installCompiledChildProcess();

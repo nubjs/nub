@@ -40,6 +40,23 @@ pub const SECTION_NAME: &str = "__nubc";
 /// and must not vary with the entry's layout.
 pub const COMPILE_BOOTSTRAP_NAME: &str = "__nub_compile_bootstrap.cjs";
 
+/// The trailer that marks an inline (`no-extract`) payload, and the only thing in
+/// the container the compiled artifact's own JavaScript ever parses.
+///
+/// Written at the very END of the payload blob, so it is inside the injected
+/// section and therefore inside whatever the platform signs. The bootstrap reads a
+/// bounded window at the end of the executable, scans BACKWARDS for this magic, and
+/// takes the two little-endian `u64`s that follow it: the distance back from the
+/// magic's first byte to the app region's first byte, and the app region's length.
+///
+/// Sixteen bytes of non-ASCII so it cannot occur in the JavaScript or the manifest
+/// it sits behind, and searched from the end so the last match wins — the compiler
+/// writes exactly one, and nothing but the platform's signature follows it.
+pub const INLINE_LOCATOR_MAGIC: &[u8; 16] = b"\x00nub-inline-app\x00";
+
+/// Magic + `u64` back-distance + `u64` app-region length.
+pub const INLINE_LOCATOR_LEN: usize = 16 + 8 + 8;
+
 const MAGIC: &[u8; 4] = b"NUBC";
 const FORMAT_VERSION_V1: u8 = 1;
 const FORMAT_VERSION: u8 = 2;
@@ -264,6 +281,33 @@ pub struct Manifest {
     /// Absent in legacy manifests, where `false` is exactly what they were doing.
     #[serde(default)]
     pub hide_console: bool,
+    /// Whether this payload runs WITHOUT being extracted: the launcher hands Node
+    /// the compiled bootstrap through `-e` and the bootstrap serves every chunk
+    /// from the executable's own bytes as a `data:` URL, so nothing the app needs
+    /// is ever written to disk.
+    ///
+    /// Set only for a payload that reduces to generated JavaScript chunks and the
+    /// bootstrap — no `--external` shim, no verbatim file, no worker chunk, and an
+    /// acyclic chunk graph (see `nub compile`'s `inline_launch_plan`). A payload
+    /// that misses any of those extracts exactly as it always has.
+    ///
+    /// Two container conventions follow from it, and they are the reason this is a
+    /// manifest field rather than a launcher inference:
+    /// - the app-file bytes are BROTLI-compressed, not zstd, because the code that
+    ///   decompresses them is the JavaScript bootstrap and
+    ///   `zlib.zstdDecompressSync` is missing on 23.5/23.6 while brotli is on every
+    ///   supported Node. [`Self::app_compressed`] is therefore false: no Rust code
+    ///   decompresses an inline payload.
+    /// - the payload blob carries an [`INLINE_LOCATOR_MAGIC`] trailer, which is how
+    ///   the bootstrap finds the app region's FILE offset. The launcher cannot
+    ///   supply one: `find_section` returns a pointer into the MAPPED image on all
+    ///   three platforms (`getsectdata`, `dl_iterate_phdr`, `LockResource`), and no
+    ///   file offset exists anywhere on that path.
+    ///
+    /// Absent in legacy manifests, where `false` is what every existing artifact
+    /// already does.
+    #[serde(default)]
+    pub inline_app: bool,
 }
 
 /// One logical file in the payload. `B` is `Vec<u8>` on the writing side and
@@ -571,6 +615,18 @@ pub fn encode_with_license(
     out.extend_from_slice(&app_region);
     out.extend_from_slice(node_blob);
     out.extend_from_slice(node_license_blob);
+    // The inline locator, and only for an inline payload: it is what the compiled
+    // artifact's own `-e` bootstrap uses to find the app region's FILE offset,
+    // which nothing on the Rust side can tell it (see `Manifest::inline_app`).
+    // Written past the last declared region, which `decode` already tolerates, so
+    // a payload carrying it decodes byte-identically to one that does not.
+    if manifest.inline_app {
+        let app_start = HEADER_LEN_V2 + manifest_bytes.len();
+        let back = (out.len() - app_start) as u64;
+        out.extend_from_slice(INLINE_LOCATOR_MAGIC);
+        out.extend_from_slice(&back.to_le_bytes());
+        out.extend_from_slice(&(app_region.len() as u64).to_le_bytes());
+    }
     out
 }
 
@@ -902,6 +958,7 @@ mod tests {
             node_flags: Vec::new(),
             sealed_module_graph: false,
             hide_console: false,
+            inline_app: false,
         }
     }
 
@@ -938,6 +995,7 @@ mod tests {
             // manifest carrying it would round-trip through an encoding bug that
             // dropped the field entirely.
             hide_console: true,
+            inline_app: false,
         };
         let app = vec![
             AppFile::plain("main.js", b"import './c.js'\n".to_vec()),
@@ -990,6 +1048,7 @@ mod tests {
             node_flags: Vec::new(),
             sealed_module_graph: false,
             hide_console: false,
+            inline_app: false,
         };
         let app = vec![AppFile::plain("main.js", b"console.log(1)".to_vec())];
         let blob = encode_with_license(&manifest, &app, &[], &[]);

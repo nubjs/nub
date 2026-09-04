@@ -37,6 +37,7 @@ mod closure;
 mod external;
 mod icu;
 mod inject;
+mod inline;
 mod launcher;
 mod loaders;
 mod metafile;
@@ -256,6 +257,35 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         entry_name = shim.entry;
         app_files.extend(shim.files);
     }
+    // Computed here rather than beside the manifest because the no-extract decision
+    // below needs it: only the VERBATIM payload sets can carry a file Node parses
+    // that the bundler did not — emitted asset copies, native-island contents, and
+    // `--include`s. Their PRESENCE is the predicate, not their extensions, since the
+    // CommonJS loader parses an exact-path `require()` of any unknown or absent
+    // extension with its `.js` handler, so no name-based allowlist can prove a
+    // shipped file is not runtime JavaScript.
+    let carries_verbatim_files =
+        bundled.assets.len() + bundled.native_files.len() + layout.assets.len() > 0;
+    let sealed_module_graph = !shim_plan.needed() && !carries_verbatim_files;
+
+    // Can this payload run WITHOUT being written to disk? `sealed_module_graph` is
+    // necessary and not sufficient: a statically traced worker chunk and a
+    // `--sourcemap=linked` map are both files the bundler itself parsed, so the
+    // graph is sealed with either present, and neither can be reached from a
+    // `data:` URL. See `compile::inline`.
+    let (app_files, inline_app, inline_decline) = match inline::rewrite(
+        app_files,
+        &inline::Inputs {
+            sealed_module_graph,
+            worker_roots: bundled.worker_roots.len(),
+            worker_wrappers: worker_wrappers.len(),
+            sourcemap: opts.bundle.sourcemap != bundle::SourcemapMode::None,
+            entry: &entry_name,
+        },
+    )? {
+        inline::Rewritten::Inline(files) => (files, true, None),
+        inline::Rewritten::Extract(files, why) => (files, false, Some(why)),
+    };
     let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
         live.phase("embedding", &format!("{} files", layout.assets.len()));
@@ -339,19 +369,29 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Node blob already uses, and it lets the launcher decode only the files it
     // actually extracts. Level 19 matches the Node blob; the app region is small
     // enough that the time is not noticeable next to the ~107 MB one.
-    // Computed before `app_files` is consumed below. Only the VERBATIM payload
-    // sets can carry a file Node parses that the bundler did not: emitted asset
-    // copies, native-island contents, and `--include`s. Their PRESENCE is the
-    // predicate, not their extensions — the CJS loader parses an exact-path
-    // `require()` of any unknown or absent extension with its `.js` handler, so
-    // no name-based allowlist can prove a shipped file is not runtime JS.
-    let carries_verbatim_files =
-        bundled.assets.len() + bundled.native_files.len() + layout.assets.len() > 0;
+    // An inline payload takes BROTLI instead, because the code that decompresses it
+    // is the artifact's own JavaScript: `zlib.zstdDecompressSync` is missing on Node
+    // 23.5 and 23.6 while brotli is on every supported version. Nothing in Rust ever
+    // decompresses these bytes, which is why the manifest's `app_compressed` — the
+    // launcher's per-file zstd flag — stays false for them.
     let app_files: Vec<_> = app_files
         .into_iter()
         .map(|file| {
-            let bytes = zstd::encode_all(&file.bytes[..], 19)
-                .with_context(|| format!("zstd-compressing {}", file.name))?;
+            let bytes = if inline_app {
+                // The bootstrap alone is stored VERBATIM. The launcher reads it out
+                // of the payload to build the `-e` argument, and it carries no
+                // decompressor for this codec by design — nub-launcher is a
+                // deliberately minimal binary. Storing ~13 KB raw is what buys that.
+                if file.name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
+                    file.bytes
+                } else {
+                    brotli_encode(&file.bytes)
+                        .with_context(|| format!("brotli-compressing {}", file.name))?
+                }
+            } else {
+                zstd::encode_all(&file.bytes[..], 19)
+                    .with_context(|| format!("zstd-compressing {}", file.name))?
+            };
             Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
                 name: file.name,
                 bytes,
@@ -382,7 +422,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_blake3: node.blake3,
         node_size: node.size,
         node_icu: node.icu,
-        app_compressed: true,
+        app_compressed: !inline_app,
         app_sha256: app_sha,
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
@@ -396,11 +436,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // construction: the bundler parsed them. Computed require of a path
         // OUTSIDE the artifact stays out of the predicate on the
         // plain-Node-baseline argument in the Manifest field's doc comment.
-        sealed_module_graph: !shim_plan.needed() && !carries_verbatim_files,
+        sealed_module_graph,
         // The launcher's half of `--hide-console`. The PE subsystem flip below
         // only stops Windows giving the LAUNCHER a console; this is what stops it
         // giving one to the Node it spawns.
         hide_console: opts.hide_console,
+        inline_app,
     };
     let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
 
@@ -453,6 +494,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         app_bytes: app_files.iter().map(|f| f.bytes.len() as u64).sum(),
         shipped,
         deferred: bundled.dynamic_import_sites,
+        app_extracts: inline_decline,
         report: opts.metafile.clone(),
         elapsed: started.elapsed(),
     };
@@ -735,6 +777,23 @@ fn resolved_build_rows(
             ],
         ));
     }
+    // Always shown, because whether the binary needs a writable directory is the
+    // question a self-contained artifact exists to answer — and the reason is what
+    // makes the answer actionable when it is the wrong one.
+    rows.push((
+        "app",
+        match facts.app_extracts {
+            None => vec![
+                ("run from the executable".to_string(), Ink::Plain),
+                ("  nothing is written to disk".to_string(), Ink::Muted),
+            ],
+            Some(why) => vec![
+                ("extracted on first run".to_string(), Ink::Plain),
+                (format!("  {}", why.reason()), Ink::Muted),
+            ],
+        },
+    ));
+
     if let Some(report) = &facts.report {
         rows.push((
             "report",
@@ -948,6 +1007,9 @@ struct BuildFacts {
     shipped: Vec<(String, &'static str)>,
     /// Surviving computed `import()` sites, from `--allow-dynamic-import`.
     deferred: usize,
+    /// `None` when the app runs straight out of the executable; otherwise why it
+    /// has to be written to the cache on first run.
+    app_extracts: Option<inline::Decline>,
     /// Where `--metafile` wrote the build report, if it was asked for.
     report: Option<PathBuf>,
     elapsed: std::time::Duration,
@@ -2935,6 +2997,18 @@ fn run_ok(program: impl AsRef<std::ffi::OsStr>, args: &[&std::ffi::OsStr]) -> bo
 ///
 /// This is the extraction cache key, so the mode belongs in it: two artifacts
 /// whose files differ only in executability must not share one extracted tree.
+/// Brotli at the maximum quality, for an inline payload's chunks.
+///
+/// Quality 11 with a 24-bit window, matching what the zstd-19 it replaces is
+/// reaching for: this runs once per build on a few tens of kilobytes, and the bytes
+/// it produces are shipped to every user of the artifact.
+fn brotli_encode(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut reader = brotli::CompressorReader::new(bytes, 4096, 11, 24);
+    std::io::copy(&mut reader, &mut out).context("brotli-compressing an inline payload chunk")?;
+    Ok(out)
+}
+
 fn sha256_of_app(files: &[AppFile<Vec<u8>>]) -> String {
     let mut h = Sha256::new();
     for file in files {
@@ -3709,6 +3783,7 @@ mod tests {
             node_flags: Vec::new(),
             sealed_module_graph: false,
             hide_console: false,
+            inline_app: false,
         };
         let app = vec![AppFile::plain("main.js", b"app".to_vec())];
         let missing = nub_core::compile::encode_with_license(&manifest, &app, b"node", &[]);
