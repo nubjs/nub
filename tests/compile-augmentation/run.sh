@@ -151,6 +151,21 @@ for fixture in "${fixtures[@]}"; do
   else
     verdict='FAIL'; fail=$((fail + 1))
   fi
+  # Same reasoning as the build-log dump above, for the half it did not cover: the
+  # cell holds the artifact's LAST line, which for a crash is Node's version
+  # banner and names nothing. Every Windows fixture failed as `Node.js v24 rc=1`
+  # and the stack that would have explained it was already in hand, unprinted.
+  case "$verdict" in
+    FAIL*)
+      if [ "$built" = 1 ]; then
+        {
+          echo "--- $name: artifact output (rc=$got_rc), expected: $ref ---"
+          printf '%s\n' "$got_out"
+          echo "--- end $name ---"
+        } >&2
+      fi
+      ;;
+  esac
   # Did nub change anything here at all? If not, the row cannot fail for the
   # right reason and is reported so the coverage claim stays honest.
   if [ "$plain" != "$ref" ]; then
