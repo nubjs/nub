@@ -1097,6 +1097,32 @@ fn remove_strays(paths: &[std::path::PathBuf], why: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fold the two manifest-root build-allowlist spellings into the single map
+/// pnpm reads, with an explicit `false` beating any allow — the same deny-wins
+/// rule the engine applies when one package is named by several sources.
+///
+/// Both arguments are passed because a manifest can legitimately carry both: the
+/// rename refusal only guards paths that build an install session, and `nub pm
+/// use pnpm` is not one. Order is irrelevant to the result; a denial in either
+/// map survives.
+///
+/// `None` when neither name holds an object, which is what keeps a manifest with
+/// nothing to migrate on the idempotent-rerun path.
+fn merge_root_allow_maps(legacy: Option<&Value>, current: Option<&Value>) -> Option<Value> {
+    let mut out: Option<Map<String, Value>> = None;
+    for map in [legacy, current].into_iter().flatten() {
+        let Some(map) = map.as_object() else { continue };
+        let acc = out.get_or_insert_with(Map::new);
+        for (key, value) in map {
+            if acc.get(key) == Some(&Value::Bool(false)) {
+                continue;
+            }
+            acc.insert(key.clone(), value.clone());
+        }
+    }
+    out.map(Value::Object)
+}
+
 /// The yaml-regeneration half of `nub pm use pnpm` — the exact reverse of
 /// [`run_use_nub`]'s migration: collect the nub-mode homes out of
 /// `package.json` (`workspaces` membership + catalogs, top-level `overrides`
@@ -1131,16 +1157,18 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
     // for the same map is `allowBuilds`, so this one entry is renamed on the
     // way out rather than moved verbatim.
     //
-    // The pre-cutover root key is accepted here too. This command never builds
-    // an install session, so the `ERR_NUB_ALLOW_BUILDS_RENAMED` refusal cannot
-    // reach it — a project that predates the rename would otherwise switch to
-    // pnpm with its whole build policy stranded at a root key pnpm does not
-    // read. Migrating it out is strictly better than refusing, because pnpm's
-    // destination key is the legacy spelling anyway.
-    let allow_builds = manifest
-        .get(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY)
-        .or_else(|| manifest.get(aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY))
-        .cloned();
+    // The pre-cutover root key is read here too, and MERGED rather than chosen
+    // between. This command never builds an install session, so the
+    // `ERR_NUB_ALLOW_BUILDS_RENAMED` refusal cannot reach it — a project that
+    // predates the rename, or that is part-way through it and carries both
+    // spellings, would otherwise switch to pnpm with its build policy stranded
+    // at a root key pnpm does not read. Taking one map wholesale would drop the
+    // other's entries silently, and the entry that matters is a `false`: losing
+    // a denial runs a script the project refused.
+    let allow_builds = merge_root_allow_maps(
+        manifest.get(aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY),
+        manifest.get(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY),
+    );
     let audit_config = manifest.get("auditConfig").cloned();
 
     if packages.is_none()
@@ -1182,9 +1210,9 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
             "overrides",
             "patchedDependencies",
             aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
-            // Cleared alongside the current spelling: whichever of the two the
-            // project carried was just written into the yaml above, so leaving
-            // it here would strand a duplicate nothing reads.
+            // Cleared alongside the current spelling. Both were folded into the
+            // one map written above, so removing only one would strand a
+            // duplicate nothing reads.
             aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY,
             "auditConfig",
         ] {
@@ -1517,6 +1545,59 @@ mod tests {
             manifest.get("allowBuilds").is_none(),
             "the legacy key must not be left behind as a duplicate"
         );
+    }
+
+    /// A manifest can carry both spellings — the rename refusal guards only the
+    /// paths that build an install session, and this is not one. Choosing one
+    /// map wholesale would drop the other's entries, and the entry that matters
+    /// is the denial: `fsevents: false` in the stale map against `true` in the
+    /// new one has to reach pnpm as `false`, or the switch runs a script the
+    /// project refused.
+    #[test]
+    fn regenerate_folds_both_allow_spellings_with_the_denial_winning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "app",
+                "packageManager": "nub@0.1.0",
+                "allowScripts": { "esbuild": true, "fsevents": true, "sharp": true },
+                "allowBuilds": { "fsevents": false, "canvas": false, "sharp": true }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        regenerate_workspace_yaml(dir.path()).unwrap();
+
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(dir.path().join("pnpm-workspace.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            yaml["allowBuilds"]["fsevents"], false,
+            "a denial in the stale map must beat an allow in the new one"
+        );
+        assert_eq!(
+            yaml["allowBuilds"]["esbuild"], true,
+            "an entry only the new map carries must survive"
+        );
+        assert_eq!(
+            yaml["allowBuilds"]["canvas"], false,
+            "an entry only the stale map carries must survive"
+        );
+        assert_eq!(yaml["allowBuilds"]["sharp"], true);
+
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
+        )
+        .unwrap();
+        for key in ["allowScripts", "allowBuilds"] {
+            assert!(
+                manifest.get(key).is_none(),
+                "{key} must not be left behind once folded into the yaml"
+            );
+        }
     }
 
     #[test]
