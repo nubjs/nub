@@ -367,7 +367,10 @@ mod tests {
                 b"// bootstrap\n".to_vec(),
             ),
             AppFile::plain("main.mjs".to_string(), b"console.log(1);\n".to_vec()),
-            AppFile::plain(ROOT_MANIFEST_NAME.to_string(), b"{\"private\":true}\n".to_vec()),
+            AppFile::plain(
+                ROOT_MANIFEST_NAME.to_string(),
+                b"{\"private\":true}\n".to_vec(),
+            ),
         ];
 
         match rewrite(files, &sealed("main.mjs")).expect("classification succeeds") {
