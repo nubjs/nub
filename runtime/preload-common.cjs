@@ -35,13 +35,32 @@ const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 // startup, so dropping them here keeps the feature ON while restoring the execArgv a
 // plain-Node user would have seen. Only flags NUB injected are removed; a user's own
 // `v8Flags` stay visible, because those are the user's choice to reason about.
+// The flags have to be hidden on two boundaries, and no single channel spans both.
+//
+// The ENV VAR crosses a PROCESS boundary: the Rust spawn layer sets it on a Node it
+// starts. Deleting it after use is what stops a descendant from hiding a flag its own
+// user passed, so that hygiene stays.
+//
+// WORKER ENVIRONMENT DATA crosses a THREAD boundary, which the env var cannot. Node
+// starts a worker from the process's REAL exec argv — flags and all — whatever the main
+// thread filtered, so the worker has to filter again, and this preload runs there to do
+// it. Three measured properties make this the right channel and an env copy the wrong
+// one (verified on 18.19 and 26.7): it survives `new Worker(…, { env: {} })`, which
+// REPLACES the environment outright and would otherwise strand that worker with the flags
+// visible; it is transitive to nested workers; and it does NOT cross a process boundary,
+// so a thread of this process is separated from a descendant structurally rather than by
+// guesswork.
+const ARGV_ONLY_FLAGS_KEY = "nub.argv-only-flags";
 try {
-  const injectedArgvFlags = process.env.__NUB_ARGV_ONLY_FLAGS;
+  const workerThreads = getBuiltin("node:worker_threads");
+  const fromEnv = process.env.__NUB_ARGV_ONLY_FLAGS;
+  const injectedArgvFlags = fromEnv || workerThreads.getEnvironmentData(ARGV_ONLY_FLAGS_KEY);
   if (injectedArgvFlags) {
-    // Delete rather than propagate: a descendant that nub augments gets its own
-    // signal, and one that nub does not never had the flags on argv anyway.
-    delete process.env.__NUB_ARGV_ONLY_FLAGS;
-    const injected = new Set(injectedArgvFlags.split(" ").filter(Boolean));
+    if (fromEnv) {
+      delete process.env.__NUB_ARGV_ONLY_FLAGS;
+      workerThreads.setEnvironmentData(ARGV_ONLY_FLAGS_KEY, fromEnv);
+    }
+    const injected = new Set(String(injectedArgvFlags).split(" ").filter(Boolean));
     if (Array.isArray(process.execArgv)) {
       process.execArgv = process.execArgv.filter((arg) => !injected.has(arg));
     }

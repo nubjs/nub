@@ -50,6 +50,21 @@ pub fn with_webpki_root_fallback(builder: reqwest::ClientBuilder) -> reqwest::Cl
         any(all(unix, not(target_os = "android")), target_os = "windows")
     ))]
     {
+        // Claude Code's macOS sandbox (`srt`) seals off the trust daemon the
+        // platform verifier evaluates against, so every handshake fails with
+        // `invalid peer certificate: OSStatus -26276` even though the
+        // sandbox's proxy has allowlisted the host (measured with srt
+        // 0.0.75; Codex's Seatbelt profile does not block it). There the
+        // bundled roots are the only usable trust store. Roots a caller adds
+        // afterwards — `NODE_EXTRA_CA_CERTS`, `ca`, `cafile` — still merge
+        // in, which is how srt hands over its interception CA when it
+        // terminates TLS.
+        if cfg!(target_os = "macos")
+            && crate::agent_sandbox::detect()
+                == Some(crate::agent_sandbox::AgentSandbox::ClaudeCode)
+        {
+            return builder.tls_certs_only(certs);
+        }
         builder.tls_certs_merge(certs)
     }
 

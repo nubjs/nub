@@ -3,7 +3,7 @@ title: Package meta-manager
 description: Provision and run the package manager your project pins — corepack's job, in native Rust. The exact pnpm, npm, or yarn release is fetched, verified, cached, and run on the project's Node.
 ---
 
-Nub reads your project's package-manager pin, fetches that exact version from the npm registry — integrity-verified, cached under `~/.cache/nub/pm` — and runs it under the project's Node. No corepack, no `enable` step, no baked version table: a six-month-old Nub binary provisions today's pnpm.
+Nub reads your project's package-manager pin, fetches that exact version from the npm registry — integrity-verified, cached under `~/.cache/nub/pm` — and runs it under the project's Node. There is no corepack `enable` step and no baked version table, so a six-month-old Nub binary provisions today's pnpm.
 
 ```console
 $ nub pm which
@@ -65,12 +65,12 @@ using pnpm@11.5.3
 
 What it writes:
 
-- **`package.json#/packageManager`** — the exact version plus a `+sha512` hash from the verified tarball. What corepack, pnpm, and turbo execute; `use` is the only Nub command that writes it.
+- **`package.json#/packageManager`** — the exact version plus a `+sha512` hash from the verified tarball. This is the field corepack, pnpm, and turbo read; `use` is the only Nub command that writes it.
 - **`package.json#/devEngines/packageManager`** — `{ name, version: "^<exact>", onFail: "warn" }`, the range-and-policy form npm and pnpm enforce natively, written beside the exact pin so the two can't drift.
 - **The lockfile, in the new manager's format.** A lockfile in another format is *converted* — resolution state preserved — and the old file removed. One already in the target format is left untouched; with no lockfile, the next install creates it. The converted lockfile passes the active manager's frozen install (`pnpm install --frozen-lockfile`, etc.) byte-for-byte.
 
 <Callout title="Config is not migrated">
-Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are — Nub does not translate them. Carry over whatever the new manager needs yourself.
+Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are — Nub does not translate them. Migrate the new manager's config manually.
 </Callout>
 
 Whichever manager the project ends up on, [Nub's own installer](/docs/install) mirrors its supported resolution settings and respects its lockfile. The layout fields in [`nub.jsonc`](/docs/config#installlinker) apply in every project; the incumbent's branded layout settings do not.
@@ -82,7 +82,7 @@ Every file written or removed is named in the output; rerunning is a no-op. Four
 - **Running `use yarn` onto a Berry (2+) `yarn.lock`** — classic would downgrade the format; use `yarn set version`.
 - **Running `use yarn` on a graph using the `workspace:` protocol** — classic yarn can't express it.
 
-A converting `use yarn` is otherwise fine — Nub writes a classic `yarn.lock` directly. Running `use bun` writes the pin and lockfile but doesn't provision bun.
+Otherwise a converting `use yarn` writes a classic `yarn.lock` directly. Running `use bun` writes the pin and lockfile but doesn't provision bun.
 
 ### `nub pm pin`
 
@@ -100,7 +100,7 @@ pinned nub@0.2.10
   package.json: devEngines.packageManager = { name: "nub", version: "^0.2.10", onFail: "ignore" }
 ```
 
-It writes the two pin fields — the exact `packageManager` and the `devEngines.packageManager` caret beside it — and nothing else: no lockfile conversion, no config migration. That fuller switch onto Nub is [`nub pm use nub`](#nub-pm-use)'s job; pin is the lightweight lock, the package-manager analog of [Nub's Node pin](/docs/node).
+It writes the two pin fields — the exact `packageManager` and the `devEngines.packageManager` caret beside it — and nothing else: no lockfile conversion, no config migration. The full switch onto Nub is [`nub pm use nub`](#nub-pm-use); `pin` only records the version, the package-manager analog of [Nub's Node pin](/docs/node).
 
 The version must be exact — Nub is the binary you're running, not a registry package, so a range or dist-tag has nothing to resolve against.
 
@@ -168,7 +168,7 @@ registry=https://npm.corp.example
 //npm.corp.example/:_authToken=${CORP_NPM_TOKEN}
 ```
 
-Environment placeholders (`${VAR}`) in these values expand from your user `~/.npmrc` and `npm_config_*` — but not from a project `.npmrc` committed to the repo, which is read literally. A hostile `registry=` or auth line in a checked-out repo therefore can't interpolate a secret like `${NPM_TOKEN}` into a request to an attacker's host. On trusted CI where the project file genuinely needs expansion, set `PNPM_CONFIG_NPMRC_AUTH_FILE=.npmrc` to opt back in — it comes from the environment, so a repo can't set it for itself.
+Environment placeholders (`${VAR}`) in these values expand from your user `~/.npmrc` and `npm_config_*` — but not from a project `.npmrc` committed to the repo, which is read literally. A hostile `registry=` or auth line in a checked-out repo therefore can't interpolate a secret like `${NPM_TOKEN}` into a request to an attacker's host. On trusted CI where the project file needs expansion, set `PNPM_CONFIG_NPMRC_AUTH_FILE=.npmrc` to opt back in — it comes from the environment, so a repo can't set it for itself.
 
 To fetch package managers from a different registry than your dependencies, `COREPACK_NPM_REGISTRY` (+ `COREPACK_NPM_TOKEN`) overrides the PM-download registry — teams migrating off corepack keep their existing CI vars.
 

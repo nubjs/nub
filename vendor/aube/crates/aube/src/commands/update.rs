@@ -818,7 +818,12 @@ pub async fn run(
                 .as_deref(),
         )
     };
-    super::run_pnpmfile_pre_resolution(&pnpmfile_paths, &cwd, existing.as_ref()).await?;
+    // No importer list to hand over here — `update` resolves against
+    // the root manifest and the workspace members are only enumerated
+    // below. The ids are consulted only when there is no lockfile at
+    // all, where the empty slice means "the root importer".
+    super::run_pnpmfile_pre_resolution(&pnpmfile_paths, &cwd, existing.as_ref(), &manifest, &[])
+        .await?;
     let (read_package_host, read_package_forwarders) =
         match crate::pnpmfile::ReadPackageHostChain::spawn(&pnpmfile_paths, &cwd)
             .await
@@ -1107,6 +1112,11 @@ pub async fn run(
     chained.ignore_pnpmfile = args.ignore_pnpmfile;
     chained.pnpmfile = args.pnpmfile.clone();
     chained.global_pnpmfile = args.global_pnpmfile.clone();
+    // `preResolution` already ran above, before this command's own
+    // resolve. pnpm fires it once per install operation, so letting the
+    // chained install fire it again would run the user's hook twice for
+    // one `aube update`.
+    chained.pre_resolution_hook_already_ran = true;
     // `aube update` is one of the canonical fresh-resolution
     // entry points — by design it pulls newer versions than the
     // lockfile pins. Route the post-resolve transitive set

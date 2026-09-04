@@ -481,7 +481,7 @@ impl NodeLicenseAttestation {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -1479,7 +1479,7 @@ mod tests {
             builder.into_inner().unwrap().finish().unwrap();
         }
         use sha2::{Digest, Sha256};
-        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let sha = hex::encode(Sha256::digest(&bytes));
         (bytes, sha)
     }
 
@@ -1799,7 +1799,7 @@ mod tests {
         let mut corrupt = b"\xfd7zXZ\x00".to_vec();
         corrupt.extend(std::iter::repeat_n(0xAAu8, 4 << 20));
         use sha2::{Digest, Sha256};
-        let sha = format!("{:x}", Sha256::digest(&corrupt));
+        let sha = hex::encode(Sha256::digest(&corrupt));
         let (base, hits) = serve_dist(
             format!("{sha}  {name}.tar.xz\n"),
             format!("{name}.tar.xz"),

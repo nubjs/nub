@@ -6,6 +6,13 @@ pub(crate) struct Seed {
     pub(crate) etag: Option<String>,
     #[serde(default, rename = "lm")]
     pub(crate) last_modified: Option<String>,
+    /// `generate-primer.mjs` dropped at least one old version from this
+    /// seed (`--prune-age-days`), keeping the highest version of every
+    /// `major.minor` line and every dist-tag target. The resolver reads
+    /// this to refetch a pick that a dropped version could outrank
+    /// (`semver_util::sparse_pick_needs_refetch`).
+    #[serde(default, rename = "sp")]
+    pub(crate) sparse: bool,
     #[serde(rename = "p")]
     pub(super) packument: PrimerPackument,
 }
@@ -91,7 +98,48 @@ pub(super) struct PrimerDist {
     #[serde(default, rename = "t")]
     pub(super) tarball: Option<String>,
     #[serde(default, rename = "i")]
-    pub(super) integrity: Option<String>,
+    pub(super) integrity: Option<PrimerIntegrity>,
     #[serde(default, rename = "a")]
     pub(super) provenance: bool,
+}
+
+/// An SRI integrity string, stored as the raw digest. This is the primer's
+/// single largest field — one `sha512-<base64>` per version, ~97k of them in
+/// the release primer — and a digest compresses no better than its own bytes,
+/// so the base64 text costs a third more for nothing. Re-encoded on read.
+#[derive(Archive, Clone, RkyvSerialize, RkyvDeserialize)]
+pub(super) enum PrimerIntegrity {
+    Sha512([u8; 64]),
+    /// Any other SRI form (the ~100 legacy `sha1-` publishes), verbatim.
+    Other(String),
+}
+
+impl PrimerIntegrity {
+    pub(super) fn from_sri(sri: String) -> Self {
+        use base64::Engine as _;
+        if let Some(b64) = sri.strip_prefix("sha512-")
+            && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
+            && let Ok(digest) = <[u8; 64]>::try_from(bytes)
+        {
+            return Self::Sha512(digest);
+        }
+        Self::Other(sri)
+    }
+
+    pub(super) fn to_sri(&self) -> String {
+        use base64::Engine as _;
+        match self {
+            Self::Sha512(digest) => format!(
+                "sha512-{}",
+                base64::engine::general_purpose::STANDARD.encode(digest)
+            ),
+            Self::Other(sri) => sri.clone(),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PrimerIntegrity {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from_sri)
+    }
 }

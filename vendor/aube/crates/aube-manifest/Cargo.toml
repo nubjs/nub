@@ -20,7 +20,6 @@ sonic-rs = { workspace = true }
 yaml_serde = { workspace = true }
 yamlpatch = { workspace = true }
 yamlpath = { workspace = true }
-serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

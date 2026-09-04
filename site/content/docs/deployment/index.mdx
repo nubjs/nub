@@ -108,6 +108,6 @@ Read the [full docs](https://docs.github.com/en/packages/working-with-a-github-p
 
 A managed builder selects Node, and Nub augments that version. Pin Node with the source the platform supports, normally `.node-version`, `.nvmrc`, or `package.json#engines.node`.
 
-A container carries its own Node version. Pin the Nub image tag and update it deliberately when you want a new Nub or Node release.
+A container carries its own Node version. Pin the Nub image tag and update it to move to a new Nub or Node release.
 
 Environments driven by `.tool-versions` can also provision the CLI through [mise](https://mise.jdx.dev): `mise use nub@latest` puts `nub` and `nubx` on `PATH`.

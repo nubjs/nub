@@ -1,6 +1,6 @@
 ---
 title: Docker
-description: Official Nub Docker images, and how to add Nub to your own image. The images install Nub onto an official Node base, so Node is present and the runtime is augmented out of the box.
+description: Official Nub Docker images, and how to add Nub to your own image. The images install Nub onto an official Node base.
 ---
 
 Nub augments the Node already in your image — it is not a separate runtime. The official images start from an official `node` base and layer Nub on top, so `node`, `npm`, and `nub` are all present.
@@ -15,7 +15,7 @@ COPY --chown=node:node . .
 CMD ["nub", "run", "start"]
 ```
 
-The image runs as the non-root `node` user, so copy your project in with `--chown=node:node` — a bare `COPY . .` lands root-owned files that `nub install` then can't write alongside.
+The image runs as the non-root `node` user, so copy your project in with `--chown=node:node` — a bare `COPY . .` creates root-owned files that `nub install` then cannot write alongside.
 
 Two variants, both on the current Node release line, digest-pinned and published for `linux/amd64` and `linux/arm64`:
 
@@ -30,7 +30,7 @@ Run a TypeScript file directly — the entrypoint passes any non-command argumen
 docker run --rm -v "$PWD:/app" ghcr.io/nubjs/nub script.ts
 ```
 
-Signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown. The `node` user is uid 1000, so when you bind-mount a directory that `nub install` must write into, run with `--user "$(id -u)"` and the writes land with your host ownership.
+Signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown. The `node` user is uid 1000, so when you bind-mount a directory that `nub install` must write into, run with `--user "$(id -u)"` and the writes carry your host ownership.
 
 ## Adding Nub to your own image
 

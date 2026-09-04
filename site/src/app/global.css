@@ -406,6 +406,43 @@ pre .line[data-output] span {
   color: var(--nub-code-muted) !important;
 }
 
+/* ```ansi fences — see `src/lib/shiki-ansi.ts`, which tags the block `data-ansi`.
+
+   In dual-theme mode shiki emits every token attribute as a CSS variable and
+   leaves the mapping to the consumer. fumadocs maps `--shiki-{light,dark}` onto
+   `color` and `--shiki-{light,dark}-font-style` onto `font-style`, and stops
+   there — so background color, bold, underline and strikethrough are all
+   dropped. A highlighted language never uses them; ANSI output uses them
+   constantly (`\e[1m` bold, `\e[41m` and `\e[7m` for a FAIL badge), and an
+   inverse-video token with no background renders as invisible text. These rules
+   restore the missing four, mirroring fumadocs' own light/dark split so the pair
+   still works if the two themes ever stop being the same one.
+
+   The variables are set only on tokens that carry the attribute, so an unset
+   variable makes the declaration invalid-at-computed-value-time and the property
+   falls back to its initial value — which is exactly the desired no-op. Except
+   for the background pair: shiki writes the THEME background onto the `pre`'s
+   own style as those same variable names, and custom properties inherit, so
+   every token would otherwise paint vesper's #101010 over the panel's #0b0a08.
+   Resetting them on the `code` element cuts that inheritance without touching a
+   token that sets its own. */
+code[data-ansi] {
+  --shiki-light-bg: initial;
+  --shiki-dark-bg: initial;
+}
+
+code[data-ansi] span {
+  background-color: var(--shiki-light-bg);
+  font-weight: var(--shiki-light-font-weight);
+  text-decoration: var(--shiki-light-text-decoration);
+}
+
+.dark code[data-ansi] span {
+  background-color: var(--shiki-dark-bg);
+  font-weight: var(--shiki-dark-font-weight);
+  text-decoration: var(--shiki-dark-text-decoration);
+}
+
 /* Geist Mono against the Encode Sans body. X-height parity with Encode Sans lands
    near 1.0em, but even at parity the mono reads a touch large in a sentence, so we
    set it a tick UNDER (0.95em ≈ x-height ratio 0.93) so the token sits *in* the

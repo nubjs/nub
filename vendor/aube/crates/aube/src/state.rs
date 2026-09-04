@@ -1240,13 +1240,28 @@ struct NoIntegrityBinding {
 /// them straight from the store. Tracks a `storeDir` override so the binding
 /// moves with the store it indexes.
 pub fn no_integrity_dir(project_dir: &Path) -> PathBuf {
-    let store_v1 = match crate::commands::resolved_store_dir(project_dir) {
-        Some(custom) => custom.join("v1"),
-        None => aube_store::dirs::store_dir()
-            .and_then(|files| files.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store").join("v1")),
-    };
-    store_v1.join("no-integrity")
+    crate::commands::store_v1_dir(project_dir).join("no-integrity")
+}
+
+/// Every directory a binding may be READ from, [`no_integrity_dir`] first,
+/// then the read-only global store's when the default store is unwritable
+/// and installs are writing a project-local one. Only directories that
+/// exist, so an empty list means nothing is bound anywhere and the caller
+/// can skip building a registry client.
+pub fn no_integrity_read_dirs(project_dir: &Path) -> Vec<PathBuf> {
+    let dirs = crate::commands::store_v1_dirs(project_dir);
+    std::iter::once(dirs.primary)
+        .chain(dirs.read_fallback)
+        .map(|v1| v1.join("no-integrity"))
+        .filter(|dir| dir.exists())
+        .collect()
+}
+
+/// [`read_no_integrity_binding`] across [`no_integrity_read_dirs`]: the
+/// first directory holding a binding for `url` answers.
+pub fn read_no_integrity_binding_in(dirs: &[PathBuf], url: &str) -> Option<String> {
+    dirs.iter()
+        .find_map(|dir| read_no_integrity_binding(dir, url))
 }
 
 fn no_integrity_binding_file(dir: &Path, url: &str) -> PathBuf {
@@ -1289,9 +1304,9 @@ pub fn read_no_integrity_index_for<'a, I>(project_dir: &Path, pkgs: I) -> BTreeM
 where
     I: IntoIterator<Item = &'a aube_lockfile::LockedPackage>,
 {
-    let dir = no_integrity_dir(project_dir);
+    let dirs = no_integrity_read_dirs(project_dir);
     // Nothing bound yet (fresh store) → skip building a registry client.
-    if !dir.exists() {
+    if dirs.is_empty() {
         return BTreeMap::new();
     }
     let client = crate::commands::make_client(project_dir);
@@ -1299,7 +1314,7 @@ where
         .filter(|pkg| pkg.integrity.is_none() && pkg.local_source.is_none())
         .filter_map(|pkg| {
             let url = client.tarball_url(pkg.registry_name(), &pkg.version);
-            read_no_integrity_binding(&dir, &url)
+            read_no_integrity_binding_in(&dirs, &url)
                 .map(|sri| (format!("{}@{}", pkg.registry_name(), pkg.version), sri))
         })
         .collect()
@@ -2489,6 +2504,36 @@ mod tests {
         super::read_no_integrity_index_for(project, std::slice::from_ref(&no_integrity_pkg()))
             .get("foo@1.0.0")
             .cloned()
+    }
+
+    #[test]
+    fn no_integrity_binding_reads_layer_the_writable_dir_over_the_global_one() {
+        let base = std::env::temp_dir().join(format!("aube-ni-layer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let local = base.join("local/no-integrity");
+        let global = base.join("global/no-integrity");
+        let url = "https://reg.test/dep/-/dep-1.0.0.tgz";
+        let mut bindings = std::collections::BTreeMap::new();
+        bindings.insert(url.to_string(), "sha512-global".to_string());
+        super::write_no_integrity_bindings(&global, &bindings).unwrap();
+        // Only the global store knows the URL: the warm read still finds it.
+        let dirs = vec![local.clone(), global.clone()];
+        assert_eq!(
+            super::read_no_integrity_binding_in(&dirs, url).as_deref(),
+            Some("sha512-global")
+        );
+        // A local binding for the same URL shadows the global one.
+        bindings.insert(url.to_string(), "sha512-local".to_string());
+        super::write_no_integrity_bindings(&local, &bindings).unwrap();
+        assert_eq!(
+            super::read_no_integrity_binding_in(&dirs, url).as_deref(),
+            Some("sha512-local")
+        );
+        assert_eq!(
+            super::read_no_integrity_binding_in(&dirs, "https://reg.test/other"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

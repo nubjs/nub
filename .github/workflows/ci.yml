@@ -199,7 +199,15 @@ jobs:
         with:
           shared-key: ci-check
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --manifest-path crates/nub-phantom/Cargo.toml --all-targets
+      # `--locked`, because this crate is its OWN workspace with its own tracked
+      # `Cargo.lock` — the fifth in the repo, alongside the root, nub-native,
+      # nub-launcher and vendor/aube. Without it this step silently re-resolves
+      # around a stale lock, so a manifest change that should have moved the lock
+      # passes here and the tracked file keeps describing a dependency graph that
+      # no longer exists. That is not hypothetical: switching this crate's gzip
+      # backend left the lock still naming the old CMake-backed one, and nothing
+      # in the build caught it. Nothing else covers this workspace either.
+      - run: cargo check --locked --manifest-path crates/nub-phantom/Cargo.toml --all-targets
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
@@ -424,7 +432,23 @@ jobs:
       # the staged runtime/ into the binary; the binary extracts it on first run. The
       # feature (not the profile) is what triggers the include_bytes! blob arm + the
       # find_preload extraction path, so this exercises the same code a release build does.
+      # Static MSVC CRT, matching what release.yml ships — this leg is where a link
+      # failure surfaces on a PR instead of during a release. Rust links the CRT
+      # dynamically by default, which puts VCRUNTIME140.dll and VCRUNTIME140_1.dll in
+      # nub.exe's import table; on a clean Windows Server 2022 the process then dies at
+      # 0xC0000135 with EMPTY stderr, because the loader fails it before any code runs.
+      #
+      # Set per-STEP rather than per-job deliberately: the addon built above is a cdylib
+      # loaded into the user's node.exe and MUST keep the dynamic CRT, or it gets a
+      # private heap and any allocation crossing that boundary becomes corruption.
+      # `+crt-static` is STICKY — a later `-crt-static` does not undo it, in either
+      # order and with no warning — so the flag must never reach a build that has to
+      # stay dynamic. That is also why this is an env var here and not a root
+      # `.cargo/config.toml`: cargo CONCATENATES rustflags down the directory tree, so a
+      # root config would reach crates/nub-native with no way to opt back out.
       - name: Build release nub.exe (--features embed-runtime,compile)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build -p nub-cli --release --features embed-runtime,compile
       # `nub compile` injects this real release launcher into the artifact. Build
       # it in its own workspace, as release.yml does; it is intentionally not a
@@ -432,6 +456,29 @@ jobs:
       - name: Build release nub-launcher template
         shell: bash
         run: (cd crates/nub-launcher && cargo build --locked --release)
+      # GATE: neither shipped Windows binary may depend on the VC++ redistributable.
+      #
+      # This runner already HAS the redistributable, so every functional test above
+      # passes whether or not the static CRT survived — deleting
+      # crates/nub-launcher/.cargo/config.toml or the RUSTFLAGS above would go
+      # unnoticed here and fail only on a user's clean machine, silently, at
+      # 0xC0000135 with nothing on stderr. Nothing else in CI can see that, so the
+      # linkage contract is asserted directly against the artifact.
+      #
+      # It walks the PE import directory rather than searching the file for the string
+      # `VCRUNTIME140.dll`, which is the shortcut that looks equivalent and is not: a DLL
+      # name is ordinary ASCII, so any copy anywhere matches. Measured on Microsoft's own
+      # node.exe, a whole-file search reports five VC++ DLLs it does not import. The
+      # script also refuses a file whose import table it could not read, so the gate
+      # cannot pass by finding nothing.
+      - name: Verify no VC++ redistributable dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in target/release/nub.exe crates/nub-launcher/target/release/nub-launcher.exe; do
+            test -f "$f" || { echo "::error::$f not found — this gate must not be skipped silently"; exit 1; }
+            node scripts/pe-imports.mjs --check "$f" > /dev/null
+          done
       # The WHOLE point of a Windows runner is the on-access AV heuristic (process
       # writes a DLL then dlopen's it). GitHub-hosted runners ship with real-time
       # protection OFF, so try to turn it ON before the round-trip so the scan is
@@ -469,7 +516,21 @@ jobs:
           # Cold, isolated cache so the FIRST run is forced to extract (proves the
           # DLL write + dlopen). cache_dir() honors XDG_CACHE_HOME on every platform,
           # so the extracted dir is <XDG_CACHE_HOME>\nub\runtime-<key>.
-          $cache = Join-Path $env:RUNNER_TEMP "nub-embed-cache"
+          # NOT under RUNNER_TEMP, which is on D: — and about one windows-latest
+          # image in six gives D:\a\_temp an EFFECTIVE
+          # `Authenticated Users: Modify` ACE. `Modify` contains DELETE, which is in
+          # the runtime cache's non-leaf dangerous mask, so nub correctly refuses the
+          # ancestor, relocates the cache, and leaves no runtime-* dir where the
+          # assertions below look for one. That is nub behaving as designed on a
+          # volume where any authenticated user could delete the cache; only an
+          # ancestor nub owns is repairable, and this one belongs to the runner.
+          #
+          # Measured, not guessed: a 12-shard probe walking the real predicate found
+          # RUNNER_TEMP unusable on 1 shard while USERPROFILE, LOCALAPPDATA and TEMP
+          # were usable on all 12 — including that shard. USERPROFILE is on the system
+          # volume and carries no such grant. (`TEMP` also works but is an 8.3 short
+          # path here, which is a poor thing to compare against.)
+          $cache = Join-Path $env:USERPROFILE "nub-embed-cache"
           if (Test-Path $cache) { Remove-Item -Recurse -Force $cache }
           $env:XDG_CACHE_HOME = $cache
           $nubRoot = Join-Path $cache "nub"
@@ -1032,7 +1093,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --manifest-path crates/nub-launcher/Cargo.toml
+          # `cd`, not `--manifest-path`: cargo discovers `.cargo/config.toml` by walking up
+          # from the WORKING DIRECTORY, so the manifest form silently skipped the launcher's
+          # own config and built it with the dynamic MSVC CRT while every shipped path
+          # (release.yml, compile-native.yml, the Windows embed job) builds it static. This
+          # step would then have tested a launcher linked unlike the one users get.
+          (cd crates/nub-launcher && cargo build --locked)
           launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/debug/nub-launcher"
           if [[ "$RUNNER_OS" == "Windows" ]]; then launcher="$launcher.exe"; fi
           test -f "$launcher"

@@ -106,7 +106,7 @@ When pnpm is the incumbent, Nub honors pnpm's own settings:
 - `pnpm.patchedDependencies` — patch files applied to dependency contents during linking, wired to `nub patch` / `patch-commit` / `patch-remove`.
 - `pnpm.onlyBuiltDependencies` / `pnpm.neverBuiltDependencies` / `pnpm.allowBuilds` — feed Nub's lifecycle-script policy.
 - `pnpm.supportedArchitectures` — which platforms' optional dependencies get installed. Also readable from `.npmrc` and `pnpm-workspace.yaml`, and overridable per axis for one run with [`--os` / `--cpu` / `--libc`](/docs/install#nub-install).
-- `.pnpmfile.cjs` / `.pnpmfile.mjs` — the `readPackage`, `preResolution`, and `afterAllResolved` hooks run. Dependency-map edits from `readPackage` apply; package-map edits from `afterAllResolved` apply. New importers/packages, identity rewrites, `updateConfig` hooks, and config-dependency pnpmfiles are not supported.
+- `.pnpmfile.cjs` / `.pnpmfile.mjs` — the `readPackage`, `preResolution`, and `afterAllResolved` hooks run. Dependency-map edits from `readPackage` apply; package-map edits from `afterAllResolved` apply. `preResolution` is read-only: it runs on every install and receives pnpm's lockfile object, but Nub runs it out of process, so edits it makes to that object are reported and discarded. New importers/packages, identity rewrites, `updateConfig` hooks, and config-dependency pnpmfiles are not supported.
 
 <Callout>
 Read the [full docs](https://pnpm.io/settings) on pnpm.io.
@@ -129,7 +129,7 @@ namedRegistries:
 
 Nub reads `overrides`, `packageExtensions`, and `patchedDependencies` from either home pnpm accepts: the `pnpm.*` namespace in `package.json`, or the matching key in `pnpm-workspace.yaml`. The pnpm resolver prefers `pnpm.overrides`; top-level `resolutions` is still honored (pnpm supports it for Yarn compatibility), but top-level `overrides` is npm and Bun's field and is ignored under pnpm.
 
-Adopting Nub into an existing pnpm repo leaves the project pnpm-owned, so all of this keeps working untouched. Switching it to Nub's own identity with `nub pm use nub` migrates the pins to the top-level `overrides` and `patchedDependencies` fields in `package.json`.
+Adopting Nub into an existing pnpm repo leaves the project pnpm-owned. Switching it to Nub's own identity with `nub pm use nub` migrates the pins to the top-level `overrides` and `patchedDependencies` fields in `package.json`.
 
 None of this is read under an npm, Yarn, or Bun incumbent, or in a Nub-identity project. Under those three incumbents, a stray `.pnpmfile.cjs` is ignored with a warning rather than applied silently:
 
@@ -160,7 +160,7 @@ $ nub install
   │ `hoisted`
 ```
 
-Lifecycle scripts for dependencies are skipped by default, exactly as pnpm 10 does. A package runs install scripts only when allowlisted via `pnpm.onlyBuiltDependencies` (or `pnpm.allowBuilds`), or when Nub's gated default-trust floor vouches for it (see [the default-trust floor](/docs/install#default-trust-floor)); `nub approve-builds` adds an entry and builds the approved packages in the same invocation. `pnpm.neverBuiltDependencies` is a denylist that wins over any allow and over the floor.
+Lifecycle scripts for dependencies are skipped by default, as pnpm 10 does. A package runs install scripts only when allowlisted via `pnpm.onlyBuiltDependencies` (or `pnpm.allowBuilds`), or when Nub's gated default-trust floor vouches for it (see [the default-trust floor](/docs/install#default-trust-floor)); `nub approve-builds` adds an entry and builds the approved packages in the same invocation. `pnpm.neverBuiltDependencies` is a denylist that wins over any allow and over the floor.
 
 ## Unsupported
 

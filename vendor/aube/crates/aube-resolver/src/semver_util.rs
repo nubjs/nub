@@ -500,6 +500,107 @@ pub(crate) fn range_resolves_via_dist_tag(packument: &Packument, range_str: &str
     packument.dist_tags.contains_key(range_str) || range_str == "latest"
 }
 
+/// Could a version the primer's age prune DROPPED be what the full
+/// packument picks for `range_str`? `packument` is the sparse seed and
+/// `picked_version` what `pick_version` chose from it.
+///
+/// The prune (`scripts/generate-primer.mjs`, `--prune-age-days`) keeps the
+/// highest version of every `major.minor` line (prereleases on their own
+/// line) and every dist-tag target, and drops other old versions. So a
+/// dropped version lies below the highest held version of a line the
+/// seed still holds, and a `^x` / `~x.y` pick, which lands on a line's
+/// highest, has nothing dropped above it. A range with an explicit upper
+/// bound (`<4.17.21` against lodash: 4.17.20 dropped, 4.16.6 held) can,
+/// and refetches.
+///
+/// Conservative wherever the seed cannot prove the pick: `pick_lowest`
+/// (the floor of a range is exactly what was dropped), a locked version
+/// the seed does not hold, and a deprecated pick (`outranks` prefers any
+/// live version, so a dropped live one anywhere in the range beats it)
+/// refetch outright, so does anything unparseable, and
+/// `Range::allows_any` overlaps bounds without npm's prerelease rule.
+pub(crate) fn sparse_pick_needs_refetch(
+    packument: &Packument,
+    picked_version: &str,
+    range_str: &str,
+    pick_lowest: bool,
+    locked: Option<&str>,
+) -> bool {
+    if pick_lowest || locked.is_some_and(|v| !packument.versions.contains_key(v)) {
+        return true;
+    }
+    let Ok(picked) = node_semver::Version::parse(picked_version) else {
+        return true;
+    };
+    // An exact pin the seed holds is the full packument's pick too.
+    if node_semver::Version::parse(range_str.trim().trim_start_matches(['=', 'v']))
+        .is_ok_and(|pinned| pinned == picked)
+    {
+        return false;
+    }
+    if packument
+        .versions
+        .get(picked_version)
+        .is_some_and(|meta| meta.deprecated.is_some())
+    {
+        return true;
+    }
+    let Ok(range) = node_semver::Range::parse(normalize_range(range_str)) else {
+        return true;
+    };
+    // Highest held version per line, keyed `(major, minor, prerelease)`.
+    let mut lines: std::collections::BTreeMap<(u64, u64, bool), node_semver::Version> =
+        std::collections::BTreeMap::new();
+    for v in packument
+        .versions
+        .keys()
+        .filter_map(|v| node_semver::Version::parse(v).ok())
+    {
+        let slot = lines
+            .entry((v.major, v.minor, !v.pre_release.is_empty()))
+            .or_insert_with(|| v.clone());
+        if v > *slot {
+            *slot = v;
+        }
+    }
+    let picked_line = (picked.major, picked.minor, !picked.pre_release.is_empty());
+    for (&(major, minor, pre), highest) in &lines {
+        if *highest <= picked {
+            continue;
+        }
+        // Where a dropped version of this line could sit above the pick.
+        // `allows_any` compares bounds only, so a prerelease line is
+        // consulted just when the range names a prerelease of that
+        // `major.minor` — npm's rule for admitting one at all.
+        let gap = if (major, minor, pre) == picked_line {
+            format!(">{picked} <{highest}")
+        } else if pre {
+            if !range_names_prerelease_of(range_str, major, minor) {
+                continue;
+            }
+            format!(">={major}.{minor}.0-0 <{highest}")
+        } else if highest.patch == 0 {
+            continue;
+        } else {
+            format!(">={major}.{minor}.0 <{highest}")
+        };
+        match node_semver::Range::parse(&gap) {
+            Ok(gap) if range.allows_any(&gap) => return true,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+fn range_names_prerelease_of(range_str: &str, major: u64, minor: u64) -> bool {
+    range_str
+        .split(|c: char| c.is_whitespace() || c == '|')
+        .map(|token| token.trim_start_matches(['<', '>', '=', '~', '^', 'v']))
+        .filter_map(|token| node_semver::Version::parse(token).ok())
+        .any(|v| !v.pre_release.is_empty() && v.major == major && v.minor == minor)
+}
+
 /// Walk the packument's versions and return the highest non
 /// prerelease version string. Used as the `latest` tag fallback
 /// when the registry response lacks `dist-tags.latest`. Some

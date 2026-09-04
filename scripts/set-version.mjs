@@ -125,6 +125,15 @@ const lockVersionOf = (crate) =>
   new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${crate}"\\r?\\nversion = )"[^"]*"`);
 replaceOrDie("crates/nub-launcher/Cargo.lock", lockVersionOf("nub-core"), `$1"${v}"`);
 replaceOrDie("crates/nub-native/Cargo.lock", lockVersionOf("nub-native"), `$1"${v}"`);
+// crates/nub-phantom is the THIRD such workspace, and it was missing here until
+// 2026-09-02 — its lock had drifted to 0.6.0 while the tree shipped 0.8.x, and
+// nothing noticed because the rule above is what decides membership: a lock is
+// stamped once something consumes it under `--locked`, and nothing did. Its CI
+// step now does, so it does. Two entries, not one: this workspace records BOTH
+// path deps it pulls out of the root workspace, and stamping only one leaves the
+// lock just as unsatisfiable as stamping neither.
+replaceOrDie("crates/nub-phantom/Cargo.lock", lockVersionOf("nub-phantom-core"), `$1"${v}"`);
+replaceOrDie("crates/nub-phantom/Cargo.lock", lockVersionOf("nub-phantom-scan"), `$1"${v}"`);
 
 // Freeze a copy of the nub.jsonc schema at this release. `latest.json` keeps
 // tracking the newest release; a versioned file is what a project pins when it

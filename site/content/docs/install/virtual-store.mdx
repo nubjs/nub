@@ -25,12 +25,12 @@ my-app/
     └── react  →  ~/.local/share/nub/store/…/react@19.2.0
 ```
 
-Two properties fall out of this layout:
+Two properties follow:
 
 - **Warm installs scale with package count, not file count.** Linking a project is O(packages) symlinks instead of O(files) hardlinks or copies.
-- **The store is a sealed world.** Node resolves a symlink to its real path before loading, so code loaded from the store resolves imports from inside its store entry — its declared dependencies and nothing else. An undeclared import fails at resolve time instead of working by accident.
+- **The store is sealed.** Node resolves a symlink to its real path before loading, so code loaded from the store resolves imports from inside its store entry — its declared dependencies and nothing else. An undeclared import fails at resolve time instead of working by accident.
 
-No other package manager ships this as its default. Bun shipped it for its isolated linker and reverted to opt-in three weeks later; pnpm keeps it behind the off-by-default `enableGlobalVirtualStore` flag. The blocker is the same in both trackers: widely-used packages import **phantom dependencies** — packages they never declare — and a sealed store breaks them. The deep dive on that history and the mechanism below is the blog post: [how we built a 5x faster package manager](/blog/unblocking-the-global-virtual-store).
+No other package manager ships this as its default. Bun shipped it for its isolated linker and reverted to opt-in three weeks later; pnpm keeps it behind the off-by-default `enableGlobalVirtualStore` flag. The blocker is the same in both trackers: widely-used packages import **phantom dependencies** — packages they never declare — and a sealed store breaks them. The history and the mechanism below are in the blog post: [how we built a 5x faster package manager](/blog/unblocking-the-global-virtual-store).
 
 ## Phantom detection and ejection
 
@@ -44,7 +44,7 @@ Detection and ejection are on for every install, with no configuration. Two tool
 
 ## Performance
 
-A warm install — store populated, frozen lockfile — is where the layout pays: relinking costs O(packages) while every other installer pays O(files), so the gap widens as trees get fatter.
+A warm install — store populated, frozen lockfile — is where the layout's advantage shows: relinking costs O(packages) while every other installer pays O(files), so the gap widens as trees grow.
 
 <Bench
   label="warm install · 1168 packages · Linux (ubuntu-latest)"
@@ -61,7 +61,7 @@ A warm install — store populated, frozen lockfile — is where the layout pays
   ]}
 />
 
-The two Nub rows isolate the layout's contribution. With `--node-linker hoisted`, Nub links Bun's exact flat layout with the same per-file hardlink syscall — 1.3× faster than Bun on the same work. The default row is the same install with the one-symlink-per-package relink: 4.2× faster than Nub's own hoisted mode, 5.5× faster than Bun. On a thinner 313-package tree the default's lead over Bun is 1.7× — the advantage grows with the tree.
+The two Nub rows isolate the layout's contribution. With `--node-linker hoisted`, Nub links Bun's exact flat layout with the same per-file hardlink syscall — 1.3× faster than Bun on the same work. The default row is the same install with the one-symlink-per-package relink. On a thinner 313-package tree the default's lead over Bun is 1.7×.
 
 ## The flat opt-out
 
@@ -118,7 +118,7 @@ node-linker=hoisted
 enableGlobalVirtualStore=false
 ```
 
-The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-dependency protection; it only relocates the store from the shared per-machine location to `node_modules/.store/` inside the project. That makes the tree self-contained — it survives a Docker `COPY --from` into a fresh image, where the shared store would not exist. Nub already does this automatically in CI and under `nub ci`, so you rarely set it by hand. See [store and disk layout](/docs/install#store-and-disk-layout) for the shared-versus-project-local store in full.
+The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-dependency protection; it only relocates the store from the shared per-machine location to `node_modules/.store/` inside the project. That makes the tree self-contained — it survives a Docker `COPY --from` into a fresh image, where the shared store would not exist. Nub already does this automatically in CI and under `nub ci`. See [store and disk layout](/docs/install#store-and-disk-layout) for the shared-versus-project-local store in full.
 
 <Callout>
 Read the [full docs](https://pnpm.io/settings/node-modules#enableglobalvirtualstore) on pnpm.io.
@@ -139,7 +139,7 @@ Pruned 2 entries from the virtual store and 0 entries from the extracted-tree ti
 
 Nub records every project that installs against the shared store. A prune keeps the entries those projects still reach — directly, or through another entry's own dependencies — and removes the rest.
 
-A registered project that nub cannot find might be deleted, or might be on a disk that is not mounted, and those look identical. It stops counting as a store user and the prune says so, but everything else still gets collected. Whatever only that project reached becomes unreferenced and takes the usual 30-day hold, so plugging the disk back in before then keeps it.
+A registered project that nub cannot find might be deleted, or might be on a disk that is not mounted, and those look identical. It stops counting as a store user and the prune says so, but everything else still gets collected. Whatever only that project reached becomes unreferenced and takes the usual 30-day hold, so remounting the disk before then keeps it.
 
 Removal takes two passes. The first prune to find an entry unreferenced holds it and says so; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
 
@@ -148,7 +148,7 @@ Holding 24 entries unreferenced for 30 days before removal.
 Install in any project that still needs them and they are kept.
 ```
 
-That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks exactly like garbage. Without the hold, one install followed by one prune would delete the rest.
+That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks unreferenced. Without the hold, one install followed by one prune would delete the rest.
 
 With nothing registered at all, a prune skips the store entirely rather than treating an empty registry as an empty store:
 
@@ -158,7 +158,7 @@ Run an install in each project you want kept, then prune again.
 ```
 
 <Callout>
-Any install registers a project, including one that reports no work to do. Opening each project you care about and running an install once is enough.
+Any install registers a project, including one that reports no work to do. Running an install once in each project registers it.
 </Callout>
 
 ## Project configuration
@@ -204,7 +204,7 @@ Under `global-virtual-store` that option is `eject`, which writes matching packa
 
 The two are not interchangeable: `hoist` fills a directory that only exists when the store is project-local, and a package linked out of a shared store never walks through the project on the way to it. Naming one under the other strategy is rejected.
 
-A related field, [`publicHoist`](/docs/config#installpublichoist), sits outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
+A related field, [`publicHoist`](/docs/config#installpublichoist), is outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
 
 ## GYP-based native builds
 
@@ -220,7 +220,7 @@ Some packages that compile native code with node-gyp fail to build under the iso
 }
 ```
 
-Every node-gyp run generates with `--depth=.` and writes into `build/`, and GYP joins its output paths against that depth. A dependency reference pointing outside the package directory — which any non-flat `node_modules` produces — then resolves one level short of its target. The build either dies with a Python `FileNotFoundError` naming a `.target.mk` path, or writes a duplicate tree next to the intended one.
+Every node-gyp run generates with `--depth=.` and writes into `build/`, and GYP joins its output paths against that depth. A dependency reference pointing outside the package directory — which any non-flat `node_modules` produces — then resolves one level short of its target. The build either fails with a Python `FileNotFoundError` naming a `.target.mk` path, or writes a duplicate tree next to the intended one.
 
 Install that project flat:
 

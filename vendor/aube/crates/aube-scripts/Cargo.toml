@@ -53,6 +53,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_JobObjects",
 ] }
 
+[dev-dependencies]
+# `implicit_gyp_install.rs` builds PackageJson fixtures from manifest JSON so
+# the `gypfile` opt-out is exercised through the same deserialize path a real
+# package.json takes, rather than by hand-populating `extra`.
+serde_json = { workspace = true }
+
 [target.'cfg(windows)'.dev-dependencies]
 # Tests poll grandchild liveness with OpenProcess / GetExitCodeProcess.
 windows-sys = { version = "0.61", features = [

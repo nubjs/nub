@@ -958,7 +958,14 @@ pub enum Error {
     // Render through `redact_http_error` to scrub the URL while keeping
     // the (redacted) host for debuggability.
     #[error("HTTP error: {}", redact_http_error(.0))]
-    Http(#[from] reqwest::Error),
+    Http(#[source] reqwest::Error),
+    /// The socket was refused by policy, not by the network: the OS or a
+    /// sandbox denied it (`EPERM`, an empty network namespace, a proxy
+    /// that refuses the tunnel). Split from the transient [`Error::Http`]
+    /// because no retry fixes it and the remedy is environmental; the
+    /// resolver keys its help on this variant's message.
+    #[error("network access denied: {}", redact_http_error(.0))]
+    NetworkDenied(#[source] reqwest::Error),
     #[error("package not found: {0}")]
     #[diagnostic(code(ERR_AUBE_PACKAGE_NOT_FOUND))]
     NotFound(String),
@@ -1047,6 +1054,21 @@ fn render_locator(locator: &str) -> String {
 }
 
 fn redact_http_error(e: &reqwest::Error) -> String {
+    // reqwest's Display stops at "error sending request for url (…)"; the
+    // cause — a refused socket, an unsuccessful proxy tunnel, a TLS failure —
+    // is in the source chain. Render the chain so the failure can be acted
+    // on without `RUST_LOG`. Layers that only restate their source
+    // (`#[error(transparent)]`) are collapsed.
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        let text = err.to_string();
+        if parts.last().is_none_or(|prev| !prev.ends_with(&text)) {
+            parts.push(text);
+        }
+        cur = err.source();
+    }
+    let rendered = parts.join(": ");
     match e.url() {
         Some(url) => {
             let raw = url.as_str();
@@ -1054,9 +1076,21 @@ fn redact_http_error(e: &reqwest::Error) -> String {
             // reqwest interpolates the URL via `url::Url`'s Display,
             // which equals `Url::as_str()`, so a plain substring swap on
             // the rendered message reliably replaces the leaked form.
-            e.to_string().replace(raw, &safe)
+            rendered.replace(raw, &safe)
         }
-        None => e.to_string(),
+        None => rendered,
+    }
+}
+
+/// Every transport error enters through here, so the deny classification is
+/// applied once rather than at each retry loop's give-up arm.
+impl From<reqwest::Error> for Error {
+    fn from(e: reqwest::Error) -> Self {
+        if aube_util::agent_sandbox::is_hard_network_deny(&e) {
+            Error::NetworkDenied(e)
+        } else {
+            Error::Http(e)
+        }
     }
 }
 

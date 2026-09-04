@@ -15,6 +15,7 @@ pub const WARN_AUBE_HOOK_IMPORTER_MUTATED: &str = "WARN_AUBE_HOOK_IMPORTER_MUTAT
 pub const WARN_AUBE_HOOK_IMPORTER_ADDED: &str = "WARN_AUBE_HOOK_IMPORTER_ADDED";
 pub const WARN_AUBE_HOOK_IDENTITY_REWRITTEN: &str = "WARN_AUBE_HOOK_IDENTITY_REWRITTEN";
 pub const WARN_AUBE_HOOK_PACKAGE_ADDED: &str = "WARN_AUBE_HOOK_PACKAGE_ADDED";
+#[rustfmt::skip] pub const WARN_AUBE_HOOK_PRE_RESOLUTION_MUTATED: &str = "WARN_AUBE_HOOK_PRE_RESOLUTION_MUTATED";
 
 // ── install lifecycle ───────────────────────────────────────────────
 pub const WARN_AUBE_IGNORED_BUILD_SCRIPTS: &str = "WARN_AUBE_IGNORED_BUILD_SCRIPTS";
@@ -75,6 +76,9 @@ pub const WARN_AUBE_HTTP_RETRY_TRANSIENT: &str = "WARN_AUBE_HTTP_RETRY_TRANSIENT
 pub const WARN_AUBE_HTTP_RETRY_TRANSPORT: &str = "WARN_AUBE_HTTP_RETRY_TRANSPORT";
 pub const WARN_AUBE_HTTP_RETRY_BODY_READ: &str = "WARN_AUBE_HTTP_RETRY_BODY_READ";
 pub const WARN_AUBE_HTTP_RETRY_BODY_DECODE: &str = "WARN_AUBE_HTTP_RETRY_BODY_DECODE";
+
+// ── store ───────────────────────────────────────────────────────────
+pub const WARN_AUBE_STORE_FALLBACK: &str = "WARN_AUBE_STORE_FALLBACK";
 
 // ── registry caching / perf ─────────────────────────────────────────
 pub const WARN_AUBE_PACKUMENT_CACHE_WRITE: &str = "WARN_AUBE_PACKUMENT_CACHE_WRITE";
@@ -197,6 +201,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_HOOK_PACKAGE_ADDED,
         category: category::PNPMFILE_HOOKS,
         description: "A pnpmfile hook added a wholly-new package entry; aube ignored it.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_HOOK_PRE_RESOLUTION_MUTATED,
+        category: category::PNPMFILE_HOOKS,
+        description: "A pnpmfile `preResolution` hook edited the lockfile it was handed. pnpm runs the hook in-process, so such an edit reaches the resolver; aube runs it in a child and the edit is discarded. Move the change to `readPackage` or `afterAllResolved`.",
         exit_code: None,
     },
     // Install lifecycle
@@ -461,6 +471,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_HTTP_RETRY_TRANSPORT,
         category: category::HTTP_RETRIES,
         description: "Retrying after a transport / connection error.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_STORE_FALLBACK,
+        category: category::LINKER,
+        description: "The default store is not writable; using a project-local store under node_modules for this run.",
         exit_code: None,
     },
     CodeMeta {

@@ -38,9 +38,11 @@ mod external;
 mod inject;
 mod launcher;
 mod loaders;
+mod metafile;
 mod native;
 mod native_layout;
 mod unbundlable;
+mod version_info;
 
 pub use bundle::{BundleOptions, SourcemapMode};
 
@@ -78,6 +80,12 @@ pub struct CompileOptions {
     /// macOS reads one from the surrounding `.app` bundle and Linux from a
     /// `.desktop` entry, and neither is part of a single-file artifact.
     pub icon: Option<PathBuf>,
+    /// `--metadata KEY=VALUE`: Windows version-resource fields, overriding what
+    /// the nearest `package.json` supplies. Windows-only for the same reason as
+    /// [`CompileOptions::icon`] — no other container format carries them.
+    pub metadata: Vec<String>,
+    /// `--metafile`: where to write the build report. `None` collects nothing.
+    pub metafile: Option<PathBuf>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
     pub bundle: BundleOptions,
 }
@@ -88,6 +96,10 @@ pub struct CompileOptions {
 type AppFiles = Vec<AppFile<Vec<u8>>>;
 
 pub fn run(mut opts: CompileOptions) -> Result<i32> {
+    // Started before anything that can touch the network or the disk, so the
+    // `elapsed` row measures the wait the user actually sat through rather than
+    // the part of it this function happens to bracket.
+    let started = std::time::Instant::now();
     let target = resolve_platform(opts.platform.as_deref())?;
 
     // A typo'd entry costs one stat, so it is checked before anything that can
@@ -121,6 +133,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Read before the expensive work, so a bad path or a mislabelled file fails in
     // the first second rather than after a ~100 MB Node download.
     let icon = load_icon(opts.icon.as_deref(), &target)?;
+    let version_info = load_version_info(
+        &opts.metadata,
+        entry_abs.parent().unwrap_or(Path::new(".")),
+        &out_path,
+        &target,
+    )?;
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -169,8 +187,18 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Native addons are embedded for the TARGET, and those same defines are what
     // make resolution pick the target's platform package rather than the host's.
     opts.bundle.native_target = Some(target);
-    eprintln!("Bundling {} …", opts.entry);
+    // Held for the rest of `run`. Its `Drop` clears the line on every exit, the
+    // error paths included, so nothing can leave a spinner frozen above a report.
+    let live = LiveLine::start();
+    live.phase("bundling", &opts.entry);
     let bundled = bundle::bundle_for_compile(&entry_abs, &opts.bundle, &cwd)?;
+    // Written as soon as the bundle exists, not at the end: everything after this
+    // point can fail on the network or on the target's launcher, and a report of
+    // what the bundler produced is exactly what someone diagnosing a size problem
+    // wants to keep from a run that did not finish.
+    if let (Some(path), Some(report)) = (&opts.metafile, &bundled.metafile) {
+        write_metafile(path, report)?;
+    }
     // The runtime resolve hook is decided AFTER the bundle: `--external` always
     // needs it, but `--allow-dynamic-import` only earns it if a computed
     // `import()` actually survived — the flag is cheap to pass defensively and a
@@ -203,34 +231,34 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let shim = external::shim(&app_files, &entry_name, &shim_plan)?;
         entry_name = shim.entry;
         app_files.extend(shim.files);
-        if !opts.bundle.external.is_empty() {
-            eprintln!(
-                "External (must be installed where the binary runs): {}",
-                opts.bundle.external.join(", ")
-            );
-        }
-        if shim_plan.dynamic {
-            eprintln!(
-                "Dynamic import: {} site(s) resolved where the binary runs, not at build time",
-                bundled.dynamic_import_sites
-            );
-        }
     }
     let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
-        eprintln!("Embedding {} file(s) …", layout.assets.len());
+        live.phase("embedding", &format!("{} files", layout.assets.len()));
     }
-    // Worth saying out loud: the binary now carries machine code for one platform,
-    // and an addon that silently failed to resolve would otherwise look identical
-    // to one that embedded correctly.
-    if !bundled.native_addons.is_empty() {
-        eprintln!("Native addons: {}", bundled.native_addons.join(", "));
+
+    // What did NOT get sealed into the bundle, collected for the closing block.
+    //
+    // These were three separate sentences printed at three points in the build —
+    // `External (must be installed where the binary runs): …`, `Native addons: …`,
+    // and a `Dynamic import: …` line. They are three shapes for one question, and
+    // a reader asks it once, about the finished artifact, not spread across a
+    // scrolling build log. Worth saying at all because a binary carrying machine
+    // code for one platform, or depending on something installed elsewhere, is
+    // otherwise indistinguishable from one that is fully self-contained.
+    let mut shipped: Vec<(String, &'static str)> = Vec::new();
+    for addon in &bundled.native_addons {
+        shipped.push((addon.clone(), "native addon"));
+    }
+    for package in &opts.bundle.external {
+        shipped.push((package.clone(), "--external"));
     }
 
     // 3. Resolve the Node version through nub run's SAME pin chain (so compile
     //    can't drift from run); --target overrides it. The pin context is the
     //    entry's project dir (walk up from there).
-    let (node_version, provision_version, node) = if opts.smol {
+    live.phase("runtime", "");
+    let (node_version, provision_version, node, runtime_summary) = if opts.smol {
         // Smol bakes the oldest acceptable runtime as its bundling floor. The
         // manifest also retains an explicit range so discovery can enforce both
         // ends; other non-exact targets retain floor behavior.
@@ -248,16 +276,21 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
                 .filter(|newest| {
                     provision_preference_is_usable(newest, &floor, shim_plan.needed())
                 });
-        eprintln!(
-            "Using Node.js {} (resolved from {source}; {}{})",
-            non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string()),
-            smol_runtime_policy(&pin, &floor),
-            newest
-                .as_ref()
-                .map(|n| format!(", provisioning {n}"))
-                .unwrap_or_default()
-        );
-        (floor, newest, EmbeddedNode::default())
+        let summary = RuntimeSummary {
+            fact: format!(
+                "Node {}, not embedded",
+                non_exact_spec(&pin, &raw).unwrap_or_else(|| floor.to_string())
+            ),
+            provenance: format!(
+                "{source}; {}{}",
+                smol_runtime_policy(&pin, &floor),
+                newest
+                    .as_ref()
+                    .map(|n| format!(", provisioning {n}"))
+                    .unwrap_or_default()
+            ),
+        };
+        (floor, newest, EmbeddedNode::default(), summary)
     } else {
         // Embed bakes ONE exact version — a range/major/alias collapses to the
         // newest satisfying release at compile time. (`build_node_blob` →
@@ -268,7 +301,11 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
         let node = build_node_blob(&exact, &target, &cache_root, &source)?;
-        (exact, None, node)
+        let summary = RuntimeSummary {
+            fact: format!("Node {exact}, embedded"),
+            provenance: source.to_string(),
+        };
+        (exact, None, node, summary)
     };
 
     // Compress AFTER `sha256_of_app` above: that hash is the extraction cache key
@@ -341,13 +378,22 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // 5. Build and verify a staged artifact before replacing the requested
     // destination. A late signing/permission/static/native-probe failure must
     // never truncate a previously good executable at `--out`.
+    live.phase("linking", &target.triple());
     let staged_maps = stage_detached_maps(&bundled, &out_path)?;
     let staged = StagedArtifact::new(&out_path, "artifact")?;
-    inject::inject(&target, &template, &payload, icon.as_deref(), staged.path())
-        .with_context(|| format!("writing {}", staged.path().display()))?;
+    inject::inject(
+        &target,
+        &template,
+        &payload,
+        icon.as_deref(),
+        version_info.as_deref(),
+        staged.path(),
+    )
+    .with_context(|| format!("writing {}", staged.path().display()))?;
     set_executable(staged.path())?;
     sync_file(staged.path())?;
-    verify_artifact(staged.path(), &target)?;
+    live.phase("verifying", "");
+    verify_artifact(staged.path(), &target, version_info.as_deref())?;
     staged.publish(&out_path)?;
 
     // Detached maps are optional debugging companions rather than part of the
@@ -356,16 +402,558 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // warns (the verified executable remains usable) and removes its temp file.
     publish_detached_maps(staged_maps);
 
+    // Cleared HERE, explicitly, rather than left to the end of the scope. `Drop`
+    // would run after the block below has already printed, so the spinner would
+    // still be repainting over the rows it is supposed to hand off to.
+    drop(live);
+
     let size = fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
-    eprintln!(
-        "Compiled {} — {} shape, Node {}, {}, {:.1} MB",
-        out_path.display(),
-        if opts.smol { "smol" } else { "embed" },
-        node_version,
-        target.triple(),
-        size as f64 / 1_000_000.0
-    );
+    let facts = BuildFacts {
+        size,
+        // The COMPRESSED contribution of each region, which is what occupies the
+        // bytes being split. `node.size` is the DECOMPRESSED length — the
+        // launcher's warm-start check — so using it here would report a Node
+        // component four times the space it takes in the file.
+        node_bytes: node.blob.len() as u64,
+        app_bytes: app_files.iter().map(|f| f.bytes.len() as u64).sum(),
+        shipped,
+        deferred: bundled.dynamic_import_sites,
+        report: opts.metafile.clone(),
+        elapsed: started.elapsed(),
+    };
+    report_resolved_build(&out_path, &facts, &runtime_summary, &target);
     Ok(0)
+}
+
+/// The runtime row, split where its two tiers are.
+///
+/// `fact` is what was resolved; `provenance` is where the version came from and,
+/// for `--smol`, what the launcher will enforce at run time. Kept apart rather
+/// than joined with an em dash because the row is drawn in two weights — the
+/// provenance is why this row exists, but not what a reader checks first.
+struct RuntimeSummary {
+    fact: String,
+    provenance: String,
+}
+
+/// The build's resolved configuration, as a labelled block.
+///
+/// It replaces a single comma-separated line, and the reason is not only that
+/// five unlabelled facts in a row are hard to read. The Node version's
+/// PROVENANCE was missing entirely on the default path: a `--smol` build said
+/// where its pin came from and an embed build never did, because the embed
+/// path's only mention rode the provisioning line, which prints when a Node is
+/// downloaded and stays silent when one is cached. Where the runtime came from
+/// is the fact a reader most often wants, so it is now stated on every build.
+///
+/// Four fixed rows and three that appear only when they have something to say.
+/// The optional ones — `shipped`, `deferred`, `report` — used to be standalone
+/// sentences printed at three different points in the build, and moving them here
+/// is the point rather than a side effect: `External (must be installed where the
+/// binary runs): …`, `Native addons: …` and `Dynamic import: … site(s)` were three
+/// sentence shapes for one question, which a reader asks once, at the end, about
+/// the artifact in front of them. The bundler's `Shipping N packages unbundled`
+/// list stays where it is, because it carries the REASON each package earned, and
+/// a row here would trade that reason for a second, worse copy.
+///
+/// The word `shape` is gone from user-facing output with it. It is nub's internal
+/// name for the embed/`--smol` split; a reader knows the flag, not the noun.
+fn report_resolved_build(
+    out_path: &Path,
+    facts: &BuildFacts,
+    runtime_summary: &RuntimeSummary,
+    target: &TargetPlatform,
+) {
+    let color = crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
+    let rows = resolved_build_rows(out_path, facts, runtime_summary, target);
+    // Sized from the widest label PRESENT rather than from a constant: the
+    // optional rows mean the set differs between builds, so a fixed width would
+    // either strand a gap on a narrow block or collide on a wide one. That is what
+    // `install_report.rs::render_block` does, for the same reason.
+    let width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+    let cols = console::Term::stderr()
+        .size_checked()
+        .map_or(FALLBACK_COLS, |(_, cols)| cols as usize);
+    eprintln!();
+    for (label, spans) in rows {
+        for line in render_row(label, &spans, width, cols, color) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// Assumed terminal width when stderr cannot be measured — a pipe, a log file, a
+/// CI runner. Matches `install_report.rs`.
+const FALLBACK_COLS: usize = 80;
+
+/// One row: the label right-aligned in its gutter, then each span in its own ink.
+///
+/// Split out so a test can assert on the line this actually prints. The gutter is
+/// computed from the VISIBLE label and the escapes added afterwards — pad an
+/// already-painted string instead and its escape bytes count toward the field
+/// width, so every styled label silently loses the column the block exists to
+/// give it, and only once color is on.
+///
+/// The label is RIGHT-aligned, which is the one thing that makes this block read
+/// differently from the one `install_report.rs` prints. Both put every value in
+/// the same column; the choice is only which side the slack falls on. Left-aligned
+/// it lands inside the row, so a short label sits further from its own value than
+/// a long one does. Right-aligned it lands in the margin, on dim text, and no
+/// label is ever separated from the thing it labels.
+///
+/// That holds only while the labels stay close in length: the ragged margin is
+/// exactly as wide as the spread between the shortest and longest, so a label far
+/// longer than the rest turns the margin into something that reads as broken
+/// indentation. Keep them short and near-uniform — the current spread is two
+/// columns, `output` to `platform`.
+/// Wraps at the terminal's width, with every continuation line hung at the value
+/// column. Without that a long row — the `--smol` runtime row is 112 columns on a
+/// real build — wraps wherever the terminal happens to break it, and the
+/// remainder restarts at column 0. That destroys the aligned value column the
+/// block exists for, and it does it on the widest, most informative row.
+fn render_row(
+    label: &str,
+    spans: &[(String, Ink)],
+    width: usize,
+    cols: usize,
+    color: bool,
+) -> Vec<String> {
+    let value_col = INDENT + width + GAP;
+    // A pathologically narrow terminal still has to make progress rather than
+    // emit one word per line forever.
+    let limit = cols.max(value_col + 20);
+
+    let mut lines = Vec::new();
+    let mut line = format!(
+        "{}{}{}{}",
+        " ".repeat(INDENT),
+        " ".repeat(width.saturating_sub(label.len())),
+        paint(label, Ink::Muted, color),
+        " ".repeat(GAP),
+    );
+    let mut col = value_col;
+    let mut at_line_start = true;
+
+    for (text, ink) in spans {
+        for (lead, word) in words(text) {
+            // The separator belongs to whichever line the word lands on, so a
+            // wrapped word sheds it and no continuation opens with stray spaces.
+            let needed = if at_line_start { 0 } else { lead } + word.chars().count();
+            if !at_line_start && col + needed > limit {
+                lines.push(std::mem::take(&mut line));
+                line = " ".repeat(value_col);
+                col = value_col;
+                at_line_start = true;
+            }
+            if !at_line_start {
+                line.push_str(&" ".repeat(lead));
+                col += lead;
+            }
+            line.push_str(&paint(word, *ink, color));
+            col += word.chars().count();
+            at_line_start = false;
+        }
+    }
+    lines.push(line);
+    lines
+}
+
+/// Split into `(leading spaces, word)` pairs, so the two-space gap that separates
+/// a fact from its aside survives on the line it lands on and is dropped on one
+/// it wraps to. Splitting on whitespace and rejoining with single spaces instead
+/// would silently close that gap, which is the block's only separator now that no
+/// dash is.
+fn words(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let lead = rest.len() - rest.trim_start_matches(' ').len();
+        rest = &rest[lead..];
+        if rest.is_empty() {
+            break;
+        }
+        let end = rest.find(' ').unwrap_or(rest.len());
+        out.push((lead, &rest[..end]));
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// The block's left margin, and the space between the label column and the value
+/// column. Both match `install_report.rs`, so nub's two labelled blocks sit on the
+/// same grid even though they align their labels to opposite edges.
+const INDENT: usize = 2;
+const GAP: usize = 2;
+
+/// How one segment of the block is drawn.
+///
+/// Three tiers and no more, because the block only has three jobs: point at the
+/// artifact, state the facts, and say where they came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ink {
+    /// The facts themselves, at the terminal's own default weight.
+    Plain,
+    /// Secondary detail — a label, a size, a provenance, a parenthetical aside.
+    /// Present when wanted, out of the way when not.
+    Muted,
+    /// The one token the reader acts on next: the path they are about to run.
+    Accent,
+}
+
+/// Apply an [`Ink`], or return the text untouched when color is off.
+///
+/// Bright cyan is deliberate rather than free choice: it is what `nub run`
+/// already spends on a script name, so an artifact path drawn in it reuses a
+/// color the CLI has taught instead of introducing a second identifier color.
+fn paint(text: &str, ink: Ink, color: bool) -> String {
+    match ink {
+        _ if !color => text.to_string(),
+        Ink::Plain => text.to_string(),
+        Ink::Muted => format!("\x1b[2m{text}\x1b[22m"),
+        Ink::Accent => format!("\x1b[96m{text}\x1b[39m"),
+    }
+}
+
+/// The rows themselves, split from the printing so they can be asserted on
+/// without a terminal — including their styling, which is the half most likely
+/// to be wrong in a way no plain-text assertion would catch.
+fn resolved_build_rows(
+    out_path: &Path,
+    facts: &BuildFacts,
+    runtime_summary: &RuntimeSummary,
+    target: &TargetPlatform,
+) -> Vec<(&'static str, Vec<(String, Ink)>)> {
+    let mut rows = vec![
+        (
+            "output",
+            vec![
+                (out_path.display().to_string(), Ink::Accent),
+                (format!("  {}", mb(facts.size)), Ink::Plain),
+                (facts.size_split(), Ink::Muted),
+            ],
+        ),
+        (
+            "runtime",
+            vec![
+                (runtime_summary.fact.clone(), Ink::Plain),
+                (format!("  ({})", runtime_summary.provenance), Ink::Muted),
+            ],
+        ),
+        (
+            // `platform`, not `target`. `--target` selects the NODE VERSION and
+            // `--platform` the os-arch pair, so a row labelled `target` showing a
+            // triple names one flag while answering for the other — and the Node
+            // version `--target` really does set is on the row above. The internal
+            // binding is `let target = resolve_platform(opts.platform)`, which is
+            // where the confusion came from.
+            "platform",
+            if target.is_host() {
+                // No aside. Building for the host is the overwhelming majority of
+                // builds, so a note saying so is a note on the default: it is paid
+                // for on every build and tells the reader nothing they did not
+                // already assume. The cross-compile is the surprising case, and it
+                // is the one that gets the words.
+                vec![(target.triple().to_string(), Ink::Plain)]
+            } else {
+                vec![
+                    (target.triple().to_string(), Ink::Plain),
+                    (
+                        match TargetPlatform::host() {
+                            Some(host) => format!("  cross-compiled from {}", host.triple()),
+                            None => "  cross-compiled".to_string(),
+                        },
+                        Ink::Muted,
+                    ),
+                ]
+            },
+        ),
+    ];
+
+    // The three optional rows. Each replaces a standalone sentence printed earlier
+    // in the build, and the reason to move them is that they were three sentence
+    // shapes for one question — what is NOT sealed inside this binary — which a
+    // reader asks once, at the end, about the artifact in front of them.
+    if !facts.shipped.is_empty() {
+        let mut spans = Vec::new();
+        for (i, (name, why)) in facts.shipped.iter().enumerate() {
+            if i > 0 {
+                spans.push((", ".to_string(), Ink::Plain));
+            }
+            spans.push((name.clone(), Ink::Plain));
+            spans.push((format!(" ({why})"), Ink::Muted));
+        }
+        rows.push(("shipped", spans));
+    }
+    if facts.deferred > 0 {
+        rows.push((
+            "deferred",
+            vec![
+                (
+                    format!(
+                        "{} dynamic import site{}",
+                        facts.deferred,
+                        if facts.deferred == 1 { "" } else { "s" }
+                    ),
+                    Ink::Plain,
+                ),
+                ("  resolved where the binary runs".to_string(), Ink::Muted),
+            ],
+        ));
+    }
+    if let Some(report) = &facts.report {
+        rows.push((
+            "report",
+            vec![
+                (report.display().to_string(), Ink::Plain),
+                ("  esbuild schema".to_string(), Ink::Muted),
+            ],
+        ));
+    }
+
+    rows.push((
+        "elapsed",
+        vec![(format!("{:.1}s", facts.elapsed.as_secs_f64()), Ink::Plain)],
+    ));
+    rows
+}
+
+/// Bytes as the megabytes a reader compares against a disk quota — decimal, the
+/// unit every other size in this output and on the docs page already uses.
+fn mb(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+// ---- the live line -------------------------------------------------------------
+
+/// The one status line a compile shows while it runs.
+///
+/// It is deliberately the SAME surface `nub install` draws — the magenta `nub`
+/// token, the dim version, clx's `mini_dot` braille spinner, a cyan phase verb —
+/// because a user who has watched an install already knows how to read it. The
+/// spinner is clx's own `{{ spinner() }}`, whose default set is `mini_dot`: the
+/// exact frames aube spins during an install and the compiled binary's launcher
+/// spins on first run, so all three animate identically without sharing code.
+///
+/// Progress erases itself. Every fact worth keeping is restated by the closing
+/// block, so a scrollback full of phase lines would be a second, worse copy of
+/// it — and the phases a compile passes through are not something a reader needs
+/// after the build is over.
+///
+/// Off entirely when stderr is not a terminal or color is off. clx's `Text` mode
+/// would append a line per update instead, which is the scrollback this exists to
+/// avoid; a redirected build gets the notes and the closing block, which is all a
+/// log needs.
+struct LiveLine(Option<std::sync::Arc<clx::progress::ProgressJob>>);
+
+/// The phase column's width, so the payload after it does not jitter as the verb
+/// changes. Sized to the longest verb below.
+const PHASE_WIDTH: usize = 11;
+
+/// The active line, reachable from anywhere in the compile path.
+///
+/// A module-level slot rather than a `&LiveLine` threaded through every
+/// signature, because the places that need to print during a build are the
+/// deepest ones — the Node stripper, the launcher fetch, the bundler's own
+/// warnings — and none of them is otherwise given anything about how this command
+/// reports. Threading a reporter down to `prepare_node_bytes` to let it say one
+/// sentence buys nothing but churn in the signatures in between. aube reaches for
+/// the same shape and for the same reason (`progress::safe_eprintln`).
+///
+/// Only `run` writes it, once, and only through [`LiveLine::start`].
+static LIVE: std::sync::Mutex<Option<std::sync::Arc<clx::progress::ProgressJob>>> =
+    std::sync::Mutex::new(None);
+
+/// Print a line without tearing an animated status line.
+///
+/// A bare `eprintln!` while a job is repainting interleaves with it and leaves
+/// the line's remains in the scrollback, so every note the compile path emits has
+/// to come through here. With no live line — redirected output, `NO_COLOR`, a
+/// call from a test — it is exactly `eprintln!`.
+pub(crate) fn note(line: &str) {
+    match LIVE.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(job) => job.println(line),
+            None => eprintln!("{line}"),
+        },
+        // A poisoned lock means another thread panicked while holding it. The
+        // message still matters more than the tearing does.
+        Err(_) => eprintln!("{line}"),
+    }
+}
+
+/// The label column a warning's body hangs under: `warn` plus the same [`GAP`]
+/// the block uses, so a wrapped explanation lines up with the headline it
+/// explains instead of with the margin.
+const WARN_INDENT: usize = 4 + GAP;
+
+/// A warning, drawn in the two tiers it has.
+///
+/// Everything the compile path wants to say used to be one weight and one
+/// prefix — a `note:` in front of a paragraph — so a warning a reader had to act
+/// on looked exactly like one they did not. This splits it: a yellow `warn` label
+/// and the headline at full weight, then the explanation dimmed underneath.
+///
+/// The reason to dim the body rather than drop it is that these explanations are
+/// the useful part. The data-asset warning has to say what a data asset cannot
+/// do; the dropped-edge warning has to say what will fail at run time and where.
+/// Dimming keeps them skimmable for a reader who already knows, without making
+/// the one who does not go looking.
+///
+/// A plain [`note`] is still the right call for something a reader cannot act on
+/// — that a cross-compiled payload was verified statically is a fact about the
+/// build, not a problem with it.
+pub(crate) fn warn(headline: &str, body: &[&str]) {
+    let color = crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
+    for line in warn_lines(headline, body, color) {
+        note(&line);
+    }
+}
+
+/// The lines [`warn`] prints, split from the printing so a test can read them.
+///
+/// Same reason [`render_row`] is split out: the body's hanging indent has to be
+/// computed from the label's VISIBLE width, and a test that rebuilt the
+/// arithmetic itself would stay green while production indented by the escape
+/// bytes instead.
+fn warn_lines(headline: &str, body: &[&str], color: bool) -> Vec<String> {
+    let label = if color {
+        // Yellow, which is what an install already spends on the `latest X`
+        // advisory — the CLI's existing "worth your attention, not an error".
+        "\x1b[33m\x1b[1mwarn\x1b[22m\x1b[39m".to_string()
+    } else {
+        "warn".to_string()
+    };
+    let mut lines = vec![format!("{label}{}{headline}", " ".repeat(GAP))];
+    lines.extend(body.iter().map(|line| {
+        format!(
+            "{}{}",
+            " ".repeat(WARN_INDENT),
+            paint(line, Ink::Muted, color)
+        )
+    }));
+    lines
+}
+
+impl LiveLine {
+    fn start() -> Self {
+        if !crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr())) {
+            return Self(None);
+        }
+        let header = format!(
+            "\x1b[35m\x1b[1mnub\x1b[22m\x1b[39m \x1b[2m{}\x1b[22m",
+            env!("CARGO_PKG_VERSION")
+        );
+        let job = clx::progress::ProgressJobBuilder::new()
+            .body("{{header}}  {{ spinner() }} {{phase}}{{detail}}")
+            .prop("header", &header)
+            .prop("phase", &Self::phase_field("bundling"))
+            .prop("detail", &String::new())
+            // The line is transient by construction: at teardown the job flips to
+            // `Done`, which under `Hide` renders empty, so there is no frame left
+            // behind for the closing block to be printed underneath.
+            .on_done(clx::progress::ProgressJobDoneBehavior::Hide)
+            .start();
+        if let Ok(mut slot) = LIVE.lock() {
+            *slot = Some(job.clone());
+        }
+        Self(Some(job))
+    }
+
+    /// Move to a phase, with an optional detail after it.
+    fn phase(&self, verb: &str, detail: &str) {
+        if let Some(job) = &self.0 {
+            job.prop("phase", &Self::phase_field(verb));
+            job.prop("detail", &detail.to_string());
+        }
+    }
+
+    /// Pad on the PLAIN verb, so the trailing spaces land outside the color span
+    /// and the field's visible width is what it claims. Padding the styled string
+    /// counts escape bytes as columns and collapses the field — the same trap the
+    /// block's label gutter has, and the reason both compute width before paint.
+    fn phase_field(verb: &str) -> String {
+        format!(
+            "\x1b[36m{verb}\x1b[39m{}",
+            " ".repeat(PHASE_WIDTH.saturating_sub(verb.len()))
+        )
+    }
+}
+
+impl Drop for LiveLine {
+    /// Clears the line however the build ended, an error path included: a bail
+    /// out between two phases would otherwise leave a spinner frozen mid-frame
+    /// above the error report.
+    fn drop(&mut self) {
+        if let Some(job) = &self.0 {
+            job.set_status(clx::progress::ProgressStatus::Done);
+        }
+        // Cleared before the block prints, and before any later command in the
+        // same process could reach `note` and push a line at a job that is gone.
+        if let Ok(mut slot) = LIVE.lock() {
+            *slot = None;
+        }
+    }
+}
+
+/// What the build produced, gathered where it is known rather than recomputed.
+///
+/// Every field is already in hand at the point the artifact is finished. Deriving
+/// one again at report time — re-reading the blob, re-stat'ing a payload — is how
+/// a report starts describing something other than the file that was written.
+struct BuildFacts {
+    /// The finished file, from `metadata` on what was published.
+    size: u64,
+    /// The COMPRESSED Node blob's contribution. Zero under `--smol`, which
+    /// embeds no runtime at all.
+    node_bytes: u64,
+    /// The compressed app files' contribution.
+    app_bytes: u64,
+    /// Everything that did not get sealed into the bundle, with the reason each
+    /// one earned. Ordered as the build discovered them.
+    shipped: Vec<(String, &'static str)>,
+    /// Surviving computed `import()` sites, from `--allow-dynamic-import`.
+    deferred: usize,
+    /// Where `--metafile` wrote the build report, if it was asked for.
+    report: Option<PathBuf>,
+    elapsed: std::time::Duration,
+}
+
+impl BuildFacts {
+    /// Where the megabytes went, as the aside on the `output` row.
+    ///
+    /// This is the number someone shrinking a binary actually wants; the total on
+    /// its own cannot tell them whether their code or the runtime is the problem.
+    /// The remainder is the launcher plus the container's own headers, which is
+    /// what is left once the two payload regions are accounted for — computed as
+    /// a difference rather than measured, so it can never disagree with the total.
+    ///
+    /// Empty when the parts do not add up to something worth splitting: a `--smol`
+    /// build with no assets is almost entirely launcher, and naming three
+    /// components of one small number is noise.
+    fn size_split(&self) -> String {
+        let launcher = self
+            .size
+            .saturating_sub(self.node_bytes)
+            .saturating_sub(self.app_bytes);
+        let mut parts = Vec::new();
+        if self.node_bytes > 0 {
+            parts.push(format!("node {}", mb(self.node_bytes)));
+        }
+        parts.push(format!("app {}", mb(self.app_bytes)));
+        parts.push(format!("launcher {}", mb(launcher)));
+        format!("  ({})", parts.join(" · "))
+    }
+}
+
+/// Write the `--metafile` report, pretty-printed because it is read by people at
+/// least as often as by a tool.
+/// The path is NOT announced here. It is one of the build's outputs, so it
+/// belongs beside the others in the closing block rather than ten lines above
+/// it, in the middle of the progress the block summarises.
+fn write_metafile(path: &Path, report: &metafile::Metafile) -> Result<()> {
+    let json = serde_json::to_string_pretty(report).context("serializing the build report")?;
+    fs::write(path, json).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 // ---- target platform ----------------------------------------------------------
@@ -470,6 +1058,139 @@ fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<
         );
     }
     Ok(Some(bytes))
+}
+
+/// Build the Windows version resource — the fields Explorer's Details tab shows
+/// and `(Get-Item app.exe).VersionInfo` reads.
+///
+/// The defaults are the point. A compiled binary with no version resource is what
+/// installers and antivirus heuristics treat as anonymous, and the information
+/// they want is already in `package.json`, so it is taken from there and the
+/// common case needs no flags. `--metadata` only overrides: `Key=value` sets a
+/// field and `Key=` drops one, the same spelling by which an empty
+/// `--install-message` suppresses the first-run notice.
+///
+/// Refused rather than ignored on a non-Windows target, matching `--icon`: no
+/// other container format carries these fields, so accepting the flag would
+/// silently produce a binary without them. The package.json DEFAULTS are not
+/// refused — they are implicit, and erroring on a Linux build because a project
+/// has a `name` would be absurd.
+fn load_version_info(
+    metadata: &[String],
+    entry_dir: &Path,
+    out_path: &Path,
+    target: &TargetPlatform,
+) -> Result<Option<Vec<u8>>> {
+    if !metadata.is_empty() && target.format() != ContainerFormat::Pe {
+        bail!(
+            "--metadata sets Windows executable metadata, and this build targets {}.\n\
+             \x20\x20Only the PE format carries these fields inside the executable.",
+            target.triple()
+        );
+    }
+    if target.format() != ContainerFormat::Pe {
+        return Ok(None);
+    }
+
+    let mut strings = nearest_package_metadata(entry_dir);
+    // The field means the name the file was built under, so it is derived from
+    // the output rather than defaulted from the manifest — a rename is exactly
+    // what it lets a program detect.
+    if let Some(name) = out_path.file_name().and_then(|n| n.to_str()) {
+        strings.insert("OriginalFilename".to_string(), name.to_string());
+    }
+    for assignment in metadata {
+        let (key, value) = version_info::parse_assignment(assignment)?;
+        if value.is_empty() {
+            strings.remove(key);
+        } else {
+            strings.insert(key.to_string(), value);
+        }
+    }
+
+    // The numeric block is derived from the strings so the two can never
+    // disagree; a prerelease tag survives in the string and is truncated only in
+    // the four-u16 block, which has nowhere to put it.
+    let file_version =
+        version_info::parse_version(strings.get("FileVersion").map(String::as_str).unwrap_or(""))?;
+    let product_version = version_info::parse_version(
+        strings
+            .get("ProductVersion")
+            .map(String::as_str)
+            .unwrap_or(""),
+    )?;
+    let info = version_info::VersionInfo {
+        file_version,
+        product_version,
+        strings,
+    };
+    // OriginalFilename alone is not worth a resource: it would put an otherwise
+    // blank Details tab on every Windows build that never asked for one.
+    if info.strings.len() <= 1 && info.file_version == [0; 4] && info.product_version == [0; 4] {
+        return Ok(None);
+    }
+    Ok(Some(info.encode()?))
+}
+
+/// Version-resource defaults from the nearest `package.json`, walking up from the
+/// entry's directory — the same boundary Node itself resolves against.
+fn nearest_package_metadata(entry_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut dir = Some(entry_dir);
+    while let Some(current) = dir {
+        let manifest = current.join("package.json");
+        if let Ok(text) = fs::read_to_string(&manifest)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            let field = |name: &str| {
+                json.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let mut set = |key: &str, value: Option<String>| {
+                if let Some(value) = value {
+                    out.insert(key.to_string(), value);
+                }
+            };
+            set("ProductName", field("name"));
+            set("InternalName", field("name"));
+            set(
+                "FileDescription",
+                field("description").or_else(|| field("name")),
+            );
+            set("FileVersion", field("version"));
+            set("ProductVersion", field("version"));
+            set("CompanyName", package_author(&json));
+            return out;
+        }
+        dir = current.parent();
+    }
+    out
+}
+
+/// The `author` field's display name. npm allows either a `{ name, email, url }`
+/// object or the shorthand `"Name <email> (url)"`, and only the name belongs in
+/// CompanyName — an email address in Explorer's Company column is noise.
+fn package_author(json: &serde_json::Value) -> Option<String> {
+    let author = json.get("author")?;
+    let name = match author {
+        serde_json::Value::String(s) => s
+            .split(['<', '('])
+            .next()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string(),
+        serde_json::Value::Object(_) => author
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        _ => return None,
+    };
+    (!name.is_empty()).then_some(name)
 }
 
 /// Refuse an output that names the source entry before fetching a launcher,
@@ -810,6 +1531,29 @@ fn read_define_files(raw: &[String]) -> Result<Vec<String>> {
                 value.pop();
             }
         }
+        // Same trap as the argv form, caught here so the advice can name the FILE.
+        // `defines()` sees only the merged `KEY=VALUE` strings and cannot tell which
+        // flag a value came from, and telling someone to retype it as `--define`
+        // is the one fix that does not apply: this flag exists precisely for values
+        // that do not fit on a command line.
+        //
+        // The remedy is shown as the required FILE CONTENTS, not as a shell command.
+        // Both halves would be interpolated user input: a path with a space breaks the
+        // redirect and sends the write somewhere else, and an apostrophe anywhere in the
+        // value ends the quoting. A pasteable command that silently writes the wrong
+        // file is worse than no command.
+        if let Some(s) = bundle::swallowed_define(&value) {
+            let (kept, suggested, outcome) =
+                (&s.kept, &s.suggested, bundle::swallowed_define_outcome(&s));
+            bail!(
+                "{path}, the --define-file for {key}, is not a complete JavaScript expression: {suggested}\n\
+                 \x20\x20The file holds an EXPRESSION, and JavaScript keeps only `{kept}` here —\n\
+                 \x20\x20the rest is discarded (`//` opens a comment). Accepted, it would\n\
+                 \x20\x20{outcome}\n\
+                 \x20\x20Put the quotes inside the file, so it holds a string literal:\n\
+                 \x20\x20\"{suggested}\""
+            );
+        }
         out.push(format!("{key}={value}"));
     }
     Ok(out)
@@ -1063,10 +1807,16 @@ fn publish_detached_maps(staged_maps: Vec<StagedDetachedMap>) {
     for map in staged_maps {
         let destination = map.destination;
         match map.staged.publish(&destination) {
-            Ok(()) => eprintln!("Wrote {}", destination.display()),
-            Err(error) => eprintln!(
-                "note: compiled executable was written, but its detached source map {} was not: {error:#}",
-                destination.display()
+            Ok(()) => note(&format!("Wrote {}", destination.display())),
+            Err(error) => warn(
+                &format!(
+                    "the detached source map {} was not written",
+                    destination.display()
+                ),
+                &[
+                    "The compiled executable itself is complete and usable.",
+                    &format!("{error:#}"),
+                ],
             ),
         }
     }
@@ -1145,10 +1895,13 @@ fn build_node_blob(
     let blob = match std::fs::read(&cached) {
         Ok(blob) => blob,
         Err(_) => {
-            eprintln!(
+            // Only on a cache MISS, which is the slow path — ~20 s for a
+            // ~113 MB Node. Worth a line of its own rather than a phase alone,
+            // because it names WHY this build is slower than the last one.
+            note(&format!(
                 "Compressing Node ({:.0} MB) with zstd-19 …",
                 bytes.len() as f64 / 1_000_000.0
-            );
+            ));
             let blob = zstd::encode_all(&bytes[..], 19).context("zstd-19 compressing Node")?;
             // Written through a temporary so a killed compile cannot leave a
             // truncated blob behind for the next one to read as complete.
@@ -1219,9 +1972,9 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
 
     let needs_resign = format == ContainerFormat::MachO;
     if needs_resign && which_first(&["codesign"]).is_none() {
-        eprintln!(
-            "note: no codesign on PATH — a stripped macOS Node could not be re-signed, \
-             so it is embedded unstripped"
+        warn(
+            "no codesign on PATH, so the embedded Node is not stripped",
+            &["A stripped macOS Node could not be re-signed, and an unsigned one cannot launch."],
         );
         return Ok(original);
     }
@@ -1235,9 +1988,12 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         &["llvm-strip"]
     };
     let Some(strip) = which_first(candidates) else {
-        eprintln!(
-            "note: no {} on PATH — embedding the Node binary unstripped",
-            candidates.join("/")
+        warn(
+            &format!(
+                "no {} on PATH, so the embedded Node is not stripped",
+                candidates.join("/")
+            ),
+            &["The artifact is larger than it needs to be; installing the tool shrinks it."],
         );
         return Ok(original);
     };
@@ -1309,6 +2065,10 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
             ]);
         }
         sign.extend_from_slice(&["-s".as_ref(), "-".as_ref(), tmp.as_os_str()]);
+        // Announced BEFORE the call, not after it. Signing a ~107 MB binary takes
+        // real time, and a progress line printed once it finished left that whole
+        // stretch labelled by the previous phase.
+        note("Signing embedded Node.js");
         ok = run_ok("codesign", &sign);
     }
 
@@ -1335,14 +2095,17 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         None
     };
     if let Some(why) = reject {
-        eprintln!("note: {why} — embedding the Node binary unstripped");
+        // The same class as the two missing-tool warnings above: the artifact is
+        // correct but larger than it should be, and the reader can act on why.
+        warn(
+            "the embedded Node is not stripped",
+            &[why, "The artifact is larger than it needs to be."],
+        );
         return Ok(original);
     }
 
-    if needs_resign {
-        eprintln!("Stripped + ad-hoc re-signed the embedded Node");
-    } else {
-        eprintln!("Stripped the embedded Node");
+    if !needs_resign {
+        note("Stripped the embedded Node");
     }
     Ok(stripped)
 }
@@ -1542,7 +2305,7 @@ fn node_runs(node: &Path) -> bool {
 ///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
 ///    the scan but was never executed is a weaker guarantee, and the user should
 ///    know which one they got.
-fn verify_artifact(bin: &Path, target: &TargetPlatform) -> Result<()> {
+fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u8]>) -> Result<()> {
     let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
     let payload = inject::find_payload(target.format(), &bytes)
         .with_context(|| format!("scanning {} for its payload", bin.display()))?
@@ -1551,13 +2314,50 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform) -> Result<()> {
         .context("the produced executable's payload does not decode")?;
     verify_payload_shape(&view)?;
 
+    // The version resource is re-read here for the same reason the payload is,
+    // and it needs it more. A cross-compiled Windows binary cannot be executed
+    // on this host, so this parse is the only evidence the resource is REACHABLE
+    // rather than merely written — and an unreachable one fails silently, with
+    // Explorer showing nothing and no error anywhere. The concrete way to lose it
+    // is the resource directory's ascending-id rule (see `set_version_info` in
+    // vendor/libsui), which takes the icon down with it.
+    if let Some(encoded) = version_info {
+        let found = inject::find_version_resource(&bytes)
+            .with_context(|| format!("scanning {} for its version resource", bin.display()))?
+            .context(
+                "the produced executable carries no version resource, so its metadata \
+                 would not appear in Explorer — the injection did not take",
+            )?;
+        // Compared as PARSED values rather than as bytes. The walk is the point:
+        // it navigates by the declared lengths and the alignment rule, so a
+        // resource whose root header survived while its StringTable or Var
+        // children were truncated compares unequal here, where a byte compare
+        // would only catch a change and a bare parse would accept the header
+        // alone. Both sides go through the same reader so the comparison is of
+        // what Windows would see, not of what nub meant.
+        let intended = version_info::parse(encoded)
+            .context("the version resource nub encoded does not parse")?;
+        let carried = version_info::parse(found)
+            .context("the produced executable's version resource does not parse")?;
+        if carried != intended {
+            bail!(
+                "the produced executable's version resource is not the one that was \
+                 encoded — {} fields and {} translations survived, out of {} and {}",
+                carried.strings.len(),
+                carried.translations.len(),
+                intended.strings.len(),
+                intended.translations.len()
+            );
+        }
+    }
+
     if !target.is_host() {
-        eprintln!(
+        note(&format!(
             "note: cross-compiled for {} — payload verified statically; the run-it \
              self-check needs a {} host",
             target.triple(),
             target.triple()
-        );
+        ));
         return Ok(());
     }
 
@@ -1981,7 +2781,7 @@ fn sha256_of_app(files: &[AppFile<Vec<u8>>]) -> String {
         h.update(&file.bytes);
         h.update([u8::from(file.executable)]);
     }
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// The source file's Unix mode, or `None` where the platform has none — see
@@ -2103,6 +2903,108 @@ mod tests {
             "must name the target, got: {err}"
         );
         assert!(load_icon(None, &mac).unwrap().is_none());
+    }
+
+    /// The defaults are the feature: a Windows build with no version resource is
+    /// what installers and antivirus heuristics treat as anonymous, and everything
+    /// they want is already in `package.json`. So the manifest path is asserted
+    /// first, then the two override spellings, then the target gate.
+    ///
+    /// Read back through [`version_info::parse`] rather than compared against the
+    /// map that went in — the bytes are what ships, and a resource that encodes
+    /// but does not walk is the failure mode nothing else here would catch.
+    #[test]
+    fn version_metadata_defaults_to_the_manifest_and_metadata_overrides_it() {
+        let dir = fresh_dir("versioninfo");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"acme-tool","version":"2.5.1","description":"Does a thing","author":{"name":"Acme Inc."}}"#,
+        )
+        .unwrap();
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let out = dir.join("acme.exe");
+
+        let bytes = load_version_info(&[], &dir, &out, &win)
+            .unwrap()
+            .expect("a manifest with a name and a version earns a resource");
+        let parsed = version_info::parse(&bytes).unwrap();
+        assert_eq!(
+            parsed.strings.get("ProductName").map(String::as_str),
+            Some("acme-tool")
+        );
+        assert_eq!(
+            parsed.strings.get("CompanyName").map(String::as_str),
+            Some("Acme Inc.")
+        );
+        assert_eq!(
+            parsed.strings.get("FileDescription").map(String::as_str),
+            Some("Does a thing")
+        );
+        assert_eq!(parsed.file_version, [2, 5, 1, 0]);
+        // Derived from --out, not the manifest: the field means the name the file
+        // was built under, which is exactly what a rename should change.
+        assert_eq!(
+            parsed.strings.get("OriginalFilename").map(String::as_str),
+            Some("acme.exe")
+        );
+
+        // `Key=value` overrides; `Key=` drops, the same spelling by which an empty
+        // --install-message suppresses the first-run notice.
+        let overridden = load_version_info(
+            &[
+                "ProductName=Renamed".to_string(),
+                "CompanyName=".to_string(),
+            ],
+            &dir,
+            &out,
+            &win,
+        )
+        .unwrap()
+        .unwrap();
+        let parsed = version_info::parse(&overridden).unwrap();
+        assert_eq!(
+            parsed.strings.get("ProductName").map(String::as_str),
+            Some("Renamed")
+        );
+        assert!(
+            !parsed.strings.contains_key("CompanyName"),
+            "an empty value drops the field rather than writing a blank one"
+        );
+
+        // A project with nothing to say earns no resource at all: OriginalFilename
+        // alone would put a near-blank Details tab on every Windows build. The
+        // empty manifest is what makes this deterministic — the lookup walks UP
+        // from the entry, so a bare directory would otherwise inherit whatever
+        // package.json happens to sit above the temp dir on the runner.
+        let bare = fresh_dir("versioninfo-bare");
+        fs::write(bare.join("package.json"), "{}").unwrap();
+        assert!(load_version_info(&[], &bare, &out, &win).unwrap().is_none());
+
+        // Refused on a target whose container cannot carry the fields — accepting
+        // it would ship a binary silently missing them. The manifest DEFAULTS are
+        // not refused, because they are implicit: erroring on a Linux build
+        // because the project has a name would be absurd.
+        let linux = TargetPlatform {
+            os: TargetOs::Linux,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let err = load_version_info(&["ProductName=x".to_string()], &dir, &out, &linux)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("linux-x64"),
+            "must name the target, got: {err}"
+        );
+        assert!(
+            load_version_info(&[], &dir, &out, &linux)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// exists, so the build used to run to completion and die on the rename with
@@ -2553,6 +3455,7 @@ mod tests {
             entry: "main.ts".into(),
             out: None,
             icon: None,
+            metadata: Vec::new(),
             smol: false,
             target: None,
             platform: None,
@@ -2561,6 +3464,7 @@ mod tests {
             install_message: install_message.map(str::to_string),
             node_options: Vec::new(),
             define_file: Vec::new(),
+            metafile: None,
             bundle: BundleOptions {
                 minify: true,
                 keep_names: true,
@@ -2579,6 +3483,9 @@ mod tests {
                 tsconfig: None,
                 loaders: Vec::new(),
                 native_target: None,
+                drop_console: false,
+                drop_debugger: false,
+                metafile: false,
                 target_node: None,
             },
         }
@@ -2643,6 +3550,41 @@ mod tests {
             ],
             "cross-compiled platform checks must fold against the TARGET, and the \
              values must be quoted so they land as string literals, not identifiers"
+        );
+    }
+
+    /// A file holding a bare URL is the same shipped-`ReferenceError` trap as the argv
+    /// form, and it is caught here rather than in `defines()` so the advice can name the
+    /// FILE. By the time the two flags merge, the source is unrecoverable — and the one
+    /// remedy that does not apply to this flag is "retype it as `--define`", since
+    /// `--define-file` exists for values that do not fit on a command line.
+    #[test]
+    fn a_define_file_holding_a_bare_url_is_rejected_and_the_advice_names_the_file() {
+        let dir = fresh_dir("definefile-url");
+        let f = dir.join("api.txt");
+        fs::write(&f, "https://api.example.com\n").unwrap();
+
+        let err = read_define_files(&[format!("API={}", f.display())])
+            .expect_err("a file holding an unquoted URL must be rejected at build time");
+        let m = format!("{err:#}");
+        assert!(
+            m.contains("ReferenceError: https is not defined"),
+            "the error must name the run-time failure it prevents: {m}"
+        );
+        assert!(
+            m.contains(&f.display().to_string()),
+            "the advice must name the file that has to change, not a flag to retype: {m}"
+        );
+        assert!(
+            !m.contains("--define '"),
+            "it must NOT tell a --define-file user to switch to --define: {m}"
+        );
+
+        // The quoted form is what the error tells the user to write, so it has to work.
+        fs::write(&f, "\"https://api.example.com\"\n").unwrap();
+        assert_eq!(
+            read_define_files(&[format!("API={}", f.display())]).unwrap(),
+            vec!["API=\"https://api.example.com\"".to_string()]
         );
     }
 
@@ -2913,6 +3855,355 @@ mod tests {
         );
     }
 
+    /// A build with everything present, so the optional rows all appear at once.
+    fn full_facts() -> BuildFacts {
+        BuildFacts {
+            size: 29_473_842,
+            node_bytes: 25_100_000,
+            app_bytes: 2_500_000,
+            shipped: vec![
+                ("@napi-rs/nice".to_string(), "native addon"),
+                ("sharp".to_string(), "--external"),
+            ],
+            deferred: 3,
+            report: Some(PathBuf::from("report.json")),
+            elapsed: std::time::Duration::from_millis(8_880),
+        }
+    }
+
+    fn embedded_summary() -> RuntimeSummary {
+        RuntimeSummary {
+            fact: "Node 26.8.1, embedded".to_string(),
+            provenance: "package.json#engines.node".to_string(),
+        }
+    }
+
+    /// Every row the block can carry, in order, with its text.
+    ///
+    /// The `platform` row is the one worth reading closely. It is named for what
+    /// `--platform` sets; the row above it carries what `--target` sets. Getting
+    /// those two the wrong way round is the defect this label fixes.
+    #[test]
+    fn the_resolved_build_block_states_every_output_fact_once() {
+        let host = TargetPlatform::host().unwrap();
+        assert_eq!(
+            plain_rows(&resolved_build_rows(
+                Path::new("acme"),
+                &full_facts(),
+                &embedded_summary(),
+                &host,
+            )),
+            vec![
+                "output=acme  29.5 MB  (node 25.1 MB · app 2.5 MB · launcher 1.9 MB)".to_string(),
+                "runtime=Node 26.8.1, embedded  (package.json#engines.node)".to_string(),
+                // No aside: building for the host is the default, and a note on
+                // the default is paid for by every build and earned by none.
+                format!("platform={}", host.triple()),
+                "shipped=@napi-rs/nice (native addon), sharp (--external)".to_string(),
+                "deferred=3 dynamic import sites  resolved where the binary runs".to_string(),
+                "report=report.json  esbuild schema".to_string(),
+                "elapsed=8.9s".to_string(),
+            ]
+        );
+    }
+
+    /// A cross-compile is the case that earns words, and it is the only one.
+    #[test]
+    fn only_a_cross_compile_annotates_the_platform_row() {
+        let host = TargetPlatform::host().unwrap();
+        let foreign = SUPPORTED_TRIPLES
+            .iter()
+            .map(|t| TargetPlatform::parse(t).unwrap())
+            .find(|t| *t != host)
+            .unwrap();
+        let rows = resolved_build_rows(
+            Path::new("acme"),
+            &full_facts(),
+            &embedded_summary(),
+            &foreign,
+        );
+        assert_eq!(
+            plain_rows(&rows)[2],
+            format!(
+                "platform={}  cross-compiled from {}",
+                foreign.triple(),
+                host.triple()
+            ),
+            "a cross-compile has to say what it was built ON, since the artifact \
+             cannot be run here to find out"
+        );
+    }
+
+    /// The optional rows are optional. A plain build states four facts, and a
+    /// reader of that block should not have to skip three empty ones to find them.
+    #[test]
+    fn a_build_with_nothing_deferred_or_external_prints_no_row_for_it() {
+        let host = TargetPlatform::host().unwrap();
+        let bare = BuildFacts {
+            size: 4_400_000,
+            // `--smol` embeds no runtime, so the split names only what is there.
+            node_bytes: 0,
+            app_bytes: 2_500_000,
+            shipped: Vec::new(),
+            deferred: 0,
+            report: None,
+            elapsed: std::time::Duration::from_millis(2_400),
+        };
+        assert_eq!(
+            plain_rows(&resolved_build_rows(
+                Path::new("acme"),
+                &bare,
+                &RuntimeSummary {
+                    fact: "Node >=22 <23, not embedded".to_string(),
+                    provenance: "--target".to_string(),
+                },
+                &host,
+            )),
+            vec![
+                "output=acme  4.4 MB  (app 2.5 MB · launcher 1.9 MB)".to_string(),
+                "runtime=Node >=22 <23, not embedded  (--target)".to_string(),
+                format!("platform={}", host.triple()),
+                "elapsed=2.4s".to_string(),
+            ]
+        );
+    }
+
+    /// Render the rows the way [`report_resolved_build`] does, minus the styling,
+    /// so a text assertion reads what a user without color sees.
+    fn plain_rows(rows: &[(&'static str, Vec<(String, Ink)>)]) -> Vec<String> {
+        rows.iter()
+            .map(|(label, spans)| {
+                let joined: String = spans.iter().map(|(text, _)| text.as_str()).collect();
+                format!("{label}={joined}")
+            })
+            .collect()
+    }
+
+    /// Which tier each segment is drawn in.
+    ///
+    /// Worth its own test because it is invisible to every text assertion above:
+    /// the block could lose all of its styling, or paint the whole line one color,
+    /// and the rendered text would be byte-identical.
+    ///
+    /// The accent is the claim being pinned. It belongs to the artifact path and
+    /// nothing else — it marks the one thing the reader runs next, so a second
+    /// accented token would spend the distinction it exists to make.
+    #[test]
+    fn only_the_artifact_path_is_accented_and_every_aside_is_muted() {
+        let host = TargetPlatform::host().unwrap();
+        let rows =
+            resolved_build_rows(Path::new("acme"), &full_facts(), &embedded_summary(), &host);
+        let inks: Vec<(&str, Vec<Ink>)> = rows
+            .iter()
+            .map(|(label, spans)| (*label, spans.iter().map(|(_, ink)| *ink).collect()))
+            .collect();
+
+        assert_eq!(
+            inks,
+            vec![
+                // The size is Plain and only its breakdown is Muted: the total is
+                // a fact the reader came for, the split is why it is that size.
+                ("output", vec![Ink::Accent, Ink::Plain, Ink::Muted]),
+                ("runtime", vec![Ink::Plain, Ink::Muted]),
+                ("platform", vec![Ink::Plain]),
+                (
+                    "shipped",
+                    vec![Ink::Plain, Ink::Muted, Ink::Plain, Ink::Plain, Ink::Muted,],
+                ),
+                ("deferred", vec![Ink::Plain, Ink::Muted]),
+                ("report", vec![Ink::Plain, Ink::Muted]),
+                ("elapsed", vec![Ink::Plain]),
+            ],
+            "exactly one Accent in the whole block, on the path the reader runs next"
+        );
+        assert_eq!(
+            inks.iter()
+                .flat_map(|(_, i)| i)
+                .filter(|i| **i == Ink::Accent)
+                .count(),
+            1
+        );
+    }
+
+    /// A row too wide for the terminal wraps to the value column, not to zero.
+    ///
+    /// The input is the real one that exposed this: a `--smol` build's runtime
+    /// row measured 112 columns on an 80-column terminal, so the terminal broke
+    /// it wherever it liked and the remainder restarted at the left margin —
+    /// destroying the aligned value column on the widest row in the block. Every
+    /// other test here passes on the unwrapped implementation.
+    #[test]
+    fn a_row_wider_than_the_terminal_wraps_to_the_value_column() {
+        let spans = vec![
+            ("Node >=22, not embedded".to_string(), Ink::Plain),
+            (
+                "  (package.json#engines.node; range enforced at runtime, provisioning 26.8.1)"
+                    .to_string(),
+                Ink::Muted,
+            ),
+        ];
+        let lines = render_row("runtime", &spans, 8, 80, false);
+        assert!(lines.len() > 1, "this row does not fit in 80 columns");
+        for line in &lines {
+            assert!(
+                line.chars().count() <= 80,
+                "{} columns: {line:?}",
+                line.chars().count()
+            );
+        }
+        let value_col = INDENT + 8 + GAP;
+        for continuation in &lines[1..] {
+            assert_eq!(
+                continuation.len() - continuation.trim_start().len(),
+                value_col,
+                "a continuation hung anywhere but the value column is the defect: {continuation:?}"
+            );
+        }
+        // Wrapping moves words between lines; it must not lose or duplicate one.
+        let words_out: Vec<&str> = lines
+            .iter()
+            .flat_map(|l| l.split_whitespace())
+            .skip(1) // the label
+            .collect();
+        let words_in: Vec<&str> = spans
+            .iter()
+            .flat_map(|(t, _)| t.split_whitespace())
+            .collect();
+        assert_eq!(words_out, words_in, "wrapping dropped or reordered a word");
+    }
+
+    /// A warning's body hangs under its headline, not under the margin.
+    ///
+    /// The indent is the whole reason this tier reads as two: line up the body
+    /// with the left edge instead and the explanation stops looking like it
+    /// belongs to the headline above it. Asserted with color ON as well, because
+    /// that is the case where an implementation that padded the painted label
+    /// would silently indent by the escape bytes.
+    #[test]
+    fn a_warning_hangs_its_body_under_its_headline() {
+        let body = ["first explanation line", "second"];
+        assert_eq!(
+            warn_lines("the embedded Node is not stripped", &body, false),
+            vec![
+                "warn  the embedded Node is not stripped".to_string(),
+                "      first explanation line".to_string(),
+                "      second".to_string(),
+            ]
+        );
+
+        let colored = warn_lines("headline", &body, true);
+        assert_eq!(
+            colored.iter().map(|l| strip_sgr(l)).collect::<Vec<_>>(),
+            warn_lines("headline", &body, false),
+            "color must change nothing about which columns the lines occupy"
+        );
+        assert!(
+            colored[0].starts_with("\x1b[33m\x1b[1mwarn"),
+            "the label carries the whole of the warning's weight: {:?}",
+            colored[0]
+        );
+    }
+
+    /// `NO_COLOR` and a redirected stream both reach [`paint`] as `color = false`,
+    /// and the block has to survive it on alignment alone — so nothing may depend
+    /// on an escape being present, and none may be emitted.
+    #[test]
+    fn paint_emits_no_escapes_when_color_is_off() {
+        for ink in [Ink::Plain, Ink::Muted, Ink::Accent] {
+            assert_eq!(paint("dist/cli", ink, false), "dist/cli");
+        }
+        assert_eq!(paint("dist/cli", Ink::Plain, true), "dist/cli");
+        assert_eq!(
+            paint("dist/cli", Ink::Muted, true),
+            "\x1b[2mdist/cli\x1b[22m"
+        );
+        assert_eq!(
+            paint("dist/cli", Ink::Accent, true),
+            "\x1b[96mdist/cli\x1b[39m"
+        );
+    }
+
+    /// A colored row must occupy exactly the columns its plain twin does.
+    ///
+    /// Asserted through [`render_row`] — the function that prints — rather than a
+    /// copy of its arithmetic, or the test would pass while production padded the
+    /// painted label and collapsed the very column this guards. Verified by
+    /// breaking it: padding the painted string turns the color-on `output` row
+    /// into `  outputdist/cli`, and this goes red.
+    #[test]
+    fn a_styled_row_occupies_the_same_columns_as_a_plain_one() {
+        let spans = vec![
+            ("acme".to_string(), Ink::Accent),
+            ("  (29.5 MB)".to_string(), Ink::Muted),
+        ];
+        for label in ["output", "runtime", "platform"] {
+            assert_eq!(
+                render_row(label, &spans, 8, 80, true)
+                    .iter()
+                    .map(|l| strip_sgr(l))
+                    .collect::<Vec<_>>(),
+                render_row(label, &spans, 8, 80, false),
+                "the {label} row must not lose its gutter to escape bytes"
+            );
+        }
+        assert_eq!(
+            render_row("runtime", &spans, 8, 80, false),
+            vec!["   runtime  acme  (29.5 MB)".to_string()],
+            "the label column is the block's whole structure — pin it literally"
+        );
+    }
+
+    /// Right alignment is the block's whole visual claim, so pin the thing it
+    /// promises: every value starts in the same column whatever its label is, and
+    /// the slack lands in the left margin instead of between a label and its own
+    /// value. A left-aligned implementation passes every other test in this file.
+    #[test]
+    fn every_value_starts_in_one_column_and_the_slack_is_on_the_left() {
+        let spans = vec![("x".to_string(), Ink::Plain)];
+        let width = 8;
+        let rendered: Vec<String> = ["output", "runtime", "platform", "elapsed"]
+            .iter()
+            .map(|label| render_row(label, &spans, width, 80, false).join(""))
+            .collect();
+
+        let value_columns: Vec<usize> = rendered
+            .iter()
+            .map(|line| line.find('x').expect("every row carries its value"))
+            .collect();
+        assert_eq!(
+            value_columns,
+            vec![INDENT + width + GAP; 4],
+            "a value that does not start where every other value starts is the \
+             one defect right alignment exists to prevent"
+        );
+
+        assert_eq!(
+            rendered[0], "    output  x",
+            "the shortest label carries the widest left margin"
+        );
+        assert_eq!(
+            rendered[2], "  platform  x",
+            "the longest label sits flush against the indent"
+        );
+    }
+
+    /// Drop every SGR sequence, so a painted row can be compared against a plain
+    /// one column for column. Written generically rather than as a list of the
+    /// codes [`paint`] emits today, so a fourth [`Ink`] cannot slip past it.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(start) = rest.find('\x1b') {
+            out.push_str(&rest[..start]);
+            let Some(end) = rest[start..].find('m') else {
+                return out;
+            };
+            rest = &rest[start + end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     /// A cross target must never be provisioned into the host's Node store — the
     /// store is keyed by version alone, so a foreign binary there would be picked
     /// up as runnable. Asserted on the path, since exercising it needs a download.
@@ -2967,6 +4258,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let layout = assets::Layout {
             entry_prefix: String::new(),
@@ -3036,6 +4328,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let layout = assets::Layout {
             entry_prefix: "dist/bun".into(),
@@ -3086,6 +4379,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
         let files = assemble_app(
             &bundled,
@@ -3148,6 +4442,7 @@ mod tests {
             native_addons: Vec::new(),
             external_imports: Vec::new(),
             worker_roots: Vec::new(),
+            metafile: None,
         };
 
         let err = assemble_app(
@@ -3190,6 +4485,7 @@ mod tests {
                 entry: "worker-a.mjs".into(),
                 chunk: "worker-a-code.mjs".into(),
             }],
+            metafile: None,
         };
         let wrappers = external::worker_wrappers(&bundled.worker_roots, true, "").unwrap();
         let files = assemble_app(
@@ -3233,6 +4529,7 @@ mod tests {
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),
                 worker_roots: Vec::new(),
+                metafile: None,
             },
             assets::Layout {
                 entry_prefix: String::new(),

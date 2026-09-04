@@ -68,9 +68,9 @@ Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock
 
 A no-op rewrite keeps the incoming `lockfileVersion` — a v2 lock stays v2. The first **mutating** operation (`nub add`, `nub remove`) rewrites it as v3 (npm's default since npm 9), so the version field is an expected diff. An `npm-shrinkwrap.json` is read and preserved as-is.
 
-Older formats are read too. A `lockfileVersion: 1` lock (npm 5/6) and a pre-2017 `npm-shrinkwrap.json` — a nested `dependencies` tree with no `lockfileVersion` field at all — both resolve and install: Nub lifts the legacy nested tree into the same install-path scheme it uses for v2/v3. Registry dependencies install fully. The first mutating operation (`nub add`, `nub remove`) rewrites the lock as v3, the same in-place upgrade npm 7+ performs.
+Older formats are read too. A `lockfileVersion: 1` lock (npm 5/6) and a pre-2017 `npm-shrinkwrap.json` — a nested `dependencies` tree with no `lockfileVersion` field at all — both resolve and install: Nub maps the legacy nested tree onto the same install-path scheme it uses for v2/v3. Registry dependencies install fully. The first mutating operation (`nub add`, `nub remove`) rewrites the lock as v3, the same in-place upgrade npm 7+ performs.
 
-Two legacy edges remain out of scope. Git and `file:` dependencies, which a v1 lock encodes in the `version` field rather than `resolved`, are not yet read. And a fully-hoisted pre-npm-5 shrinkwrap that records no `requires` edges cannot place every transitive — Nub installs what it can and warns about the rest (`WARN_NUB_LOCKFILE_LEGACY_INCOMPLETE_GRAPH`). For either, re-lock once under npm 7+, then `nub install`.
+Two legacy cases are not read. Git and `file:` dependencies, which a v1 lock encodes in the `version` field rather than `resolved`, are not yet read. And a fully-hoisted pre-npm-5 shrinkwrap that records no `requires` edges cannot place every transitive — Nub installs what it can and warns about the rest (`WARN_NUB_LOCKFILE_LEGACY_INCOMPLETE_GRAPH`). For either, re-lock once under npm 7+, then `nub install`.
 
 ## `.npmrc`
 

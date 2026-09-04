@@ -255,20 +255,176 @@ pub(crate) fn ensure_registry_auth_for_package(
 /// across versions of aube and never collides with a pnpm store rooted
 /// at the same path.
 pub(crate) fn open_store(cwd: &std::path::Path) -> miette::Result<aube_store::Store> {
-    let root = match resolved_store_dir(cwd) {
-        // No configured `storeDir`: the aube-owned default under XDG/HOME, or a
-        // `$TMPDIR`-rooted store when neither is available. The store ctors used
-        // to resolve HOME themselves and hard-fail with `NoHome`, so an install
-        // with HOME stripped from the env (pnpm's own test harness, a minimal CI
-        // container) aborted even when a concrete `storeDir` was configured.
-        None => aube_store::dirs::store_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store/v1/files")),
-        Some(custom) => custom.join("v1").join("files"),
-    };
+    let roots = store_roots(cwd);
     // The virtual store is always passed explicitly so this and every read-side
     // caller resolve it through the same `global_virtual_store_dir` ladder.
-    Ok(aube_store::Store::with_dirs(root, resolved_cache_dir(cwd))
-        .with_virtual_store_dir(global_virtual_store_dir(cwd)))
+    let mut store = aube_store::Store::with_dirs(roots.files, resolved_cache_dir(cwd))
+        .with_virtual_store_dir(global_virtual_store_dir(cwd));
+    if let Some(read_fallback) = roots.read_fallback {
+        store = store.with_read_fallback(read_fallback);
+    }
+    Ok(store)
+}
+
+/// Where the CAS lives for `cwd`: `files` is `<store>/v1/files`, and
+/// `read_fallback` is a second, read-only CAS root when `files` is a
+/// project-local stand-in for an unwritable global store.
+#[derive(Clone)]
+struct StoreRoots {
+    files: std::path::PathBuf,
+    read_fallback: Option<std::path::PathBuf>,
+}
+
+/// A `storeDir` the USER set is used verbatim; an unset one, or one that
+/// merely restates the embedder profile's default (nub registers its data-dir
+/// store as a settings default, so under nub `storeDir` always resolves to
+/// *something*), is a default and gets [`default_store_roots`]'s
+/// unwritable-fallback treatment.
+fn store_roots(cwd: &std::path::Path) -> StoreRoots {
+    match resolved_store_dir(cwd) {
+        Some(custom) if !is_embedder_default_store_dir(&custom, cwd) => StoreRoots {
+            files: custom.join("v1").join("files"),
+            read_fallback: None,
+        },
+        profile_default => {
+            default_store_roots(cwd, profile_default.map(|d| d.join("v1").join("files")))
+        }
+    }
+}
+
+fn is_embedder_default_store_dir(resolved: &std::path::Path, cwd: &std::path::Path) -> bool {
+    aube_settings::embedder_defaults()
+        .iter()
+        .find(|(key, _)| key == "storeDir")
+        .and_then(|(_, raw)| expand_setting_path(raw, cwd))
+        .is_some_and(|default| default == resolved)
+}
+
+/// The store's `v1` directories for `cwd`: `primary` is the parent of the CAS
+/// root [`open_store`] writes, and `read_fallback` is the read-only global
+/// `v1` still consulted for everything it holds when the default store is not
+/// writable. A tier layered on the store — the no-integrity bindings, nub's
+/// phantom sidecars — reads both, primary first, and writes only the
+/// primary, exactly as the CAS and index do.
+#[derive(Clone, Debug)]
+pub struct StoreV1Dirs {
+    pub primary: std::path::PathBuf,
+    pub read_fallback: Option<std::path::PathBuf>,
+}
+
+pub(crate) fn store_v1_dirs(cwd: &std::path::Path) -> StoreV1Dirs {
+    let roots = store_roots(cwd);
+    StoreV1Dirs {
+        primary: v1_of(roots.files),
+        read_fallback: roots.read_fallback.map(v1_of),
+    }
+}
+
+fn v1_of(files: std::path::PathBuf) -> std::path::PathBuf {
+    files
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or(files)
+}
+
+/// The `v1` directory store-adjacent state is WRITTEN to for `cwd`. Reads
+/// that must also see the global store go through [`store_v1_dirs`].
+pub(crate) fn store_v1_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+    store_v1_dirs(cwd).primary
+}
+
+/// [`store_v1_dirs`] anchored the way [`resolved_project_store_dir`] is, for
+/// an embedder's store-adjacent tier. The same fallback decision the engine's
+/// own store handle made, so the embedder's producer and consumer key one
+/// store — and still read through to the global one for warm packages.
+pub fn resolved_project_store_v1_dirs() -> Option<StoreV1Dirs> {
+    let anchor = crate::dirs::workspace_or_project_root()
+        .or_else(|_| crate::dirs::cwd())
+        .ok()?;
+    Some(store_v1_dirs(&anchor))
+}
+
+/// The CAS root when no `storeDir` is configured: `profile_default` (the
+/// embedder's) else the aube-owned default under XDG/HOME (a `$TMPDIR`-rooted
+/// store when neither is set — the store ctors used to hard-fail with
+/// `NoHome` and aborted installs in HOME-less CI), or, when that default is
+/// not writable, a project-local store under `node_modules`.
+///
+/// The unwritable default is a coding agent's command sandbox: Codex and
+/// Claude Code confine writes to the workspace and temp dirs, so the data
+/// home EPERMs and even a network-free `file:` install died on its first CAS
+/// write. A store inside `node_modules` sits on the writable side of that
+/// line — the linker skips dot-entries when it sweeps the root, so it
+/// survives an install, and `rm -rf node_modules` disposes of it like any
+/// cache. The unwritable global store stays attached as a read-only
+/// fallback, so everything it already holds is still reused; only NEW
+/// content lands in the project-local store.
+///
+/// Decided once per process so every open — install, the lifecycle runner's
+/// read-side handle, dlx — agrees on one store. Elsewhere the probe costs one
+/// temp-file create and unlink.
+fn default_store_roots(
+    cwd: &std::path::Path,
+    profile_default: Option<std::path::PathBuf>,
+) -> StoreRoots {
+    static DECISION: std::sync::OnceLock<StoreRoots> = std::sync::OnceLock::new();
+    DECISION
+        .get_or_init(|| {
+            let default = profile_default
+                .or_else(aube_store::dirs::store_dir)
+                .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store/v1/files"));
+            match probe_writable(&default) {
+                Ok(()) => StoreRoots {
+                    files: default,
+                    read_fallback: None,
+                },
+                Err(e) if is_unwritable(&e) => {
+                    let fallback = cwd
+                        .join("node_modules")
+                        .join(format!(".{}-store", aube_util::prog()))
+                        .join("v1")
+                        .join("files");
+                    let sandbox = aube_util::agent_sandbox::detect()
+                        .map(|s| format!(" (inside the {} sandbox)", s.label()))
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_STORE_FALLBACK,
+                        "store {} is not writable{sandbox}; new packages go to the project-local store {} for this run",
+                        default.display(),
+                        fallback.display()
+                    );
+                    StoreRoots {
+                        files: fallback,
+                        read_fallback: Some(default),
+                    }
+                }
+                // Anything else is reported by the first real write, with the
+                // path it failed on.
+                Err(_) => StoreRoots {
+                    files: default,
+                    read_fallback: None,
+                },
+            }
+        })
+        .clone()
+}
+
+/// Can this process create files under `root`? Creates the directory chain
+/// if missing (an empty store dir is the normal first-run state anyway) and
+/// a temp file inside it that is unlinked on drop.
+fn probe_writable(root: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root)?;
+    tempfile::Builder::new()
+        .prefix(".write-probe-")
+        .tempfile_in(root)?;
+    Ok(())
+}
+
+fn is_unwritable(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
 }
 
 /// Resolve the configured `storeDir` for `cwd`, returning `None` if
@@ -379,6 +535,8 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
     paths: &[std::path::PathBuf],
     cwd: &std::path::Path,
     existing: Option<&aube_lockfile::LockfileGraph>,
+    manifest: &aube_manifest::PackageJson,
+    importer_ids: &[String],
 ) -> miette::Result<()> {
     if paths.is_empty() {
         return Ok(());
@@ -400,12 +558,38 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
         aube_store::dirs::store_dir()
             .and_then(|p| p.parent()?.parent().map(std::path::Path::to_path_buf))
     });
-    let ctx = crate::pnpmfile::PreResolutionContext::from_existing(
-        cwd,
-        store_dir.as_deref(),
-        existing,
-        registries,
-    );
+    // Only read when there is no lockfile to project — the settings a
+    // hook sees then are the ones pnpm stamps into its synthesized
+    // empty lockfile. When a lockfile exists its own `settings:` header
+    // is authoritative and this is never consulted.
+    let (settings, peers_suffix_max_length) = if existing.is_some() {
+        // Unread on this arm: with a lockfile to project, the synthesized
+        // object these two feed is never built.
+        (aube_lockfile::LockfileSettings::default(), 0)
+    } else {
+        with_settings_ctx(cwd, |ctx| {
+            (
+                aube_lockfile::LockfileSettings {
+                    auto_install_peers: aube_settings::resolved::auto_install_peers(ctx),
+                    exclude_links_from_lockfile:
+                        aube_settings::resolved::exclude_links_from_lockfile(ctx),
+                    ..Default::default()
+                },
+                aube_settings::resolved::peers_suffix_max_length(ctx),
+            )
+        })
+    };
+    let ctx =
+        crate::pnpmfile::PreResolutionContext::from_existing(crate::pnpmfile::PreResolutionInputs {
+            lockfile_dir: cwd,
+            store_dir: store_dir.as_deref(),
+            existing,
+            manifest,
+            importer_ids,
+            settings,
+            peers_suffix_max_length,
+            registries,
+        });
     crate::pnpmfile::run_pre_resolution_chain(paths, cwd, &ctx)
         .await
         .wrap_err("pnpmfile preResolution hook failed")

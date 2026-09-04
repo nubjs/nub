@@ -587,9 +587,23 @@ fn walk_windows_base(path: &Path, create_missing: bool) -> std::io::Result<()> {
                 && crate::windows_security::harden_private_directory(component).is_ok()
                 && crate::windows_security::directory_is_stable(component, leaf, volume_root)?;
             if !recovered {
-                return Err(std::io::Error::other(
-                    "runtime cache path has an unsafe owner or DACL",
-                ));
+                // Name the COMPONENT, not just the root the caller asked for. The
+                // walk validates every ancestor, so "this path is unsafe" leaves a
+                // reader unable to tell a runner- or installer-created parent from
+                // the leaf nub makes itself — and only the leaf is recoverable, so
+                // which one failed decides whether there is anything to fix. A CI
+                // failure spent hours on that distinction with nothing in the log to
+                // settle it.
+                return Err(std::io::Error::other(format!(
+                    "runtime cache path has an unsafe owner or DACL: {} ({})",
+                    component.display(),
+                    if leaf {
+                        "the cache directory itself, which nub creates and hardens"
+                    } else {
+                        "an ancestor nub does not own, so its permissions are the \
+                         system's to fix"
+                    }
+                )));
             }
         }
     }

@@ -19,6 +19,7 @@ on:
       - 'tests/compile-native-islands/**'
       - 'tests/compile-augmentation/**'
       - 'tests/compile-corpus/**'
+      - 'tests/compile-metadata/**'
       - '.github/workflows/compile-native.yml'
   pull_request:
     branches: [main]
@@ -35,6 +36,7 @@ on:
       - 'tests/compile-native-islands/**'
       - 'tests/compile-augmentation/**'
       - 'tests/compile-corpus/**'
+      - 'tests/compile-metadata/**'
       - '.github/workflows/compile-native.yml'
   workflow_dispatch:
 
@@ -107,8 +109,37 @@ jobs:
             Linux) cp target/release/libnub_native.so runtime/addons/nub-native.node ;;
             *) echo "::error::unsupported runner OS: $RUNNER_OS"; exit 1 ;;
           esac
-          cargo build -p nub-cli --release --features embed-runtime,compile
+          # On Windows, build the same LINKAGE the release ships: a dynamic MSVC CRT
+          # leaves VCRUNTIME140.dll in the import table and the binary dies at
+          # 0xC0000135 on a machine without the redistributable. Scoped to this command
+          # so it never reaches the nub-native cdylib built above, which must stay
+          # dynamic — `+crt-static` is sticky and cannot be undone once applied.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            RUSTFLAGS="-C target-feature=+crt-static" cargo build -p nub-cli --release --features embed-runtime,compile
+          else
+            cargo build -p nub-cli --release --features embed-runtime,compile
+          fi
           (cd crates/nub-launcher && cargo build --locked --release)
+      # This job is the only place BOTH MSVC targets are built on real hardware
+      # (windows-latest for x64, windows-11-arm for arm64), so it is where the
+      # self-contained linkage contract is checked for each of them. The runner
+      # already has the VC++ redistributable, so nothing else here can tell the
+      # difference — the artifact has to be inspected directly.
+      #
+      # The check walks the PE import directory instead of searching the file for
+      # `VCRUNTIME140.dll` — the shortcut that looks equivalent and is not, since a DLL
+      # name is ordinary ASCII and any copy anywhere in the file matches. It also refuses
+      # a binary whose import table it could not read, so the gate cannot pass by finding
+      # nothing.
+      - name: Verify no VC++ redistributable dependency
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in target/release/nub.exe crates/nub-launcher/target/release/nub-launcher.exe; do
+            test -f "$f" || { echo "::error::$f not found on ${{ matrix.platform }} — this gate must not be skipped silently"; exit 1; }
+            node scripts/pe-imports.mjs --check "$f" > /dev/null
+          done
       # Fixture contract (owned by tests/compile-native-islands):
       # - `run.sh` receives exactly the freshly built candidate and launcher.
       # - `--mode prebuilt` must install exactly sharp@0.35.3 using that
@@ -213,6 +244,23 @@ jobs:
           COMPILE_FLAGS=--smol \
           NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
             tests/compile-augmentation/run.sh "${version#v}"
+      # Windows only, because the version resource is a PE structure and the
+      # launcher template this job built is the host's. `verify_artifact` already
+      # refuses a compile whose resource is unreachable, so what this adds is the
+      # VALUES: the package.json defaults, an override, a drop, and the negative
+      # control that an empty manifest earns no resource at all.
+      - name: Executable metadata reaches the PE
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub.exe"
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher.exe"
+          test -f "$nub"
+          test -f "$launcher"
+          version="$(node --version)"
+          NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
+            tests/compile-metadata/run.sh "${version#v}"
       - name: Upload native-island failure logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
