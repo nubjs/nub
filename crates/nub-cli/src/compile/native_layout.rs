@@ -513,16 +513,16 @@ fn ensure_metadata_matches(
     )
 }
 
-/// Names WHERE `supportedArchitectures` works, for the same reason
-/// [`super::native`]'s `check_target` does: the engine reads that setting from
-/// an incumbent pnpm or yarn's own config. Every project can still select the
-/// target for one install with Nub's neutral `--os` / `--cpu` / `--libc` flags.
+/// Leads with Nub's own `--os` / `--cpu` / `--libc` install flags, which work in
+/// every project, for the same reason [`super::native`]'s `check_target` does:
+/// `supportedArchitectures` is the persistent form of the same selection, but
+/// the engine reads it only from an incumbent pnpm or yarn's config.
 fn architecture_advice() -> &'static str {
     "\x20\x20Install a compatible optional package before compiling.\n\
-     \n\x20\x20If this project uses pnpm or yarn, set supportedArchitectures.os, .cpu and .libc\n\
-     \x20\x20in its config and install again. Otherwise ask for them on the install itself —\n\
-     \x20\x20nub install --os <os> --cpu <cpu> --libc <libc> — or, if no prebuilt exists,\n\
-     \x20\x20install on the target platform; a container is the usual way."
+     \n\x20\x20Select it for one install with nub install --os <os> --cpu <cpu> --libc <libc>, or set\n\
+     \x20\x20supportedArchitectures.os, .cpu and .libc in the project config and install again.\n\
+     \x20\x20If no prebuilt exists for the target, install on the target platform itself; a\n\
+     \x20\x20container is the usual way."
 }
 
 /// Resolve a declared edge to an installed, readable package.
