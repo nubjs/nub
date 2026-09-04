@@ -1,0 +1,2142 @@
+{
+ "packages": {
+  "@apollo/protobufjs": {
+   "default": {
+    "": "Measured 1.2.7 on Windows; the dist-tag 1.2.8 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it. win32 egress restored 2026-09-02: the `<1.2.8` band already grants win32 egress and both bands run the same install script, so the two cells disagreed on the network axis with no measurement behind the difference. Every corpus record backing the denial carries `arms-unfalsifiable`, which cannot license a narrowing, and baseline_caps() grants egress -- so denial was the deviation needing evidence."
+   },
+   "versions": {
+    "<1.2.8": {
+     "": "measured 1.2.7; covers everything below 1.2.8"
+    }
+   }
+  },
+  "@apollo/rover": {
+   "default": {
+    "": "latest measured 0.41.0"
+   },
+   "versions": {
+    "<0.41.0": {
+     "": "measured 0.0.9, 0.1.9, 0.2.1, 0.3.0, 0.4.8, 0.5.4, 0.6.0, 0.7.0, 0.8.2, 0.9.1, 0.10.0, 0.11.1, 0.12.2, 0.13.0, 0.14.2, 0.15.0, 0.16.2, 0.17.3, 0.18.1, 0.19.1, 0.20.0, 0.21.0, 0.22.0, 0.23.0, 0.24.0, 0.25.0, 0.26.3, 0.27.2, 0.28.1, 0.29.1, 0.30.0, 0.31.3, 0.32.1, 0.33.0, 0.34.1, 0.35.0, 0.36.2, 0.37.0, 0.38.1, 0.39.1, 0.40.0; covers everything below 0.41.0"
+    }
+   }
+  },
+  "@arbitrum/sdk": {
+   "default": {
+    "": "latest measured 4.1.0"
+   },
+   "versions": {
+    "<4.1.0": {
+     "": "measured 1.1.4, 2.0.0; covers everything below 4.1.0"
+    }
+   }
+  },
+  "@aws-amplify/cli": {
+   "default": {
+    "": "latest measured 14.5.1; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and product exactly"
+   },
+   "versions": {
+    "<14.5.1": {
+     "": "measured 4.9.0, 8.5.1, 9.2.1, 10.8.1, 11.1.1, 12.9.0, 13.0.1; covers everything below 14.5.1"
+    }
+   }
+  },
+  "@azure-devops/mcp": {
+   "default": {
+    "": "latest measured 2.9.0"
+   },
+   "versions": {
+    "<2.9.0": {
+     "": "measured 2.8.0; covers everything below 2.9.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "@bazel/cypress": {
+   "default": {
+    "": "latest measured 5.8.1; linux write narrowed to deps 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352. npm_version_check.js reads package.json and process.env and throws only inside a Bazel context, so it writes nothing; the control arm at the wide grant left the arm's own real home EMPTY, and the narrowed arm reproduces its installer output and product exactly"
+   }
+  },
+  "@bufbuild/buf": {
+   "default": {
+    "": "latest measured 1.54.0"
+   }
+  },
+  "@clerk/shared": {
+   "default": {
+    "": "latest measured 4.29.1"
+   },
+   "versions": {
+    "<4.29.1": {
+     "": "measured 2.9.2, 3.9.8, 4.9.0; covers everything below 4.29.1; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output byte for byte and leaves the same .config/clerk/config.json in the arm's own real home; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly; macOS repaired 2026-09-02 from write:null up to the base profile's write.deps plus network: the winning state for 2.9.2, 3.9.8 and 4.9.0 on darwin is a state-0 pass carrying only the Library/Preferences/clerk promotion, and state 0 is spelled as an ABSENT ENTRY, which resolves to catalog_v2::baseline_caps(). The linux cell is untouched — its narrow arm was measured at write:null with peers 0"
+    }
+   }
+  },
+  "@confluentinc/kafka-javascript": {
+   "default": {
+    "": "latest measured 1.8.0"
+   }
+  },
+  "@copilotkit/aimock": {
+   "default": {
+    "": "latest measured 1.38.0"
+   },
+   "versions": {
+    "<1.38.0": {
+     "": "measured 1.14.8; covers everything below 1.38.0"
+    }
+   }
+  },
+  "@coze/cli": {
+   "default": {
+    "": "latest measured 0.3.6"
+   },
+   "versions": {
+    "<0.3.6": {
+     "": "measured 0.2.0-alpha.f62ab3, 0.3.5; covers everything below 0.3.6; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and product exactly"
+    }
+   }
+  },
+  "@cubejs-backend/cubestore": {
+   "default": {
+    "": "latest measured 1.7.19"
+   }
+  },
+  "@cypress/snapshot": {
+   "default": {
+    "": "latest measured 2.1.7"
+   }
+  },
+  "@danmarshall/deckgl-typings": {
+   "default": {
+    "": "latest measured 4.9.28"
+   }
+  },
+  "@depot/cli": {
+   "default": {
+    "": "latest measured 0.0.1-cli.2.99.1; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "@discordjs/opus": {
+   "default": {
+    "": "latest measured 0.10.0; macOS network withdrawal REMOVED — measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked"
+   },
+   "versions": {
+    "<0.10.0": {
+     "": "measured 0.1.0, 0.2.1; covers everything below 0.10.0"
+    }
+   }
+  },
+  "@eth-optimism/core-utils": {
+   "default": {
+    "": "latest measured 0.13.2. Carries the <0.13.2 band's measured grant, per-OS blocks included. Of this package's 228 published versions, 165 resolve to `default` and 28 of those declare a lifecycle hook (preinstall `npx only-allow pnpm`); all 28 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<0.13.2": {
+     "": "measured 0.0.0-develop-20230928190155, 0.13.1; covers everything below 0.13.2"
+    }
+   }
+  },
+  "@eth-optimism/sdk": {
+   "default": {
+    "": "latest measured 3.3.3. Carries the <3.3.3 band's measured grant, per-OS blocks included. Of this package's 500 published versions, 424 resolve to `default` and 236 of those declare a lifecycle hook (preinstall `npx only-allow pnpm`); all 236 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<3.3.3": {
+     "": "measured 0.0.0-will-20230915154458, 3.2.1; covers everything below 3.3.3"
+    }
+   }
+  },
+  "@eversdk/lib-node": {
+   "default": {
+    "": "latest measured 1.48.0"
+   }
+  },
+  "@firebase/util": {
+   "default": {
+    "": "latest measured 1.15.1"
+   }
+  },
+  "@heroui/shared-utils": {
+   "default": {
+    "": "Measured 2.1.9 on Windows; the dist-tag 2.1.12 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<2.1.12": {
+     "": "measured 0.0.0-canary-20251004132934, 2.1.9; covers everything below 2.1.12"
+    }
+   }
+  },
+  "@hyperjump/json-pointer": {
+   "default": {
+    "": "latest measured 1.1.2"
+   },
+   "versions": {
+    "<1.1.2": {
+     "": "measured 0.9.8; covers everything below 1.1.2"
+    }
+   }
+  },
+  "@hyperjump/json-schema": {
+   "default": {
+    "": "latest measured 1.17.8"
+   },
+   "versions": {
+    "<1.17.8": {
+     "": "measured 0.18.5, 0.22.0, 0.23.5; covers everything below 1.17.8; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "@hyperjump/json-schema-core": {
+   "default": {
+    "": "latest measured 0.28.5"
+   },
+   "versions": {
+    "<0.28.5": {
+     "": "measured 0.23.7, 0.27.0; covers everything below 0.28.5; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "@hyperjump/pact": {
+   "default": {
+    "": "latest measured 1.4.0"
+   },
+   "versions": {
+    "<1.4.0": {
+     "": "measured 0.2.5; covers everything below 1.4.0"
+    }
+   }
+  },
+  "@larksuite/cli": {
+   "default": {
+    "": "latest measured 1.0.87"
+   },
+   "versions": {
+    "<1.0.87": {
+     "": "measured 1.0.9; covers everything below 1.0.87"
+    }
+   }
+  },
+  "@lottiefiles/lottie-player": {
+   "default": {
+    "": "latest measured 2.0.12"
+   },
+   "versions": {
+    "<2.0.12": {
+     "": "measured 2.0.1; covers everything below 2.0.12"
+    }
+   }
+  },
+  "@matrix-org/matrix-sdk-crypto-nodejs": {
+   "default": {
+    "": "latest measured 0.6.6"
+   }
+  },
+  "@mongodb-js/zstd": {
+   "default": {
+    "": "latest measured 7.0.0"
+   }
+  },
+  "@mui/x-telemetry": {
+   "default": {
+    "": "latest measured 9.10.0; linux/win32 write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write.userHome WITHDRAWN 2026-09-01, reversing that restore on linux only and leaving write.deps, write.project and network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 64/64 artefacts while the empty arm went red, and the two arms' entire jail $HOME holds 16 entries on each side with nothing in either direction. postinstall/storage.js resolves its config dir as XDG_CONFIG_HOME || os.homedir() + '/.config', and the jail's env allowlist drops XDG_CONFIG_HOME, so under the jail that line lands in the redirected private home, observed at .cache/nub/jail-home/<hash>/.config/mui-x/config.json. The restore had measured that write with the jail off, where $HOME is the real home, and inferred a jailed capability requirement from it; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 9.10.0 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms printing the MUI X telemetry notice at rc=0 over 7219 paths with nothing the control produced that the arm did not. USERPROFILE is redirected into the granted private jail home, so the config write postinstall/storage.js resolves as XDG_CONFIG_HOME || os.homedir() + '/.config' lands there rather than in the real home, which is the mechanism the linux withdrawal already recorded. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it."
+   }
+  },
+  "@nestjs/core": {
+   "default": {
+    "": "latest measured 11.2.1"
+   },
+   "versions": {
+    "<11.2.1": {
+     "": "measured 9.4.3, 11.1.19; covers everything below 11.2.1"
+    }
+   }
+  },
+  "@netlify/esbuild": {
+   "default": {
+    "": "latest measured 0.14.39-1"
+   },
+   "versions": {
+    "<0.14.39": {
+     "": "measured 0.13.6, 0.14.39-1; covers everything below 0.14.39; win32 writePaths RESTORED 2026-09-01 — the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write WITHDRAWN 2026-09-01 on a later Linux descent of 0.13.6 that verified the minimum as network plus writePaths [.cache/esbuild, .config/configstore], with a red drop-no-network arm proving the venue produced signal, so the .config/configstore promotion replaces the home reach the epoch-71 log attributed"
+    }
+   }
+  },
+  "@notarize/qlc-cli": {
+   "default": {
+    "": "latest measured 4.2.0"
+   }
+  },
+  "@nuxt/components": {
+   "default": {
+    "": "latest measured 2.2.1"
+   },
+   "versions": {
+    "<2.2.1": {
+     "": "measured 2.1.0; covers everything below 2.2.1"
+    }
+   }
+  },
+  "@openapitools/openapi-generator-cli": {
+   "default": {
+    "": "latest measured 2.39.1"
+   }
+  },
+  "@opencode-ai/cli": {
+   "default": {
+    "": "The only measurement at any version is 0.0.0-next-16573, a prerelease, and a prerelease never matches a `<X` bound -- so the band below is unreachable by the very run that produced it. The current dist-tag is also a prerelease, so it lands here too. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<1.18.18": {
+     "": "measured 0.0.0-next-16573; covers everything below 1.18.18. ⛔ WRITE WITHDRAWN 2026-09-01, and the band deliberately kept as a notes-only entry rather than deleted: an absent package falls back to baseline_caps() and still promotes the baseline write paths, while a present entry resolves to Some(grant) and returns before the promotion loop, so a notes-only band is strictly tighter than no band. Two things carry the withdrawal. The band is unreachable by its own evidence — 0.0.0-next-16573 is a prerelease, and a prerelease never matches a `<X` bound, so that run resolves to `default` rather than here, and every version this band covers is unmeasured. And those versions run nothing: all 43 published releases below 1.18.18 were fetched as their packed tarballs, and none declares preinstall, install or postinstall, none ships a binding.gyp. aube executes nothing for a package in that state (aube-scripts has_dep_lifecycle_work = those three hooks plus the implicit node-gyp rebuild), so the jail never compiles a grant here and a write capability cannot be exercised. Network and the writePaths promotion are untouched — the withdrawal is scoped to write — and the prerelease that needed the rest still lands on `default`, which keeps it."
+    }
+   }
+  },
+  "@pact-foundation/pact-node": {
+   "default": {
+    "": "latest measured 10.18.0; linux write.userHome WITHDRAWN 2026-09-01, leaving write.project, write.deps and network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 3360/3360 artefacts while minus-network and empty both went red, the empty arm naming write.project by EACCES opening the project's .npmrc and the GitHub binary fetch naming network, so both retained capabilities are proved necessary and the home reach is not. The two arms' entire jail $HOME holds 15 entries on each side with nothing in either direction"
+   }
+  },
+  "@paloaltonetworks/postman-code-generators": {
+   "default": {
+    "": "latest measured 1.1.15-patch.2"
+   },
+   "versions": {
+    "<1.1.15-patch.2": {
+     "": "measured 1.1.9; covers everything below 1.1.15-patch.2; macOS keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; linux keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 on nub-linux by cold-network-sweep.sh: fails cold as shipped, succeeds with egress restored"
+    }
+   }
+  },
+  "@pdftron/pdfnet-node": {
+   "default": {
+    "": "latest measured 12.0.0; linux write RESTORED 2026-09-01 from corpus epoch 71, then WITHDRAWN again 2026-09-01 by measurement, leaving network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 10/10 artefacts while minus-network and empty both went red on one shortfall, getaddrinfo EAI_AGAIN downloads.apryse.com via prebuild-install, so network is proved necessary and the home reach is not. The two arms' entire jail $HOME holds 18 entries on each side with nothing in either direction. The restore's premise was that the artifact gate walks only the package's own directory and so could not see the real-home writes the OBSERVE census attributed; that census runs the script with the jail off, where $HOME is the real home, so it measured an unjailed write and inferred a jailed capability requirement from it"
+   }
+  },
+  "@playwright/browser-chromium": {
+   "default": {
+    "": "latest measured 1.62.1; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 8/8 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 596 files in the free ms-playwright leaf and none in its private home. The `<1.62.1` band was MEASURED on this axis 2026-09-01 by the two-binary `materialize_tool_leaf` differential and its linux write is now withdrawn too"
+   },
+   "versions": {
+    "<1.62.1": {
+     "": "measured 1.61.1; covers everything below 1.62.1; macOS keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, and since 46b623e352 `materialize_tool_leaf` (compiler::preset) CREATES that leaf before the confined launch, so `compile_mount_plan` attaches the read-write rule it used to drop as an absent Speculative path. Measured 1.61.1 on a real Landlock ABI 7 kernel as a two-binary differential one source line apart, materialization live versus neutered, with the leaf asserted absent immediately before each arm: neutered, the arm dies EACCES mkdir on the leaf; live, the same arm granting only `network` verifies at 8/8 artefacts and leaves a 278568152-byte chromium at tools/ms-playwright/chromium-1228/chrome-linux64/chrome. Corroborated by the corpus record of 2026-09-01T10:30, whose post-0492dce58 OBSERVE bills the 617 leaf writes `toolsRw NOT billed` and synthesizes exactly {network:true}, and whose verify arm fails the same EACCES only because its nub 30757a70ff predates 46b623e352"
+    }
+   }
+  },
+  "@playwright/browser-firefox": {
+   "default": {
+    "": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 8/8 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 50 files in the free ms-playwright leaf and none in its private home"
+   }
+  },
+  "@playwright/browser-webkit": {
+   "default": {
+    "": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 8/8 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 56 files in the free ms-playwright leaf and none in its private home"
+   }
+  },
+  "@posthog/cli": {
+   "default": {
+    "": "latest measured 0.11.2"
+   }
+  },
+  "@prisma/client": {
+   "default": {
+    "": "latest measured 7.9.1"
+   },
+   "versions": {
+    "<7.9.1": {
+     "": "measured 4.16.2, 5.22.0, 6.19.3; covers everything below 7.9.1"
+    }
+   }
+  },
+  "@prisma/engines": {
+   "default": {
+    "": "latest measured 7.9.1"
+   },
+   "versions": {
+    "<7.9.1": {
+     "": "measured 4.16.2, 5.22.0, 6.19.3, 7.8.0; covers everything below 7.9.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "@progress/kendo-licensing": {
+   "default": {
+    "": "Measured 1.9.1 on Windows; the dist-tag 1.11.3 is the bound itself. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it.; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly win32 egress restored 2026-09-02: the `<1.11.3` band already grants win32 egress and both bands run the same install script, so the two cells disagreed on the network axis with no measurement behind the difference. Every corpus record backing the denial carries `arms-unfalsifiable`, which cannot license a narrowing, and baseline_caps() grants egress -- so denial was the deviation needing evidence."
+   },
+   "versions": {
+    "<1.11.3": {
+     "": "measured 0.2.0, 0.3.0, 0.4.0, 1.9.1; covers everything below 1.11.3"
+    }
+   }
+  },
+  "@pulumi/aws-native": {
+   "default": {
+    "": "latest measured 1.74.1"
+   }
+  },
+  "@pulumi/awsx": {
+   "default": {
+    "": "latest measured 2.9.0"
+   }
+  },
+  "@pulumi/azuread": {
+   "default": {
+    "": "latest measured 6.10.0. Carries the <6.10.0 band's measured grant, per-OS blocks included. Of this package's 952 published versions, 828 resolve to `default` and 239 of those declare a lifecycle hook (install `node scripts/install-pulumi-plugin.js resource azuread`); all 239 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<6.10.0": {
+     "": "measured 0.0.1-dev.1556840842, 0.18.4, 1.8.0, 2.6.1, 3.6.0, 4.3.0, 5.9.0; covers everything below 6.10.0"
+    }
+   }
+  },
+  "@pulumi/cloudflare": {
+   "default": {
+    "": "latest measured 6.19.0. Carries the <6.19.0 band's measured grant, per-OS blocks included. Of this package's 887 published versions, 719 resolve to `default` and 204 of those declare a lifecycle hook (install `node scripts/install-pulumi-plugin.js resource cloudflare`); all 204 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<6.19.0": {
+     "": "measured 0.0.1-dev.1552019135, 1.9.0, 2.9.0, 3.6.0, 4.9.0, 5.9.0; covers everything below 6.19.0"
+    }
+   }
+  },
+  "@pulumi/command": {
+   "default": {
+    "": "latest measured 4.5.0"
+   }
+  },
+  "@pulumi/datadog": {
+   "default": {
+    "": "latest measured 5.10.0. Carries the <5.10.0 band's measured grant, per-OS blocks included. Of this package's 814 published versions, 673 resolve to `default` and 153 of those declare a lifecycle hook (install `node scripts/install-pulumi-plugin.js resource datadog`); all 153 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<5.10.0": {
+     "": "measured 0.0.1-dev.1561157133, 0.18.9, 1.4.0, 2.9.0, 3.3.0, 4.9.0; covers everything below 5.10.0"
+    }
+   }
+  },
+  "@pulumi/docker": {
+   "default": {
+    "": "latest measured 3.6.1"
+   }
+  },
+  "@pulumi/docker-build": {
+   "default": {
+    "": "Measured 0.0.14; the dist-tag 0.0.22 is the bound itself, so the current release lands here and the postinstall that fetches a plugin needs egress. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<0.0.22": {
+     "": "measured 0.0.14; covers everything below 0.0.22"
+    }
+   }
+  },
+  "@pulumi/gcp": {
+   "default": {
+    "": "latest measured 9.34.1"
+   },
+   "versions": {
+    "<9.34.1": {
+     "": "measured 0.11.1, 0.12.0, 0.13.0-dev-1528849084-ge189779, 0.14.3, 0.15.1, 0.16.9, 1.9.0, 2.9.0, 3.9.0, 4.9.1, 5.9.0, 6.9.0; covers everything below 9.34.1"
+    },
+    "<0.16.9": {
+     "": "measured 0.11.1, 0.12.0, 0.13.0-dev-1528849084-ge189779, 0.14.3, 0.15.1; covers everything below 0.16.9"
+    }
+   }
+  },
+  "@pulumi/kubernetes": {
+   "default": {
+    "": "The corpus tops out at 4.9.1 while the note claimed 4.33.0 and the dist-tag is 4.34.0, so every current release lands here and the postinstall that fetches a plugin needs egress. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<4.33.0": {
+     "": "measured 0.0.1-testwindows.signing, 0.11.3, 0.12.0, 0.13.0, 0.14.0, 0.15.1, 0.16.0, 0.17.5, 0.18.0, 0.19.0, 0.20.4, 1.6.0, 2.9.1, 3.9.0, 4.9.1; covers everything below 4.33.0"
+    }
+   }
+  },
+  "@pulumi/postgresql": {
+   "default": {
+    "": "latest measured 3.18.0. Carries the <3.18.0 band's measured grant, per-OS blocks included. Of this package's 682 published versions, 613 resolve to `default` and 139 of those declare a lifecycle hook (install `node scripts/install-pulumi-plugin.js resource postgresql`); all 139 are PRERELEASES, and no stable release above the bound runs anything, because the hook was dropped in later stables. A prerelease can never match a plain `<X` bound, so the band is unreachable for every one of them and `default` is the only grant they can get. Notes-only, it granted no egress and no write at all, which is strictly tighter than having no entry: an absent package still takes baseline_caps() plus BASELINE_WRITE_PATHS. No version of this package sets gypfile, and binding.gyp is absent from packed tarballs sampled across the range of script-free versions, so implicit_install_script cannot fire either. An unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<3.18.0": {
+     "": "measured 0.0.1-alpha.1592990611, 0.18.9, 1.7.0, 2.9.0, 3.9.0; covers everything below 3.18.0"
+    }
+   }
+  },
+  "@pulumi/tls": {
+   "default": {
+    "": "latest measured 5.5.1"
+   },
+   "versions": {
+    "<5.5.1": {
+     "": "measured 0.18.5, 1.6.0, 2.5.0, 3.4.0, 4.9.1, 5.1.0-alpha.1694757639; covers everything below 5.5.1"
+    }
+   }
+  },
+  "@railway/cli": {
+   "default": {
+    "": "latest measured 5.34.0"
+   }
+  },
+  "@salesforce/cli": {
+   "default": {
+    "": "latest measured 2.146.3"
+   }
+  },
+  "@sap/hana-client": {
+   "default": {
+    "": "latest measured 2.29.23"
+   }
+  },
+  "@sematext/gc-stats": {
+   "default": {
+    "": "latest measured 1.5.9; egress GRANTED 2026-08-18 — the entry named no network at all, and a present entry grants only what it names, so the default silently denied egress to an install script that downloads a prebuilt (`npx node-pre-gyp install --fallback-to-build`). Measured cold with the override banner confirmed loaded: 2 DNS failures cold, 0 with egress granted; rc stayed 0 BOTH ways because the fallback compiled from source. A withheld download here costs every user a source build and hard-fails anyone without a toolchain"
+   }
+  },
+  "@sentry/cli": {
+   "default": {
+    "": "latest measured 3.6.2"
+   },
+   "versions": {
+    "<3.6.2": {
+     "": "measured 1.77.3, 2.58.6, 3.6.0; covers everything below 3.6.2; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "@shoelace-style/shoelace": {
+   "default": {
+    "": "latest measured 2.13.1; the postinstall is `npx playwright install`, read out of the packed tarball, so `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, and the browser download never reaches the real home; linux write WITHDRAWN 2026-09-01, leaving network in place: a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 5833/5833 artefacts while minus-network and empty both went red on getaddrinfo EAI_AGAIN registry.npmjs.org, so network is proved necessary and the home reach is not; that arm put 702 files in the free leaf, and its remaining 191 private-home files are npx's own cache under .npm/_npx and .npm/_cacache in the redirected home; macOS write WITHDRAWN 2026-09-01 by the same ladder, keeping writePaths: the minus-network arm goes red with ENOTFOUND and an empty tool-cache leaf, while the minus-home arm fills that leaf with 7315 files across the same five browser directories as the shipped grant"
+   }
+  },
+  "@shopify/ngrok": {
+   "default": {
+    "": "latest measured 4.3.2; win32 writePaths RESTORED 2026-09-01 — the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 4.3.2 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms downloading ngrok-v3-stable-windows-amd64.zip from bin.equinox.io and unpacking ngrok.exe into the store cell at rc=0 over 7593 paths. The zip was observed landing under the redirected APPDATA inside the granted private jail home, so the AppData/Roaming/ngrok promotion carries the product and the real-home write is unused. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it."
+   }
+  },
+  "@sitespeed.io/chromedriver": {
+   "default": {
+    "": "latest measured 149.0.7827"
+   }
+  },
+  "@sitespeed.io/edgedriver": {
+   "default": {
+    "": "latest measured 149.0.4022"
+   }
+  },
+  "@stdlib/math-base-assert-is-infinite": {
+   "default": {
+    "": "latest measured 0.0.7"
+   }
+  },
+  "@stdlib/math-base-assert-is-nan": {
+   "default": {
+    "": "latest measured 0.2.3"
+   },
+   "versions": {
+    "<0.2.3": {
+     "": "measured 0.0.6; covers everything below 0.2.3"
+    }
+   }
+  },
+  "@stdlib/math-base-assert-is-positive-zero": {
+   "default": {
+    "": "latest measured 0.0.6"
+   }
+  },
+  "@stdlib/math-base-napi-binary": {
+   "default": {
+    "": "latest measured 0.3.3"
+   },
+   "versions": {
+    "<0.3.3": {
+     "": "measured 0.0.6; covers everything below 0.3.3"
+    }
+   }
+  },
+  "@stdlib/number-float64-base-to-words": {
+   "default": {
+    "": "latest measured 0.2.3"
+   },
+   "versions": {
+    "<0.2.3": {
+     "": "measured 0.0.4; covers everything below 0.2.3"
+    }
+   }
+  },
+  "@substrate/connect": {
+   "default": {
+    "": "latest measured 0.8.0"
+   }
+  },
+  "@syncfusion/ej2-angular-base": {
+   "default": {
+    "": "latest measured 34.1.29"
+   }
+  },
+  "@team-plain/typescript-sdk": {
+   "default": {
+    "": "latest measured 5.12.1"
+   },
+   "versions": {
+    "<5.12.1": {
+     "": "measured 2.9.0; covers everything below 5.12.1"
+    }
+   }
+  },
+  "@tensorflow/tfjs-backend-wasm": {
+   "default": {
+    "": "latest measured 4.22.0. Carries the <4.22.0 band's measured grant, per-OS block included, because every version that lands HERE and executes anything is a prerelease. 1.4.0-alpha1 and 1.4.0-alpha2 are the only 2 of 88 published versions declaring a lifecycle hook (preinstall 'cd ../tfjs-core && yarn && yarn build'), agreed by the full packument's scripts and the abbreviated one's hasInstallScript, and no version sets gypfile, so there is no implicit node-gyp path either. A prerelease never matches a <X bound, so those two resolve to default, and the notes-only default they used to land on grants no egress and no write at all, which is strictly tighter than having no entry (an absent package still takes baseline_caps plus BASELINE_WRITE_PATHS). The grant restored here is the one measured AT 1.4.0-alpha2, which is where the /proc/self/stat residual behind the linux write:disk was observed. 4.22.0 and every other real release execute nothing, so the jail compiles no grant for them and this widening cannot reach them."
+   },
+   "versions": {
+    "<4.22.0": {
+     "": "measured 1.4.0-alpha2; covers everything below 4.22.0. The base is the macOS measurement; the Linux overlay is the /proc/self/stat residual, not a path need — the ladder ran this exact grant on linux-x64 and it exited 1 on `EACCES uv_resident_set_memory`, as did the same grant plus read:disk, and only the unconfined rung passed. Landlock cannot reach a per-process /proc entry at any grant short of a whole-/proc subtree, which linux_landlock.rs PROC_READ_PATHS rejects because it exposes a sibling script's environ. Same treatment as @nuxt/components and react-native-purchases. Do not narrow without re-measuring on Linux. ⛔ WRITE WITHDRAWN 2026-09-01, which supersedes that last instruction for the write axis only and leaves it standing for every other axis. 1.4.0-alpha2 is a prerelease, and a prerelease never matches a `<X` bound, so the single run this band rests on resolves to `default` and not one version the band covers was ever measured. All 65 published releases below 4.22.0 were then read from their packed tarballs: none declares preinstall, install or postinstall and none ships a binding.gyp, so aube executes nothing for them and the jail never compiles a grant here. The /proc residual above was observed at the prerelease, which takes `default`; network stays; and re-measuring a real release below 4.22.0 is what would put a write back."
+    }
+   }
+  },
+  "@tensorflow/tfjs-node": {
+   "default": {
+    "": "latest measured 4.22.0"
+   }
+  },
+  "@tloncorp/tlon-skill": {
+   "default": {
+    "": "latest measured 0.5.0"
+   }
+  },
+  "@trufflesuite/bigint-buffer": {
+   "default": {
+    "": "latest measured 1.1.9"
+   }
+  },
+  "@vscode/deviceid": {
+   "default": {
+    "": "latest measured 0.1.5"
+   }
+  },
+  "@vscode/ripgrep": {
+   "default": {
+    "": "latest measured 1.18.0"
+   },
+   "versions": {
+    "<1.18.0": {
+     "": "measured 1.17.1; covers everything below 1.18.0"
+    }
+   }
+  },
+  "@vscode/windows-registry": {
+   "default": {
+    "": "latest measured 1.2.0"
+   }
+  },
+  "angularx-qrcode": {
+   "default": {
+    "": "latest measured 22.0.1. Carries the <22.0.1 band's measured grant, per-OS blocks included, because every version that lands HERE and executes anything is a prerelease. 1.7.0-beta.1, 1.7.0-beta.3 and 1.7.0-beta.5 are the only 3 of 122 published versions declaring a lifecycle hook (postinstall patch-package), agreed by the full packument's scripts and the abbreviated one's hasInstallScript, and no version sets gypfile. A prerelease never matches a <X bound, so those three resolve to default, and the notes-only default they used to land on grants no egress, no write and no promotion at all, which is strictly tighter than having no entry. The grant restored here is the one measured AT 1.7.0-beta.5: write is userHome on win only, and macOS and Linux take the configstore promotion on top of the base profile. The record behind those two is a state-0 pass — its grant names no read, write or network atom, and the search spells state 0 as NO ENTRY, which resolves to catalog_v2::baseline_caps(). So the measurement licenses the promotion, never a withdrawal: macOS and Linux carry write.deps and network because the base profile does. An earlier reading of that same record took the absent network key for a measured refusal and left both platforms below the baseline on egress and write.deps; that was a misreading of the state space, not a measurement. 22.0.1 and every other real release execute nothing, so this widening cannot reach them."
+   },
+   "versions": {
+    "<22.0.1": {
+     "": "measured 1.7.0-beta.5; covers everything below 22.0.1. ⛔ WRITE WITHDRAWN 2026-09-01: 1.7.0-beta.5 is a prerelease, and a prerelease never matches a `<X` bound, so the only run behind this band resolves to `default` and every version the band covers is unmeasured. All 93 published releases below 22.0.1 were then read from their packed tarballs: none declares preinstall, install or postinstall and none ships a binding.gyp, so aube executes nothing for them and the jail never compiles a grant here. The `.config/configstore` writePaths promotion and the win withdrawal of it are left in place — only write is withdrawn — and the band stays a notes-only entry, which resolves to Some(grant) and is strictly tighter than deleting it."
+    }
+   }
+  },
+  "apify-client": {
+   "default": {
+    "": "latest measured 2.24.0"
+   },
+   "versions": {
+    "<2.24.0": {
+     "": "measured 2.23.2; covers everything below 2.24.0"
+    }
+   }
+  },
+  "appium-uiautomator2-driver": {
+   "default": {
+    "": "latest measured 8.4.0"
+   },
+   "versions": {
+    "<8.4.0": {
+     "": "measured 0.0.9, 0.1.1, 0.2.9, 0.3.4, 0.4.6, 0.5.5, 0.6.6, 0.7.7, 0.8.1, 0.9.1, 0.10.0, 0.11.0, 8.2.2; covers everything below 8.4.0; macOS write WITHDRAWN 2026-09-01: with the jail OFF and a real $HOME this install writes ZERO files to the home, so the capability covered a write that does not occur. Measured on four arms: the jail-off control and an arm granting only `network` both produce the same 4 APKs totalling 3,463,052 bytes, while dropping `network` loses uiautomator2/appium-uiautomator2-server-debug-androidTest.apk and uiautomator2/appium-uiautomator2-server-v0.3.0.apk and leaves 52 bytes of pointer stubs; win32 write narrowed 2026-09-02 from disk to read.disk with no write scope, which is what macOS and linux already carry for this band: re-measured at 0.11.0 on a windows-latest runner over a 17-arm ladder in which 16 arms go RED, write.deps, network and write.deps+network among them. The verified minimum is read.disk+network, and it reproduces the control run's script output and product exactly, both arms writing, extracting and copying chromedriver_win32 into the store cell at rc=0. read.disk is retained because it is exactly the arm that passed, and it is strictly narrower than what this cell had: a write reach of disk makes fs_confines false, so backend/windows.rs declines the AppContainer token altogether and applies no rule list, while a read reach of disk compiles disk-minus-secrets allow entries and takes the token normally. 0.11.0 is the HIGHEST version in this band that declares an install script (60 of the 440 versions the band covers do), so the band's easy end is not shadowing a lower one."
+    }
+   }
+  },
+  "applicationinsights-native-metrics": {
+   "default": {
+    "": "latest measured 0.0.9; macOS network withdrawal REMOVED — measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked"
+   }
+  },
+  "aws-iot-device-sdk-v2": {
+   "default": {
+    "": "latest measured 1.28.0"
+   },
+   "versions": {
+    "<1.28.0": {
+     "": "measured 1.8.3; covers everything below 1.28.0"
+    }
+   }
+  },
+  "axios-cache-interceptor": {
+   "default": {
+    "": "latest measured 1.12.3"
+   },
+   "versions": {
+    "<1.12.3": {
+     "": "measured 1.1.0; covers everything below 1.12.3"
+    }
+   }
+  },
+  "azure-functions-core-tools": {
+   "default": {
+    "": "latest measured 4.13.0"
+   }
+  },
+  "azure-streamanalytics-cicd": {
+   "default": {
+    "": "latest measured 4.0.0; macOS write WITHDRAWN 2026-09-01: with the jail OFF and a real $HOME this install writes ZERO files to the home, so the capability covered a write that does not occur. Measured on four arms: the jail-off control and an arm granting only `network` both pass the artifact gate 481/481, while dropping `network` fails it at 6/481, losing bin/ASACommon.dll and 474 more"
+   }
+  },
+  "backport": {
+   "default": {
+    "": "latest measured 12.0.4"
+   }
+  },
+  "base62": {
+   "default": {
+    "": "latest measured 1.2.7"
+   }
+  },
+  "bcrypt": {
+   "default": {
+    "": "latest measured 6.0.0"
+   },
+   "versions": {
+    "<6.0.0": {
+     "": "measured 5.1.1; covers everything below 6.0.0"
+    }
+   }
+  },
+  "better-sqlite3": {
+   "default": {
+    "": "latest measured 13.0.3"
+   },
+   "versions": {
+    "<13.0.3": {
+     "": "measured 8.7.0, 12.11.1, 13.0.1; covers everything below 13.0.3"
+    },
+    "<13.0.1": {
+     "": "measured 8.7.0, 12.11.1; covers everything below 13.0.1"
+    }
+   }
+  },
+  "bigint-buffer": {
+   "default": {
+    "": "latest measured 1.1.5"
+   }
+  },
+  "blake-hash": {
+   "default": {
+    "": "latest measured 2.0.0"
+   }
+  },
+  "bootstrap-vue": {
+   "default": {
+    "": "latest measured 2.23.1"
+   }
+  },
+  "bun": {
+   "default": {
+    "": "latest measured 1.3.14"
+   }
+  },
+  "canvas": {
+   "default": {
+    "": "latest measured 3.2.3"
+   }
+  },
+  "cbor-extract": {
+   "default": {
+    "": "latest measured 2.2.2"
+   },
+   "versions": {
+    "<2.2.2": {
+     "": "measured 1.0.0; covers everything below 2.2.2"
+    }
+   }
+  },
+  "ccxt": {
+   "default": {
+    "": "latest measured 4.5.73"
+   }
+  },
+  "chromedriver": {
+   "default": {
+    "": "latest measured 151.0.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "chromium": {
+   "default": {
+    "": "latest measured 3.0.3"
+   }
+  },
+  "classic-level": {
+   "default": {
+    "": "latest measured 3.0.0"
+   }
+  },
+  "cld": {
+   "default": {
+    "": "latest measured 2.9.1"
+   }
+  },
+  "cldr-data": {
+   "default": {
+    "": "latest measured 36.0.5"
+   }
+  },
+  "cloudflared": {
+   "default": {
+    "": "latest measured 0.7.3"
+   }
+  },
+  "codeceptjs": {
+   "default": {
+    "": "latest measured 1.1.3"
+   }
+  },
+  "compresion": {
+   "default": {
+    "": "latest measured 1.7.11"
+   }
+  },
+  "contentlayer": {
+   "default": {
+    "": "latest measured 0.3.4"
+   },
+   "versions": {
+    "<0.3.4": {
+     "": "measured 0.0.34, 0.1.2, 0.2.9; covers everything below 0.3.4"
+    }
+   }
+  },
+  "ctrlc-windows": {
+   "default": {
+    "": "latest measured 2.2.0"
+   },
+   "versions": {
+    "<2.2.0": {
+     "": "measured 0.1.9, 0.2.0, 1.0.6, 2.0.0; covers everything below 2.2.0"
+    }
+   }
+  },
+  "cwebp-bin": {
+   "default": {
+    "": "latest measured 8.0.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "cypress": {
+   "default": {
+    "": "latest measured 15.20.1; macOS re-measured cold 2026-08-18 and the default band promoted nothing there — the postinstall unzips Cypress.app into cachedir('Cypress'), which is ~/Library/Caches/Cypress on macOS and ~/.cache/Cypress only on linux, so a default naming the linux path alone left the browser in the throwaway home: install exited 0 with one confined spawn, 633 MB stranded under jail-home/cypress-*/Library/Caches/Cypress/15.20.1, `cypress cache list` printed \"No cached binary versions were found.\" and `cypress verify` exited 1 with \"Cypress executable not found at: <home>/Library/Caches/Cypress/15.20.1/Cypress.app/Contents/MacOS/Cypress\"; the same install with install.buildJail false (zero confined spawns) left it usable, and the per-version bands below already carried the macOS path"
+   },
+   "versions": {
+    "<15.20.1": {
+     "": "measured 9.7.0, 11.2.0, 12.17.4, 13.17.0, 14.5.4, 15.19.0, 15.20.0; covers everything below 15.20.1"
+    },
+    "<15.19.0": {
+     "": "measured 9.7.0, 11.2.0, 12.17.4, 13.17.0, 14.5.4; covers everything below 15.19.0"
+    },
+    "<13.17.0": {
+     "": "measured 9.7.0, 11.2.0, 12.17.4; covers everything below 13.17.0"
+    }
+   }
+  },
+  "cz-customizable": {
+   "default": {
+    "": "latest measured 7.5.4"
+   },
+   "versions": {
+    "<7.5.4": {
+     "": "measured 2.6.0; covers everything below 7.5.4"
+    }
+   }
+  },
+  "detox": {
+   "default": {
+    "": "latest measured 22.0.0-rc.0"
+   }
+  },
+  "device-detector-js": {
+   "default": {
+    "": "latest measured 1.0.9"
+   }
+  },
+  "diskusage": {
+   "default": {
+    "": "latest measured 1.2.0"
+   }
+  },
+  "docxtemplater": {
+   "default": {
+    "": "latest measured 3.69.3"
+   },
+   "versions": {
+    "<3.69.3": {
+     "": "measured 0.3.0, 0.5.2, 3.31.3; covers everything below 3.69.3; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "dotnet-2.0.0": {
+   "default": {
+    "": "latest measured 1.4.4"
+   }
+  },
+  "dprint": {
+   "default": {
+    "": "latest measured 0.55.2"
+   },
+   "versions": {
+    "<0.55.2": {
+     "": "measured 0.14.1, 0.15.4, 0.16.3, 0.17.3, 0.18.2, 0.19.2, 0.20.0, 0.21.2, 0.22.2, 0.23.1, 0.24.4, 0.25.1, 0.26.0, 0.27.1, 0.28.0, 0.29.1, 0.30.3, 0.31.1, 0.32.2, 0.33.0, 0.34.5, 0.35.4, 0.36.1, 0.37.1, 0.38.3, 0.39.1, 0.40.2, 0.41.0, 0.42.5, 0.43.2, 0.44.0, 0.45.1, 0.46.3, 0.47.6, 0.48.0, 0.49.1, 0.50.2, 0.51.1, 0.52.0, 0.53.2, 0.54.0; covers everything below 0.55.2"
+    }
+   }
+  },
+  "dtrace-provider": {
+   "default": {
+    "": "latest measured 0.8.8; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "duckdb": {
+   "default": {
+    "": "latest measured 1.4.4; macOS network withdrawal REMOVED — measured cold 2026-08-18: the jail denied the prebuilt download (npm.duckdb.org / github.com respectively) while npm reached it, and the package then compiled from source. The install still exited 0, and the sweep row read BROKEN-EITHER-WAY for an unrelated reason, so neither the exit code nor that verdict surfaced the wrong grant"
+   }
+  },
+  "dugite": {
+   "default": {
+    "": "latest measured 3.2.2"
+   }
+  },
+  "eccrypto": {
+   "default": {
+    "": "latest measured 1.1.6; Windows keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 on nub-win3 by cold-network-sweep.sh: fails cold as shipped, succeeds with egress restored, and like @paloaltonetworks/postman-code-generators it reports NO network error in its log"
+   }
+  },
+  "eckles": {
+   "default": {
+    "": "latest measured 1.4.1"
+   },
+   "versions": {
+    "<1.4.1": {
+     "": "measured 0.1.1, 0.7.2, 1.4.0; covers everything below 1.4.1"
+    }
+   }
+  },
+  "egg-ci": {
+   "default": {
+    "": "latest measured 2.2.0"
+   }
+  },
+  "electron": {
+   "default": {
+    "": "latest measured 43.4.0, but the dist-tag has since moved to 44.x, which lands here because bands are exclusive upper bounds and default is not a base they extend. This band was notes-only, and a notes-only entry is NOT the same as no entry: it resolves to Some(grant) with every capability empty and returns before the promotion loop, so it was strictly tighter than leaving the package uncatalogued. That is an under-grant on a postinstall that downloads electron-v<ver>-<platform>.zip from github.com, which the band below records failing getaddrinfo ENOTFOUND when its network was withdrawn. Mirrors the measured base; the per-OS withdrawals are deliberately not carried up, because each rests on a measurement of a version below 43.4.0 and an unmeasured version takes the wider base until someone measures it. ⛔ Re-examined 2026-09-01 and DELIBERATELY LEFT WIDE, so the argument is recorded rather than re-derived: the sentence above about a postinstall no longer describes this band. Electron removed its `postinstall` on 2026-08-25 and none of the 25 published versions at or above 43.4.0 declares a scripts field at all, read from the packed tarballs of 43.4.0, 44.0.0, 44.1.1 and 45.0.0-alpha.3 against 41.10.7 one version below the band, which does carry `postinstall: node install.js`. Mind the DOCUMENT FLAVOUR rather than distrusting npm's hasInstallScript: it lives only in the abbreviated packument (Accept: application/vnd.npm.install-v1+json) and scripts only in the full one, so reading either off the wrong document returns undefined for every version and manufactures a fake zero -- which is exactly what an earlier version of this note recorded as false for all 1785 versions. Measured over all 1785: absent from the full document every time; present on 1691 in the abbreviated one and omitted when false on the other 94, so absent there means false rather than unknown; and zero disagreements against the full document's scripts under npm's own rule, scripts intersected with preinstall/install/postinstall. ⛔ That does NOT license narrowing this band, and a second pass on 2026-09-01 established why rather than leaving it to be re-derived a third time: a PRERELEASE never matches a plain <X bound, because `Entry::grant_for` selects with `version_scope::applies` = `semver::VersionReq::matches`, pinned in that module as !applies(<0.13.0, 0.12.0-rc.1). So `<43.4.0` covers only the STABLE releases below it, and all 711 electron prereleases fall through to `default` alongside the 7 stable releases above the bound. `default` therefore covers 718 versions, 665 of which declare an install hook -- `postinstall: node install.js`, back to 1.8.2-beta.1. Narrowing it would strip the grant from those 665. An under-grant is worse than an over-grant, so the band stays wide, and the latest release dropping its script is never on its own a reason to touch a `default` band."
+   },
+   "versions": {
+    "<43.4.0": {
+     "": "measured 23.3.13, 31.7.7, 33.4.11, 39.8.9, 40.10.2, 41.1.0, 43.2.0; covers everything below 43.4.0; macOS keeps the write withdrawal but NOT the network one — measured cold 2026-08-17, the postinstall downloads electron-v33.4.11-darwin-arm64.zip from github.com and the withdrawal made a cold install fail getaddrinfo ENOTFOUND; artefact then matches npm exactly; linux write WITHDRAWN 2026-09-01, leaving network in place: `redirect_electron_cache` (pm_engine::build_jail) points electron_config_cache at $cache/nub/pm/tools/electron-cache, and since 46b623e352 `materialize_tool_leaf` (compiler::preset) CREATES that leaf before the confined launch, so `compile_mount_plan` attaches the read-write rule it used to drop as an absent Speculative path. Measured 39.8.9 on a real Landlock ABI 7 kernel as a two-binary differential one source line apart, with the leaf asserted absent immediately before each arm: the arm granting only `network` verifies at 85/85 artefacts and leaves a 113444340-byte electron-v39.8.9-linux-x64.zip in the leaf. The `default` band is untouched and stays wide for the reason recorded there"
+    }
+   }
+  },
+  "electron-chromedriver": {
+   "default": {
+    "": "latest measured 43.2.0; macOS keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; macOS write WITHDRAWN 2026-09-01, reversing that restore on macOS only: the OBSERVE census paths are under ~/Library/Caches/electron, which is @electron/get's UNJAILED default; under the jail `redirect_electron_cache` (pm_engine::build_jail) points `electron_config_cache` at $cache/nub/pm/tools/electron-cache, which `compiler::preset` grants read-write to every jailed script unconditionally, so that write is free. Re-measured with a jail-off control: jail OFF leaves the content-addressed download directory in the real home and the leaf empty, jail ON mirrors it, and an arm granting only `network` reproduces the package's bin/ product while dropping `network` fails getaddrinfo ENOTFOUND github.com; linux write WITHDRAWN 2026-09-01, leaving network in place: the same `redirect_electron_cache` redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 10/10 artefacts while minus-network and empty both went red at 5/10, so network is proved necessary and the home reach is not. The win32 restore above is untouched and still rests on the epoch-71 census, because that ladder ran only on linux; the `<43.2.0` and `<32.3.3` bands were likewise MEASURED on this axis 2026-09-01 by the two-binary `materialize_tool_leaf` differential and their linux write is now withdrawn too"
+   },
+   "versions": {
+    "<43.2.0": {
+     "": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7, 32.3.3, 33.4.9, 34.5.8, 35.7.5, 36.9.5, 37.7.1, 38.8.6, 39.8.9, 40.9.2, 41.9.2, 42.8.0; covers everything below 43.2.0; macOS write WITHDRAWN 2026-09-01, reversing the epoch-71 restore: the OBSERVE census paths are under ~/Library/Caches/electron, which is @electron/get's UNJAILED default; under the jail `redirect_electron_cache` (pm_engine::build_jail) points `electron_config_cache` at $cache/nub/pm/tools/electron-cache, which `compiler::preset` grants read-write to every jailed script unconditionally, so that write is free. Re-measured with a jail-off control: jail OFF leaves the content-addressed download directory in the real home and the leaf empty, jail ON mirrors it, and an arm granting only `network` reproduces the package's bin/ product while dropping `network` fails getaddrinfo ENOTFOUND github.com; linux write WITHDRAWN 2026-09-01, leaving network in place: the same `redirect_electron_cache` leaf and the same two-binary differential recorded on electron, measured 39.8.9 on a real Landlock ABI 7 kernel with the leaf asserted absent immediately before each arm: the arm granting only `network` verifies at 10/10 artefacts and leaves a 27688162-byte chromedriver-v39.8.9-linux-x64.zip in the leaf. `writePaths` is deliberately NOT nulled the way macOS nulled it: the passing arm carried no writePaths at all, so removing the promotion is supported, but keeping an inert one is the over-grant direction and this lane measured a single version in the band"
+    },
+    "<32.3.3": {
+     "": "measured 0.37.1, 1.8.0, 2.0.0, 3.0.0, 4.2.0, 5.0.1, 6.0.0, 7.0.0, 8.0.0, 9.0.0, 10.0.0, 11.0.0, 12.0.0, 13.0.0, 14.0.0, 15.0.0, 16.0.0, 17.0.0, 18.0.0, 19.0.0, 20.0.0, 21.0.0, 22.3.27, 23.3.7, 24.8.8, 25.9.8, 26.6.9, 27.3.9, 28.3.3, 29.4.5, 30.5.0, 31.7.7; covers everything below 32.3.3; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; macOS write WITHDRAWN 2026-09-01, reversing that restore on macOS only: the OBSERVE census paths are under ~/Library/Caches/electron, which is @electron/get's UNJAILED default; under the jail `redirect_electron_cache` (pm_engine::build_jail) points `electron_config_cache` at $cache/nub/pm/tools/electron-cache, which `compiler::preset` grants read-write to every jailed script unconditionally, so that write is free. Re-measured with a jail-off control: jail OFF leaves the content-addressed download directory in the real home and the leaf empty, jail ON mirrors it, and an arm granting only `network` reproduces the package's bin/ product while dropping `network` fails getaddrinfo ENOTFOUND github.com; linux write WITHDRAWN 2026-09-01, leaving network in place: the same `redirect_electron_cache` leaf and the same two-binary differential as the `<43.2.0` band above, measured 31.7.7 on a real Landlock ABI 7 kernel with the leaf asserted absent immediately before each arm: the arm granting only `network` verifies at 10/10 artefacts and leaves a 164191350-byte chromedriver-v31.7.7-linux-x64.zip in the leaf. `writePaths` is left in place for the same reason as the band above"
+    }
+   }
+  },
+  "electron-prebuilt": {
+   "default": {
+    "": "latest measured 1.4.13; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 1.4.13 on a windows-latest runner over a five-arm ladder whose verified minimum is network ALONE. Three arms go RED at rc=1 losing 78 of the control's 9344 paths (read.project, read.userHome, read.project+read.userHome), so the venue had resolution, and the network arm reproduces the control exactly. The zip and SHASUMS256.txt land under the redirected USERPROFILE, inside the granted private jail home. write.deps is KEPT rather than withdrawn outright even though the passing arm carried no write scope: one measured version is not grounds to drop a second capability across a default band covering 125 versions, all 125 of which run an install script."
+   }
+  },
+  "electron-vite": {
+   "default": {
+    "": "latest measured 5.0.0"
+   },
+   "versions": {
+    "<5.0.0": {
+     "": "measured 1.0.26; covers everything below 5.0.0"
+    }
+   }
+  },
+  "elm": {
+   "default": {
+    "": "latest measured 2.0.0"
+   }
+  },
+  "es-check": {
+   "default": {
+    "": "latest measured 9.6.4"
+   },
+   "versions": {
+    "<9.6.4": {
+     "": "measured 6.2.0; covers everything below 9.6.4"
+    }
+   }
+  },
+  "esbuild": {
+   "default": {
+    "": "latest measured 0.28.2"
+   },
+   "versions": {
+    "<0.28.2": {
+     "": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17, 0.17.19, 0.18.20, 0.19.12, 0.20.2, 0.21.5, 0.23.1, 0.24.2, 0.25.12, 0.26.0, 0.27.7, 0.28.1; covers everything below 0.28.2; win32 writePaths RESTORED 2026-09-01 — the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded"
+    },
+    "<0.17.19": {
+     "": "measured 0.11.23, 0.14.54, 0.15.18, 0.16.17; covers everything below 0.17.19; win32 writePaths RESTORED 2026-09-01 — the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. install.js getCachePath() caches at os.homedir()/AppData/Local/Cache/esbuild on win32, and homedir() follows the redirected USERPROFILE into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; linux write WITHDRAWN 2026-09-01 on a later Linux descent of 0.11.23 and 0.16.17, taking the UNION of the two: 0.11.23 verified the minimum as network plus writePaths [.cache/esbuild, .config/configstore] with a red drop-no-network arm, while 0.16.17 verified an empty grant but produced no red arm at all, so the band keeps the stricter of the two answers"
+    }
+   }
+  },
+  "eth-gas-reporter": {
+   "default": {
+    "": "latest measured 0.2.27"
+   },
+   "versions": {
+    "<0.2.27": {
+     "": "measured 0.0.4; covers everything below 0.2.27"
+    }
+   }
+  },
+  "event-loop-stats": {
+   "default": {
+    "": "latest measured 1.4.1"
+   }
+  },
+  "exiftool-vendored": {
+   "default": {
+    "": "latest measured 37.2.0"
+   },
+   "versions": {
+    "<37.2.0": {
+     "": "measured 0.1.1, 3.1.1; covers everything below 37.2.0; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement"
+    }
+   }
+  },
+  "farmhash": {
+   "default": {
+    "": "latest measured 5.0.1"
+   },
+   "versions": {
+    "<5.0.1": {
+     "": "measured 1.2.1, 2.1.0, 4.0.2; covers everything below 5.0.1"
+    },
+    "<4.0.2": {
+     "": "measured 1.2.1, 2.1.0; covers everything below 4.0.2"
+    }
+   }
+  },
+  "fast-folder-size": {
+   "default": {
+    "": "latest measured 2.4.0"
+   }
+  },
+  "faunadb": {
+   "default": {
+    "": "latest measured 4.8.2"
+   }
+  },
+  "ffmpeg-static": {
+   "default": {
+    "": "latest measured 5.3.0; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement"
+   }
+  },
+  "flow-bin": {
+   "default": {
+    "": "latest measured 0.328.0"
+   },
+   "versions": {
+    "<0.328.0": {
+     "": "measured 0.23.1, 0.24.2, 0.25.0, 0.26.0, 0.27.0, 0.28.0, 0.29.0, 0.30.0, 0.31.1; covers everything below 0.328.0"
+    },
+    "<0.30.0": {
+     "": "measured 0.23.1, 0.24.2, 0.25.0, 0.26.0, 0.27.0, 0.28.0, 0.29.0; covers everything below 0.30.0"
+    }
+   }
+  },
+  "free-email-domains": {
+   "default": {
+    "": "latest measured 1.9.91"
+   }
+  },
+  "fs-xattr": {
+   "default": {
+    "": "latest measured 0.4.0"
+   }
+  },
+  "fsevents": {
+   "default": {
+    "": "latest measured 1.2.13"
+   }
+  },
+  "gatsby": {
+   "default": {
+    "": "latest measured 5.16.1"
+   }
+  },
+  "gc-stats": {
+   "default": {
+    "": "latest measured 1.4.1"
+   }
+  },
+  "gcstats.js": {
+   "default": {
+    "": "latest measured 1.0.0"
+   }
+  },
+  "geckodriver": {
+   "default": {
+    "": "latest measured 6.1.0"
+   },
+   "versions": {
+    "<6.1.0": {
+     "": "measured 4.2.1, 5.0.0; covers everything below 6.1.0"
+    }
+   }
+  },
+  "gif2webp-bin": {
+   "default": {
+    "": "latest measured 5.0.0"
+   }
+  },
+  "gifsicle": {
+   "default": {
+    "": "latest measured 7.0.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   },
+   "versions": {
+    "<7.0.1": {
+     "": "measured 4.0.1, 5.3.0; covers everything below 7.0.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "gl": {
+   "default": {
+    "": "latest measured 8.1.6"
+   }
+  },
+  "graphql-shield": {
+   "default": {
+    "": "latest measured 7.6.5"
+   },
+   "versions": {
+    "<7.6.5": {
+     "": "measured 1.2.6, 4.1.2, 5.7.3, 7.0.0; covers everything below 7.6.5"
+    }
+   }
+  },
+  "grpc-tools": {
+   "default": {
+    "": "latest measured 1.13.1"
+   }
+  },
+  "handbrake-js": {
+   "default": {
+    "": "latest measured 8.0.2"
+   }
+  },
+  "hnswlib-node": {
+   "default": {
+    "": "latest measured 3.0.0"
+   }
+  },
+  "hugo-bin": {
+   "default": {
+    "": "latest measured 0.161.0"
+   }
+  },
+  "hugo-extended": {
+   "default": {
+    "": "latest measured 0.164.0"
+   },
+   "versions": {
+    "<0.164.0": {
+     "": "measured 0.63.2, 0.64.1, 0.65.3, 0.66.0, 0.67.1, 0.68.3, 0.69.2, 0.70.0, 0.71.1, 0.72.0, 0.73.0, 0.74.3, 0.75.1, 0.76.5, 0.77.0, 0.78.2, 0.79.1, 0.80.0, 0.81.0, 0.82.1, 0.83.1, 0.84.4, 0.85.0, 0.86.1, 0.87.0, 0.88.1, 0.89.4, 0.90.1, 0.91.2, 0.92.2, 0.93.3, 0.94.2, 0.95.0, 0.96.0, 0.97.3, 0.98.0, 0.99.1, 0.100.2, 0.101.0, 0.102.3, 0.103.1, 0.104.3, 0.105.0, 0.106.0, 0.107.0, 0.108.0, 0.109.0, 0.110.0, 0.111.3, 0.112.7, 0.113.0, 0.114.1, 0.115.4, 0.116.1, 0.117.0, 0.118.2, 0.119.0, 0.120.4, 0.121.2, 0.122.0, 0.123.8, 0.124.1, 0.125.7, 0.126.3, 0.127.0, 0.128.2, 0.129.0, 0.130.0, 0.131.0, 0.132.2, 0.133.1, 0.134.3, 0.135.0, 0.136.5, 0.137.1, 0.138.0, 0.139.4, 0.140.2, 0.141.0, 0.142.0, 0.143.1, 0.144.2, 0.145.0, 0.146.7, 0.147.9, 0.148.2, 0.149.1, 0.150.1, 0.151.2, 0.152.2, 0.153.5, 0.154.5, 0.155.3, 0.156.0, 0.157.0, 0.158.0, 0.159.2, 0.160.1, 0.161.1, 0.162.1, 0.163.3; covers everything below 0.164.0"
+    }
+   }
+  },
+  "ibm_db": {
+   "default": {
+    "": "latest measured 4.0.1; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement"
+   }
+  },
+  "iconv": {
+   "default": {
+    "": "latest measured 3.0.1"
+   }
+  },
+  "iedriver": {
+   "default": {
+    "": "latest measured 4.0.0"
+   }
+  },
+  "iltorb": {
+   "default": {
+    "": "latest measured 2.4.5"
+   }
+  },
+  "impit": {
+   "default": {
+    "": "latest measured 0.14.3"
+   },
+   "versions": {
+    "<0.14.3": {
+     "": "measured 0.13.1, 0.14.0; covers everything below 0.14.3"
+    }
+   }
+  },
+  "inngest-cli": {
+   "default": {
+    "": "latest measured 1.41.1"
+   }
+  },
+  "ip-num": {
+   "default": {
+    "": "latest measured 1.6.1"
+   }
+  },
+  "iso-constants": {
+   "default": {
+    "": "latest measured 0.1.2"
+   }
+  },
+  "isolated-vm": {
+   "default": {
+    "": "latest measured 7.0.1"
+   },
+   "versions": {
+    "<7.0.1": {
+     "": "measured 5.0.4, 6.1.2, 7.0.0; covers everything below 7.0.1"
+    },
+    "<7.0.0": {
+     "": "measured 5.0.4, 6.1.2; covers everything below 7.0.0"
+    }
+   }
+  },
+  "javascript-obfuscator": {
+   "default": {
+    "": "latest measured 5.5.0"
+   },
+   "versions": {
+    "<5.5.0": {
+     "": "measured 0.1.4, 0.10.2, 0.19.4, 0.20.4, 1.9.0, 2.9.6, 3.2.7, 5.0.0; covers everything below 5.5.0"
+    }
+   }
+  },
+  "jest-preview": {
+   "default": {
+    "": "latest measured 0.3.3"
+   },
+   "versions": {
+    "<0.3.3": {
+     "": "measured 0.1.7, 0.2.8, 0.3.2; covers everything below 0.3.3"
+    }
+   }
+  },
+  "jotai-devtools": {
+   "default": {
+    "": "latest measured 0.5.1"
+   }
+  },
+  "jpeg-recompress-bin": {
+   "default": {
+    "": "latest measured 7.0.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "jpegtran-bin": {
+   "default": {
+    "": "latest measured 7.0.0"
+   }
+  },
+  "json-schema-library": {
+   "default": {
+    "": "latest measured 11.6.2"
+   },
+   "versions": {
+    "<11.6.2": {
+     "": "measured 11.0.4; covers everything below 11.6.2"
+    }
+   }
+  },
+  "keccak": {
+   "default": {
+    "": "latest measured 3.0.4"
+   },
+   "versions": {
+    "<3.0.4": {
+     "": "measured 1.4.0; covers everything below 3.0.4; linux write and network RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "kerberos": {
+   "default": {
+    "": "latest measured 7.0.0; macOS network withdrawal REMOVED — measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked"
+   }
+  },
+  "keytar": {
+   "default": {
+    "": "latest measured 7.9.0; macOS network withdrawal REMOVED — measured cold 2026-08-18: its postinstall runs prebuild-install, which fetches from github.com, and the withdrawal made a cold install log ENOTFOUND github.com and silently fall back to compiling from source. rc stayed 0, which is why an exit-code-only sweep filed the withdrawal as legitimate"
+   }
+  },
+  "koffi": {
+   "default": {
+    "": "latest measured 3.1.2"
+   },
+   "versions": {
+    "<3.1.2": {
+     "": "measured 2.16.3; covers everything below 3.1.2"
+    }
+   }
+  },
+  "leveldown": {
+   "default": {
+    "": "Measured 5.6.0 on macOS; the dist-tag 6.1.1 is the bound itself, and the node-gyp cache is a promotion path rather than a scope widening. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it."
+   },
+   "versions": {
+    "<6.1.1": {
+     "": "measured 5.6.0; covers everything below 6.1.1"
+    }
+   }
+  },
+  "libxmljs": {
+   "default": {
+    "": "latest measured 1.0.11; egress GRANTED 2026-08-18 — the entry named no network at all, and a present entry grants only what it names, so the default silently denied egress to an install script that downloads a prebuilt (`node-pre-gyp install --fallback-to-build`). Measured cold with the override banner confirmed loaded: 2 DNS failures cold, 0 with egress granted; rc=1 both ways for an unrelated reason, so no outcome-based check could see it. A withheld download here costs every user a source build and hard-fails anyone without a toolchain"
+   }
+  },
+  "libxmljs2": {
+   "default": {
+    "": "latest measured 0.37.0; linux network withdrawal REMOVED — measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it; macOS network withdrawal REMOVED — measured cold 2026-08-18: the jail denied the prebuilt download (npm.duckdb.org / github.com respectively) while npm reached it, and the package then compiled from source. The install still exited 0, and the sweep row read BROKEN-EITHER-WAY for an unrelated reason, so neither the exit code nor that verdict surfaced the wrong grant"
+   }
+  },
+  "lz4": {
+   "default": {
+    "": "latest measured 0.6.5"
+   }
+  },
+  "macos-alias": {
+   "default": {
+    "": "latest measured 0.2.12"
+   }
+  },
+  "mbt": {
+   "default": {
+    "": "latest measured 1.2.49"
+   },
+   "versions": {
+    "<1.2.49": {
+     "": "measured 0.0.9, 0.1.0, 0.2.9, 1.2.7; covers everything below 1.2.49; linux write WITHDRAWN 2026-09-01, reversing the epoch-71 restore on a later Linux descent of 0.0.9 and 1.2.7 that took the UNION of the two: 0.0.9 verified the minimum as network plus writePaths [.config/configstore] and 1.2.7 verified network alone, both with a red drop-no-network arm proving the venue produced signal. The outer write.project goes with the home reach on this OS because neither verified arm carried a write scope, which is what macOS already settled"
+    }
+   }
+  },
+  "modern-syslog": {
+   "default": {
+    "": "latest measured 1.2.0"
+   }
+  },
+  "mongodb-client-encryption": {
+   "default": {
+    "": "latest measured 7.2.0"
+   }
+  },
+  "mongodb-crypt-library-dummy": {
+   "default": {
+    "": "latest measured 1.0.2"
+   }
+  },
+  "mongodb-memory-server": {
+   "default": {
+    "": "latest measured 11.2.0"
+   }
+  },
+  "mozjpeg": {
+   "default": {
+    "": "latest measured 8.0.0"
+   }
+  },
+  "muhammara": {
+   "default": {
+    "": "latest measured 6.0.5; linux drops the network withdrawal — measured cold 2026-08-18 on Ubuntu 24.04. The install script is node-pre-gyp install --fallback-to-build and the tarball ships no prebuilt, so it downloads node-v127-linux-x64-glibc.tar.gz from github.com. Withdrawn, that download was denied (getaddrinfo EAI_AGAIN github.com) and it silently fell back to compiling from source, still exiting 0 after 4m46s; npm on the same box downloads the prebuilt in 4s with no compile"
+   }
+  },
+  "n8n-nodes-evolution-api": {
+   "default": {
+    "": "latest measured 1.0.4"
+   }
+  },
+  "native-keymap": {
+   "default": {
+    "": "latest measured 3.3.9"
+   }
+  },
+  "netlify-cli": {
+   "default": {
+    "": "latest measured 25.6.2; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and product exactly; macOS and win32 repaired 2026-09-02 from below the base profile up to write.deps plus network, on their own in-band state-0 records; the linux cell is untouched because its real-home differential narrow arm ran at write:null with peers 0 and reproduced the control"
+   }
+  },
+  "ngrok": {
+   "default": {
+    "": "latest measured 5.0.0-beta.2; win32 writePaths RESTORED 2026-09-01 — the win32 measurement lane declared no private home (roots.jailHome null in 1683 of 1688 captures), so it could derive no writePaths at all and the overlay withdrew promotion by default rather than by measurement. download.js caches at process.env.APPDATA/ngrok on win32, and APPDATA is redirected into the jail home, so the entry is promotable and was being discarded; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 5.0.0-beta.2, the exact version the restore was recorded from, on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms downloading ngrok-v3-stable-windows-amd64.zip from bin.equinox.io and unpacking ngrok.exe into the store cell at rc=0 over 8236 paths, with the zip observed under the redirected APPDATA inside the granted private jail home. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it."
+   }
+  },
+  "node": {
+   "default": {
+    "": "latest measured 26.7.0"
+   }
+  },
+  "node-expat": {
+   "default": {
+    "": "latest measured 2.4.1"
+   }
+  },
+  "node-jq": {
+   "default": {
+    "": "latest measured 6.3.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "node-libcurl": {
+   "default": {
+    "": "latest measured 5.1.2"
+   }
+  },
+  "nodejieba": {
+   "default": {
+    "": "latest measured 3.5.8"
+   },
+   "versions": {
+    "<3.5.8": {
+     "": "measured 2.6.0; covers everything below 3.5.8; macOS keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; linux keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 on nub-linux by cold-network-sweep.sh: fails cold as shipped, succeeds with egress restored"
+    }
+   }
+  },
+  "nodemon": {
+   "default": {
+    "": "latest measured 3.1.14"
+   },
+   "versions": {
+    "<3.1.14": {
+     "": "measured 1.19.4, 2.0.14; covers everything below 3.1.14; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "nx": {
+   "default": {
+    "": "latest measured 23.1.1"
+   },
+   "versions": {
+    "<23.1.1": {
+     "": "measured 15.9.7, 16.10.0, 19.8.4, 20.8.4, 21.6.11, 22.7.5, 23.1.0; covers everything below 23.1.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "odbc": {
+   "default": {
+    "": "latest measured 2.5.0"
+   }
+  },
+  "oniguruma": {
+   "default": {
+    "": "latest measured 7.2.3"
+   }
+  },
+  "onnxruntime-node": {
+   "default": {
+    "": "latest measured 1.27.0"
+   }
+  },
+  "openclaw": {
+   "default": {
+    "": "latest measured 2026.6.10"
+   }
+  },
+  "opencode-ai": {
+   "default": {
+    "": "latest measured 1.18.18"
+   },
+   "versions": {
+    "<1.18.18": {
+     "": "measured 1.18.4; covers everything below 1.18.18"
+    }
+   }
+  },
+  "optipng-bin": {
+   "default": {
+    "": "latest measured 9.0.0; linux network withdrawal REMOVED — measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   },
+   "versions": {
+    "<9.0.0": {
+     "": "measured 3.1.4, 4.0.0, 5.1.0, 6.0.0, 7.0.1, 8.1.0; covers everything below 9.0.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "phantomjs": {
+   "default": {
+    "": "latest measured 2.1.7"
+   }
+  },
+  "phantomjs-prebuilt": {
+   "default": {
+    "": "latest measured 2.1.16"
+   }
+  },
+  "pizzip": {
+   "default": {
+    "": "latest measured 3.0.5"
+   }
+  },
+  "pkcs11js": {
+   "default": {
+    "": "latest measured 2.1.7"
+   }
+  },
+  "playwright": {
+   "default": {
+    "": "latest measured 1.62.1"
+   },
+   "versions": {
+    "<1.62.1": {
+     "": "measured 1.31.0; covers everything below 1.62.1; linux write WITHDRAWN 2026-09-01, leaving network in place: the same `redirect_playwright_browsers` leaf and the same two-binary differential recorded on @playwright/browser-chromium, measured 1.31.0 on a real Landlock ABI 7 kernel with the leaf asserted absent immediately before each arm: the arm granting only `network` verifies at 9/9 artefacts and leaves a 349159128-byte chromium at tools/ms-playwright/chromium-1048/chrome-linux/chrome. macOS is untouched and still grants the home here, because only linux was measured; win32 write narrowed 2026-09-02 to write.deps, on the same tool-cache-leaf mechanism as the linux block above: re-measured at 1.37.1 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms downloading Chromium 116.0.5845.82, FFMPEG v1009, Firefox 115.0 and Webkit 17.0 into AppData/Local/nub/pm/tools/ms-playwright at rc=0. redirect_playwright_browsers points PLAYWRIGHT_BROWSERS_PATH at that leaf, which compiler::preset grants read-write to every jailed script unconditionally, so no home reach is involved. 1.37.1 is the HIGHEST version in this band that declares an install script (129 of the 186 versions the band covers do), so the band's easy end is not shadowing a lower one. macOS is untouched: nothing has re-measured it there. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it."
+    }
+   }
+  },
+  "playwright-chromium": {
+   "default": {
+    "": "latest measured 1.62.1; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 9/9 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 596 files in the free ms-playwright leaf and none in its private home. The `<1.62.1` and `<0.16.0` bands were MEASURED on this axis 2026-09-01 by the two-binary `materialize_tool_leaf` differential and their linux write is now narrowed to `deps`"
+   },
+   "versions": {
+    "<1.62.1": {
+     "": "measured 0.9.24, 0.10.0, 0.11.1, 0.12.1, 0.13.0, 0.14.0, 0.15.0, 0.16.0, 0.17.0, 0.18.0, 1.9.2; covers everything below 1.62.1; linux write NARROWED to `deps` 2026-09-01, leaving network in place: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, and since 46b623e352 `materialize_tool_leaf` (compiler::preset) CREATES that leaf before the confined launch. Measured 0.17.0 on a real Landlock ABI 7 kernel as a two-binary differential one source line apart, with the leaf asserted absent immediately before each arm: with materialization neutered 55 Landlock rules attach and the arm dies EACCES mkdir /home/nub/.cache/nub/pm/tools/ms-playwright, with it live 57 attach and the same arm granting only `network` verifies at 6/6 artefacts and leaves a 252274856-byte chromium at tools/ms-playwright/chromium-764964/chrome-linux/chrome. +2 rules and not +3 because `redirect_npm_prefix` already materialized the third leaf, which is the fix commit`s own claim measured on a real kernel. `write.deps` is RETAINED although the network-only arm did not need it: it mirrors macOS, and one measured version is not grounds to drop a second capability across a whole band"
+    },
+    "<0.16.0": {
+     "": "measured 0.9.24, 0.10.0, 0.11.1, 0.12.1, 0.13.0, 0.14.0, 0.15.0; covers everything below 0.16.0; linux write NARROWED to `deps` 2026-09-01, leaving network in place: the same leaf and the same two-binary differential as the `<1.62.1` band above, measured 0.15.0 on a real Landlock ABI 7 kernel with the leaf asserted absent immediately before each arm: the arm granting only `network` verifies at 5/5 artefacts and leaves a 251643848-byte chromium at tools/ms-playwright/v0.15.0/chromium/chrome-linux/chrome. `write.deps` is retained to mirror macOS and win32"
+    }
+   }
+  },
+  "playwright-webkit": {
+   "default": {
+    "": "latest measured 1.62.1; macOS keeps any write withdrawal but NOT the network one — measured cold 2026-08-17 by tests/jail-acceptance/cold-network-sweep.sh: the install fails cold as shipped and succeeds with egress restored, so the withdrawal was a warm-download-cache artefact; macOS write WITHDRAWN 2026-09-01: `redirect_playwright_browsers` (pm_engine::build_jail) points PLAYWRIGHT_BROWSERS_PATH at $cache/nub/pm/tools/ms-playwright, which `compiler::preset` grants read-write to every jailed script unconditionally, so the browser download never reaches the real home. Measured with a jail-off control: jail OFF writes the browser under ~/Library/Caches/ms-playwright, jail ON writes the same file count into the free leaf, and an arm granting only `network` reproduces it while dropping `network` fails ENOTFOUND cdn.playwright.dev; linux write WITHDRAWN 2026-09-01, leaving network in place: the same redirect applies on linux, and a five-arm ladder on Landlock ABI 7 (jail off, the shipped grant, minus network, minus every reach over the user's home, and empty) found the minus-home arm green at 9/9 artefacts while minus-network and empty both went red, so network is proved necessary and the home reach is not; the minus-home arm put 56 files in the free ms-playwright leaf and none in its private home"
+   }
+  },
+  "pngout-bin": {
+   "default": {
+    "": "latest measured 6.0.1"
+   },
+   "versions": {
+    "<6.0.1": {
+     "": "measured 3.0.0, 4.0.0, 5.0.0; covers everything below 6.0.1"
+    }
+   }
+  },
+  "pngquant-bin": {
+   "default": {
+    "": "latest measured 9.0.0; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "posix": {
+   "default": {
+    "": "latest measured 4.2.0"
+   }
+  },
+  "postcss-rtlcss": {
+   "default": {
+    "": "latest measured 6.0.0"
+   },
+   "versions": {
+    "<6.0.0": {
+     "": "measured 5.1.1; covers everything below 6.0.0"
+    }
+   }
+  },
+  "postman-code-generators": {
+   "default": {
+    "": "latest measured 2.1.1"
+   }
+  },
+  "powerbi-models": {
+   "default": {
+    "": "latest measured 2.1.1"
+   },
+   "versions": {
+    "<2.1.1": {
+     "": "measured 1.10.3; covers everything below 2.1.1"
+    }
+   }
+  },
+  "pprof": {
+   "default": {
+    "": "latest measured 5.0.0"
+   },
+   "versions": {
+    "<5.0.0": {
+     "": "measured 4.0.0; covers everything below 5.0.0; macOS network withdrawal REMOVED — measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked"
+    }
+   }
+  },
+  "prettier-plugin-ember-template-tag": {
+   "default": {
+    "": "latest measured 2.1.7"
+   },
+   "versions": {
+    "<2.1.7": {
+     "": "measured 1.0.1; covers everything below 2.1.7"
+    }
+   }
+  },
+  "prisma-json-types-generator": {
+   "default": {
+    "": "latest measured 5.1.1"
+   },
+   "versions": {
+    "<5.1.1": {
+     "": "measured 2.2.2; covers everything below 5.1.1"
+    }
+   }
+  },
+  "protoc": {
+   "default": {
+    "": "latest measured 35.1.0"
+   },
+   "versions": {
+    "<35.1.0": {
+     "": "measured 1.1.3; covers everything below 35.1.0"
+    }
+   }
+  },
+  "protoc-gen-grpc-web": {
+   "default": {
+    "": "latest measured 1.5.0"
+   }
+  },
+  "puppeteer": {
+   "default": {
+    "": "latest measured 25.3.0"
+   },
+   "versions": {
+    "<25.3.0": {
+     "": "measured 1.20.0, 2.1.1, 3.0.0, 9.1.1, 10.4.0, 13.7.0, 19.11.1, 22.15.0, 23.11.1, 24.43.1; covers everything below 25.3.0"
+    }
+   }
+  },
+  "purescript": {
+   "default": {
+    "": "latest measured 0.15.16; macOS re-measured cold 2026-08-18 alongside the cypress correction, same defect shape — the installer caches through cacache under cachedir('purescript-npm-installer-nodejs'), so on macOS the default named a path the install never writes and 102 MB stayed in the throwaway home under jail-home/purescript-*/Library/Caches/purescript-npm-installer-nodejs with nothing under the real ~/Library/Caches; unlike cypress the package still works (purs.bin lands in the store entry, 107,322,424 bytes) so the cost is a re-download per project, not a broken install; the <0.15.16 band below already carried the macOS path"
+   },
+   "versions": {
+    "<0.15.16": {
+     "": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6, 0.9.3, 0.10.7, 0.13.8, 0.14.9, 0.15.9; covers everything below 0.15.16"
+    },
+    "<0.13.8": {
+     "": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6, 0.9.3, 0.10.7; covers everything below 0.13.8"
+    },
+    "<0.9.3": {
+     "": "measured 0.0.1, 0.1.0, 0.6.9, 0.7.6; covers everything below 0.9.3; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement"
+    }
+   }
+  },
+  "qlobber": {
+   "default": {
+    "": "latest measured 8.0.1"
+   },
+   "versions": {
+    "<8.0.1": {
+     "": "measured 4.2.0; covers everything below 8.0.1"
+    }
+   }
+  },
+  "rc-editor-core": {
+   "default": {
+    "": "latest measured 0.8.10"
+   },
+   "versions": {
+    "<0.8.10": {
+     "": "measured 0.3.9; covers everything below 0.8.10; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "re2": {
+   "default": {
+    "": "latest measured 1.26.1. BOTH per-OS network withdrawals are now dropped, each on its own cold measurement of the same mechanism. The install script tries three github.com release URLs via install-from-cache, which prints only \"Trying <url>\" and swallows the failure -- so a denied egress leaves NO error string and rc stays 0. Only the download attempt reveals it. linux: measured cold 2026-08-18 on Ubuntu 24.04, withdrawn it compiles from source in 1m45s, granted it downloads in 6.3s (npm does it in 4s). macos: measured cold 2026-09-01, withdrawn all three URLs fail and it falls back to a 54s local compile, granted it writes build/Release/re2.node in 8s. The macOS arm exited 0 EITHER WAY because this host carries Xcode, Python and the Node headers; on a machine without a C++ toolchain the withdrawn install has nothing to fall back to and fails outright, which is why rc was not the signal and arm divergence was."
+   }
+  },
+  "react-jsx-parser": {
+   "default": {
+    "": "latest measured 2.4.1"
+   },
+   "versions": {
+    "<2.4.1": {
+     "": "measured 1.29.0, 2.0.0; covers everything below 2.4.1"
+    }
+   }
+  },
+  "react-native-purchases": {
+   "default": {
+    "": "latest measured 10.7.1"
+   },
+   "versions": {
+    "<10.7.1": {
+     "": "measured 0.4.3, 0.5.1, 1.5.4, 2.4.1, 3.4.3, 4.6.3, 10.6.0, 10.7.0; covers everything below 10.7.1; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    },
+    "<1.5.4": {
+     "": "measured 0.4.3, 0.5.1; covers everything below 1.5.4; linux write WITHDRAWN 2026-09-01, reversing the epoch-71 restore on a later Linux descent that ran BOTH covered versions and had them agree: 0.4.3 and 0.5.1 each verified the minimum as network plus writePaths [.config/configstore], each with a red drop-no-network arm proving the venue produced signal. The wider `<10.7.1` band is untouched, because 2.4.1 passed no state even at write:disk there"
+    }
+   }
+  },
+  "realm": {
+   "default": {
+    "": "latest measured 20.2.0"
+   }
+  },
+  "redis-memory-server": {
+   "default": {
+    "": "latest measured 0.17.1"
+   },
+   "versions": {
+    "<0.17.1": {
+     "": "measured 0.1.0, 0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0, 0.11.0, 0.12.1, 0.13.0, 0.14.1, 0.16.1, 0.17.0; covers everything below 0.17.1"
+    }
+   }
+  },
+  "ref-napi": {
+   "default": {
+    "": "latest measured 3.0.3"
+   }
+  },
+  "registry-js": {
+   "default": {
+    "": "latest measured 1.16.1; egress GRANTED 2026-08-18 — the entry named no network at all, and a present entry grants only what it names, so the default silently denied egress to an install script that downloads a prebuilt (`prebuild-install || node-gyp rebuild`). Measured cold with the override banner confirmed loaded: 1 DNS failure cold, 0 with egress granted; rc stayed 0 BOTH ways because the `||` arm rebuilt from source. A withheld download here costs every user a source build and hard-fails anyone without a toolchain"
+   }
+  },
+  "robotjs": {
+   "default": {
+    "": "latest measured 0.8.0"
+   }
+  },
+  "rs-module-lexer": {
+   "default": {
+    "": "latest measured 2.8.0"
+   }
+  },
+  "samlify": {
+   "default": {
+    "": "latest measured 2.13.1"
+   },
+   "versions": {
+    "<2.13.1": {
+     "": "measured 2.5.1; covers everything below 2.13.1"
+    }
+   }
+  },
+  "saucectl": {
+   "default": {
+    "": "latest measured 0.213.0; win32 write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02 to write.deps, reversing the epoch-71 win32 restore on this platform only: re-measured at 0.213.0 on a windows-latest runner where the base-profile arm reproduces the control run's script output and product exactly, both arms printing Fetching saucectl binary / saucectl version 0.213.0 / Installation succeeded at rc=0 over 7912 paths with nothing the control produced that the arm did not. write.deps is retained because the base profile IS catalog_v2::baseline_caps(), which carries it, and the search has no rung below it."
+   }
+  },
+  "scrollmirror": {
+   "default": {
+    "": "latest measured 1.2.4"
+   },
+   "versions": {
+    "<1.2.4": {
+     "": "measured 1.2.0; covers everything below 1.2.4"
+    }
+   }
+  },
+  "secp256k1": {
+   "default": {
+    "": "latest measured 5.0.2"
+   },
+   "versions": {
+    "<5.0.2": {
+     "": "measured 3.8.1, 4.0.4, 5.0.1; covers everything below 5.0.2"
+    }
+   }
+  },
+  "segfault-handler": {
+   "default": {
+    "": "latest measured 1.3.0"
+   }
+  },
+  "serverless": {
+   "default": {
+    "": "latest measured 4.41.0"
+   },
+   "versions": {
+    "<4.41.0": {
+     "": "measured 3.40.0, 4.40.0; covers everything below 4.41.0"
+    }
+   }
+  },
+  "sharp": {
+   "default": {
+    "": "latest measured 0.35.3"
+   },
+   "versions": {
+    "<0.35.3": {
+     "": "measured 0.30.7, 0.32.6, 0.33.5, 0.34.5; covers everything below 0.35.3"
+    }
+   }
+  },
+  "skia-canvas": {
+   "default": {
+    "": "latest measured 3.0.8"
+   }
+  },
+  "sleep": {
+   "default": {
+    "": "latest measured 6.1.0"
+   }
+  },
+  "snappy": {
+   "default": {
+    "": "latest measured 7.4.0"
+   },
+   "versions": {
+    "<7.4.0": {
+     "": "measured 6.3.5, 7.3.3; covers everything below 7.4.0"
+    }
+   }
+  },
+  "snyk": {
+   "default": {
+    "": "latest measured 1.1306.4"
+   }
+  },
+  "spellchecker": {
+   "default": {
+    "": "latest measured 3.7.1"
+   }
+  },
+  "sqlite3": {
+   "default": {
+    "": "latest measured 6.0.1"
+   }
+  },
+  "squawk-cli": {
+   "default": {
+    "": "latest measured 2.62.0"
+   },
+   "versions": {
+    "<2.62.0": {
+     "": "measured 0.1.4, 0.2.3, 0.3.0, 0.4.1, 0.5.4, 0.6.0, 0.7.3, 0.8.2, 0.10.0, 0.11.3, 0.12.0, 0.13.1, 0.14.0, 0.15.0, 0.16.0, 0.19.0, 0.20.0, 0.21.0, 0.22.0, 0.23.0, 0.24.2, 0.25.0, 0.26.0, 0.27.0, 0.28.0, 0.29.0, 1.6.1, 2.9.0; covers everything below 2.62.0"
+    }
+   }
+  },
+  "ssh2": {
+   "default": {
+    "": "latest measured 1.17.0"
+   }
+  },
+  "storage-engine": {
+   "default": {
+    "": "latest measured 3.0.7"
+   }
+  },
+  "storybook-addon-remix-react-router": {
+   "default": {
+    "": "latest measured 6.1.0"
+   }
+  },
+  "stream-chat-react-native-core": {
+   "default": {
+    "": "latest measured 9.7.6"
+   },
+   "versions": {
+    "<9.7.6": {
+     "": "measured 8.13.9, 9.0.0-beta.9; covers everything below 9.7.6"
+    }
+   }
+  },
+  "subrequests": {
+   "default": {
+    "": "Measured 2.9.2 on Windows; the dist-tag 2.18.0 is the bound itself. `write.deps` is also what baseline_caps() grants, so an empty band here is tighter than having no entry at all. A notes-only band is NOT the same as no entry: an absent package falls back to baseline_caps() and still promotes the baseline write_paths, while a present entry resolves to Some(grant) with every capability empty and returns before the promotion loop. The generator writes the note \"latest measured X\" unconditionally, including when X was never measured and the band was fabricated as {} -- so the note is not evidence that anything was measured at that version. `default` therefore mirrors the band, per-OS blocks included, because the versions that land on it are unmeasured and an unmeasured version takes the measured grant until someone measures it. win32 egress restored 2026-09-02: the `<2.18.0` band already grants win32 egress and both bands run the same install script, so the two cells disagreed on the network axis with no measurement behind the difference. Every corpus record backing the denial carries `arms-unfalsifiable`, which cannot license a narrowing, and baseline_caps() grants egress -- so denial was the deviation needing evidence."
+   },
+   "versions": {
+    "<2.18.0": {
+     "": "measured 1.6.0, 2.9.2; covers everything below 2.18.0"
+    }
+   }
+  },
+  "subrequests-json-merger": {
+   "default": {
+    "": "latest measured 1.13.0"
+   }
+  },
+  "supabase": {
+   "default": {
+    "": "latest measured 2.98.2"
+   }
+  },
+  "svf-lib": {
+   "default": {
+    "": "latest measured 1.0.999"
+   }
+  },
+  "taiko": {
+   "default": {
+    "": "latest measured 1.5.0"
+   }
+  },
+  "tiny-secp256k1": {
+   "default": {
+    "": "latest measured 2.2.4"
+   },
+   "versions": {
+    "<2.2.4": {
+     "": "measured 1.1.7; covers everything below 2.2.4"
+    }
+   }
+  },
+  "tree-sitter-bash": {
+   "default": {
+    "": "latest measured 0.25.1"
+   }
+  },
+  "tree-sitter-c-sharp": {
+   "default": {
+    "": "latest measured 0.23.5"
+   },
+   "versions": {
+    "<0.23.5": {
+     "": "measured 0.20.0, 0.21.3; covers everything below 0.23.5"
+    }
+   }
+  },
+  "tree-sitter-cli": {
+   "default": {
+    "": "latest measured 0.26.12"
+   }
+  },
+  "tree-sitter-cpp": {
+   "default": {
+    "": "latest measured 0.23.4"
+   }
+  },
+  "tree-sitter-go": {
+   "default": {
+    "": "latest measured 0.25.0"
+   },
+   "versions": {
+    "<0.25.0": {
+     "": "measured 0.20.0, 0.21.2; covers everything below 0.25.0"
+    }
+   }
+  },
+  "tree-sitter-kotlin": {
+   "default": {
+    "": "latest measured 0.3.8"
+   },
+   "versions": {
+    "<0.3.8": {
+     "": "measured 0.0.1, 0.2.9; covers everything below 0.3.8"
+    }
+   }
+  },
+  "tree-sitter-php": {
+   "default": {
+    "": "latest measured 0.24.2"
+   },
+   "versions": {
+    "<0.24.2": {
+     "": "measured 0.21.1, 0.22.8; covers everything below 0.24.2"
+    },
+    "<0.22.8": {
+     "": "measured 0.21.1; covers everything below 0.22.8"
+    }
+   }
+  },
+  "tree-sitter-ruby": {
+   "default": {
+    "": "latest measured 0.23.1"
+   },
+   "versions": {
+    "<0.23.1": {
+     "": "measured 0.20.1, 0.21.0; covers everything below 0.23.1"
+    }
+   }
+  },
+  "tree-sitter-rust": {
+   "default": {
+    "": "latest measured 0.24.0"
+   },
+   "versions": {
+    "<0.24.0": {
+     "": "measured 0.20.4, 0.21.0; covers everything below 0.24.0"
+    }
+   }
+  },
+  "tree-sitter-typescript": {
+   "default": {
+    "": "latest measured 0.23.2"
+   },
+   "versions": {
+    "<0.23.2": {
+     "": "measured 0.20.5, 0.21.2; covers everything below 0.23.2"
+    }
+   }
+  },
+  "tree-sitter-yaml": {
+   "default": {
+    "": "latest measured 0.5.0"
+   }
+  },
+  "truffle": {
+   "default": {
+    "": "latest measured 5.11.5; linux write withdrawn 2026-09-02: re-measured on a Landlock ABI 7 host against a binary carrying 50ec17043a and 46b623e352, and the arm without the home write reproduces the control arm's installer output and the same cached solc in the arm's own real home; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "ttf2woff2": {
+   "default": {
+    "": "latest measured 8.0.1"
+   },
+   "versions": {
+    "<8.0.1": {
+     "": "measured 1.2.3, 2.0.3, 3.0.0, 7.0.0; covers everything below 8.0.1"
+    },
+    "<7.0.0": {
+     "": "measured 1.2.3, 2.0.3, 3.0.0; covers everything below 7.0.0"
+    },
+    "<2.0.3": {
+     "": "measured 1.2.3; covers everything below 2.0.3"
+    }
+   }
+  },
+  "typia": {
+   "default": {
+    "": "latest measured 13.3.0"
+   },
+   "versions": {
+    "<13.3.0": {
+     "": "measured 8.0.3, 13.2.0; covers everything below 13.3.0"
+    }
+   }
+  },
+  "unicode": {
+   "default": {
+    "": "measured on darwin+linux across all three record trees; latest (>=14) runs no lifecycle script at all"
+   },
+   "versions": {
+    "<14.0.0": {
+     "": "win32 ONLY: the pre-14 installer writes under AppData/Local/Microsoft. darwin and linux measure {network:true} in BOTH trees; only win32 ever observed the userHome write, and its v2 arm cannot be measured (VOID twice).; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+    }
+   }
+  },
+  "unix-dgram": {
+   "default": {
+    "": "latest measured 2.0.7"
+   }
+  },
+  "unrs-resolver": {
+   "default": {
+    "": "measured 1.12.2. A former write.userHome was withdrawn on evidence: the one write is napi-postinstall mkdiring a sibling inside its own store entry, which deps covers. Three-arm probe on macOS, Linux and Windows - narrow matches wide, and dropping deps as a control fails with EPERM/EACCES on exactly that path."
+   }
+  },
+  "ursa-optional": {
+   "default": {
+    "": "latest measured 0.10.2; linux write RESTORED 2026-09-01 from corpus epoch 71: the artifact gate walks only the package's own directory, so the real-home writes the OBSERVE census attributes were invisible to the drop arm and the capability was narrowed by default rather than by measurement; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "use-mask-input": {
+   "default": {
+    "": "latest measured 3.13.0"
+   },
+   "versions": {
+    "<3.13.0": {
+     "": "measured 3.3.2; covers everything below 3.13.0"
+    }
+   }
+  },
+  "v8-profiler-next": {
+   "default": {
+    "": "latest measured 1.10.0; egress GRANTED 2026-08-18 — the entry previously named no network at all, and a present entry grants only what it names, so the default silently denied egress to a postinstall that fetches a node-pre-gyp prebuilt from github.com. Measured cold: `getaddrinfo ENOTFOUND github.com`. npm reaches the host and gets an HTTP 404 for the node-v147 ABI instead, so BOTH fail today and neither the exit code nor an npm differential on the OUTCOME surfaces the denial — the mechanisms differ. The grant is still wrong: on a Node whose ABI has a published prebuilt, the withheld egress forces every user into a source build"
+   }
+  },
+  "vanilla-cookieconsent": {
+   "default": {
+    "": "latest measured 3.0.0-rc.9"
+   }
+  },
+  "victory-bar": {
+   "default": {
+    "": "latest measured 37.3.6"
+   },
+   "versions": {
+    "<37.3.6": {
+     "": "measured 0.1.0, 1.0.3, 2.6.0, 4.0.1; covers everything below 37.3.6"
+    }
+   }
+  },
+  "victory-scatter": {
+   "default": {
+    "": "latest measured 37.3.6"
+   },
+   "versions": {
+    "<37.3.6": {
+     "": "measured 0.0.3, 0.2.0, 0.3.3, 0.4.0, 0.5.4, 0.6.0, 0.7.0, 1.0.0; covers everything below 37.3.6"
+    }
+   }
+  },
+  "vnu-jar": {
+   "default": {
+    "": "latest measured 26.8.6"
+   }
+  },
+  "vue-inbrowser-compiler-demi": {
+   "default": {
+    "": "latest measured 4.71.1"
+   }
+  },
+  "wdeasync": {
+   "default": {
+    "": "latest measured 0.1.120"
+   }
+  },
+  "weak-napi": {
+   "default": {
+    "": "latest measured 2.0.2"
+   }
+  },
+  "windows-build-tools": {
+   "default": {
+    "": "latest measured 0.1.8"
+   }
+  },
+  "wordpos": {
+   "default": {
+    "": "latest measured 2.1.0"
+   }
+  },
+  "wrtc": {
+   "default": {
+    "": "latest measured 0.2.1"
+   }
+  },
+  "xxhash": {
+   "default": {
+    "": "latest measured 0.3.0"
+   }
+  },
+  "yo": {
+   "default": {
+    "": "latest measured 7.0.1"
+   }
+  },
+  "zopflipng-bin": {
+   "default": {
+    "": "latest measured 7.1.0; macOS network withdrawal REMOVED — measured cold 2026-08-18: the install exits 0 but a download is DENIED and it falls back to compiling from source, so an exit-code-only sweep passed the withdrawal. A user without a toolchain gets a hard failure where a prebuilt would have worked; linux network withdrawal REMOVED — measured cold 2026-08-18 on nub-linux: the install exits 0 but a download is DENIED and it falls back to a source build, so an exit-code-only sweep passed it; win32 write narrowed 2026-09-02: re-measured on windows-latest against a binary carrying 50ec17043a and 46b623e352, and the base-profile arm reproduces the control run's script output and product exactly"
+   }
+  },
+  "zstd-napi": {
+   "default": {
+    "": "latest measured 0.0.10"
+   }
+  }
+ },
+ "env": {
+  "PYTHONDONTWRITEBYTECODE": "node-gyp ships gyp/pylib and CPython writes __pycache__/*.pyc beside any module it imports. The jail refuses correctly and the build succeeds either way, because bytecode is a pure cache — but the refused writes were counted as side effects and made nine native packages (keccak, lz4, ssh2, ...) demand write.userHome, the second-widest grant, when bytecode was the ENTIRE delta between arms. Setting this stops the write happening at all, which is the general fix; the harness previously filtered .pyc after the fact, which is the same fix re-derived per tool.",
+  "npm_config_logs_max": "npm writes a timestamped debug log to $HOME/.npm/_logs on failure, and nothing about it belongs to the package being measured. MEASURED in the top-100 sweep: '.npm/_logs' derived as a writePaths entry for FOUR unrelated packages, which would ship four per-package grants for a diagnostic byproduct of the installer. The same directory already caused one wrong diagnosis: its timestamped FILENAME varied between control runs and read as nondeterminism, which is what motivated the double-control union. Setting logs-max to 0 stops npm creating the file at all — the same shape as PYTHONDONTWRITEBYTECODE above, and preferred over a harness filter for the same reason: it fixes the cause once for every tool rather than hiding the effect per tool. VERIFIED: a failing install writes 1 log file by default and 0 with this set.",
+  "npm_config_update_notifier": "npm stamps $HOME/.npm/_update-notifier-last-checked when it checks for a newer npm. It is npm's own housekeeping and has nothing to do with the package under test, but a lifecycle script that shells out to npm causes it, and the write then has to be BOUGHT with a grant. MEASURED: it is one of only two paths unrs-resolver was denied — the other being the native binary it legitimately writes into a dependency's store entry — so the package's grant was partly paying for npm's update check. Third entry of the same shape as the two above: stop the write at its cause rather than filtering the effect per package. VERIFIED: the file is created by default and absent with this set."
+ }
+}

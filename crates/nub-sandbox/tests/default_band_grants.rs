@@ -226,23 +226,23 @@ fn a_prerelease_only_hook_bearing_entry_grants_on_the_band_its_versions_actually
         // bound, every assertion below would silently be about the band instead of `default`, and
         // this test would keep passing while testing something else.
         //
-        // ⛔ WHAT THE `assert_ne!` ACTUALLY RESTS ON, because it is weaker than it looks for six of
-        // the eight. The repair sets `default` equal to its band, so for those six the two grants
-        // are capability-identical BY CONSTRUCTION and differ only in `notes`. `Grant` derives
-        // `PartialEq` over every field including `notes`, so the pair is still distinguishable and
-        // the equality above still pins the routing -- but the capability assertion below is what
-        // carries the grant, and this control must not be read as proving more than routing.
-        assert_eq!(
-            entry.grant_for(Some(prerelease)),
-            &entry.default,
+        // ⛔ ROUTING IS PINNED BY POINTER, NOT BY VALUE, AND THAT DISTINCTION IS LOAD-BEARING. The
+        // repair sets `default` equal to its band, so for six of the eight subjects the two grants
+        // are capability-identical BY CONSTRUCTION. This used to compare values and survived only
+        // because `Grant` derives `PartialEq` over `notes` too, so differing prose kept the pair
+        // unequal -- i.e. the control was resting on a comment. Prose has since moved out of the
+        // shipped catalog entirely and the values are now genuinely equal, which turned that
+        // `assert_ne!` red. Comparing WHICH GRANT OBJECT was returned tests the routing directly and
+        // does not care whether the two happen to grant the same thing.
+        assert!(
+            std::ptr::eq(entry.grant_for(Some(prerelease)), &entry.default),
             "{name}@{prerelease} no longer falls through to `default`, so this test is no longer \
              exercising the prerelease fallthrough it is named for"
         );
-        assert_ne!(
-            entry.grant_for(Some(in_band)),
-            &entry.default,
-            "control failed: {name}'s band and `default` now grant the same thing, so the \
-             fallthrough assertion above cannot distinguish them"
+        assert!(
+            !std::ptr::eq(entry.grant_for(Some(in_band)), &entry.default),
+            "control failed: {name}@{in_band} resolved to the `default` grant object rather than to \
+             its own band, so the fallthrough assertion above cannot distinguish them"
         );
 
         for platform in [Platform::Macos, Platform::Linux, Platform::Windows] {

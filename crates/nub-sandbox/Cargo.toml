@@ -133,6 +133,7 @@ semver = "1"
 
 [dev-dependencies]
 tempfile = "3"
+serde_json = { workspace = true }
 # Proxy integration tests build the client-side `Proxy-Authorization: Basic` credential.
 base64 = "0.22"
 

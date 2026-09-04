@@ -25,11 +25,67 @@
 //!
 //! Reads the shipped bytes through `include_str!` rather than the runtime lookup, which consults a
 //! dev override and an on-disk update tier first; the subject here is the file in this repository.
+//!
+//! ⛔ THE NOTES COME FROM THE SIDECAR AND ARE READ FROM DISK, NOT `include_str!`. Prose is ~46% of
+//! what the catalog used to weigh and no runtime code reads it, so it moved to
+//! `build-jail-catalog-notes.json` and the shipped catalog carries none. Embedding the sidecar here
+//! would put those bytes straight back into every binary that links this crate, which is the whole
+//! thing the split was for — so this reads the file at test time instead.
 use nub_sandbox::catalog_v2::{Catalog, Platform, Scope};
+use std::collections::BTreeMap;
 
 fn shipped() -> Catalog {
     nub_sandbox::catalog_v2::parse(include_str!("../data/build-jail-catalog-v2.json"))
         .expect("the shipped catalog parses; build.rs fails the build otherwise")
+}
+
+/// `(package, band, platform-key-or-empty) -> note`, where the empty key is the cell's own note.
+type Notes = BTreeMap<(String, String, String), String>;
+
+fn sidecar_notes() -> Notes {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/build-jail-catalog-notes.json"
+    );
+    let raw = std::fs::read_to_string(path).expect("the notes sidecar is readable");
+    let doc: serde_json::Value = serde_json::from_str(&raw).expect("the notes sidecar parses");
+    let mut out = Notes::new();
+    let pkgs = doc["packages"].as_object().expect("`packages` object");
+    for (name, entry) in pkgs {
+        let mut bands: Vec<(String, &serde_json::Value)> = Vec::new();
+        for (key, val) in entry.as_object().expect("entry object") {
+            if key == "versions" {
+                for (range, cell) in val.as_object().expect("versions object") {
+                    bands.push((range.clone(), cell));
+                }
+            } else {
+                bands.push((key.clone(), val));
+            }
+        }
+        for (band, cell) in bands {
+            for (scope, note) in cell.as_object().expect("cell object") {
+                if let Some(t) = note.as_str() {
+                    out.insert((name.clone(), band.clone(), scope.clone()), t.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The note that applies to one cell on one platform, mirroring `Grant::on`'s own rule for the
+/// field: the platform's own note when it has one, otherwise the cell's.
+fn note_for(notes: &Notes, name: &str, band: &str, platform: Platform) -> String {
+    let key = match platform {
+        Platform::Macos => "macos",
+        Platform::Linux => "linux",
+        Platform::Windows => "win",
+    };
+    notes
+        .get(&(name.to_string(), band.to_string(), key.to_string()))
+        .or_else(|| notes.get(&(name.to_string(), band.to_string(), String::new())))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// How a note names each OS when it records one of these narrowings. `win32` rather than `win`:
@@ -50,7 +106,7 @@ type Cell = (String, String, Platform);
 /// Both halves are required. "base-profile arm" alone appears in prose about OTHER cells — a
 /// `default` note routinely describes what was done to the bands below it — and matching on it
 /// alone attributes a band's measurement to the default that merely mentions it.
-fn cells_narrowed_at_the_base_profile(catalog: &Catalog) -> Vec<Cell> {
+fn cells_narrowed_at_the_base_profile(catalog: &Catalog, notes: &Notes) -> Vec<Cell> {
     let mut found = Vec::new();
     for (name, entry) in &catalog.packages {
         let bands = std::iter::once((String::from("default"), &entry.default)).chain(
@@ -61,8 +117,9 @@ fn cells_narrowed_at_the_base_profile(catalog: &Catalog) -> Vec<Cell> {
         );
         for (range, grant) in bands {
             for (prose, platform) in OS_IN_PROSE {
-                let caps = grant.on(platform);
-                if caps.notes.contains(prose) && caps.notes.contains("base-profile arm") {
+                let _ = grant;
+                let note = note_for(notes, name, &range, platform);
+                if note.contains(prose) && note.contains("base-profile arm") {
                     found.push((name.clone(), range.clone(), platform));
                 }
             }
@@ -90,7 +147,7 @@ fn a_cell_narrowed_at_the_base_profile_still_grants_that_arm_s_write_deps() {
     // 1 of N — which reads as an isolated typo rather than the systematic narrowing it is.
     let mut floored: Vec<String> = Vec::new();
 
-    for (name, range, platform) in cells_narrowed_at_the_base_profile(&catalog) {
+    for (name, range, platform) in cells_narrowed_at_the_base_profile(&catalog, &sidecar_notes()) {
         let entry = &catalog.packages[&name];
         let grant = if range == "default" {
             &entry.default
@@ -128,13 +185,14 @@ fn a_cell_narrowed_at_the_base_profile_still_grants_that_arm_s_write_deps() {
 #[test]
 fn the_derived_walk_still_finds_the_cells_it_is_meant_to_guard() {
     let catalog = shipped();
-    let cells = cells_narrowed_at_the_base_profile(&catalog);
+    let cells = cells_narrowed_at_the_base_profile(&catalog, &sidecar_notes());
 
     assert!(
         cells.len() >= 24,
         "the note-derived walk found only {} cell(s), so the floor test is asserting almost \
          nothing. Either the narrowing note was reworded — match the new wording in OS_IN_PROSE — \
-         or `Grant::on` stopped carrying `notes` through to the resolved caps.",
+         or the note is no longer in `data/build-jail-catalog-notes.json`, which is where prose \
+         lives now that the shipped catalog carries none.",
         cells.len()
     );
 }
