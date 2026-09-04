@@ -1024,6 +1024,267 @@ pub fn run_supervised(policy: EgressPolicy, argv: &[CString]) -> io::Result<i32>
 }
 
 // ---------------------------------------------------------------------------
+// The library launch path: a bespoke-fork confined child + its supervisor thread.
+// ---------------------------------------------------------------------------
+
+/// A confined child launched by [`spawn_supervised`]: the bespoke-forked pid plus the
+/// supervisor thread servicing its `USER_NOTIF` listener. It mirrors the slice of
+/// `std::process::Child` the sandbox launch path uses — [`id`](Self::id), [`wait`](Self::wait),
+/// process-group signalling, and a kill-and-reap `Drop`.
+///
+/// WHY NOT `std::process::Child`. The listener-fd handoff needs a pre-`execve` BARRIER — the
+/// child writes the listener fd number, then blocks until the parent has `pidfd_getfd`'d it —
+/// and a blocking `pre_exec` deadlocks `Command::spawn`'s internal CLOEXEC exec-sync pipe.
+/// Leaking the listener into the execve'd target instead is a sandbox ESCAPE (the target could
+/// answer its own notifications with CONTINUE). So the supervised path forks directly;
+/// `Command`/`pre_exec` stays for the no-listener path.
+pub(super) struct SupervisedChild {
+    pid: libc::pid_t,
+    /// The `pidfd` opened to grab the listener; retained for a race-free kill in `Drop`.
+    pidfd: RawFd,
+    /// The supervisor loop thread. It returns on its own once the target dies (the RECV ioctl
+    /// fails when the listener has no live target), so `wait` joins it after reaping.
+    supervisor: Option<std::thread::JoinHandle<()>>,
+    /// Set once `waitpid` has reaped `pid`, so `Drop` neither re-kills nor double-reaps.
+    reaped: bool,
+    /// The child leads its own session (`setsid`), so `-pid` names its whole descendant tree.
+    group_leader: bool,
+}
+
+impl SupervisedChild {
+    pub(super) fn id(&self) -> u32 {
+        self.pid as u32
+    }
+
+    /// The child's process-GROUP id — `Some` only when it leads its own group, the sole state
+    /// in which `-pid` names the child's tree and nothing else. See [`SupervisedChild`].
+    pub(super) fn process_group_id(&self) -> Option<i32> {
+        self.group_leader.then_some(self.pid)
+    }
+
+    /// Reap the child and return its exit status. When it leads its own group, best-effort
+    /// signals the group first — the supervised path has no PID namespace, so a signalled group
+    /// is its only handle on a build tool the child backgrounded. Joins the supervisor thread
+    /// after reaping (it has already returned once the target is gone).
+    pub(super) fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        use std::os::unix::process::ExitStatusExt;
+        let mut status = 0;
+        loop {
+            if unsafe { libc::waitpid(self.pid, &mut status, 0) } < 0 {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            break;
+        }
+        self.reaped = true;
+        if self.group_leader {
+            unsafe { libc::kill(-self.pid, libc::SIGKILL) };
+        }
+        if let Some(handle) = self.supervisor.take() {
+            let _ = handle.join();
+        }
+        Ok(std::process::ExitStatus::from_raw(status))
+    }
+}
+
+impl Drop for SupervisedChild {
+    fn drop(&mut self) {
+        if !self.reaped {
+            let target = if self.group_leader { -self.pid } else { self.pid };
+            unsafe {
+                libc::kill(target, libc::SIGKILL);
+                let mut status = 0;
+                libc::waitpid(self.pid, &mut status, 0);
+            }
+        }
+        if self.pidfd >= 0 {
+            unsafe { libc::close(self.pidfd) };
+        }
+        if let Some(handle) = self.supervisor.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// What a [`spawn_supervised`] child applies post-fork, pre-`execve`, IN ORDER. Every field is
+/// prepared in the PARENT — allocation and lock acquisition are unsafe once forked.
+pub(super) struct SupervisedLaunch<'a> {
+    /// Fully-resolved argv. `argv[0]` MUST be an absolute program path: the child `execve`s
+    /// (not `execvp`), because the environment is replaced by `envp` and a PATH search against
+    /// the parent's `environ` would resolve against the wrong environment.
+    pub argv: &'a [CString],
+    /// The child's complete environment as `KEY=VALUE` entries; replaces the inherited env.
+    pub envp: &'a [CString],
+    /// `chdir` target, applied last before `execve`.
+    pub cwd: Option<&'a std::ffi::CStr>,
+    /// Landlock ruleset fd to `restrict_self` against, or `< 0` for no filesystem boundary.
+    pub ruleset_fd: RawFd,
+    /// The shared deny-ceiling filter (io_uring/keyctl/xattr/…), installed before the notifier.
+    pub seccomp_ceiling: Option<&'a [seccompiler::sock_filter]>,
+    /// Put the child in its own session (`setsid`): detaches the controlling terminal (the
+    /// `TIOCSTI` defence) and gives the parent a group to reap.
+    pub setsid: bool,
+}
+
+/// Fork `launch.argv` as a fully-confined child under the connect-notifier, start its supervisor
+/// thread, and return a handle the caller reaps. This is [`run_supervised`]'s network machinery
+/// (DNS stub + supervisor + pidfd handoff) with the FULL child confinement a library launch needs
+/// (setsid, `PDEATHSIG`, cloexec sweep, `no_new_privs`, capability drop, Landlock, the seccomp
+/// ceiling) and returning rather than blocking on `waitpid`.
+pub(super) fn spawn_supervised(
+    policy: EgressPolicy,
+    launch: SupervisedLaunch,
+) -> io::Result<SupervisedChild> {
+    {
+        let mut st = state().lock().unwrap();
+        st.allow_all = policy.allow_all;
+        st.allow = policy.allow.clone();
+    }
+    start_stub()?;
+
+    // child->parent (listener fd NUMBER) and parent->child ("go" barrier) plain pipes.
+    let mut c2p = [0i32; 2];
+    let mut p2c = [0i32; 2];
+    if unsafe { libc::pipe(c2p.as_mut_ptr()) } != 0 || unsafe { libc::pipe(p2c.as_mut_ptr()) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    let argv_ptrs: Vec<*const libc::c_char> = launch
+        .argv
+        .iter()
+        .map(|a| a.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    let envp_ptrs: Vec<*const libc::c_char> = launch
+        .envp
+        .iter()
+        .map(|e| e.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    let cwd_ptr = launch.cwd.map(|c| c.as_ptr());
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pid == 0 {
+        // ---- child ---- async-signal-safe only: raw syscalls, no allocation, no locks.
+        unsafe {
+            libc::close(c2p[0]);
+            libc::close(p2c[1]);
+            if launch.setsid && libc::setsid() < 0 {
+                libc::_exit(10);
+            }
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                libc::_exit(11);
+            }
+            // FIRST, before any restriction: the sweep opens `/proc/self/fd`, which Landlock
+            // below would make unreadable. It marks c2p[1]/p2c[0]/ruleset CLOEXEC too, which is
+            // harmless — each stays usable until the explicit close before `execve`.
+            if mark_inherited_fds_cloexec().is_err() {
+                libc::_exit(12);
+            }
+            // Gates Landlock and seccomp, both of which refuse a caller that could still gain
+            // privileges through a setuid `execve`.
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                libc::_exit(13);
+            }
+            if super::linux_landlock::drop_all_capabilities().is_err() {
+                libc::_exit(14);
+            }
+            if launch.ruleset_fd >= 0
+                && super::linux_landlock::restrict_self(launch.ruleset_fd).is_err()
+            {
+                libc::_exit(15);
+            }
+            if let Some(filter) = launch.seccomp_ceiling {
+                if install_target_seccomp(filter).is_err() {
+                    libc::_exit(16);
+                }
+            }
+            // The USER_NOTIF listener, LAST so the ceiling above never traps to this supervisor.
+            // `nfd` is handed to the parent then CLOSED before `execve`, so it never leaks into
+            // the target (which could otherwise service its own notifications with CONTINUE).
+            let nfd = install_connect_notifier();
+            if nfd < 0 {
+                libc::_exit(17);
+            }
+            let nfd_bytes = nfd.to_ne_bytes();
+            if libc::write(c2p[1], nfd_bytes.as_ptr() as *const libc::c_void, 4) != 4 {
+                libc::_exit(18);
+            }
+            let mut go = [0u8; 1];
+            if libc::read(p2c[0], go.as_mut_ptr() as *mut libc::c_void, 1) != 1 {
+                libc::_exit(19);
+            }
+            libc::close(nfd);
+            libc::close(c2p[1]);
+            libc::close(p2c[0]);
+            if let Some(cwd) = cwd_ptr {
+                if libc::chdir(cwd) != 0 {
+                    libc::_exit(20);
+                }
+            }
+            libc::execve(argv_ptrs[0], argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+            libc::_exit(127);
+        }
+    }
+
+    // ---- parent ----
+    unsafe {
+        libc::close(c2p[1]);
+        libc::close(p2c[0]);
+    }
+    let reap = |pid: libc::pid_t| {
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+    };
+    let mut child_nfd_bytes = [0u8; 4];
+    let got =
+        unsafe { libc::read(c2p[0], child_nfd_bytes.as_mut_ptr() as *mut libc::c_void, 4) };
+    unsafe { libc::close(c2p[0]) };
+    if got != 4 {
+        unsafe { libc::close(p2c[1]) };
+        reap(pid);
+        return Err(io::Error::other(
+            "supervised child did not hand over its notifier fd",
+        ));
+    }
+    let child_nfd = i32::from_ne_bytes(child_nfd_bytes);
+    let pf = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
+    let nfd = if pf >= 0 {
+        unsafe { libc::syscall(libc::SYS_pidfd_getfd, pf, child_nfd, 0) as RawFd }
+    } else {
+        -1
+    };
+    if nfd < 0 {
+        let e = io::Error::last_os_error();
+        if pf >= 0 {
+            unsafe { libc::close(pf) };
+        }
+        unsafe { libc::close(p2c[1]) };
+        reap(pid);
+        return Err(e);
+    }
+    let sup_thread = std::thread::spawn(move || supervisor(nfd));
+    // Release the barrier ONLY after the supervisor owns the listener — otherwise the child
+    // could execve and issue a filtered connect before anything services the notification.
+    let _ = unsafe { libc::write(p2c[1], b"g".as_ptr() as *const libc::c_void, 1) };
+    unsafe { libc::close(p2c[1]) };
+    Ok(SupervisedChild {
+        pid,
+        pidfd: pf,
+        supervisor: Some(sup_thread),
+        reaped: false,
+        group_leader: launch.setsid,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Child-side confinement helpers the Landlock path calls (ported from the dropped
 // `linux_monitor` module). Signatures match the call sites in `linux_landlock.rs`.
 // ---------------------------------------------------------------------------

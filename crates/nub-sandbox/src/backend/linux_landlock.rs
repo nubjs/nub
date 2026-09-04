@@ -623,7 +623,7 @@ struct CapData {
 ///
 /// # Safety
 /// Must be called between `fork` and `execve`. Performs only raw syscalls.
-unsafe fn drop_all_capabilities() -> Result<(), std::io::Error> {
+pub(super) unsafe fn drop_all_capabilities() -> Result<(), std::io::Error> {
     // 64 covers every capability the kernel defines; past the last one `prctl` returns
     // EINVAL, which is the loop's natural terminator and not a failure.
     for cap in 0..64 {
