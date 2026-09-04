@@ -161,6 +161,8 @@ Run an install in each project you want kept, then prune again.
 Any install registers a project, including one that reports no work to do. Running an install once in each project registers it.
 </Callout>
 
+Earlier versions of Nub kept the shared store in a different layout. A prune removes what that layout left behind once no project links into it, on the same 30-day hold.
+
 ## Project configuration
 
 Any project can pick the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree.

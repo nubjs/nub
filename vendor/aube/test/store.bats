@@ -263,7 +263,39 @@ JSON
 	assert_output --partial "from the global virtual store"
 	assert [ -z "$(find "$gvs" -mindepth 1 -maxdepth 1 -type d ! -name node_modules ! -name '.*' -print -quit)" ]
 	assert [ -z "$(find "$gvs/.projects" -mindepth 1 -maxdepth 1 -type f -print -quit)" ]
+	# Prune does sweep the pre-v1 root, but only against the registry THAT
+	# layout kept — and nothing wrote one here, so the entry is held rather
+	# than judged. The case below covers the sweep itself.
 	assert_dir_exists "$legacy"
+}
+
+@test "aube store prune retires the previous global virtual store layout" {
+	# The pre-v1 root is the PARENT of the versioned store. Releases from
+	# before the versioned namespace wrote entries straight into it, beside a
+	# `.projects` registry whose records are plain files each holding one
+	# absolute project path.
+	root="$AUBE_GLOBAL_VIRTUAL_STORE_DIR"
+	kept="$root/kept@1.0.0-deadbeefdeadbeef"
+	orphan="$root/orphan@1.0.0-deadbeefdeadbeef"
+	mkdir -p "$root/v1/.projects" "$root/.projects" "$kept/node_modules" "$orphan/node_modules"
+	mkdir -p project/node_modules
+	printf '%s' "$PWD/project" >"$root/.projects/0123456789abcdef"
+	ln -s "$kept" project/node_modules/kept
+	# Backdate both sightings past the 30-day hold, in the sweep's own state
+	# file format (`<first seen>\t<entry>`), so what survives can only be
+	# surviving because the project links to it.
+	printf '0\tkept@1.0.0-deadbeefdeadbeef\n0\torphan@1.0.0-deadbeefdeadbeef\n' >"$root/.gc-state"
+
+	run aube store prune --dry-run
+	assert_success
+	assert_output --partial "from the previous global virtual store layout"
+	assert_dir_exists "$orphan"
+
+	run aube store prune
+	assert_success
+	assert_dir_exists "$kept"
+	[ ! -d "$orphan" ]
+	assert_dir_exists "$root/v1"
 }
 
 @test "GVS registration failure does not report install success" {
@@ -361,8 +393,17 @@ JSON
 		([.mutationRoots[].kind] | index("globalVirtualStore") != null) and
 		([.mutationRoots[].kind] | index("extractedTrees") != null) and
 		([.mutationRoots[].kind] | index("legacyPackageIndex") != null) and
+		([.mutationRoots[].kind] | index("legacyGlobalVirtualStore") != null) and
 		([.actions[].kind] | index("migrateLegacyPackageIndex") != null) and
 		([.actions[].kind] | index("pruneExtractedTreeEntries") != null) and
+		([.actions[].kind] | index("pruneLegacyGlobalVirtualStoreEntries") != null) and
+		.legacyGlobalVirtualStore == {
+			"entries": 0,
+			"bytesUpperBound": 0,
+			"deferredEntries": 0,
+			"bookkeepingPaths": 0,
+			"skippedNoRecords": false
+		} and
 		.extractedTrees == {
 			"entries": 0,
 			"bytesUpperBound": 0,

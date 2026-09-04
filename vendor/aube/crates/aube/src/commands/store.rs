@@ -14,10 +14,11 @@
 //!   without touching any project's `node_modules/`.
 //! - `aube store prune` — mark global virtual-store entries reachable from
 //!   registered projects, remove the rest, sweep the extracted-tree tier at
-//!   `<store>/v1/trees/` the same way, then remove unreferenced CAS files.
-//!   CAS pruning uses hardlink counts where available and cached package
-//!   indexes on reflink filesystems. `--dry-run` reports the same totals
-//!   without deleting anything.
+//!   `<store>/v1/trees/` and the global virtual store's pre-`v1` layout the
+//!   same way, then remove unreferenced CAS files. CAS pruning uses hardlink
+//!   counts where available and cached package indexes on reflink
+//!   filesystems. `--dry-run` reports the same totals without deleting
+//!   anything.
 //! - `aube store status` — verify every file referenced by a cached package
 //!   index still exists in the store and its BLAKE3 hash matches. Exits 0
 //!   when everything is consistent, 1 when any corruption is found.
@@ -59,10 +60,11 @@ pub enum StoreCommand {
     /// project node_modules directories, manifests, or lockfiles.
     ///
     /// It removes global virtual-store graph entries not referenced by any
-    /// registered project. Entries from older aube releases live outside the
-    /// registry-managed versioned namespace and are not touched. It sweeps the
-    /// extracted-tree cache on the same evidence, holding an unreferenced tree
-    /// for a grace period first. It then prunes content-store files.
+    /// registered project. Entries older releases wrote outside the versioned
+    /// namespace are swept too, against the project registry those releases
+    /// kept, and held for a grace period first. It sweeps the extracted-tree
+    /// cache on the same evidence and with the same hold. It then prunes
+    /// content-store files.
     ///
     /// On reflink filesystems such as APFS or btrfs, link counts cannot prove
     /// project reachability, so content-store pruning relies on cached package
@@ -104,6 +106,7 @@ struct PruneReport {
     mutation_roots: Vec<MutationRoot>,
     actions: Vec<PlannedAction>,
     global_virtual_store: GvsStats,
+    legacy_global_virtual_store: LegacyGvsStats,
     extracted_trees: TreesStats,
     content_store: CasStats,
     reclaimable_bytes_upper_bound: u64,
@@ -140,6 +143,22 @@ struct GvsStats {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LegacyGvsStats {
+    entries: usize,
+    bytes_upper_bound: u64,
+    /// Unreferenced but still inside the grace window, so held rather than
+    /// planned for removal.
+    deferred_entries: usize,
+    /// The old registry and its sweep state, retired once the layout holds no
+    /// entry left to protect. Zero until then.
+    bookkeeping_paths: usize,
+    /// The old registry names no project that still resolves while the layout
+    /// holds entries, so it was not swept at all.
+    skipped_no_records: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TreesStats {
     entries: usize,
     bytes_upper_bound: u64,
@@ -172,9 +191,11 @@ struct CasPrunePlan {
     files: Vec<super::gvs_registry::CandidateFile>,
 }
 
-/// One expired entry of the extracted-tree tier.
+/// One entry that has been unreferenced long enough to remove. Shared by the
+/// two tiers that hold before deleting: the extracted-tree cache and the
+/// global virtual store's pre-`v1` layout.
 #[derive(Debug)]
-struct ExpiredTree {
+struct ExpiredEntry {
     path: std::path::PathBuf,
     name: String,
     /// When the entry was FIRST seen unreferenced. Kept so a removal that
@@ -183,9 +204,34 @@ struct ExpiredTree {
     first_seen: u64,
 }
 
+/// Plan for the global virtual store's pre-`v1` layout: the entries earlier
+/// releases wrote directly under the store root, before
+/// `GVS_REGISTRY_NAMESPACE_VERSION` moved the whole tier into a versioned
+/// child. Nothing writes there any more and no other sweep can see it.
+#[derive(Debug, Default)]
+struct LegacyGvsPrunePlan {
+    /// The pre-`v1` root. `None` when the global virtual store does not sit in
+    /// a versioned child, in which case there is no earlier layout and — the
+    /// point of the option — no licence to sweep the store's parent.
+    root: Option<std::path::PathBuf>,
+    entries: Vec<ExpiredEntry>,
+    /// Unreferenced entries still inside the grace window, name → first seen.
+    deferred: HashMap<String, u64>,
+    /// The old project registry, its sweep state, and any crashed install's
+    /// leftovers. Populated only when every entry of the layout is planned for
+    /// removal: the records are the only evidence protecting what remains.
+    bookkeeping: Vec<std::path::PathBuf>,
+    files: Vec<super::gvs_registry::CandidateFile>,
+    vanished_files: Vec<std::path::PathBuf>,
+    swept: bool,
+    /// Reported, never acted on: no record of the old registry names a project
+    /// that still resolves, while the layout holds entries.
+    skipped_no_records: bool,
+}
+
 #[derive(Debug, Default)]
 struct TreesPrunePlan {
-    entries: Vec<ExpiredTree>,
+    entries: Vec<ExpiredEntry>,
     /// Unreferenced entries still inside the grace window, name → first seen.
     /// Written back verbatim as the next state file.
     deferred: HashMap<String, u64>,
@@ -437,10 +483,11 @@ fn prune(args: PruneArgs) -> miette::Result<()> {
     if legacy_index_dir != current_index_dir {
         referenced.extend(referenced_hashes(&legacy_index_dir)?);
     }
-    let cas_plan = plan_cas_prune(store.root(), &referenced, &gvs_plan)?;
+    let legacy_plan = plan_legacy_gvs_prune(&store.virtual_store_dir());
+    let cas_plan = plan_cas_prune(store.root(), &referenced, &gvs_plan, &legacy_plan)?;
     let trees = store.trees_dir();
     let trees_plan = plan_trees_prune(&trees, &store.virtual_store_dir(), &gvs_plan.live_projects);
-    let report = build_prune_report(&store, &gvs_plan, &trees_plan, &cas_plan);
+    let report = build_prune_report(&store, &gvs_plan, &legacy_plan, &trees_plan, &cas_plan);
 
     if json {
         let output = serde_json::to_string_pretty(&report).into_diagnostic()?;
@@ -453,6 +500,7 @@ fn prune(args: PruneArgs) -> miette::Result<()> {
             store.migrate_legacy_index_for_maintenance(&maintenance_lock);
         }
         super::gvs_registry::apply_prune(&store.virtual_store_dir(), &gvs_plan)?;
+        apply_legacy_gvs_prune(&legacy_plan);
         apply_trees_prune(&trees, &trees_plan);
         for path in &cas_plan.paths {
             std::fs::remove_file(path).map_err(|e| {
@@ -487,6 +535,13 @@ fn prune(args: PruneArgs) -> miette::Result<()> {
             )
         );
     }
+    if !legacy_plan.entries.is_empty() {
+        eprintln!(
+            "{verb} {} ({:.1} MB) from the previous global virtual store layout",
+            pluralizer::pluralize("package", legacy_plan.entries.len() as isize, true),
+            candidate_bytes(&legacy_plan.files) as f64 / 1_048_576.0
+        );
+    }
     if !trees_plan.entries.is_empty() {
         eprintln!(
             "{verb} {} ({:.1} MB) from the extracted-tree cache",
@@ -506,6 +561,8 @@ fn prune(args: PruneArgs) -> miette::Result<()> {
         && gvs_plan.stale_records.is_empty()
         && cas_plan.files.is_empty()
         && trees_plan.entries.is_empty()
+        && legacy_plan.entries.is_empty()
+        && legacy_plan.bookkeeping.is_empty()
     {
         eprintln!("Nothing to prune");
     }
@@ -526,11 +583,33 @@ fn prune(args: PruneArgs) -> miette::Result<()> {
              Run an install in each project you want kept, then prune again."
         );
     }
+    if !legacy_plan.deferred.is_empty() {
+        // No "install to keep them" remedy here, unlike the tiers above: an
+        // install re-links the project into the versioned store, which makes
+        // the old entry MORE collectable, not less.
+        eprintln!(
+            "Holding {} of the previous global virtual store layout unreferenced for {} days before removal.",
+            pluralizer::pluralize("entry", legacy_plan.deferred.len() as isize, true),
+            GRACE.as_secs() / 86_400,
+        );
+    }
+    if legacy_plan.skipped_no_records {
+        eprintln!(
+            "No project record of the previous global virtual store layout names a directory that still exists; skipping it."
+        );
+    }
     for path in &gvs_plan.vanished_files {
         tracing::warn!(
             code = aube_codes::warnings::WARN_AUBE_STORE_PRUNE_ENTRY_DISAPPEARED,
             path = %path.display(),
             "global virtual-store file disappeared while building the prune plan"
+        );
+    }
+    for path in &legacy_plan.vanished_files {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_STORE_PRUNE_ENTRY_DISAPPEARED,
+            path = %path.display(),
+            "previous-layout global virtual-store file disappeared while building the prune plan"
         );
     }
     for path in &trees_plan.vanished_files {
@@ -547,12 +626,17 @@ fn plan_cas_prune(
     root: &Path,
     referenced: &HashSet<String>,
     gvs_plan: &super::gvs_registry::GvsPrunePlan,
+    legacy_plan: &LegacyGvsPrunePlan,
 ) -> miette::Result<CasPrunePlan> {
     if !root.try_exists().into_diagnostic()? {
         return Ok(CasPrunePlan::default());
     }
+    // The pre-`v1` entries count here too: earlier releases hardlinked them out
+    // of this same CAS, so releasing one drops a link exactly as a versioned
+    // entry does. Extracted trees deliberately do not — they are reflink
+    // clones, and their blocks are not what a link count measures.
     let mut removed_gvs_links: HashMap<super::gvs_registry::FileIdentity, u64> = HashMap::new();
-    for file in &gvs_plan.files {
+    for file in gvs_plan.files.iter().chain(&legacy_plan.files) {
         *removed_gvs_links.entry(file.identity.clone()).or_default() += 1;
     }
     let mut plan = CasPrunePlan::default();
@@ -666,6 +750,7 @@ fn read_dir_complete(path: &Path) -> miette::Result<Vec<std::fs::DirEntry>> {
 fn build_prune_report(
     store: &aube_store::Store,
     gvs_plan: &super::gvs_registry::GvsPrunePlan,
+    legacy_plan: &LegacyGvsPrunePlan,
     trees_plan: &TreesPrunePlan,
     cas_plan: &CasPrunePlan,
 ) -> PruneReport {
@@ -689,6 +774,12 @@ fn build_prune_report(
                 .join(super::gvs_registry::LOCK_FILE),
         ),
     ];
+    if let Some(legacy_root) = &legacy_plan.root {
+        mutation_roots.push(mutation_root(
+            "legacyGlobalVirtualStore",
+            legacy_root.clone(),
+        ));
+    }
     let mut actions = Vec::new();
     if store.legacy_index_migration_needed() {
         mutation_roots.push(mutation_root(
@@ -716,6 +807,18 @@ fn build_prune_report(
             count: gvs_plan.stale_records.len(),
         },
         PlannedAction {
+            kind: "pruneLegacyGlobalVirtualStoreEntries",
+            from: None,
+            to: None,
+            count: legacy_plan.entries.len(),
+        },
+        PlannedAction {
+            kind: "removeLegacyGlobalVirtualStoreRecords",
+            from: None,
+            to: None,
+            count: legacy_plan.bookkeeping.len(),
+        },
+        PlannedAction {
             kind: "pruneExtractedTreeEntries",
             from: None,
             to: None,
@@ -732,6 +835,7 @@ fn build_prune_report(
     for file in gvs_plan
         .files
         .iter()
+        .chain(&legacy_plan.files)
         .chain(&trees_plan.files)
         .chain(&cas_plan.files)
     {
@@ -746,6 +850,13 @@ fn build_prune_report(
             entries: gvs_plan.entries.len(),
             bytes_upper_bound: gvs_plan.bytes(),
             stale_project_records: gvs_plan.stale_records.len(),
+        },
+        legacy_global_virtual_store: LegacyGvsStats {
+            entries: legacy_plan.entries.len(),
+            bytes_upper_bound: candidate_bytes(&legacy_plan.files),
+            deferred_entries: legacy_plan.deferred.len(),
+            bookkeeping_paths: legacy_plan.bookkeeping.len(),
+            skipped_no_records: legacy_plan.skipped_no_records,
         },
         extracted_trees: TreesStats {
             entries: trees_plan.entries.len(),
@@ -762,6 +873,12 @@ fn build_prune_report(
             .vanished_files
             .iter()
             .map(|path| ("global virtual-store file", path))
+            .chain(
+                legacy_plan
+                    .vanished_files
+                    .iter()
+                    .map(|path| ("previous-layout global virtual-store file", path)),
+            )
             .chain(
                 trees_plan
                     .vanished_files
@@ -893,7 +1010,7 @@ fn plan_trees_prune(
                 &mut plan.files,
                 &mut plan.vanished_files,
             );
-            plan.entries.push(ExpiredTree {
+            plan.entries.push(ExpiredEntry {
                 path,
                 name,
                 first_seen,
@@ -924,6 +1041,199 @@ fn apply_trees_prune(trees: &Path, plan: &TreesPrunePlan) {
     // `state` holds only entries still on disk and still unreferenced, so the
     // file cannot grow without bound.
     write_grace_state(trees, &state);
+}
+
+/// The global virtual store's pre-`v1` root: the parent of today's versioned
+/// child, and only when the child really is that version.
+///
+/// Derived rather than configured, the same way `side_effects_cache_root`
+/// derives its sibling, so one constant governs both directions of the move.
+/// The `None` arm is the safety property: a store that is not in a versioned
+/// child has no earlier layout, and its parent is some unrelated directory
+/// that must never be swept.
+fn legacy_gvs_root(global_virtual_store: &Path) -> Option<std::path::PathBuf> {
+    let versioned = global_virtual_store.file_name()
+        == Some(std::ffi::OsStr::new(
+            crate::commands::settings_context::GVS_REGISTRY_NAMESPACE_VERSION,
+        ));
+    versioned
+        .then(|| global_virtual_store.parent())
+        .flatten()
+        .map(Path::to_path_buf)
+}
+
+/// Project directories named by the PRE-`v1` registry that still resolve.
+///
+/// That registry is gone from the code — the sync replaced it with the JSON
+/// records under `v1/.projects/` — so its format is re-derived here from the
+/// releases that wrote it: `<root>/.projects/<16 hex>`, a plain file holding
+/// one absolute project path and nothing else. Only the line terminator is
+/// stripped, never `trim()`: a project directory may legitimately end in a
+/// space, and eating it turns a live project into an unresolvable record.
+fn legacy_project_records(root: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root.join(super::gvs_registry::PROJECTS_DIR)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .map(|text| std::path::PathBuf::from(text.trim_end_matches(['\n', '\r'])))
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
+/// Plan the sweep of the global virtual store's pre-`v1` layout.
+///
+/// Every heuristic fails toward keeping an entry, for the same asymmetry the
+/// tiers above reason from: a retained entry wastes disk, while a deleted one
+/// leaves a live project's `node_modules` pointing at nothing. Concretely —
+///
+/// - Reachability is the OLD registry's records alone. A project holding a
+///   `v1` record has by definition re-linked into the versioned store, so it
+///   says nothing about this layout; counting it would only make the mark set
+///   look complete when it is not.
+/// - No old record that still resolves, while entries exist, sweeps nothing.
+///   A registry that predates the records is indistinguishable from a store
+///   nothing references, and this is the arm that keeps 2.8 GB of live entries
+///   rather than guess.
+/// - Removal keeps the same 30-day [`GRACE`] the tiers above use, against this
+///   root's OWN `.gc-state` — the same file, same format, that the releases
+///   which wrote this layout swept it with. So sightings they recorded still
+///   count, and an entry already past its window goes on the first prune.
+///   A project installed before the old registry existed appears in no record
+///   at all; the hold is the only thing standing between it and eviction.
+/// - The records and the state file are retired only once nothing is left to
+///   protect, which is what finally makes the layout disappear.
+///
+/// Planning is pure: nothing is removed and no clock starts until
+/// [`apply_legacy_gvs_prune`] runs, so `--dry-run` leaves the layout untouched.
+fn plan_legacy_gvs_prune(global_virtual_store: &Path) -> LegacyGvsPrunePlan {
+    let mut plan = LegacyGvsPrunePlan::default();
+    let Some(root) = legacy_gvs_root(global_virtual_store) else {
+        return plan;
+    };
+    let Ok(children) = std::fs::read_dir(&root) else {
+        plan.root = Some(root);
+        return plan;
+    };
+    plan.root = Some(root.clone());
+
+    let mut entries = Vec::new();
+    let mut bookkeeping = Vec::new();
+    for child in children.flatten() {
+        let Some(name) = child.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name == crate::commands::settings_context::GVS_REGISTRY_NAMESPACE_VERSION {
+            continue;
+        }
+        // A dot name is the old layout's own bookkeeping — its project
+        // registry, its sweep state, a crashed install's `.tmp-…`. The new
+        // layout keeps none of its own here; it is all inside the versioned
+        // child. `node_modules` is excluded for the same reason the versioned
+        // sweep excludes it: it is not a graph entry under any layout.
+        if name.starts_with('.') {
+            bookkeeping.push(child.path());
+        } else if name != "node_modules" && child.file_type().is_ok_and(|t| t.is_dir()) {
+            entries.push((name, child.path()));
+        }
+    }
+
+    if entries.is_empty() {
+        plan.bookkeeping = bookkeeping;
+        return plan;
+    }
+    let projects = legacy_project_records(&root);
+    if projects.is_empty() {
+        plan.skipped_no_records = true;
+        return plan;
+    }
+    plan.swept = true;
+
+    // The versioned sweep's walk, rooted at the old store instead. It follows
+    // every symlink under a project's `node_modules` and recurses into a
+    // marked entry's own, so it covers the project-local virtual-store subdir
+    // and scope directories without naming either, and marks an entry
+    // reachable only as some other entry's dependency. Its own `visited` set,
+    // because a walk shared with the versioned root would stop at the first
+    // directory the other one had already entered.
+    let mut reachable = HashSet::new();
+    let mut visited = HashSet::new();
+    for project in &projects {
+        for modules_dir in find_node_modules_dirs(project) {
+            mark_from(&modules_dir, &root, &mut reachable, &mut visited);
+        }
+    }
+
+    let now = unix_now();
+    let previous = read_grace_state(&root);
+    let mut layout_emptied = true;
+    for (name, path) in entries {
+        if reachable.contains(&name) {
+            layout_emptied = false;
+            continue;
+        }
+        let first_seen = previous.get(&name).copied().unwrap_or(now);
+        if now.saturating_sub(first_seen) >= GRACE.as_secs() {
+            let _ = super::gvs_registry::collect_candidate_files(
+                &path,
+                &mut plan.files,
+                &mut plan.vanished_files,
+            );
+            plan.entries.push(ExpiredEntry {
+                path,
+                name,
+                first_seen,
+            });
+        } else {
+            plan.deferred.insert(name, first_seen);
+            layout_emptied = false;
+        }
+    }
+    if layout_emptied {
+        plan.bookkeeping = bookkeeping;
+    }
+    plan
+}
+
+/// Remove the planned entries, then either retire the layout's bookkeeping or
+/// rewrite its grace state.
+///
+/// Infallible, like [`apply_trees_prune`] and unlike the versioned apply: this
+/// tier is a leftover nothing writes to, so an entry we cannot delete is
+/// re-recorded under its ORIGINAL sighting and retried next prune rather than
+/// failing a command whose real work is elsewhere. That tolerance is also why
+/// the bookkeeping goes only when every removal SUCCEEDED — deleting the
+/// records while one entry survives would strand it forever, with no evidence
+/// left to judge it by.
+fn apply_legacy_gvs_prune(plan: &LegacyGvsPrunePlan) {
+    let Some(root) = &plan.root else {
+        return;
+    };
+    let mut state = plan.deferred.clone();
+    let mut all_removed = true;
+    for entry in &plan.entries {
+        if aube_linker::remove_dir_all_with_retry(&entry.path).is_err() {
+            state.insert(entry.name.clone(), entry.first_seen);
+            all_removed = false;
+        }
+    }
+    if all_removed && !plan.bookkeeping.is_empty() {
+        // The grace state is one of these, so it must not be rewritten after.
+        for path in &plan.bookkeeping {
+            let is_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+            let _ = if is_dir {
+                aube_linker::remove_dir_all_with_retry(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+        }
+        return;
+    }
+    if plan.swept {
+        write_grace_state(root, &state);
+    }
 }
 
 /// Every `node_modules` directory in a project, workspace packages
@@ -1157,6 +1467,179 @@ fn verify_stored_file(path: &Path, expected_hex: &str) -> bool {
     }
     let actual = hasher.finalize().to_hex().to_string();
     actual == expected_hex
+}
+
+#[cfg(all(test, unix))]
+mod legacy_gvs_prune_tests {
+    use super::*;
+
+    /// A pre-`v1` root with its versioned child beside it, the way an upgraded
+    /// store really looks.
+    fn layout(tmp: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = tmp.join("store");
+        let current = root.join(crate::commands::settings_context::GVS_REGISTRY_NAMESPACE_VERSION);
+        std::fs::create_dir_all(&current).unwrap();
+        (root, current)
+    }
+
+    /// One old-layout entry, with a file inside so a wrong removal is visible
+    /// rather than a no-op on an empty directory.
+    fn entry(root: &Path, name: &str) -> std::path::PathBuf {
+        let modules = root.join(name).join("node_modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(modules.join("index.js"), name).unwrap();
+        root.join(name)
+    }
+
+    /// A pre-`v1` registry record, written the way `Store::register_project`
+    /// wrote it before the sync: a file named by the first 16 hex of the
+    /// project path's BLAKE3, holding that path and nothing else.
+    fn record(root: &Path, project: &Path) {
+        let dir = root.join(super::super::gvs_registry::PROJECTS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = project.to_string_lossy();
+        let name = blake3::hash(path.as_bytes()).to_hex()[..16].to_string();
+        std::fs::write(dir.join(name), path.as_bytes()).unwrap();
+    }
+
+    /// Link a project into the old root through its project-local
+    /// virtual-store directory, the way an install of that era did.
+    fn link_project(project: &Path, target: &Path, alias: &str) {
+        let local = project
+            .join("node_modules")
+            .join(format!(".{}", aube_util::prog()));
+        std::fs::create_dir_all(&local).unwrap();
+        std::os::unix::fs::symlink(target, local.join(alias)).unwrap();
+    }
+
+    /// Backdate an entry's unreferenced record so the next plan treats it as
+    /// already expired, without waiting out the real window.
+    fn expire(root: &Path, name: &str) {
+        let mut state = read_grace_state(root);
+        state.insert(name.to_string(), 0);
+        write_grace_state(root, &state);
+    }
+
+    fn planned(plan: &LegacyGvsPrunePlan) -> Vec<&str> {
+        let mut names: Vec<_> = plan.entries.iter().map(|e| e.name.as_str()).collect();
+        names.sort();
+        names
+    }
+
+    /// The load-bearing case. Both entries are past their window, so the one
+    /// that survives can only be surviving because a still-registered project
+    /// links to it.
+    #[test]
+    fn an_old_entry_a_registered_project_links_to_survives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, current) = layout(tmp.path());
+        let live = entry(&root, "live@1.0.0-aaaa");
+        let orphan = entry(&root, "orphan@1.0.0-bbbb");
+
+        let project = tmp.path().join("proj");
+        link_project(&project, &live, "live@1.0.0");
+        record(&root, &project);
+        expire(&root, "live@1.0.0-aaaa");
+        expire(&root, "orphan@1.0.0-bbbb");
+
+        let plan = plan_legacy_gvs_prune(&current);
+        assert_eq!(planned(&plan), vec!["orphan@1.0.0-bbbb"]);
+        assert!(live.is_dir() && orphan.is_dir(), "planning removes nothing");
+
+        apply_legacy_gvs_prune(&plan);
+        assert!(live.is_dir(), "a linked entry survives its own expiry");
+        assert!(!orphan.exists(), "the unreferenced entry is removed");
+        assert!(current.is_dir(), "the versioned store is never touched");
+    }
+
+    /// No record resolves, so the layout carries no evidence at all — which is
+    /// indistinguishable from one every project still uses. Same outcome when
+    /// the registry directory is missing entirely: both leave no live record.
+    #[test]
+    fn an_old_layout_with_no_resolvable_record_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, current) = layout(tmp.path());
+        let kept = entry(&root, "still-needed@1.0.0-aaaa");
+        expire(&root, "still-needed@1.0.0-aaaa");
+        record(&root, &tmp.path().join("deleted-project"));
+
+        let plan = plan_legacy_gvs_prune(&current);
+        assert!(plan.skipped_no_records, "the skip must be reported");
+        assert!(plan.entries.is_empty() && plan.bookkeeping.is_empty());
+
+        apply_legacy_gvs_prune(&plan);
+        assert!(kept.is_dir());
+    }
+
+    /// The upgrade case, and the reason the hold exists. A project that has
+    /// not reinstalled since the layout was retired appears in no record, so
+    /// the first prune to find an entry unreferenced must only RECORD it.
+    #[test]
+    fn an_unreferenced_old_entry_survives_its_first_prune() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, current) = layout(tmp.path());
+        let orphan = entry(&root, "orphan@1.0.0-aaaa");
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        record(&root, &project);
+
+        let plan = plan_legacy_gvs_prune(&current);
+        assert_eq!((plan.entries.len(), plan.deferred.len()), (0, 1));
+        apply_legacy_gvs_prune(&plan);
+        assert!(orphan.is_dir(), "the first prune only records the sighting");
+        assert!(read_grace_state(&root).contains_key("orphan@1.0.0-aaaa"));
+
+        // Positive control: it IS removable once the window has passed, so the
+        // assertions above pin the hold and not something else.
+        expire(&root, "orphan@1.0.0-aaaa");
+        let plan = plan_legacy_gvs_prune(&current);
+        apply_legacy_gvs_prune(&plan);
+        assert!(!orphan.exists());
+    }
+
+    /// Retiring the last entry retires the registry and the sweep state with
+    /// it, so the layout disappears instead of leaving an empty shell that
+    /// every later prune has to reason about again.
+    #[test]
+    fn the_old_records_go_once_no_entry_is_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, current) = layout(tmp.path());
+        entry(&root, "orphan@1.0.0-aaaa");
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        record(&root, &project);
+        expire(&root, "orphan@1.0.0-aaaa");
+
+        let plan = plan_legacy_gvs_prune(&current);
+        assert_eq!(plan.bookkeeping.len(), 2, "the registry and the state file");
+
+        apply_legacy_gvs_prune(&plan);
+        assert!(!root.join(super::super::gvs_registry::PROJECTS_DIR).exists());
+        assert!(!grace_state_path(&root).exists());
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "only the versioned store is left"
+        );
+    }
+
+    /// The store is not in a versioned child, so there is no earlier layout —
+    /// and above all no licence to sweep the store's PARENT, which is an
+    /// unrelated cache directory holding unrelated things.
+    #[test]
+    fn an_unversioned_store_has_no_previous_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gvs = tmp.path().join("virtual-store");
+        std::fs::create_dir_all(gvs.join("entry@1.0.0-aaaa")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sibling")).unwrap();
+
+        let plan = plan_legacy_gvs_prune(&gvs);
+        assert!(plan.root.is_none());
+        assert!(plan.entries.is_empty() && !plan.skipped_no_records);
+
+        apply_legacy_gvs_prune(&plan);
+        assert!(tmp.path().join("sibling").is_dir());
+    }
 }
 
 #[cfg(all(test, unix))]
