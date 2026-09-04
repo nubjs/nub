@@ -1,32 +1,33 @@
 #!/usr/bin/env bash
-# Compare the WORK two commands do, on a machine that is not quiet.
+# Compare the WORK several commands do, on a machine that is not quiet.
 #
-#   tests/preamble-eval/cpu-ab.sh ./art-full ./art-ungate full ungate
+#   tests/preamble-eval/cpu-ab.sh full=./art-full ungate=./art-ungate control=./art-full
 #
-# Wall clock on this repo's dev host has a ~1.4 ms floor and a shared CI runner
-# measured 0.50, 0.81 and 1.16 ms on three consecutive jobs — which is larger than
-# most of the startup terms anyone wants to separate, and is how three plausible
-# wrong numbers got recorded before. Child CPU time (user+sys, via bash's `times`)
-# ignores what other tenants do to the clock, and measured an 0.075 ms floor here
-# against its own null control while the host sat at load 18.
+# ALWAYS pass a CONTROL arm naming the same command as the first arm. Its gap from
+# that arm is this run's error bar, and it is the only thing that tells you whether
+# any other row means anything. That is not paranoia: an earlier version of this
+# script reported an 0.075 ms control gap on its first pair and -0.420 ms on the
+# same pair fifteen minutes later, which would have turned a 0.36 ms reading into a
+# finding. Measure the floor in the SAME run as the effect, never once up front.
 #
-# Two things make it work and the second is not optional:
+# Why CPU time. Wall clock on this repo's dev host has a ~1.4 ms floor, and three
+# consecutive shared CI runners gave baseline spreads of 0.50, 0.81 and 1.16 ms —
+# larger than most startup terms anyone wants to separate, and how several
+# plausible wrong numbers got recorded. Child CPU time (user+sys, through bash's
+# `times`) ignores what other tenants do to the clock.
 #
-#   * Each block runs inside its OWN subshell, because `times` reports the CALLING
-#     shell's accumulated child CPU and a command substitution forks — so the runs
-#     and the `times` that reads them have to be in the same shell.
-#   * The arms alternate (A B / B A / A B …). CPU time still DRIFTS with host load:
-#     two straight A-then-B passes over the same artifact differed by 0.90 ms.
-#     Alternating cancels the drift; running the order both ways cancels any bias
-#     the alternation itself introduces.
+# Why the rotation. CPU time still DRIFTS with host load: two straight A-then-B
+# passes over one artifact differed by 0.90 ms. Arms therefore run in short blocks
+# whose ORDER rotates every round, so no arm sits systematically early or late. Keep
+# PER small — finer interleaving cancels faster drift; the run costs the same.
 #
-# ALWAYS run the null control first — the same command as both arms — and throw the
-# comparison away if it does not come back near zero. That is the only check that
-# catches a broken instrument rather than a real difference.
+# Each block runs in its OWN subshell because `times` reports the CALLING shell's
+# accumulated child CPU, and a command substitution forks — so the runs and the
+# `times` that reads them have to live in the same shell.
 #
-# READ IT AS WORK, NOT AS STARTUP. This is user+sys summed across threads, so it is
-# an upper bound on the wall-clock win, not the same number. Quote a wall-clock
-# figure only from a quiet-machine hyperfine run.
+# READ IT AS WORK, NOT AS STARTUP. user+sys summed across threads bounds the
+# wall-clock win from above rather than equalling it. Quote a wall-clock number
+# only from a quiet-machine hyperfine run.
 set -euo pipefail
 
 block() { # block <n> <cmd…> -> seconds of child CPU
@@ -37,26 +38,34 @@ block() { # block <n> <cmd…> -> seconds of child CPU
            printf "%.4f", (a[1] * 60 + u) + (b[1] * 60 + s) }'
 }
 
-PER="${PER:-25}"
-BLOCKS="${BLOCKS:-8}"
-A="${1:?usage: cpu-ab.sh <cmd-a> <cmd-b> [label-a] [label-b]}"
-B="${2:?}"
-LA="${3:-A}"
-LB="${4:-B}"
+PER="${PER:-5}"
+ROUNDS="${ROUNDS:-40}"
+[ "$#" -ge 2 ] || { echo "usage: cpu-ab.sh <label>=<cmd> <label>=<cmd> [<label>=<cmd>…]" >&2; exit 2; }
 
-sa=0
-sb=0
-for ((k = 0; k < BLOCKS; k++)); do
-  if ((k % 2 == 0)); then
-    x=$(block "$PER" $A); y=$(block "$PER" $B)
-  else
-    y=$(block "$PER" $B); x=$(block "$PER" $A)
-  fi
-  sa=$(awk -v a="$sa" -v b="$x" 'BEGIN { printf "%.4f", a + b }')
-  sb=$(awk -v a="$sb" -v b="$y" 'BEGIN { printf "%.4f", a + b }')
+labels=()
+cmds=()
+for spec in "$@"; do
+  labels+=("${spec%%=*}")
+  cmds+=("${spec#*=}")
+done
+n=${#cmds[@]}
+sums=()
+for ((i = 0; i < n; i++)); do sums+=(0); done
+
+for ((r = 0; r < ROUNDS; r++)); do
+  for ((j = 0; j < n; j++)); do
+    i=$(((j + r) % n))
+    x=$(block "$PER" ${cmds[$i]})
+    sums[$i]=$(awk -v a="${sums[$i]}" -v b="$x" 'BEGIN { printf "%.4f", a + b }')
+  done
 done
 
-awk -v a="$sa" -v b="$sb" -v n="$((PER * BLOCKS))" -v la="$LA" -v lb="$LB" 'BEGIN {
-  printf "%-12s %8.3f ms/run\n%-12s %8.3f ms/run\n%-12s %+8.3f ms  (%s minus %s, %d runs each)\n",
-    la, a * 1000 / n, lb, b * 1000 / n, "delta", (b - a) * 1000 / n, lb, la, n
-}'
+total=$((PER * ROUNDS))
+base=$(awk -v a="${sums[0]}" -v n="$total" 'BEGIN { printf "%.4f", a * 1000 / n }')
+for ((i = 0; i < n; i++)); do
+  awk -v s="${sums[$i]}" -v n="$total" -v l="${labels[$i]}" -v b="$base" 'BEGIN {
+    v = s * 1000 / n
+    printf "%-12s %8.3f ms/run   %+7.3f vs %s\n", l, v, v - b, "arm 1"
+  }'
+done
+echo "($total runs per arm, blocks of $PER, order rotated each round)"
