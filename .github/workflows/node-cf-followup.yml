@@ -1,0 +1,34 @@
+name: node-cf-followup
+
+# Re-measures two already-built node binaries pulled from a node-cf-probe run's
+# cf-bins artifact, so a second reading costs minutes rather than a rebuild.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'node-cf-probe run id carrying the cf-bins artifact'
+        required: true
+
+jobs:
+  measure:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install hyperfine && sudo DevToolsSecurity -enable || true
+      - name: Fetch the built binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ inputs.run_id }}" -n cf-bins -D bins -R "$GITHUB_REPOSITORY"
+      - name: Measure
+        run: tests/node-cf-followup/probe.sh bins/node-baseline bins/node-macos-cf "$RUNNER_TEMP/fu" | tee followup.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cf-followup
+          path: |
+            followup.txt
+            ${{ runner.temp }}/fu/*.txt
+            ${{ runner.temp }}/fu/*.json
+            ${{ runner.temp }}/fu/*.log
+          retention-days: 7
