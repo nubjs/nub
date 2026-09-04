@@ -160,16 +160,26 @@ first_err() {
 # One fixture writer for all three arms so they cannot drift apart. `allowBuilds` is nub's field and
 # npm ignores an unknown key, which is what lets the SAME package.json drive the control.
 write_fixture() {
-  _dir="$1"; _pkg="$2"; _ver="$3"; _jail="$4"
+  _dir="$1"; _pkg="$2"; _ver="$3"; _jail="$4"; _extra="${5:-}"
   mkdir -p "$_dir"
+  # ⛔ APPROVE THE TRANSITIVE CARRIERS TOO, AND THERE IS NO WILDCARD TO DO IT WITH.
+  # `allowBuilds` matches literal names only (`build_jail.rs` pins that `"*"` names no package), and
+  # the package this sweep names is not always the one that owns the install script: `prisma@7.10.0`
+  # carries none itself and its `@prisma/engines` dependency carries it. Approving only the top-level
+  # package therefore measures NOTHING for that whole shape — the install succeeds, nothing is
+  # confined, and the row reads as a benign pass. `$_extra` carries the names the first pass reported
+  # as ignored, so the second pass confines what actually runs. Derived from nub's own report, never
+  # from a list: a hand-maintained one would go stale the next time a package moves its script.
   node -e '
-    const [out, pkg, ver] = process.argv.slice(1);
+    const [out, pkg, ver, extra] = process.argv.slice(1);
+    const allowBuilds = { [pkg]: true };
+    for (const n of (extra || "").split(",").filter(Boolean)) allowBuilds[n] = true;
     require("fs").writeFileSync(out, JSON.stringify({
       name: "iss", version: "1.0.0",
       dependencies: { [pkg]: ver },
-      allowBuilds: { [pkg]: true },
+      allowBuilds,
     }));
-  ' "$_dir/package.json" "$_pkg" "$_ver"
+  ' "$_dir/package.json" "$_pkg" "$_ver" "$_extra"
   # ⛔ TURNING THE AGE GATE OFF IS LOAD-BEARING, NOT TIDINESS — AND THE SPELLING IS THE WHOLE
   # TRICK. The setting has TWO surfaces: `nub.jsonc` takes `install.minimumReleaseAge` (camelCase,
   # and it REJECTS a bare integer), while the CLI and `.npmrc` take `minimum-release-age` as bare
@@ -188,7 +198,15 @@ write_fixture() {
   # sweep runs, not of the platform, and re-counting beats trusting this list. The gate is a supply-chain
   # default worth having; it is simply not what this sweep measures, and leaving it on silently
   # deletes packages from the population.
-  printf 'side-effects-cache=false\nminimum-release-age=0\nminimumReleaseAge=0\n' > "$_dir/.npmrc"
+  # ⛔ THE TRUST POLICY IS A SECOND CLOCK-DEPENDENT GATE, AND IT IS NOT THE AGE GATE. Same argument as
+  # the block above, same fix, different setting: `trustPolicy=no-downgrade` is on by default and
+  # refuses a version whose provenance looks like a regression against an earlier publish
+  # (`ERR_NUB_TRUST_DOWNGRADE`, exit 23). nub additionally exempts anything older than 14 days
+  # (`trust_policy_ignore_after_default`), so whether a given pinned version is refused depends on the
+  # DATE THE SWEEP RUNS — measured: `prisma@7.10.0` refused at 10 days old, and the identical fixture
+  # passes once it ages out. That makes a re-run non-reproducible, which is the one property this
+  # harness cannot trade away. Off here, and the supply-chain default is untouched for real users.
+  printf 'side-effects-cache=false\nminimum-release-age=0\nminimumReleaseAge=0\ntrust-policy=off\ntrustPolicy=off\n' > "$_dir/.npmrc"
   # ⛔ NODE, NOT PYTHON, AND THAT IS WHAT MAKES THIS RUNNABLE ON WINDOWS. `nub-win3` has no python3
   # and no `py`, so the heredoc that used to be here wrote no fixture at all and every Windows row read
   # NO-SCRIPT-RAN — 87 rows summarising as "0 jail-suspect failures" over installs that never happened.
@@ -245,6 +263,28 @@ for pkg in $PKGS; do
   _jail_t0=$SECONDS
   install_arm "$home" "$proj" "$log" "$NUB" install
   rc=$?
+  # SECOND PASS when the first reported ignored build scripts. nub names them in
+  # `WARN_NUB_IGNORED_BUILD_SCRIPTS ... packages=["a@1","b@2"]`; re-approving and re-installing is what
+  # turns "measured nothing" into a measurement. One retry only — if the second pass still reports
+  # ignored scripts the row stands as it is rather than looping.
+  EXTRA_APPROVALS="$(node -e '
+    const names = new Set();
+    for (const m of require("fs").readFileSync(process.argv[1], "utf8").matchAll(/packages=\[([^\]]*)\]/g)) {
+      for (const raw of m[1].split(",")) {
+        const s = raw.trim().replace(/^"|"$/g, "");
+        if (!s) continue;
+        const at = s.lastIndexOf("@");
+        names.add(at > 0 ? s.slice(0, at) : s);
+      }
+    }
+    process.stdout.write([...names].join(","));
+  ' "$log" 2>/dev/null || true)"
+  if [ -n "$EXTRA_APPROVALS" ]; then
+    write_fixture "$proj" "$pkg" "$ver" jail "$EXTRA_APPROVALS"
+    rm -rf "$proj/node_modules" "$proj/nub.lock" 2>/dev/null || true
+    install_arm "$home" "$proj" "$log" "$NUB" install
+    rc=$?
+  fi
   jail_s=$(( SECONDS - _jail_t0 ))
 
   # ⛔⛔ COUNT THE JAIL'S OWN PER-SPAWN DUMP, NOT A WARNING. The first version counted
@@ -317,7 +357,7 @@ for pkg in $PKGS; do
   nojail_rc="—"; npm_rc="—"; ctl_err="—"
   if [ "$verdict" = SUSPECT ]; then
     bhome="$(mktemp -d "$HOME/issb-XXXXXX")"; bproj="$bhome/project"; blog="$bhome/install.log"
-    write_fixture "$bproj" "$pkg" "$ver" nojail
+    write_fixture "$bproj" "$pkg" "$ver" nojail "$EXTRA_APPROVALS"
     install_arm "$bhome" "$bproj" "$blog" "$NUB" install
     nojail_rc=$?
     if [ "$nojail_rc" = 0 ]; then
@@ -341,7 +381,7 @@ for pkg in $PKGS; do
       # A real ERESOLVE conflict now fails the control, which scores the row UPSTREAM. That is the safe
       # direction: it is the verdict that indicts nobody. This flag cannot affect JAIL-CAUSED either way
       # — arms A and B decide that, and arm C runs only once both have already failed.
-      write_fixture "$cproj" "$pkg" "$ver" jail
+      write_fixture "$cproj" "$pkg" "$ver" jail "$EXTRA_APPROVALS"
       install_arm "$chome" "$cproj" "$clog" npm install --no-audit --no-fund
       npm_rc=$?
       ctl_err=$(first_err "$clog")
