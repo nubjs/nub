@@ -190,7 +190,7 @@ pub fn trim(bytes: &mut [u8], locales: &[String]) -> Result<TrimReport> {
     // corruption of exactly the kind this whole rewrite has to be trusted not to
     // produce. Not observed in any Node measured; checked because the cost of being
     // wrong is unbounded and the cost of the check is one pass.
-    if sizes.iter().any(|&size| size == 0) {
+    if sizes.contains(&0) {
         bail!("the ICU data package aliases two resources to one offset; refusing to rewrite it");
     }
 

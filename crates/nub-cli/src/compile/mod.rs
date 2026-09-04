@@ -3647,6 +3647,7 @@ mod tests {
             icon: None,
             metadata: Vec::new(),
             hide_console: false,
+            icu: None,
             smol: false,
             target: None,
             platform: None,
