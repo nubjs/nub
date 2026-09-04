@@ -73,20 +73,18 @@ $ du -sh node_modules
 8.6M	node_modules
 
 $ nub compile cli.ts --smol --target lts --out cli
-Bundling cli.ts …
 
-  output   cli  (1.0 MB)
-  runtime  Node lts, not embedded — from --target; floor enforced at runtime
-  target   darwin-arm64 (this machine)
-
-$ ls -l cli
--rwxr-xr-x  1  1007138  cli        # 941,090 baseline + 66,048 bytes of app
+    output  cli  990 KB  (app 105 KB · launcher 885 KB)
+   runtime  Node lts, not embedded  (--target; floor enforced at runtime)
+  platform  darwin-arm64
+       app  extracted on first run  its chunks import each other in a cycle
+   elapsed  0.5s
 
 $ ./cli --name nub
 ✔ hello, nub
 ```
 
-Four dependencies and 8.6 MB of `node_modules` become 66,048 bytes of bundled, tree-shaken, minified app.
+Four dependencies and 8.6 MB of `node_modules` become 445 KB of bundled, tree-shaken, minified app, and 105 KB once compressed into the executable.
 
 ### Startup
 
