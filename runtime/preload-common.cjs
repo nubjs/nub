@@ -54,14 +54,24 @@ const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
 // so a thread of this process is separated from a descendant structurally rather than by
 // guesswork.
 const ARGV_ONLY_FLAGS_KEY = "nub.argv-only-flags";
+// A compiled artifact whose sealed graph cannot reach Worker or worker_threads has
+// no second thread, so nothing can have written this channel and nobody can read
+// what we publish to it — only the env var below carries flags into such a process.
+// Asking anyway loads the builtin, and its subgraph is eight internal modules on
+// every run. This module's EVALUATION is part of the compile preamble's static
+// import graph, so no call-gating reaches that cost; the same signal and the same
+// deliberately over-detecting build-time scan gate the preamble's own Worker branch.
+// The record is published by the bootstrap's `--require`, ahead of any ESM here.
+// Undefined outside a compiled artifact, where the load stays eager.
+const workerless = compileBootstrap?.needsWorker === false;
 try {
-  const workerThreads = getBuiltin("node:worker_threads");
+  const workerThreads = workerless ? null : getBuiltin("node:worker_threads");
   const fromEnv = process.env.__NUB_ARGV_ONLY_FLAGS;
-  const injectedArgvFlags = fromEnv || workerThreads.getEnvironmentData(ARGV_ONLY_FLAGS_KEY);
+  const injectedArgvFlags = fromEnv || workerThreads?.getEnvironmentData(ARGV_ONLY_FLAGS_KEY);
   if (injectedArgvFlags) {
     if (fromEnv) {
       delete process.env.__NUB_ARGV_ONLY_FLAGS;
-      workerThreads.setEnvironmentData(ARGV_ONLY_FLAGS_KEY, fromEnv);
+      workerThreads?.setEnvironmentData(ARGV_ONLY_FLAGS_KEY, fromEnv);
     }
     const injected = new Set(String(injectedArgvFlags).split(" ").filter(Boolean));
     if (Array.isArray(process.execArgv)) {
