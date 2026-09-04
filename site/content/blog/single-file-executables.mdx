@@ -151,7 +151,7 @@ Shipping 1 package unbundled, in its own installed layout:
    elapsed  3.0s
 ```
 
-Packages like `sharp` and `@napi-rs/nice` publish one binary package per platform — 24 of them, in sharp's case — and pick between them at load time with a `process.platform` check. Compiling replaces `process.platform` and `process.arch` with the target's values; the check becomes a constant, and only that platform's addon goes into the executable.
+Packages like `sharp` and `@napi-rs/nice` publish one binary package per platform — 25 of them, in sharp's case — and pick between them at load time with a `process.platform` check. Compiling replaces `process.platform` and `process.arch` with the target's values; the check becomes a constant, and only that platform's addon goes into the executable.
 
 Cross-compiling with an addon means having that target's binary package on disk. When the resolved addon doesn't match the target, the build refuses:
 
@@ -213,8 +213,15 @@ $ ./app deploy
 deployed!
 
 $ ls ~/.cache/nub/compile-app/*/
-__nub_compile_bootstrap.cjs   deploy-DOT-CGau.mjs   rolldown-runtime-CQMMWdV6.mjs
-_nub_commonjs-C_xMe9k8.mjs    main.mjs              worker-blob-url.cjs
+__nub_compile_bootstrap.cjs
+_nub_commonjs-Upy-LYoG.mjs
+_nub_compile-preamble-Ydg2E6k8.mjs
+deploy-DrKhUmBG.mjs
+main.mjs
+package.json
+rolldown-runtime-CQMMWdV6.mjs
+worker-330a94350ac07edfd25eb4bbe98201b91ce9087fe792dc5c1fa6d2ed215576ce-code.mjs
+worker-330a94350ac07edfd25eb4bbe98201b91ce9087fe792dc5c1fa6d2ed215576ce.mjs
 ```
 
 Chunks and assets land flat in one directory, which keeps a rewritten asset reference valid from every chunk. Workers compile the same way: a static `new Worker(new URL("./worker.ts", import.meta.url))` becomes a second bundled entry carrying the same runtime preamble as the program, and the thread sees the same `process.execPath` and the same globals.
