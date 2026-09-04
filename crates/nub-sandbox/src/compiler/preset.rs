@@ -3023,10 +3023,14 @@ mod tests {
     /// Every other secret-floor test compiles the BASE profile
     /// ([`build_jail_withholds_every_secret_without_a_single_deny`] uses
     /// `production_build_jail_policy`), so they prove the floor for a package holding NO grant. But
-    /// 165 of the 338 baked catalog entries — 48.8% — hold a `userHome` read or write, and nothing
-    /// pinned what those get. The mechanism is right today (`apply_v2_grant` lowers `Scope::UserHome`
-    /// through `defaults::home_minus_secrets_allows` on BOTH axes), and that is exactly the kind of
-    /// single call one refactor replaces with the un-narrowed variant.
+    /// 120 of the shipped catalog's 433 cells — 27.7%, across 100 of its 294 packages, counted by
+    /// walking every band and per-OS overlay for a `userHome` read or write — take this path. The
+    /// mechanism is right today (`apply_v2_grant` lowers `Scope::UserHome` through
+    /// `defaults::home_minus_secrets_allows` on BOTH axes), and that is exactly the kind of single
+    /// call one refactor replaces with the un-narrowed variant. This test pins the mechanism on a
+    /// synthetic entry; `no_shipped_catalog_grant_reaches_a_credential_at_any_band_or_platform`
+    /// pins every SHIPPED cell, which is the half this one stopped covering when the last real
+    /// entry that materialised a home rule was narrowed.
     ///
     /// `~/.npmrc` is the assertion that matters most: it carries the npm publish token, which is what
     /// turns a stolen credential into a self-propagating worm. `.ssh` and `.aws` are here because a
@@ -3160,6 +3164,294 @@ mod tests {
                  harvest it, and ~/.npmrc in particular is the npm token a worm republishes with"
             );
         }
+    }
+
+    /// ⛔ THE SAME FLOOR, PROVEN ON THE SHIPPED CATALOG RATHER THAN ON ONE SYNTHETIC ENTRY. The test
+    /// above proves the MECHANISM narrows a `userHome` grant; it cannot say whether any grant nub
+    /// actually ships routes around it. This one lowers every grant in `build-jail-catalog-v2.json`
+    /// — every package, every version band, every OS an overlay can name — and asks the matcher
+    /// whether a jailed script could read a credential. The two are not redundant: the mechanism test
+    /// dies the moment `home_minus_secrets_allows` is replaced, and this one dies the moment a
+    /// catalog EDIT hands a package something wider than the vocabulary the mechanism narrows.
+    ///
+    /// ⛔ THE `write:"disk"` TIER IS EXEMPT BY CONSTRUCTION, NOT BY OVERSIGHT. `compile_build_jail`
+    /// answers it with `relax_fs_to_full_disk`, which clears every rule and flips the default to
+    /// Allow — there is no filesystem confinement left to assert about. Skipping those silently would
+    /// hide the tier growing, so they are collected and pinned instead: a new disk-tier entry fails
+    /// this test and has to be argued.
+    ///
+    /// ⛔ `read:"disk"` IS NOT EXEMPT AND MUST NOT BE FOLDED IN WITH IT. It answers through
+    /// `relax_fs_read_to_disk_minus_secrets`, which excludes the credentials by walking them out of
+    /// the allow-set, so the two disk spellings differ on exactly the question this test asks.
+    /// Treating "disk" as one tier would have dropped `@mui/x-telemetry` and
+    /// `appium-uiautomator2-driver` from the assertion — the only two entries whose disk reach is
+    /// read-only, and therefore the only two where the exclusion has to hold under a disk grant.
+    ///
+    /// The project's own `.env` is deliberately NOT in the credential set. A `project` grant hands
+    /// over the consumer's own tree by design, `.env` included (82 combinations today), so asserting
+    /// it denied would be asserting the catalog is something it is not. What IS asserted is the
+    /// implication: nothing reaches that file without a grant that names `project`.
+    #[test]
+    fn no_shipped_catalog_grant_reaches_a_credential_at_any_band_or_platform() {
+        // Home-relative, because a `project` grant legitimately covers the project tree and a
+        // credential planted there would make this test assert the opposite of the design. `.ssh` is
+        // the directory itself: a grant on it confers the private key even if the key's own path
+        // were somehow refused.
+        const HOME_CREDENTIALS: [&str; 4] =
+            [".npmrc", ".aws/credentials", ".ssh/id_ed25519", ".ssh"];
+
+        let (_guard, homes) = secretful_home();
+        // BEFORE any compile: `home_minus_secrets_allows` and `disk_minus_secrets_read_allows` both
+        // WALK the real directory, so a credential created afterwards never enters the walk and every
+        // denial below would be a denial of a path that does not exist — which proves nothing.
+        std::fs::write(
+            homes.home.join(".npmrc"),
+            "//registry.npmjs.org/:_authToken=decoy",
+        )
+        .expect("mk .npmrc");
+        std::fs::create_dir_all(homes.home.join(".aws")).expect("mk .aws");
+        std::fs::write(homes.home.join(".aws/credentials"), "[default]").expect("mk aws creds");
+        std::fs::write(homes.home.join(".ssh/id_ed25519"), "-----BEGIN----").expect("mk ssh key");
+        std::fs::write(homes.home.join("Documents/notes.txt"), "ordinary").expect("mk notes");
+
+        struct Reached {
+            credentials: Vec<&'static str>,
+            /// The ordinary home file. Without it a grant that materialised NOTHING would satisfy
+            /// every credential assertion, and the sweep would report a clean catalog by examining
+            /// an empty allow-set 1,299 times.
+            home: bool,
+            project_env: bool,
+        }
+        let reached = |policy: &SandboxPolicy| -> Reached {
+            let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+            let allow = |p: PathBuf| m.decide(&p).effect == Effect::Allow;
+            Reached {
+                credentials: HOME_CREDENTIALS
+                    .into_iter()
+                    .filter(|s| allow(homes.home.join(s)))
+                    .collect(),
+                home: allow(homes.home.join("Documents/notes.txt")),
+                project_env: allow(homes.project.join(".env")),
+            }
+        };
+
+        let (interpreter, extra_reads) = POSIX_LAYOUT;
+        // ⛔ COMPILED ONCE AND CLONED, AND THE FIDELITY ARGUMENT IS THE ONE ON THE TEST ABOVE:
+        // production applies the v2 grant partway through `compile_build_jail`, no fs rule is added
+        // after that point, and the matcher is last-match-wins — so appending is equivalent. 1,299
+        // real compiles would also make this the slowest test in the crate for an identical answer.
+        // `package_name: None` is what keeps the base free of a catalog grant of its own; it lands on
+        // `baseline_caps`, which grants no home read at all and so cannot mask or manufacture a leak.
+        let package_dir = homes.project.join("node_modules").join("sweep-fixture");
+        let base = compile_build_jail(
+            homes.clone(),
+            &package_dir,
+            None,
+            None,
+            vec![PathBuf::from(interpreter)],
+            extra_reads.iter().map(PathBuf::from).collect(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        {
+            let r = reached(&base);
+            assert!(
+                r.credentials.is_empty() && !r.home,
+                "fixture precondition: the ungranted base must reach nothing (got {:?}, home={}), \
+                 or a leak found below could have come from the base rather than from the catalog \
+                 grant under test",
+                r.credentials,
+                r.home
+            );
+        }
+
+        // Captured from the production function once. It answers purely from `homes` — the same
+        // allow-set for every package — and it walks the real disk, which cost 13s of suite time when
+        // it ran per combination for a byte-identical result.
+        let disk_read_allows = {
+            let mut scratch = SandboxPolicy::default();
+            relax_fs_read_to_disk_minus_secrets(&mut scratch, &homes);
+            scratch.fs.rules.entries
+        };
+
+        // Both controls drive the SAME `reached` detector the sweep uses, through the SAME catalog
+        // parse and `apply_v2_grant` lowering, so a detector that had stopped answering — a path that
+        // never matches, a scope that stopped lowering — could not pass them.
+        let synthetic = |json: &str| -> SandboxPolicy {
+            let catalog = crate::catalog_v2::parse(json).expect("synthetic entry must parse");
+            let mut policy = base.clone();
+            let out = crate::compiler::curated::apply_v2_grant(
+                &mut policy,
+                &homes,
+                &package_dir,
+                &catalog.packages["p"]
+                    .default
+                    .on(crate::catalog_v2::Platform::current()),
+            );
+            if out.write_disk {
+                relax_fs_to_full_disk(&mut policy);
+            }
+            enforce_pure_allowlist("build-jail", &mut policy);
+            policy
+        };
+
+        let narrow = reached(&synthetic(
+            r#"{"packages":{"p":{"default":{"write":{"userHome":true},"notes":"control: the grant the sweep must find safe"}}}}"#,
+        ));
+        assert!(
+            narrow.home,
+            "control: a userHome grant must actually materialise a home allow — if it does not, the \
+             sweep's clean verdicts are verdicts about a policy that granted nothing"
+        );
+        assert!(
+            narrow.credentials.is_empty(),
+            "control: a narrowed userHome grant must reach no credential, got {:?}",
+            narrow.credentials
+        );
+
+        // The wide half, and the reason the control needs two arms: the narrow arm proves the
+        // detector can say "home reachable", not that it can say "credential reachable". Only a grant
+        // that genuinely opens the filesystem separates a working detector from one wired to a path
+        // that never matches anything.
+        let wide = reached(&synthetic(
+            r#"{"packages":{"p":{"default":{"write":"disk","notes":"control: the detector must fire on an unconfined grant"}}}}"#,
+        ));
+        assert_eq!(
+            wide.credentials.len(),
+            HOME_CREDENTIALS.len(),
+            "control: an unconfined write:\"disk\" grant must report EVERY credential as reached \
+             (got {:?}) — anything less means the detector, not the policy, is what is denying",
+            wide.credentials
+        );
+
+        let catalog =
+            crate::catalog_override::baked_v2().expect("the baked v2 catalog is always in force");
+        let mut combinations = 0usize;
+        let mut grants = 0usize;
+        let mut home_reaching = 0usize;
+        let mut unconfined: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut leaks: Vec<String> = Vec::new();
+        let mut stray_project_env: Vec<String> = Vec::new();
+
+        for (name, entry) in &catalog.packages {
+            let mut bands: Vec<(&str, &crate::catalog_v2::Grant)> =
+                vec![("default", &entry.default)];
+            bands.extend(entry.versions.iter().map(|b| (b.range.as_str(), &b.grant)));
+            grants += bands.len();
+            for (band, grant) in bands {
+                for platform in crate::catalog_v2::Platform::ALL {
+                    combinations += 1;
+                    let caps = grant.on(platform);
+                    let mut policy = base.clone();
+                    let out = crate::compiler::curated::apply_v2_grant(
+                        &mut policy,
+                        &homes,
+                        &package_dir,
+                        &caps,
+                    );
+                    if out.write_disk {
+                        unconfined.insert(name.as_str());
+                        continue;
+                    }
+                    if out.read_disk {
+                        policy
+                            .fs
+                            .rules
+                            .entries
+                            .splice(0..0, disk_read_allows.iter().cloned());
+                    }
+                    enforce_pure_allowlist("build-jail", &mut policy);
+
+                    let r = reached(&policy);
+                    home_reaching += usize::from(r.home);
+                    let cell = || format!("{name} @ {band} on {}", platform.key());
+                    for secret in r.credentials {
+                        leaks.push(format!("{}: reached ~/{secret}", cell()));
+                    }
+                    // A `project` grant covers `.env` by design; ANY OTHER route to it is a defect,
+                    // and this is the only assertion the fixture's project-local `.env` carries.
+                    if r.project_env
+                        && !(caps.read.covers(crate::catalog_v2::Scope::Project)
+                            || caps.write.covers(crate::catalog_v2::Scope::Project))
+                    {
+                        stray_project_env.push(cell());
+                    }
+                }
+            }
+        }
+
+        assert!(
+            leaks.is_empty(),
+            "a shipped catalog grant reaches a credential a jailed lifecycle script could harvest \
+             ({} of {combinations} combinations):\n  {}",
+            leaks.len(),
+            leaks.join("\n  ")
+        );
+        assert!(
+            stray_project_env.is_empty(),
+            "the consuming project's .env is reachable without a grant naming `project`:\n  {}",
+            stray_project_env.join("\n  ")
+        );
+
+        // Floors, not equalities: the catalog grows on its own schedule and pinning exact counts
+        // would make every entry a test edit. Measured 2026-09-04: 294 packages, 433 grants, 1,299
+        // combinations, 136 of them reaching the home. The floors sit far enough below to absorb
+        // ordinary narrowing and high enough that an emptied catalog, a lost band walk, or a
+        // `Platform::ALL` reduced to the host OS cannot pass by examining almost nothing.
+        assert!(
+            catalog.packages.len() >= 250 && grants >= 380 && combinations >= 1_100,
+            "the sweep examined {} packages / {grants} grants / {combinations} combinations, which \
+             is too few to be the shipped catalog — a clean result here would mean nothing",
+            catalog.packages.len()
+        );
+        assert!(
+            home_reaching >= 100,
+            "only {home_reaching} combinations reached the home at all, so the credential \
+             assertions above are near-vacuous — the userHome lowering has stopped materialising"
+        );
+
+        // ⛔ PINNED, WITH THE FULL LIST SPELLED OUT, BECAUSE THIS IS THE NARROWING BACKLOG. Every
+        // name here is a package whose scripts run with NO filesystem confinement, so the credential
+        // assertion above cannot speak for it — the list IS the residual exposure, and it may only
+        // ever shrink without an argument. Provenance for the shape it has today: of the 23 entries
+        // reaching either disk tier, 12 reach it only through an older `<`-bounded band, 12 reach it
+        // only on Windows (a `macos`/`linux` overlay narrows the other two and no `win` overlay
+        // narrows it), and 2 — `@mui/x-telemetry`, `appium-uiautomator2-driver` — are `read:"disk"`
+        // only, so they are asserted above rather than listed here.
+        let expected: std::collections::BTreeSet<&str> = [
+            "@larksuite/cli",
+            "@nuxt/components",
+            "@opencode-ai/cli",
+            "@paloaltonetworks/postman-code-generators",
+            "@sap/hana-client",
+            "@tensorflow/tfjs-backend-wasm",
+            "codeceptjs",
+            "cz-customizable",
+            "dotnet-2.0.0",
+            "flow-bin",
+            "opencode-ai",
+            "pizzip",
+            "pngout-bin",
+            "postman-code-generators",
+            "purescript",
+            "qlobber",
+            "react-native-purchases",
+            "redis-memory-server",
+            "samlify",
+            "tree-sitter-kotlin",
+            "windows-build-tools",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            unconfined,
+            expected,
+            "the set of packages whose scripts run UNCONFINED changed; added {:?}, removed {:?} — an \
+             addition needs the same argument the existing entries carry, a removal is a narrowing \
+             and just needs this list updated",
+            unconfined.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&unconfined).collect::<Vec<_>>()
+        );
     }
 
     /// The build jail's toolchain read was CARVED OUT of `$tooldirs`, so it must remain a
