@@ -31,9 +31,19 @@ The subsystem is read back by `read-subsystem.mjs`, which shares no code with nu
 
 `observe-console.ps1` asks the question directly: launch the artifact through ShellExecute — what a double-click in Explorer does — and count the console windows that appear, with a build made without the flag as the control.
 
-The fixture it needs must write a marker file and exit 7. Standard output has nowhere to go when there is no console, so a file is the only channel that can prove the program ran rather than dying on its own invalid handles — which is the failure this flag could plausibly introduce and nothing else here would catch.
+The fixture it needs must write a marker file, stay alive past `-SettleMs`, then exit 7. Staying alive is not incidental: Windows destroys a console with its last attached process, so a program that exits immediately is counted after its console has already gone — which reads as "no console" for the control as much as for the hidden build, and makes the whole run inconclusive. Standard output has nowhere to go when there is no console, so a file is the only channel that can prove the program ran rather than dying on its own invalid handles — which is the failure this flag could plausibly introduce and nothing else here would catch.
 
-It is deliberately **not** wired into CI. A hosted runner has no interactive desktop, so a console window may be un-creatable there and every assertion would pass without meaning anything. The script detects that itself: if the control opens no console either, it reports inconclusive rather than claiming a pass. Run it on a real Windows desktop or the local Windows VM (`windows-vm-test`):
+### Counting console hosts instead does not work
+
+The obvious way to make this runnable anywhere is to count console-host processes rather than windows, since Windows starts a `conhost` in every window station including the non-interactive one. It was tried on Server 2022 and it does not discriminate: `CREATE_NO_WINDOW` does not stop a console being **allocated**, it allocates one with no window. Control and hidden both started exactly one new console host, while the launcher traces confirmed only the hidden build had passed the flag. An assertion on that count reports a failure against a launcher doing exactly what it was asked.
+
+So the window is the only signal, and a window needs a desktop.
+
+### Getting a desktop
+
+It is deliberately **not** wired into CI, and SSH is not enough either. A hosted runner has no interactive desktop, and an SSH session on Windows lands in session 0 — the services session — where nothing can draw. In both cases the control opens no window, every assertion below it passes vacuously, and the script says so: it reports inconclusive rather than claiming a pass, and prints the session id it found.
+
+Run it from a session that has a desktop — RDP into the machine, or use its own console. On a GCE Windows VM (`gcloud-vm`) that means connecting over RDP, not the SSH path the rest of this harness uses.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File observe-console.ps1 `

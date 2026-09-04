@@ -58,16 +58,24 @@ public static class Win {
 }
 '@
 
-# Two independent signals, because each one is blind somewhere.
+# THE ASSERTION IS THE WINDOW, AND ONLY THE WINDOW.
 #
-# CONSOLE HOST COUNT is the primary. Windows starts one console host process per
-# console it allocates, and it does so in every window station - including the
-# non-interactive one an SSH session runs in, where window enumeration sees
-# nothing at all. This is the signal that survives being driven remotely.
+# Console-host COUNT looks like the more portable signal and is the wrong one:
+# CREATE_NO_WINDOW does not stop a console being ALLOCATED, it allocates one with
+# no window. So a correctly-hidden artifact starts a conhost exactly like an
+# ordinary one, and asserting on that count reports a failure against a launcher
+# doing precisely what it was asked. Measured on Server 2022: control and hidden
+# both showed one new console host, and the traces confirmed the hidden launcher
+# had passed CREATE_NO_WINDOW.
 #
-# WINDOW COUNT is the confirmation, and it is what literally answers "did
-# something appear on screen". It only means anything on an interactive desktop,
-# so it is reported rather than asserted on.
+# What separates them is whether that console has a visible window, which is only
+# observable from a session that HAS a desktop. An SSH session runs in session 0,
+# where the control reports no window either -- that is the inconclusive case, and
+# the control arm below is what detects it rather than reporting a false failure.
+# NOTE: never name a result variable $Hidden/$Shown. PowerShell variables are
+# case-insensitive, the parameters above are [string]-typed, and assigning an
+# object to one silently stringifies it -- so `.Hosts` reads as empty and the
+# arm misreports rather than erroring.
 function Measure-Launch([string]$exe, [string]$label) {
   $before = [Win]::Consoles()
   $hosts0 = @(Get-Process -Name conhost, OpenConsole -ErrorAction SilentlyContinue).Count
@@ -76,7 +84,14 @@ function Measure-Launch([string]$exe, [string]$label) {
   # program gets a brand new one.
   Remove-Item -Force -ErrorAction SilentlyContinue $script:Marker
   $proc = Start-Process -FilePath $exe -PassThru
+  # Sampled WHILE it runs. Sampling after exit measures nothing: Windows destroys a
+  # console with its last attached process, so a short-lived program shows a zero
+  # delta whether or not it ever had one. That mistake made the control look as
+  # console-free as the hidden build and turned the whole run inconclusive.
   Start-Sleep -Milliseconds $SettleMs
+  if ($proc.HasExited) {
+    Write-Host ("  WARNING: {0} exited before it was sampled; the fixture must outlive -SettleMs" -f $label)
+  }
   $after  = [Win]::Consoles()
   $hosts1 = @(Get-Process -Name conhost, OpenConsole -ErrorAction SilentlyContinue).Count
   # Let it finish rather than killing it. The exit code and the marker are the only
@@ -87,8 +102,8 @@ function Measure-Launch([string]$exe, [string]$label) {
   $ran = Test-Path $script:Marker
   $windows = @($after | Where-Object { $before -notcontains $_ }).Count
   $hosts = $hosts1 - $hosts0
-  Write-Host ("  {0}: {1} new console host(s), {2} new console window(s), exit {3}, marker {4}" `
-    -f $label, $hosts, $windows, $code, $ran)
+  Write-Host ("  {0}: {1} new console window(s), {2} new console host(s), exit {3}, marker {4}" `
+    -f $label, $windows, $hosts, $code, $ran)
   return [pscustomobject]@{ Hosts = $hosts; Windows = $windows; Code = $code; Ran = $ran }
 }
 
@@ -99,27 +114,33 @@ $script:Marker = $Marker
 # no console either, this host cannot show one and the hidden result below proves
 # nothing - which is a different answer from "the feature works".
 Write-Host "== control: a binary built WITHOUT --hide-console =="
-$control = Measure-Launch $Shown 'shown.exe'
-if (-not $control.Ran) {
+$controlResult = Measure-Launch $Shown 'shown.exe'
+if (-not $controlResult.Ran) {
   Write-Host "  FAIL: the control never wrote its marker, so the fixture is wrong and"
   Write-Host "        nothing below can be believed."
   Write-Host "RESULT: 1 check(s) failed"
   exit 1
 }
-if ($control.Hosts -lt 1) {
-  Write-Host "  INCONCLUSIVE: the control allocated no console either, so this host"
-  Write-Host "                cannot show one and the arm below would be vacuous."
+if ($controlResult.Windows -lt 1) {
+  Write-Host "  INCONCLUSIVE: the control opened no console WINDOW, so this host has no"
+  Write-Host "                interactive desktop and the arm below would be vacuous."
+  Write-Host ("                (session {0}; an SSH session runs in session 0, which has none)" -f (Get-Process -Id $PID).SessionId)
+  Write-Host "                Run this from a desktop session -- RDP, or the console itself."
   Write-Host "RESULT: inconclusive on this host"
   exit 0
 }
-Write-Host "  ok: the control allocates a console, so this host can"
+Write-Host "  ok: the control opens a console window, so this host can show one"
 
-Write-Host "== the claim: --hide-console allocates none =="
-$hidden = Measure-Launch $Hidden 'hidden.exe'
-if ($hidden.Hosts -eq 0) {
-  Write-Host "  ok: no console was allocated"
+Write-Host "== the claim: --hide-console opens no console WINDOW =="
+$hiddenResult = Measure-Launch $Hidden 'hidden.exe'
+if ($hiddenResult.Windows -eq 0) {
+  Write-Host "  ok: no console window appeared"
+  if ($hiddenResult.Hosts -gt 0) {
+    Write-Host "       (a console host still started, which is correct: CREATE_NO_WINDOW"
+    Write-Host "        allocates a console without a window rather than none at all)"
+  }
 } else {
-  Write-Host ("  FAIL: {0} console host(s) started, so a window would appear" -f $hidden.Hosts)
+  Write-Host ("  FAIL: {0} console window(s) appeared" -f $hiddenResult.Windows)
   $fail = 1
 }
 
@@ -127,10 +148,10 @@ if ($hidden.Hosts -eq 0) {
 # standard handles are invalid, and this is where a launcher that mishandles them
 # shows up: no marker, or a nonzero exit.
 Write-Host "== and it still runs, with no valid standard handles =="
-if ($hidden.Ran -and $hidden.Code -eq 7) {
+if ($hiddenResult.Ran -and $hiddenResult.Code -eq 7) {
   Write-Host "  ok: the program ran to completion and returned its own exit code"
 } else {
-  Write-Host ("  FAIL: marker {0}, exit {1} (expected marker True, exit 7)" -f $hidden.Ran, $hidden.Code)
+  Write-Host ("  FAIL: marker {0}, exit {1} (expected marker True, exit 7)" -f $hiddenResult.Ran, $hiddenResult.Code)
   $fail = 1
 }
 
