@@ -109,6 +109,15 @@ jobs:
       # Fail rather than silently pick a channel: `publish` selects a stable tag
       # and `canary` builds the head of main, so a dispatch asking for both has
       # no correct interpretation.
+      #
+      # The ref check is a release-safety gate, not a tidiness one. A dispatch
+      # runs against whatever branch or tag the operator selected in the UI, and
+      # every canary job downstream trusts `is_canary` and targets GITHUB_SHA —
+      # so without this, a canary dispatch from a feature branch would build that
+      # branch, publish it to the `canary` dist-tag, and repoint the rolling
+      # release at it while the notes claim it is main. The schedule event cannot
+      # reach this state (GitHub runs it on the default branch), so the guard
+      # costs nothing there.
       - id: channel
         name: Resolve release channel
         env:
@@ -119,6 +128,10 @@ jobs:
           set -euo pipefail
           if [ "$WANT_CANARY" = "true" ] && [ "$WANT_PUBLISH" = "true" ]; then
             echo "::error::publish and canary are mutually exclusive - publish releases a v* tag, canary builds the head of main"
+            exit 1
+          fi
+          if [ "$IS_CANARY" = "true" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::a canary publishes the head of main, but this run is on $GITHUB_REF"
             exit 1
           fi
           echo "is_canary=$IS_CANARY" >> "$GITHUB_OUTPUT"
@@ -1191,6 +1204,7 @@ jobs:
           # script is zizmor error-level template injection; env is inert.
           CANARY_VERSION: ${{ needs.verify.outputs.canary_version }}
           PUBLISH_VERSION: ${{ needs.verify.outputs.publish_version }}
+          IS_CANARY: ${{ needs.verify.outputs.is_canary }}
         run: |
           set -euo pipefail
           BIN="nub-pkg/${{ matrix.bin }}"
@@ -1210,10 +1224,15 @@ jobs:
           # A stable publication gets its expected version only from verify's
           # validated tag output. A canary run uses its stamped version; a
           # non-publishing dispatch only checks that the binary is runnable.
+          # Select the canary expectation from IS_CANARY, never from the event
+          # name: a canary arrives on `schedule` (or a dispatch), so an
+          # event-name test silently drops every canary run into the
+          # runnable-only branch below and publishes without ever comparing the
+          # stamped version — the exact stale-build case this gate exists for.
           EXPECTED=""
           if [ -n "$PUBLISH_VERSION" ]; then
             EXPECTED="$PUBLISH_VERSION"
-          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
+          elif [ "$IS_CANARY" = "true" ]; then
             EXPECTED="$CANARY_VERSION"
           fi
           if [ -n "$EXPECTED" ]; then

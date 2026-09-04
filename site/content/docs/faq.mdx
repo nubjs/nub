@@ -413,7 +413,7 @@ npm install -g @nubjs/nub@canary
 
 An existing script install switches channels in place with `nub upgrade --canary`; `nub upgrade --stable` returns to the latest stable release. On a canary build, a plain `nub upgrade` stays on the canary channel. Canary versions are date-stamped — `nub --version` prints something like `v0.5.1-canary.20260724.117`.
 
-Canary may break, and each build replaces the last. A canary is at most a day behind `main`, so a fix that just landed reaches the channel on the next nightly rather than immediately. Homebrew and winget carry only stable releases.
+Canary may break, and each build replaces the last. A fix that just landed reaches the channel on the next successful nightly rather than immediately. Homebrew and winget carry only stable releases.
 
 ## Does it have a dev server?
 
