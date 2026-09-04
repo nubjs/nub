@@ -129,8 +129,7 @@ fn write_transitive_count_line(count: usize) {
     let verb = if count == 1 { "has" } else { "have" };
     let msg = append_command_hint(
         format!("{pkgs} {verb} deprecation warnings."),
-        "aube deprecations --transitive",
-        is_standalone_aube(),
+        &aube_util::cmd("deprecations --transitive"),
     );
     write_summary_line(msg);
 }
@@ -139,28 +138,20 @@ fn write_count_line(count: usize, has_transitive: bool) {
     let pkgs = pluralizer::pluralize("package", count as isize, true);
     let verb = if count == 1 { "has" } else { "have" };
     let cmd = if has_transitive {
-        "aube deprecations --transitive"
+        aube_util::cmd("deprecations --transitive")
     } else {
-        "aube deprecations"
+        aube_util::cmd("deprecations")
     };
-    let msg = append_command_hint(
-        format!("{pkgs} {verb} deprecation warnings."),
-        cmd,
-        is_standalone_aube(),
-    );
+    let msg = append_command_hint(format!("{pkgs} {verb} deprecation warnings."), &cmd);
     write_summary_line(msg);
 }
 
-fn is_standalone_aube() -> bool {
-    aube_util::embedder().name == aube_util::AUBE.name
-}
-
-fn append_command_hint(message: String, command: &str, show_hint: bool) -> String {
-    if show_hint {
-        format!("{message} Run `{command}` to see them.")
-    } else {
-        message
-    }
+// The `deprecations` verb exists under every embedder, so the hint is always
+// worth printing; `aube_util::cmd` brands it at the emit site, which is what
+// keeps the product name right on a line an embedder's output rewrite may
+// never see.
+fn append_command_hint(message: String, command: &str) -> String {
+    format!("{message} Run `{command}` to see them.")
 }
 
 fn write_summary_line(message: String) {
@@ -191,15 +182,11 @@ mod tests {
     }
 
     #[test]
-    fn command_hint_is_only_added_for_standalone_aube() {
+    fn command_hint_names_the_command() {
         let message = "1 transitive package has deprecation warnings.".to_string();
         assert_eq!(
-            append_command_hint(message.clone(), "aube deprecations --transitive", true,),
+            append_command_hint(message, "aube deprecations --transitive"),
             "1 transitive package has deprecation warnings. Run `aube deprecations --transitive` to see them."
-        );
-        assert_eq!(
-            append_command_hint(message.clone(), "aube deprecations --transitive", false),
-            message
         );
     }
 
