@@ -191,12 +191,6 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             None
         };
     let fresh = !(force_resolve || revalidate_release_policy && matches!(mode, FrozenMode::Prefer))
-        // pnpm records each patch's CONTENT hash in `patchedDependencies`, so an
-        // in-place edit of a patch file is only visible through that comparison.
-        && match parsed {
-            Ok((g, k)) => matches!(check_patch_drift(cwd, g, k)?, DriftStatus::Fresh),
-            Err(_) => true,
-        }
         && matches!(
             parsed,
             Ok((g, k))
@@ -524,13 +518,6 @@ pub(super) fn select_lockfile_result(
                          help: run without --frozen-lockfile to update the lockfile"
                     ));
                 }
-                if let DriftStatus::Stale { reason } = check_patch_drift(cwd, graph, kind)? {
-                    return Err(miette!(
-                        code = aube_codes::errors::ERR_AUBE_LOCKFILE_CONFIG_MISMATCH,
-                        "lockfile is out of date with patchedDependencies: {reason}\n\
-                         help: run without --frozen-lockfile to update the lockfile"
-                    ));
-                }
                 if let DriftStatus::Stale { reason } = graph.check_drift_workspace_for_kind(
                     manifests,
                     &ws_config.overrides,
@@ -600,13 +587,6 @@ pub(super) fn select_lockfile_result(
                             "Lockfile out of date with workspace catalogs ({reason}), re-resolving..."
                         );
                         Ok(Err(aube_lockfile::Error::NotFound(cwd.to_path_buf())))
-                    } else if let DriftStatus::Stale { reason } =
-                        check_patch_drift(cwd, graph, *kind)?
-                    {
-                        tracing::debug!(
-                            "Lockfile out of date with patchedDependencies ({reason}), re-resolving..."
-                        );
-                        Ok(Err(aube_lockfile::Error::NotFound(cwd.to_path_buf())))
                     } else {
                         let (effective_patch_paths, effective_patch_hashes) =
                             crate::patches::effective_patch_config(cwd)?;
@@ -646,20 +626,24 @@ pub(super) fn select_lockfile_result(
     }
 }
 
+/// Patch-config drift for a caller outside the install pipeline
+/// (`remove`'s lockfile-trim fast path). The install modes above run the
+/// same comparison inline. It has to be the hash-aware check: a pnpm
+/// lockfile records each patch as a content hash, and nub's reader keeps
+/// that hash rather than a path, so a path-map comparison would report
+/// every recorded pnpm patch as missing.
 pub(crate) fn check_patch_drift(
     cwd: &Path,
     graph: &LockfileGraph,
     kind: LockfileKind,
 ) -> miette::Result<DriftStatus> {
-    if !matches!(kind, LockfileKind::Pnpm) {
-        return Ok(DriftStatus::Fresh);
-    }
-    Ok(
-        match crate::patches::pnpm_patch_hash_drift(cwd, &graph.patched_dependencies)? {
-            Some(reason) => DriftStatus::Stale { reason },
-            None => DriftStatus::Fresh,
-        },
-    )
+    let (effective_patch_paths, effective_patch_hashes) =
+        crate::patches::effective_patch_config(cwd)?;
+    Ok(graph.check_patched_dependencies_drift(
+        kind,
+        &effective_patch_paths,
+        &effective_patch_hashes,
+    ))
 }
 
 fn active_lockfile_has_conflict_markers(lockfile_dir: &Path) -> bool {

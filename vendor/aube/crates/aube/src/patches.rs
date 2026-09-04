@@ -624,59 +624,6 @@ pub fn read_patched_dependencies(cwd: &Path) -> Result<BTreeMap<String, String>>
     Ok(out)
 }
 
-/// Compare pnpm's recorded patch-content hashes with the currently
-/// declared patch files. A pnpm lockfile keeps the content hash in its
-/// `patchedDependencies` values, while the manifest/workspace config
-/// keeps the path; checking both catches in-place edits that don't
-/// otherwise change dependency resolution.
-pub fn pnpm_patch_hash_drift(
-    cwd: &Path,
-    recorded: &BTreeMap<String, String>,
-) -> Result<Option<String>> {
-    let declared = read_patched_dependencies(cwd)?;
-    for (selector, rel) in &declared {
-        let Some(expected) = recorded.get(selector) else {
-            return Ok(Some(format!(
-                "patched dependency {selector} is missing from pnpm-lock.yaml"
-            )));
-        };
-        // Legacy path-only pnpm entries carry no hash to validate. Leave
-        // them fresh when the declaration still names the same path.
-        if expected == rel {
-            continue;
-        }
-        if !is_safe_patch_rel(rel) {
-            return Err(miette!(
-                "refusing unsafe patch path for {selector}: {rel:?} (absolute, UNC, or contains `..`)"
-            ));
-        }
-        let path = cwd.join(rel);
-        let content = std::fs::read_to_string(&path)
-            .into_diagnostic()
-            .map_err(|e| {
-                miette!(
-                    "failed to read patch file {} for {selector}: {e}",
-                    path.display()
-                )
-            })?;
-        let normalized = content.replace("\r\n", "\n");
-        let mut hasher = Sha256::new();
-        hasher.update(normalized.as_bytes());
-        let actual = hex::encode(hasher.finalize());
-        if !expected.eq_ignore_ascii_case(&actual) {
-            return Ok(Some(format!(
-                "patched dependency {selector} has changed content"
-            )));
-        }
-    }
-    if let Some(selector) = recorded.keys().find(|key| !declared.contains_key(*key)) {
-        return Ok(Some(format!(
-            "patched dependency {selector} is no longer declared"
-        )));
-    }
-    Ok(None)
-}
-
 fn read_package_json_patched_dependencies(cwd: &Path) -> Result<BTreeMap<String, String>> {
     let manifest_path = cwd.join("package.json");
     if !manifest_path.exists() {
