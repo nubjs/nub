@@ -289,7 +289,21 @@ for pkg in $PKGS; do
     verdict="BLOCKED"; blocked=$((blocked+1))
   elif [ "$ran" = 0 ]; then
     verdict="NO-SCRIPT-RAN"; noscript=$((noscript+1))
-  elif [ "$rc" = 0 ] && [ "$jail_lines" = 0 ] && [ "$net_err" = 0 ]; then
+  # ⛔⛔ `net_err` MUST NOT SET THE VERDICT, AND IT DID — A TRANSIENT BECAME A GATE FAILURE.
+  # Measured 2026-09-04: `@aws-amplify/cli` came back JAIL-CAUSED from a full macOS sweep at
+  # `rc=0 confined-spawns=1 jail-lines=0 net-err=1`. The install SUCCEEDED. One retried network line
+  # in its log sent it to SUSPECT, the jail-off arm then passed, and an rc=0 success was reported as
+  # the jail breaking a package. Three back-to-back re-runs on a quiet box: OK, OK, OK, `net-err=0`
+  # every time. JAIL-CAUSED is the ONLY verdict that fails this gate, so a false one there sends
+  # somebody hunting a confinement bug that does not exist — which is exactly what it did.
+  #
+  # `jail_lines` STAYS, and the asymmetry is deliberate. A lifecycle script that catches its own
+  # denial exits 0, so a jail line is the only tell for a swallowed failure — that is the case arm A
+  # exists to catch. A network error is different in kind: npm retries, and if the retry succeeded
+  # the install is fine by definition. If confinement had genuinely broken egress the install would
+  # not have exited 0. This also makes the code match the comment above it, which already claimed
+  # the detectors no longer set the verdict.
+  elif [ "$rc" = 0 ] && [ "$jail_lines" = 0 ]; then
     verdict="OK"; ok=$((ok+1)); ran_total=$((ran_total+1))
   else
     verdict="SUSPECT"; ran_total=$((ran_total+1))
