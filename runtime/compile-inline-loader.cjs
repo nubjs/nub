@@ -19,11 +19,14 @@
   const zlib = boot.getBuiltin("node:zlib");
 
   const ENTRY = "__NUB_INLINE_ENTRY__";
-  // The virtual root every chunk reports as its own location. `file:` rather than
-  // a private scheme because the bundled runtime calls `fileURLToPath` on
-  // `import.meta.url`, and a scheme it does not know throws. Bun publishes
-  // `/$bunfs/root` for the same reason.
-  const ROOT = "file:///$nub/";
+  // The virtual root every chunk reports as its own location, and the same string
+  // `nub compile` bakes into each chunk's `import.meta.url` — see
+  // `compile::inline::VIRTUAL_ROOT`, which carries the reason for the drive
+  // letter. The short version: Node's Windows `fileURLToPath` rejects any path
+  // that does not start with one, and `createRequire(import.meta.url)` converts,
+  // so `file:///$nub/` crashed every inline artifact on Windows. `/N:/$nub/` is
+  // an ordinary absolute path on POSIX, so one string serves both.
+  const ROOT = "file:///N:/$nub/";
   // nub_core::compile::INLINE_LOCATOR_MAGIC.
   const MAGIC = Buffer.from("006e75622d696e6c696e652d61707000", "hex");
   // How much of the executable's tail to search before falling back to the whole

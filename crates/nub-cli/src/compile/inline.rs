@@ -32,7 +32,25 @@ use super::bundle;
 /// scheme because the bundled preamble calls `fileURLToPath(import.meta.url)`,
 /// which throws on a scheme it does not know. Bun publishes `/$bunfs/root` for the
 /// same reason.
-const VIRTUAL_ROOT: &str = "file:///$nub/";
+///
+/// The DRIVE LETTER is what makes it portable, and it is not decoration: Node's
+/// `fileURLToPath` has a separate Windows implementation that rejects any path
+/// whose second character is not a drive letter followed by `:`, so the obvious
+/// `file:///$nub/` threw `ERR_INVALID_FILE_URL_PATH` on Windows — and every
+/// payload hits it, because the emitted entry and the CommonJS interop chunk both
+/// open with `createRequire(import.meta.url)`, which converts before it does
+/// anything else. Measured: every inline fixture died at startup on both Windows
+/// legs while the two that decline inline passed. `/N:/$nub/` is an ordinary
+/// absolute path on POSIX — a colon is a legal filename character there — so one
+/// string satisfies both conversions and the two implementations of this shape
+/// cannot drift apart on a platform only one of them was tested on. Bun instead
+/// carries a second root (`B:\~BUN\root`) for Windows; the single string is chosen
+/// here because a divergence is exactly what shipped this bug.
+///
+/// Nothing is read through it, so a machine that really has an `N:` drive is
+/// unaffected: the chunks are served as `data:` URLs and this string is only an
+/// identity.
+const VIRTUAL_ROOT: &str = "file:///N:/$nub/";
 
 /// The specifier an inline chunk carries in place of a relative import of another
 /// chunk. The loader replaces it with that chunk's `data:` URL before importing.
@@ -669,13 +687,37 @@ mod tests {
         }
     }
 
+    /// The root is a CONTRACT between this file and the runtime loader, and it has
+    /// one non-obvious requirement: Node converts it with `fileURLToPath`, whose
+    /// Windows implementation rejects anything that is not `<letter>:`. Without the
+    /// drive letter every inline artifact died at startup on Windows and nowhere
+    /// else, because `createRequire(import.meta.url)` runs before any user code.
+    /// Both halves are asserted here — the shape, and that the loader agrees —
+    /// since a second implementation drifting silently is what shipped the bug.
+    #[test]
+    fn the_virtual_root_is_a_windows_convertible_path_the_loader_agrees_on() {
+        let path = VIRTUAL_ROOT
+            .strip_prefix("file:///")
+            .expect("the virtual root is an absolute file URL");
+        let drive: Vec<char> = path.chars().take(2).collect();
+        assert!(
+            drive[0].is_ascii_alphabetic() && drive[1] == ':',
+            "a file URL Node can convert on Windows opens with a drive letter, not {path:?}"
+        );
+        let loader = loader_source("main.mjs").expect("the loader source is readable");
+        assert!(
+            loader.contains(&format!("const ROOT = {VIRTUAL_ROOT:?};")),
+            "the loader publishes the same root this bakes into every chunk"
+        );
+    }
+
     #[test]
     fn a_chunk_keeps_every_line_below_the_prefixed_identity() {
         let source = "import{a}from\"./dep-A1.mjs\";\nconsole.log(a);\n";
         let out = rewrite_chunk(source, "main.mjs", &chunks(&["main.mjs", "dep-A1.mjs"]));
         let lines: Vec<&str> = out.lines().collect();
         assert!(
-            lines[0].ends_with("import.meta.url = \"file:///$nub/main.mjs\";"),
+            lines[0].ends_with("import.meta.url = \"file:///N:/$nub/main.mjs\";"),
             "the identity assignment closes the single prefix line: {}",
             lines[0]
         );
