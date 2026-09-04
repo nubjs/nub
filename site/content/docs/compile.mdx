@@ -465,10 +465,11 @@ $ nub compile app.ts
 Shipping 1 package unbundled, in its own installed layout:
   @napi-rs/nice — it declares 16 per-platform binary packages (napi-rs layout)
 
-    output  app  29.6 MB  (node 28.3 MB · app 168 KB · launcher 1.1 MB)
+    output  app  29.6 MB  (node 28.3 MB · app 165 KB · launcher 1.1 MB)
    runtime  Node 26.8.1, embedded  (package.json#engines.node)
   platform  darwin-arm64
-   elapsed  3.8s
+       app  extracted on first run  it resolves modules at run time
+   elapsed  3.0s
 ```
 
 ### Cross-compiling
