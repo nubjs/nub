@@ -15,7 +15,7 @@
 //! not a re-read of whatever the writer happened to emit.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -238,6 +238,42 @@ pub fn find_payload(format: ContainerFormat, image: &[u8]) -> Result<Option<&[u8
     }
 }
 
+/// How many bytes of `image` are its ad-hoc code signature — 0 for a format that
+/// carries none, and for a Mach-O that was never signed.
+///
+/// Reported as its own component of the output size rather than being left in a
+/// remainder, because it is neither launcher nor payload and it is not small: the
+/// CodeDirectory holds one SHA-256 per 4 KiB page, so it grows at ~0.78% of the
+/// file — 228 KB on a 29 MB embed build, against a launcher template of 851 KB.
+pub fn code_signature_size(format: ContainerFormat, image: &[u8]) -> u64 {
+    // ELF is never signed and Authenticode is out of scope; see `inject`.
+    match format {
+        ContainerFormat::MachO => macho_code_signature_size(image).unwrap_or(0),
+        ContainerFormat::Elf | ContainerFormat::Pe => 0,
+    }
+}
+
+/// The same measurement against a file on disk, reading only the Mach-O header
+/// and its load commands. The artifact is up to ~30 MB and the answer lives in
+/// its first few KB, so this deliberately does not `read` the whole image.
+pub fn code_signature_size_of(format: ContainerFormat, path: &Path) -> Result<u64> {
+    if format != ContainerFormat::MachO {
+        return Ok(0);
+    }
+    let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut header = [0u8; 32];
+    file.read_exact(&mut header)
+        .with_context(|| format!("reading the Mach-O header of {}", path.display()))?;
+    // `sizeofcmds` comes out of the file, so cap the allocation it sizes. A
+    // launcher template's load commands are ~4 KB; nothing legitimate is near 1 MB.
+    let sizeofcmds = (u32le(&header, 20).context("truncated Mach-O header")? as usize).min(1 << 20);
+    let mut prefix = vec![0u8; 32usize.saturating_add(sizeofcmds)];
+    prefix[..32].copy_from_slice(&header);
+    file.read_exact(&mut prefix[32..])
+        .with_context(|| format!("reading the load commands of {}", path.display()))?;
+    Ok(macho_code_signature_size(&prefix).unwrap_or(0))
+}
+
 /// Find the `VS_VERSIONINFO` resource in a produced PE, walking the same
 /// `RT_VERSION` → name 1 → language path `GetFileVersionInfo` takes.
 ///
@@ -316,6 +352,31 @@ fn slice_at(image: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
 
 const MH_MAGIC_64: u32 = 0xfeed_facf;
 const LC_SEGMENT_64: u32 = 0x19;
+const LC_CODE_SIGNATURE: u32 = 0x1d;
+
+/// `datasize` of the `LC_CODE_SIGNATURE` load command, or `None` when the image
+/// is unparseable or unsigned. Never errors: a size split is a report, and a
+/// report must not fail a build that already produced a verified artifact.
+fn macho_code_signature_size(image: &[u8]) -> Option<u64> {
+    if u32le(image, 0) != Some(MH_MAGIC_64) {
+        return None;
+    }
+    let ncmds = u32le(image, 16)? as usize;
+    let mut cursor = 32usize; // sizeof(mach_header_64)
+    for _ in 0..ncmds {
+        let cmd = u32le(image, cursor)?;
+        let cmdsize = u32le(image, cursor + 4)? as usize;
+        if cmdsize == 0 {
+            return None;
+        }
+        // linkedit_data_command: cmd, cmdsize, dataoff, datasize.
+        if cmd == LC_CODE_SIGNATURE {
+            return u32le(image, cursor + 12).map(u64::from);
+        }
+        cursor = cursor.checked_add(cmdsize)?;
+    }
+    None
+}
 
 /// Walk `LC_SEGMENT_64` load commands for a section named `name`. libsui writes
 /// it under its own `__SUI` segment; matching on the SECTION name alone keeps the

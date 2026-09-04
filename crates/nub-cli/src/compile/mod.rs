@@ -527,8 +527,17 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // bytes being split. `node.size` is the DECOMPRESSED length — the
         // launcher's warm-start check — so using it here would report a Node
         // component four times the space it takes in the file.
-        node_bytes: node.blob.len() as u64,
+        node_bytes: (node.blob.len() + node.license.len()) as u64,
         app_bytes: app_files.iter().map(|f| f.bytes.len() as u64).sum(),
+        // Injection re-signs the whole image, so the template's own ad-hoc
+        // signature never reaches the artifact and must come off its size.
+        launcher_bytes: (template.len() as u64)
+            .saturating_sub(inject::code_signature_size(target.format(), &template)),
+        // Measured off the published file rather than predicted: the signature's
+        // size is a function of the final image, which nothing before the write
+        // knows. A failure to read it back is not worth failing a verified build
+        // over — the component simply reports zero and lands in `overhead`.
+        signature_bytes: inject::code_signature_size_of(target.format(), &out_path).unwrap_or(0),
         shipped,
         deferred: bundled.dynamic_import_sites,
         app_extracts: inline_decline,
@@ -775,7 +784,7 @@ fn render_row(
     // `run` is the text accumulated since the ink last changed or the line last
     // broke; it is flushed through `paint` once. Painting each word as it lands
     // renders identically and is what shipped first — but it wraps every word in
-    // its own escape pair, so `(node 28.3 MB · app 24 KB · launcher 1.2 MB)`
+    // its own escape pair, so `(node 28.2 MB · app 57 KB · launcher 851 KB)`
     // leaves the terminal as eleven separate dim spans and roughly ten times the
     // bytes, which is what anyone piping the output to a file or a doc gets.
     let mut run = String::new();
@@ -1387,11 +1396,19 @@ impl Drop for LiveLine {
 struct BuildFacts {
     /// The finished file, from `metadata` on what was published.
     size: u64,
-    /// The COMPRESSED Node blob's contribution. Zero under `--smol`, which
-    /// embeds no runtime at all.
+    /// The embedded runtime's contribution: the COMPRESSED Node blob plus the
+    /// compressed `LICENSE` shipped beside it, which exists only because that
+    /// runtime does. Zero under `--smol`, which embeds no runtime at all.
     node_bytes: u64,
     /// The compressed app files' contribution.
     app_bytes: u64,
+    /// The launcher template's contribution, which is its file size MINUS its own
+    /// ad-hoc signature: injection re-signs the whole image, so the template's
+    /// signature is discarded rather than carried.
+    launcher_bytes: u64,
+    /// The finished artifact's ad-hoc code signature, measured off the file that
+    /// was written. Zero on ELF and PE, which nub never signs.
+    signature_bytes: u64,
     /// Everything that did not get sealed into the bundle, with the reason each
     /// one earned. Ordered as the build discovered them.
     shipped: Vec<(String, &'static str)>,
@@ -1410,24 +1427,36 @@ impl BuildFacts {
     ///
     /// This is the number someone shrinking a binary actually wants; the total on
     /// its own cannot tell them whether their code or the runtime is the problem.
-    /// The remainder is the launcher plus the container's own headers, which is
-    /// what is left once the two payload regions are accounted for — computed as
-    /// a difference rather than measured, so it can never disagree with the total.
+    /// Every component is therefore MEASURED, and only `overhead` is a remainder.
     ///
-    /// Empty when the parts do not add up to something worth splitting: a `--smol`
-    /// build with no assets is almost entirely launcher, and naming three
-    /// components of one small number is noise.
+    /// It used to be the other way round: `launcher` was `size - node - app`, so
+    /// it swallowed the ad-hoc code signature as well. That is not a rounding
+    /// error — the CodeDirectory carries one SHA-256 per 4 KiB page, so on a
+    /// 29 MB embed build a fixed 851 KB launcher was reported as 1.2 MB, and the
+    /// row said the launcher alone outweighed a whole `--smol` binary.
+    ///
+    /// `overhead` is what is left: the payload container's header, the manifest,
+    /// the per-file framing, and the alignment of the payload region to a 64 KiB
+    /// boundary. Structurally non-negative on Mach-O and ELF, where injection only
+    /// ever appends; `saturating_sub` covers PE, whose resource directory libsui
+    /// rebuilds rather than extends.
     fn size_split(&self) -> String {
-        let launcher = self
+        let overhead = self
             .size
             .saturating_sub(self.node_bytes)
-            .saturating_sub(self.app_bytes);
+            .saturating_sub(self.app_bytes)
+            .saturating_sub(self.launcher_bytes)
+            .saturating_sub(self.signature_bytes);
         let mut parts = Vec::new();
         if self.node_bytes > 0 {
             parts.push(format!("node {}", mb(self.node_bytes)));
         }
         parts.push(format!("app {}", mb(self.app_bytes)));
-        parts.push(format!("launcher {}", mb(launcher)));
+        parts.push(format!("launcher {}", mb(self.launcher_bytes)));
+        if self.signature_bytes > 0 {
+            parts.push(format!("signature {}", mb(self.signature_bytes)));
+        }
+        parts.push(format!("overhead {}", mb(overhead)));
         format!("  ({})", parts.join(" · "))
     }
 }
@@ -4560,9 +4589,15 @@ mod tests {
     /// A build with everything present, so the optional rows all appear at once.
     fn full_facts() -> BuildFacts {
         BuildFacts {
-            size: 29_473_842,
-            node_bytes: 25_100_000,
-            app_bytes: 2_500_000,
+            // Every size here is measured off a real darwin-arm64 embed build, so
+            // the components add up the way a reader's own build will: 851 KB of
+            // launcher template, a 228 KB signature that scales with the file, and
+            // 66 KB of container header, manifest and 64 KiB payload alignment.
+            size: 29_390_370,
+            node_bytes: 28_189_460,
+            app_bytes: 56_571,
+            launcher_bytes: 850_864,
+            signature_bytes: 227_954,
             shipped: vec![
                 ("@napi-rs/nice".to_string(), "native addon"),
                 ("sharp".to_string(), "--external"),
@@ -4600,7 +4635,9 @@ mod tests {
                 &host,
             )),
             vec![
-                "output=acme  29.5 MB  (node 25.1 MB · app 2.5 MB · launcher 1.9 MB)".to_string(),
+                "output=acme  29.4 MB  (node 28.2 MB · app 57 KB · launcher 851 KB · \
+                 signature 228 KB · overhead 66 KB)"
+                    .to_string(),
                 "runtime=Node 26.8.1, embedded  (package.json#engines.node)".to_string(),
                 // No aside: building for the host is the default, and a note on
                 // the default is paid for by every build and earned by none.
@@ -4610,6 +4647,39 @@ mod tests {
                 "app=extracted on first run  it resolves modules at run time".to_string(),
                 "report=report.json  esbuild schema".to_string(),
             ]
+        );
+    }
+
+    /// Every component of the split is measured; only `overhead` is a remainder.
+    ///
+    /// The regression this pins: `launcher` used to BE the remainder, so it
+    /// swallowed the ad-hoc code signature — which grows at one SHA-256 per 4 KiB
+    /// page — and reported a fixed 851 KB template as 1.2 MB on a 29 MB build.
+    #[test]
+    fn the_split_names_the_signature_apart_from_the_launcher() {
+        let signed = full_facts();
+        assert_eq!(
+            signed.size_split(),
+            "  (node 28.2 MB · app 57 KB · launcher 851 KB · signature 228 KB · overhead 66 KB)",
+        );
+        let components =
+            signed.node_bytes + signed.app_bytes + signed.launcher_bytes + signed.signature_bytes;
+        assert!(
+            components < signed.size,
+            "the measured components must leave a non-negative overhead: {components} vs {}",
+            signed.size
+        );
+
+        // ELF and PE are never signed, so there is no component to name and the
+        // bytes it would have covered do not exist rather than moving elsewhere.
+        let unsigned = BuildFacts {
+            size: signed.size - signed.signature_bytes,
+            signature_bytes: 0,
+            ..signed
+        };
+        assert_eq!(
+            unsigned.size_split(),
+            "  (node 28.2 MB · app 57 KB · launcher 851 KB · overhead 66 KB)",
         );
     }
 
@@ -4646,10 +4716,12 @@ mod tests {
     fn a_build_with_nothing_deferred_or_external_prints_no_row_for_it() {
         let host = TargetPlatform::host().unwrap();
         let bare = BuildFacts {
-            size: 4_400_000,
+            size: 3_433_512,
             // `--smol` embeds no runtime, so the split names only what is there.
             node_bytes: 0,
             app_bytes: 2_500_000,
+            launcher_bytes: 850_864,
+            signature_bytes: 26_744,
             shipped: Vec::new(),
             deferred: 0,
             app_extracts: None,
@@ -4667,7 +4739,9 @@ mod tests {
                 &host,
             )),
             vec![
-                "output=acme  4.4 MB  (app 2.5 MB · launcher 1.9 MB)".to_string(),
+                "output=acme  3.4 MB  (app 2.5 MB · launcher 851 KB · signature 27 KB · \
+                 overhead 56 KB)"
+                    .to_string(),
                 "runtime=Node >=22 <23, not embedded  (--target)".to_string(),
                 format!("platform={}", host.triple()),
                 "app=run from the executable  nothing is written to disk".to_string(),

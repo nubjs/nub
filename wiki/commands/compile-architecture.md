@@ -24,8 +24,10 @@ The default shape embeds a Node; `--smol` does not, and finds one at startup ins
 
 | Shape | Size | Contains | Node comes from |
 | --- | --- | --- | --- |
-| default (embed) | ~26 MB | launcher + manifest + bundled JS + assets + a stripped, zstd-19 Node | inside the binary |
-| `--smol` | ~0.6 MB | launcher + manifest + bundled JS + assets | discovered locally, else provisioned |
+| default (embed) | ~29 MB | launcher + manifest + bundled JS + assets + a stripped, zstd-19 Node | inside the binary |
+| `--smol` | ~1.0 MB | launcher + manifest + bundled JS + assets | discovered locally, else provisioned |
+
+Both figures are a hello-world artifact on Node 26 for darwin-arm64. Neither floor is the bundled program: a `--smol` artifact is 851 KB of launcher template before it carries a byte of application code, and an embed artifact is that plus the compressed runtime.
 
 ### Trimming ICU out of the embedded Node
 
@@ -57,7 +59,7 @@ Payload V3 carries the app files, the length each one extracts to, and — for t
 
 Injection is format-specific:
 
-- **Mach-O** uses a new section and is ad-hoc-signed by the pure-Rust injector. The signature supplies neither a Developer ID identity nor notarization.
+- **Mach-O** uses a new section and is ad-hoc-signed by the pure-Rust injector. The signature supplies neither a Developer ID identity nor notarization. It is also not a fixed cost: the CodeDirectory holds one SHA-256 per 4 KiB page, so it scales with the image at roughly 0.78% of it — 8 KB on a `--smol` artifact and 228 KB on a 29 MB embed one. The template's own signature is discarded, since the whole image is signed again after injection.
 - **ELF** uses `.note.sui` plus `.sui.phdrs` and remains unsigned.
 - **PE** uses a resource and remains unsigned. Authenticode signing is the distributor's responsibility.
 
