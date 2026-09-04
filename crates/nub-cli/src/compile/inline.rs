@@ -386,10 +386,18 @@ fn reaches_cluster(source: &str) -> bool {
             // reverted: minification is on by default and renames the import, so the
             // emitted chunk reads `i(import.meta.url)(`cluster`)` and the narrower
             // rule let a real cluster payload inline — measured, and it crashes at
-            // `fork()`. The failure directions are not symmetric. Declining
-            // `makeLogger()("cluster")` by mistake costs an optimization on a payload
-            // that still runs; missing a real one ships a binary that dies on the
-            // first byte of its own executable.
+            // `fork()`. A local rule cannot do better: the emitted binding is
+            // imported from the runtime chunk, so the name `createRequire` is not in
+            // this file to match on, minified or not.
+            //
+            // Both directions can break a build, so the choice is which failure to
+            // take. Over-declining `makeLogger()("cluster")` extracts a payload that
+            // did not need to — which is not merely a lost optimization, since a
+            // `--smol` artifact built FOR a read-only HOME then has nowhere to
+            // extract to and will not start there. Under-declining ships a binary
+            // whose `cluster.fork()` hands the real Node a Mach-O/ELF/PE and dies,
+            // for every user, in every environment. The second is unconditional and
+            // the first is confined to one deployment shape, so this over-declines.
             Expression::CallExpression(_) => true,
             other => other
                 .as_member_expression()
@@ -637,8 +645,9 @@ mod tests {
             Some(Decline::ClusterReentry),
             "an immediately-invoked call result is accepted without proving it is a \
              require, because minification renames the createRequire binding out of \
-             reach — this over-declines, which only costs the no-write launch, where \
-             under-declining would ship a binary that crashes at fork()"
+             reach — deliberately over-declining, which costs the no-write launch and \
+             so a read-only deployment, against under-declining, which ships a binary \
+             that crashes at fork() for everyone"
         );
         assert_eq!(
             decline_of("const msg = \"cluster failed\";console.log(msg);"),
