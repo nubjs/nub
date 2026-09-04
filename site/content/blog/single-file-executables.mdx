@@ -64,6 +64,8 @@ The default shape embeds a full Node. A stock `node` binary is 145 MB on darwin-
   ]}
 />
 
+That is size on disk. The embedded Node is already compressed at level 19, so the artifact gains little from another pass: 29.0 MB gzipped, against 23.9 MB for Bun's. The runtime-free shape below is the one built for the wire.
+
 ### App size
 
 A CLI built on `commander`, `chalk`, `ora` and `zod`:
