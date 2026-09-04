@@ -103,6 +103,15 @@ for (const drop of drops) {
         "const NATIVE_IMPORT_TEXT = false;\nconst VERSION_ENV = ",
       );
       break;
+    // polyfills.cjs ablations. `installSyncPolyfills` is the single largest term in
+    // the preamble's budget and it is WORK, not evaluation, so it is priced by
+    // removing installers rather than the import.
+    case "sp-nocalls":
+      cut(/^  installUint8ArrayBase64\(\);\n(?:  install.*\n)*/m, "the eleven installers");
+      break;
+    case "sp-noiter":
+      cut(/^  installIteratorSurface\(\);\n/m, "installIteratorSurface call");
+      break;
     case "empty":
       src = "export function installCompilePreamble() {}\ninstallCompilePreamble();\n";
       break;
