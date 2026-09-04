@@ -4,6 +4,7 @@
 //   -DMULMOD_LOOP    the shipped loop against itself (control)
 //   -DMULMOD_INT128  (__uint128_t)a * b % m, what the V8 patch does under __SIZEOF_INT128__
 //   -DMULMOD_INTRIN  _umul128 + _udiv128, the MSVC-style alternative
+//   -DMULMOD_SUB     the loop with conditional subtraction instead of two modulos per iteration
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -51,7 +52,24 @@ static inline u64 mul_mod_intrin(u64 a, u64 b, u64 m) {
   u64 hi, rem; u64 lo = _umul128(a, b, &hi); _udiv128(hi, lo, m, &rem); return rem;
 }
 #endif
-#if defined(MULMOD_INTRIN)
+// --- portable alternative: the same double-and-add loop, but with a conditional subtraction in
+// place of the two 64-bit modulos per iteration. Equivalent while a, r < m (which every caller
+// guarantees: pow_mod reduces before each call and the Miller-Rabin bases are below n).
+static inline u64 mul_mod_sub(u64 a, u64 b, u64 m) {
+  g_mulmod_calls++;
+  if (a >= m) a %= m;
+  u64 r = 0;
+  while (b) {
+    if (b & 1) { u64 r2 = r + a; if (r2 < r || r2 >= m) r2 -= m; r = r2; }
+    b >>= 1;
+    if (b) { u64 a2 = a + a; if (a2 < a || a2 >= m) a2 -= m; a = a2; }
+  }
+  return r;
+}
+#if defined(MULMOD_SUB)
+#define MULMOD_CANDIDATE mul_mod_sub
+#define MULMOD_NAME "sub(conditional subtraction)"
+#elif defined(MULMOD_INTRIN)
 #define MULMOD_CANDIDATE mul_mod_intrin
 #define MULMOD_NAME "intrin(_umul128/_udiv128)"
 #elif defined(MULMOD_LOOP)

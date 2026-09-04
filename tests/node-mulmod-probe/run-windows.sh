@@ -11,9 +11,11 @@ try() { local label=$1; shift; rm -f "$label.exe"
 try clangcl-loop   clang-cl -nologo -O2 -EHsc -DMULMOD_LOOP   mulmod-probe.cc -Fe:clangcl-loop.exe
 try clangcl-int128 clang-cl -nologo -O2 -EHsc -DMULMOD_INT128 mulmod-probe.cc -Fe:clangcl-int128.exe
 try clangcl-intrin clang-cl -nologo -O2 -EHsc -DMULMOD_INTRIN mulmod-probe.cc -Fe:clangcl-intrin.exe
+try clangcl-sub    clang-cl -nologo -O2 -EHsc -DMULMOD_SUB    mulmod-probe.cc -Fe:clangcl-sub.exe
 try cl-loop        cl -nologo -O2 -EHsc -DMULMOD_LOOP   mulmod-probe.cc -Fe:cl-loop.exe
 try cl-intrin      cl -nologo -O2 -EHsc -DMULMOD_INTRIN mulmod-probe.cc -Fe:cl-intrin.exe
+try cl-sub         cl -nologo -O2 -EHsc -DMULMOD_SUB    mulmod-probe.cc -Fe:cl-sub.exe
 echo "--- does an int128 object carry a /DEFAULTLIB directive for compiler-rt?"
 clang-cl -nologo -O2 -EHsc -DMULMOD_INT128 -c mulmod-probe.cc -Fo:int128.obj > /dev/null 2>&1 && strings -a int128.obj | grep -i 'defaultlib\|clang_rt' | head -5
-rt=$(find "/c/Program Files/LLVM/lib" "/c/Program Files (Arm)" "/c/Program Files/Microsoft Visual Studio" -iname 'clang_rt.builtins-*.lib' 2>/dev/null | head -3 | tr '\n' ' '); echo "compiler-rt builtins found: ${rt:-none}"; rt=${rt%% *}; [ -n "$rt" ] && try clangcl-int128-explicit-rt clang-cl -nologo -O2 -EHsc -DMULMOD_INT128 mulmod-probe.cc -Fe:clangcl-int128-explicit-rt.exe -link "$(cygpath -w "$rt")"
+rt=$(find "/c/Program Files/LLVM/lib" "/c/Program Files (Arm)" "/c/Program Files/Microsoft Visual Studio" -iname 'clang_rt.builtins-*.lib' 2>/dev/null | head -3 | tr '\n' ' '); echo "compiler-rt builtins found: ${rt:-none}"; rt=${rt%% *}; if [ -n "$rt" ]; then cp "$rt" ./builtins.lib; echo "umodti3 in builtins.lib: $(strings -a builtins.lib | grep -c umodti3)"; try clangcl-int128-explicit-rt clang-cl -nologo -O2 -EHsc -DMULMOD_INT128 mulmod-probe.cc -Fe:clangcl-int128-explicit-rt.exe -link builtins.lib; fi
 grep -q '^clangcl-loop: OK' <(try clangcl-loop clang-cl -nologo -O2 -EHsc -DMULMOD_LOOP mulmod-probe.cc -Fe:clangcl-loop.exe) || { echo "CONTROL FAILED"; exit 1; }
