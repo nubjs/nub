@@ -1,0 +1,204 @@
+[package]
+name = "nub-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The OS-enforced sandbox ENGINE for nub — PM-PURE by construction (Boundary B):
+# it takes only already-parsed data (a serde value + host-provided paths/env) and
+# has ZERO dependency on nub-cli / nub-core / vendor/aube. This is what keeps the
+# future build-jail embedder seam clean — aube's lifecycle.rs will wire to
+# compile()/apply() without dragging any PM type across the boundary. Do NOT add a
+# nub-cli/nub-core/aube dependency here; an impact-analysis review leg asserts the
+# graph. See epics/sandbox/design.md §2 (the two boundaries).
+
+[dependencies]
+serde = { workspace = true }
+# preserve_order is LOAD-BEARING: object-form fold (fold_fs/net/env) relies on
+# SOURCE key order for last-match-wins, so `{ "~/.ssh": true, "~/**": false }`
+# must evaluate in written order (a BTreeMap sort would flip the verdict). Declared
+# locally so the guarantee is owned here, not inherited by accidental workspace
+# feature unification.
+serde_json = { workspace = true, features = ["preserve_order"] }
+tracing = { workspace = true }
+# Matcher stack: globset is ripgrep's glob engine (cross-platform path
+# normalization + per-glob case flags); regex backs the env /regex/ grammar; ipnet
+# parses net CIDRs. All already in the workspace lockfile (transitive) — no new
+# supply-chain surface.
+globset = "0.4"
+regex = "1"
+ipnet = { version = "2", features = ["serde"] }
+sha2 = { workspace = true }
+# The build-jail catalog's optional per-entry `versions` range: validated at BUILD time by
+# the shared parser and matched at policy-compile time against the installer-resolved
+# version. Cargo range semantics rather than npm's, because these ranges are nub-authored
+# catalog text and never a package's own dependency spec — the dialect only has to be one
+# this repo writes. Already in the workspace lockfile via nub-cli/nub-core.
+semver = "1"
+
+# Per-session egress-proxy token: getrandom mints the 256-bit bearer (OS CSPRNG, no
+# userspace-seeded PRNG); base64 decodes the client's HTTP `Proxy-Authorization: Basic`
+# credential + SOCKS5 user/pass. Both already in the workspace lockfile (getrandom via
+# ring/rand; base64 via rustls-pemfile) — no new supply-chain surface.
+getrandom = "0.2"
+base64 = "0.22"
+
+# TLS termination for the MITM credential-brokering tier (proxy/mitm.rs, proxy/ca.rs).
+# Engaged ONLY when a net rule uses a capability that cannot be enforced without
+# reading inside the TLS stream (exact-host marker brokering); host-only policies never
+# instantiate any of this. rustls (server side, blocking over std::net) + rustls-native-
+# certs (the real platform roots, bundled with the ephemeral CA so blind-tunneled hosts
+# still verify) are ALREADY in the workspace lockfile via reqwest's rustls-tls-native-
+# roots; rcgen (ephemeral CA + per-host leaf minting) is the one added supply-chain
+# surface. All three pinned to the `ring` crypto backend (already in-tree) so there is a
+# single provider — passed EXPLICITLY (no process-global default is installed anywhere).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+# pem encodes the real platform roots into the child CA-bundle (rcgen gives the CA cert
+# as PEM directly; the DER roots need encoding). tempfile owns the bundle file's lifetime
+# — it holds ONLY public certs (never the CA key) and is removed when the CA drops. Both
+# already in the workspace lockfile (pem via rcgen; tempfile was a dev-dep) — no new
+# supply-chain surface.
+pem = "3"
+tempfile = "3"
+
+# libc: macOS needs it for confstr scratch-dir lookup; Linux uses it for secure
+# descriptor inheritance and the Bubblewrap launcher boundary.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = { workspace = true }
+
+# Bubblewrap installs this classic BPF program only when network confinement is
+# requested. Filesystem confinement remains mount-only and pays no syscall-filter cost.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"
+
+# windows-sys backs the Windows AppContainer backend: the LowBox launch
+# (CreateProcessW + STARTUPINFOEX + SECURITY_CAPABILITIES), per-run inheritable
+# allow-ACE grants (Get/SetNamedSecurityInfoW + SetEntriesInAclW), the
+# CreateAppContainerProfile identity, and the Job-Object KILL_ON_JOB_CLOSE reap.
+# The strict-Windows net tier adds the loopback-exemption RMW
+# (NetworkIsolationGet/SetAppContainerConfig, WindowsFirewall) + the elevation query
+# (OpenProcessToken/GetTokenInformation, Threading/Security).
+# 0.61 is already in the workspace lockfile (transitive via clap/anstyle) — no
+# new supply-chain surface. Raw FFI (no COM), gated `#[cfg(target_os = "windows")]`.
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.61"
+features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_System_Threading",
+  "Win32_System_JobObjects",
+  "Win32_System_Memory",
+  "Win32_NetworkManagement_WindowsFirewall",
+  # The dedicated-account + WFP backend (backend/windows_account/): the SID-keyed egress
+  # fence (WindowsFilteringPlatform; System_Rpc only because FwpmEngineOpen0's signature
+  # names SEC_WINNT_AUTH_IDENTITY_W), local-account lifecycle (NetManagement), the
+  # DPAPI-sealed credential (Security_Cryptography), the Winlogon user-picker hide
+  # (System_Registry), profile deletion (DeleteProfileW lives under UI_Shell), and the FILE_GENERIC_* access
+  # masks the grant/deny aces are built from (Storage_FileSystem).
+  "Win32_NetworkManagement_WindowsFilteringPlatform",
+  "Win32_System_Rpc",
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_Security_Cryptography",
+  "Win32_System_Registry",
+  "Win32_UI_Shell",
+  "Win32_Storage_FileSystem",
+  # Window-station / desktop aces for the launch. A non-interactive caller (a service, an SSH
+  # session, a CI agent) runs on a per-logon `Service-0x0-…$` station, NOT `WinSta0`, and the
+  # Secondary Logon service's auto-grant does not cover it — without an explicit ace the child
+  # dies in loader init with STATUS_DLL_INIT_FAILED (VM-diagnosed 2026-07-24).
+  "Win32_System_StationsAndDesktops",
+  # `GetConsoleMode` is the launch's console-handle test. The confined child runs on its OWN
+  # console (`CREATE_NO_WINDOW`), which makes one of nub's console handles a silent bit-bucket for
+  # it, so each such std handle is replaced by a relayed pipe. This is the one call that tells a
+  # console apart from a pipe, a file and `NUL` — `GetFileType == FILE_TYPE_CHAR` also matches `NUL`.
+  "Win32_System_Console",
+]
+
+# build.rs bakes data/build-jail-catalog.json into `static` Rust, so the jail's carve-outs
+# have no runtime parse and a malformed catalog fails the BUILD rather than a user's
+# install. serde_json is already a normal dependency above — no new supply-chain surface.
+# `preserve_order` is deliberately NOT requested: the generator emits list order as
+# written, and none of the catalog's objects carry last-match-wins semantics.
+[build-dependencies]
+serde_json = { workspace = true }
+# The shared validator (`src/catalog.rs`, pulled into build.rs with `#[path]`) parses each
+# entry's `versions` range, so the build-script copy needs the same crate the library one does.
+semver = "1"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }
+# Proxy integration tests build the client-side `Proxy-Authorization: Basic` credential.
+base64 = "0.22"
+
+# The Windows enforcement probe is BOTH the runner and the AppContainer child, so it
+# needs a little FFI (token-query + process-liveness) beyond what the lib exposes.
+# Win32_Security_Authorization is the residual probe's own ACL surface (it places and
+# inspects deny-ACEs the backend never emits); declared here rather than inherited from
+# the lib target's feature set, which unification would otherwise supply invisibly.
+[target.'cfg(target_os = "windows")'.dev-dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem",
+  # The de-elevation probe's administrative-authority oracle: OpenSCManagerW for
+  # SC_MANAGER_CREATE_SERVICE succeeds only for an administrator and mutates nothing, which
+  # is what lets the paired arms be gated on an access check rather than a token flag.
+  "Win32_System_Services",
+  # `NtCreateLowBoxToken` is resolved by name from ntdll: it is the only way to build a LowBox
+  # token from a chosen BASE token, which is the composed-token experiment's whole mechanism.
+  "Win32_System_LibraryLoader"]
+
+[lints]
+workspace = true
+
+# Purpose-built integration harness: unlike libtest's generated main, this can
+# install the retained-monitor hook before any test/runtime initialization.
+[[bin]]
+name = "nub-sandbox-monitor-harness"
+path = "src/bin/nub-sandbox-monitor-harness.rs"
+test = false
+bench = false
+
+# Direct-nesting composition harness (epic D7/D8): drives three real nested levels
+# through the production apply_with_runtime path. Like the monitor harness it owns a
+# real main so earliest_bootstrap runs before anything else — and it is ALSO the
+# runtime image + PID-1 monitor for every level it launches.
+[[bin]]
+name = "nub-sandbox-nesting-harness"
+path = "src/bin/nub-sandbox-nesting-harness.rs"
+test = false
+bench = false
+
+# The zero-privilege curated-import skeleton (epic row 0.3) drops the privileged-tier
+# integration tests along with the backends they drove; the `tests/` tree is not vendored
+# here. These `windows-sandbox-probe` / `build-jail-*-arm` features stay: they gate LIBRARY
+# behavior the compiler and backends still read.
+[features]
+windows-sandbox-probe = []
+# TEST-ONLY. Lets a run DROP the build jail's curated project-file read grant, so the
+# build-jail corpus study's project-grant arm is a runtime setting instead of one patched
+# binary per shard. Compile-time and off by default for the same reason as nub-cli's
+# `prefetch-github-hosts`: neither a user nor a dependency can turn it on. The seam is
+# drop-only and carries no path channel, so it can never widen the allowlist. Rationale:
+# src/arm.rs module doc.
+build-jail-project-grant-arm = []
+# TEST-ONLY, and a CONTROL rather than a capability. Drops the Windows `APPDATA` redirect so
+# the corpus can measure that change against an otherwise byte-identical binary — the two
+# arms then differ by this feature and nothing else, which a comparison across 23 commits of
+# unrelated tree movement is not. Drop-only and carries no path channel, exactly like the arm
+# above, so its only reachable effect is strictly LESS access than the default build. The
+# featured build announces itself on stderr so a run asserts the arm engaged from its own
+# output instead of trusting the build flags. Rationale: compiler/preset.rs, at the redirect.
+build-jail-appdata-arm = []
+# DEVELOPMENT-ONLY. Lets a run load the build-jail catalog from a path at startup instead of
+# the copy build.rs bakes in, so a corpus iteration is an edit and a re-run rather than a full
+# Rust rebuild. Compile-time and off by default for the same reason as the arm above: an env
+# var alone would be one stray export away from a user pointing the jail at an attacker's
+# file. Without this feature the catalog PARSER is not compiled into the crate at all — the
+# dev path is absent, not merely inert. Rationale: src/catalog_override.rs module doc.
+build-jail-catalog-override = []

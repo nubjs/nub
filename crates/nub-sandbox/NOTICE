@@ -1,0 +1,40 @@
+nub-sandbox
+
+The macOS Seatbelt essential base profile
+(src/backend/macos_seatbelt_base.sbpl) and the glob→Seatbelt-regex translation
+(glob_to_seatbelt_regex in src/backend/macos.rs) are adapted from OpenAI Codex
+(https://github.com/openai/codex), licensed under the Apache License 2.0:
+
+    Copyright OpenAI
+    Licensed under the Apache License, Version 2.0.
+
+Codex's Seatbelt base policy is itself derived from the Chromium project's macOS
+sandbox policy (https://source.chromium.org/chromium/chromium/src), licensed
+under the BSD 3-Clause License:
+
+    Copyright The Chromium Authors
+    Licensed under the BSD 3-Clause License.
+
+The Linux backend launches an UNMODIFIED upstream Bubblewrap executable. Release
+builds package that executable — statically linked against libcap and musl — as
+a fallback resource (bin/nub-resources), built by scripts/build-bwrap-resource.sh
+from pinned, checksum-verified upstream releases. No source of any of the three is
+modified.
+
+    bubblewrap 0.11.2 (https://github.com/containers/bubblewrap)
+    Copyright the bubblewrap authors.
+    Its license text ships in the resource bundle as COPYING.bubblewrap, and the
+    complete corresponding source ships alongside it as
+    bubblewrap-0.11.2.tar.xz.
+
+    libcap 2.78 (https://sites.google.com/site/fullycapable/)
+    Copyright Andrew G. Morgan and contributors.
+    Its license text ships in the resource bundle as LICENSE.libcap, and the
+    complete corresponding source ships alongside it as libcap-2.78.tar.xz.
+
+    musl libc 1.2.5 (https://musl.libc.org/)
+    Copyright Rich Felker and contributors.
+    Its license text ships in the resource bundle as COPYRIGHT.musl.
+
+Consult each upstream project for its authoritative license terms; the texts
+above are shipped verbatim rather than restated here.

@@ -1,0 +1,5574 @@
+{
+ "packages": {
+  "@apollo/protobufjs": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<1.2.8": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@apollo/rover": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.41.0": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@arbitrum/sdk": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<4.1.0": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": [
+      ".cache/hardhat-nodejs",
+      ".config/hardhat-nodejs",
+      ".local/share/hardhat-nodejs"
+     ],
+     "macos": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "@aws-amplify/cli": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".amplify",
+     ".config/configstore"
+    ],
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "writePaths": null
+    }
+   },
+   "versions": {
+    "<14.5.1": {
+     "network": true,
+     "writePaths": [
+      ".amplify",
+      ".config/configstore"
+     ],
+     "write": {
+      "userHome": true,
+      "deps": true
+     },
+     "macos": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "userHome": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "@azure-devops/mcp": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.9.0": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@bazel/cypress": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": null
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "@bufbuild/buf": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "@clerk/shared": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<4.29.1": {
+     "write": {
+      "userHome": true
+     },
+     "writePaths": [
+      ".config/clerk",
+      "Library/Preferences/clerk"
+     ],
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "writePaths": [
+       "Library/Preferences/clerk"
+      ],
+      "network": true
+     },
+     "linux": {
+      "write": null,
+      "writePaths": [
+       ".config/clerk"
+      ]
+     },
+     "win": {
+      "network": true,
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "@confluentinc/kafka-javascript": {
+   "default": {
+    "network": true
+   }
+  },
+  "@copilotkit/aimock": {
+   "default": {},
+   "versions": {
+    "<1.38.0": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@coze/cli": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<0.3.6": {
+     "network": true,
+     "write": {
+      "userHome": true
+     },
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@cubejs-backend/cubestore": {
+   "default": {
+    "network": true
+   }
+  },
+  "@cypress/snapshot": {
+   "default": {
+    "write": {
+     "project": true
+    }
+   }
+  },
+  "@danmarshall/deckgl-typings": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true
+    }
+   }
+  },
+  "@depot/cli": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "network": true,
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "@discordjs/opus": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<0.10.0": {
+     "network": true,
+     "write": {
+      "project": true
+     }
+    }
+   }
+  },
+  "@eth-optimism/core-utils": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   },
+   "versions": {
+    "<0.13.2": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@eth-optimism/sdk": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   },
+   "versions": {
+    "<3.3.3": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@eversdk/lib-node": {
+   "default": {
+    "network": true
+   }
+  },
+  "@firebase/util": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "@heroui/shared-utils": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.1.12": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@hyperjump/json-pointer": {
+   "default": {},
+   "versions": {
+    "<1.1.2": {
+     "write": {
+      "deps": true,
+      "project": true
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "network": true,
+      "write": {
+       "deps": true
+      }
+     },
+     "macos": {
+      "network": true
+     }
+    }
+   }
+  },
+  "@hyperjump/json-schema": {
+   "default": {},
+   "versions": {
+    "<1.17.8": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true,
+       "project": true
+      }
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "@hyperjump/json-schema-core": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "network": true,
+     "write": {
+      "deps": true
+     }
+    },
+    "macos": {
+     "network": true
+    }
+   },
+   "versions": {
+    "<0.28.5": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "@hyperjump/pact": {
+   "default": {},
+   "versions": {
+    "<1.4.0": {
+     "write": {
+      "deps": true,
+      "project": true
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "network": true,
+      "write": {
+       "deps": true
+      }
+     },
+     "macos": {
+      "network": true
+     }
+    }
+   }
+  },
+  "@larksuite/cli": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<1.0.87": {
+     "network": true,
+     "write": "disk",
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@lottiefiles/lottie-player": {
+   "default": {},
+   "versions": {
+    "<2.0.12": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@matrix-org/matrix-sdk-crypto-nodejs": {
+   "default": {
+    "network": true
+   }
+  },
+  "@mongodb-js/zstd": {
+   "default": {
+    "network": true
+   }
+  },
+  "@mui/x-telemetry": {
+   "default": {
+    "writePaths": [
+     "Library/Preferences/mui-x"
+    ],
+    "read": "disk",
+    "macos": {
+     "read": null,
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "linux": {
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "project": true
+     },
+     "network": true
+    },
+    "win": {
+     "network": true,
+     "read": null,
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "@nestjs/core": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<11.2.1": {
+     "network": true
+    }
+   }
+  },
+  "@netlify/esbuild": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.14.39": {
+     "network": true,
+     "writePaths": [
+      ".cache/esbuild",
+      "Library/Caches/esbuild"
+     ],
+     "macos": {
+      "writePaths": [
+       "Library/Caches/esbuild"
+      ]
+     },
+     "linux": {
+      "writePaths": [
+       ".cache/esbuild",
+       ".config/configstore"
+      ]
+     },
+     "win": {
+      "writePaths": [
+       "AppData/Local/Cache/esbuild"
+      ],
+      "write": {
+       "deps": true,
+       "userHome": true
+      }
+     }
+    }
+   }
+  },
+  "@notarize/qlc-cli": {
+   "default": {
+    "network": true
+   }
+  },
+  "@nuxt/components": {
+   "default": {},
+   "versions": {
+    "<2.2.1": {
+     "write": "disk",
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true,
+       "project": true,
+       "userHome": true
+      }
+     }
+    }
+   }
+  },
+  "@openapitools/openapi-generator-cli": {
+   "default": {
+    "network": true
+   }
+  },
+  "@opencode-ai/cli": {
+   "default": {
+    "write": "disk",
+    "network": true,
+    "writePaths": [
+     ".cache/opencode",
+     ".local/share/opencode"
+    ],
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null
+    }
+   },
+   "versions": {
+    "<1.18.18": {
+     "network": true,
+     "writePaths": [
+      ".cache/opencode",
+      ".local/share/opencode"
+     ],
+     "macos": {
+      "network": null
+     },
+     "linux": {
+      "writePaths": null
+     },
+     "win": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "@pact-foundation/pact-node": {
+   "default": {
+    "write": {
+     "project": true,
+     "deps": true,
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": {
+      "project": true
+     }
+    },
+    "linux": {
+     "write": {
+      "project": true,
+      "deps": true
+     }
+    },
+    "win": {
+     "write": null
+    }
+   }
+  },
+  "@paloaltonetworks/postman-code-generators": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<1.1.15-patch.2": {
+     "network": true,
+     "write": "disk",
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@pdftron/pdfnet-node": {
+   "default": {
+    "network": true
+   }
+  },
+  "@playwright/browser-chromium": {
+   "default": {
+    "write": null,
+    "network": true
+   },
+   "versions": {
+    "<1.62.1": {
+     "write": {
+      "userHome": true,
+      "deps": true,
+      "project": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@playwright/browser-firefox": {
+   "default": {
+    "write": null,
+    "network": true
+   }
+  },
+  "@playwright/browser-webkit": {
+   "default": {
+    "write": null,
+    "network": true
+   }
+  },
+  "@posthog/cli": {
+   "default": {
+    "network": true
+   }
+  },
+  "@prisma/client": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<7.9.1": {
+     "network": true,
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "@prisma/engines": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".cache/prisma"
+    ]
+   },
+   "versions": {
+    "<7.9.1": {
+     "network": true,
+     "writePaths": [
+      ".cache/prisma"
+     ],
+     "write": {
+      "userHome": true
+     },
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "@progress/kendo-licensing": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<1.11.3": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@pulumi/aws-native": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   }
+  },
+  "@pulumi/awsx": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   }
+  },
+  "@pulumi/azuread": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<6.10.0": {
+     "write": {
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@pulumi/cloudflare": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<6.19.0": {
+     "write": {
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@pulumi/command": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   }
+  },
+  "@pulumi/datadog": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<5.10.0": {
+     "write": {
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@pulumi/docker": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   }
+  },
+  "@pulumi/docker-build": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.0.22": {
+     "write": {
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@pulumi/gcp": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<9.34.1": {
+     "write": {
+      "userHome": true,
+      "deps": true,
+      "project": true
+     },
+     "network": true,
+     "win": {
+      "write": {
+       "userHome": true
+      }
+     }
+    },
+    "<0.16.9": {
+     "write": {
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@pulumi/kubernetes": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<4.33.0": {
+     "write": {
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@pulumi/postgresql": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<3.18.0": {
+     "write": {
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@pulumi/tls": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<5.5.1": {
+     "write": {
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@railway/cli": {
+   "default": {
+    "network": true
+   }
+  },
+  "@salesforce/cli": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".cache/sf",
+     ".sf"
+    ]
+   }
+  },
+  "@sap/hana-client": {
+   "default": {
+    "write": "disk",
+    "network": true,
+    "macos": {
+     "write": {
+      "userHome": true
+     },
+     "network": null
+    },
+    "linux": {
+     "write": {
+      "userHome": true
+     },
+     "network": null
+    }
+   }
+  },
+  "@sematext/gc-stats": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "writePaths": null
+    }
+   }
+  },
+  "@sentry/cli": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<3.6.2": {
+     "write": {
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "@shoelace-style/shoelace": {
+   "default": {
+    "write": {
+     "userHome": true,
+     "deps": true,
+     "project": true
+    },
+    "network": true,
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null,
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null
+    }
+   }
+  },
+  "@shopify/ngrok": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".ngrok"
+    ],
+    "win": {
+     "writePaths": [
+      "AppData/Roaming/ngrok"
+     ],
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "@sitespeed.io/chromedriver": {
+   "default": {
+    "network": true
+   }
+  },
+  "@sitespeed.io/edgedriver": {
+   "default": {
+    "network": true
+   }
+  },
+  "@stdlib/math-base-assert-is-infinite": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@stdlib/math-base-assert-is-nan": {
+   "default": {},
+   "versions": {
+    "<0.2.3": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "@stdlib/math-base-assert-is-positive-zero": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@stdlib/math-base-napi-binary": {
+   "default": {},
+   "versions": {
+    "<0.3.3": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "@stdlib/number-float64-base-to-words": {
+   "default": {},
+   "versions": {
+    "<0.2.3": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "@substrate/connect": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "@syncfusion/ej2-angular-base": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "@team-plain/typescript-sdk": {
+   "default": {},
+   "versions": {
+    "<5.12.1": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "@tensorflow/tfjs-backend-wasm": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "network": true,
+    "linux": {
+     "write": "disk"
+    }
+   },
+   "versions": {
+    "<4.22.0": {
+     "network": true
+    }
+   }
+  },
+  "@tensorflow/tfjs-node": {
+   "default": {
+    "network": true
+   }
+  },
+  "@tloncorp/tlon-skill": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "@trufflesuite/bigint-buffer": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@vscode/deviceid": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "@vscode/ripgrep": {
+   "default": {},
+   "versions": {
+    "<1.18.0": {
+     "network": true
+    }
+   }
+  },
+  "@vscode/windows-registry": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "angularx-qrcode": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "writePaths": [
+     ".config/configstore"
+    ],
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "writePaths": null
+    }
+   },
+   "versions": {
+    "<22.0.1": {
+     "writePaths": [
+      ".config/configstore"
+     ],
+     "win": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "apify-client": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.24.0": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "appium-uiautomator2-driver": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<8.4.0": {
+     "write": "disk",
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      }
+     },
+     "win": {
+      "read": "disk",
+      "write": null
+     }
+    }
+   }
+  },
+  "applicationinsights-native-metrics": {
+   "default": {
+    "network": true
+   }
+  },
+  "aws-iot-device-sdk-v2": {
+   "default": {},
+   "versions": {
+    "<1.28.0": {
+     "network": true,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "win": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "axios-cache-interceptor": {
+   "default": {},
+   "versions": {
+    "<1.12.3": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "azure-functions-core-tools": {
+   "default": {
+    "network": true
+   }
+  },
+  "azure-streamanalytics-cicd": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": null
+    }
+   }
+  },
+  "backport": {
+   "default": {
+    "writePaths": [
+     ".backport"
+    ],
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "network": true,
+     "writePaths": null,
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "base62": {
+   "default": {
+    "network": true
+   }
+  },
+  "bcrypt": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<6.0.0": {
+     "network": true
+    }
+   }
+  },
+  "better-sqlite3": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<13.0.3": {
+     "network": true,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     },
+     "win": {
+      "writePaths": null
+     }
+    },
+    "<13.0.1": {
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "bigint-buffer": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "write": {
+     "deps": true,
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null,
+     "write": null
+    }
+   }
+  },
+  "blake-hash": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true
+    },
+    "network": true,
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": null,
+     "writePaths": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": null,
+     "writePaths": null
+    }
+   }
+  },
+  "bootstrap-vue": {
+   "default": {
+    "network": true
+   }
+  },
+  "bun": {
+   "default": {
+    "write": "disk",
+    "network": true,
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": null
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": null
+    },
+    "win": {
+     "write": {
+      "deps": true,
+      "project": true
+     }
+    }
+   }
+  },
+  "canvas": {
+   "default": {
+    "network": true
+   }
+  },
+  "cbor-extract": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.2.2": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "ccxt": {
+   "default": {
+    "network": true
+   }
+  },
+  "chromedriver": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "chromium": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".cache/node-chromium",
+     "Library/Caches/node-chromium"
+    ],
+    "write": {
+     "deps": true,
+     "userHome": true
+    },
+    "macos": {
+     "write": null,
+     "writePaths": [
+      "Library/Caches/node-chromium"
+     ]
+    },
+    "linux": {
+     "write": null,
+     "writePaths": [
+      ".cache/node-chromium"
+     ]
+    },
+    "win": {
+     "writePaths": null
+    }
+   }
+  },
+  "classic-level": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "cld": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "cldr-data": {
+   "default": {
+    "network": true
+   }
+  },
+  "cloudflared": {
+   "default": {
+    "network": true
+   }
+  },
+  "codeceptjs": {
+   "default": {
+    "write": "disk",
+    "network": true,
+    "macos": {
+     "write": {
+      "project": true,
+      "userHome": true
+     }
+    }
+   }
+  },
+  "compresion": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "contentlayer": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.3.4": {
+     "network": true,
+     "write": {
+      "deps": true,
+      "project": true
+     }
+    }
+   }
+  },
+  "ctrlc-windows": {
+   "default": {},
+   "versions": {
+    "<2.2.0": {
+     "network": true
+    }
+   }
+  },
+  "cwebp-bin": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "cypress": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".cache/Cypress",
+     "Library/Caches/Cypress"
+    ],
+    "macos": {
+     "writePaths": [
+      "Library/Caches/Cypress"
+     ]
+    },
+    "linux": {
+     "writePaths": [
+      ".cache/Cypress"
+     ]
+    },
+    "win": {
+     "writePaths": null
+    }
+   },
+   "versions": {
+    "<15.20.1": {
+     "network": true,
+     "writePaths": [
+      ".cache/Cypress",
+      "Library/Caches/Cypress"
+     ],
+     "write": {
+      "userHome": true,
+      "deps": true,
+      "project": true
+     },
+     "macos": {
+      "write": null,
+      "writePaths": [
+       "Library/Caches/Cypress"
+      ]
+     },
+     "linux": {
+      "write": null,
+      "writePaths": [
+       ".cache/Cypress"
+      ]
+     },
+     "win": {
+      "writePaths": null
+     }
+    },
+    "<15.19.0": {
+     "network": true,
+     "writePaths": [
+      ".cache/Cypress",
+      "Library/Caches/Cypress"
+     ],
+     "write": {
+      "userHome": true,
+      "deps": true
+     },
+     "macos": {
+      "write": null,
+      "writePaths": [
+       "Library/Caches/Cypress"
+      ]
+     },
+     "linux": {
+      "write": null,
+      "writePaths": [
+       ".cache/Cypress"
+      ]
+     },
+     "win": {
+      "writePaths": null
+     }
+    },
+    "<13.17.0": {
+     "network": true,
+     "writePaths": [
+      ".cache/Cypress",
+      "Library/Caches/Cypress"
+     ],
+     "write": {
+      "userHome": true
+     },
+     "macos": {
+      "write": null,
+      "writePaths": [
+       "Library/Caches/Cypress"
+      ]
+     },
+     "linux": {
+      "write": null,
+      "writePaths": [
+       ".cache/Cypress"
+      ]
+     },
+     "win": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "cz-customizable": {
+   "default": {},
+   "versions": {
+    "<7.5.4": {
+     "write": "disk",
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": null
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": null
+     }
+    }
+   }
+  },
+  "detox": {
+   "default": {
+    "writePaths": [
+     "Library/Detox"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "device-detector-js": {
+   "default": {
+    "network": true
+   }
+  },
+  "diskusage": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "docxtemplater": {
+   "default": {},
+   "versions": {
+    "<3.69.3": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null,
+      "writePaths": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "dotnet-2.0.0": {
+   "default": {
+    "write": "disk",
+    "network": true
+   }
+  },
+  "dprint": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.55.2": {
+     "write": null,
+     "network": true
+    }
+   }
+  },
+  "dtrace-provider": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "duckdb": {
+   "default": {
+    "network": true
+   }
+  },
+  "dugite": {
+   "default": {
+    "network": true
+   }
+  },
+  "eccrypto": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true,
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    }
+   }
+  },
+  "eckles": {
+   "default": {},
+   "versions": {
+    "<1.4.1": {
+     "network": true
+    }
+   }
+  },
+  "egg-ci": {
+   "default": {
+    "write": {
+     "project": true
+    }
+   }
+  },
+  "electron": {
+   "default": {
+    "write": {
+     "userHome": true,
+     "deps": true,
+     "project": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<43.4.0": {
+     "write": {
+      "userHome": true,
+      "deps": true,
+      "project": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "electron-chromedriver": {
+   "default": {
+    "write": null,
+    "network": true
+   },
+   "versions": {
+    "<43.2.0": {
+     "write": {
+      "userHome": true,
+      "project": true,
+      "deps": true
+     },
+     "network": true,
+     "writePaths": [
+      ".cache/electron"
+     ],
+     "macos": {
+      "write": null,
+      "writePaths": null
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "writePaths": null
+     }
+    },
+    "<32.3.3": {
+     "write": {
+      "userHome": true,
+      "project": true
+     },
+     "network": true,
+     "writePaths": [
+      ".cache/electron"
+     ],
+     "macos": {
+      "write": null,
+      "writePaths": null
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "writePaths": null,
+      "write": {
+       "deps": true,
+       "project": true,
+       "userHome": true
+      }
+     }
+    }
+   }
+  },
+  "electron-prebuilt": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".electron"
+    ],
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "electron-vite": {
+   "default": {},
+   "versions": {
+    "<5.0.0": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "elm": {
+   "default": {
+    "network": true,
+    "write": null
+   }
+  },
+  "es-check": {
+   "default": {},
+   "versions": {
+    "<9.6.4": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "esbuild": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.28.2": {
+     "network": true,
+     "writePaths": [
+      ".cache/esbuild",
+      "Library/Caches/esbuild"
+     ],
+     "write": {
+      "deps": true
+     },
+     "macos": {
+      "write": null,
+      "writePaths": [
+       "Library/Caches/esbuild"
+      ]
+     },
+     "linux": {
+      "write": null,
+      "writePaths": [
+       ".cache/esbuild"
+      ]
+     },
+     "win": {
+      "writePaths": [
+       "AppData/Local/Cache/esbuild"
+      ]
+     }
+    },
+    "<0.17.19": {
+     "network": true,
+     "writePaths": [
+      ".cache/esbuild",
+      "Library/Caches/esbuild"
+     ],
+     "macos": {
+      "writePaths": [
+       "Library/Caches/esbuild"
+      ]
+     },
+     "linux": {
+      "writePaths": [
+       ".cache/esbuild",
+       ".config/configstore"
+      ]
+     },
+     "win": {
+      "writePaths": [
+       "AppData/Local/Cache/esbuild"
+      ],
+      "write": {
+       "deps": true,
+       "userHome": true
+      }
+     }
+    }
+   }
+  },
+  "eth-gas-reporter": {
+   "default": {},
+   "versions": {
+    "<0.2.27": {
+     "write": {
+      "deps": true,
+      "project": true
+     },
+     "network": true,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": null,
+      "writePaths": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "event-loop-stats": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "exiftool-vendored": {
+   "default": {},
+   "versions": {
+    "<37.2.0": {
+     "network": true,
+     "win": {
+      "write": {
+       "deps": true,
+       "project": true,
+       "userHome": true
+      }
+     }
+    }
+   }
+  },
+  "farmhash": {
+   "default": {},
+   "versions": {
+    "<5.0.1": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "network": true,
+     "linux": {
+      "writePaths": null
+     },
+     "win": {
+      "writePaths": null
+     }
+    },
+    "<4.0.2": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "fast-folder-size": {
+   "default": {
+    "network": true,
+    "macos": {
+     "network": null,
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "network": null,
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "faunadb": {
+   "default": {
+    "network": true
+   }
+  },
+  "ffmpeg-static": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".cache/ffmpeg-static-nodejs"
+    ],
+    "macos": {
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "userHome": true
+     }
+    }
+   }
+  },
+  "flow-bin": {
+   "default": {},
+   "versions": {
+    "<0.328.0": {
+     "network": true,
+     "write": "disk",
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    },
+    "<0.30.0": {
+     "network": true,
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "free-email-domains": {
+   "default": {
+    "network": true
+   }
+  },
+  "fs-xattr": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "fsevents": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "gatsby": {
+   "default": {
+    "network": true
+   }
+  },
+  "gc-stats": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "gcstats.js": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "geckodriver": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<6.1.0": {
+     "network": true,
+     "win": {
+      "network": null,
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "gif2webp-bin": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "gifsicle": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   },
+   "versions": {
+    "<7.0.1": {
+     "network": true,
+     "write": "disk",
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "gl": {
+   "default": {
+    "network": true
+   }
+  },
+  "graphql-shield": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<7.6.5": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "win": {
+      "write": null
+     }
+    }
+   }
+  },
+  "grpc-tools": {
+   "default": {
+    "network": true
+   }
+  },
+  "handbrake-js": {
+   "default": {
+    "network": true,
+    "linux": {
+     "network": null,
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "hnswlib-node": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "hugo-bin": {
+   "default": {
+    "network": true,
+    "write": null
+   }
+  },
+  "hugo-extended": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<0.164.0": {
+     "network": true,
+     "write": {
+      "userHome": true
+     },
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "ibm_db": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     }
+    }
+   }
+  },
+  "iconv": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "iedriver": {
+   "default": {
+    "network": true,
+    "write": {
+     "project": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "iltorb": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "impit": {
+   "default": {},
+   "versions": {
+    "<0.14.3": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "inngest-cli": {
+   "default": {
+    "network": true
+   }
+  },
+  "ip-num": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "iso-constants": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "isolated-vm": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<7.0.1": {
+     "network": true,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "network": null,
+      "writePaths": null,
+      "write": {
+       "deps": true
+      }
+     },
+     "win": {
+      "writePaths": null
+     }
+    },
+    "<7.0.0": {
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "javascript-obfuscator": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<5.5.0": {
+     "network": true
+    }
+   }
+  },
+  "jest-preview": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.3.3": {
+     "write": "disk",
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true,
+       "project": true
+      }
+     },
+     "linux": {
+      "write": {
+       "deps": true,
+       "project": true
+      }
+     },
+     "win": {
+      "write": {
+       "project": true
+      }
+     }
+    }
+   }
+  },
+  "jotai-devtools": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "jpeg-recompress-bin": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "jpegtran-bin": {
+   "default": {
+    "network": true,
+    "write": null
+   }
+  },
+  "json-schema-library": {
+   "default": {},
+   "versions": {
+    "<11.6.2": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "keccak": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true
+    },
+    "network": true,
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": null,
+     "writePaths": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": null,
+     "writePaths": null
+    }
+   },
+   "versions": {
+    "<3.0.4": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "write": {
+       "userHome": true
+      },
+      "writePaths": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "kerberos": {
+   "default": {
+    "network": true
+   }
+  },
+  "keytar": {
+   "default": {
+    "network": true
+   }
+  },
+  "koffi": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<3.1.2": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "leveldown": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   },
+   "versions": {
+    "<6.1.1": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "libxmljs": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "writePaths": null
+    }
+   }
+  },
+  "libxmljs2": {
+   "default": {
+    "network": true
+   }
+  },
+  "lz4": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "macos-alias": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "mbt": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<1.2.49": {
+     "network": true,
+     "write": {
+      "project": true
+     },
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "writePaths": [
+       ".config/configstore"
+      ],
+      "write": null
+     }
+    }
+   }
+  },
+  "modern-syslog": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "mongodb-client-encryption": {
+   "default": {
+    "network": true
+   }
+  },
+  "mongodb-crypt-library-dummy": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "mongodb-memory-server": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "mozjpeg": {
+   "default": {
+    "network": true,
+    "write": null
+   }
+  },
+  "muhammara": {
+   "default": {
+    "network": true
+   }
+  },
+  "n8n-nodes-evolution-api": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "native-keymap": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "netlify-cli": {
+   "default": {
+    "writePaths": [
+     ".config/netlify",
+     "Library/Preferences/netlify"
+    ],
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "writePaths": [
+      "Library/Preferences/netlify"
+     ],
+     "network": true
+    },
+    "linux": {
+     "write": null,
+     "writePaths": [
+      ".config/netlify"
+     ]
+    },
+    "win": {
+     "writePaths": null,
+     "write": {
+      "deps": true,
+      "userHome": true
+     },
+     "network": true
+    }
+   }
+  },
+  "ngrok": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".ngrok"
+    ],
+    "win": {
+     "writePaths": [
+      "AppData/Roaming/ngrok"
+     ],
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "node": {
+   "default": {
+    "network": true
+   }
+  },
+  "node-expat": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "node-jq": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "node-libcurl": {
+   "default": {
+    "network": true
+   }
+  },
+  "nodejieba": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   },
+   "versions": {
+    "<3.5.8": {
+     "network": true,
+     "write": {
+      "userHome": true
+     },
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null,
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "nodemon": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<3.1.14": {
+     "write": {
+      "userHome": true
+     },
+     "writePaths": [
+      ".config/configstore"
+     ],
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "network": true,
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "nx": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<23.1.1": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": null
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "odbc": {
+   "default": {
+    "network": true
+   }
+  },
+  "oniguruma": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "onnxruntime-node": {
+   "default": {
+    "network": true
+   }
+  },
+  "openclaw": {
+   "default": {
+    "writePaths": [
+     ".openclaw"
+    ],
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "writePaths": null
+    }
+   }
+  },
+  "opencode-ai": {
+   "default": {
+    "write": "disk",
+    "network": true
+   },
+   "versions": {
+    "<1.18.18": {
+     "write": "disk",
+     "network": true,
+     "writePaths": [
+      ".cache/opencode",
+      ".local/share/opencode"
+     ],
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "writePaths": null
+     },
+     "win": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "optipng-bin": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   },
+   "versions": {
+    "<9.0.0": {
+     "network": true,
+     "write": "disk",
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "phantomjs": {
+   "default": {
+    "network": true
+   }
+  },
+  "phantomjs-prebuilt": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "pizzip": {
+   "default": {
+    "write": "disk",
+    "network": true,
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": null
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": null
+    }
+   }
+  },
+  "pkcs11js": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "playwright": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<1.62.1": {
+     "write": {
+      "userHome": true,
+      "deps": true,
+      "project": true
+     },
+     "network": true,
+     "macos": {
+      "write": {
+       "userHome": true
+      }
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "playwright-chromium": {
+   "default": {
+    "write": null,
+    "network": true
+   },
+   "versions": {
+    "<1.62.1": {
+     "write": {
+      "userHome": true,
+      "deps": true,
+      "project": true
+     },
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      }
+     }
+    },
+    "<0.16.0": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "playwright-webkit": {
+   "default": {
+    "write": null,
+    "network": true
+   }
+  },
+  "pngout-bin": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<6.0.1": {
+     "network": true,
+     "write": "disk",
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "pngquant-bin": {
+   "default": {
+    "network": true,
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "posix": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "postcss-rtlcss": {
+   "default": {},
+   "versions": {
+    "<6.0.0": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "postman-code-generators": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     "Library/Caches/Yarn"
+    ],
+    "write": "disk",
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null
+    }
+   }
+  },
+  "powerbi-models": {
+   "default": {},
+   "versions": {
+    "<2.1.1": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "pprof": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   },
+   "versions": {
+    "<5.0.0": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "network": true,
+     "linux": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "prettier-plugin-ember-template-tag": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.1.7": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "prisma-json-types-generator": {
+   "default": {},
+   "versions": {
+    "<5.1.1": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "protoc": {
+   "default": {},
+   "versions": {
+    "<35.1.0": {
+     "network": true
+    }
+   }
+  },
+  "protoc-gen-grpc-web": {
+   "default": {
+    "network": true
+   }
+  },
+  "puppeteer": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".cache/puppeteer"
+    ]
+   },
+   "versions": {
+    "<25.3.0": {
+     "network": true,
+     "writePaths": [
+      ".cache/puppeteer"
+     ],
+     "write": {
+      "userHome": true
+     },
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     },
+     "win": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "purescript": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".cache/purescript-npm-installer-nodejs",
+     "Library/Caches/purescript-npm-installer-nodejs"
+    ],
+    "macos": {
+     "writePaths": [
+      "Library/Caches/purescript-npm-installer-nodejs"
+     ]
+    },
+    "linux": {
+     "writePaths": [
+      ".cache/purescript-npm-installer-nodejs"
+     ]
+    },
+    "win": {
+     "writePaths": null
+    }
+   },
+   "versions": {
+    "<0.15.16": {
+     "network": true,
+     "writePaths": [
+      ".cache/cabal",
+      ".cache/purescript-npm-installer-nodejs",
+      ".stack",
+      "Library/Caches/purescript-npm-installer-nodejs"
+     ],
+     "write": "disk",
+     "macos": {
+      "write": null,
+      "writePaths": [
+       "Library/Caches/purescript-npm-installer-nodejs"
+      ]
+     },
+     "linux": {
+      "write": null,
+      "writePaths": [
+       ".cache/cabal",
+       ".cache/purescript-npm-installer-nodejs",
+       ".stack"
+      ]
+     },
+     "win": {
+      "writePaths": null
+     }
+    },
+    "<0.13.8": {
+     "network": true,
+     "writePaths": [
+      ".cache/cabal",
+      ".cache/purescript-npm-installer-nodejs",
+      ".stack"
+     ],
+     "write": "disk",
+     "macos": {
+      "write": null,
+      "writePaths": null
+     },
+     "linux": {
+      "write": null,
+      "writePaths": [
+       ".cache/cabal",
+       ".stack"
+      ]
+     },
+     "win": {
+      "writePaths": null
+     }
+    },
+    "<0.9.3": {
+     "network": true,
+     "writePaths": [
+      ".cache/cabal",
+      ".cache/purescript-npm-installer-nodejs"
+     ],
+     "write": "disk",
+     "macos": {
+      "write": null,
+      "writePaths": null
+     },
+     "linux": {
+      "write": {
+       "userHome": true
+      },
+      "writePaths": [
+       ".cache/cabal"
+      ]
+     },
+     "win": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "qlobber": {
+   "default": {},
+   "versions": {
+    "<8.0.1": {
+     "write": "disk",
+     "network": true
+    }
+   }
+  },
+  "rc-editor-core": {
+   "default": {},
+   "versions": {
+    "<0.8.10": {
+     "write": {
+      "userHome": true
+     },
+     "writePaths": [
+      ".config/configstore"
+     ],
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "network": true,
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "re2": {
+   "default": {
+    "network": true
+   }
+  },
+  "react-jsx-parser": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.4.1": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "react-native-purchases": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<10.7.1": {
+     "network": true,
+     "write": "disk",
+     "macos": {
+      "write": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      }
+     }
+    },
+    "<1.5.4": {
+     "network": true,
+     "linux": {
+      "writePaths": [
+       ".config/configstore"
+      ]
+     }
+    }
+   }
+  },
+  "realm": {
+   "default": {
+    "network": true
+   }
+  },
+  "redis-memory-server": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.17.1": {
+     "write": "disk",
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      }
+     }
+    }
+   }
+  },
+  "ref-napi": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "registry-js": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "writePaths": null
+    }
+   }
+  },
+  "robotjs": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "rs-module-lexer": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "samlify": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.13.1": {
+     "write": "disk",
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": null
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": null
+     }
+    }
+   }
+  },
+  "saucectl": {
+   "default": {
+    "network": true,
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "scrollmirror": {
+   "default": {},
+   "versions": {
+    "<1.2.4": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "secp256k1": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<5.0.2": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "segfault-handler": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "serverless": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<4.41.0": {
+     "network": true,
+     "write": {
+      "deps": true
+     },
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "sharp": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.35.3": {
+     "network": true,
+     "writePaths": [
+      "Library/Caches/Homebrew"
+     ],
+     "linux": {
+      "writePaths": null
+     },
+     "win": {
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "skia-canvas": {
+   "default": {
+    "network": true
+   }
+  },
+  "sleep": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "snappy": {
+   "default": {},
+   "versions": {
+    "<7.4.0": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "snyk": {
+   "default": {
+    "network": true
+   }
+  },
+  "spellchecker": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "sqlite3": {
+   "default": {
+    "network": true
+   }
+  },
+  "squawk-cli": {
+   "default": {},
+   "versions": {
+    "<2.62.0": {
+     "network": true
+    }
+   }
+  },
+  "ssh2": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "write": {
+     "deps": true,
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": {
+      "deps": true
+     }
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "writePaths": null
+    },
+    "win": {
+     "writePaths": null
+    }
+   }
+  },
+  "storage-engine": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "storybook-addon-remix-react-router": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "stream-chat-react-native-core": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true
+    }
+   },
+   "versions": {
+    "<9.7.6": {
+     "network": true,
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "subrequests": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.18.0": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "subrequests-json-merger": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "supabase": {
+   "default": {
+    "network": true
+   }
+  },
+  "svf-lib": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "taiko": {
+   "default": {
+    "network": true,
+    "write": {
+     "project": true
+    },
+    "macos": {
+     "write": null
+    },
+    "win": {
+     "write": null
+    }
+   }
+  },
+  "tiny-secp256k1": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<2.2.4": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "tree-sitter-bash": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "tree-sitter-c-sharp": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.23.5": {
+     "write": {
+      "deps": true
+     },
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "macos": {
+      "network": true
+     },
+     "linux": {
+      "network": true,
+      "writePaths": null
+     },
+     "win": {
+      "network": true,
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "tree-sitter-cli": {
+   "default": {
+    "network": true
+   }
+  },
+  "tree-sitter-cpp": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "tree-sitter-go": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.25.0": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "tree-sitter-kotlin": {
+   "default": {
+    "write": "disk",
+    "network": true,
+    "macos": {
+     "write": null,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ]
+    },
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    }
+   },
+   "versions": {
+    "<0.3.8": {
+     "write": "disk",
+     "network": true,
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "tree-sitter-php": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.24.2": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "write": {
+      "deps": true
+     },
+     "macos": {
+      "network": true
+     },
+     "linux": {
+      "network": true,
+      "writePaths": null
+     },
+     "win": {
+      "network": true,
+      "writePaths": null
+     }
+    },
+    "<0.22.8": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "tree-sitter-ruby": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.23.1": {
+     "write": {
+      "deps": true
+     },
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "macos": {
+      "network": true
+     },
+     "linux": {
+      "network": true,
+      "writePaths": null
+     },
+     "win": {
+      "network": true,
+      "writePaths": null
+     }
+    }
+   }
+  },
+  "tree-sitter-rust": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.24.0": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "tree-sitter-typescript": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<0.23.2": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "macos": {
+      "write": {
+       "deps": true
+      },
+      "network": true
+     }
+    }
+   }
+  },
+  "tree-sitter-yaml": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "truffle": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     ".config/truffle-nodejs",
+     "Library/Preferences/truffle-nodejs"
+    ],
+    "write": {
+     "userHome": true
+    },
+    "macos": {
+     "write": null,
+     "writePaths": [
+      "Library/Preferences/truffle-nodejs"
+     ]
+    },
+    "linux": {
+     "write": null,
+     "writePaths": [
+      ".config/truffle-nodejs"
+     ]
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "ttf2woff2": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   },
+   "versions": {
+    "<8.0.1": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true,
+       "project": true
+      },
+      "writePaths": null
+     },
+     "linux": {
+      "write": null,
+      "writePaths": null
+     },
+     "win": {
+      "write": {
+       "deps": true,
+       "userHome": true
+      },
+      "writePaths": null
+     }
+    },
+    "<7.0.0": {
+     "writePaths": [
+      "Library/Caches/node-gyp"
+     ],
+     "write": {
+      "deps": true,
+      "project": true
+     },
+     "macos": {
+      "network": true,
+      "writePaths": null
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      },
+      "network": true,
+      "writePaths": null
+     },
+     "win": {
+      "network": true,
+      "write": {
+       "deps": true
+      },
+      "writePaths": null
+     }
+    },
+    "<2.0.3": {
+     "writePaths": null,
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "typia": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<13.3.0": {
+     "write": {
+      "deps": true,
+      "project": true,
+      "userHome": true
+     },
+     "network": true,
+     "macos": {
+      "write": null
+     },
+     "linux": {
+      "write": null
+     }
+    }
+   }
+  },
+  "unicode": {
+   "default": {
+    "network": true
+   },
+   "versions": {
+    "<14.0.0": {
+     "network": true,
+     "win": {
+      "write": {
+       "deps": true
+      },
+      "writePaths": [
+       "AppData/Local/Microsoft"
+      ]
+     }
+    }
+   }
+  },
+  "unix-dgram": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "unrs-resolver": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true
+    },
+    "network": true
+   }
+  },
+  "ursa-optional": {
+   "default": {
+    "write": {
+     "deps": true,
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": null,
+     "writePaths": [
+      ".config/configstore",
+      "Library/Caches/node-gyp"
+     ]
+    },
+    "linux": {
+     "write": {
+      "userHome": true
+     }
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "use-mask-input": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   },
+   "versions": {
+    "<3.13.0": {
+     "network": true
+    }
+   }
+  },
+  "v8-profiler-next": {
+   "default": {
+    "network": true,
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "writePaths": null
+    }
+   }
+  },
+  "vanilla-cookieconsent": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true,
+     "project": true,
+     "userHome": true
+    },
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "victory-bar": {
+   "default": {},
+   "versions": {
+    "<37.3.6": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "victory-scatter": {
+   "default": {},
+   "versions": {
+    "<37.3.6": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "vnu-jar": {
+   "default": {
+    "write": {
+     "deps": true,
+     "project": true
+    },
+    "network": true,
+    "linux": {
+     "write": {
+      "deps": true
+     }
+    },
+    "win": {
+     "write": null
+    }
+   }
+  },
+  "vue-inbrowser-compiler-demi": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "wdeasync": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "weak-napi": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true
+   }
+  },
+  "windows-build-tools": {
+   "default": {
+    "write": "disk",
+    "network": true
+   }
+  },
+  "wordpos": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true
+    }
+   }
+  },
+  "wrtc": {
+   "default": {
+    "network": true,
+    "write": {
+     "deps": true
+    },
+    "linux": {
+     "write": null
+    }
+   }
+  },
+  "xxhash": {
+   "default": {
+    "writePaths": [
+     "Library/Caches/node-gyp"
+    ],
+    "linux": {
+     "write": {
+      "deps": true
+     },
+     "network": true,
+     "writePaths": null
+    },
+    "macos": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    },
+    "win": {
+     "write": {
+      "deps": true
+     },
+     "network": true
+    }
+   }
+  },
+  "yo": {
+   "default": {
+    "network": true
+   }
+  },
+  "zopflipng-bin": {
+   "default": {
+    "write": {
+     "userHome": true
+    },
+    "network": true,
+    "macos": {
+     "write": null
+    },
+    "linux": {
+     "write": null
+    },
+    "win": {
+     "write": {
+      "deps": true
+     }
+    }
+   }
+  },
+  "zstd-napi": {
+   "default": {
+    "network": true
+   }
+  }
+ },
+ "baseline": [],
+ "env": [
+  {
+   "name": "PYTHONDONTWRITEBYTECODE",
+   "value": "1"
+  },
+  {
+   "name": "npm_config_logs_max",
+   "value": "0"
+  },
+  {
+   "name": "npm_config_update_notifier",
+   "value": "false"
+  }
+ ],
+ "provenance": {
+  "schemaVersion": 1,
+  "harnessEpoch": 3,
+  "harnessSha256": "c8ba5e14f9901906dc811923711e5819985765eea9a7847a2887cb3586b750dd",
+  "invalidationPolicySha256": "06169e73b994a573a1e6d9a53ae7c4f9281e00d3bb05c1270e20022b8448d89f",
+  "recordsSha256": "e1cc5b87c30b9761472062a8767c16bf93e5066ac73b81378540ebb21880a2ef",
+  "recordCount": 9913,
+  "sourceHarnesses": {
+   "3:f2cd230bd7d342ce681f335ad78ab0dbb44a6aa0c3f98862ab322537e55b4d6f": 3033,
+   "unknown:unknown": 6880
+  },
+  "provenanceSlim": true,
+  "generatedAt": "2026-08-19T00:00:00Z"
+ }
+}

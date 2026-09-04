@@ -1,0 +1,1877 @@
+//! The v2 build-jail catalog: one table, keyed by package name, whose grants say what a
+//! package's lifecycle scripts may reach beyond the base profile.
+//!
+//! WHAT THE BASE PROFILE ALREADY GRANTS, and therefore what is NOT expressible here: read
+//! and write on the package's own directory (node-gyp builds into its own `build/`), READ
+//! on its declared dependencies (that is how `require` works — deny it and nothing
+//! installs), a private writable `$HOME`, and the project root directory node so `getcwd`
+//! succeeds. A grant only ever widens beyond that.
+//!
+//! THE SHAPE IS TWO UNIONS, AND BOTH ARE DELIBERATE. `read` and `write` each carry either a
+//! SET of narrow scopes or the single escalation `"disk"`. The narrow scopes compose because
+//! none nests inside another — `deps` sits under `project` when a package is force-
+//! materialized and under `userHome` when it is symlinked into the global store, measured in
+//! one install — so no combination may be validated away as implied. `disk` is the only
+//! dominance relation, which is why it is a separate arm: `disk` alongside a narrow scope is
+//! unrepresentable rather than merely rejected.
+//!
+//! `write` IMPLIES read at its own scope, so a `read` naming a scope its `write` already
+//! covers is rejected as redundant rather than silently honoured.
+//!
+//! VERSIONS ARE `default` PLUS `<`-BOUNDED BANDS, and NOTHING MERGES ACROSS THEM. A package's
+//! entry carries one `default` — generated from `latest`, so it covers today's release and
+//! every future one — beside optional bands whose keys are all `<X`. Bands therefore reach
+//! DOWNWARD without limit, which is what makes coverage total: a band catches every old
+//! release including the ones too unpopular to probe, and `default` catches the rest. Because
+//! all keys are `<`, any two bands either nest or are disjoint, so resolution is NARROWEST
+//! BOUND WINS with no ordering rule and no dependence on JSON key order.
+//!
+//! A version resolves to EXACTLY ONE grant, complete in itself. `default` is not a base a band
+//! extends, and a band is not a patch on `default` — reading one grant tells you the whole
+//! answer for the versions it covers. This is deliberately UNLIKE the per-OS overlays, which
+//! DO merge: a package is exactly one version, so bands are ALTERNATIVES, whereas an OS overlay
+//! refines a grant that still applies. The two cannot share a rule.
+//!
+//! PER-OS OVERLAYS OVERRIDE FIELD BY FIELD. A grant carries the capability fields directly —
+//! that is its answer everywhere — plus optional `macos` / `linux` / `win` blocks, each holding
+//! the same fields and nothing else. A block REPLACES only the fields it NAMES and leaves the
+//! rest of the outer grant standing, so `{write:"disk", macos:{write:{project:true}}}` is
+//! `disk` on Linux and Windows and `project` on macOS with one line, rather than three grants
+//! that must be kept in step. This is what the retired `platforms` FILTER could not express:
+//! a filter could only make a whole grant apply or not, so a package whose needs merely DIFFER
+//! by OS had to be written as several mutually-exclusive entries or, in practice, as one grant
+//! carrying the widest answer everywhere. 44 of 581 package/versions measured on two or more
+//! operating systems diverge in the expensive direction — `write:"disk"` on one OS and narrow
+//! on another — so the filter was over-granting 7.6% of the corpus by construction.
+//!
+//! `null` IS HOW A BLOCK SAYS "NOT NEEDED HERE", and it is the only spelling of nothing at any
+//! level. `{write:"disk", macos:{write:null}}` grants no write on macOS. Without it the
+//! narrowing direction is inexpressible whenever the outer grant is the union — the author
+//! would have to invert the entry so the outer is the INTERSECTION and every OS widens, which
+//! is a different document for the same policy and one a generator gets wrong silently, in the
+//! over-granting direction. `false` is not an alternative spelling: `network` still admits only
+//! `true` or `null`, so there is exactly one way to write each answer.
+//!
+//! NESTING IS EXACTLY ONE LEVEL. A block may not contain `macos`/`linux`/`win`; that is a hard
+//! parse error, not a silently-ignored key. There is no second OS to refine, so the only thing
+//! a nested block could express is a contradiction.
+//!
+//! EVERY VALIDATION RUNS ON THE EFFECTIVE GRANT, ONCE PER OS — not on the outer grant and the
+//! blocks in isolation. `write` implying read is the case that forces it: `{write:"disk",
+//! macos:{read:{project:true}}}` is redundant on macOS and on no other OS, and neither half is
+//! redundant read alone.
+
+use std::collections::BTreeMap;
+
+/// Which filesystem scope a capability names. `Deps` is write-only: read on declared
+/// dependencies is part of the base profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Scope {
+    /// The package's declared dependencies, resolved by FOLLOWING the package's own
+    /// `node_modules` links — never by joining a name onto a directory. That is the whole
+    /// security argument: the only reachable entries are ones the package can already
+    /// `require`, so a separator in a name cannot escape because no name is ever joined.
+    Deps,
+    /// The user's project tree. Reachable by a lifecycle script only when nub materialized
+    /// the package into the project or the script consults `INIT_CWD`; nub sets `INIT_CWD`
+    /// to the project root and it is inherited into the jail, so this is never security by
+    /// obscurity.
+    Project,
+    /// The REAL user home — where nub's store and package caches live. NOT `$HOME`, which
+    /// the jail has already redirected to a private per-package directory.
+    UserHome,
+}
+
+impl Scope {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "deps" => Some(Self::Deps),
+            "project" => Some(Self::Project),
+            "userHome" => Some(Self::UserHome),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deps => "deps",
+            Self::Project => "project",
+            Self::UserHome => "userHome",
+        }
+    }
+}
+
+/// A capability's reach: a set of narrow scopes, or the whole filesystem.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Reach {
+    #[default]
+    None,
+    Scopes(Vec<Scope>),
+    Disk,
+}
+
+impl Reach {
+    pub fn covers(&self, scope: Scope) -> bool {
+        match self {
+            Self::None => false,
+            Self::Disk => true,
+            Self::Scopes(v) => v.contains(&scope),
+        }
+    }
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Platform {
+    Macos,
+    Linux,
+    Windows,
+}
+
+impl Platform {
+    /// Every OS an overlay can name. Iterated by the parser, which validates the EFFECTIVE
+    /// grant on each rather than the outer grant and its blocks in isolation.
+    pub const ALL: [Platform; 3] = [Self::Macos, Self::Linux, Self::Windows];
+
+    /// The catalog's key for this OS. `win`, not `windows` — the schema's spelling.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Macos => "macos",
+            Self::Linux => "linux",
+            Self::Windows => "win",
+        }
+    }
+
+    fn parse_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.key() == s)
+    }
+
+    /// The platform this build targets, so a caller can resolve a grant's overlays without
+    /// having to know how to spell the current OS.
+    pub fn current() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::Macos
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Self::Linux
+        }
+    }
+}
+
+/// What a grant says on ONE operating system, with no overlay left to apply — the schema's
+/// `Omit<Grant, "win"|"linux"|"macos">`.
+///
+/// THIS IS THE ONLY TYPE A CONSUMER SHOULD ACT ON. [`Grant`]'s own fields are private for
+/// exactly that reason: reading a capability straight off the grant would answer from the
+/// outer default and silently ignore an overlay that narrows it, which is the wrong-answer
+/// this shape exists to make unrepresentable. Go through [`Grant::on`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Caps {
+    pub read: Reach,
+    pub write: Reach,
+    pub network: bool,
+    /// Subpaths of the package's PRIVATE `$HOME` that nub moves into the REAL home once the
+    /// lifecycle scripts finish. Relative to that home — `.cache/puppeteer`, not an absolute
+    /// path.
+    ///
+    /// THE NAME IS HONEST: nub copies whatever lands in these directories into the real home, so
+    /// the script effectively HOLDS that write. Calling it anything softer would understate the
+    /// authority.
+    ///
+    /// WHY A COPY RATHER THAN A DIRECT GRANT. The jail redirects `$HOME` to a throwaway directory,
+    /// so a package caching under `~/.cache/<vendor>` installs cleanly and its artefact is
+    /// discarded: puppeteer's browser was 355 of 359 written paths, with none under the real
+    /// `~/.cache/puppeteer`. The obvious fix is to grant write on the real home, but that hands
+    /// a dependency script a live handle on `$HOME` for the whole run. Promotion never does:
+    /// the script writes to the throwaway, and NUB moves the declared subpaths afterwards. Same
+    /// end state, and the script never touches the user's home.
+    ///
+    /// DECLARED, never "everything in the private home" — that would let any package land
+    /// arbitrary files in a real `$HOME`. The entries are derived from a run record's
+    /// `ephemeralPaths`, so they are measured rather than authored.
+    ///
+    /// The move is a rename: `jail-home` and the real cache are on one filesystem (verified),
+    /// so a 300 MB browser costs nothing.
+    pub write_paths: Vec<String>,
+    /// Free text, optional, unvalidated. A CATCHALL — the earlier `evidence` enum was
+    /// validated and then discarded by every consumer, and a minimum-length rule on this
+    /// field was the same mistake in cheaper clothing: it rejected real catalogs written by
+    /// a harness that had nothing interesting to say.
+    pub notes: String,
+}
+
+impl Caps {
+    /// Does this widen anything at all beyond the base profile?
+    pub fn widens_nothing(&self) -> bool {
+        self.read.is_none() && self.write.is_none() && !self.network && self.write_paths.is_empty()
+    }
+}
+
+/// Home-relative subpaths the BASELINE promotes — the cache and config directories that install
+/// scripts write and that a fresh install genuinely needs to keep.
+///
+/// ⛔ THESE ARE PROMOTION TARGETS, NOT A LIVE GRANT ON THE REAL HOME. The jail redirects `$HOME` to a
+/// throwaway, the script writes there, and nub copies only these subpaths out once the scripts
+/// finish, so a script never holds a handle on the real `$HOME`.
+///
+/// ⛔⛔ THAT IS A STATEMENT ABOUT THE HANDLE, NOT ABOUT THE OUTCOME, AND THIS COMMENT USED TO CONFUSE
+/// THE TWO. It asserted that promotion "cannot be used to plant a shell profile or a git hook — the
+/// persistence vector that rules a broad `userHome` WRITE out of any baseline". The premise holds and
+/// the conclusion did not follow: NUB does the writing, so whatever a script leaves in one of these
+/// prefixes is planted in the real home by nub's own hand, handle or no handle. MEASURED on this
+/// branch, uncatalogued `file:` dependency, jail on, three markers: the direct write to the real home
+/// returned EPERM (confinement intact) and `.cache` promoted (the positive control), and so did
+/// `.config/git/config` carrying `core.hooksPath` and `.config/autostart/evil.desktop`. Verified
+/// separately that git honours `~/.config/git/config` even when `~/.gitconfig` exists, so that is
+/// code execution on the next `git` command in any repository — persistence that outlives the jail,
+/// which is the one property the jail exists to deny.
+///
+/// ⛔ SO THE LIST HOLDS CACHE ROOTS AND NO CONFIG ROOT. `.config` was dropped for exactly that reason.
+/// The prefixes are deliberately un-enumerated so a tool published tomorrow that caches
+/// conventionally works with no catalog entry — but that convenience is only safe over directories
+/// whose contents are DATA. A config root is where things that are executable BY REFERENCE live
+/// (`git/config` `core.hooksPath`, `autostart/*.desktop`, `systemd/user/*.service`,
+/// `fish/config.fish`), and no prefix rule can tell those from a cache.
+///
+/// ⛔ DROPPING IT COSTS NO INSTALL, and that is what made it cheap rather than a trade. `write_paths`
+/// has ZERO consumers in the compiler — its only readers are in `persist_declared_home_writes` — so
+/// it cannot decide whether a write SUCCEEDS, only whether the result is KEPT. The script still
+/// writes into its private home. What is lost is persistence across installs for an UNCATALOGUED tool
+/// that stores config under `~/.config/<vendor>`, and the five packages that were the reason for the
+/// prefix carry their own `writePaths` naming their own leaf (`.config/configstore`,
+/// `.config/netlify`, `.config/clerk`, `.config/truffle-nodejs`, `.config/hardhat-nodejs`), which
+/// promotion reads in preference to the baseline. A newcomer that needs it gets a catalog entry, and
+/// the catalog no longer waits for a release.
+///
+/// ⛔ `Library/Application Support` WAS DROPPED FOR THE SAME REASON, AND IT COST LESS THAN `.config`.
+/// It holds application config as well as caches, and several widely-installed applications execute
+/// what they find in their own subfolder the next time they open — so a promoted file is code
+/// execution by reference, exactly as a planted `.config/git/config` was. Unlike `.config` there is
+/// no single leaf to exclude: the set of per-app auto-run folders is open-ended and unenumerable, so
+/// an exclusion list could never be exhaustive while reading as though the hole were closed.
+///
+/// ⛔ THE COST ARGUMENT RUNS THE OPPOSITE WAY TO `.config`, AND AN EARLIER VERSION OF THIS DOC HAD IT
+/// BACKWARDS. `.config` was free because five packages already named their own leaves. Here NO
+/// catalogued package names anything under `Library/Application Support` at all, so nothing measured
+/// relies on it — less is lost by dropping, not more. Promotion also runs AFTER the lifecycle scripts
+/// finish and only decides what is KEPT, so dropping a prefix cannot fail an install; the cost is
+/// that an uncatalogued macOS tool storing a payload there refetches it next install, and the
+/// 31-entry cold-reinstall sweep on macOS 2026-08-18 found none that did.
+///
+/// ⛔ `AppData/Local` STAYS, because it is the Windows cache root — the platform's analogue of
+/// `~/.cache`, which was deliberately kept. Dropping it would strand ordinary Windows caches for
+/// every uncatalogued package. Its one dangerous leaf is excluded at the MOVER instead, as a floor
+/// that applies to catalog grants too rather than to this list: see `promotion_refused` in
+/// `pm_engine::build_jail`. That distinction is load-bearing — `unicode <14.0.0` legitimately
+/// declares `AppData/Local/Microsoft`, so narrowing this constant could not have covered it.
+///
+/// Derived from what the corpus measured packages actually asking for, most-wanted first:
+/// `.electron` (15), `.config/configstore` (11), `.backport` (11), `.config/netlify` (9),
+/// `.amplify` (7), `.cache/Cypress` (7), `.cache/prisma` (5), `.cache/puppeteer` (4),
+/// `.cache/electron` (3), `.cache/esbuild` (2). The prefixes below cover the CACHE-shaped ones and
+/// their siblings without enumerating vendors, so a new tool that caches conventionally works with no
+/// catalog entry. They deliberately do NOT cover the rest, and that is not an oversight: the two
+/// `.config/<vendor>` leaves are promoted by those packages' OWN `writePaths` for the reason above,
+/// and `.backport` and `.amplify` were never under any prefix and are likewise an entry's job.
+///
+/// ⛔ AN ENTRY'S GRANT REPLACES THIS LIST RATHER THAN UNIONING WITH IT, so an entry naming only a
+/// linux-shaped path promotes NOTHING on macOS and is strictly worse off than having no entry at
+/// all. That is a REAL defect shape — cypress and purescript were both measured stranding their
+/// payload (633 MB and 102 MB) and carry the macOS path now. It is NOT a defect wherever the latest
+/// release writes nothing under the private home, which is why the remaining instances of the shape
+/// were measured rather than widened: all 31 entries whose macOS-resolved `default` promotes nothing
+/// while one of their own lower bands names a macOS path were re-installed cold on macOS 2026-08-18
+/// at the shipped default grant with the build approved, and NONE stranded anything the package
+/// reads later.
+///
+/// 14 of the 31 run no lifecycle hook at all at their latest release (sharp 0.35.3, nodemon 3.1.14,
+/// @clerk/shared 4.29.2, farmhash 5.0.1, …), so there is nothing to promote. 17 ran a confined
+/// script, and 16 of those left 0 bytes in the private home — the artefact lands in the package dir
+/// that the deps grant already persists, as opencode-ai 1.18.18 does with its 143 MB binary. 22 of
+/// the 31 name `Library/Caches/node-gyp`, which is inert by construction; the mechanism and its two
+/// real-compile controls are on the `npm_config_nodedir` block in `pm_engine::build_jail`. The one
+/// non-empty private home was nodejieba 3.5.8, whose `npx @mapbox/node-pre-gyp` install left 8.8 MB
+/// of npm's own `_cacache`/`_npx` scratch: nothing reads it back, the compiled binding loads, and
+/// promoting `.npm` would push a dependency script's cache into the user's real one.
+///
+/// The instrument was controlled in the same run rather than assumed: purescript 0.15.16 promoted
+/// 104,816 KB into the real home and left an empty `Library/Caches` shell behind, and nodejieba's
+/// 8.8 MB proves an undeclared subpath is WRITABLE in the private home, so a zero there is the
+/// script writing nothing and not a denial.
+pub const BASELINE_WRITE_PATHS: &[&str] = &[
+    ".cache",
+    ".npm",
+    ".electron",
+    // Windows and macOS spell the same idea differently, and a baseline that named only the POSIX
+    // form would silently be narrower on two of three platforms.
+    "AppData/Local",
+    "Library/Caches",
+];
+
+/// What a package with NO catalog entry may do — the HOT-SWAPPABLE baseline.
+///
+/// ⛔⛔ THIS FUNCTION IS THE ENTIRE UNCATALOGUED POLICY. It exists as ONE named profile, expressed in
+/// the same [`Caps`] vocabulary a catalog entry uses, so that widening or narrowing the baseline is
+/// an edit here plus a test update — never a hunt through backend conditionals. It deliberately goes
+/// through the same `apply_v2_grant` lowering as a catalog grant: a baseline with its own code path
+/// is a second policy engine, and the two would drift.
+///
+/// WHY A BASELINE AT ALL, rather than denying everything an entry does not name. npm publishes
+/// continuously and the catalog is compiled into the binary, so a package published after a release
+/// is uncatalogued BY CONSTRUCTION and no amount of corpus growth closes that. Denying by default
+/// therefore does not mean "secure", it means "install scripts break for a growing tail forever".
+/// Measured over 2,028 packages with a known minimum grant: denying everything satisfies 54.2%,
+/// while this baseline satisfies 96.4%.
+///
+/// WHAT IT DELIBERATELY WITHHOLDS, and why each is not a compatibility problem worth its risk:
+/// - **No `read` beyond the base profile.** This is the load-bearing one. Credential FILES stay
+///   unreadable, which is what breaks the read-then-exfiltrate pair: verified on linux, win32 and
+///   macOS that a package granted `network` reads 0 of 5 planted credential decoys and receives 0 of
+///   3 credential env vars while its socket still connects.
+/// - **No `write` on the real `$HOME`.** See [`BASELINE_WRITE_PATHS`] — promotion covers the real
+///   need (143 of 2,028 packages want any home write, and only 63 of those want it broadly) without
+///   handing out a live handle.
+/// - **No `write` on the project.** Granting it would let an unknown package rewrite the consuming
+///   project's source and lockfile, which is how a supply-chain worm propagates. Costs ~0.4%.
+/// - **No whole-disk anything.** On Windows a full-disk grant makes the backend decline the LowBox
+///   token, and egress is an AppContainer capability, so OS-enforced fs AND network confinement are
+///   lost together. What is left there is the env axis and the userland `NODE_OPTIONS` net gate,
+///   neither of which needs the token and neither of which binds a native addon — so a whole-disk
+///   baseline would leave that platform with no OS confinement at all.
+///
+/// Egress IS granted, and that is a real concession rather than an oversight: 90.1% of packages need
+/// it and nothing narrower is expressible today (the proxy enforces per-host policy, but the grant
+/// vocabulary's network axis is a boolean). The filesystem denials above are what keep it from being
+/// an exfiltration channel.
+pub fn baseline_caps() -> Caps {
+    Caps {
+        read: Reach::None,
+        write: Reach::Scopes(vec![Scope::Deps]),
+        network: true,
+        write_paths: BASELINE_WRITE_PATHS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+        notes: String::from("baseline profile for a package with no catalog entry"),
+    }
+}
+
+/// A per-OS override: the same fields as [`Caps`], each `Some` exactly when the block NAMED it.
+///
+/// A named field replaces the outer one WHOLE — there is no merging within a field, so
+/// `macos: {write: {project: true}}` under an outer `write: "disk"` is `project` on macOS and
+/// not `project` unioned with anything. `null` names a field as nothing, which is the only way
+/// to narrow toward the base profile; see the module doc.
+///
+/// This type doubles as the parse result for the OUTER grant's own fields, which is what keeps
+/// one field parser honest for both positions — an absent outer field and an absent overlay
+/// field mean different things (default vs. inherit), but they PARSE identically.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Overlay {
+    pub read: Option<Reach>,
+    pub write: Option<Reach>,
+    pub network: Option<bool>,
+    pub write_paths: Option<Vec<String>>,
+    pub notes: Option<String>,
+}
+
+impl Overlay {
+    /// Read as an OUTER grant's fields: an absent field is the default, not an inherit.
+    fn into_caps(self) -> Caps {
+        Caps {
+            read: self.read.unwrap_or_default(),
+            write: self.write.unwrap_or_default(),
+            network: self.network.unwrap_or_default(),
+            write_paths: self.write_paths.unwrap_or_default(),
+            notes: self.notes.unwrap_or_default(),
+        }
+    }
+
+    fn names_nothing(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// One grant: what a package's scripts may reach beyond the base profile, at the versions its
+/// position in the entry covers. The version range is NOT here — it is the KEY of the entry's
+/// `versions` map, so one grant can never carry two answers about its own scope.
+///
+/// The capability fields are the answer on every OS the overlays do not speak for; resolve one
+/// OS's answer with [`Grant::on`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Grant {
+    base: Caps,
+    macos: Option<Overlay>,
+    linux: Option<Overlay>,
+    windows: Option<Overlay>,
+}
+
+impl Grant {
+    /// The ONE effective answer on `platform`: the outer fields with this OS's block laid over
+    /// them field by field. Borrowed when no block names this OS, which is the common case.
+    pub fn on(&self, platform: Platform) -> std::borrow::Cow<'_, Caps> {
+        match self.overlay(platform) {
+            None => std::borrow::Cow::Borrowed(&self.base),
+            Some(o) => std::borrow::Cow::Owned(Caps {
+                read: o.read.clone().unwrap_or_else(|| self.base.read.clone()),
+                write: o.write.clone().unwrap_or_else(|| self.base.write.clone()),
+                network: o.network.unwrap_or(self.base.network),
+                write_paths: o
+                    .write_paths
+                    .clone()
+                    .unwrap_or_else(|| self.base.write_paths.clone()),
+                notes: o.notes.clone().unwrap_or_else(|| self.base.notes.clone()),
+            }),
+        }
+    }
+
+    fn overlay(&self, platform: Platform) -> Option<&Overlay> {
+        match platform {
+            Platform::Macos => self.macos.as_ref(),
+            Platform::Linux => self.linux.as_ref(),
+            Platform::Windows => self.windows.as_ref(),
+        }
+    }
+
+    fn overlay_mut(&mut self, platform: Platform) -> &mut Option<Overlay> {
+        match platform {
+            Platform::Macos => &mut self.macos,
+            Platform::Linux => &mut self.linux,
+            Platform::Windows => &mut self.windows,
+        }
+    }
+}
+
+/// One `<`-bounded version band: the grant for every release below its bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Band {
+    /// The range exactly as written — `<0.28.1` — so it can be handed to the shared range
+    /// matcher rather than reconstructed from the parsed bound.
+    pub range: String,
+    /// The bound, parsed at LOAD time. It is what orders bands against each other, and
+    /// ordering by a parsed bound rather than by the map's iteration is what makes
+    /// [`Entry::grant_for`] independent of the order the catalog happens to be written in.
+    /// Private because nothing outside this module has a reason to construct a band.
+    bound: semver::Version,
+    pub grant: Grant,
+}
+
+/// One package's entry: the grant for current and future releases, plus the bands that cover
+/// older ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// GENERATED FROM `latest`. Every band key is a `<` bound, so old versions are always
+    /// caught by the lowest band and `default` only ever applies from the highest bound upward
+    /// — today's releases and tomorrow's, which is exactly what a measurement at `latest`
+    /// predicts.
+    pub default: Grant,
+    /// The `<`-bounded bands, in no meaningful order. [`Entry::grant_for`] resolves by bound,
+    /// so nothing here depends on how they were written.
+    pub versions: Vec<Band>,
+}
+
+impl Entry {
+    /// The ONE grant that applies at `version`.
+    ///
+    /// NARROWEST BOUND WINS. All bands are `<X`, so any two either nest or are disjoint, and
+    /// among those matching `version` the smallest bound is the most specific answer —
+    /// `0.12.0` matching both `<0.13.0` and `<1.0.0` takes `<0.13.0`. Selecting by bound rather
+    /// than by position is what removes the first-match footgun the `Grant[]` shape had, where
+    /// a matcher-less grant written early silently shadowed every grant after it.
+    ///
+    /// NOTHING MERGES. The returned grant is complete on its own; `default` is not a base the
+    /// bands extend.
+    ///
+    /// No band matching — including an absent, non-semver, or PRERELEASE version, which the
+    /// shared range matcher deliberately refuses — falls to `default`. That fallback is
+    /// strictly better than the withhold-everything the matcher's refusal used to mean: a
+    /// prerelease now gets `latest`'s answer instead of no grant at all.
+    pub fn grant_for(&self, version: Option<&str>) -> &Grant {
+        self.versions
+            .iter()
+            .filter(|b| crate::compiler::version_scope::applies(Some(&b.range), version))
+            .min_by(|a, b| a.bound.cmp(&b.bound))
+            .map_or(&self.default, |b| &b.grant)
+    }
+}
+
+/// One path every jailed script gets, regardless of package.
+///
+/// THE BASELINE LIVES IN THE CATALOG so it can be iterated without a rebuild. The alternative —
+/// baking it into the binary — makes every "does this package work if we also allow X?"
+/// experiment a 3-minute compile, which is what made the shape of this allowlist guesswork for
+/// so long. A path discovered here (a toolchain's cache written beside its own sources, say)
+/// can be added and re-measured in seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselinePath {
+    /// A symbolic path pattern in the compiler's own vocabulary — `$cache/...`, `~/...`.
+    pub path: String,
+    /// WRITE IS THE EXCEPTION AND MUST BE ARGUED. The baseline already grants write on four
+    /// things (the private `$HOME`, `$tmp`, the package's own store entry, its own package
+    /// dir); everything added here should be READ unless a measurement shows a build genuinely
+    /// fails without the write — not merely that the write was attempted and denied. A denied
+    /// cache write is usually harmless: Python's `__pycache__` is refused today and every
+    /// native build still succeeds.
+    pub write: bool,
+    pub notes: String,
+}
+
+/// One environment variable set for EVERY jailed script.
+///
+/// Here for the same reason as [`BaselinePath`] — so the jail's shape is data, not a rebuild.
+/// The motivating case: `PYTHONDONTWRITEBYTECODE=1`. node-gyp ships `gyp/pylib`, CPython tries
+/// to write `__pycache__/*.pyc` beside those sources, the jail refuses (correctly — that is
+/// another package's store entry), and the build succeeds anyway because bytecode is a cache.
+/// Setting the variable means Python never ATTEMPTS the write: no refused syscall, and no
+/// phantom "side effect" for a grant search to trip over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineEnv {
+    pub name: String,
+    pub value: String,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Catalog {
+    /// Package name -> its entry. Resolution within an entry is [`Entry::grant_for`].
+    pub packages: BTreeMap<String, Entry>,
+    /// Paths granted to EVERY jailed script, before any package grant applies. Empty means the
+    /// compiled-in baseline stands.
+    pub baseline: Vec<BaselinePath>,
+    /// Variables set for every jailed script, after the credential scrub.
+    pub env: Vec<BaselineEnv>,
+    /// When this catalog was generated, as an RFC 3339 UTC instant — the ONLY field that lets two
+    /// catalogs be ordered, so an update can be told from a stale copy. `None` on catalogs baked
+    /// before the field existed, and `None` orders below any stamp. See [`parse_generated_at`].
+    pub generated_at: Option<String>,
+}
+
+/// Parse and validate. Every rejection names the offending path so a contributor sees which
+/// entry to fix, whether it surfaced from `cargo build` or from a dev override at startup.
+pub fn parse(text: &str) -> Result<Catalog, String> {
+    let root: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
+    let obj = root
+        .get("packages")
+        .ok_or_else(|| "catalog has no `packages` table".to_string())?
+        .as_object()
+        .ok_or_else(|| "`packages` must be an object keyed by package name".to_string())?;
+
+    let mut packages = BTreeMap::new();
+    for (name, value) in obj {
+        packages.insert(name.clone(), parse_entry(value, name)?);
+    }
+    Ok(Catalog {
+        packages,
+        baseline: parse_baseline(&root)?,
+        env: parse_env(&root)?,
+        generated_at: parse_generated_at(&root)?,
+    })
+}
+
+/// `provenance.generatedAt` — the only field that lets two catalogs be ordered.
+///
+/// ⛔ WHY AN ORDERING FIELD EXISTS AT ALL. A catalog can now arrive from a trusted directory on disk
+/// as well as compiled in, and without a comparable stamp there is no way to tell an UPDATE from a
+/// STALE COPY. The failure that matters is silent and in the wrong direction: an old file left behind
+/// by a previous nub would replace a newer compiled catalog, every package measured since would lose
+/// its entry, and each would quietly drop to the baseline. Nothing errors, installs mostly keep
+/// working, and the catalog just stops being current.
+///
+/// Absent is `None`, not an error — the compiled catalogs baked before this field existed have no
+/// stamp, and refusing them would be refusing the floor itself. `None` orders BELOW any timestamp,
+/// which is the safe direction: an update that declares when it was made supersedes one that cannot.
+///
+/// The value is validated as an RFC 3339 UTC instant rather than taken on trust, because the whole
+/// point is a LEXICOGRAPHIC comparison — and that is only sound for a fixed-width, zero-padded,
+/// single-timezone spelling. A local-offset or variable-width stamp would compare in an order that
+/// looks right in tests and is wrong across a DST boundary or a year change.
+fn parse_generated_at(root: &serde_json::Value) -> Result<Option<String>, String> {
+    let Some(value) = root.get("provenance").and_then(|p| p.get("generatedAt")) else {
+        return Ok(None);
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| "provenance.generatedAt must be a string".to_string())?;
+    let bytes = text.as_bytes();
+    // `YYYY-MM-DDTHH:MM:SSZ` — exactly 20 bytes, digits where digits belong, `Z` and nothing else.
+    let shaped = bytes.len() == 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'Z'
+        && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+            .iter()
+            .all(|i| bytes[*i].is_ascii_digit());
+    if !shaped {
+        return Err(format!(
+            "provenance.generatedAt must be an RFC 3339 UTC instant like 2026-08-17T01:23:45Z, \
+             got `{text}` — a lexicographic comparison is only sound for that exact spelling"
+        ));
+    }
+    Ok(Some(text.to_string()))
+}
+
+fn parse_entry(value: &serde_json::Value, name: &str) -> Result<Entry, String> {
+    let at = format!("packages[{name}]");
+    let obj = value.as_object().ok_or_else(|| {
+        format!("{at}: must be an OBJECT of the form {{default, versions?}} — a bare ARRAY is the retired first-match-wins shape")
+    })?;
+    for key in obj.keys() {
+        if !matches!(key.as_str(), "default" | "versions") {
+            return Err(format!("{at}: unknown field `{key}`"));
+        }
+    }
+
+    let default = parse_grant(
+        obj.get("default")
+            .ok_or_else(|| format!("{at}: `default` is required — it is what every version not caught by a band resolves to"))?,
+        &format!("{at}.default"),
+    )?;
+
+    let mut versions = Vec::new();
+    if let Some(v) = obj.get("versions") {
+        let map = v
+            .as_object()
+            .ok_or_else(|| format!("{at}.versions: must be an object keyed by a `<` bound"))?;
+        for (range, grant) in map {
+            let at = format!("{at}.versions[{range}]");
+            // EVERY band key is `<X`, and that is load-bearing rather than a style rule: it is
+            // what makes any two bands nest or be disjoint, which is what makes NARROWEST WINS
+            // an unambiguous rule instead of an ordering convention. A key in any other dialect
+            // is a generator bug, and parsing it would resolve versions by a rule nobody wrote.
+            let bound = range.strip_prefix('<').ok_or_else(|| {
+                format!(
+                    "{at}: a band key must be a `<` bound (e.g. `<0.28.1`); bands nest by \
+                     construction, which is what makes narrowest-wins unambiguous"
+                )
+            })?;
+            let bound = semver::Version::parse(bound.trim()).map_err(|e| {
+                format!("{at}: `{bound}` is not a complete semver version, so this band cannot be ordered against the others: {e}")
+            })?;
+            versions.push(Band {
+                range: range.clone(),
+                bound,
+                grant: parse_grant(grant, &at)?,
+            });
+        }
+    }
+
+    // ⛔⛔ AN ENTRY THAT GRANTS NOTHING IS THE TIGHTEST GRANT THERE IS, AND REJECTING IT WAS A DEFECT.
+    // This used to refuse `default.widens_nothing() && versions.is_empty()` on the premise that such an
+    // entry "is byte-for-byte the base profile, i.e. what the package gets by being absent from the
+    // catalog entirely". That premise is FALSE, on both axes, and the compiler is where to read it:
+    //
+    //   `compiler/preset.rs`  .and_then(|name| v2_grant_for(name, version))
+    //                         .map(|g| g.on(here))                 // an entry: ITS OWN value
+    //                         .unwrap_or_else(|| baseline_caps())   // absent: the BASELINE
+    //
+    // So a present-but-empty entry grants NO egress and NO write, while ABSENCE grants the baseline —
+    // `network: true` plus `write: {deps}` plus `BASELINE_WRITE_PATHS`. The empty entry is therefore
+    // strictly TIGHTER than absence, not equal to it, and it is exactly the shape a high-value package
+    // measured to need nothing should carry. Refusing it meant the catalog could not express its own
+    // central claim: that a widely-depended-on package may deliberately be granted LESS than an unknown
+    // one, because the damage if it is compromised is greater.
+    //
+    // MEASURED: trying to write such an entry as a negative control was refused with the message above,
+    // while the compiled grant for the same shape denies egress. Validator and compiler disagreed.
+    //
+    // The hazard the old check was written against — "an entry that LOOKS present while doing nothing" —
+    // does not exist under these semantics, because such an entry does something: it withdraws the
+    // baseline. Nothing replaces the check.
+
+    Ok(Entry { default, versions })
+}
+
+fn parse_env(root: &serde_json::Value) -> Result<Vec<BaselineEnv>, String> {
+    let Some(value) = root.get("env") else {
+        return Ok(Vec::new());
+    };
+    let arr = value
+        .as_array()
+        .ok_or_else(|| "`env` must be an array of {name, value, notes}".to_string())?;
+    let mut out: Vec<BaselineEnv> = Vec::with_capacity(arr.len());
+    for (i, entry) in arr.iter().enumerate() {
+        let at = format!("env[{i}]");
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| format!("{at}: must be an object"))?;
+        for key in obj.keys() {
+            if !matches!(key.as_str(), "name" | "value" | "notes") {
+                return Err(format!("{at}: unknown field `{key}`"));
+            }
+        }
+        let name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{at}: `name` is required and must be a string"))?
+            .to_string();
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            return Err(format!("{at}: `{name}` is not a usable variable name"));
+        }
+        // The scrub exists to keep credentials out of a dependency's script. A catalog entry
+        // that re-introduced one would quietly undo it, and the catalog is the LEAST reviewed
+        // place that could — so refuse the shapes outright rather than trusting authorship.
+        let upper = name.to_ascii_uppercase();
+        const SECRETY: &[&str] = &[
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
+            "CREDENTIAL",
+            "APIKEY",
+            "AUTH",
+        ];
+        if SECRETY.iter().any(|s| upper.contains(s)) || upper.ends_with("_KEY") {
+            return Err(format!(
+                "{at}: `{name}` looks like a credential; the jail scrubs those deliberately and \
+                 the catalog must not put one back"
+            ));
+        }
+        let value = obj
+            .get("value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{at}: `value` is required and must be a string"))?
+            .to_string();
+        let notes = obj
+            .get("notes")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if out.iter().any(|e| e.name == name) {
+            return Err(format!("{at}: `{name}` is set twice"));
+        }
+        out.push(BaselineEnv { name, value, notes });
+    }
+    Ok(out)
+}
+
+fn parse_baseline(root: &serde_json::Value) -> Result<Vec<BaselinePath>, String> {
+    let Some(value) = root.get("baseline") else {
+        return Ok(Vec::new());
+    };
+    let arr = value
+        .as_array()
+        .ok_or_else(|| "`baseline` must be an array of {path, write?, notes}".to_string())?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, entry) in arr.iter().enumerate() {
+        let at = format!("baseline[{i}]");
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| format!("{at}: must be an object"))?;
+        for key in obj.keys() {
+            if !matches!(key.as_str(), "path" | "write" | "notes") {
+                return Err(format!("{at}: unknown field `{key}`"));
+            }
+        }
+        let path = obj
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("{at}: `path` is required and must be a string"))?
+            .to_string();
+        if path.trim().is_empty() {
+            return Err(format!("{at}: `path` is empty"));
+        }
+        // A bare `/` (or a lone symbolic root) is `disk` wearing a baseline's clothes, and it
+        // would apply to EVERY package with none of the per-package review a `disk` grant gets.
+        if path == "/" || path == "~" || path == "$home" {
+            return Err(format!(
+                "{at}: `{path}` is the whole filesystem — that is the `disk` capability, and it \
+                 belongs on a package, not on every script at once"
+            ));
+        }
+        let write = match obj.get("write") {
+            None => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(_) => return Err(format!("{at}: `write` must be a boolean")),
+        };
+        let notes = obj
+            .get("notes")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if out.iter().any(|b: &BaselinePath| b.path == path) {
+            return Err(format!("{at}: `{path}` is listed twice"));
+        }
+        out.push(BaselinePath { path, write, notes });
+    }
+    Ok(out)
+}
+
+fn parse_grant(value: &serde_json::Value, at: &str) -> Result<Grant, String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("{at}: must be an object"))?;
+
+    check_grant_keys(obj, at, /* nested = */ false)?;
+
+    let mut grant = Grant {
+        base: parse_fields(obj, at)?.into_caps(),
+        ..Grant::default()
+    };
+
+    for platform in Platform::ALL {
+        let Some(v) = obj.get(platform.key()) else {
+            continue;
+        };
+        let at = format!("{at}.{}", platform.key());
+        let block = v
+            .as_object()
+            .ok_or_else(|| format!("{at}: a per-OS override must be an object"))?;
+        check_grant_keys(block, &at, /* nested = */ true)?;
+        let overlay = parse_fields(block, &at)?;
+        // AN OVERLAY THAT NAMES NOTHING OVERRIDES NOTHING, so it is the same defect as an empty
+        // `writePaths` or an empty `read`: a line whose author believed it was doing something.
+        // Note this is NOT the "needs nothing here" case — that one NAMES its fields as `null`.
+        if overlay.names_nothing() {
+            return Err(format!(
+                "{at}: names no field, so it overrides nothing; omit it, or name the fields as \
+                 `null` to say this OS needs them not at all"
+            ));
+        }
+        *grant.overlay_mut(platform) = Some(overlay);
+    }
+
+    // VALIDATE THE EFFECTIVE GRANT, ONCE PER OS. Checking the outer fields and each block in
+    // isolation would miss the case the overlays create: `{write:"disk", macos:{read:{project}}}`
+    // is redundant only once the two are laid together, and neither half is wrong alone. Where a
+    // grant has no overlay at all this reduces to exactly the old single check, which is why the
+    // pre-overlay rejections keep their wording.
+    for platform in Platform::ALL {
+        let where_ = match grant.overlay(platform) {
+            None => at.to_string(),
+            Some(_) => format!("{at} (on {})", platform.key()),
+        };
+        check_write_implies_read(&grant.on(platform), &where_)?;
+    }
+
+    // NO "grants nothing" CHECK HERE. An empty grant is a positive statement under this shape —
+    // an empty `default` says "latest passes ungranted", which is what makes a `<` band below it
+    // meaningful. The emptiness that IS a defect is an entry with nothing anywhere, and
+    // [`parse_entry`] owns that because only it can see the whole entry.
+    Ok(grant)
+}
+
+/// Which keys a grant object may carry. `nested` is a per-OS block, whose extra rejection —
+/// another per-OS key — is the whole one-level rule.
+fn check_grant_keys(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    at: &str,
+    nested: bool,
+) -> Result<(), String> {
+    for key in obj.keys() {
+        // A STALE `versions` FIELD MUST NOT PARSE. It was a grant's own semver range under the
+        // retired first-match-wins shape; the range is now the KEY of the entry's `versions`
+        // map. Accepting it as an unknown-but-ignorable field would silently drop the scope and
+        // apply an old-version grant to every release — under-granting's mirror image, and
+        // invisible in a hand-edited catalog until something over-reaches.
+        if key == "versions" {
+            return Err(format!(
+                "{at}: `versions` is no longer a grant field — the range is the KEY of the \
+                 entry's `versions` map, so this grant's scope would be silently lost"
+            ));
+        }
+        // A `platforms` FILTER IS NOT AN OVERRIDE, and accepting it as an unknown key would be
+        // the worst of both: the grant would apply on EVERY OS, including the ones the author
+        // wrote the field to exclude. Name the replacement rather than reporting a typo.
+        if key == "platforms" {
+            return Err(format!(
+                "{at}: `platforms` was a FILTER and is retired; a grant now applies everywhere \
+                 and a `macos`/`linux`/`win` block overrides it field by field, with `null` for \
+                 a field this OS does not need"
+            ));
+        }
+        if nested && Platform::parse_key(key).is_some() {
+            return Err(format!(
+                "{at}: a per-OS override may not contain `{key}` — overrides nest exactly one \
+                 level, and there is no second OS for this block to refine"
+            ));
+        }
+        let known = matches!(
+            key.as_str(),
+            "read" | "write" | "network" | "writePaths" | "notes"
+        ) || (!nested && Platform::parse_key(key).is_some());
+        if !known {
+            return Err(format!("{at}: unknown field `{key}`"));
+        }
+    }
+    Ok(())
+}
+
+/// The five capability fields, each `Some` exactly when the object NAMED it. `null` names a
+/// field as nothing, which is what an overlay narrowing toward the base profile needs and what
+/// an outer grant may spell instead of omitting the field.
+fn parse_fields(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    at: &str,
+) -> Result<Overlay, String> {
+    /// `Some(None)` — present and `null`, i.e. named as nothing. `None` — absent.
+    fn named<'a>(
+        obj: &'a serde_json::Map<String, serde_json::Value>,
+        key: &str,
+    ) -> Option<Option<&'a serde_json::Value>> {
+        obj.get(key)
+            .map(|v| if v.is_null() { None } else { Some(v) })
+    }
+
+    let read = match named(obj, "read") {
+        None => None,
+        Some(None) => Some(Reach::None),
+        Some(Some(v)) => Some(parse_reach(
+            v,
+            at,
+            "read",
+            &[Scope::Project, Scope::UserHome],
+        )?),
+    };
+    let write = match named(obj, "write") {
+        None => None,
+        Some(None) => Some(Reach::None),
+        Some(Some(v)) => Some(parse_reach(
+            v,
+            at,
+            "write",
+            &[Scope::Deps, Scope::Project, Scope::UserHome],
+        )?),
+    };
+
+    let network = match named(obj, "network") {
+        None => None,
+        Some(None) => Some(false),
+        Some(Some(serde_json::Value::Bool(true))) => Some(true),
+        // `false` IS REFUSED SO THAT NOTHING HAS TWO SPELLINGS. Every other field says "not
+        // needed here" with `null`; letting `network` also say it with `false` would put one
+        // answer in two dialects and leave a reader wondering whether they differ.
+        Some(Some(_)) => {
+            return Err(format!(
+                "{at}: `network` may only be `true` or `null`; omit it to grant no egress, or \
+                 write `null` to withdraw an outer grant on this OS"
+            ));
+        }
+    };
+
+    let write_paths = match named(obj, "writePaths") {
+        None => None,
+        Some(None) => Some(Vec::new()),
+        Some(Some(v)) => Some(parse_write_paths(v, at)?),
+    };
+
+    let notes = match named(obj, "notes") {
+        None => None,
+        Some(None) => Some(String::new()),
+        // Unvalidated free text, and a non-string is silently ignored rather than rejected —
+        // preserved from the pre-overlay parser, which every generated catalog was written
+        // against.
+        Some(Some(v)) => Some(v.as_str().unwrap_or_default().trim().to_string()),
+    };
+
+    Ok(Overlay {
+        read,
+        write,
+        network,
+        write_paths,
+        notes,
+    })
+}
+
+/// `write` implies read at its own scope, so a `read` naming a scope the `write` already
+/// covers means nothing. Reject it rather than honour it silently — a grant whose author
+/// believed it was doing something is worse than one that fails the build.
+fn check_write_implies_read(caps: &Caps, at: &str) -> Result<(), String> {
+    // Order matters: `Reach::Disk` covers every scope, so the per-scope check below would
+    // otherwise fire first and report the vaguer message for the disk case.
+    if matches!(caps.write, Reach::Disk) && !caps.read.is_none() {
+        return Err(format!(
+            "{at}: `write: \"disk\"` already grants every read; remove `read`"
+        ));
+    }
+    if let Reach::Scopes(rs) = &caps.read {
+        for s in rs {
+            if caps.write.covers(*s) {
+                return Err(format!(
+                    "{at}: `read.{}` is already implied by `write`; remove it",
+                    s.as_str()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_write_paths(value: &serde_json::Value, at: &str) -> Result<Vec<String>, String> {
+    let arr = value
+        .as_array()
+        .ok_or_else(|| format!("{at}: `writePaths` must be an array of home-relative paths"))?;
+    let mut promote: Vec<String> = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let rel = entry
+            .as_str()
+            .ok_or_else(|| format!("{at}: `writePaths` entries must be strings"))?
+            .trim()
+            .to_string();
+        // ABSOLUTE PATHS AND TRAVERSAL ARE REFUSED. A promote entry names a destination in
+        // the user's REAL home; anything that escapes the private home would let a catalog
+        // line write outside it, which is exactly the authority promotion exists to avoid.
+        if rel.is_empty() || rel == "." {
+            return Err(format!("{at}: `writePaths` entry is empty"));
+        }
+        if rel.starts_with('/') || rel.starts_with('~') || rel.contains("..") {
+            return Err(format!(
+                "{at}: `writePaths` entry `{rel}` must be RELATIVE to the package's home and \
+                 must not traverse out of it"
+            ));
+        }
+        if promote.contains(&rel) {
+            return Err(format!("{at}: `writePaths` entry `{rel}` is listed twice"));
+        }
+        promote.push(rel);
+    }
+    if promote.is_empty() {
+        return Err(format!("{at}: `writePaths` is empty; omit it instead"));
+    }
+    Ok(promote)
+}
+
+fn parse_reach(
+    value: &serde_json::Value,
+    at: &str,
+    field: &str,
+    allowed: &[Scope],
+) -> Result<Reach, String> {
+    if let Some(s) = value.as_str() {
+        if s == "disk" {
+            return Ok(Reach::Disk);
+        }
+        return Err(format!(
+            "{at}: `{field}` as a string may only be \"disk\"; narrow scopes go in an object"
+        ));
+    }
+    let obj = value.as_object().ok_or_else(|| {
+        format!("{at}: `{field}` must be an object of scopes or the string \"disk\"")
+    })?;
+    if obj.is_empty() {
+        return Err(format!("{at}: `{field}` is empty; omit it instead"));
+    }
+    let mut scopes = Vec::new();
+    for (k, v) in obj {
+        let scope = Scope::parse(k)
+            .filter(|s| allowed.contains(s))
+            .ok_or_else(|| {
+                let names: Vec<_> = allowed.iter().map(|s| s.as_str()).collect();
+                format!("{at}: `{field}.{k}` is not a scope {field} accepts ({names:?})")
+            })?;
+        if v != &serde_json::Value::Bool(true) {
+            return Err(format!(
+                "{at}: `{field}.{k}` may only be `true`; omit it to grant nothing"
+            ));
+        }
+        scopes.push(scope);
+    }
+    scopes.sort();
+    Ok(Reach::Scopes(scopes))
+}
+
+// ── emit ──────────────────────────────────────────────────────────────────────
+
+/// Write a catalog back out. `parse(&emit(&c))` is `c` for every catalog this parser accepts,
+/// which is the property the overlays needed: an overlay carries an OPTION per field, so a
+/// serializer that flattened it — writing the effective value rather than `null` — would look
+/// right, parse cleanly, and lose the narrowing on exactly the packages the overlays exist for.
+///
+/// Deterministic: `packages` is a `BTreeMap`, and every object below it is written in one fixed
+/// field order, so two runs over one catalog produce identical bytes.
+pub fn emit(catalog: &Catalog) -> String {
+    use serde_json::{Map, Value, json};
+
+    fn reach(r: &Reach) -> Value {
+        match r {
+            Reach::None => Value::Null,
+            Reach::Disk => json!("disk"),
+            Reach::Scopes(v) => {
+                let mut m = Map::new();
+                for s in v {
+                    m.insert(s.as_str().to_string(), json!(true));
+                }
+                Value::Object(m)
+            }
+        }
+    }
+
+    /// The five capability fields. `omit_empty` is the OUTER grant, where an absent field and a
+    /// `null` one mean the same thing and the shorter spelling is the honest one; inside an
+    /// overlay `null` is load-bearing and must survive.
+    fn fields(o: &Overlay, into: &mut Map<String, Value>, omit_empty: bool) {
+        let mut put = |k: &str, v: Value| {
+            if !(omit_empty && v.is_null()) {
+                into.insert(k.to_string(), v);
+            }
+        };
+        if let Some(r) = &o.read {
+            put("read", reach(r));
+        }
+        if let Some(w) = &o.write {
+            put("write", reach(w));
+        }
+        if let Some(n) = o.network {
+            put("network", if n { json!(true) } else { Value::Null });
+        }
+        if let Some(p) = &o.write_paths {
+            put(
+                "writePaths",
+                if p.is_empty() { Value::Null } else { json!(p) },
+            );
+        }
+        if let Some(n) = &o.notes {
+            put("notes", if n.is_empty() { Value::Null } else { json!(n) });
+        }
+    }
+
+    fn grant(g: &Grant) -> Value {
+        let mut m = Map::new();
+        // The outer fields go through the same writer as an overlay, with every field named —
+        // `omit_empty` then drops the ones that carry nothing, which is what makes an
+        // all-defaults grant emit as `{}` rather than five nulls.
+        fields(
+            &Overlay {
+                read: Some(g.base.read.clone()),
+                write: Some(g.base.write.clone()),
+                network: Some(g.base.network),
+                write_paths: Some(g.base.write_paths.clone()),
+                notes: Some(g.base.notes.clone()),
+            },
+            &mut m,
+            true,
+        );
+        for platform in Platform::ALL {
+            if let Some(o) = g.overlay(platform) {
+                let mut block = Map::new();
+                fields(o, &mut block, false);
+                m.insert(platform.key().to_string(), Value::Object(block));
+            }
+        }
+        Value::Object(m)
+    }
+
+    let mut packages = Map::new();
+    for (name, entry) in &catalog.packages {
+        let mut e = Map::new();
+        e.insert("default".to_string(), grant(&entry.default));
+        if !entry.versions.is_empty() {
+            // Emitted widest-bound-first, matching the generator. Resolution is by bound, so
+            // this is presentation only.
+            let mut bands: Vec<&Band> = entry.versions.iter().collect();
+            bands.sort_by(|a, b| b.bound.cmp(&a.bound));
+            let mut v = Map::new();
+            for b in bands {
+                v.insert(b.range.clone(), grant(&b.grant));
+            }
+            e.insert("versions".to_string(), Value::Object(v));
+        }
+        packages.insert(name.clone(), Value::Object(e));
+    }
+
+    let baseline: Vec<Value> = catalog
+        .baseline
+        .iter()
+        .map(|b| {
+            let mut m = Map::new();
+            m.insert("path".to_string(), json!(b.path));
+            if b.write {
+                m.insert("write".to_string(), json!(true));
+            }
+            if !b.notes.is_empty() {
+                m.insert("notes".to_string(), json!(b.notes));
+            }
+            Value::Object(m)
+        })
+        .collect();
+    let env: Vec<Value> = catalog
+        .env
+        .iter()
+        .map(|e| {
+            let mut m = Map::new();
+            m.insert("name".to_string(), json!(e.name));
+            m.insert("value".to_string(), json!(e.value));
+            if !e.notes.is_empty() {
+                m.insert("notes".to_string(), json!(e.notes));
+            }
+            Value::Object(m)
+        })
+        .collect();
+
+    let mut root = Map::new();
+    root.insert("packages".to_string(), Value::Object(packages));
+    root.insert("baseline".to_string(), json!(baseline));
+    root.insert("env".to_string(), json!(env));
+    serde_json::to_string_pretty(&Value::Object(root)).expect("a catalog is always serializable")
+}
+
+// AN UNREACHABLE-GRANT CHECK IS NO LONGER NEEDED, and that is the point of the shape rather
+// than an omission. Under `Grant[]` a matcher-less grant written early silently shadowed every
+// grant after it, so the parser had to reject the orderings that could not fire —
+// `projectReads: ["."]` compiling to nothing cost a whole measurement campaign, and that class
+// of defect is what those rejections guarded. `{default, versions}` removes the class by
+// construction: `default` cannot shadow a band because bands are consulted first, and two bands
+// cannot shadow each other because narrowest-wins picks between them by bound.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No baseline promotion target may cover a path that is EXECUTABLE BY REFERENCE.
+    ///
+    /// ⛔ THE VECTOR IS PROMOTION ITSELF, NOT A GRANT. A script never holds a handle on the real
+    /// `$HOME` — and that is beside the point, because NUB copies whatever it left in one of these
+    /// prefixes into the real home once the scripts finish. So a prefix is only safe to promote
+    /// blindly if everything under it is DATA. Every path below is a file whose mere PRESENCE makes
+    /// some later, unconfined process run code: `core.hooksPath` fires on the next `git` command in
+    /// any repository, an XDG autostart entry fires at login, a systemd user unit fires on demand,
+    /// and a fish config fires on the next shell. That is persistence outliving the jail, which is
+    /// the one property the jail exists to deny.
+    ///
+    /// MEASURED BEFORE THIS BOUND EXISTED, on an uncatalogued `file:` dependency with the jail on:
+    /// the direct write to the real home returned EPERM and `.config/git/config` carrying
+    /// `core.hooksPath` still arrived there, moved by promotion.
+    ///
+    /// ⛔ ASSERTED AS A PROPERTY, NOT AS `assert!(!contains(".config"))`. A bare absence check reads
+    /// as arbitrary and says nothing about the prefix somebody adds next; this fails for any future
+    /// entry that reaches one of these files, whatever it is called.
+    #[test]
+    fn no_baseline_promotion_target_covers_a_by_reference_execution_path() {
+        let covered = |path: &str| {
+            BASELINE_WRITE_PATHS
+                .iter()
+                .find(|prefix| path == **prefix || path.starts_with(&format!("{prefix}/")))
+                .copied()
+        };
+
+        // THE POSITIVE CONTROL, and it is what keeps the loop below from passing vacuously: if the
+        // prefix matcher were broken it would report every path uncovered and this test would go
+        // green having checked nothing.
+        assert_eq!(
+            covered(".cache/puppeteer/chrome/x.zip"),
+            Some(".cache"),
+            "the matcher must recognise a path a baseline prefix DOES cover, or the assertions \
+             below prove nothing"
+        );
+
+        for vector in [
+            // `git config core.hooksPath` — verified that git honours the XDG file even when
+            // `~/.gitconfig` exists, so this is code execution on the next `git` command anywhere.
+            ".config/git/config",
+            // XDG autostart: runs at login.
+            ".config/autostart/anything.desktop",
+            // A user unit is startable, and `systemctl --user` is not privileged.
+            ".config/systemd/user/anything.service",
+            // Sourced by every interactive fish shell.
+            ".config/fish/config.fish",
+        ] {
+            assert_eq!(
+                covered(vector),
+                None,
+                "`{vector}` is executable by reference, and a baseline prefix promotes it into the \
+                 real $HOME of every user who installs ANY uncatalogued package with an install \
+                 script — the prefixes may hold cache roots only"
+            );
+        }
+    }
+
+    const NOTES: &str = r#""notes":"measured on macOS by the grant search""#;
+
+    /// One package whose entry is a bare `default`, which is the shape most of the corpus takes.
+    fn one(default: &str) -> Result<Catalog, String> {
+        parse(&format!(
+            r#"{{"packages":{{"p":{{"default":{default}}}}}}}"#
+        ))
+    }
+
+    /// The grant `p` resolves to at `version`, for a catalog written as `{"default":…}` plus
+    /// whatever `versions` map the test supplies.
+    fn resolve<'a>(catalog: &'a Catalog, version: &str) -> &'a Grant {
+        catalog.packages["p"].grant_for(Some(version))
+    }
+
+    #[test]
+    fn a_narrow_read_and_write_compose() {
+        let c = one(&format!(
+            r#"{{"read":{{"userHome":true}},"write":{{"deps":true,"project":true}},{NOTES}}}"#
+        ))
+        .expect("valid");
+        let g = &c.packages["p"].default.base;
+        assert_eq!(g.read, Reach::Scopes(vec![Scope::UserHome]));
+        assert_eq!(g.write, Reach::Scopes(vec![Scope::Deps, Scope::Project]));
+        assert!(!g.network);
+    }
+
+    #[test]
+    fn disk_is_a_separate_arm_not_another_scope() {
+        assert_eq!(
+            one(&format!(r#"{{"write":"disk",{NOTES}}}"#))
+                .expect("valid")
+                .packages["p"]
+                .default
+                .base
+                .write,
+            Reach::Disk
+        );
+        // "disk" alongside a narrow scope is not expressible: the union admits one or the
+        // other, so the only way to write it is a scope literally named `disk`, which is not
+        // a scope.
+        let err = one(&format!(r#"{{"write":{{"disk":true}},{NOTES}}}"#)).unwrap_err();
+        assert!(err.contains("not a scope"), "{err}");
+    }
+
+    #[test]
+    fn a_read_its_write_already_implies_is_rejected() {
+        let err = one(&format!(
+            r#"{{"read":{{"project":true}},"write":{{"project":true}},{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("already implied by `write`"), "{err}");
+
+        let err = one(&format!(
+            r#"{{"read":{{"project":true}},"write":"disk",{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("already grants every read"), "{err}");
+    }
+
+    #[test]
+    fn read_and_write_of_different_scopes_is_legitimate() {
+        // `project` and `userHome` never dominate each other — the project is not inside the
+        // home in a container, where nub explicitly supports installs.
+        one(&format!(
+            r#"{{"read":{{"project":true}},"write":{{"userHome":true}},{NOTES}}}"#
+        ))
+        .expect("distinct scopes must compose");
+    }
+
+    #[test]
+    fn deps_is_write_only_because_reading_them_is_the_base_profile() {
+        let err = one(&format!(r#"{{"read":{{"deps":true}},{NOTES}}}"#)).unwrap_err();
+        assert!(err.contains("not a scope read accepts"), "{err}");
+    }
+
+    /// An empty `default` is legitimate ONLY beneath a band — it is how "latest passes
+    /// ungranted" is spelled, and esbuild and bcrypt both measured exactly that. With no band
+    /// the same entry is indistinguishable from the package being absent from the catalog.
+    #[test]
+    fn an_entry_granting_nothing_is_accepted_and_means_granted_nothing() {
+        // ⛔⛔ THIS ASSERTED A REJECTION, AND THE REJECTION WAS A DEFECT. An entry with no grants and no
+        // bands was refused as granting "exactly the base profile" — but the compiler uses an entry's OWN
+        // value when one exists and the BASELINE only when the package is ABSENT, so such an entry grants
+        // NO egress and NO write where absence grants `network: true` plus `write: {deps}`. It is strictly
+        // TIGHTER than absence, and it is the shape a high-value package measured to need nothing should
+        // carry — the tightening the catalog exists for. `preset.rs`'s
+        // `an_empty_entry_grants_less_than_no_entry_at_all` proves the compiled difference.
+        let nothing = one(&format!(r#"{{{NOTES}}}"#))
+            .expect("an entry that grants nothing is the tightest grant there is, not an error");
+        for p in Platform::ALL {
+            assert!(
+                on(&nothing, p).widens_nothing(),
+                "{p:?}: an empty entry must widen nothing — that IS its meaning"
+            );
+        }
+
+        let c = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{{NOTES}}},
+                 "versions":{{"<6.0.0":{{"network":true,{NOTES}}}}}}}}}}}"#
+        ))
+        .expect("an empty default beneath a band states that latest passes ungranted");
+        assert!(
+            !c.packages["p"].default.base.network,
+            "the empty default must stay empty"
+        );
+    }
+
+    #[test]
+    fn an_unknown_field_is_a_typo_not_a_forward_compatible_key() {
+        let err = one(&format!(r#"{{"netwrok":true,{NOTES}}}"#)).unwrap_err();
+        assert!(err.contains("unknown field `netwrok`"), "{err}");
+    }
+
+    // ── per-OS overrides ──────────────────────────────────────────────────────
+
+    /// `p`'s default grant as it applies on `platform` — the only shape a consumer ever acts on.
+    fn on(catalog: &Catalog, platform: Platform) -> Caps {
+        catalog.packages["p"].default.on(platform).into_owned()
+    }
+
+    /// The narrowing direction, which is the whole reason the shape changed: 44 of 581
+    /// package/versions measured on two or more operating systems want `disk` on one and
+    /// something narrow on another. A block replaces ONLY the field it names — `network`
+    /// survives untouched, and a merge that unioned `write` instead of replacing it would leave
+    /// macOS on `disk`.
+    #[test]
+    fn a_block_replaces_only_the_field_it_names() {
+        let c = one(&format!(
+            r#"{{"write":"disk","network":true,"macos":{{"write":{{"project":true}}}},{NOTES}}}"#
+        ))
+        .expect("valid");
+
+        assert_eq!(
+            on(&c, Platform::Macos).write,
+            Reach::Scopes(vec![Scope::Project]),
+            "the macos block must REPLACE `disk`, not union with it"
+        );
+        assert!(
+            on(&c, Platform::Macos).network,
+            "a field the block does not name must survive from the outer grant"
+        );
+        for p in [Platform::Linux, Platform::Windows] {
+            assert_eq!(
+                on(&c, p).write,
+                Reach::Disk,
+                "{p:?} has no block and must keep the outer answer verbatim"
+            );
+        }
+    }
+
+    /// The widening direction. `@opencode-ai/cli` reads `/proc/cpuinfo` on Linux and shells out
+    /// to `sysctl` on macOS, so its needs genuinely differ; an outer grant plus one block that
+    /// ADDS a capability is how that is written.
+    #[test]
+    fn a_block_may_widen_as_well_as_narrow() {
+        let c = one(&format!(
+            r#"{{"write":{{"project":true}},"linux":{{"write":"disk","network":true}},{NOTES}}}"#
+        ))
+        .expect("valid");
+        assert_eq!(on(&c, Platform::Linux).write, Reach::Disk);
+        assert!(on(&c, Platform::Linux).network);
+        assert_eq!(
+            on(&c, Platform::Macos).write,
+            Reach::Scopes(vec![Scope::Project]),
+            "widening one OS must not widen the others"
+        );
+        assert!(!on(&c, Platform::Macos).network);
+    }
+
+    /// THE NULL CASE. `null` is how a block says "not needed on this OS", and it is the only
+    /// spelling — `network: false` is refused so one answer never has two dialects.
+    #[test]
+    fn null_withdraws_an_outer_grant_on_one_os() {
+        let c = one(&format!(
+            r#"{{"write":"disk","network":true,"writePaths":[".cache/x"],
+                 "macos":{{"write":null,"network":null,"writePaths":null}},{NOTES}}}"#
+        ))
+        .expect("valid");
+        let mac = on(&c, Platform::Macos);
+        assert!(
+            mac.widens_nothing(),
+            "every field was withdrawn, so macOS must land on the base profile; got {mac:?}"
+        );
+        assert_eq!(
+            on(&c, Platform::Windows).write,
+            Reach::Disk,
+            "the control: withdrawing on macOS must leave Windows alone"
+        );
+
+        let err = one(&format!(
+            r#"{{"network":true,"macos":{{"network":false}},{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("may only be `true` or `null`"), "{err}");
+    }
+
+    /// `@ffmpeg-installer/linux-x64@4.1.0`: nothing on macOS, `write:"disk"` on Windows. The
+    /// entry-level "widens nothing" gate must look THROUGH the blocks, or this legitimate shape
+    /// is rejected as an entry that grants exactly the base profile.
+    #[test]
+    fn an_empty_outer_grant_carrying_one_os_block_is_a_real_entry() {
+        let c = one(&format!(r#"{{"win":{{"write":"disk"}},{NOTES}}}"#))
+            .expect("an outer grant that widens nothing is legitimate beneath a block");
+        assert_eq!(on(&c, Platform::Windows).write, Reach::Disk);
+        assert!(
+            on(&c, Platform::Macos).widens_nothing() && on(&c, Platform::Linux).widens_nothing(),
+            "the OSes the entry says nothing about must get the base profile"
+        );
+
+        // The control that the block is load-bearing: strip it and Windows loses the disk grant. It used
+        // to assert an ERROR here, because an entry granting nothing anywhere was refused — see
+        // `an_entry_granting_nothing_is_accepted_and_means_granted_nothing` for why that was wrong. The
+        // discriminating claim survives without the rejection: with the block Windows gets `disk`,
+        // without it Windows gets what every other OS gets.
+        let stripped = one(&format!(r#"{{{NOTES}}}"#))
+            .expect("an entry that grants nothing is legal — it withdraws the baseline");
+        assert!(
+            on(&stripped, Platform::Windows).widens_nothing(),
+            "with the block gone, Windows must no longer be widened"
+        );
+    }
+
+    /// One level, and no more. There is no second OS for a nested block to refine, so the only
+    /// thing it could express is a contradiction — a hard error rather than an ignored key.
+    #[test]
+    fn a_block_may_not_nest_another_block() {
+        for inner in ["macos", "linux", "win"] {
+            let err = one(&format!(
+                r#"{{"network":true,"macos":{{"{inner}":{{"write":"disk"}}}},{NOTES}}}"#
+            ))
+            .unwrap_err();
+            assert!(err.contains("nest exactly one level"), "{inner}: {err}");
+            assert!(
+                err.contains("packages[p].default.macos"),
+                "the rejection must name the offending path: {err}"
+            );
+        }
+    }
+
+    /// Strictness holds INSIDE a block too — the parser's whole posture is that an unknown key
+    /// is a typo whose grant would silently go missing, and a nested block is the easiest place
+    /// for that to hide.
+    #[test]
+    fn an_unknown_key_inside_a_block_is_rejected() {
+        let err = one(&format!(
+            r#"{{"network":true,"linux":{{"netwrok":true}},{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("unknown field `netwrok`"), "{err}");
+        assert!(err.contains("packages[p].default.linux"), "{err}");
+
+        // `versions` keeps its dedicated message at every level, for the same reason it has one
+        // at the top: accepting it drops the range silently.
+        let err = one(&format!(
+            r#"{{"network":true,"linux":{{"versions":"<1.0.0"}},{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("no longer a grant field"), "{err}");
+    }
+
+    /// A block that names nothing overrides nothing, which is the same defect as an empty
+    /// `writePaths` — a line whose author believed it was doing something. Distinct from the
+    /// null case, which NAMES its fields.
+    #[test]
+    fn a_block_that_names_no_field_is_rejected() {
+        let err = one(&format!(r#"{{"network":true,"win":{{}},{NOTES}}}"#)).unwrap_err();
+        assert!(err.contains("overrides nothing"), "{err}");
+    }
+
+    /// The retired FILTER must not parse as an unknown-but-harmless key. Accepting it would be
+    /// the worst outcome available: the grant applies on EVERY OS, including the ones the field
+    /// was written to exclude.
+    #[test]
+    fn the_retired_platforms_filter_is_rejected_by_name() {
+        let err = one(&format!(
+            r#"{{"platforms":["macos"],"network":true,{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("was a FILTER and is retired"), "{err}");
+    }
+
+    /// Validation runs on the EFFECTIVE grant, once per OS. Neither half here is redundant
+    /// alone — the outer has no `read`, the block has no `write` — so a parser that checked the
+    /// outer grant and the blocks separately accepts this and silently honours a `read` that
+    /// `write: "disk"` already covers.
+    #[test]
+    fn write_implies_read_is_checked_after_the_block_is_laid_on() {
+        let err = one(&format!(
+            r#"{{"write":"disk","macos":{{"read":{{"project":true}}}},{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("already grants every read"), "{err}");
+        assert!(
+            err.contains("(on macos)"),
+            "the rejection must name the OS it fires on, since it fires on no other: {err}"
+        );
+
+        // …and the mirror: a block that WITHDRAWS the write makes the same pair legitimate.
+        let c = one(&format!(
+            r#"{{"write":"disk","macos":{{"write":null,"read":{{"project":true}}}},{NOTES}}}"#
+        ))
+        .expect("no OS sees both, so nothing is redundant");
+        assert_eq!(
+            on(&c, Platform::Macos).read,
+            Reach::Scopes(vec![Scope::Project])
+        );
+        assert_eq!(on(&c, Platform::Macos).write, Reach::None);
+    }
+
+    /// Overlays live on BANDS as well as on `default` — nothing about the version axis makes an
+    /// old release's needs uniform across operating systems.
+    #[test]
+    fn a_version_band_carries_its_own_blocks() {
+        let c = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{"network":true,{NOTES}}},
+                 "versions":{{"<1.0.0":{{"write":"disk","macos":{{"write":null}},{NOTES}}}}}}}}}}}"#
+        ))
+        .expect("valid");
+        let band = c.packages["p"].grant_for(Some("0.9.0"));
+        assert_eq!(band.on(Platform::Linux).write, Reach::Disk);
+        assert_eq!(band.on(Platform::Macos).write, Reach::None);
+    }
+
+    // ── round trip ────────────────────────────────────────────────────────────
+
+    /// `parse(emit(c)) == c`. The property that matters is the OPTION per overlay field: a
+    /// serializer that wrote the EFFECTIVE value instead of `null` would look right, parse
+    /// cleanly, and silently lose every narrowing — on exactly the packages the overlays exist
+    /// for.
+    #[test]
+    fn emit_round_trips_including_a_withdrawn_field() {
+        let text = format!(
+            r#"{{"packages":{{
+                 "p":{{
+                   "default":{{"write":"disk","network":true,
+                               "macos":{{"write":{{"project":true}},"network":null}},
+                               "win":{{"writePaths":[".cache/x"]}},{NOTES}}},
+                   "versions":{{"<1.0.0":{{"read":{{"userHome":true}},"linux":{{"read":null}},{NOTES}}}}}}},
+                 "q":{{"default":{{"write":{{"deps":true}},{NOTES}}}}}}},
+               "baseline":[{{"path":"$cache/x","write":true,"notes":"n"}}],
+               "env":[{{"name":"PYTHONDONTWRITEBYTECODE","value":"1"}}]}}"#
+        );
+        let first = parse(&text).expect("fixture must parse");
+        let emitted = emit(&first);
+        let second = parse(&emitted)
+            .unwrap_or_else(|e| panic!("emitted catalog must parse: {e}\n{emitted}"));
+        assert_eq!(first, second, "emitted:\n{emitted}");
+        assert_eq!(emit(&second), emitted, "emit must be deterministic");
+
+        // The control: the withdrawal must actually be IN the emitted bytes. Without this the
+        // assertion above passes for a serializer that dropped both the block and the field it
+        // withdraws — `first == second` would still hold if `emit` lost information symmetrically
+        // on a re-parse it never performs.
+        assert!(
+            emitted.contains("\"network\": null"),
+            "a withdrawn field must survive as `null`:\n{emitted}"
+        );
+        assert!(
+            !first.packages["p"].default.on(Platform::Macos).network,
+            "fixture precondition: macOS must be the OS whose network was withdrawn"
+        );
+    }
+
+    // ── version resolution ────────────────────────────────────────────────────
+
+    /// The rule that replaced first-match-wins. `0.5.0` sits inside all three bands, so the
+    /// answer is decided by BOUND and nothing else — a resolver that stopped at the first
+    /// match, or preferred the widest, returns a different grant here.
+    #[test]
+    fn among_the_bands_that_match_the_narrowest_bound_wins() {
+        let c = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{{NOTES}}},
+                 "versions":{{
+                   "<10.0.0":{{"write":"disk",{NOTES}}},
+                   "<1.0.0":{{"write":{{"userHome":true}},{NOTES}}},
+                   "<0.6.0":{{"network":true,{NOTES}}}}}}}}}}}"#
+        ))
+        .expect("valid");
+        assert_eq!(
+            resolve(&c, "0.5.0").base.write,
+            Reach::None,
+            "0.5.0 matches all three bands and must take <0.6.0, which grants no write"
+        );
+        assert!(resolve(&c, "0.5.0").base.network, "<0.6.0 grants network");
+        assert_eq!(
+            resolve(&c, "0.9.0").base.write,
+            Reach::Scopes(vec![Scope::UserHome]),
+            "0.9.0 is above <0.6.0, so the next-narrowest band <1.0.0 applies"
+        );
+        assert_eq!(
+            resolve(&c, "5.0.0").base.write,
+            Reach::Disk,
+            "5.0.0 matches only <10.0.0"
+        );
+    }
+
+    /// The invariant most likely to rot: resolution reads a JSON OBJECT, and any resolver that
+    /// walked it in iteration order would pass every other test in this file while silently
+    /// depending on how the generator happened to emit its keys.
+    #[test]
+    fn resolution_does_not_depend_on_the_order_the_bands_were_written_in() {
+        let narrow = r#""<0.6.0":{"network":true,NOTES}"#;
+        let wide = r#""<1.0.0":{"write":{"userHome":true},NOTES}"#;
+        let build = |first: &str, second: &str| {
+            let text = [
+                r#"{"packages":{"p":{"default":{NOTES},"versions":{"#,
+                first,
+                ",",
+                second,
+                "}}}}",
+            ]
+            .concat()
+            .replace("NOTES", NOTES);
+            parse(&text).expect("valid")
+        };
+        let ascending = build(narrow, wide);
+        let descending = build(wide, narrow);
+        assert_eq!(
+            resolve(&ascending, "0.5.0"),
+            resolve(&descending, "0.5.0"),
+            "the same bands in two key orders must resolve identically"
+        );
+        assert!(
+            resolve(&ascending, "0.5.0").base.network,
+            "and the answer must be the narrowest band, not merely a stable one"
+        );
+    }
+
+    /// `default` is the answer for everything the bands do not reach — today's release, every
+    /// future one, and anything the range matcher cannot judge (an absent version, a
+    /// `workspace:` pin, a prerelease). The last is a strict improvement on the retired shape,
+    /// where an unjudgeable version fell through to NO grant.
+    #[test]
+    fn a_version_no_band_matches_resolves_to_default() {
+        let c = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{"write":{{"project":true}},{NOTES}}},
+                 "versions":{{"<1.0.0":{{"network":true,{NOTES}}}}}}}}}}}"#
+        ))
+        .expect("valid");
+        let entry = &c.packages["p"];
+        for version in [Some("2.0.0"), Some("0.9.0-rc.1"), Some("workspace:*"), None] {
+            let g = entry.grant_for(version);
+            assert!(
+                !g.base.network && g.base.write == Reach::Scopes(vec![Scope::Project]),
+                "{version:?} matches no band and must resolve to default, got {g:?}"
+            );
+        }
+        assert!(
+            entry.grant_for(Some("0.9.0")).base.network,
+            "the control: a version the band DOES match must not resolve to default"
+        );
+    }
+
+    // ── the two shapes a stale hand-written catalog takes ─────────────────────
+
+    #[test]
+    fn a_grant_carrying_its_own_versions_range_is_rejected() {
+        let err = one(&format!(
+            r#"{{"versions":"<1.0.0","network":true,{NOTES}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("no longer a grant field"), "{err}");
+        assert!(
+            err.contains("packages[p].default"),
+            "the rejection must name the offending path: {err}"
+        );
+    }
+
+    #[test]
+    fn a_band_key_that_is_not_a_bound_is_rejected() {
+        let err = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{"network":true,{NOTES}}},
+                 "versions":{{">=14.0.0, <19.0.0":{{"write":"disk",{NOTES}}}}}}}}}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("must be a `<` bound"), "{err}");
+
+        // A `<` that is not a complete version cannot be ordered against the other bands, so it
+        // is refused for the same reason rather than silently sorted by string.
+        let err = parse(&format!(
+            r#"{{"packages":{{"p":{{
+                 "default":{{"network":true,{NOTES}}},
+                 "versions":{{"<1.0":{{"write":"disk",{NOTES}}}}}}}}}}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("not a complete semver version"), "{err}");
+    }
+
+    /// Every cell of `catalog` whose write reaches the whole disk while its egress is denied,
+    /// named `<package>@<band> on <platform>` so a failure says which line to fix.
+    ///
+    /// Shared by the shipped-catalog arm and the violating-catalog control below, deliberately:
+    /// a control that exercised a second copy of this walk would prove the copy works and say
+    /// nothing about the catalog the binary ships.
+    fn disk_writes_without_egress(catalog: &Catalog) -> Vec<String> {
+        let mut found = Vec::new();
+        for (name, entry) in &catalog.packages {
+            let bands = std::iter::once(("default", &entry.default))
+                .chain(entry.versions.iter().map(|b| (b.range.as_str(), &b.grant)));
+            for (range, grant) in bands {
+                for platform in Platform::ALL {
+                    let caps = grant.on(platform);
+                    if matches!(caps.write, Reach::Disk) && !caps.network {
+                        found.push(format!("{name}@{range} on {platform:?}"));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// ⛔ A `write: "disk"` CELL MUST CARRY `network`, and the reason is Windows-specific. A
+    /// full-disk grant is the one shape `backend::windows`'s allowlist cannot express, so that
+    /// backend declines the LowBox token entirely — and egress is an AppContainer *capability*,
+    /// so the net axis goes with it. A cell spelling `disk` + no egress therefore asks for the
+    /// exact combination the OS cannot deliver: the catalog would record a denial that the only
+    /// platform reading it cannot enforce, leaving a userland `NODE_OPTIONS` gate a native addon
+    /// walks past. Grant the disk write or keep the token — never write down the third thing.
+    ///
+    /// NOT HYPOTHETICAL. Denial is spelled by OMITTING `network` (`false` is refused outright),
+    /// so this is one deleted line away at all times, and a Windows narrowing pass is exactly the
+    /// work that would delete it. `a_block_replaces_only_the_field_it_names` records that 44 of
+    /// 581 measured package/versions already want `disk` on one OS and something narrow on
+    /// another, so the per-OS split these cells ride is live.
+    #[test]
+    fn no_catalog_cell_grants_a_whole_disk_write_without_egress() {
+        let shipped = parse(include_str!("../data/build-jail-catalog-v2.json"))
+            .expect("the shipped catalog parses");
+
+        // ⛔ THE ANTI-VACUITY GATE. The walk above reports nothing for a catalog with no
+        // full-disk cells at all, so without this the assertion below would pass just as
+        // happily against a catalog that had stopped containing the shape it polices.
+        let disk_cells = shipped
+            .packages
+            .values()
+            .flat_map(|e| std::iter::once(&e.default).chain(e.versions.iter().map(|b| &b.grant)))
+            .flat_map(|g| Platform::ALL.map(|p| matches!(g.on(p).write, Reach::Disk)))
+            .filter(|hit| *hit)
+            .count();
+        assert!(
+            disk_cells > 0,
+            "the shipped catalog has no `write: \"disk\"` cell, so this test polices nothing — \
+             delete it or fix the walk"
+        );
+
+        assert_eq!(
+            disk_writes_without_egress(&shipped),
+            Vec::<String>::new(),
+            "a full-disk grant makes Windows decline the LowBox token, which drops OS egress \
+             confinement with it — so these cells record a network denial no platform enforces"
+        );
+
+        // ⛔ THE POSITIVE CONTROL: the same walk, over a catalog that violates the rule. Without
+        // it a green run above is indistinguishable from a walk that never looks at anything.
+        // `network` is OMITTED rather than set false — that is how the grammar spells a denial.
+        let violating = parse(&format!(
+            r#"{{"packages":{{"p":{{"default":{{"write":"disk",{NOTES}}}}}}}}}"#
+        ))
+        .expect("disk-write-without-egress is well-formed; it is a POLICY error, not a parse one");
+        assert_eq!(
+            disk_writes_without_egress(&violating),
+            vec![
+                "p@default on Macos",
+                "p@default on Linux",
+                "p@default on Windows"
+            ],
+            "the walk must catch a disk write whose `network` is simply absent"
+        );
+
+        // And the per-OS spelling of the same hole, which is the one a narrowing pass actually
+        // writes: egress granted outer, withdrawn on Windows alone by `null`.
+        let per_os = parse(&format!(
+            r#"{{"packages":{{"p":{{"default":{{"write":"disk","network":true,
+                 "win":{{"network":null}},{NOTES}}}}}}}}}"#
+        ))
+        .expect("valid");
+        assert_eq!(
+            disk_writes_without_egress(&per_os),
+            vec!["p@default on Windows"],
+            "an overlay withdrawing egress under an outer `disk` write is the same hole"
+        );
+    }
+}

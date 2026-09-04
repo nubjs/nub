@@ -1,0 +1,1822 @@
+{
+  "networkHosts": [
+    {
+      "host": "nodejs.org",
+      "artifact": "Node headers and libs for a from-source native compile",
+      "fetchedBy": [
+        "node-gyp"
+      ],
+      "evidence": "source-read",
+      "observed": "node-gyp's default dist URL, reached whenever the header cache is cold. NOW MEASURED, superseding the earlier note here that the fetch 'does not arise under nub': the isolated single-package macOS arm of 2026-07-31 caught `gyp http GET https://nodejs.org/download/release/v26.5.0/node-v26.5.0-headers.tar.gz` returning 200 during bigint-buffer@1.1.5's unconfined arm, on a harness that does set `npm_config_nodedir`. The cold-header fetch is real, not speculative. It is also not admitted by this entry in the case that matters: `fetchedBy` is matched against aube's INSTALLER-RESOLVED name, so a native-build dependency that shells `node-gyp rebuild` is spawned under ITS OWN name and gets nothing. Whether that class needs a blanket grant is still open — it did not block in that arm, because the confined side never reached node-gyp at all (the lazy-bin shim recursed first).",
+      "platform": "any"
+    },
+    {
+      "host": "binaries.prisma.sh",
+      "artifact": "Prisma query/schema engine binaries",
+      "fetchedBy": [
+        "@prisma/engines",
+        "@prisma/client"
+      ],
+      "evidence": "measured",
+      "observed": "Named in Prisma's own firewall-allowlist documentation, and since MEASURED under the jail (macOS arm64, 2026-07-31). `@prisma/client` is on this list because the download does not only happen under `@prisma/engines`' identity: @prisma/client's postinstall re-execs the `prisma` CLI, whose bundled `@prisma/fetch-engine` downloads the engines itself whenever they are not already on disk — the ordinary cold-store case, because aube runs the two postinstalls CONCURRENTLY (measured: both START within 3ms) and the client's routinely reaches the check first. Traced with DEBUG=prisma:* inside the confined spawn: `prisma:fetch-engine:download https://binaries.prisma.sh/all_commits/<sha>/darwin-arm64/libquery_engine.dylib.node.gz will be downloaded to <store>/@prisma+engines@6.19.3/...`; without the grant the same request returns `getaddrinfo ENOTFOUND binaries.prisma.sh`. npm on the identical fixture, with a cold npm cache AND a cold HOME, performs the same download from the same script — so this matches npm rather than widening past it.",
+      "platform": "any"
+    },
+    {
+      "host": "download.cypress.io",
+      "artifact": "The Cypress binary (302 redirect origin)",
+      "fetchedBy": [
+        "cypress"
+      ],
+      "evidence": "measured",
+      "observed": "Resolved by cypress's postinstall in the corpus harness-validation run. Paired with cdn.cypress.io because the 302 lands there; granting only one leaves the install broken.",
+      "platform": "linux-arm64"
+    },
+    {
+      "host": "cdn.cypress.io",
+      "artifact": "The Cypress binary (302 redirect target)",
+      "fetchedBy": [
+        "cypress"
+      ],
+      "evidence": "measured",
+      "observed": "Resolved by cypress's postinstall in the corpus harness-validation run, as the redirect target of download.cypress.io. cypress is the one corpus package that installs successfully under this four-host list.",
+      "platform": "linux-arm64"
+    }
+  ],
+  "packageNetwork": {
+    "comment": "Per-package egress that names no host. Identical grant to being listed in a networkHosts entry's fetchedBy, but WITHOUT adding a hostname to $downloads — which is also the allowlist for nub's own out-of-jail prefetch. Every entry below fetches a github.com release asset; github.com stays refused in notGranted for the prefetcher's sake, and these packages reach it because the review that added them here ratified them, which is the control the jail actually relies on.",
+    "full": [
+      {
+        "package": "@anthropic-ai/claude-code",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,751,898 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@apollo/protobufjs",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 4,673,197 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@appsignal/nodejs",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error downloading from mirror: DownloadError: Could not connect to CDN` for `downloadUrl: https://d135dj0rjqvssy.cloudfront.net/0.36.12/appsignal-aarch64-darwin-all-static.tar.gz`, then the same for the fastly mirror `https://appsignal-agent-releases.global.ssl.fastly.net/0.36.12/...`, ending `DownloadError: Could not download agent from any mirror`. Unconfined A0, same fixture: `Installing downloaded agent and extension.` Two mirror hostnames for one artifact is the shape packageNetwork exists for — a host list would have to carry both and neither is wanted in the prefetcher.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@biomejs/biome",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 11,734,527 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@bufbuild/buf",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,231,888 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@confluentinc/kafka-javascript",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 38412364 B / 2257 files. nub v0.6.0 a96f26529005.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "@cubejs-backend/cubestore",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/cube-js/cube.js/releases/download/v1.4.4/cubestored-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@cubejs-backend/native",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default4`, 2026-07-31. Confined: `FetchError: request to https://github.com/cube-js/cube/releases/download/v1.4.4/native-darwin-arm64-unknown-fallback.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Its sibling @cubejs-backend/cubestore was already in this list; this package fetches the same release tag from the same repository and was missed.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@datadog/native-appsec",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,052,378 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@datadog/native-iast-taint-tracking",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,089,237 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@datadog/native-metrics",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 8,914,810 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@datadog/pprof",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 11,508,042 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@eversdk/lib-node",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND binaries.tonlabs.io` fetching https://binaries.tonlabs.io/eversdk_1_48_nodejs_addon_arm64-darwin.gz. Unconfined A0, same fixture: the addon downloads.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@firebase/util",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 17,983,044 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/fontawesome-common-types",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 4,025,084 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/fontawesome-free",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,391,228 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/fontawesome-svg-core",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,149,653 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/free-regular-svg-icons",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,499,818 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@fortawesome/free-solid-svg-icons",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,973,489 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@go-task/cli",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: Installation failed: Request failed: getaddrinfo ENOTFOUND github.com` for https://github.com/go-task/task/releases/download/v3.52.0/task_darwin_arm64.tar.gz. Unconfined A0, same fixture: the asset downloads via release-assets.githubusercontent.com.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@google/genai",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 16,859,427 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@larksuite/cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 38066091 B / 2328 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "@modelcontextprotocol/ext-apps",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,745,623 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@nestjs/core",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 12,894,852 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@netlify/esbuild",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 39477707 B / 2328 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "@newrelic/native-metrics",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,335,947 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@notarize/qlc-cli",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Unhandled error: Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@openapitools/openapi-generator-cli",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,542,716 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@pact-foundation/pact-node",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error downloading binary from https://github.com/pact-foundation/pact-ruby-standalone/releases/download/v2.4.1/pact-2.4.1-osx-arm64.tar.gz`, postinstall exit 1. Unconfined A0, same fixture: downloads, `Checksum passed for pact-2.4.1-osx-arm64.tar.gz`, `Extraction done.` EGRESS IS NOT SUFFICIENT ON ITS OWN for this package — the same confined run also raised `EPERM: operation not permitted, open <proj>/.npmrc` from inside its download path, which is why it additionally carries a packageGrants entry.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@paloaltonetworks/postman-code-generators",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: its postinstall shells `npm install`, which dies `npm error code ENOTFOUND / npm error syscall getaddrinfo` reaching https://registry.npmjs.org/. Unconfined A0, same fixture: the nested install completes. registry.npmjs.org is deliberately NOT promoted to networkHosts — it serves an authenticated PUT publish route on the same hostname, the github.com shape, and a project .npmrc token is routinely present in CI.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@parcel/watcher",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 32,031,468 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@playwright/browser-chromium",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 691193515 B / 2154 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "@playwright/browser-firefox",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 232649668 B / 2488 files. nub v0.6.0 a96f26529005.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "@playwright/browser-webkit",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 327852531 B / 8746 files. nub v0.6.0 a96f26529005.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "@pnpm/exe",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 6,531,312 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@posthog/cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 47986568 B / 1563 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "@prisma/client",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 15,596,290 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@prisma/engines",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 15,962,371 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@railway/cli",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/railwayapp/cli/releases/download/v5.30.1/railway-v5.30.1-aarch64-apple-darwin.tar.gz, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@reown/appkit",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,370,475 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@scarf/scarf",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 12,085,449 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@sematext/gc-stats",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: node-pre-gyp `getaddrinfo ENOTFOUND github.com` on https://github.com/adnanrahic/node-gcstats/archive/refs/tags/1.5.9.tar.gz. STATED PLAINLY: this grant does NOT on its own make the package install. Verified with the grant applied — the request now REACHES github and returns `404 Not Found` on that URL, so the grant does exactly its job, but the tag is gone upstream and node-pre-gyp falls back to a source compile that dies on `aube: node-gyp shim re-entered 4 times without reaching a real node-gyp`. Two separate reasons, neither a wider grant: a dead upstream artifact (this package fails on plain npm too) and a nub defect.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@sentry-internal/node-cpu-profiler",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,319,093 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@sentry/cli",
+        "versions": "<2.23.0",
+        "evidence": "measured",
+        "observed": "MEASURED on macOS arm64, 2026-07-31, every version on ONE binary (sha256 89633e8db646). 2.21.5, 2.22.1 and 2.22.2 each fail confined-and-ungranted and pass with egress alone; 2.23.2, 2.25.0, 2.27.0, 2.28.0, 2.29.1, 2.30.0, 2.58.6 and 3.6.2 each pass CONFINED AND UNGRANTED. 2.22.3, 2.23.0 and 2.23.1 carry no install script at all, so the range's edge falls in a gap where it can withhold nothing: the last scripted version below it needs egress and the first at or above it does not. The mechanism is an installer REWRITE - the script key changes from `install` to `postinstall` across that gap - and NOT the arrival of `optionalDependencies`, which is worth recording because the census's `optional_deps_count` transition (0 to 7 at 2.22.1) predicted the boundary correctly for sharp and WRONGLY here: 2.22.1 has the optional deps and still needs the network. INVERTED-RANGE CONTROL, @sentry/cli@2.22.2: `<2.23.0` gives rc 0, `>=2.23.0` gives rc 1, entry removed gives rc 1. Per-version weekly downloads: below 2.23.0 is 716,542, at or above is 22,418,316 (96.9%). Supersedes the earlier preemptive POLICY grant.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@shopify/ngrok",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `d5b`, 2026-07-31. Confined: `ngrok - error downloading from URL RequestError: getaddrinfo ENOTFOUND bin.equinox.io` for https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip. Unconfined A0, same fixture: the download completes.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@shopify/react-native-skia",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,213,864 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@sitespeed.io/chromedriver",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `break1`/`default1`, 2026-07-31. Confined: `Downloading Chromedriver 149.0.7827.53 from https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.53/mac-arm64/chromedriver-mac-arm64.zip` then `could not be installed: fetch failed`, install script exit 1. Unconfined A0, same fixture: the same URL downloads to completion (8.4 MB, progress to 93.7%) and the install succeeds. storage.googleapis.com stays refused as a HOST in notGranted (multi-tenant); this entry grants the package, not the hostname.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@sitespeed.io/edgedriver",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default4`, 2026-07-31. Confined: `Downloading Edgedriver 149.0.4022.52 from https://msedgedriver.microsoft.com/149.0.4022.52/edgedriver_mac64_m1.zip` then `could not be installed: fetch failed`, install script exit 1. Unconfined A0, same fixture: the same 9.7 MB zip downloads and the install succeeds.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@stdlib/math-base-assert-is-nan",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,001,633 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@stdlib/math-base-napi-binary",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,183,146 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@stdlib/number-float64-base-to-words",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,034,101 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@swc/core",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 37,395,886 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@temporalio/core-bridge",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,213,502 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@tensorflow/tfjs-node",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND storage.googleapis.com` fetching https://storage.googleapis.com/tf-builds/libtensorflow_r2_7_darwin_arm64_cpu.tar.gz. Unconfined A0, same fixture: libtensorflow downloads. The host stays refused in notGranted; this grants the package.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@tree-sitter-grammars/tree-sitter-yaml",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,058,585 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@typescript-tools/rust-implementation",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `AxiosError: getaddrinfo ENOTFOUND github.com` for https://github.com/typescript-tools/rust-implementation/releases/download/v7.0.8/typescript-tools-aarch64-apple-darwin.tar.gz. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "@vercel/speed-insights",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,392,698 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "@vscode/ripgrep",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 55850539 B / 1558 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "@vscode/vsce-sign",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,029,224 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "agent-browser",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,178,458 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "appium",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,159,438 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "appium-chromedriver",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,453,413 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "applicationinsights-native-metrics",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 31578237 B / 1512 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "argon2",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,808,121 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "aws-sdk",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,586,810 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "azure-functions-core-tools",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND cdn.functions.azure.com` fetching https://cdn.functions.azure.com/public/4.0.286861/Azure.Functions.Cli.osx-arm64.4.12.1.zip. Unconfined A0, same fixture: the same URL downloads.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "bcrypt",
+        "versions": "<6.0.0",
+        "evidence": "measured",
+        "observed": "MEASURED on macOS arm64, 2026-07-31, every version on ONE binary (sha256 89633e8db646). 5.0.1 and 5.1.1 each fail confined-and-ungranted and pass with egress alone; 6.0.0 passes CONFINED AND UNGRANTED. 6.0.0 replaced the `node-pre-gyp` install script, which fetches a prebuilt binary over the network, with `node-gyp-build`, which loads a prebuild shipped inside the tarball and opens no socket. INVERTED-RANGE CONTROL, bcrypt@5.1.1: `<6.0.0` gives rc 0, `>=6.0.0` gives rc 1, entry removed gives rc 1. Per-version weekly downloads: below 6.0.0 is 2,090,676, 6.0.0 and up is 3,610,793 (63.3%). Supersedes the earlier preemptive POLICY grant.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "better-sqlite3",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 8,910,366 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "bootstrap-slider",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 67493191 B / 5267 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "braintrust",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,273,894 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "browser-tabs-lock",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,558,374 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "bs-platform",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 16785433 B / 1593 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "bufferutil",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 6,693,016 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "bun",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,834,656 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "canvas",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-canvas`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`, after which it falls through to a from-source node-gyp build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. ALSO A BUG-J CARRIER: it only reaches node-gyp because the prebuilt was refused, so with egress restored it takes the prebuild-install path and the gyp write never happens.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "cbor-extract",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,369,971 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "chromedriver",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `ChromeDriver installation failed AxiosError: getaddrinfo ENOTFOUND googlechromelabs.github.io` fetching https://googlechromelabs.github.io/chrome-for-testing/151.0.7922.47.json, which is the manifest that names the storage.googleapis.com download. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "chromium",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `An error occurred while trying to setup Chromium ... RequestError: getaddrinfo ENOTFOUND www.googleapis.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. www.googleapis.com is a multi-tenant API front door and is not promoted to networkHosts for the same reason storage.googleapis.com is refused there.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "cldr-data",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `AxiosError: getaddrinfo ENOTFOUND github.com` fetching https://github.com/unicode-cldr/cldr-core/archive/36.0.0.zip. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Note this is an /archive/ URL, not /releases/download/ — a path-scoped github grant limited to release assets would not have covered it.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "cloudflared",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 64537053 B / 2398 files. nub v0.6.0 a96f26529005.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "cmark-gfm",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-cmark-gfm`, 2026-07-31. Confined: `prebuild-install WARN install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier, same mechanism as canvas.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "contentful",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,376,337 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "core-js",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 67,256,753 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "core-js-pure",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 16,387,315 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "cpu-features",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 10,357,678 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "cypress",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 7,782,859 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "date-now",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,385,244 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "dd-trace",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,629,322 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "dotnet-2.0.0",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: code: 'EPERM',. Unconfined artifact 173895874 B / 2039 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "drivelist",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-drivelist`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "dtrace-provider",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,589,540 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "dugite",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `d5b`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching the dugite-native release asset. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "edgedriver",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,002,069 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "ejs",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 38,224,673 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "electron",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 130131869 B / 1390 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "electron-chromedriver",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "electron-prebuilt",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: [Error: EPERM: operation not permitted, mkdir 'D:\\a\\_temp\\gm\\fx\\electron-prebuilt-both-Nms9p68y9a0og\\home\\AppData\\Local\\Packages'] {. Unconfined artifact 208877041 B / 1685 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "electron-winstaller",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,393,542 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "environment",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 35,276,259 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "es5-ext",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 13,898,055 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "esbuild",
+        "versions": "<0.13.0",
+        "evidence": "measured",
+        "observed": "Isolated single-version shards, macOS arm64, 2026-07-31. ONLY versions BELOW 0.13.0 need this. Confined 0.11.23: `Failed to install \"esbuild-darwin-arm64\" using npm` then `npm error network request to https://registry.npmjs.org/esbuild-darwin-arm64 failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org`, and the direct-fetch fallback dies on the same host; `bin/esbuild` is left as the shipped 650-byte JS shim. Unconfined A0, same fixture: a 7,951,298-byte Mach-O. With this entry the confined arm produces that same 7,951,298 bytes, against a control catalog loaded through the identical override path and differing only by this entry. 0.12.29 behaves identically (8,086,834 B). registry.npmjs.org is NOT promoted to networkHosts — it serves an authenticated publish route on the same hostname, the github.com shape; this is the third package granted here for that reason, after @paloaltonetworks/postman-code-generators and @mapbox/node-pre-gyp's caller. optionalDependencies landed in 0.13.0, so from 0.13.0 up install.js resolves the platform package and never opens a socket: 0.28.1, 0.27.7, 0.25.12 and 0.13.0 all pass CONFINED AND UNGRANTED with artifacts byte-identical to their unconfined arms. THE ENTRY IS SCOPED TO THAT BOUNDARY rather than keyed on the name alone. Per-version weekly downloads: below 0.13.0 is 327,496 (0.125%), 0.13.x is 136,460 (0.052%), and 0.14 and up is 261,241,226 (99.82%) — so a name-keyed grant would hand egress to 99.82% of installs measured not to need it. The corpus reached 0.11.23 only transitively, via iobroker.js-controller@7.2.2 -> @alcalzone/esbuild-register -> esbuild@^0.11.5.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "eth-gas-reporter",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 67960001 B / 7080 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "exiftool-vendored",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 90821625 B / 9954 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "fast-folder-size",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: ENOENT: no such file or directory, open 'D:\\a\\_temp\\gm\\fx\\fast-folder-size-both-Nms9ow99sclcq\\home\\AppData\\Local\\Packages\\nub_sbx_2836_18c78a0941ad1a10_0\\AC\\Temp\\du.zip'. Unconfined artifact 18136069 B / 1586 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "faunadb",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 16781099 B / 1593 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "ffmpeg-static",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "free-email-domains",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND f.hubspotusercontent40.net`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "fsevents",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 35,935,449 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "geckodriver",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,726,270 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "gif2webp-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 17340339 B / 1596 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "gifsicle",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 17209317 B / 1544 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "git-validate",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open 'D:\\a\\_temp\\gm\\fx\\git-validate-both-Nms9p3axh2p53\\proj\\.git\\hooks\\pre-commit'. Unconfined artifact 16803593 B / 1596 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "git-win",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: non-zero exit code 23. Unconfined artifact 16750548 B / 1590 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "gl",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-gl`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`. THE CONTROL IS BAD AND THE ENTRY SAYS SO: the unconfined A0 arm for this package exits rc=1 with `C++20 or later required.` and scored DID-WORK only because it had emitted 5,994 .o files before dying. So the egress DENIAL is measured and earns the entry, but there is no working unconfined arm to compare against and this package must NOT be counted as fixed by the grant — the same posture as handbrake-js above.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "grpc-tools",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default4`, 2026-07-31. Confined: `[error] install request to https://node-precompiled-binaries.grpc.io/grpc-tools/v1.13.1/darwin-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND node-precompiled-binaries.grpc.io`. Unconfined A0, same fixture: the prebuilt resolves.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "handbrake-js",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/HandBrake/HandBrake/releases/download/1.11.1/HandBrakeCLI-1.11.1.dmg, no artifact. Unconfined, same fixture: DID-WORK-AND-SUCCEEDED with a 106065024 B HandbrakeCLI. WITH THIS GRANT the download is restored (38059875 B mac.dmg on disk, verified by size against the unconfined arm) and the package STILL FAILS, at `hdiutil attach mac.dmg` -> `hdiutil: attach failed - Device not configured`. Attaching a disk image needs diskarbitrationd, which Seatbelt refuses and no catalog field can grant. The entry is earned on the measured egress denial; do not read the remaining failure as needing a wider grant, and do not count this package as fixed.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "hasura-cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 102361780 B / 2327 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "hugo-bin",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31. Confined: `Hugo binary installation failed! Error: getaddrinfo ENOTFOUND github.com`, postinstall exit 1. Unconfined, same fixture: `Hugo binary successfully installed!`, exit 0. The clearest control pair in the set — the package prints its own verdict either way.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "hummus",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 12524251 B / 904 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "ibm_db",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `ENOTFOUND : https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/macarm64_odbc_cli.tar.gz` followed by the mirror `ENOTFOUND : https://github.com/ibmdb/db2drivers/raw/main/clidriver/macarm64_odbc_cli.tar.gz`. Unconfined A0, same fixture: the IBM URL resolves. Two hostnames for one artifact, one of them github.com — the case for a package grant rather than a host list.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "identity-obj-proxy",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 10,795,805 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "iedriver",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 21117599 B / 1619 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "inngest-cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 64824526 B / 1537 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "iobroker.js-controller",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 12939329 B / 1289 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "ip-num",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16724736 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "isolated-vm",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,074,741 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "jpeg-recompress-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 17227064 B / 1596 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "jpegtran-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 16801323 B / 1547 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "jss",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,766,753 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "keccak",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,047,226 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "kerberos",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 16803812 B / 1449 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "keytar",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,548,896 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "koffi",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,473,645 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "lefthook",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,376,363 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "lmdb",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 6,152,901 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "maplibre-gl",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,889,905 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "mbt",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "mongodb-client-encryption",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-mongodb-client-encryption`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "mongodb-memory-server",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,948,906 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "mozjpeg",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 17391765 B / 1543 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "msgpackr-extract",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 26,051,087 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "msw",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 19,534,017 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "muhammara",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 18847241 B / 1405 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "n8n-nodes-evolution-api",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 16740577 B / 1568 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "nestjs-pino",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,305,283 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "ngrok",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `ngrok - error downloading from URL RequestError: getaddrinfo ENOTFOUND bin.equinox.io` for https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-arm64.zip. Unconfined A0, same fixture: the download completes.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "nice-napi",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,260,108 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "node",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,108,362 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "node-hid",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 19084310 B / 1450 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "node-jq",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64. Unconfined A0, same fixture: the jq binary is downloaded and placed.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "node-libcurl",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `[error] install request to https://github.com/JCMais/node-libcurl/releases/download/v5.1.2/node_libcurl-v5.1.2-node-v147-darwin-arm64-unknown.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: the prebuilt resolves. ALSO CARRIES BUG-J: the denied prebuild sends it down the from-source node-gyp path, which is the failure the store-entry-root write grant (46661af07c) addresses; with egress restored it takes the prebuilt path and never reaches node-gyp.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "node-liblzma",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,524,114 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "node-pty",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 5,577,783 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "node-zopfli",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-node-zopfli`, 2026-07-31. Confined: `prebuild-install WARN install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "nodejieba",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: its node-pre-gyp path falls back to shelling npm, which dies `npm error code ENOTFOUND / npm error syscall getaddrinfo` on https://registry.npmjs.org/@mapbox%2fnode-pre-gyp. Unconfined A0, same fixture: the prebuilt is fetched from github.com and the install succeeds. Both hostnames are covered by this one package grant; neither is added to networkHosts.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "nx",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 10,296,200 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "odbc",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 18635686 B / 1444 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "onnxruntime-node",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,482,571 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "openclaw",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,597,727 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "opencode-ai",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,864,020 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "package-directory",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,570,542 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "phantomjs",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 35424273 B / 1652 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "phantomjs-prebuilt",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 84666943 B / 1595 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "playwright-firefox",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, mkdir 'D:\\a\\_temp\\gm\\fx\\playwright-firefox-both-Nms9p48mpa5sl\\home\\AppData\\Local\\Packages'. Unconfined artifact 369949196 B / 1663 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "playwright-webkit",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 293651728 B / 9001 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "pngout-bin",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `RequestError: getaddrinfo ENOTFOUND raw.github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. raw.github.com is deliberately NOT promoted to networkHosts: it 301s to raw.githubusercontent.com, which serves arbitrary repository content rather than published release assets, and the prefetcher excludes that host on purpose (see GITHUB_PREFETCH_HOSTS in pm_engine/build_prefetch.rs).",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "pngquant-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 full_disk=null (0=pass). Unconfined artifact 17868339 B / 1542 files. nub v0.6.0 10f64806e9d1.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "postinstall-postinstall",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,030,556 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "postman-code-generators",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23390352 B / 2327 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "prisma",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 15,261,542 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "protobufjs",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 75,665,855 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "protoc-gen-grpc-web",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `getaddrinfo ENOTFOUND github.com` fetching https://github.com/grpc/grpc-web/releases/download/1.5.0/protoc-gen-grpc-web-1.5.0-darwin-aarch64. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "puppeteer",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm, 2026-07-31, cold store and a private HOME. Confined: postinstall rc=1, `ERROR: Failed to set up chrome v131.0.6778.204! Set \"PUPPETEER_SKIP_DOWNLOAD\" env variable to skip download.`, cause `getaddrinfo ENOTFOUND googlechromelabs.github.io` (the version-resolution manifest; the artifact itself is on storage.googleapis.com). With egress granted, the same fixture installs rc=0 and downloads both Chrome for Testing and chrome-headless-shell. Granted HERE rather than by promoting a host: googlechromelabs.github.io and storage.googleapis.com both stay refused in notGranted — the latter as a multi-tenant bucket namespace — and this grants the package without widening the prefetcher's allowlist. It pairs with puppeteer's packageGrants homePaths entry: egress alone gets the browser downloaded but leaves it in the private jail home, where executablePath() cannot find it.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "purescript",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `FetchError: request to https://github.com/purescript/purescript/releases/download/v0.15.16/macos-arm64.tar.gz failed, reason: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "re2",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,058,890 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "react-native-nitro-modules",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,711,849 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "realm",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-realm`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND static.realm.io`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "redis-memory-server",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default2`, 2026-07-31. Confined: `Couldnt download /redis-stable.tar.gz! getaddrinfo ENOTFOUND download.redis.io`, then `failed to download/install Redis binaries`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "registry-js",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Visual Studio installation to use. Unconfined artifact 17623509 B / 1603 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "saucectl",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: `Installation failed: Error: failed to download: Error: getaddrinfo ENOTFOUND github.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "secp256k1",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,272,703 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "serverless",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,520,026 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "sharp",
+        "versions": "<0.33.0",
+        "evidence": "measured",
+        "observed": "MEASURED on macOS arm64, 2026-07-31, every version on ONE binary (sha256 89633e8db646). Ladder cells, exit-code judged: 0.29.3, 0.31.3 and 0.32.6 each fail confined-and-ungranted and pass with egress alone; 0.33.0, 0.33.5 and 0.34.5 each pass CONFINED AND UNGRANTED. The boundary is exactly 0.33.0, the release that moved sharp's prebuilt libvips binaries into `optionalDependencies` as `@img/sharp-*`: from 0.33.0 up `install/check.js` resolves the platform package already on disk and never opens a socket, and below it a download is the only path. Structurally the same migration as esbuild@0.13.0. INVERTED-RANGE CONTROL, one binary and two catalogs differing only in this field, sharp@0.32.6: `<0.33.0` gives rc 0, `>=0.33.0` gives rc 1, and the entry removed gives rc 1 - so the RANGE is what decides, not merely the capability. Per-version weekly downloads: below 0.33.0 is 3,690,486; 0.33.0 and up is 76,229,274, i.e. 95.4% of installs would hold egress measured not to be needed if this were keyed on the name alone. Supersedes the earlier preemptive POLICY grant.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "skia-canvas",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 47186585 B / 1558 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "snyk",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default6`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND downloads.snyk.io` fetching https://downloads.snyk.io/cli/v1.1306.2/snyk-macos-arm64, plus denied static.snyk.io and o30291.ingest.sentry.io. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. STATED PLAINLY: egress here is a per-package BOOLEAN, so this grant also restores the sentry telemetry POST the same script makes. That endpoint would not be admissible as a networkHosts entry on its own — a telemetry sink whose POST body is the product is exactly the exfiltration shape the host criterion refuses — and it is admitted here only as part of ratifying a CLI the user installed deliberately.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "spawn-sync",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,999,911 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "sqlite3",
+        "evidence": "measured",
+        "observed": "Isolated single-package macOS arm `iso-sqlite3`, 2026-07-31. Confined: `prebuild-install warn install getaddrinfo ENOTFOUND github.com`, then a from-source build. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED. Also a BUG-J carrier.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "squawk-cli",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 23342007 B / 1557 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "ssh2",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 10,686,525 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "style-dictionary",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,954,901 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "supabase",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on linux-x64, 2026-07-31. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 110276485 B / 1286 files. nub v0.6.0 2421ab9a700c.",
+        "platform": "linux-x64"
+      },
+      {
+        "package": "svf-lib",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-EGRESS on darwin-arm64, 2026-08-01. Cells jail_off=0 no_grants=1 network=0 project_write=null both=0 (0=pass). Unconfined artifact 2230546892 B / 5674 files. nub v0.6.0 e90b24e7d432.",
+        "platform": "darwin-arm64"
+      },
+      {
+        "package": "taiko",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default7`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND storage.googleapis.com`. Unconfined A0, same fixture: DID-WORK-AND-SUCCEEDED.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "tesseract.js",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 2,395,750 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tldjs",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,421,476 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tree-sitter",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,260,253 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tree-sitter-bash",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,090,858 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tree-sitter-cli",
+        "evidence": "measured",
+        "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `Error: getaddrinfo ENOTFOUND github.com` fetching https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.11/tree-sitter-macos-arm64.gz. Unconfined A0, same fixture: the gz is fetched and the binary written.",
+        "platform": "macos-arm64"
+      },
+      {
+        "package": "tree-sitter-json",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,129,098 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "tree-sitter-python",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,111,809 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "unix-dgram",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 3,419,837 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "unrs-resolver",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 49,523,814 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "utf-8-validate",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 6,109,651 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "vue-demi",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 8,074,138 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "websocket",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,557,640 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "wordpos",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open 'D:\\a\\_temp\\gm\\fx\\wordpos-both-Nms9p08om6ikq\\home\\AppData\\Local\\nub\\pm\\store\\wordnet-db@3.1.14-f249a5f12212c55c\\node_modules\\wordnet-db\\dict\\fast-index.adv.json'. Unconfined artifact 16985912 B / 1599 files. nub v0.6.0 e13851652df5.",
+        "platform": "win32-x64"
+      },
+      {
+        "package": "workerd",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 17,444,312 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "xcase",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 1,691,875 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "yarn",
+        "evidence": "policy",
+        "observed": "POLICY grant, not measured. 9,865,491 weekly downloads, has an install script. Granted preemptively by download rank per the maintainer's 2026-07-31 directive to be generous with egress: breaking a package this popular is the failure mode the jail must avoid, and egress alone is a weak exfiltration channel here because the jail scrubs the environment and grants no secret paths. Supersede with a `measured` record when the matrix reaches it.",
+        "platform": "all"
+      },
+      {
+        "package": "zopflipng-bin",
+        "evidence": "measured",
+        "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 16973522 B / 1596 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+        "platform": "win32-x64"
+      }
+    ]
+  },
+  "packageGrants": [
+    {
+      "package": "@arkweid/lefthook",
+      "versionsObserved": "0.7.7",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config",
+        "lefthook.yml",
+        "lefthook.yaml",
+        "lefthook.json",
+        "lefthook.toml",
+        ".lefthook.yml",
+        ".lefthook.yaml",
+        ".lefthook.json",
+        ".lefthook.toml",
+        "lefthook-local.yml",
+        "lefthook-local.yaml",
+        "lefthook-local.json",
+        "lefthook-local.toml",
+        ".lefthook-local.yml",
+        ".lefthook-local.yaml",
+        ".lefthook-local.json",
+        ".lefthook-local.toml"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks",
+          "lefthook.yml"
+        ]
+      },
+      "mechanism": "The 0.7.7 predecessor of `lefthook`, under the author's original scope. Its postinstall drives the same Go binary through `install -f`, so it needs the same git detection and the same configuration search, including creating `lefthook.yml` when the project has none. It does NOT write a checksum, which is why its write set is the hooks directory and the config file and not `.git/info` — measured by ablation, not assumed.",
+      "evidence": "measured",
+      "observed": "Isolated macOS arm64 on nub ede3ac1c, 2026-07-31, four jail-ON rungs against a jail-off control. A0: `SYNCING lefthook.yml` and `SERVED HOOKS: pre-commit, prepare-commit-msg`. Jail-ON without an entry: `This command must be executed within git repository. Change working directory or initialize new repository with 'git init'.`, ZERO hooks. THE ROW HAD BEEN RECORDED AS FAILING EVEN WITH A FULL `.git` SUBTREE READ, an unexplained fourth cause; it is not a `.git` cause at all. Re-measured here with the whole `.git` subtree readable and the hooks directory writable, the failure MOVES to `open <proj>/lefthook.yml: operation not permitted` — the project CONFIG read, which no `.git` grant can express. With this entry: `SERVED HOOKS: pre-commit, prepare-commit-msg`, matching A0. Two minimality ablations on top: dropping `.git/info` from the write set still passes, so it is not granted; and withholding the fixture's `lefthook.yml` reproduces `open <proj>/lefthook.yml: operation not permitted` with ZERO hooks, which is why the config-file write is.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "@danmarshall/deckgl-typings",
+      "versionsObserved": "4.9.28",
+      "siblingDirs": [
+        "@types"
+      ],
+      "mechanism": "Its postinstall runs `indefinitely-typed`, which computes path.resolve(cwd, '../..'), asserts that directory is named node_modules, then mkdirs @types there and copySyncs each --folder argument into it. The write target is <own node_modules>/@types — the same enclosing-node_modules sibling shape as Prisma, under a different name.",
+      "evidence": "measured",
+      "observed": "EPERM mkdir <own node_modules>/@types. With the grant, 20 copied type folders present; without it, absent.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "@evilmartians/lefthook",
+      "versionsObserved": "2.1.10",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config",
+        "lefthook.yml",
+        "lefthook.yaml",
+        "lefthook.json",
+        "lefthook.toml",
+        ".lefthook.yml",
+        ".lefthook.yaml",
+        ".lefthook.json",
+        ".lefthook.toml",
+        "lefthook-local.yml",
+        "lefthook-local.yaml",
+        "lefthook-local.json",
+        "lefthook-local.toml",
+        ".lefthook-local.yml",
+        ".lefthook-local.yaml",
+        ".lefthook-local.json",
+        ".lefthook-local.toml"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks",
+          ".git/info",
+          "lefthook.yml"
+        ]
+      },
+      "mechanism": "The same tool as `lefthook` under its former scoped name, at the same version and with the same three needs — git detection, the project config search with its create-if-absent fallback, and the hooks plus checksum write. It is a separate entry rather than a shared one because the catalog is keyed on the installer-resolved package NAME, and both names are still installed.",
+      "evidence": "measured",
+      "observed": "Same run and method as the `lefthook` entry, isolated macOS arm64 on nub ede3ac1c, 2026-07-31. The package is the same tool: `bin/`, `get-exe.js`, `schema.json` and the vendored `lefthook-<platform>` optional dependency have the same shape, and `postinstall.js` differs only in formatting and in hoisting the CI guard out of a function. A0 jail-off control: `sync hooks: OK(pre-commit)`. Jail-ON without an entry: `fatal: not a git repository (or any of the parent directories): .git`, ZERO hooks. Jail-ON with this entry: `sync hooks: OK(pre-commit)`, with `.git/hooks/pre-commit` and `.git/info/lefthook.checksum` both present — the checksum file is what shows the `.git/info` write is load-bearing here too.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "@pact-foundation/pact-node",
+      "versionsObserved": "10.18.0",
+      "projectReads": [
+        ".npmrc"
+      ],
+      "mechanism": "standalone/install.js downloads the Pact Ruby standalone release, and before opening the socket it reads the CONSUMER's project `.npmrc` for proxy settings (`https-proxy` / `proxy`). That read is inside the download path, so it throws even though the failure surfaces as a download error. The egress half is granted separately under packageNetwork.full; this entry is only the manifest-adjacent read, and it is deliberately the single file rather than the project tree.",
+      "evidence": "measured",
+      "observed": "corpus-v2 shard `d5a`, 2026-07-31. Confined: `Error: Error while installing binary: Postinstalled Failed Unexpectedly: Error downloading binary from https://github.com/pact-foundation/pact-ruby-standalone/releases/download/v2.4.1/pact-2.4.1-osx-arm64.tar.gz: Error: Error while installing binary: Error: EPERM: operation not permitted, open '<proj>/.npmrc'` — the ONLY `.npmrc` EPERM in all 60 run directories. Unconfined A0, same fixture: `Checksum passed for 'pact-2.4.1-osx-arm64.tar.gz'. Extraction done.` STATED PLAINLY: a project `.npmrc` routinely carries a registry auth token, so this grant lets a lifecycle script read one. It is admitted because the script already runs as the user and reads that file on npm/pnpm/yarn today — the jail is loosening back toward the baseline it started from, not past it — and because the alternative is the package failing outright.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "@prisma/client",
+      "versionsObserved": "6.x (7.0.0 dropped the postinstall entirely)",
+      "siblingDirs": [
+        ".prisma"
+      ],
+      "dependencyDirs": [
+        [
+          "prisma"
+        ],
+        [
+          "prisma",
+          "@prisma/engines"
+        ]
+      ],
+      "projectReads": [
+        "prisma"
+      ],
+      "projectCwd": true,
+      "mechanism": "scripts/postinstall.js does four things, and each masks the next: it calls process.chdir(INIT_CWD); createDefaultGeneratedThrowFiles unconditionally mkdirs path.join(__dirname, '../../../.prisma'), a sibling of @prisma in the package's own enclosing node_modules; it looks for the prisma CLI; then it re-execs that CLI as `prisma generate`, which reads the consumer's prisma/ schema directory. The CLI lookup is why the dependencyDirs are here and not the schema: `require.resolve('prisma')` ALWAYS throws on 6.19.3 (its exports map points `.` at ./build/types.js, which the published tarball does not contain — reproduced on plain node with no sandbox), so the script always falls through to `exec('prisma -v')`, and the CLI it then runs writes the query engine into `@prisma/engines`' package directory and copies it into its own. Those two directories belong to OTHER packages, so package_dir does not cover them. The generated client itself lands inside package_dir and needs no grant.",
+      "evidence": "measured",
+      "observed": "EPERM mkdir <own node_modules>/.prisma, then EPERM uv_cwd on chdir(INIT_CWD), then EPERM reading the consumer's prisma/ schema. The dependencyDirs were measured separately (macOS arm64, 2026-07-31) with a write probe run INSIDE the real confined spawn: writes to the `prisma` CLI cell and the `@prisma/engines` cell both returned EPERM while the package's own dir returned OK, and the resulting failure was `ENOENT copyfile <store>/prisma@6.19.3/node_modules/prisma/libquery_engine-darwin-arm64.dylib.node`. Verified by artifact, not exit code: 6 files carrying a per-run schema nonce, identical to the unconfined arm, against 0 without the grants — on a COLD store with no artificial delay. Presence alone is not a valid check here — the script writes throw-stubs before every guard, so it exits 0 having generated nothing; and neither is the absence of the `please install Prisma CLI` warning, which a warm store suppresses on its own.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "bs-platform",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 16785433 B / 1593 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "cypress",
+      "versionsObserved": "13.x, measured on 13.14.2. The CYPRESS_CACHE_FOLDER override and the cachedir() default both predate 13 and are unchanged on 14/15.",
+      "homePaths": [
+        {
+          "env": "CYPRESS_CACHE_FOLDER",
+          "macos": "~/Library/Caches/Cypress",
+          "linux": "$cache/Cypress"
+        }
+      ],
+      "mechanism": "Its postinstall downloads a ~180 MB browser bundle and unzips it into `util.getCacheDir()`, which is `cachedir('Cypress')` — `~/Library/Caches/Cypress` on macOS and `$XDG_CACHE_HOME/Cypress` (else `~/.cache/Cypress`) on Linux. `state.js` consults CYPRESS_CACHE_FOLDER first and computes that same default otherwise, at INSTALL time and at RUN time alike, so redirecting the install to the real default is what makes `cypress open`/`verify` find the binary afterwards. The grant is the version-parent directory the bundle unzips into; nothing else under $HOME is named. Windows is deliberately omitted: cachedir's win32 branch is `%LOCALAPPDATA%/Cypress/Cache`, which nub's `$cache` matches only when XDG_CACHE_HOME is unset, and no Windows measurement exists.",
+      "evidence": "measured",
+      "observed": "Differential on macos-arm64, 2026-07-31, one variable (this entry present vs absent) via the dev catalog override, both arms on a per-arm private HOME/XDG_CACHE_HOME/TMPDIR and a cold store. WITHOUT: install rc=0 and cypress reports `Finished Installation <cache>/nub/jail-home/cypress-9a1706c45a41dfeb/Library/Caches/Cypress/13.14.2` — the PRIVATE jail home — then `./node_modules/.bin/cypress verify` exits 1 with `No version of Cypress is installed in: <home>/Library/Caches/Cypress/13.14.2/Cypress.app`. WITH: install rc=0 into `<home>/Library/Caches/Cypress/13.14.2` and `cypress verify` exits 0, `Verified Cypress! <home>/Library/Caches/Cypress/13.14.2/Cypress.app`. Re-confirmed through the SHIPPED path on the baked-in catalog, with the override feature compiled out. THE INSTALL EXITS 0 IN BOTH ARMS — the exit code cannot see this break, only the run-time lookup can. Egress was already granted (cdn.cypress.io fetchedBy) and is unchanged by this entry.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "dotnet-2.0.0",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: code: 'EPERM',. Unconfined artifact 173895874 B / 2039 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "dugite",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: ENOENT: no such file or directory, mkdir 'D:\\a\\_temp\\gm\\fx\\dugite-both-Nms9p19nb1tn\\home\\AppData\\Local\\Packages\\nub_sbx_2948_18c78a3f9b9668fc_0\\AC\\Temp'. Unconfined artifact 138556493 B / 1979 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "electron-chromedriver",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: [Error: ENOENT: no such file or directory, mkdtemp 'D:\\a\\_temp\\gm\\fx\\electron-chromedriver-both-Nms9tw7wlh9yf\\home\\AppData\\Local\\Packages\\nub_sbx_5244_18c791ab00c220b4_0\\AC\\Temp\\electron-download-XXXXXX'] {. Unconfined artifact 89280974 B / 1468 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "electron-prebuilt",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: [Error: EPERM: operation not permitted, mkdir 'D:\\a\\_temp\\gm\\fx\\electron-prebuilt-both-Nms9p68y9a0og\\home\\AppData\\Local\\Packages'] {. Unconfined artifact 208877041 B / 1685 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "fast-folder-size",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: ENOENT: no such file or directory, open 'D:\\a\\_temp\\gm\\fx\\fast-folder-size-both-Nms9ow99sclcq\\home\\AppData\\Local\\Packages\\nub_sbx_2836_18c78a0941ad1a10_0\\AC\\Temp\\du.zip'. Unconfined artifact 18136069 B / 1586 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "ghooks",
+      "versionsObserved": "2.0.4",
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "lib/install.js finds the repository with `findup.sync(process.cwd(), '.git')`, resolves a `.git` FILE's `gitdir:` pointer, then writes ALL SEVENTEEN git hook names into `<git>/hooks` — applypatch-msg through post-rewrite — renaming any hook it did not generate to `<name>.bkp` and chmodding each 0755. Seventeen names is why the grant is the hooks DIRECTORY rather than an enumeration: the list would have to be kept in sync with git's. Its cwd is its own store cell, which the jail already grants, so the `process.cwd()` call needs no project-root grant — verified, not assumed.",
+      "evidence": "measured",
+      "observed": "Isolated macOS arm on nub 321e731f (HEAD 4eca7e7af4 plus this change), 2026-07-31, both arms jail-ON with the catalog as the only variable. Confined WITHOUT the grant: ZERO non-sample files in `<proj>/.git/hooks`. Confined WITH it: all 17 hooks written, byte-identical to the jail-off arm apart from the run directory each script bakes in. THIS PACKAGE PRINTS NO EPERM — `bin/module-install` wraps the installer in a bare try/catch and reports a misleading `npm@2.15` message instead — so unlike the other four in this cohort its entry rests on the artifact differential rather than on a denial message, and its exit code is 0 in both arms.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "gif2webp-bin",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 17340339 B / 1596 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "git-commit-msg-linter",
+      "versionsObserved": "5.0.8",
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "install.js guesses the project root from a list (`process.cwd()`, its own `../../..` chain), resolves `<git>/hooks`, copies any existing `commit-msg` to `commit-msg.old`, writes its own, and chmods 0777. It writes `commit-msg` rather than `pre-commit`, which is why the grant names the hooks DIRECTORY and not a hook file — the five installers in this table between them write at least three different hook names, and ghooks writes seventeen.",
+      "evidence": "measured",
+      "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `[git-commit-msg-linter]: Failed to create the hook file in your .git/hooks folder because: EPERM: operation not permitted, open '<proj>/.git/hooks/commit-msg'`, then `The hook was not installed.` — and then, misleadingly, `Installed successfully.`, so this package's EXIT CODE is not a usable signal and the artifact must be checked instead. Unconfined A0, same fixture: `Install starting...` straight to `Installed successfully.` with the hook file present.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "git-validate",
+      "versionsObserved": "2.2.4",
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "`bin/install.js` calls `lib/utils.js installHooks(['pre-commit','pre-push'])`, which for each name renames any existing `<hookRoot>/<hook>` to `<hook>.backup`, unlinks a broken symlink at that path, and `Fs.writeFileSync(dest, ..., { mode: 511 })`. Its `configureHook` helper also rewrites the consumer's root package.json, but that path is not reached by the postinstall this entry covers and is NOT granted.",
+      "evidence": "measured",
+      "observed": "corpus-v2 shard `default1`, 2026-07-31. Confined: an uncaught `Error: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-commit'` with `syscall: 'open'` thrown from `lib/utils.js:259` inside `exports.installHooks`, aborting the install script. Unconfined A0, same fixture: both hooks are written.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "git-win",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: non-zero exit code 23. Unconfined artifact 16750548 B / 1590 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "husky",
+      "versions": "<5.0.0",
+      "versionsObserved": "4.3.8",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "husky 4 s postinstall runs `node husky install`, which locates the repository through git s own detection before writing git s full seventeen hook names plus husky.sh and husky.local.sh into .git/hooks. Bounded below 5 because from 5.0.0 onward husky ships NO script npm runs for a dependency: 5.0.0 renamed its hook to `_postinstall` (underscore-prefixed, so npm never invokes it), 5.2.0 moved to `prepare` (which npm runs only for the root project and git dependencies, never for a published tarball), and 6.0.0 declares no scripts at all. Installing husky became the consumer s own explicit `husky install` step, outside any dependency lifecycle. A name-wide grant would therefore hand a persistent-arbitrary-execution write to releases that provably never run anything.",
+      "evidence": "measured",
+      "observed": "MEASURED on isolated macOS arm64, nub 0.7.0-DEBUG fast profile built with nub-cli/build-jail-catalog-override, a fresh `git init` fixture per arm, `nub install` followed by `nub approve-builds --all`, varying ONLY the grant. Jail OFF via install.buildJail false: 19 files in .git/hooks (applypatch-msg, commit-msg, husky.local.sh, husky.sh, post-applypatch, post-checkout, post-commit, post-merge, post-rewrite, post-update, pre-applypatch, pre-auto-gc, pre-commit, pre-merge-commit, pre-push, pre-rebase, prepare-commit-msg, push-to-checkout, sendemail-validate). Jail ON with NO entry: ZERO files, and both commands exit 0 reporting success, so the denial is entirely silent to the user. Jail ON with the .git/hooks write ALONE and no reads: still ZERO — the write grant by itself is insufficient. Instrument control, fullDisk through the same override path: 19, which is what makes the preceding zero readable as an insufficient grant rather than an inert override. Jail ON with this entry: 19, matching the jail-off control. Three minimality ablations on top: dropping package.json from the read set still passes at 19, so it is not granted; dropping .git/config yields ZERO; dropping .git/HEAD yields ZERO. Both git-detection reads are therefore load-bearing and the read set is minimal. VERSION BOUND VERIFIED END-TO-END on the shipped catalog with no override: husky@4.3.8 installs 19 hooks (grant applies), husky@6.0.0 installs 0 with `scripts: {}` in its published tarball (nothing to confine). Registry metadata for 4.3.8 / 5.0.0 / 5.2.0 / 6.0.0 confirms the transition point is 5.0.0, not a later major.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "jpeg-recompress-bin",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 17227064 B / 1596 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "lefthook",
+      "versionsObserved": "2.1.10",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config",
+        "lefthook.yml",
+        "lefthook.yaml",
+        "lefthook.json",
+        "lefthook.toml",
+        ".lefthook.yml",
+        ".lefthook.yaml",
+        ".lefthook.json",
+        ".lefthook.toml",
+        "lefthook-local.yml",
+        "lefthook-local.yaml",
+        "lefthook-local.json",
+        "lefthook-local.toml",
+        ".lefthook-local.yml",
+        ".lefthook-local.yaml",
+        ".lefthook-local.json",
+        ".lefthook-local.toml"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks",
+          ".git/info",
+          "lefthook.yml"
+        ]
+      },
+      "mechanism": "Its postinstall spawns the bundled Go binary as `lefthook install -f` with cwd set to INIT_CWD, and that binary needs three distinct things in the project, each of which masks the next. It first runs `git rev-parse --path-format=absolute --show-toplevel --git-path hooks --git-path info --git-dir`, so git's repository detection must reach `.git/HEAD` and then `.git/config`. It then SEARCHES the project root for its own configuration and, finding none, CREATES `lefthook.yml` there rather than giving up — which is the ordinary first-install shape, since the documented order is to install the package and then write the config. Finally it writes the hooks it derived plus a `lefthook.checksum` into the directory that `--git-path info` resolved. The read list is sixteen config names because the configuration is honoured under four extensions across four spellings, all measured; `lefthook-local` and `.lefthook-local` are secondary configs MERGED over the main one rather than alternatives to it, so omitting them would silently drop a user's local hooks instead of failing. The reads are named FILES and not the `.git` subtree deliberately — a subtree read pulls in `objects/`, the consumer's entire source history, and the ladder below shows it buys nothing.",
+      "evidence": "measured",
+      "observed": "Isolated macOS arm64 on nub ede3ac1c (`91e66ad756` plus this change), 2026-07-31, one package per window, every arm on a cold store with `side-effects-cache=false` and a private HOME. A0 jail-off control: `sync hooks: OK(pre-commit)`, with `.git/hooks/pre-commit` and `.git/info/lefthook.checksum` written. Four jail-ON rungs, catalog the only variable: (a) no entry — `fatal: not a git repository (or any of the parent directories): .git`, ZERO hooks; (b) plus the two `.git` file reads — past detection, then `Config not found, creating...` and `Error: open <proj>/lefthook.yml: operation not permitted`, ZERO hooks; (c) plus the `lefthook.yml` read — `sync hooks: FAILED` and `could not create a checksum file: open <proj>/.git/info/lefthook.checksum: operation not permitted`, though the hook file itself is now written; (d) plus the `.git/info` write — `sync hooks: OK(pre-commit)`, matching A0. The `lefthook.yml` WRITE was measured separately by withholding the fixture's config: jail-off and jail-on both print `Added config: <proj>/lefthook.yml` and install `prepare-commit-msg`, and rung (b) is that same write being refused. THIS PACKAGE'S EXIT CODE IS 0 IN EVERY RUNG — its postinstall wraps the spawn in a try/catch and `spawnSync` does not propagate the child's status — so the entry rests on the hook artifact and the denial message, never on the status.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "mongodb-memory-server",
+      "versionsObserved": "11.2.0",
+      "projectReads": [
+        "**"
+      ],
+      "projectWrites": {
+        "literal": [
+          "**"
+        ]
+      },
+      "projectCwd": true,
+      "mechanism": "Measured by the grant-configuration matrix: the install script fails with the jail on and no grants, and succeeds with unscoped project read/write/cwd. The grant is UNSCOPED because the matrix measures whether project access is needed, not which paths — scoping it is a follow-up that needs the specific paths observed.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-BOTH on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=1 project_write=1 both=0 full_disk=null (0=pass). Unconfined artifact 238125878 B / 1450 files. nub v0.6.0 10f64806e9d1.",
+      "platform": "linux-x64"
+    },
+    {
+      "package": "msw",
+      "versionsObserved": "2.15.0",
+      "projectWrites": {
+        "manifestField": [
+          "msw",
+          "workerDirectory"
+        ]
+      },
+      "projectCwd": true,
+      "mechanism": "config/scripts/postinstall.js reads the CONSUMER's package.json for msw.workerDirectory, returns silently if absent, and otherwise re-execs its own CLI with cwd set to INIT_CWD to copy mockServiceWorker.js into each listed directory. The directories come from the field rather than a literal because msw imposes no convention — the consumer picks them.",
+      "evidence": "measured",
+      "observed": "EPERM uv_cwd. The cwd need bites first: without projectCwd the child dies in uv_cwd before it reads the field at all. With the grants, msw's worker script is present; without them, absent.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "nodejieba",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: npm error code EPERM. Unconfined artifact 47859780 B / 2142 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "nx",
+      "versions": ">=14.0.0, <19.0.0",
+      "projectReads": [
+        "nx.json"
+      ],
+      "projectWrites": {
+        "literal": [
+          "nx.json",
+          ".nx"
+        ]
+      },
+      "projectCwd": true,
+      "mechanism": "nx's postinstall starts the nx daemon client, which reads the consumer's `nx.json` eagerly and, from 18 on, creates `<project>/.nx/cache`. Both are the consumer's own project files, which nx is being installed to operate on.",
+      "evidence": "measured",
+      "observed": "MEASURED on macOS arm64, 2026-07-31, every version on ONE binary (sha256 89633e8db646). THE FIRST OLD-VERSION BREAK FOUND THAT THE SHIPPED CATALOG DID NOT ALREADY COVER, and it was invisible for a structural reason: nx needs nothing at latest, so every measurement taken at latest said so. Ladder cells: 13.10.6 passes confined-and-ungranted; 14.8.9, 15.9.7, 16.10.0, 17.3.2 and 18.3.5 each fail ungranted and pass with project access alone; 19.8.4, 21.6.11, 22.7.5 and 23.1.0 pass confined-and-ungranted again. So the requirement is a WINDOW, not a `<X` cutoff, and both edges are measured on adjacent majors. Ungranted, 15.9.7 dies `EPERM: operation not permitted, open <project>/nx.json` from `Workspaces.readNxJson` in the daemon client; 18.3.5 gets past that and dies `EPERM ... mkdir <project>/.nx/cache`, which is why the shape names both. INVERTED-RANGE CONTROL at all five in-window versions, one binary and catalogs differing only in this entry: the scoped range gives rc 0, `<14.0.0` gives rc 1, and the entry removed gives rc 1. Per-version weekly downloads inside the window are about 430,000 (15.9.7 alone is 257,980). Found only because the ladder's project cell was fixed the same day: it granted `projectReads: [\".\"]`, which `contained()` drops because the joined path equals the project root, so every past run scored this row FAILS-AT-BOTH - 'something the catalog cannot express' - when the catalog expresses it in two named paths.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "opencode-ai",
+      "versionsObserved": "1.18.4",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: npm error code EBADPLATFORM. Unconfined artifact 195637953 B / 1556 files. nub v0.6.0 10f64806e9d1.",
+      "platform": "linux-x64"
+    },
+    {
+      "package": "playwright-firefox",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, mkdir 'D:\\a\\_temp\\gm\\fx\\playwright-firefox-both-Nms9p48mpa5sl\\home\\AppData\\Local\\Packages'. Unconfined artifact 369949196 B / 1663 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "pre-commit",
+      "versionsObserved": "2.0.0",
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "install.js walks up from its own __dirname testing `path.resolve(<dir>, '.git')` at each level, resolves a `.git` FILE's `gitdir:` pointer if it finds one, then writes `<git>/hooks/pre-commit` and chmods it 0755, first copying any existing hook to `pre-commit.old`. The write target is git's path, not one the consumer configures, which is why this is a `literal` rather than a `manifestField`. It also does `if (!exists(hooks)) fs.mkdirSync(hooks)` — that mkdir is NOT granted (it would need write on `.git` itself), so a repository with no `hooks/` directory still fails; `git init` always creates one.",
+      "evidence": "measured",
+      "observed": "corpus-v2 shards `break1` and `default6`, 2026-07-31. Confined: `pre-commit: Found .git in <proj>/.git` — so `.git` is READABLE under the jail and only the write is refused — then `pre-commit: Failed to create the hook file in your .git/hooks folder because: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-commit'`, `The hook was not installed.`, followed by a consequential `ENOENT ... chmod` on the file that was never created. Unconfined A0, same fixture: the hook file is written. The class control is clean in every shard — `.git/hooks` non-`.sample` files appear in every A0 arm and in zero PROD arms.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "pre-push",
+      "versionsObserved": "0.1.4",
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "The same installer shape as `pre-commit`, by the same author: walk up for `.git`, resolve a gitdir pointer, write `<git>/hooks/pre-push`, chmod 0775, back up an existing hook to `pre-push.old`. Bounded to the hooks directory for the same reason — the `fs.mkdirSync(hooks)` fallback is deliberately not granted.",
+      "evidence": "measured",
+      "observed": "corpus-v2 shard `default3`, 2026-07-31. Confined: `pre-push: Found .git folder in <proj>/.git`, then `pre-push: Failed to create the hook file in your .git/hooks folder because: EPERM: operation not permitted, open '<proj>/.git/hooks/pre-push'`. Unconfined A0, same fixture: the hook is written.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "puppeteer",
+      "versionsObserved": "23.x, measured on 23.11.1. `getConfiguration.js` resolves the same way on 24.",
+      "homePaths": [
+        {
+          "env": "PUPPETEER_CACHE_DIR",
+          "macos": "~/.cache/puppeteer",
+          "linux": "~/.cache/puppeteer",
+          "windows": "~/.cache/puppeteer"
+        }
+      ],
+      "mechanism": "Its postinstall downloads Chrome for Testing and chrome-headless-shell into `configuration.cacheDirectory`, which `getConfiguration.js` resolves as `PUPPETEER_CACHE_DIR ?? <config> ?? join(homedir(), '.cache', 'puppeteer')`. `executablePath()` computes the same value at RUN time, so the install and the lookup agree only if both see the same directory. All three platforms carry the same `~/`-anchored path because puppeteer's default is `homedir()`-based on every platform — it consults neither XDG_CACHE_HOME nor %LOCALAPPDATA% — which is why this entry can name Windows and the cypress one cannot.",
+      "evidence": "measured",
+      "observed": "Three-arm ladder on macos-arm64, 2026-07-31, per-arm private HOME/XDG_CACHE_HOME/TMPDIR, cold store each arm. (A) no egress, no homePaths: install rc=1, `ERROR: Failed to set up chrome v131.0.6778.204`, cause `getaddrinfo ENOTFOUND googlechromelabs.github.io` — so this package could not reach the $HOME-cache break at all before its packageNetwork.full entry. (B) egress only: install rc=0, and `require('puppeteer').executablePath()` returns `<home>/.cache/puppeteer/chrome/mac_arm-131.0.6778.204/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`, which does not exist — `ENOENT` — because the download landed in the private jail home. (C) egress + this entry: install rc=0 and the same executablePath is present and executable, with `<home>/.cache/puppeteer/chrome{,-headless-shell}` populated. B vs C is the one-variable differential for this entry.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "registry-js",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: gyp ERR! stack Error: Could not find any Visual Studio installation to use. Unconfined artifact 17623509 B / 1603 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "shared-git-hooks",
+      "versionsObserved": "1.2.1",
+      "projectReads": [
+        ".git/HEAD",
+        ".git/config"
+      ],
+      "projectWrites": {
+        "literal": [
+          ".git/hooks"
+        ]
+      },
+      "mechanism": "Its postinstall runs `git rev-parse --show-toplevel --git-path hooks` to locate the repository, then SYMLINKS all seventeen git hook names in that directory at its own `hook.sh`. Two distinct needs, and they are staged: git's repository detection reads `.git/HEAD` and then `.git/config`, and only after both does it reach the hooks directory to create the links. The reads are the two FILES rather than the `.git` subtree deliberately — a subtree read would pull in `objects/`, the consumer's entire source history, and the ladder below shows it buys nothing.",
+      "evidence": "measured",
+      "observed": "Isolated macOS arm on nub 1731fc6e (`e12e1d2ca8`, which includes the project-root cwd grant from `65c51530cb`), 2026-07-31. THREE ARMS, all jail-ON, catalog the only variable. (a) HEAD's catalog: `fatal: not a git repository (or any of the parent directories): .git`, ZERO hooks. (b) This catalog WITHOUT this entry — i.e. the cwd grant alone: identical `fatal: not a git repository`, ZERO hooks, which is what shows the cwd fix does not close this row on its own. (c) With this entry: all 17 hooks present as symlinks at `<store cell>/shared-git-hooks/hook.sh`, matching the jail-off arm's 17 name-for-name. The corpus triage had filed this row under BUG-CWD; the cwd grant is necessary and is NOT sufficient. Granting the whole `.git` subtree instead of the two files was measured separately and reached the same rc 0, so the narrower grant is not a guess.",
+      "platform": "macos-arm64"
+    },
+    {
+      "package": "unrs-resolver",
+      "versionsObserved": "1.12.2",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on linux-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EACCES: permission denied, mkdir '<run>/fx/unrs-resolver-both-Nms9qee5oa2f8/home/.cache/nub/pm/store/napi-postinstall@0.3.4-cbfa094d9ecbe274/node_modules/unrs-resolver'. Unconfined artifact 19071209 B / 1559 files. nub v0.6.0 10f64806e9d1.",
+      "platform": "linux-x64"
+    },
+    {
+      "package": "wordpos",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Ungranted failure: Error: EPERM: operation not permitted, open 'D:\\a\\_temp\\gm\\fx\\wordpos-both-Nms9p08om6ikq\\home\\AppData\\Local\\nub\\pm\\store\\wordnet-db@3.1.14-f249a5f12212c55c\\node_modules\\wordnet-db\\dict\\fast-index.adv.json'. Unconfined artifact 16985912 B / 1599 files. nub v0.6.0 e13851652df5.",
+      "platform": "win32-x64"
+    },
+    {
+      "package": "zopflipng-bin",
+      "fullDisk": true,
+      "mechanism": "Measured by the grant-configuration matrix as the TERMINAL rung: the install script fails with the jail on and no grants, still fails with unscoped project read/write/cwd AND egress together, and succeeds only with the whole filesystem. Every narrower grant the catalog can express was therefore run against it and was insufficient. This is a candidate for narrowing once the specific path it needs is known — it is the widest tier, taken because a package with no working grant would otherwise be an open investigation.",
+      "evidence": "measured",
+      "observed": "[grant-matrix] NEEDS-FULL-DISK on win32-x64, 2026-08-01. Cells jail_off=0 no_grants=1 network=null project_write=null both=1 full_disk=0 (0=pass). Unconfined artifact 16973522 B / 1596 files. nub v0.6.0 f156e3cf57d6. Host toolchain proved on runnervmr7g38; positive control bigint-buffer@1.1.5 compiled a native addon ungranted inside the jail on the same binary.",
+      "platform": "win32-x64"
+    }
+  ],
+  "notGranted": {
+    "comment": "Documentation only. Nothing in this object is compiled into any allowlist; it records hosts that a real install was measured to need and that were not admitted, so a contributor can see the bar before opening a PR. A build-time check keeps this list and networkHosts disjoint. Entries carry the same provenance fields as networkHosts, because an evidenced candidate is what makes a later promotion reviewable — `observedUrl` in particular is what a path-scoped grant would have to be written against.",
+    "hosts": [
+      {
+        "host": "github.com",
+        "reason": "write-capable",
+        "requester": "cube-js native installer (`Cube.js Native Installer`); 46 corpus packages total, 14 of them blocking",
+        "observedUrl": "https://github.com/cube-js/cube/releases/download/v1.4.4/native-linux-x64-glibc-fallback.tar.gz",
+        "detail": "The demand is real and measured, and the refusal is NOT about the download. github.com carries `git-receive-pack` — an authenticated write on the same hostname — and CI routinely hands lifecycle scripts a token with push rights, so a host-level grant opens a push path rather than only a fetch path. Host-level DNS gating cannot separate the two. A path-scoped grant limited to /*/*/releases/download/ would, which is the argument for building proxy path support rather than treating this host as permanently refused.",
+        "evidence": "measured",
+        "observed": "FetchError: request to <url> failed, reason: getaddrinfo EAI_AGAIN github.com — the denied arm of the Linux corpus run.",
+        "platform": "linux-x64"
+      },
+      {
+        "host": "storage.googleapis.com",
+        "reason": "multi-tenant",
+        "requester": "@tensorflow/tfjs-node, chromedriver (also puppeteer and taiko on the earlier macOS pass)",
+        "observedUrl": "https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-linux-x86_64-2.9.1.tar.gz; https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.53/linux64/chromedriver-linux64.zip",
+        "detail": "Refused because an attacker can rent a bucket under the same hostname and read back whatever a confined script writes there — the exfiltration criterion, not an integrity one. The two observed prefixes (/tensorflow/ and /chrome-for-testing-public/) are stable and single-tenant, so this is a second candidate for a path-scoped grant. THE REFUSAL COSTS NOTHING NOW: the four packages measured to need this host (@sitespeed.io/chromedriver, @tensorflow/tfjs-node, taiko, and chromedriver via its googlechromelabs.github.io manifest) are each admitted in packageNetwork.full, which grants the package without putting the hostname in the prefetcher's allowlist — the same resolution github.com already has. What stays refused here is the HOST, and this list's only remaining consumer is nub's own unconfined prefetch.",
+        "evidence": "measured",
+        "observed": "Both artifacts requested in the denied arm of the Linux corpus run; libtensorflow logged as `* Downloading libtensorflow` immediately before the URL.",
+        "platform": "linux-x64"
+      },
+      {
+        "host": "package.cli.amplify.aws",
+        "reason": "not-blocking",
+        "requester": "@aws-amplify/cli",
+        "observedUrl": "https://package.cli.amplify.aws/14.5.1/amplify-pkg-linux-x64.tgz",
+        "detail": "A soft fetch that degrades rather than failing does not earn an entry: the CLI reports `failed to install amplify binary` with egress denied, but the install itself still exits 0.",
+        "evidence": "measured",
+        "observed": "Error fetching release: getaddrinfo EAI_AGAIN package.cli.amplify.aws, followed by `failed to install amplify binary`, in the denied arm of the Linux corpus run.",
+        "platform": "linux-x64"
+      },
+      {
+        "host": "workers.cloudflare.com",
+        "reason": "undecided",
+        "requester": "@cloudflare/wrangler@1.21.0",
+        "observedUrl": "https://workers.cloudflare.com/get-npm-wrangler-binary/1.21.0/x86_64-unknown-linux-musl",
+        "detail": "Recorded as an evidenced candidate, not as a disqualification: no write-capable route or multi-tenant namespace has been established for it, and the fetch is a dedicated single-tenant vendor binary path. Whether it is admitted is a maintainer call, and it is deliberately left out of networkHosts until then. Note the requester is wrangler 1.x, which prints its own deprecation notice directing users to the `wrangler` package — so the demand may not survive the version it was measured on.",
+        "evidence": "measured",
+        "observed": "Downloading release from <url>, then Error fetching release: getaddrinfo EAI_AGAIN workers.cloudflare.com, in the denied arm of the Linux corpus run.",
+        "platform": "linux-x64 (musl artifact)"
+      }
+    ]
+  }
+}

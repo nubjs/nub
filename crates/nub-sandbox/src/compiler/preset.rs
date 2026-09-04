@@ -1,0 +1,3636 @@
+//! The closed preset table. A `"sandbox": "<preset>"` string opts into a
+//! nub-implemented named policy set. The resolver is a CLOSED table — an unknown
+//! preset is a hard error naming the supported set (same discipline as the env
+//! type grammar), so adding a preset later is non-breaking.
+//!
+//! A preset expands to the equivalent granular surface `Value`, which the pipeline
+//! then folds — one code path, no separate preset→IR translator to keep in sync.
+//!
+//! The `build-jail` preset is nub's dependency-lifecycle-script confinement. It is
+//! reachable two ways: as a bare `--sandbox build-jail` STATIC policy (the skeleton
+//! below), and — the production path — via [`compile_build_jail`], which the aube
+//! lifecycle interposition drives per spawn with the script's own package dir,
+//! provisioned interpreter, and constructed env.
+
+use super::{CompileCtx, CompileError, ScopeCapabilities, compile, defaults};
+use crate::matcher::path::{Homes, canonicalize_glob_prefix};
+use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, SandboxPolicy};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Resolve a preset name to its granular surface object. `"build-jail"` is the
+/// only preset today (the lifecycle-script baseline).
+pub fn resolve(name: &str) -> Result<Value, CompileError> {
+    match name {
+        "build-jail" => Ok(build_jail_surface(None, None, None, None, None)),
+        other => Err(CompileError::unknown_preset(other, &["build-jail"])),
+    }
+}
+
+/// Make the build jail a PURE ALLOWLIST: strip every deny the fold produced, so the
+/// compiled policy carries grants only.
+///
+/// The build jail is not a deny model compiled into grants — it never had denies to begin
+/// with. Its shape is "install into a temp dir, run the script there with access to only
+/// that dir plus specific deps", and under a `default_effect == Deny` base a path is
+/// unreadable because nothing granted it. A deny rule on top is therefore either redundant
+/// (the path is outside every grant — the `~/.ssh` family, `/etc/shadow`) or a sign that a
+/// GRANT is too broad, which is fixed by narrowing the grant, never by carving it.
+///
+/// This is not cosmetic. Deny-inside-allow is inexpressible on the zero-privilege
+/// mechanisms: Landlock unions rules and has no deny primitive at any ABI, and an explicit
+/// deny-ACE naming a Windows AppContainer's own SID is inert against that AppContainer's
+/// child. Because the fold's `.env*`/`.npmrc` band is depth-independent, its literal prefix
+/// is empty, so `backend::windows::deny_shadows_grant` sees it shadow every grant and
+/// REJECTS the policy — which is why every read-granting build-jail policy fails closed on
+/// Windows today with `build-jail could not be applied`. Emitting no denies is what lets the
+/// allowlist backends enforce the jail at all.
+///
+/// Enforced by stripping rather than by suppressing each finalizer, so a deny added to the
+/// surface or to a fold finalizer later cannot silently reintroduce the rejection; the
+/// invariant lives in one place and is asserted by `build_jail_emits_no_deny_rules`.
+///
+/// THE INVARIANT BINDS THE BACKENDS, NOT JUST THIS FUNCTION. Stripping every `Effect::Deny`
+/// is worth nothing if a backend then SYNTHESIZES one out of an allow, which is exactly what
+/// the Seatbelt write loop did — a read-only Allow became `(deny file-write* …)`, so the
+/// jail's own grants cancelled each other while the IR looked deny-free. A backend may
+/// render an Allow only as permission.
+pub fn enforce_pure_allowlist(name: &str, policy: &mut SandboxPolicy) {
+    if name != "build-jail" {
+        return;
+    }
+    policy.fs.rules.entries.retain(|r| r.effect != Effect::Deny);
+}
+
+/// Grant the build-jail interpreter closure (the provisioned Node + the PATH-prepended
+/// shim) READ. nub provisions its own Node under its store rather than `/usr`, so the
+/// tight-read base (Linux `RootView::Minimal` auto-mounting `ESSENTIAL_READ_PATHS`,
+/// macOS's Seatbelt system base) does NOT reach it — the read-set spike proved this is
+/// load-bearing (a node-gyp build with the interpreter ungranted fails). Under nub a
+/// bare `node` hits the shim (`$NODE`) while `npm_node_execpath` names the real binary,
+/// so the interposition supplies BOTH; each is granted the FILE and its bin DIR
+/// (siblings a re-spawning build tool reaches). Front-inserted as a base allow so the
+/// `.env`/secret floor entries (later) still win — the interpreter paths never overlap
+/// them, so the position is safe either way.
+pub fn grant_build_jail_interpreter(name: &str, policy: &mut SandboxPolicy, ctx: &CompileCtx) {
+    if name != "build-jail" || ctx.interpreter.is_empty() {
+        return;
+    }
+    let mut grants = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for interpreter in &ctx.interpreter {
+        if seen.insert(interpreter.clone()) {
+            push_read_path(&mut grants, interpreter, FsOrigin::Authored);
+        }
+        if let Some(bin_dir) = interpreter.parent()
+            && seen.insert(bin_dir.to_path_buf())
+        {
+            push_read_path(&mut grants, bin_dir, FsOrigin::Authored);
+        }
+    }
+    policy.fs.rules.entries.splice(0..0, grants);
+}
+
+/// Grant the build-jail's per-spawn extra READ subtrees that the interpreter grant misses.
+/// The embedder derives them; today they are the provisioned Node's toolchain subtrees
+/// (below) plus the resolved Python's own closure, whose derivation and bounds live with
+/// the embedder because it owns where each toolchain comes from.
+///
+/// The Node pair is the GLOBAL PACKAGE TREE and the C/C++ HEADERS, and both are spelled by
+/// the embedder because BOTH DIFFER BY DISTRIBUTION SHAPE — the layouts are not variants of
+/// one path, they are two different answers:
+///
+/// - The global tree is `<node-root>/lib/node_modules` on POSIX and `<node-root>/node_modules`
+///   on Windows, whose archive is FLAT (`node.exe` with `node_modules` beside it, no `bin/`
+///   and no `lib/`). It is what makes `npm`/`npx`/`corepack` resolvable at all — each is a
+///   symlink into that tree on POSIX, a `%~dp0`-relative `.cmd` shim on Windows — and on POSIX
+///   it is genuinely load-bearing, because it sits OUTSIDE the granted bin dir (`../lib/…`):
+///   without it all three dangle and the standard `prebuild-install || npm run build` fallback
+///   dies at `npm: not found` (measured on `keytar`: rc 127 → rc 0 once the target is
+///   readable). On the FLAT layout it is redundant rather than load-bearing, since read grants
+///   are subtree grants ([`push_read_path`]) and the interpreter's own directory IS the
+///   distribution root — spelled anyway, so the grant states what the jail needs instead of
+///   depending on that coincidence.
+/// - The headers are `<node-root>/include/node` **only where the distribution ships them**,
+///   which the Windows one does not — verified against `node-v24.18.1-win-x64.zip`'s central
+///   directory (zero `include/`, `.h` or `.lib` entries). So `include/node` is a POSIX answer,
+///   and the embedder asks the DISK rather than the platform: where the directory exists it
+///   names the distribution root, and where it does not it prefetches the `-headers.tar.gz`
+///   plus `node.lib` OUT of jail into a tree nub owns and names that instead.
+///
+/// Either way `npm_config_nodedir` names the granted tree, which is what makes the grant
+/// load-bearing rather than an optimisation. node-gyp reads `<nodedir>/include/node/*` and
+/// `<nodedir>/$(Configuration)/<name>.lib` when nodedir is set, and when it is NOT set it
+/// DOWNLOADS the headers into its own `%LOCALAPPDATA%\node-gyp\Cache` / `~/.cache/node-gyp`
+/// devDir (node-gyp 13 `lib/configure.js` `getNodeDir`, `lib/install.js`) — a fetch the jail's
+/// deny-all egress refuses, so an ungranted nodedir is not a slow native build, it is no
+/// native build at all. nub provisions Node under its version store (`~/.cache/nub/node/
+/// <ver>`), a path in neither `$tooldirs` nor the interpreter grant, so nothing else covers it.
+///
+/// The embedder keeps the grant on SUBTREES rather than the bare root, which for a system Node
+/// is a shared prefix carrying unrelated `etc/`/`var/`. A nonexistent path yields an inert
+/// allow, which is what lets the embedder pass a speculative spelling without probing first.
+/// Front-inserted as base allows so the reasserted secret/`.env` floor stays authoritative;
+/// these paths never overlap a secret.
+fn grant_build_jail_extra_reads(
+    policy: &mut SandboxPolicy,
+    extra_reads: &[PathBuf],
+    nub_cache_root: &Path,
+) {
+    let mut grants = Vec::new();
+    for dir in extra_reads {
+        // ⛔ THE ORIGIN IS DECIDED PER PATH, BY LOCATION, AND THAT IS A SAFETY BOUNDARY. These are
+        // nub-owned in the common case — provisioned Node's global tree and its prefetched headers,
+        // public bytes from nodejs.org under nub's own cache — which makes them publishable and
+        // removes ~1.3 s per jailed launch on Windows (measured once the store was published:
+        // `node-headers` grant 657 ms + revoke 667 ms, the largest remaining per-launch cost).
+        //
+        // But this list ALSO carries the resolved Python's closure, and that Python can be the
+        // SYSTEM one (`/usr/bin`, `C:\Python311`). `NubOwnedPublic` licenses a backend to publish
+        // the subtree MACHINE-WIDE, so marking the whole list would expose a system directory to
+        // every sandboxed app on the host. Only a path inside nub's own cache earns the mark.
+        let origin = if dir.starts_with(nub_cache_root) {
+            FsOrigin::NubOwnedPublic
+        } else {
+            FsOrigin::Speculative
+        };
+        push_read_path(&mut grants, dir, origin);
+    }
+    policy.fs.rules.entries.splice(0..0, grants);
+}
+
+/// The two subtrees of nub's own PM cache the jail grants, as `$tooldirs`-style surface
+/// patterns. Held here rather than inlined so they and the broad `$tooldirs` set resolve
+/// against the same anchor on every platform — `builtin_sets` carries `$cache/nub/pm` for
+/// its nub entry, and `the_narrowed_toolchain_grant_stays_inside_tooldirs` pins that these
+/// stay inside it.
+///
+/// The grant used to be the cache ROOT. That was wider than anything the jail reads and it
+/// leaked: a git dependency is cloned to `$cache/nub/pm/git/<key>`, whose `.git/config`
+/// records the fetch URL — so a private dep fetched over HTTPS with a token in the URL put
+/// that token in reach of EVERY lifecycle script on the machine (reproduced under the real
+/// jail on macOS and Linux, 2026-07-28). Naming the subtrees the jail actually needs is a
+/// GRANT NARROWING, not a deny, so the pure-allowlist invariant and the Windows backend are
+/// untouched.
+///
+/// Why exactly these two, and why the rest of the cache is not needed:
+/// - `store` is the global virtual store (`identity.rs` sets `virtual_store_subdir` to
+///   `store`), the directory packages actually materialize into. A project's
+///   `node_modules/<name>` is a SYMLINK out of it, and both Landlock and Seatbelt match on
+///   the canonicalized path, so the project `node_modules` grant does not reach the content
+///   behind the link. Nothing runs without this.
+/// - `tools` holds the node-gyp nub bootstraps for itself
+///   (`node_gyp_bootstrap.rs` → `<cache>/tools/node-gyp`). The read-ladder study measured 16
+///   of 33 packages failing `rc=127` without it.
+/// - `git` stays UNGRANTED. A git dep's own `prepare` still reaches its checkout, because
+///   the checkout is that spawn's `package_dir` rw grant — so the narrowing costs a git dep
+///   nothing and closes every CROSS-package read. (A git dep's script can still see its own
+///   repo's fetch URL; that credential is one it was fetched with, not another project's.)
+/// - `packuments-v1`, `packuments-full-v1`, `trust-policy-v1` are registry metadata the
+///   resolver consumes UNCONFINED, before any script spawns. No lifecycle script reads them.
+const NUB_PM_CACHE_PATTERNS: &[&str] = &[NUB_GLOBAL_VIRTUAL_STORE_PATTERN, "$cache/nub/pm/tools"];
+
+/// The GLOBAL virtual store, as a `$cache`-anchored surface pattern — the directory aube
+/// materializes every package into when `use_global_virtual_store` is on (the default off
+/// CI). Named once so the read grant above and the store-containment guard in
+/// [`store_entry_write_root`] can never drift apart.
+const NUB_GLOBAL_VIRTUAL_STORE_PATTERN: &str = "$cache/nub/pm/store";
+
+/// The PROJECT-LOCAL virtual store's leaf under `node_modules` — the OTHER root the same
+/// package can materialize into, since `use_global_virtual_store` is a per-install toggle
+/// and `with_project_local_dep_paths` flips it per PACKAGE. A `file:` dependency takes this
+/// path on an otherwise-global install, so both roots are live in one tree.
+///
+/// THE SINGLE SOURCE OF TRUTH FOR THE NAME, which nub-cli's `nub_setting_defaults` reuses
+/// when it sets the engine's `virtualStoreDir`. It lives here rather than there so the
+/// grant and the layout cannot drift: this leaf was `.nub` until it moved to the
+/// vendor-neutral `.store`, and a jail holding its own stale copy of the name declines
+/// SILENTLY — the grant compiles to nothing and the package dies on gyp's laundered
+/// ENOENT, indistinguishable from having no fix at all.
+pub const PROJECT_VIRTUAL_STORE_LEAF: &str = ".store";
+
+/// Where the per-package private HOMEs live, as a `$cache`-anchored surface pattern.
+///
+/// A 66-package lifecycle corpus put an unwritable `$HOME` behind 7 of 11 filesystem
+/// failures — `npx only-allow`'s `~/.npm` (the widest, a common preinstall idiom),
+/// `~/.cache/Cypress`, `~/.stc`, `~/.cache/ffmpeg-static-nodejs`. Each wants a
+/// home-anchored scratch dir; none wants the USER's home. Cypress also shows the tiers
+/// are ordered: its CDNs are already on `$downloads` and it still failed, because the
+/// write is refused before the fetch is attempted.
+///
+/// A sibling of, not a child of, `$cache/nub/pm`: the PM cache is read-granted to every
+/// jailed script, and the one writable home must not nest inside the store it could then
+/// shadow.
+const NUB_JAIL_HOME_ROOT_PATTERN: &str = "$cache/nub/jail-home";
+
+/// Environment set on every CONFINED lifecycle script, and on nothing else.
+///
+/// The bar for an entry here is narrow and both halves are load-bearing: the variable must
+/// suppress an attempt that NO grant could satisfy, and suppressing it must not be able to
+/// change an outcome. An entry that merely tidies output does not qualify — nub is not in the
+/// business of editing a script's environment for neatness, and outside the jail it sets
+/// nothing at all.
+///
+/// `PYTHONDONTWRITEBYTECODE` qualifies on both counts; the reasoning and the measurement are at
+/// the application site in [`compile_build_jail`].
+const BUILD_JAIL_BASELINE_ENV: &[(&str, &str)] = &[("PYTHONDONTWRITEBYTECODE", "1")];
+
+/// Resolve and materialize the private HOME for ONE package's lifecycle spawns.
+///
+/// PER-PACKAGE, not shared. A shared home is a config root two different dependencies
+/// both write: package A drops `$HOME/.npmrc` naming `script-shell`/`node-gyp` under its
+/// own control, package B's `prebuild-install || npm run build` fallback honours it, and
+/// the attacker now runs inside B's jail with write access to B's `build/Release/*.node`
+/// — which the user later `require()`s UNCONFINED. Per-package removes that channel
+/// outright, and it is what aube's own jail chose (`aube-scripts::jail_home`).
+///
+/// PERSISTENT across runs, which is the one divergence from `$tmp` and from aube. It buys
+/// only install-time cache reuse — re-installing the same package skips a ~250 MB Cypress
+/// or ~70 MB ffmpeg-static re-download and works offline the second time. It does NOT
+/// make those artifacts resolvable at RUN time: the app's `HOME` is the user's own, and
+/// nub sets no `CYPRESS_CACHE_FOLDER`. Persistence is safe here only because the home is
+/// per-package — the sole writer is the package that reads it.
+///
+/// `None` — a cache root the engine never established, or anything but a real directory
+/// squatting the leaf — leaves the jail compiling exactly as before. That is the
+/// conservative direction: no grant, no redirect, today's behavior.
+/// The package's private `$HOME`, for a caller that must reach into it AFTER the scripts
+/// finish — the `writePaths` move. Exposed rather than recomputed in nub-cli, because two
+/// implementations of the same path is exactly how a mover ends up looking somewhere the
+/// jail never wrote.
+pub fn jail_private_home(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
+    private_home_dir(homes, package_dir)
+}
+
+fn private_home_dir(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
+    // Gate on the engine's cache root already existing, so a policy compiled against a
+    // synthetic `Homes` (every unit test) neither materializes a tree nor silently
+    // changes shape with the caller's privileges.
+    if !homes.cache.is_dir() {
+        return None;
+    }
+    let root = PathBuf::from(crate::matcher::path::expand_symbolic(
+        NUB_JAIL_HOME_ROOT_PATTERN,
+        homes,
+    ));
+    std::fs::create_dir_all(&root).ok()?;
+    // Canonicalize the ROOT and append the leaf literally — never canonicalize the leaf.
+    // The leaf is the one node a jailed script can unlink and recreate (a Seatbelt subpath
+    // grant matches its own root), so following it would let a script replace its home
+    // with a symlink to the real one and have the NEXT compile grant that. Resolving the
+    // parent instead is what makes the grant unforgeable; `symlink_metadata` then refuses
+    // a leaf that is anything but a real directory. The helper also strips Windows'
+    // `\\?\` verbatim prefix, whose `?` a bounded-literal grant reads as a glob and drops.
+    let root = crate::matcher::path::canonicalize_including_nonexistent(&root);
+    let dir = root.join(package_home_slug(package_dir));
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => Some(dir),
+        Ok(_) => None,
+        Err(_) => create_private_dir(&dir).is_ok().then_some(dir),
+    }
+}
+
+/// Create `dir` owner-only. The home holds one package's install scratch; nothing else on
+/// the machine has business in it, and the umask default (0755) would publish it.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    // Only the `unix` arm mutates the builder; elsewhere the binding is immutable.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// A stable, filesystem-safe directory name for one package's home: its readable basename
+/// plus a hash of the resolved package dir, so two packages never collide and the same
+/// package finds its own cache again on the next install. Hash stability across Rust
+/// releases is not required — a changed hash only means a cold cache.
+fn package_home_slug(package_dir: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let resolved = crate::matcher::path::canonicalize_including_nonexistent(package_dir);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    resolved.hash(&mut hasher);
+    let name: String = resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("package")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{name}-{:016x}", hasher.finish())
+}
+
+/// Grant the build jail's narrowed READ set: the consumer's DEPENDENCY TREE, the
+/// consumer's top-level MANIFEST, and the two [`NUB_PM_CACHE_PATTERNS`] subtrees of nub's
+/// own PM cache. Together these replace what were once two much broader grants — `"./"`
+/// (the entire consuming project) and `$tooldirs` (16 ecosystem cache patterns).
+///
+/// Measured, not reasoned. A 34-package read-ladder study
+/// (`.fray/sandbox-minimum-readset.md`) isolated which grants are load-bearing, and a
+/// 311-package trust-list corpus (`.fray/sandbox-readset-fullcorpus.md`) then ran the
+/// whole set at scale: of the 219 packages that pass today, 217 are unaffected and the
+/// 2 that regressed drove the manifest grant below. What the narrowing buys is the
+/// credential surface those broad grants carried — under `"./"` a dependency's install
+/// script could read the consumer's source, config, `.git/hooks/`, and
+/// `.github/workflows/`.
+///
+/// Why each is irreducible:
+/// - a lifecycle script's OWN dependencies are HOISTED to the consumer's `node_modules`,
+///   so `node-gyp-build` and `prebuild-install` resolve out of `<project>/node_modules/.bin`
+///   rather than the package's own directory. Dropping the project read outright fails 27
+///   of 33 packages; keeping only `node_modules` costs nothing.
+/// - `package.json` is granted as ONE FILE, never the directory that holds it. Two
+///   packages at scale read the consumer's top-level manifest and crash with an uncaught
+///   `ENOENT` without it: `@sentry/capacitor` cross-checks its version against sibling
+///   `@sentry/*` entries, and `simple-git-hooks` looks for its own config field. It is a
+///   non-secret manifest the package is already declared in, so the exposure is
+///   negligible — and confining it to the file is what keeps the rest of the project out.
+/// - nub bootstraps its OWN node-gyp into `<cache>/nub/pm/tools/node-gyp`
+///   (`node_gyp_bootstrap.rs`) — a TOOLCHAIN grant wearing a cache-directory name.
+///   Under nub a confined script skips the ambient-PATH probe entirely, so this subtree
+///   (including the `lazy-bin` shim) is the ONLY node-gyp a native build can reach. The
+///   other 15 `$tooldirs` patterns (`~/.cargo/registry`, `~/.m2/repository`, the
+///   pnpm/yarn/bun stores, …) were reached by no package in either corpus.
+/// - `<cache>/nub/pm/store` is where the dependency tree physically lives under the global
+///   virtual store; the `node_modules` grant above only covers the symlinks pointing at it.
+///
+/// SPECULATIVE origin is load-bearing, not incidental: every root here is legitimately
+/// absent on a real host — a project whose dependencies are not installed, a manifest-less
+/// directory, a machine where nub has never bootstrapped node-gyp — and
+/// `compile_mount_plan` REFUSES a missing AUTHORED source, which would abort every
+/// confined script there.
+///
+/// ORDER: outermost path first, so each later grant nests INSIDE the one before it in
+/// bwrap's argv. The project root heads the list as a NODE-only read ([`project_cwd_node`]),
+/// so bwrap binds it list-only instead of auto-creating writable scaffolding, and the
+/// `package.json` / `node_modules` grants nest inside it unchanged.
+///
+/// Front-inserted so the surface's `package_dir` rw entry stays later and keeps winning.
+pub fn grant_build_jail_dependency_reads(
+    name: &str,
+    policy: &mut SandboxPolicy,
+    ctx: &CompileCtx,
+    package_dir: Option<&Path>,
+) {
+    if name != "build-jail" {
+        return;
+    }
+    // The two project roots are the ONLY grants the experimental arm can withhold, and
+    // withholding is all it can do — see `crate::arm` for why a drop-only boolean is what
+    // keeps the allowlist's nub-curated authorship invariant structural.
+    let mut roots = if crate::arm::project_grant_dropped() {
+        Vec::new()
+    } else {
+        vec![
+            ctx.homes.project.join("package.json"),
+            ctx.homes.project.join("node_modules"),
+        ]
+    };
+    // ⛔ THE STORE GRANT IS WHOLESALE, AND NARROWING IT IS OPT-IN FOR NOW. `$cache/nub/pm/store`
+    // grants read across every package ever installed into the global store — including other
+    // projects' private dependencies — where a script needs only its own closure. It is also 76%
+    // of the Windows per-launch cost (one inheritable ACE over 25,526 entries, granted AND revoked
+    // per package: 10,553 ms of 13,845 ms), so [`dependency_closure_store_cells`] is tighter and
+    // faster at once.
+    //
+    // BEHIND A SEAM BECAUSE THE FAILURE DIRECTION IS SILENT. A closure this walk under-discovers
+    // does not raise an error — the package dies on a laundered `ENOENT`, indistinguishable from
+    // having no fix. That is the one outcome CANON rejects outright, and a fixture cannot rule it
+    // out; only the corpus can, across the layouts a fixture never builds (hoisted, workspace,
+    // `file:` deps, optional deps absent on the measuring host). So the seam can only ever make
+    // the jail STRICTER, exactly like `NUB_SANDBOX_WIN_FAIL_CLOSED_READ_GRANTS`, and the DEFAULT
+    // stays the wholesale grant until the corpus promotes it.
+    let narrowed = std::env::var_os("NUB_SANDBOX_NARROW_STORE_READS").is_some();
+    // Kept APART from `roots` because these carry a different origin: they are nub's own public
+    // caches, which a backend may satisfy with one persistent machine-wide read rather than an ACE
+    // written and revoked every launch. `roots` holds project and user paths, which must never be
+    // marked that way — see [`FsOrigin::NubOwnedPublic`].
+    let mut nub_owned: Vec<PathBuf> = Vec::new();
+    for pattern in NUB_PM_CACHE_PATTERNS {
+        let expanded = PathBuf::from(crate::matcher::path::expand_symbolic(pattern, &ctx.homes));
+        if narrowed
+            && *pattern == NUB_GLOBAL_VIRTUAL_STORE_PATTERN
+            && let Some(dir) = package_dir
+            && let Some(cells) = dependency_closure_store_cells(dir, &expanded)
+        {
+            // Narrowed cells stay nub-owned — same bytes, same ownership, fewer of them.
+            nub_owned.extend(cells);
+            continue;
+        }
+        nub_owned.push(expanded);
+    }
+    // The `node_modules` the package ACTUALLY sits in, which is not always the project's.
+    // aube's hoisted planner is per-IMPORTER, so a workspace member's dependency
+    // materializes at `<root>/packages/<m>/node_modules/<name>` and resolves its own
+    // tooling through the sibling `<root>/packages/<m>/node_modules/.bin` — outside
+    // `<project>/node_modules` entirely. Missing it reproduces exactly the failure the
+    // read ladder measured at 27 of 33 packages when the project read is dropped, but
+    // only in workspaces, which is how it would have escaped a single-project corpus.
+    // Redundant for the root-hoisted and isolated layouts (both anchor under the
+    // project's own `node_modules`), where this resolves to a path already covered.
+    if let Some(dir) = package_dir
+        && let Some(own) = enclosing_node_modules(dir)
+    {
+        roots.push(own);
+    }
+    let mut grants = vec![project_cwd_node(&ctx.homes.project)];
+    for root in roots {
+        push_read_path(&mut grants, &root, FsOrigin::Speculative);
+    }
+    for root in nub_owned {
+        push_read_path(&mut grants, &root, FsOrigin::NubOwnedPublic);
+    }
+    // ⛔ THE npm PREFIX NEEDS **WRITE**, AND EVERYTHING ABOVE IS READ-ONLY. `redirect_npm_prefix`
+    // points `npm_config_prefix` at `$cache/nub/pm/tools/npm-prefix` precisely because `tools` is
+    // a baseline grant — but that grant is `push_read_path`, and a prefix is a directory npm
+    // CREATES and installs into. Its doc comment's "the leaf need not exist: granted-and-absent
+    // yields the handled ENOENT" holds for a package that only STATS the prefix and fails for any
+    // package whose npm invocation writes one.
+    //
+    // MEASURED on real Windows, the synth arm of `iedriver@4.0.0`:
+    //   EPERM: operation not permitted, mkdir 'C:\Users\nub\AppData\Local\nub\pm\tools\npm-prefix'
+    // The refused path is NUB'S OWN, not the package's, so this is a missing BASELINE rather than
+    // a package's capability need. It went unseen on POSIX because a measuring host that has run an
+    // unjailed install already HAS the directory — the over-granting-host hazard, not a platform
+    // difference.
+    //
+    // ⛔ THE TRIGGER IS "LOADS npm's CONFIG MACHINERY", NOT "SHELLS OUT TO npm", AND THE
+    // DISTINCTION SHRINKS THE BLAST RADIUS BY AN ORDER OF MAGNITUDE. `iedriver`'s install script is
+    // `node install.js` and never invokes npm at all; it reaches the prefix through its DEPENDENCY
+    // `npmconf`, which is what mkdirs it. Measured against that predicate across all 1466 win32
+    // MINIMUM records, only THREE packages carry an npm-config-family dependency and NONE of them
+    // is in the 96-record `write:"disk"` set — with a positive control that correctly flags
+    // `iedriver` itself, so the zero is a real negative rather than a broken filter.
+    //
+    // ⇒ This is a genuine defect and the fix is correct, but do NOT bill it as an explanation for
+    // the Windows residual. That population is dominated by something else and remains open.
+    //
+    // ⛔ SCOPED TO `npm-prefix`, NOT TO `tools`, AND THAT IS A SECURITY BOUNDARY. `tools` also
+    // holds the node-gyp nub bootstraps FOR ITSELF and executes on later installs, so a write
+    // grant over the whole directory would let one package's lifecycle script replace a binary
+    // that every subsequent install then runs — persistence, dressed as a build need.
+    // ⛔ EVERY REDIRECT TARGET NEEDS THE SAME CARVE-OUT, AND TWO WENT MISSING FOR MONTHS.
+    // `redirect_playwright_browsers` and `redirect_electron_cache` (`pm_engine/build_jail.rs`) both
+    // point their package at `$cache/nub/pm/tools/<leaf>` for the same reason the npm prefix does —
+    // to keep a multi-hundred-megabyte download out of the real home — and both are directories the
+    // package CREATES and writes into. Granting them read-only tells the package to download into
+    // space it cannot write. MEASURED in the corpus: `playwright-chromium@0.17.0` performed 653
+    // writes under `tools/ms-playwright`, every one refused, and the ladder repaired it by granting
+    // `write.userHome` — the whole home directory, to reach a directory nub itself created and
+    // named. The rule generalises past these three: a redirect that hands a package a path is
+    // incomplete until that path is writable.
+    //
+    // ⛔ ONE ENTRY PER LEAF, NEVER `tools` ITSELF — see the boundary argument above. `tools` holds
+    // the node-gyp nub bootstraps for its own use and executes on every later install, so a write
+    // grant spanning the directory would let one package's lifecycle script replace a binary that
+    // every subsequent install then runs. Adding a leaf here is safe; widening to the parent is not.
+    //
+    // ⛔ AND THE GRANT DOES NOT CREATE THE LEAF, WHICH ON TWO OF THREE BACKENDS MAKES THE GRANT
+    // VANISH RATHER THAN MERELY IDLE. `push_rw_path` stamps [`FsOrigin::Speculative`], and both
+    // enforcing backends DROP such a rule when its path is absent — `derive_grants`
+    // (`backend/windows.rs`) and `compile_mount_plan` (`backend/linux_grants.rs`) both `continue`
+    // on `tolerates_absent() && !exists`, and Landlock could not attach one anyway, since
+    // `open_path` needs an `open(O_PATH)` that a missing path cannot answer. The leaf is then
+    // covered only by the READ-ONLY `tools` grant above, and the package's own `mkdir` is refused.
+    // MEASURED on real Windows, corpus `electron@39.8.9`:
+    //
+    //     Error: EPERM: operation not permitted, mkdir '…\nub\pm\tools\electron-cache'
+    //
+    // A grant cannot authorize its own path's CREATION on either backend regardless: Landlock's
+    // `ACCESS_MAKE_DIR` is a right over a directory's CONTENTS, and Windows needs
+    // `FILE_ADD_SUBDIRECTORY` on the PARENT — which is exactly what `tools` withholds by design.
+    //
+    // ⛔ macOS IS THE EXCEPTION, so this is not the whole explanation for why it went unseen there.
+    // Measured with `sandbox-exec`, `(allow file-write* (subpath X))` DOES permit `mkdir X`:
+    // Seatbelt checks `file-write-create` against the target path and `subpath` matches its own
+    // root. Creating the leaf unconditionally anyway costs one empty directory and keeps all three
+    // backends on one story rather than leaving a platform whose behaviour depends on the host
+    // having run an unjailed install before — the over-granting-host hazard named above.
+    //
+    // `npm-prefix` is already materialized one level deeper by `redirect_npm_prefix`
+    // (`pm_engine/build_jail.rs`), which creates `<prefix>/lib/node_modules` and `<prefix>/bin`
+    // because npm `lstat`s that whole layout. It stays in this loop so the property holds HERE,
+    // where the leaves are enumerated, rather than depending on a redirect in another crate that a
+    // future leaf would not get.
+    for leaf in [
+        "$cache/nub/pm/tools/npm-prefix",
+        "$cache/nub/pm/tools/ms-playwright",
+        "$cache/nub/pm/tools/electron-cache",
+    ] {
+        let path = PathBuf::from(crate::matcher::path::expand_symbolic(leaf, &ctx.homes));
+        materialize_tool_leaf(&ctx.homes, &path);
+        push_rw_path(&mut grants, &path);
+    }
+    policy.fs.rules.entries.splice(0..0, grants);
+}
+
+/// The project root DIRECTORY NODE, read — `getcwd()`'s permission, not a project read.
+///
+/// WHAT THIS FIXES. Seatbelt gates `getcwd(2)` on `file-read-data` of the CWD's OWN
+/// directory node: measured on macOS 15, a process whose cwd is an ungranted directory
+/// gets EPERM from `getcwd` even though every ancestor and every path it goes on to open
+/// is granted. Nothing else in the jail's surface names the project root, so a confined
+/// process running there cannot learn where it is — `uv_cwd` EPERM in Node,
+/// `getwd: invalid argument` from Go, `fatal: Unable to read current working directory`
+/// from git, `pwd: .: Operation not permitted` from coreutils.
+///
+/// It is reached constantly because `INIT_CWD` is the project root and a lifecycle script
+/// acting on the CONSUMER's repository spawns its real work there — every git-hook
+/// installer does, and so does anything shelling out to make, python, or a Go/Rust binary.
+/// The script's OWN cwd is its package dir, which is granted, so the failure surfaces only
+/// once it spawns or `chdir`s; that made it look like a rule about process DEPTH (children
+/// fine, grandchildren broken) when depth is irrelevant and the cwd is the whole story.
+///
+/// THE NODE ALONE, and that distinction is the entire safety argument: `defaults::
+/// subtree_globs` would add the `/**` twin and turn this into a read of the consumer's
+/// whole project — source, `.env`, credentials. A bare path names the directory node, so
+/// what a confined package gains is the ability to LIST the project root's top-level
+/// entries, and nothing below it. Both backends already implement that distinction for
+/// `curated::project_cwd`'s per-package version of this same grant — `(literal …)` on
+/// macOS, `MountAccess::ListOnly` on Linux — and both once lost it in the WIDENING
+/// direction, so a change here re-reads those two first.
+///
+/// OUTSIDE the experimental arm above, deliberately. That arm exists to measure which
+/// packages need to READ the consumer's project files; withholding the cwd node with them
+/// would break `getcwd` in every confined spawn and confound the measurement with a
+/// failure that is not about reading anything.
+///
+/// Only Seatbelt enforces it — `chdir`/`getcwd` are not Landlock-handled accesses, and a
+/// Windows process's cwd is process state no AppContainer check consults — but the grant
+/// is emitted unconditionally anyway: it is one rule, and the platform that needs it is
+/// the one most developers install on.
+fn project_cwd_node(project_root: &Path) -> FsRule {
+    FsRule {
+        matcher: CanonGlob(canonicalize_glob_prefix(&project_root.to_string_lossy())),
+        effect: Effect::Allow,
+        access: FsAccess::Read,
+        origin: FsOrigin::Speculative,
+    }
+}
+
+/// The store cells this package's dependency closure actually occupies, or `None` when the
+/// closure cannot be established with certainty.
+///
+/// ⛔ WHY THIS EXISTS, AND WHY IT IS BOTH TIGHTER AND FASTER — the rare pair. The baseline grants
+/// [`NUB_GLOBAL_VIRTUAL_STORE_PATTERN`] WHOLESALE, so every lifecycle script on the host can read
+/// every package ever installed into the global store, including other PROJECTS' private
+/// dependencies. A script needs only its own closure. Measured cost of the wholesale grant on
+/// Windows: one inheritable read ACE across 25,526 store entries, granted AND revoked per package
+/// launch — 10,553 ms of a 13,845 ms fixed per-launch cost, i.e. 76% of it, since Windows
+/// propagates an inheritable ACE across the existing tree on both the set and the revoke.
+/// Narrowing removes most of that cost as a side effect of removing the over-grant.
+///
+/// ⛔ `None` FALLS BACK TO THE WHOLESALE GRANT, AND THAT DIRECTION IS DELIBERATE. Under-granting is
+/// rejected outright: a store cell this walk fails to discover is a package that dies on a
+/// laundered `ENOENT` with no diagnostic. So every uncertainty — an unreadable directory, a symlink
+/// escaping the store, a package never materialized into a store — returns `None` and keeps
+/// today's behaviour rather than guessing a smaller set.
+///
+/// THE WALK: dependencies materialize as symlinks in a cell's own `node_modules` pointing at
+/// sibling cells, so the closure is the transitive symlink reachability from this package's cell.
+/// Bounded by `MAX_CELLS` so a pathological tree cannot turn a policy compile into an unbounded
+/// filesystem crawl — and because past that size the per-cell ACE cost overtakes the one wholesale
+/// grant this is trying to avoid.
+fn dependency_closure_store_cells(package_dir: &Path, store_root: &Path) -> Option<Vec<PathBuf>> {
+    const MAX_CELLS: usize = 512;
+
+    // ⛔ `canonicalize_including_nonexistent`, NEVER `std::fs::canonicalize` — and the committed
+    // guard test `grant_canonicalizer.rs` enforces it, having caught exactly this bug in this
+    // function. On Windows the std form returns a `\\?\C:\…` verbatim path, whose `?` the compiler
+    // reads as a GLOB METACHAR and then DROPS the grant: a silent under-grant on the one platform
+    // this narrowing exists to speed up. The helper resolves symlinks — which this walk is entirely
+    // about — and strips that prefix. It also cannot fail, so an absent path normalises lexically
+    // instead of aborting the walk, and granting a not-yet-existent cell is harmless because these
+    // land as `FsOrigin::Speculative`.
+    use crate::matcher::path::canonicalize_including_nonexistent as canon;
+
+    let store_root = canon(store_root);
+    // The cell a path sits in: `<store>/<cell>`, exactly one component below the store root.
+    let cell_of = |p: &Path| -> Option<PathBuf> {
+        let rel = p.strip_prefix(&store_root).ok()?;
+        Some(store_root.join(rel.components().next()?.as_os_str()))
+    };
+
+    let start = cell_of(&canon(package_dir))?;
+    let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut queue = vec![start];
+    while let Some(cell) = queue.pop() {
+        if !seen.insert(cell.clone()) {
+            continue;
+        }
+        if seen.len() > MAX_CELLS {
+            return None;
+        }
+        // A cell with no `node_modules` has no dependencies — ordinary, not a failure.
+        let entries = match std::fs::read_dir(cell.join("node_modules")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            // Unreadable means the closure is UNKNOWN, which is not the same as empty.
+            Err(_) => return None,
+        };
+        for entry in entries {
+            let path = entry.ok()?.path();
+            // A `@scope/` directory holds the real links one level further down.
+            let is_scope = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('@'));
+            let candidates = if is_scope && path.is_dir() {
+                std::fs::read_dir(&path)
+                    .ok()?
+                    .map(|e| e.map(|e| e.path()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?
+            } else {
+                vec![path]
+            };
+            for candidate in candidates {
+                // A DANGLING link normalises lexically rather than erroring, so it still yields a
+                // cell. That is the safe direction: an absent optional dependency then carries a
+                // speculative grant on a path that does not exist (harmless) instead of being
+                // dropped from the closure, which would under-grant if it later appears.
+                let target = canon(&candidate);
+                if !target.starts_with(&store_root) {
+                    // Resolved OUTSIDE the store — a `file:` dependency, or a hoisted layout. The
+                    // closure stops being expressible as a set of store cells at all.
+                    return None;
+                }
+                queue.push(cell_of(&target)?);
+            }
+        }
+    }
+    (!seen.is_empty()).then(|| seen.into_iter().collect())
+}
+
+/// The nearest ancestor of `package_dir` named `node_modules`. That is the directory a
+/// lifecycle script's own dependency closure and `.bin` shims are installed into,
+/// whichever linker placed it.
+fn enclosing_node_modules(package_dir: &Path) -> Option<PathBuf> {
+    package_dir
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == "node_modules"))
+        .map(Path::to_path_buf)
+}
+
+/// The package's own STORE-ENTRY ROOT — the extra subtree a confined native build must be
+/// able to write — or `None` when the package was not materialized into a virtual store.
+///
+/// THE INVARIANT, and it is arithmetic rather than a choice any tool makes: a
+/// `node-addon-api` dependant hands gyp a `..`-relative `.gyp` path (`path.relative` in
+/// that package's `index.js`), and gyp joins `depth(".") + generator_output("build") +
+/// base_path("../../../..")` — **`build/` absorbs exactly one `..`**, so the join collapses
+/// one level too shallow and lands on the package's store-entry root, scoped and unscoped
+/// alike (a scoped name's extra `..` is cancelled by its extra directory level). npm and
+/// pnpm compute the same escaping path and both build fine, so the layout is not the fault;
+/// only confinement turns it into a failure. It presented for weeks as an ABI problem
+/// because gyp's `EnsureDirExists` is a bare `except OSError: pass` one line above the
+/// `open()` that reports, laundering the jail's EPERM into a misleading ENOENT.
+///
+/// THE ARITHMETIC ONLY LANDS HERE WHILE THE PACKAGE AND ITS GYP PROVIDER SHARE A VIRTUAL
+/// STORE. Split them — the package ejected project-local, `node-addon-api` left
+/// machine-global — and the climb overshoots into the PROJECT ROOT, which this grant does
+/// not and must not cover. `phantom_closure::gyp_provider_seeds` is what keeps them
+/// together; do not remove it expecting this grant to absorb the difference.
+///
+/// GUARDED ON STORE CONTAINMENT, because under a HOISTED linker the identical arithmetic
+/// lands on the PROJECT ROOT (or a workspace member's root), which must never be writable.
+/// The candidate qualifies only when its parent is a virtual store aube itself materializes
+/// into, so a hoisted layout declines structurally rather than by luck. `package_dir` is
+/// resolved first so the derivation does not depend on whether aube handed over the store
+/// path or the project's symlink into it — both backends match the resolved path anyway.
+///
+/// KNOWN RESIDUAL: a SCOPED package under a hoisted linker escapes into
+/// `node_modules/@scope/`, which this correctly declines and deliberately does not fix —
+/// granting the scope dir would hand a build write access to its sibling packages.
+fn store_entry_write_root(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
+    let resolved = crate::matcher::path::canonicalize_including_nonexistent(package_dir);
+    let candidate = enclosing_node_modules(&resolved)?.parent()?.to_path_buf();
+    let parent = crate::matcher::path::canonicalize_including_nonexistent(candidate.parent()?);
+    let global = PathBuf::from(crate::matcher::path::expand_symbolic(
+        NUB_GLOBAL_VIRTUAL_STORE_PATTERN,
+        homes,
+    ));
+    let project_local = homes
+        .project
+        .join("node_modules")
+        .join(PROJECT_VIRTUAL_STORE_LEAF);
+    [global, project_local]
+        .iter()
+        .any(|root| crate::matcher::path::canonicalize_including_nonexistent(root) == parent)
+        .then_some(candidate)
+}
+
+/// Push a READ-allow rule per subtree glob for `path` (the node itself + `/**`).
+///
+/// `origin` decides what an ABSENT path means. The interpreter was resolved from the
+/// spawn, so its disappearance is a real error; the extra reads are derived from the
+/// interpreter's location without ever being looked up, so a Node laid out differently
+/// (distro headers in a separate package, no bundled npm) must leave them inert rather
+/// than fail the jail closed.
+fn push_read_path(out: &mut Vec<FsRule>, path: &Path, origin: FsOrigin) {
+    for g in defaults::subtree_globs(&path.to_string_lossy()) {
+        out.push(FsRule {
+            matcher: CanonGlob(canonicalize_glob_prefix(&g)),
+            effect: Effect::Allow,
+            access: FsAccess::Read,
+            origin,
+        });
+    }
+}
+
+/// Baseline READ-WRITE on one directory nub owns. Always [`FsOrigin::Speculative`]: the target
+/// legitimately does not exist on a fresh machine — it is created by the very write this grant
+/// exists to permit — and `compile_mount_plan` REFUSES a missing AUTHORED source, which would
+/// fail the jail closed and abort the install this is meant to keep working.
+fn push_rw_path(out: &mut Vec<FsRule>, path: &Path) {
+    for g in defaults::subtree_globs(&path.to_string_lossy()) {
+        out.push(FsRule {
+            matcher: CanonGlob(canonicalize_glob_prefix(&g)),
+            effect: Effect::Allow,
+            access: FsAccess::ReadWrite,
+            origin: FsOrigin::Speculative,
+        });
+    }
+}
+
+/// Create one `$cache/nub/pm/tools` redirect target, so the read-write grant pushed beside it is
+/// attachable and the package never has to `mkdir` it against a read-only parent. The per-backend
+/// reasoning, and why widening `tools` is not the alternative, are at the call site in
+/// [`grant_build_jail_dependency_reads`].
+///
+/// `create_dir_all` rather than one level: `$cache/nub/pm/tools` itself is absent on a machine
+/// where nub has never bootstrapped node-gyp, which is precisely the fresh host this fixes.
+///
+/// GATED ON THE ENGINE'S CACHE ROOT EXISTING, the same guard [`private_home_dir`] and
+/// `curated::materialize_home_path` use and for the same two reasons: a policy compiled against a
+/// synthetic `Homes` (every unit test uses `/testhome/.cache`) must materialize nothing on the
+/// measuring host, and the side effect must not change shape with the caller's privileges.
+///
+/// Default permissions on purpose, unlike [`create_private_dir`]: these leaves are shared by every
+/// package's lifecycle scripts by design — a shared browser/Electron download cache is the entire
+/// point of the redirect — so the owner-only mode the per-package jail home needs is wrong here.
+///
+/// Failure is IGNORED. It is a best-effort improvement on a directory nub owns and names; if it
+/// cannot be made, the install proceeds and fails, or does not, exactly as it does today. Refusing
+/// the compile over a cache directory would trade a package-specific break for a total one.
+fn materialize_tool_leaf(homes: &Homes, path: &Path) {
+    if !homes.cache.is_dir() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(path);
+}
+
+/// The build-jail baseline surface. Tight, default-deny read — the dependency tree and
+/// nub's own toolchain cache ([`grant_build_jail_dependency_reads`], front-inserted after
+/// this folds) plus the OS backends' minimal-root closure — with WRITE confined to a
+/// per-run tmp (private everywhere but Windows, which takes the shared tmp; see the `$tmp`
+/// comment below) and, via [`compile_build_jail`], the script's own package dir.
+/// Egress gated on package identity, coarsely (see [`build_jail_net`]).
+///
+/// `package_dir` is the per-spawn WRITE grant. It stays LAST so its read-write access
+/// wins over the front-inserted dependency-tree read for the package subtree
+/// (last-match-wins, preserved by the `preserve_order` serde_json map). `None` yields
+/// the static `--sandbox build-jail` skeleton (the per-package write is a production-
+/// interposition concern), as does `private_home`. The env axis is the strip-all floor
+/// here; [`compile_build_jail`] replaces it with the scrubbed lifecycle env.
+fn build_jail_surface(
+    package_dir: Option<&Path>,
+    private_home: Option<&Path>,
+    package_name: Option<&str>,
+    package_version: Option<&str>,
+    store_entry_root: Option<&Path>,
+) -> Value {
+    let mut fs = serde_json::Map::new();
+    // `$tmp` sets the private per-run tmp MODE (TmpMode::Private) — a writable scratch,
+    // shared host tmp hidden. It emits no ordinary fs rule.
+    //
+    // WINDOWS takes the SHARED tmp instead, spelled as the key's ABSENCE (`Shared` is the
+    // default and the sentinel deliberately cannot name it). It is not a concession: the
+    // AppContainer backend cannot enforce `Private` at all, so asking for it only ever
+    // produced a standing `tmp-private` lost axis plus a per-run scratch dir the confined
+    // launch path never points the child at. The child is not left without scratch — the
+    // OS redirects an AppContainer's TEMP into its own
+    // `…\AppData\Local\Packages\<profile>\AC` profile.
+    //
+    // ⛔ "WRITABLE BY CONSTRUCTION" WAS TOO STRONG, and this comment used to say exactly that.
+    // The profile is created LAZILY, so `<profile>\AC` and `<profile>\AC\Temp` may simply NOT
+    // EXIST when the first confined child runs — and the failure is then ENOENT, not EPERM.
+    // MEASURED: 130 cell logs across electron-chromedriver, playwright-chromium and gifsicle
+    // carry `ENOENT: no such file or directory, open '…\<profile>\AC\Temp\…'`. That is why the
+    // Windows backend now `create_dir_all`s BOTH leaves before launch (`backend/windows.rs`,
+    // the `for leaf in ["AC", "AC/Temp"]` block). It matters far beyond scratch space: every
+    // download-then-move installer — `bin-wrapper`, `@electron/get`, `careful-downloader`
+    // (which hugo-extended adopted at 0.90.x), playwright's zip — STAGES INTO TEMP first, so a
+    // missing `AC\Temp` fails the install itself and the package walks the ladder to
+    // `write:"disk"`.
+    //
+    // The mode-not-path reasoning below is unaffected: creating two empty leaves costs nothing,
+    // whereas granting the literal `%TEMP%` path would pay the ACE tree walk described next.
+    // Free by construction, which is the load-bearing part: a tmp MODE emits no fs rule, so
+    // no inheritable ACE and no DACL propagation. Granting the literal `%TEMP%` PATH instead
+    // would cost a full inheritable-ACE tree walk over an enormous directory on every
+    // lifecycle spawn (`set_ace` propagates; ~1000 ms on a populated tree vs 3 ms on an
+    // empty one) — that is why the widening is a mode change and not a path grant.
+    #[cfg(not(windows))]
+    fs.insert("$tmp".to_string(), json!("rw"));
+    if let Some(dir) = private_home {
+        // This package's own HOME (see `private_home_dir`), read-write.
+        fs.insert(dir.to_string_lossy().into_owned(), json!("rw"));
+    }
+    if let Some(dir) = package_dir {
+        // The package's own store-entry root, read-write. FIRST so the `package_dir` entry
+        // below stays last and keeps winning under last-match-wins for its own subtree.
+        // See [`store_entry_write_root`] for why gyp writes here and why this is guarded on
+        // store containment rather than emitted unconditionally.
+        //
+        // COST, weighed and accepted: the store entry also holds `node_modules/.bin` for a
+        // package with binary deps, which this makes writable. Those shims execute only
+        // while THIS package's own lifecycle scripts run — a context the attacker already
+        // owns — and it does not reach the project's `node_modules/.bin`. The store is
+        // machine-global, so it shares the cross-project reach the store already has. A
+        // tighter variant (enumerate `<store-entry-root>/<dep_dirname>` per direct dep,
+        // which nub knows at spawn time) is real machinery for a jail whose stated posture
+        // is to loosen liberally when packages break.
+        if let Some(root) = store_entry_root {
+            fs.insert(root.to_string_lossy().into_owned(), json!("rw"));
+        }
+        // Own-package-dir READ-WRITE: the one subtree a dep build may write (its
+        // `build/`, the compiled `.node`).
+        //
+        // The write ladder found no outcome changed by widening this to `node_modules` rw
+        // or `./` rw — but it installed only the LATEST version of every package, so that
+        // is a result about the versions measured, NOT a general equivalence. Known
+        // counterexample: `@prisma/client` 3.x initializes `node_modules/.prisma/client`
+        // from its postinstall (`path.join(__dirname, '../../../.prisma/client')`), a
+        // SIBLING of the package dir, which this grant denies. Older versions can need
+        // writes the corpus never exercised; read the ladder as evidence about a version
+        // sample, not about the ecosystem.
+        //
+        // DO NOT "fix" that by allowing writes to dot-directories at the `node_modules`
+        // root. That generalization is strictly WORSE than the whole-project write grant
+        // it looks like a tightening of, because the dot-entries there are not scratch
+        // space — they are the install itself:
+        //   - `.aube/<dep_path>/node_modules/<name>` is nub's own virtual store, where
+        //     EVERY materialized package in the dependency tree lives (`.pnpm/` likewise).
+        //     Write access there is write access to every dependency's source, before that
+        //     source is executed.
+        //   - `.bin/` is the shim directory later tooling executes UNCONFINED — the exact
+        //     persistence vector the jail exists to close.
+        // Covering the codegen case therefore needs an ENUMERATED namespace (`.prisma`),
+        // never a pattern over dot-entries. Such a grant is a pure positive rw nested in
+        // the dependency-tree read — the same shape this `package_dir` entry already is —
+        // so it costs nothing on Windows: `deny_shadows_grant` rejects a DENY that overlaps
+        // a grant, and an allow-list introduces no deny. The deny-inside-allow form (grant
+        // the dot-entries, refuse `.bin`) is what Windows cannot express and would fail
+        // closed on every install there.
+        fs.insert(dir.to_string_lossy().into_owned(), json!("rw"));
+    }
+    // NO `/etc/shadow` deny here any more. The build jail is a PURE ALLOWLIST — it emits no
+    // deny rules at all — so the password-hash files are protected by not being granted:
+    // free on Linux (the minimal root binds `/etc` LEAVES, never the directory), and on
+    // macOS by the Seatbelt base granting the specific `/private/etc` files it needs instead
+    // of the whole subpath (`macos_seatbelt_base.sbpl`).
+    // The catalog's BASELINE paths, applied to every jailed script. Last, so an entry can widen
+    // a path the skeleton above already granted; a catalog cannot NARROW one, which keeps this
+    // a purely additive surface and means a bad entry cannot break confinement's floor.
+    for b in crate::catalog_override::baseline_paths() {
+        fs.insert(b.path.clone(), json!(if b.write { "rw" } else { "r" }));
+    }
+
+    json!({
+        "fs": Value::Object(fs),
+        "net": build_jail_net(package_name, package_version),
+        // Strip-all here; the interposition supplies the scrubbed lifecycle env.
+        "vars": []
+    })
+}
+/// Is this package allowed egress at all? THE ONE ANSWER, for every site that needs it.
+///
+/// ⛔⛔ THERE ARE THREE DECISION SITES AND ONE OF THEM WAS ANSWERING FROM THE v1 TABLE. The filesystem
+/// axis is decided in `compile_build_jail`, the compiled net axis in [`build_jail_net`], and the
+/// PER-PACKAGE NODE-LEVEL GATE in [`super::defaults::net_gate_node_options`] — which called
+/// `package_network::build_jail_net_allowed` directly, i.e. the v1 table, with no v2 catalog and no
+/// baseline. On Windows that shim IS the egress enforcement, so an uncatalogued package was denied the
+/// network there even though `baseline_caps().network` grants it, and a v2 entry carrying
+/// `network: true` was denied unless v1 happened to agree.
+///
+/// MEASURED, not theorised: 17 of the 86 win32 records whose verdict blames the jail fail with
+/// `nub build sandbox: blocked network access to node-precompiled-binaries.grpc.io by grpc` — and `grpc`
+/// carries NO catalog entry, so the baseline should have allowed it. The shim's own error text still told
+/// the user "packages may only reach the network if they carry an entry in nub's build catalog", which was
+/// the policy before the baseline existed.
+///
+/// So the decision lives here once and both callers use it. A comment telling the next person to keep two
+/// sites in step was already present and was not enough; the third site is why this is a function.
+pub fn build_jail_net_allowed_for(
+    package_name: Option<&str>,
+    package_version: Option<&str>,
+) -> bool {
+    // A v2 catalog owns the net axis too, for the same reason it owns the fs axis: the two
+    // tables are alternative spellings of one policy, so consulting v1 while v2 is in force
+    // answers from the wrong one. Measured before this existed — `network: true` compiled to
+    // nothing, because `apply_v2_grant` reported it on its outcome and the surface, built
+    // EARLIER, had already asked v1 and been told no.
+    // No longer feature-gated: every build bakes a v2 catalog, so `v2_in_force()` is the
+    // RUNTIME question of whether one is present rather than a compile-time question of whether
+    // the dev override exists. The v1 arm stays as the honest fallback for a build that bakes
+    // nothing.
+    if crate::catalog_override::v2_in_force() {
+        let here = crate::catalog_v2::Platform::current();
+        // ⛔⛔ THE NET AXIS IS DECIDED HERE AND THE FS AXIS IS DECIDED IN `compile_build_jail`, SO
+        // BOTH MUST APPLY THE SAME BASELINE. This was `is_some_and(|g| …network)`, i.e. "no
+        // catalog entry ⇒ no egress". Adding the baseline to the fs site alone changed NOTHING
+        // observable — the jail canary still reported `outbound socket denied:EPERM` on a freshly
+        // built binary — because egress never consulted the resolved caps at all. If you touch
+        // one of these two sites, touch the other; `an_uncatalogued_package_gets_the_baseline_grant`
+        // fails if they disagree.
+        // ⛔ THE ENTRY'S OWN VALUE, NOT UNIONED WITH THE BASELINE — AND A CATALOGUED PACKAGE MAY
+        // DELIBERATELY GET LESS THAN AN UNCATALOGUED ONE. That is not an incoherence in the model, it
+        // is the point of measuring: a widely-depended-on package is a high-value target, so the
+        // damage if it is compromised is far greater than for some unknown package, and confining it
+        // as tightly as its measurement allows is exactly the value the catalog adds. An earlier
+        // version of this line raised every entry to the baseline floor and erased that tightening
+        // across 168 packages.
+        package_name
+            .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
+            .map(|g| g.on(here).network)
+            .unwrap_or_else(|| crate::catalog_v2::baseline_caps().network)
+    } else {
+        super::package_network::build_jail_net_allowed(package_name, package_version)
+    }
+}
+
+/// The build-jail's net axis, gated on PACKAGE IDENTITY: a catalog entry decides egress, and a
+/// package with no entry — including one with no NAME at all — takes [`catalog_v2::baseline_caps`].
+///
+/// ⛔ NO ENTRY NO LONGER MEANS NO NETWORK. It did until `4001cec5c5`, and this doc said so; the
+/// baseline now grants egress, because the catalog is compiled in with `include_str!` while npm
+/// publishes continuously, so a package released after a nub build is uncatalogued BY CONSTRUCTION
+/// and refusing it is not a posture that converges — measured over 2,028 packages, denying
+/// everything satisfies 54.2% against the baseline's 96.4%. Read the whole argument at
+/// [`catalog_v2::baseline_caps`]; widen or narrow it THERE, not here.
+///
+/// So the Shai-Hulud shape — an attacker publishing a new `postinstall` into a package that never
+/// had one — is NOT blunted on this axis, and the entry that grants network is no longer the only
+/// way to get it. What blunts it is the FILESYSTEM half of the baseline: an unvetted package reads
+/// nothing beyond the base profile, so there is nothing worth exfiltrating down the socket it is
+/// allowed to open. Host granularity would not have helped either: narrowing an admitted host
+/// constrains a package somebody already reviewed while doing nothing about the unvetted one, and
+/// a global egress set handed that unvetted package `github.com` — ample for exfiltration alone.
+///
+/// The grant is therefore a BOOLEAN, deliberately. Both catalog spellings — a package named in
+/// `networkHosts[].fetchedBy` and one listed in `packageNetwork.full` — mean "this package was
+/// reviewed and admitted", so both resolve to the same grant. A package recorded in
+/// `notGranted.packages` is denied whichever way it was observed: the catalog parser subtracts
+/// the refused set from the union, so a refusal cannot be contradicted by an observation of
+/// what the package was seen fetching.
+///
+/// PER-HOST EGRESS IS DELIBERATELY NOT ENFORCED HERE, AND `$downloads` IS DELIBERATELY NOT
+/// REFERENCED. Do not restore either as a missing feature. Two of the three backends cannot
+/// enforce a host list at all: Linux needs a network namespace to force the child through nub's
+/// proxy, which needs an unprivileged user namespace — denied by default on Ubuntu 24.04, and
+/// requiring it is the one thing this product cannot do; Windows' loopback exemption
+/// (`NetworkIsolationSetAppContainerConfig`) is admin-only. macOS alone COULD enforce it, via
+/// Seatbelt confining egress to the proxy port, and enforcing it there was withdrawn on purpose:
+/// macOS is the platform most developers use, so being stricter there means an incomplete host
+/// list throws errors that Linux and Windows users never see, and confidence in the list is low.
+/// A host list that gates one platform and is provenance on two is a compat liability, not a
+/// defense. `$downloads` still serves `nub sandbox`, a different mechanism where per-host DOES
+/// work — this jail simply no longer consults it.
+///
+/// The catalog's per-package `hosts` arrays are retained for the same reason and enforce nothing
+/// either: a CHANGING host list is a detection signal, so a package that used to fetch from its
+/// own CDN and now reaches somewhere else shows up as a reviewable diff on
+/// `data/build-jail-catalog.json`. They are provenance, never a gate.
+///
+/// The surviving contract is uniform: an entry decides, and no entry takes the baseline's `true`.
+/// Denial is `false` everywhere. The admitted case is coarse everywhere too, but SPELLED per
+/// platform, because `enforce` carries more than egress on Linux:
+///
+/// - **macOS** and **Windows** get `true` (`enforce = false`). Seatbelt emits `(allow network*)`
+///   and starts no proxy; Windows' unprivileged egress lever is the AppContainer
+///   `internetClient` capability, which the backend grants on exactly `!net.enforce`, so
+///   coarse-allow is the ONLY spelling that reaches it. A host array there would instead select
+///   the per-host tier via `needs_account_backend` / `plan_net`, which needs an admin-registered
+///   loopback exemption, so an ordinary `nub install` would fail closed (or divert to the
+///   admin-only dedicated-account backend) for every catalogued package. `true` is still not
+///   "unrestricted" on Windows: WFP refuses an AppContainer's loopback whatever its capabilities
+///   and `privateNetworkClientServer` stays withheld, so the grant is public outbound only.
+/// - **Linux** gets `["*"]` — a catch-all Allow, naming no host. It CANNOT be `true`, because
+///   `backend::linux::build_seccomp` gates the whole socket-family ceiling and the io_uring
+///   triple-block on `net.enforce`: `enforce = false` would re-permit `AF_UNIX` (a path to host
+///   daemons like `docker.sock` that neither Landlock nor a netns scopes), `AF_VSOCK`,
+///   `AF_PACKET`, and io_uring's socket-creation side door. Keeping `enforce = true` with a
+///   catch-all Allow lifts exactly `AF_INET`/`AF_INET6` out of that ceiling and leaves the rest
+///   denied, which is the coarse grant with the non-egress protections intact. Zero named hosts
+///   means nothing here reads as a gate, and zero *authored* hosts keeps `mode` off the
+///   proxy-starting path (`apply_inner`'s Landlock arm skips the proxy outright).
+fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> Value {
+    let allowed = build_jail_net_allowed_for(package_name, package_version);
+    if !allowed {
+        return json!(false);
+    }
+    if cfg!(target_os = "linux") {
+        json!(["*"])
+    } else {
+        json!(true)
+    }
+}
+
+/// Compile the build-jail policy for ONE dependency lifecycle spawn — the production
+/// interposition entry the aube lifecycle hook drives. Builds the tight read/write
+/// skeleton for `package_dir`, grants the provisioned `interpreter`, then REPLACES the
+/// env axis with the constructed lifecycle env minus credential-shaped keys (D1: a
+/// dep build needs `PATH`/`NODE`/`npm_package_*`/build hints, so strip-all breaks it;
+/// the credential family — registry auth, `*TOKEN*`/`*SECRET*`/`*AUTH*` — is withheld).
+///
+/// `ambient_env` is the effective child env the UNCONFINED spawn would have had (the
+/// aube-process env plus the command's overlay), already reconstructed by the caller.
+/// `interpreter` is the closure to grant read (the provisioned Node + shim); each
+/// path and its bin dir become read grants. `extra_reads` are additional per-spawn read
+/// subtrees the embedder derives — the headers node-gyp compiles against and the global
+/// package tree `npm`/`npx` resolve through, both spelled per distribution shape (POSIX
+/// `include/node` + `lib/node_modules`; Windows a prefetched header tree + a flat
+/// `node_modules`) — see [`grant_build_jail_extra_reads`].
+///
+/// `package_name` is aube's INSTALLER-RESOLVED identity for this spawn and the only key
+/// the curated per-package exception table ([`super::curated`]) is looked up by. `None` —
+/// aube's root is a checkout it fetched — grants no exception. `package_version` is that
+/// identity's resolved version; it narrows a matched entry that carries a semver range, on
+/// both the filesystem and the egress axis. Most entries carry none and admit every version.
+pub fn compile_build_jail(
+    homes: Homes,
+    package_dir: &Path,
+    package_name: Option<&str>,
+    package_version: Option<&str>,
+    interpreter: Vec<PathBuf>,
+    extra_reads: Vec<PathBuf>,
+    ambient_env: BTreeMap<String, String>,
+) -> Result<SandboxPolicy, CompileError> {
+    let private_home = private_home_dir(&homes, package_dir);
+    let store_entry_root = store_entry_write_root(&homes, package_dir);
+    // Captured before `homes` is moved into the ctx below. `<cache>/nub` rather than `<cache>`:
+    // the publishable mark must cover only trees NUB owns, and the ambient cache root is shared
+    // with every other tool on the machine.
+    let nub_cache_root = homes.cache.join("nub");
+    let surface = build_jail_surface(
+        Some(package_dir),
+        private_home.as_deref(),
+        package_name,
+        package_version,
+        store_entry_root.as_deref(),
+    );
+    // cwd anchors diagnostics/canonicalization; the project root (homes.project) is
+    // what `"./"` expands against, so the package dir as cwd does not affect grants.
+    let cwd = homes.project.clone();
+    // Approved caps: this is nub's own build-jail, not dependency-authored config.
+    let ctx = CompileCtx::new(
+        homes,
+        cwd,
+        ScopeCapabilities::approved(),
+        ambient_env.clone(),
+    )
+    .with_interpreter(interpreter);
+    // The object surface routes through `compile` (not the string-preset arm), so the
+    // interpreter grant + secret-floor reassert are applied here rather than in
+    // `compile_scope`'s preset branch.
+    let mut policy = compile(&surface, &ctx)?;
+    grant_build_jail_dependency_reads("build-jail", &mut policy, &ctx, Some(package_dir));
+    grant_build_jail_interpreter("build-jail", &mut policy, &ctx);
+    grant_build_jail_extra_reads(&mut policy, &extra_reads, &nub_cache_root);
+    // LAST of the grants, so a curated rw wins under last-match-wins over the
+    // front-inserted dependency-tree READ it nests inside. `ctx.homes.project` is the
+    // consumer's project root, which aube guarantees whenever it hands over a name.
+    // A v2 override REPLACES the curated path rather than layering onto it: both express the
+    // same axis, so applying both would union two answers and leave the search that generates
+    // v2 unable to observe its own cell.
+    //
+    // THE GATE IS WHETHER A v2 CATALOG IS IN FORCE, not whether this package has an entry in
+    // one. Those are different questions, and conflating them makes an EMPTY v2 catalog — how
+    // "this package gets no grant" is spelled — fall through to the compiled-in v1 table, so
+    // the package silently keeps whatever grant it shipped with. Measured with the per-package
+    // gate: `wordpos` wrote into a sibling store entry from a supposedly grant-free cell,
+    // because v1 was still granting it, and every cell of the search then passed at state 0.
+    // Always `mut` now that the v2 arm is compiled into every build — the old feature-split on this
+    // binding existed only because nothing assigned it without the override, which made clippy's
+    // `unused_mut` fire on the DEFAULT feature set.
+    let mut applied_v2 = false;
+    // Accumulated across BOTH the v2 and v1 passes and applied once at the end — see the deferral
+    // note at the `write_disk` arm below.
+    let mut full_disk = false;
+    if crate::catalog_override::v2_in_force() {
+        applied_v2 = true;
+        let here = crate::catalog_v2::Platform::current();
+        // ONE grant, resolved by version inside `v2_grant_for` (narrowest `<` band, else the
+        // entry's `default`), then resolved to THIS OS by `on`, which lays the grant's
+        // `macos`/`linux`/`win` block over the outer fields one field at a time. An OS an entry
+        // says nothing extra about gets the outer answer; one whose block withdraws every field
+        // gets a grant that widens nothing, which means the base profile — never a fall-through
+        // to v1, which would silently apply a different answer.
+        // ⛔ AN UNCATALOGUED PACKAGE GETS THE BASELINE, NOT NOTHING — see `catalog_v2::baseline_caps`
+        // for the whole rationale. The two arms lower through the SAME `apply_v2_grant` call on
+        // purpose: a baseline with its own path would be a second policy engine that drifts from the
+        // catalog's. `package_name` being `None` (a path/tarball dep with no registry identity) also
+        // lands here, which is correct — it is exactly as unknown as an unlisted registry package.
+        // ⛔ THE BASELINE IS A FALLBACK, NOT A FLOOR, AND THAT ASYMMETRY IS DELIBERATE. A catalogued
+        // package may be granted LESS than an uncatalogued one: a widely-depended-on package is a
+        // high-value supply-chain target, so the damage if it is compromised is far greater than for an
+        // unknown package, and confining it to exactly what it was measured to need is the value the
+        // catalog adds. An earlier version of this raised every entry to the baseline, which erased that
+        // tightening for 168 packages in the name of a consistency the model never wanted.
+        let resolved = package_name
+            .and_then(|name| crate::catalog_override::v2_grant_for(name, package_version))
+            .map(|grant| grant.on(here))
+            .unwrap_or_else(|| std::borrow::Cow::Owned(crate::catalog_v2::baseline_caps()));
+        {
+            let caps = resolved;
+            let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, &caps);
+            if out.write_disk {
+                // DEFERRED, not applied here. `relax_fs_to_full_disk` clears the rules and flips
+                // `default_effect`, and the v1 pass below now also runs in a shipped build — so
+                // relaxing at this point lets v1 repopulate `entries` afterwards and the policy
+                // stops matching the empty-entries/Allow-default shape all three backends key on
+                // for "the whole disk". Caught by
+                // `a_full_disk_grant_opens_the_filesystem_for_that_package_and_no_other`.
+                full_disk = true;
+            } else if out.read_disk {
+                // `write:"disk"` already implies read, and it discards the rules wholesale, so the
+                // read relaxation is only meaningful on its own. Checked second, never both.
+                //
+                // ⛔ A BARE `**` READ ALLOW USED TO SIT HERE, AND IT HANDED OUT CREDENTIALS.
+                // The old relaxation front-inserted the whole-fs read so a later secret deny would
+                // stay authoritative under last-match-wins — sound in isolation, and its unit test
+                // asserted exactly that. But `enforce_pure_allowlist` (the LAST step of this
+                // compile) drops EVERY deny, because Landlock has no deny primitive at any ABI, so
+                // by launch time no floor was left for the ordering to protect. The test passed
+                // while guarding nothing: it called the relaxation directly and never ran the rest.
+                //
+                // MEASURED on macOS arm64, two arms differing only in the grant, fixtures kept OUT
+                // of `/tmp` (a fixture under `/tmp` sits inside the jail's private-temp redirect and
+                // cannot test a filesystem-denial claim at all — that confound produced a wrong
+                // reading first time round): with no catalog entry a script gets EPERM on `~/.ssh`
+                // and on the consuming project's `.env`; under `read:"disk"` it read BOTH.
+                //
+                // The allow-set below expresses the exclusion positively, which is the only form an
+                // allowlist can carry. ⛔ It recovers the `$HOME`-anchored SUBTREE secrets only —
+                // `.env*` is a depth-independent basename match with no finite allow-complement, so
+                // that band stays open here and needs a per-backend rendering step.
+                relax_fs_read_to_disk_minus_secrets(&mut policy, &ctx.homes);
+            }
+        }
+    }
+
+    let mut curated_env: Vec<(String, String)> = Vec::new();
+    // ⛔⛔ v2 IS CANONICAL FOR EVERY PACKAGE IT NAMES; v1 IS NOT LAYERED ON TOP OF IT. This used to
+    // union the two tables and keep the wider answer, on the reasoning that v2 cannot express v1's
+    // enumerated `siblingDirs` so applying both was "the safe direction". It is not safe in the
+    // direction that matters: v1 can only ever WIDEN, so a newer measurement could never narrow an
+    // older hand-written grant, and a catalog whose new document cannot narrow the old one is not a
+    // catalog. Measured on the shipped tables: 16 packages carried v1 `fullDisk` — which
+    // `relax_fs_to_full_disk` turns into no filesystem confinement AT ALL — while v2 has since
+    // measured 12 of them far narrower (`wordpos` `write:{deps}`, `registry-js` one `writePaths`
+    // entry, `dugite` network only). `puppeteer` is the row that cost an investigation: its v1
+    // `homePaths` grants read-write on the REAL `~/.cache/puppeteer` and aims `PUPPETEER_CACHE_DIR`
+    // there, so a jailed install left two multi-hundred-megabyte archives in the user's home while
+    // its v2 entry asked only that `.cache/puppeteer` be promoted out of the throwaway one.
+    //
+    // ⛔ WHICH HALF v2 TAKES IS DECIDED BY WHAT v2 CAN EXPRESS — see [`V2Coverage`]. Dropping the
+    // whole v1 entry is the blunt version and it breaks `@prisma/client`.
+    //
+    // ⛔ WHY DEFERRING IS SOUND RATHER THAN A LEAP. A corpus search measures a v2 entry with the dev
+    // override in force, and that override is the one thing that ALREADY skipped v1 — so every v2
+    // entry was measured in a v1-free world. Deferring to it reproduces the conditions it was
+    // measured under; the union never did.
+    let _ = applied_v2;
+    if !crate::catalog_override::override_v2_in_force() {
+        let coverage = if package_name.is_some_and(|name| {
+            crate::catalog_override::v2_grant_for(name, package_version).is_some()
+        }) {
+            super::curated::V2Coverage::Present
+        } else {
+            super::curated::V2Coverage::Absent
+        };
+        let curated = super::curated::grant_curated_package(
+            &mut policy,
+            &ctx.homes,
+            package_dir,
+            package_name,
+            package_version,
+            coverage,
+        );
+        full_disk |= curated.full_disk;
+        curated_env = curated.env;
+    }
+    // ONE relaxation, after BOTH passes, because it is destructive: it discards every rule and flips
+    // the default. Either source asking for the whole disk is enough, and doing it last is what
+    // keeps the shape the backends read.
+    if full_disk {
+        relax_fs_to_full_disk(&mut policy);
+    }
+    enforce_pure_allowlist("build-jail", &mut policy);
+    policy.env = defaults::lifecycle_scrubbed_env(&ambient_env);
+    // ⛔ CONFINED SCRIPTS ONLY. This is the sole `build_jail` construction path, so an
+    // unconfined lifecycle script keeps whatever bytecode behaviour the user's Python already
+    // had — nub does not reach into a process it is not confining.
+    //
+    // No grant can satisfy the write this suppresses, which is why suppressing it is the fix
+    // rather than widening the catalog: Python writes `__pycache__/*.pyc` beside node-gyp's
+    // own `gyp/pylib` sources, which sit in ANOTHER package's store entry that the interpreter
+    // closure grants READ-ONLY (`grant_build_jail_interpreter`), and `Scope::Deps` reaches only
+    // a DECLARED dependency while node-gyp is provisioned. So the jail refuses correctly and
+    // forever. Setting the variable means Python never ATTEMPTS it.
+    //
+    // MEASURED on `lmdb-store@2.0.0-alpha2`, Linux: 10 of 10 `mkdir __pycache__` refused
+    // `EACCES` and the install exited `rc=0` regardless. What makes it safe to generalise from
+    // that one package is not the count but CPython's documented fallback to compiling in
+    // memory — bytecode is a cache, so its absence cannot change an outcome.
+    //
+    // ⛔ THIS LIVED ONLY IN THE OVERRIDE UNTIL NOW, i.e. the mechanism the doc comment on
+    // `catalog_v2::BaselineEnv` describes was INERT in every shipped build:
+    // `catalog_override::baseline_env()` reads `active_v2()`, the compiled-in catalog declares
+    // no env at all, and the whole path is behind `build-jail-catalog-override`. The override
+    // loop still runs after this and still wins, so a v2 catalog can change or extend it.
+    for (name, value) in BUILD_JAIL_BASELINE_ENV {
+        defaults::insert_env(
+            &mut policy.env.constructed,
+            (*name).to_string(),
+            (*value).to_string(),
+        );
+    }
+    // The catalog's baseline env, AFTER the scrub so it cannot be stripped by it, and before
+    // the per-package overlay so a package can still win. The parser refuses credential-shaped
+    // names, so this cannot undo the scrub.
+    #[cfg(feature = "build-jail-catalog-override")]
+    for e in crate::catalog_override::baseline_env() {
+        defaults::insert_env(&mut policy.env.constructed, e.name.clone(), e.value.clone());
+    }
+    policy.build_jail = true;
+    // AFTER the scrub, which admits the ambient `HOME`/`USERPROFILE` verbatim — without
+    // this the grant above is invisible, because the script still spells its home the
+    // user's way and still lands outside every rule. Only names the ambient actually
+    // carried, so a POSIX child does not acquire a `USERPROFILE` the unconfined spawn
+    // never had. `LOCALAPPDATA` is deliberately NOT redirected: the Windows LowBox launch
+    // resolves its AppContainer profile dir from it (`defaults::OS_ESSENTIAL_ENV`), so
+    // pointing it elsewhere breaks process creation rather than a cache path. That leaves
+    // Windows a compat gap of a DIFFERENT SHAPE, not a reachability one: measured on
+    // windows-latest, the OS itself redirects the known folder for a LowBox token, so the
+    // child's `%LOCALAPPDATA%` is the per-container `…\AppData\Local\Packages\<profile>\AC`
+    // and the real one is denied outright. `unique_profile_name` keys that profile on
+    // pid+nonce and `ProfileGuard::drop` deletes it, so the redirect target is fresh,
+    // empty and destroyed per LAUNCH — Windows tooling that caches there never hard-fails,
+    // it just gets zero reuse, ever. The `USERPROFILE` jail-home below IS persistent, so
+    // the two axes do not behave alike.
+    // `APPDATA` RIDES WITH THEM, and the `LOCALAPPDATA` rationale above does NOT transfer:
+    // nothing in the launch path reads `APPDATA` (it appears only as an `OS_ESSENTIAL_ENV`
+    // passthrough name), so repointing it cannot break process creation the way repointing
+    // `LOCALAPPDATA` would.
+    //
+    // It has to move because npm on Windows resolves its cache to `%APPDATA%\npm-cache`,
+    // not to `$HOME/.npm` as on POSIX. Redirecting only HOME/USERPROFILE fixes the POSIX
+    // spelling and leaves the Windows one addressing the real user profile — outside the
+    // jail's writable set — so every lifecycle script shelling out to npm or
+    // prebuild-install takes `EPERM: mkdir …\AppData\Roaming\npm-cache`. That was 14 of 63
+    // Windows corpus breaks, the largest single mechanism (run 30651475914).
+    //
+    // The value keeps Windows' real `AppData\Roaming` shape instead of collapsing onto the
+    // home root, so a package that walks relative to `%APPDATA%` sees the layout it
+    // expects. It sits INSIDE `private_home`, which is already granted read-write, so it
+    // rides that grant and emits no new rule — no inheritable ACE, no DACL propagation,
+    // the same cost argument the `$tmp` mode change rests on.
+    if let Some(home) = &private_home {
+        let home_value = home.to_string_lossy().into_owned();
+        let appdata = home.join("AppData").join("Roaming");
+        // Materialized for the reason `private_home_dir` materializes its own leaf: a
+        // redirect onto a path that does not exist trades one failure for another.
+        let _ = std::fs::create_dir_all(&appdata);
+        let appdata_value = appdata.to_string_lossy().into_owned();
+        // THE CONTROL ARM. `build-jail-appdata-arm` drops the APPDATA redirect so the
+        // corpus can measure it against an otherwise identical binary. The banner is not
+        // decoration: an arm that silently did nothing is how a prior run measured jail-on
+        // against jail-on, so the harness asserts engagement from the run's own output
+        // rather than from the build flags it believes it used.
+        let mut keys: Vec<(&str, &String)> =
+            vec![("HOME", &home_value), ("USERPROFILE", &home_value)];
+        if cfg!(feature = "build-jail-appdata-arm") {
+            eprintln!(
+                "warning: build-jail APPDATA redirect DROPPED (build-jail-appdata-arm) \
+                 — experimental control arm, not a shipped configuration"
+            );
+        } else {
+            keys.push(("APPDATA", &appdata_value));
+        }
+        for (key, value) in keys {
+            // Matched the way `insert_env` replaces (case-insensitively on Windows, where
+            // the ambient may spell it `Userprofile`), so presence and replacement agree.
+            // Presence-gating is also what keeps this Windows-only without a `cfg`: a POSIX
+            // ambient carries no `APPDATA`, so the key is never introduced.
+            let present = policy.env.constructed.keys().any(|k| {
+                if cfg!(windows) {
+                    k.eq_ignore_ascii_case(key)
+                } else {
+                    k == key
+                }
+            });
+            if present {
+                defaults::insert_env(&mut policy.env.constructed, key.to_string(), value.clone());
+            }
+        }
+    }
+    // The other half of a `homePaths` grant, and it is UNCONDITIONAL where the `HOME` redirect
+    // above is presence-gated. The two differ because the redirect REPLACES a variable the
+    // script would otherwise read the user's way, while this one supplies a variable that is
+    // normally absent — gating it on presence would make the grant reachable only for a user
+    // who had already set it by hand, which is nobody. Overwriting an ambient value is
+    // deliberate and argued at `curated::CuratedGrant::home_paths`: the rule was compiled
+    // against nub's path, so a respected ambient value would aim the download at a directory
+    // the policy denies.
+    for (key, value) in curated_env {
+        defaults::insert_env(&mut policy.env.constructed, key, value);
+    }
+    Ok(policy)
+}
+
+/// Turn the fs axis off for a [`super::curated::CuratedGrant::full_disk`] package — the
+/// catalog's terminal rung, and the one grant that is not a rule.
+///
+/// SPELLED IN THE IR, NOT IN A FLAG. `{ entries: [], default_effect: Allow }` is the shape
+/// [`crate::policy::FsPolicy`] already defines as "this axis confines nothing", and all three
+/// backends already agree on it (`fs_confines` is the same predicate in each). So a full-disk
+/// policy is self-describing in a dump — the record of a package running effectively
+/// unjailed is the compiled policy itself, not a boolean a reader would have to know to look
+/// for — and it needs no `#[serde(skip)]` marker riding alongside the data.
+///
+/// DISCARDING THE RULES IS THE POINT, not a shortcut. They are all positive grants nested
+/// inside what is now granted, so keeping them would change nothing an access check can see
+/// while leaving three backends to reconcile "everything" against a list of narrower
+/// everythings — the shape that has already produced two silent widenings here (Seatbelt
+/// rendering a node grant as a subtree, Landlock collapsing one into an inherited subtree).
+/// `home_paths`' ENV pairs survive, because they are returned separately and are still
+/// load-bearing: the env axis keeps redirecting `HOME`, so a tool still has to be pointed at
+/// its real cache.
+///
+/// TMP GOES BACK TO SHARED for the same reason. `TmpMode::Private` hides the host tmp — a
+/// genuine filesystem confinement that would otherwise survive "full disk" and leave a
+/// script writing a hardcoded `/tmp/...` still broken, which is exactly the residual failure
+/// this tier exists to have none of.
+///
+/// ⛔⛔ THE SECRET FLOOR GOES WITH THE RULES, AND THAT ASYMMETRY AGAINST `read:"disk"` IS THE
+/// WHOLE REASON THIS RUNG IS THE ONE TO DRIVE TO ZERO. `defaults::SECRET_READ_RELPATHS` and the
+/// `.env` band live in `entries`, so `clear()` discards them and `default_effect = Allow` then
+/// grants what they denied — READ *and* WRITE on `~/.ssh`, `~/.npmrc`, the browser profiles and
+/// the keychain. Its sibling `relax_fs_read_to_disk_minus_secrets` keeps every one of them,
+/// because it front-inserts allows under a default that stays `Deny`.
+///
+/// MEASURED on macOS, one variable, same binary and probe, only the grant differing — and the
+/// WRITE column is the part worth internalising, because it makes this persistence rather than
+/// disclosure: a script that can write `~/.ssh` can append to `authorized_keys`.
+///
+/// | grant | list `~/.ssh` | read `~/.ssh/config` | write into `~/.ssh` | read `~/.npmrc` |
+/// |---|---|---|---|---|
+/// | `{"network":true}` | EPERM | EPERM | EPERM | EPERM |
+/// | `{"write":"disk","network":true}` | ok | ok | **wrote** | ok |
+///
+/// Both arms asserted `catalog OVERRIDDEN` present, `REJECTED` absent, and `HOME` redirected to
+/// the throwaway, so the jail was engaged in the arm that read the keys.
+///
+/// The consequence is a LADDER shape, not a local property: a package that fails at
+/// `read:"disk"` *because* it wanted a secret cannot be repaired by any narrower rung, so the
+/// search walks it up to here — and hands it the credential it was refused, plus write. Nothing
+/// in the ordering notices, since the ladder's oracle is pass/fail and this rung passes
+/// everything. Any grant recorded at this tier should be read as "unconfined", never as
+/// "needs to write widely".
+fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
+    policy.fs.rules.entries.clear();
+    policy.fs.rules.default_effect = Effect::Allow;
+    policy.fs.tmp = crate::policy::TmpMode::Shared;
+}
+
+/// Relax the fs READ axis to the whole filesystem, leaving WRITE confined.
+///
+/// ⛔ THIS EXISTED IN THE IR AND IN ALL THREE BACKENDS AND WAS NEVER EMITTED. `apply_v2_grant`
+/// has always computed `V2Outcome.read_disk`, and the only production consumer branched on
+/// `write_disk` alone — so `read:"disk"` was INERT. Measured before the fix: across 2,653
+/// MINIMUM corpus records, ZERO won at a read-disk-only state, and one package's read-disk cell
+/// was byte-identical to its zero-grant cell (same digest, same file count, same denial).
+/// A test asserted `read_disk` "must reach the caller" while the caller dropped it — the shape
+/// that let it survive.
+///
+/// WHY IT MATTERS MORE THAN ITS SIZE: with the rung dead, a package needing disk-wide READ could
+/// only ever be satisfied at `write:"disk"`, which is NO CONFINEMENT AT ALL. So emitting this is
+/// a security IMPROVEMENT, not a widening — those packages went from unjailed to read-everywhere
+/// but WRITE-CONFINED, and write is the axis that matters for tampering.
+///
+/// ⛔ NOT `relax_fs_to_full_disk`'s TRICK. That clears the rules and flips `default_effect`, which
+/// cannot express this: `FsRuleSet.default_effect` is a SINGLE `Effect` covering read and write,
+/// so flipping it to `Allow` would grant writes too. The default stays `Deny` and writes remain
+/// denied by the absence of an allow.
+///
+/// ⛔ FRONT-INSERTED, AND THAT IS LOAD-BEARING. Matching is last-match-wins, so an allow placed
+/// first is the LOWEST priority: the reasserted secret/`.env` floor and every narrower deny still
+/// override it. Appending instead would put whole-fs read above the secret denies and hand every
+/// lifecycle script `~/.ssh`.
+///
+/// ⛔ NO LONGER A `**` GRANT, AND THAT IS THE POINT. A bare whole-fs allow used to sit here; it
+/// handed a jailed script `~/.ssh` and the consuming project's `.env`, because
+/// `enforce_pure_allowlist` strips the secret floor the front-insertion was ordered to preserve.
+/// The emitter now names the disk MINUS the secret subtrees, since an allowlist cannot subtract.
+/// The old whole-fs spelling note still matters for `relax_fs_to_full_disk` (the `write:"disk"`
+/// path, which does still emit one): `is_whole_root` (Linux) accepts `"" | "**" | "/" | "/**"`
+/// but `is_whole_fs` (Windows) accepts only `"**" | "/**" | "/"`, and `subtree_globs` special-cases
+/// Windows to `**` because the drive-less globs `/` expands to match nothing there.
+///
+/// Per backend — all three implement it, but only since the emitter stopped spelling this rung as
+/// a whole-root pattern. Two earlier revisions of this list were each wrong for Linux in opposite
+/// directions; the current row is measured, not reasoned:
+///   Linux   Implemented, and it does NOT go through `is_whole_root`. That branch of
+///           `compile_mount_plan` (`linux_grants.rs`) silently drops a whole-root READ, which is
+///           what made this rung inert while a bare `**` was the spelling — MEASURED then on kernel
+///           6.17: base and `read:"disk"` were byte-identical across every probe. The walk below
+///           emits concrete per-path allows instead, so the branch is never reached and Landlock
+///           gets real rules. Proved end-to-end in `wiki/research/linux-full-disk-read.md`, and
+///           `linux_grants.rs` carries the matching note above the branch.
+///   macOS   emits per-path `file-read*` allows, no longer the `(subpath "/")` generous base.
+///   Windows ⛔ THIS ROW IS STALE IN THE SAME WAY THE LINUX ONE WAS, and the correction is READ
+///           OFF THE CODE, not measured — treat the runtime consequence as unverified until a
+///           Windows run confirms it. It used to say `degrade.generous_read` is set, so the LowBox
+///           token is declined and the loss reported. `generous_read` has exactly two triggers
+///           (`windows.rs`): `fs.rules.default_effect == Effect::Allow`, and a rule whose matcher
+///           satisfies `is_whole_fs`. The walk below leaves the default at `Deny` and emits
+///           concrete per-path allows, so it meets NEITHER — the first trigger is now reached only
+///           by `relax_fs_to_full_disk`, i.e. by `write:"disk"`. What this rung costs on Windows
+///           instead is an ACE per granted path, written and revoked every launch, which is a
+///           volume question rather than a correctness one.
+// No longer gated: the `read:"disk"` rung is emitted from the v2 catalog path, and that path is now
+// compiled into every build because every build bakes a catalog. The gate existed only because the
+// sole production caller was itself feature-gated.
+fn relax_fs_read_to_disk_minus_secrets(policy: &mut SandboxPolicy, homes: &Homes) {
+    policy
+        .fs
+        .rules
+        .entries
+        .splice(0..0, super::defaults::disk_minus_secrets_read_allows(homes));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::compile;
+
+    /// A catalogued package whose entry WITHHOLDS egress on the platform this binary runs on, plus
+    /// a version its entry admits.
+    ///
+    /// ⛔ IT IS PER-PLATFORM BECAUSE NO PACKAGE DENIES ON ALL THREE ANY MORE, and that is the point
+    /// rather than an inconvenience. Two earlier fixtures — `classic-level`, then
+    /// `stream-chat-react-native-core` — were each chosen for denying everywhere, and each stopped
+    /// denying once its licence was re-examined: the first rested on base-profile passes, a rung
+    /// that CARRIES the network, and the second on corpus records flagged `arms-unfalsifiable`
+    /// behind which no arm had ever dropped egress. What is left are COLD-INSTALL SWEEP verdicts,
+    /// where the real package was installed against the shipped grant, and those are per-platform
+    /// by nature. One fixture per platform keeps every arm resting on a measurement rather than on
+    /// a name that merely reads as denied today.
+    ///
+    /// Both entries are a single unbanded `default` and neither appears in `curated` or
+    /// `package_network`, so no version and no other tier can move the answer. Each test asserts
+    /// the denial from the catalog before relying on it.
+    #[cfg(target_os = "windows")]
+    const DENIED_FIXTURE: (&str, &str) = ("blake-hash", "2.0.0");
+    #[cfg(not(target_os = "windows"))]
+    const DENIED_FIXTURE: (&str, &str) = ("pizzip", "3.0.5");
+
+    /// Anchor a synthetic fixture path on a real drive when the tests run on Windows.
+    ///
+    /// ⛔ `/testhome` IS NOT AN ABSOLUTE PATH ON WINDOWS. It is rooted but DRIVE-LESS, so
+    /// `Path::is_absolute` answers false, `canonicalize_glob_prefix` returns the pattern
+    /// unresolved, and `PathMatcher::decide` then answers Deny for every candidate. The whole
+    /// build-jail fixture family was therefore inert on Windows: the tests that assert a grant
+    /// failed, and — worse — every test asserting a DENIAL passed without exercising anything.
+    /// MEASURED on Windows Server 2022 before this: 14 of 229 lib tests red, and the green ones
+    /// included denial assertions no policy could have satisfied differently.
+    ///
+    /// Expands at COMPILE time to a `&'static str`, so every call site keeps its existing type
+    /// and the POSIX spelling is byte-identical off Windows.
+    macro_rules! fx {
+        ($path:literal) => {
+            if cfg!(windows) {
+                concat!("C:", $path)
+            } else {
+                $path
+            }
+        };
+    }
+
+    /// The `read:"disk"` grant must be READ-only and must sit BENEATH every pre-existing deny, so a
+    /// user-authored or fold-emitted deny still overrides it under last-match-wins.
+    ///
+    /// ⛔ THIS NO LONGER CHECKS FOR A WHOLE-FS SPELLING, and that is the change rather than an
+    /// omission. It used to assert `entries[0]` was `**`/`/**`/`/`; that grant is exactly what
+    /// handed a jailed script `~/.ssh`, so asserting its presence now contradicts
+    /// `read_disk_excludes_secret_subtrees_and_emits_no_whole_disk_allow` below, which asserts its
+    /// ABSENCE. The ordering property it also covered is real and is kept here.
+    #[test]
+    fn read_disk_relaxation_is_read_only_and_yields_to_later_denies() {
+        let mut policy = SandboxPolicy::default();
+        let secret_floor = FsRule {
+            matcher: CanonGlob(fx!("/testhome/.ssh/**").to_string()),
+            effect: Effect::Deny,
+            access: FsAccess::DENY,
+            origin: FsOrigin::Authored,
+        };
+        policy.fs.rules.entries.push(secret_floor.clone());
+
+        let (_guard, homes) = secretful_home();
+        relax_fs_read_to_disk_minus_secrets(&mut policy, &homes);
+
+        assert!(
+            policy.fs.rules.entries.len() > 1,
+            "precondition: the emitter must have produced something, or every assertion below is \
+             vacuously true"
+        );
+        assert!(
+            policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .all(|r| r.effect != Effect::Allow || r.access == FsAccess::Read),
+            "every allow must grant READ only; ReadWrite here is a disk-wide WRITE grant wearing a \
+             read grant's name, and Landlock outright rejects a writable whole-fs mount"
+        );
+        assert_eq!(
+            policy.fs.rules.default_effect,
+            Effect::Deny,
+            "the default must stay Deny — flipping it to Allow (what relax_fs_to_full_disk does) \
+             would grant WRITES too, which is the distinction this function exists to make"
+        );
+        assert_eq!(
+            policy.fs.rules.entries.last(),
+            Some(&secret_floor),
+            "the pre-existing deny must remain LAST; matching is last-match-wins, so an allow \
+             spliced in after it would override the secret floor"
+        );
+    }
+
+    /// A `$HOME` with one real secret and one ordinary sibling, so a test can tell "excluded the
+    /// secret" apart from "granted nothing at all" — which are indistinguishable without the
+    /// sibling, and which is exactly how a broken emitter would look correct.
+    fn secretful_home() -> (tempfile::TempDir, Homes) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Canonicalized because macOS resolves `/var` and `/tmp` through symlinks; the walk
+        // compares real paths, so an uncanonicalized home never matches and the test would pass
+        // for the wrong reason. Through the CRATE's canonicalizer rather than `std::fs`'s: the
+        // std one returns a `\\?\`-verbatim path on Windows, and after slash-normalization that
+        // `?` reads as a glob metacharacter — every grant derived from this home is then dropped
+        // as an unenforceable embedded glob, and the emitter looks like it granted nothing.
+        let home = crate::matcher::path::canonicalize_including_nonexistent(dir.path());
+        std::fs::create_dir_all(home.join(".ssh")).expect("mk .ssh");
+        std::fs::create_dir_all(home.join("projects")).expect("mk projects");
+        // A real project-local env secret, and an ordinary sibling beside it: the pair is what
+        // lets a test tell "excluded the .env" from "excluded the whole project directory".
+        std::fs::write(home.join("projects/.env"), "TOKEN=decoy").expect("mk .env");
+        std::fs::write(home.join("projects/index.js"), "//").expect("mk index.js");
+        // A directory containing NO secret at any depth. `projects` cannot serve this role: it holds
+        // a `.env`, so the walk descends into it and grants its children individually rather than
+        // granting the directory wholesale — which is correct, and which is why a test asserting a
+        // whole-subtree grant needs a branch the walk never has reason to enter.
+        std::fs::create_dir_all(home.join("Documents")).expect("mk Documents");
+        let homes = Homes {
+            home: home.clone(),
+            tmp: home.join("tmp"),
+            cache: home.join("cache"),
+            project: home.join("projects"),
+        };
+        (dir, homes)
+    }
+
+    /// ⛔ THE REGRESSION GUARD FOR A MEASURED CREDENTIAL LEAK. A bare `**` read allow used to be
+    /// emitted here, and `enforce_pure_allowlist` — the LAST step of the build-jail compile — then
+    /// stripped the secret deny that was supposed to sit beneath it. MEASURED on macOS arm64, two
+    /// arms differing only in the grant, fixtures kept OUT of `/tmp` (a fixture under `/tmp` sits
+    /// inside the jail's private-temp redirect, which produced a wrong reading the first time):
+    /// with no catalog entry a script got EPERM on `~/.ssh`; under `read:"disk"` it read the file.
+    ///
+    /// Runs the PRODUCTION order — relax, then enforce the pure allowlist — because that ordering
+    /// is what the old test got wrong: it exercised the relaxation in isolation and so passed while
+    /// guarding nothing.
+    #[test]
+    fn read_disk_excludes_secret_subtrees_and_emits_no_whole_disk_allow() {
+        let (_guard, homes) = secretful_home();
+        let mut policy = SandboxPolicy::default();
+
+        relax_fs_read_to_disk_minus_secrets(&mut policy, &homes);
+        enforce_pure_allowlist("build-jail", &mut policy);
+
+        let allows: Vec<&str> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|r| r.effect == Effect::Allow)
+            .map(|r| r.matcher.as_str())
+            .collect();
+
+        // POSITIVE CONTROL FIRST. Without it an emitter returning an empty vec satisfies every
+        // assertion below, and "granted nothing" would read as "excluded the secret".
+        let sibling = format!(
+            "{}/Documents/**",
+            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+        );
+        assert!(
+            allows.iter().any(|a| *a == sibling),
+            "the ordinary sibling {sibling:?} must still be granted — without this the test cannot \
+             distinguish a working exclusion from an emitter that granted nothing at all"
+        );
+
+        let secret = format!(
+            "{}/.ssh",
+            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+        );
+        assert!(
+            !allows
+                .iter()
+                .any(|a| *a == secret || *a == format!("{secret}/**")),
+            "~/.ssh must never appear in the allow-set; it is the exact path a jailed lifecycle \
+             script was measured reading under a read:\"disk\" grant"
+        );
+        // ⛔ THE EMPTY STRING IS IN THIS LIST BECAUSE OMITTING IT LET THE BUG THROUGH. The emitter
+        // used to self-grant `/`, `canonicalize_glob_prefix` collapsed that to `""`, and `""` is
+        // one of the four spellings `is_whole_root` accepts — so the policy opened with a
+        // whole-root read while this very test reported green. Keep this list identical to the
+        // union of `is_whole_root` (Linux, `"" | "**" | "/" | "/**"`) and `is_whole_fs` (Windows).
+        assert!(
+            !allows
+                .iter()
+                .any(|a| matches!(*a, "" | "**" | "/**" | "/" | "/*")
+                    || *a
+                        == format!(
+                            "{}/**",
+                            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+                        )),
+            "no whole-disk or whole-home SUBTREE allow may be emitted (got {allows:?}) — either one \
+             re-admits every secret the walk exists to leave out, which is the defect this guards"
+        );
+        assert_eq!(
+            policy.fs.rules.default_effect,
+            Effect::Deny,
+            "the default must stay Deny; flipping it to Allow would grant writes too"
+        );
+        assert!(
+            policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .all(|r| r.access == FsAccess::Read),
+            "every emitted rule must be READ-only — a write here would be a whole-disk write grant \
+             wearing a read grant's name"
+        );
+    }
+
+    /// ⛔ THE PROJECT'S OWN `.env` IS THE CASE THAT MATTERS MOST and it is NOT covered by
+    /// `SECRET_READ_RELPATHS`, which is entirely `$HOME`-relative. MEASURED before the fix: under a
+    /// `read:"disk"` grant a jailed lifecycle script read the consuming project's `.env` in full.
+    ///
+    /// `ENV_DENY_LEAF_GLOBS` is a depth-INDEPENDENT basename match, so it has no finite
+    /// allow-complement and cannot be preserved in general. What IS recoverable is the file that
+    /// exists on disk at compile time: it resolves to an exact path the walk can exclude by name.
+    ///
+    /// ⛔ RESIDUAL, DELIBERATE, AND NOT A BUG THIS TEST SHOULD GROW TO COVER: a `.env` NESTED deeper
+    /// (a monorepo's `packages/foo/.env`) is still reachable under `read:"disk"`, because the walk
+    /// only descends toward paths it already knows are secret. Closing that needs a per-backend
+    /// rendering step, since the compile is backend-agnostic.
+    #[test]
+    fn read_disk_excludes_the_projects_own_env_file() {
+        let (_guard, homes) = secretful_home();
+        let mut policy = SandboxPolicy::default();
+
+        relax_fs_read_to_disk_minus_secrets(&mut policy, &homes);
+        enforce_pure_allowlist("build-jail", &mut policy);
+
+        let allows: Vec<&str> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|r| r.effect == Effect::Allow)
+            .map(|r| r.matcher.as_str())
+            .collect();
+
+        // POSITIVE CONTROL: the project's ordinary file must still be granted. Without it, excluding
+        // the ENTIRE project directory would satisfy the assertion below and read as a pass.
+        let ordinary = format!(
+            "{}/projects/index.js/**",
+            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+        );
+        assert!(
+            allows.iter().any(|a| *a == ordinary),
+            "the project's ordinary file must still be readable (looked for {ordinary:?}) — without \
+             this the test cannot tell an excluded .env from an excluded project"
+        );
+
+        let env = format!(
+            "{}/projects/.env",
+            crate::matcher::path::normalize_slashes(&homes.home.to_string_lossy())
+        );
+        assert!(
+            !allows
+                .iter()
+                .any(|a| *a == env || *a == format!("{env}/**")),
+            "the project's .env must never appear in the allow-set; got {allows:?}"
+        );
+    }
+
+    /// The jail suppresses Python's bytecode write on a CONFINED script, and on nothing else.
+    ///
+    /// ⛔ THE NEGATIVE HALF IS THE POINT. Setting an environment variable is nub reaching into
+    /// someone else's process, which is justified only where nub is already confining that
+    /// process — so an assertion that only checked PRESENCE would pass for an implementation
+    /// that edited every spawn's environment. The unconfined arm is what pins the scope.
+    #[test]
+    fn python_bytecode_is_suppressed_only_inside_the_jail() {
+        let jailed = production_build_jail_policy();
+        assert_eq!(
+            jailed
+                .env
+                .constructed
+                .get("PYTHONDONTWRITEBYTECODE")
+                .map(String::as_str),
+            Some("1"),
+            "a confined script must not attempt a __pycache__ write that no grant can satisfy",
+        );
+
+        let ctx = CompileCtx::new(
+            Homes {
+                home: PathBuf::from(fx!("/testhome")),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: PathBuf::from(fx!("/testhome/.cache")),
+                project: PathBuf::from(fx!("/proj")),
+            },
+            PathBuf::from(fx!("/proj")),
+            ScopeCapabilities::approved(),
+            BTreeMap::new(),
+        );
+        let unconfined =
+            compile(&json!({ "fs": ["./"] }), &ctx).expect("an ordinary surface compiles");
+        assert!(
+            !unconfined.build_jail,
+            "fixture precondition: this surface must NOT be the build jail, or the control below is vacuous",
+        );
+        assert!(
+            !unconfined
+                .env
+                .constructed
+                .contains_key("PYTHONDONTWRITEBYTECODE"),
+            "nub must not edit the environment of a process it is not confining",
+        );
+    }
+
+    fn build_jail_policy() -> SandboxPolicy {
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
+        };
+        let ctx = CompileCtx::new(
+            homes,
+            PathBuf::from(fx!("/proj")),
+            ScopeCapabilities::approved(),
+            BTreeMap::new(),
+        );
+        compile(&json!("build-jail"), &ctx).expect("build-jail preset compiles")
+    }
+
+    /// The PRODUCTION path — what every lifecycle spawn actually runs. Reaches the fold with
+    /// a `package_dir` allow present, so the fold's env-deny finalizer fires here where it
+    /// declines on the denies-only static skeleton; that difference is exactly why the
+    /// pure-allowlist invariant is asserted on both.
+    fn production_build_jail_policy() -> SandboxPolicy {
+        let (interpreter, extra_reads) = POSIX_LAYOUT;
+        production_build_jail_policy_for(interpreter, extra_reads)
+    }
+
+    /// The two DISTRIBUTION SHAPES the embedder can hand `compile_build_jail`, as
+    /// (interpreter, extra reads). They are not variants of one path — see
+    /// [`grant_build_jail_extra_reads`] — so both are exercised rather than the POSIX one
+    /// standing in for both, which is how the Windows spelling stayed inert unnoticed.
+    ///
+    /// Spelled POSIX-style because the compiler is OS-agnostic and the drive letter is not what
+    /// differs: the SHAPE is (nested `bin/` + sibling `lib/` + in-tree headers) against (flat
+    /// root + headers in a separately-prefetched tree).
+    const POSIX_LAYOUT: (&str, &[&str]) = (
+        fx!("/testhome/.cache/nub/node/v26/bin/node"),
+        &[
+            fx!("/testhome/.cache/nub/node/v26/include/node"),
+            fx!("/testhome/.cache/nub/node/v26/lib/node_modules"),
+        ],
+    );
+    const FLAT_LAYOUT: (&str, &[&str]) = (
+        fx!("/testhome/.cache/nub/pm/jail-bin/24.18.1-x64/node.exe"),
+        &[
+            fx!("/testhome/.cache/nub/pm/node-headers/24.18.1"),
+            fx!("/testhome/.cache/nub/pm/jail-bin/24.18.1-x64/node_modules"),
+        ],
+    );
+
+    fn production_build_jail_policy_for(interpreter: &str, extra_reads: &[&str]) -> SandboxPolicy {
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
+        };
+        compile_build_jail(
+            homes,
+            Path::new(fx!("/proj/node_modules/somepkg")),
+            None,
+            None,
+            vec![PathBuf::from(interpreter)],
+            extra_reads.iter().map(PathBuf::from).collect(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles")
+    }
+
+    /// The build-jail policy for ONE named package, so a test can vary only the catalog
+    /// identity — the single input that selects a curated grant.
+    fn build_jail_policy_for_package(name: &str) -> SandboxPolicy {
+        build_jail_policy_for_package_at(name, "1.0.0")
+    }
+
+    /// The same, at a chosen version — for a fixture whose catalog answer is version-banded and
+    /// whose bands carry per-OS overlays, where pinning `1.0.0` would make the assertion mean
+    /// something different on each platform.
+    fn build_jail_policy_for_package_at(name: &str, version: &str) -> SandboxPolicy {
+        let (interpreter, extra_reads) = POSIX_LAYOUT;
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
+        };
+        compile_build_jail(
+            homes,
+            Path::new(fx!("/proj/node_modules/somepkg")),
+            Some(name),
+            Some(version),
+            vec![PathBuf::from(interpreter)],
+            extra_reads.iter().map(PathBuf::from).collect(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles")
+    }
+
+    /// The v2 catalog is CANONICAL for every package it names — v1 is the fallback for the tail
+    /// v2 has never measured, never a layer on top of it.
+    ///
+    /// ⛔ THE UNION THIS REPLACED WROTE THE USER'S REAL HOME. Both tables shipped, and
+    /// `compile_build_jail` applied v1 after v2 and kept the wider answer. v1 can only widen, so a
+    /// newer measurement could never narrow an older hand-written grant: `wordpos` held v1
+    /// `fullDisk` — which `relax_fs_to_full_disk` turns into NO filesystem confinement at all —
+    /// long after the corpus measured it at `write: {deps}`, and `puppeteer`'s v1 `homePaths` kept
+    /// a live read-write grant on the real `~/.cache/puppeteer` plus the `PUPPETEER_CACHE_DIR` that
+    /// aims the package at it, so a jailed install left two archives in the user's home.
+    ///
+    /// THE THIRD ROW IS THE NON-VACUITY CONTROL, and without it this passes just as well against a
+    /// compiler that had stopped consulting v1 entirely — which would silently drop the git-hook
+    /// installers, `msw`'s cwd grant and four `fullDisk` rows that no v2 entry covers.
+    #[test]
+    fn the_v2_catalog_replaces_a_v1_grant_rather_than_being_unioned_with_it() {
+        let decide = |policy: &SandboxPolicy, probe: &str| {
+            crate::matcher::PathMatcher::new(&policy.fs.rules)
+                .decide(Path::new(probe))
+                .effect
+        };
+
+        // v1: `fullDisk`. v2: `write: {deps}`, no per-OS overlay, so this reads the same on every
+        // platform. The probe is outside every narrow grant, so only the disk relaxation reaches it.
+        let wordpos = build_jail_policy_for_package("wordpos");
+        assert_eq!(
+            decide(&wordpos, fx!("/testhome/.ssh/id_ed25519")),
+            Effect::Deny,
+            "`wordpos` has a v2 entry, so its v1 `fullDisk` must not apply — the fs axis is opened \
+             for a package the corpus measured at `write: {{deps}}`"
+        );
+        assert!(
+            !wordpos.fs.rules.entries.is_empty() && wordpos.fs.rules.default_effect == Effect::Deny,
+            "`wordpos` must still be a default-deny allowlist; the empty-entries/Allow shape IS \
+             how every backend spells the whole disk"
+        );
+
+        // v1: `homePaths` → rw on the REAL home plus the cache variable. Pinned ABOVE puppeteer's
+        // `<25.3.0` band so its `default` answers on every platform: that band's `write: {userHome}`
+        // is removed by a macos/linux overlay but survives on win, which would make one assertion
+        // mean three different things.
+        let puppeteer = build_jail_policy_for_package_at("puppeteer", "25.3.0");
+        assert_eq!(
+            decide(&puppeteer, fx!("/testhome/.cache/puppeteer/chrome/x.zip")),
+            Effect::Deny,
+            "a jailed script must not hold a live write on the user's REAL home — this is the \
+             escape the union produced, reproduced end to end on a puppeteer install"
+        );
+        assert!(
+            !puppeteer
+                .env
+                .constructed
+                .contains_key("PUPPETEER_CACHE_DIR"),
+            "the fs rule is only half of a `homePaths` grant: the variable is what aims the \
+             package at the real home, and dropping one without the other trades a write escape \
+             for an EPERM"
+        );
+
+        // v1 ONLY — no v2 entry — so its `projectWrites: [".git/hooks"]` must still be granted.
+        let pre_commit = build_jail_policy_for_package("pre-commit");
+        assert!(
+            crate::catalog_override::v2_grant_for("pre-commit", Some("1.0.0")).is_none(),
+            "`pre-commit` is this test's uncovered-tail fixture and it now HAS a v2 entry — \
+             re-point the control at a package v2 still says nothing about"
+        );
+        assert_eq!(
+            decide(&pre_commit, fx!("/proj/.git/hooks/pre-commit")),
+            Effect::Allow,
+            "v1 still serves a package v2 has never measured — deferring to v2 must not mean \
+             discarding v1"
+        );
+    }
+
+    /// A package the catalog has never heard of gets the BASELINE, on BOTH axes.
+    ///
+    /// ⛔⛔ THIS EXISTS BECAUSE THE TWO AXES ARE DECIDED IN TWO PLACES AND I FIXED ONLY ONE. The
+    /// filesystem grant is lowered in `compile_build_jail` and egress is decided in
+    /// `build_jail_net`, and each independently used to mean "no catalog entry ⇒ nothing". Adding the
+    /// baseline to the filesystem site alone changed NOTHING observable: a freshly built binary still
+    /// reported `outbound socket denied:EPERM` from the jail canary, because egress never consulted
+    /// the resolved caps. The unit suite was fully green across that mistake — 249 passed — which is
+    /// exactly why this asserts the AXIS the compile path does not.
+    ///
+    /// ⛔⛔ AN EMPTY CATALOG ENTRY IS TIGHTER THAN NO ENTRY, and this is the test that says so out loud.
+    ///
+    /// The parser used to REFUSE an entry with no grants and no version bands, on the premise that it
+    /// "grants exactly the base profile" — so the catalog could not express "this package gets nothing",
+    /// which is precisely the tightening a high-value target deserves. The premise was false: an entry's
+    /// own value is used when one exists, and the BASELINE only when the package is absent. So the two
+    /// differ, and a reader (or a future validator) must not conflate them again.
+    ///
+    /// Asserted through the shipped decision function rather than by inspecting a struct, because that is
+    /// the thing the jail actually consults.
+    #[test]
+    fn an_empty_entry_grants_less_than_no_entry_at_all() {
+        let baseline = crate::catalog_v2::baseline_caps().network;
+        assert!(
+            baseline,
+            "this test only means something while the baseline GRANTS egress; if that changed, \
+             rewrite it rather than deleting it"
+        );
+        // A name no catalog entry carries takes the baseline.
+        let absent =
+            build_jail_net_allowed_for(Some("definitely-not-in-the-catalog"), Some("1.0.0"));
+        assert_eq!(absent, baseline, "an absent package must take the baseline");
+
+        // A name whose entry withholds egress on THIS platform. The shipped entry grants
+        // `write: {deps}` and no network, which is the shape under test; asserted from the catalog
+        // rather than hardcoded so a re-bake that widens it fails here instead of silently making
+        // this vacuous. `DENIED_FIXTURE` carries why the subject is per-platform.
+        let (denied_pkg, denied_ver) = DENIED_FIXTURE;
+        let entry_says = crate::catalog_override::v2_grant_for(denied_pkg, Some(denied_ver))
+            .map(|g| g.on(crate::catalog_v2::Platform::current()).network);
+        assert_eq!(
+            entry_says,
+            Some(false),
+            "this test needs a package whose ENTRY withholds egress; {denied_pkg} no longer does"
+        );
+        let catalogued = build_jail_net_allowed_for(Some(denied_pkg), Some(denied_ver));
+        assert!(
+            !catalogued,
+            "a catalogued package's own value governs, so an entry withholding egress must DENY it \
+             even though the baseline would have granted it"
+        );
+        assert_ne!(
+            catalogued, absent,
+            "the whole point: catalogued may be TIGHTER than uncatalogued"
+        );
+    }
+
+    /// ⛔ `net.enforce` IS INVERTED ON macOS AND WINDOWS, and a consumer that reads it as "the
+    /// network is being confined" has it exactly backwards. A coarse egress GRANT compiles to
+    /// `true`, i.e. `enforce == false`, because that is the only spelling reaching the
+    /// AppContainer `internetClient` capability — so the flag is set precisely when egress is
+    /// DENIED. Linux is the deliberate exception: it needs `enforce = true` plus a catch-all
+    /// Allow to keep the non-`AF_INET` socket ceiling, so there the flag says nothing about
+    /// egress on its own. All three cases are asserted rather than described.
+    ///
+    /// WHAT DEPENDS ON IT. `backend::windows`'s no-token full-disk path gates its proxy
+    /// blackhole on this flag. Every catalogued full-disk cell is network-ALLOWED today, so
+    /// reading the polarity the obvious way would blackhole exactly the packages whose grant
+    /// exists to let them download a binary — a break with nothing else to catch it.
+    #[test]
+    fn a_coarse_egress_grant_compiles_to_enforce_false_off_linux() {
+        use crate::catalog_v2::Platform;
+
+        // Fixture shape asserted from the catalog, not hardcoded: a re-bake that flips it fails
+        // HERE rather than quietly inverting what the assertions below mean.
+        let granted = crate::catalog_override::v2_grant_for("windows-build-tools", Some("0.1.8"))
+            .map(|g| g.on(Platform::current()).network);
+        assert_eq!(
+            granted,
+            Some(true),
+            "this test needs a catalogued package that IS admitted to the network; \
+             windows-build-tools no longer is"
+        );
+
+        // The denied arm's subject is `DENIED_FIXTURE` — per-platform, and cold-swept on the
+        // platform it names, so this arm rests on a real install on every CI leg. Asserted from
+        // the catalog first, for the same reason the granted arm is.
+        let (denied_pkg, denied_ver) = DENIED_FIXTURE;
+        assert_eq!(
+            crate::catalog_override::v2_grant_for(denied_pkg, Some(denied_ver))
+                .map(|g| g.on(Platform::current()).network),
+            Some(false),
+            "this test needs a catalogued package that is DENIED the network; \
+             {denied_pkg} no longer is"
+        );
+
+        let allowed = build_jail_policy_for_package("windows-build-tools").net;
+        let denied = build_jail_policy_for_package_at(denied_pkg, denied_ver).net;
+
+        assert!(
+            denied.enforce,
+            "a withheld egress grant must ENFORCE the net axis on every platform"
+        );
+        assert_eq!(
+            denied.default_effect,
+            Effect::Deny,
+            "and it must deny by default"
+        );
+
+        if cfg!(target_os = "linux") {
+            assert!(
+                allowed.enforce,
+                "Linux keeps `enforce` on under a grant so the socket-family ceiling survives; \
+                 the catch-all Allow is what lifts AF_INET out of it"
+            );
+            assert!(
+                allowed.rules.iter().any(|r| r.effect == Effect::Allow),
+                "the Linux grant must carry the catch-all Allow, or it is a deny-all"
+            );
+        } else {
+            assert!(
+                !allowed.enforce,
+                "a coarse egress grant must leave `enforce` OFF — it is what reaches \
+                 `internetClient`, and what keeps the Windows blackhole away from a package the \
+                 catalog admits to the network"
+            );
+        }
+    }
+
+    /// Keyed on `baseline_caps()` rather than a hardcoded `true` so that narrowing the baseline's
+    /// network axis updates the expectation here instead of failing as a lowering bug.
+    #[test]
+    fn an_uncatalogued_package_gets_the_baseline_grant() {
+        // A name no catalog can plausibly carry, so this cannot pass by accidentally matching an entry.
+        const UNKNOWN: &str = "definitely-not-a-real-package-name-9f3c2b";
+        assert!(
+            crate::catalog_override::v2_grant_for(UNKNOWN, Some("1.0.0")).is_none(),
+            "{UNKNOWN} unexpectedly HAS a catalog entry, so this test proves nothing about the \
+             uncatalogued path — pick another name"
+        );
+        let expected = crate::catalog_v2::baseline_caps().network;
+        let net = build_jail_net(Some(UNKNOWN), Some("1.0.0"));
+        // `build_jail_net` returns `false` for denial, and `["*"]`/`true` for coarse-allow.
+        let allowed = net != serde_json::json!(false);
+        assert_eq!(
+            allowed, expected,
+            "an uncatalogued package's egress ({net}) disagrees with the baseline profile \
+             (network={expected}) — the net axis in `build_jail_net` and the filesystem axis in \
+             `compile_build_jail` have drifted apart"
+        );
+    }
+
+    /// The catalog's `fullDisk` tier opens the filesystem for the NAMED package and for
+    /// nobody else.
+    ///
+    /// BOTH DIRECTIONS IN ONE TEST, deliberately. The widening half alone ("a full-disk
+    /// package may open an arbitrary path") passes just as well against a compiler that had
+    /// stopped confining ANY package, which is the failure this tier could plausibly cause
+    /// and the one worth being unable to miss. So the same probe path is decided under three
+    /// identities compiled by the same code — the granted one, an ordinarily-granted one, and
+    /// a name the catalog has never heard of — and only the first may be admitted. Package
+    /// identity is the entire security model here; this is the assertion that says so.
+    ///
+    /// The three tail assertions are the SHAPE the tier compiles to rather than a restatement
+    /// of the effect: `fs_confines` (spelled identically in all three backends) is what each
+    /// of them keys on to render "the whole disk", and a private tmp surviving would leave a
+    /// script writing a hardcoded `/tmp/...` still broken under a grant that claims to have
+    /// no residual failures.
+    #[test]
+    fn a_full_disk_grant_opens_the_filesystem_for_that_package_and_no_other() {
+        // Outside every baseline grant and every curated one: not the project, not the
+        // package dir, not the private jail home, not an interpreter path.
+        let probe = Path::new(fx!("/testhome/.ssh/id_ed25519"));
+        let decide = |name: &str| {
+            let policy = build_jail_policy_for_package(name);
+            let effect = crate::matcher::PathMatcher::new(&policy.fs.rules)
+                .decide(probe)
+                .effect;
+            (policy, effect)
+        };
+
+        // WAS `wordpos`, THEN `@evilmartians/lefthook`, AND BOTH MOVES WERE THE CATALOG WORKING —
+        // not a regression either time. v1 granted `wordpos` `fullDisk` by hand (scoped to win32-x64
+        // at that) while the corpus MEASURED only `write: {deps}`. `@evilmartians/lefthook` then lost
+        // its disk grant on THIS platform when the collator began emitting per-OS overlays: its disk
+        // need was measured on win32 and the union used to spread that everywhere, which is exactly
+        // the over-grant the overlays removed (macOS whole-disk bands went 65 → 5).
+        //
+        // So the fixture must be a package that still holds disk ON THE PLATFORM UNDER TEST, and the
+        // guard below is what makes a future narrowing say so out loud instead of failing as a
+        // lowering bug. The invariant itself never moves: whatever holds a disk grant reaches outside
+        // every narrow grant, and no other package does.
+        // Re-pointed 2026-08-17: the re-bake narrowed `redis-memory-server` from `Disk` to
+        // `Scopes([Deps, Project, UserHome])` — exactly the drift the guard below was written to
+        // announce. `dotnet-2.0.0` carries `write: "disk"` on macOS and, the property that matters in
+        // a fixture, has NO version bands, so every version resolves to its `default` and this cannot
+        // drift again on a band-resolution change the way the previous fixture did.
+        const FULL_DISK_PKG: &str = "dotnet-2.0.0";
+        let (full, full_effect) = decide(FULL_DISK_PKG);
+        // Guard, so a future catalog that narrows this package fails HERE with a legible reason
+        // rather than in the shape assertions below, which would read as a lowering bug.
+        assert_eq!(
+            crate::catalog_override::v2_grant_for(FULL_DISK_PKG, Some("1.0.0"))
+                .map(|g| g.on(crate::catalog_v2::Platform::current()).write.clone()),
+            Some(crate::catalog_v2::Reach::Disk),
+            "{FULL_DISK_PKG} is this test's disk-grant fixture and the baked catalog no longer \
+             grants it disk — re-point the test at a package that carries one"
+        );
+        assert_eq!(
+            full_effect,
+            Effect::Allow,
+            "a full-disk package must reach a path outside every narrow grant"
+        );
+
+        // `cypress` holds an ordinary curated grant, so this arm also proves the relaxation
+        // is not something `grant_curated_package` does for any matched entry.
+        for name in ["cypress", "no-such-package-in-the-catalog"] {
+            let (other, effect) = decide(name);
+            assert_eq!(
+                effect,
+                Effect::Deny,
+                "{name} must still be denied the same path — the grant is keyed on ONE name"
+            );
+            assert_eq!(
+                other.fs.rules.default_effect,
+                Effect::Deny,
+                "{name}'s fs axis must still be a default-deny allowlist"
+            );
+        }
+
+        assert!(
+            full.fs.rules.entries.is_empty() && full.fs.rules.default_effect == Effect::Allow,
+            "full disk is spelled as an fs axis that does not confine — every backend reads \
+             exactly that shape"
+        );
+        assert_eq!(
+            full.fs.tmp,
+            crate::policy::TmpMode::Shared,
+            "a private tmp is a filesystem confinement and must not survive full disk"
+        );
+        assert!(
+            full.env.enforce,
+            "the env axis is unaffected: full disk is a FILESYSTEM tier, and the credential \
+             scrub is what keeps it a reduction from an unjailed script"
+        );
+    }
+
+    /// The project root resolves as a CWD without the project becoming readable.
+    ///
+    /// Seatbelt gates `getcwd(2)` on read of the cwd's OWN directory node, and a lifecycle
+    /// script that acts on the consumer's repository spawns its work at `INIT_CWD` — so
+    /// without the node grant every such spawn dies before it does anything (`uv_cwd` EPERM,
+    /// Go's `getwd: invalid argument`, git's `Unable to read current working directory`).
+    ///
+    /// The `.env` and `src/` arms are what make it a real assertion rather than a tautology:
+    /// the failure this guards against is not the grant disappearing but the grant WIDENING,
+    /// which is what happens the moment someone routes it through `subtree_globs`.
+    #[test]
+    fn the_project_root_resolves_as_a_cwd_without_opening_the_project() {
+        let policy = production_build_jail_policy();
+        let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        assert_eq!(
+            m.decide(Path::new(fx!("/proj"))).effect,
+            Effect::Allow,
+            "the project root node must be readable or `getcwd` fails at INIT_CWD"
+        );
+        for leaked in [fx!("/proj/.env"), fx!("/proj/src/index.ts")] {
+            assert_ne!(
+                m.decide(Path::new(leaked)).effect,
+                Effect::Allow,
+                "the cwd grant widened into a project read: {leaked}"
+            );
+        }
+    }
+
+    /// Each shape's toolchain reads actually LAND — the headers node-gyp compiles against and
+    /// the global package tree `npm` resolves through — while a sibling of the distribution
+    /// stays refused.
+    ///
+    /// The refused sibling is what makes this non-vacuous: asserting only that the two trees are
+    /// readable would pass just as well if the grant had widened to the whole cache home. And
+    /// asserting it per SHAPE is the point — the Windows spellings were a POSIX path and a
+    /// directory that does not exist in that archive at all, which a POSIX-only fixture cannot
+    /// distinguish from a working grant.
+    #[test]
+    fn both_distribution_shapes_grant_their_headers_and_global_package_tree() {
+        for (label, (interpreter, extra_reads)) in [("posix", POSIX_LAYOUT), ("flat", FLAT_LAYOUT)]
+        {
+            let policy = production_build_jail_policy_for(interpreter, extra_reads);
+            let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+            for read in extra_reads {
+                let deep = Path::new(read).join("npm/bin/npm-cli.js");
+                assert_eq!(
+                    m.decide(&deep).effect,
+                    Effect::Allow,
+                    "{label}: {} must be readable",
+                    deep.display()
+                );
+            }
+            let sibling = Path::new(interpreter)
+                .parent()
+                .and_then(Path::parent)
+                .expect("the fixture interpreter has a grandparent")
+                .join("unrelated/secret.txt");
+            assert_ne!(
+                m.decide(&sibling).effect,
+                Effect::Allow,
+                "{label}: the grant widened past the distribution to {}",
+                sibling.display()
+            );
+        }
+    }
+
+    /// THE build-jail invariant: the compiled policy is a PURE ALLOWLIST — zero deny rules.
+    /// Rationale on [`enforce_pure_allowlist`]. Asserted on BOTH entry points because they
+    /// reach the fold differently: the static skeleton folds to denies-only so the env-deny
+    /// finalizer declines, while the production path folds with a `package_dir` allow present
+    /// and the finalizer fires.
+    #[test]
+    fn build_jail_emits_no_deny_rules() {
+        for (label, policy) in [
+            ("static --sandbox build-jail", build_jail_policy()),
+            ("compile_build_jail", production_build_jail_policy()),
+        ] {
+            let denies: Vec<&str> = policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .filter(|r| r.effect == Effect::Deny)
+                .map(|r| r.matcher.as_str())
+                .collect();
+            assert!(
+                denies.is_empty(),
+                "{label} must compile to a pure allowlist; found deny rules {denies:?}"
+            );
+            assert_eq!(
+                policy.fs.rules.default_effect,
+                Effect::Deny,
+                "{label}: the allowlist only confines over a default-deny base"
+            );
+        }
+    }
+
+    /// The store-entry write grant, in both directions — it FIRES for a package
+    /// materialized into a virtual store (either spelling) and DECLINES for every layout
+    /// where the same arithmetic would land on user-authored source.
+    ///
+    /// The decline half is the property, not an assertion: a hoisted package's escape
+    /// target IS the project root (or a workspace member's), so a guard that fired there
+    /// would hand a dependency build write access to the consumer's own tree. Both hoisted
+    /// rows are therefore run against the same compile path as the granted ones — a guard
+    /// that declined by accident (wrong helper, absent wiring) would show up as the granted
+    /// rows failing, and one that fired too widely as the declined rows failing.
+    #[test]
+    fn the_store_entry_write_grant_is_scoped_to_a_virtual_store() {
+        use crate::matcher::PathMatcher;
+        use crate::policy::FsAccess;
+
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
+        };
+        let escape_target = |package_dir: &str| -> (PathBuf, bool) {
+            let package_dir = PathBuf::from(package_dir);
+            let policy = compile_build_jail(
+                homes.clone(),
+                &package_dir,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .expect("build-jail compiles");
+            // Where gyp's `build/`-absorbed `..` chain actually lands: one level above the
+            // package's enclosing `node_modules`.
+            let escape = enclosing_node_modules(&package_dir)
+                .and_then(|nm| nm.parent().map(Path::to_path_buf))
+                .expect("every fixture sits under a node_modules");
+            let d = PathMatcher::new(&policy.fs.rules).decide(&escape.join("Makefile"));
+            (
+                escape,
+                d.effect == Effect::Allow && d.access == FsAccess::ReadWrite,
+            )
+        };
+
+        for (label, package_dir) in [
+            // GLOBAL virtual store — `$cache/nub/pm/store`, the default off CI.
+            (
+                "global store",
+                fx!("/testhome/.cache/nub/pm/store/sqlite3@5.1.14/node_modules/sqlite3"),
+            ),
+            // PROJECT-LOCAL virtual store — what `use_global_virtual_store(false)` and
+            // `with_project_local_dep_paths` materialize into.
+            (
+                "project-local store",
+                fx!("/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3"),
+            ),
+            // SCOPED, whose extra `..` is cancelled by its extra directory level, so it
+            // lands on the same store-entry root rather than one level further out.
+            (
+                "scoped, global store",
+                fx!(
+                    "/testhome/.cache/nub/pm/store/@vscode+sqlite3@5.1.14/node_modules/@vscode/sqlite3"
+                ),
+            ),
+        ] {
+            let (escape, writable) = escape_target(package_dir);
+            assert!(
+                writable,
+                "{label}: the store-entry root {} must be writable",
+                escape.display()
+            );
+        }
+
+        for (label, package_dir) in [
+            // HOISTED — the escape target IS the consumer's project root.
+            ("hoisted", fx!("/proj/node_modules/sqlite3")),
+            // HOISTED in a WORKSPACE — the escape target is a member's source root, which
+            // a project-root check alone would miss.
+            (
+                "hoisted workspace member",
+                fx!("/proj/packages/api/node_modules/sqlite3"),
+            ),
+            // A SCOPED package under a hoisted linker escapes into `node_modules/@scope/`,
+            // the one shape this deliberately does not fix: granting the scope dir would
+            // hand the build write access to its sibling packages.
+            ("hoisted scoped", fx!("/proj/node_modules/@vscode/sqlite3")),
+        ] {
+            let (escape, writable) = escape_target(package_dir);
+            assert!(
+                !writable,
+                "{label}: {} is user-authored source and must stay unwritable",
+                escape.display()
+            );
+        }
+    }
+
+    /// The ACCEPTED COST of the grant above, pinned so a future tightening is a deliberate
+    /// decision rather than a silent one: the store entry also holds `node_modules/.bin`
+    /// for a package with binary deps, and those shims become writable. They execute only
+    /// while THIS package's own lifecycle scripts run — a context the attacker already owns
+    /// — and the grant does not reach the project's `node_modules/.bin`, which is the shim
+    /// directory later tooling runs UNCONFINED.
+    #[test]
+    fn the_store_entry_grant_reaches_its_own_bin_but_never_the_projects() {
+        use crate::matcher::PathMatcher;
+        use crate::policy::FsAccess;
+
+        let policy = compile_build_jail(
+            Homes {
+                home: PathBuf::from(fx!("/testhome")),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: PathBuf::from(fx!("/testhome/.cache")),
+                project: PathBuf::from(fx!("/proj")),
+            },
+            Path::new(fx!(
+                "/proj/node_modules/.store/sqlite3@5.1.14/node_modules/sqlite3"
+            )),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        let m = PathMatcher::new(&policy.fs.rules);
+        let writable = |p: &str| {
+            let d = m.decide(Path::new(p));
+            d.effect == Effect::Allow && d.access == FsAccess::ReadWrite
+        };
+        assert!(
+            writable(fx!(
+                "/proj/node_modules/.store/sqlite3@5.1.14/node_modules/.bin/node-gyp"
+            )),
+            "the store entry's own .bin is inside the grant (accepted)"
+        );
+        assert!(
+            !writable(fx!("/proj/node_modules/.bin/tsc")),
+            "the project's .bin is where unconfined tooling resolves and must stay read-only"
+        );
+        assert!(
+            !writable(fx!(
+                "/proj/node_modules/.store/left-pad@1.0.0/node_modules/left-pad/index.js"
+            )),
+            "a SIBLING store entry must stay outside the grant"
+        );
+    }
+
+    /// The store-closure walk reaches TRANSITIVELY and stops at a SIBLING, which is the whole
+    /// point of narrowing: today's wholesale grant hands a lifecycle script every package on the
+    /// host, including other projects' private dependencies.
+    ///
+    /// Asserted against a REAL directory tree with REAL symlinks, because the walk's entire job is
+    /// resolving them — a fixture of path strings would pass while the walk was broken. Unix-only
+    /// for one reason: creating a symlink on Windows needs `SeCreateSymbolicLinkPrivilege`, which
+    /// an ordinary account does not hold, so the test would fail on the platform rather than the
+    /// code. The walk itself is platform-neutral (`std::fs::canonicalize` + `read_dir`), and the
+    /// Windows behaviour it exists to fix is measured on a real box instead.
+    #[cfg(unix)]
+    #[test]
+    fn the_store_closure_reaches_transitive_deps_and_excludes_a_sibling() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("store");
+        // a -> b -> c, all in the store; `unrelated` belongs to nobody's closure.
+        let cell = |name: &str| store.join(name);
+        let pkg_dir = |name: &str, cell_name: &str| cell(cell_name).join("node_modules").join(name);
+        for (name, cell_name) in [
+            ("a", "a@1.0.0"),
+            ("b", "b@1.0.0"),
+            ("c", "c@1.0.0"),
+            ("unrelated", "unrelated@9.9.9"),
+        ] {
+            std::fs::create_dir_all(pkg_dir(name, cell_name)).expect("cell");
+        }
+        // a depends on b, b depends on c — the link lives in the DEPENDANT's node_modules.
+        for (from_cell, dep, dep_cell) in [("a@1.0.0", "b", "b@1.0.0"), ("b@1.0.0", "c", "c@1.0.0")]
+        {
+            std::os::unix::fs::symlink(
+                pkg_dir(dep, dep_cell),
+                cell(from_cell).join("node_modules").join(dep),
+            )
+            .expect("symlink");
+        }
+
+        let cells = dependency_closure_store_cells(&pkg_dir("a", "a@1.0.0"), &store)
+            .expect("closure is knowable for a fully-materialized store tree");
+        let names: Vec<String> = cells
+            .iter()
+            .map(|c| c.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            names.contains(&"c@1.0.0".to_string()),
+            "the walk must reach TRANSITIVELY (a -> b -> c), else a real dependency loses its \
+             read grant and dies on a laundered ENOENT; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"unrelated@9.9.9".to_string()),
+            "a sibling cell outside the closure must NOT be granted — that over-grant is the \
+             thing being removed; got {names:?}"
+        );
+        assert_eq!(names.len(), 3, "expected exactly a, b, c; got {names:?}");
+    }
+
+    /// A dependency resolving OUTSIDE the store makes the closure inexpressible as a set of cells,
+    /// and the answer must be `None` — which the caller turns back into today's wholesale grant.
+    ///
+    /// THE DIRECTION IS THE ASSERTION. Returning a partial set here would silently under-grant,
+    /// and under-granting is the one failure CANON rejects outright: it surfaces as the package
+    /// dying on an ENOENT with no diagnostic, indistinguishable from having no fix at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependency_outside_the_store_falls_back_rather_than_under_granting() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("store");
+        let outside = tmp.path().join("elsewhere/linked-pkg");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let own = store.join("a@1.0.0/node_modules/a");
+        std::fs::create_dir_all(&own).expect("cell");
+        std::os::unix::fs::symlink(&outside, store.join("a@1.0.0/node_modules/linked-pkg"))
+            .expect("symlink");
+
+        assert!(
+            dependency_closure_store_cells(&own, &store).is_none(),
+            "a `file:`-style dependency outside the store must force the wholesale fallback, \
+             never a partial cell list"
+        );
+    }
+
+    /// The curated exception is WIRED and ORDERED, which the `curated` unit tests cannot
+    /// show: they call the granting function against an empty policy, so they would pass
+    /// just as well if `compile_build_jail` never called it, or called it before the
+    /// dependency-tree READ that would then shadow the write under last-match-wins.
+    ///
+    /// Asserted as the WRITE decision specifically. `.prisma` sits inside the enclosing
+    /// `node_modules` read grant, so an ordering bug leaves it readable-but-unwritable —
+    /// which is exactly the `EPERM … mkdir` the exception exists to remove, and is
+    /// invisible to a rule-presence check.
+    ///
+    /// HOISTED, where it used to be store-shaped: [`store_entry_write_root`] now makes the
+    /// whole store entry writable, which SUBSUMES a `sibling_dirs` grant under the isolated
+    /// linker and leaves both of this test's controls unable to fail. Under a hoisted
+    /// linker the store grant declines, so the curated exception is again the only thing
+    /// that can produce this write — which is what the test is for.
+    #[test]
+    fn a_curated_exception_is_wired_into_the_production_path_and_wins_the_write() {
+        use crate::matcher::PathMatcher;
+        use crate::policy::FsAccess;
+
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
+        };
+        let package_dir = PathBuf::from(fx!("/proj/node_modules/@prisma/client"));
+        let sibling = Path::new(fx!("/proj/node_modules/.prisma"));
+        let compile = |name: Option<&str>| {
+            compile_build_jail(
+                homes.clone(),
+                &package_dir,
+                name,
+                Some("1.0.0"),
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .expect("build-jail compiles")
+        };
+        let writable = |policy: &SandboxPolicy, path: &Path| {
+            let d = PathMatcher::new(&policy.fs.rules).decide(path);
+            d.effect == Effect::Allow && d.access == FsAccess::ReadWrite
+        };
+
+        let named = compile(Some("@prisma/client"));
+        assert!(
+            writable(&named, sibling),
+            "the curated sibling must be WRITABLE, not merely inside the dependency read"
+        );
+        // Two controls, because "writable" alone would also hold for a compiler that made
+        // the whole enclosing node_modules writable — which is the `.bin`/virtual-store
+        // hazard the enumerated form exists to avoid.
+        assert!(
+            !writable(&named, Path::new(fx!("/proj/node_modules/.bin/x"))),
+            "the exception must not widen the enclosing node_modules"
+        );
+        assert!(
+            !writable(&compile(None), sibling),
+            "an unnamed spawn (a fetched checkout) gets no exception"
+        );
+    }
+
+    /// One build-jail compile against REAL directories, so `private_home_dir` materializes.
+    /// `home` and `cache` are separate tempdirs so "the private home is writable" and "the
+    /// user's home is not" are independent facts here rather than two readings of one path.
+    struct HomeCase {
+        user_home: tempfile::TempDir,
+        cache: tempfile::TempDir,
+        policy: SandboxPolicy,
+    }
+
+    fn home_case(package: &str) -> HomeCase {
+        let user_home = tempfile::tempdir().expect("user home");
+        let cache = tempfile::tempdir().expect("cache home");
+        std::fs::create_dir_all(user_home.path().join(".ssh")).expect(".ssh");
+        std::fs::write(user_home.path().join(".ssh/id_rsa"), b"k").expect("key");
+        let project = user_home.path().join("proj");
+        let package_dir = project.join("node_modules").join(package);
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+        let policy = compile_build_jail(
+            Homes {
+                home: crate::matcher::path::canonicalize_including_nonexistent(user_home.path()),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: crate::matcher::path::canonicalize_including_nonexistent(cache.path()),
+                project,
+            },
+            &package_dir,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            [("HOME".to_string(), "/the/users/home".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("build-jail compiles");
+        HomeCase {
+            user_home,
+            cache,
+            policy,
+        }
+    }
+
+    /// The one directory under the jail-home root, which is the home the compile just made.
+    fn only_jail_home(cache: &tempfile::TempDir) -> PathBuf {
+        let mut homes: Vec<PathBuf> = std::fs::read_dir(cache.path().join("nub/jail-home"))
+            .expect("the jail home root is materialized at compile time")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        assert_eq!(homes.len(), 1, "one home per package: {homes:?}");
+        // Canonical, because that is the spelling the compiler grants and hands the child
+        // (on macOS the tempdir root is reached through the `/var -> /private/var` link).
+        crate::matcher::path::canonicalize_including_nonexistent(&homes.pop().expect("one"))
+    }
+
+    /// The compat half: the script gets a REAL writable home AND is told about it. Neither
+    /// half implies the other — a grant the child never spells is invisible, and a redirect
+    /// with no grant is worse than nothing. The fixture's ambient `HOME` is the user's, so
+    /// this also pins that the redirect lands after the env scrub that passes it through.
+    #[test]
+    fn the_build_jail_hands_the_script_its_own_writable_home() {
+        let case = home_case("somepkg");
+        let jail_home = only_jail_home(&case.cache);
+        let matcher = crate::matcher::PathMatcher::new(&case.policy.fs.rules);
+        for rel in [".npm/_npx", ".cache/Cypress", ".stc"] {
+            let decision = matcher.decide(&jail_home.join(rel));
+            assert_eq!(
+                (decision.effect, decision.access),
+                (Effect::Allow, FsAccess::ReadWrite),
+                "{rel}: the corpus breakers' home-anchored dirs must be writable"
+            );
+        }
+        assert_eq!(
+            case.policy.env.constructed.get("HOME").map(String::as_str),
+            Some(jail_home.to_string_lossy().as_ref()),
+            "the child's HOME must name the granted dir, not the ambient one"
+        );
+    }
+
+    /// `FsOrigin::NubOwnedPublic` marks nub's OWN caches and NOTHING ELSE.
+    ///
+    /// ⛔ THIS IS THE SAFETY INVARIANT FOR THAT ORIGIN, NOT A LABELLING NICETY. The mark licenses a
+    /// backend to publish the subtree to `ALL APPLICATION PACKAGES` — readable by sandboxed
+    /// processes OTHER than the one being launched. That is defensible for the PM store (public npm
+    /// bytes) and indefensible for a project directory or a user home, which carry source and
+    /// credentials. A future grant added to the wrong list would widen machine-wide read with no
+    /// other symptom, so the project paths are asserted NEGATIVELY here rather than left implied.
+    #[test]
+    fn only_nubs_own_caches_carry_the_publishable_origin() {
+        let user_home = tempfile::tempdir().expect("user home");
+        let cache_home = tempfile::tempdir().expect("cache home");
+        let home = crate::matcher::path::canonicalize_including_nonexistent(user_home.path());
+        let cache = crate::matcher::path::canonicalize_including_nonexistent(cache_home.path());
+        let project = home.join("proj");
+        let package_dir = project.join("node_modules/cypress");
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+
+        // The extra-reads list is MIXED in production: provisioned Node's headers live under nub's
+        // cache (publishable), while the resolved Python can be the SYSTEM one (never publishable).
+        // Passing both is what makes this test cover the per-path decision rather than only the
+        // PM-cache roots.
+        let nub_headers = cache.join("nub/pm/node-headers/22.15.0");
+        let system_python = PathBuf::from(if cfg!(windows) {
+            "C:/Python311"
+        } else {
+            "/usr/lib/python3.11"
+        });
+
+        let policy_extra_reads = vec![nub_headers.clone(), system_python.clone()];
+
+        let policy = compile_build_jail(
+            Homes {
+                home: home.clone(),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: cache.clone(),
+                project: project.clone(),
+            },
+            &package_dir,
+            Some("cypress"),
+            Some("1.0.0"),
+            Vec::new(),
+            policy_extra_reads,
+            BTreeMap::new(),
+        )
+        .expect("build-jail policy compiles");
+
+        let marked: Vec<String> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|r| r.origin == FsOrigin::NubOwnedPublic)
+            .map(|r| r.matcher.as_str().to_string())
+            .collect();
+
+        assert!(
+            !marked.is_empty(),
+            "the PM cache roots must carry the publishable origin, or the Windows publish-once \
+             path silently degrades to a per-launch ACE and the 10.5s cost returns"
+        );
+        let cache_prefix = crate::matcher::path::normalize_slashes(&cache.to_string_lossy());
+        for m in &marked {
+            assert!(
+                m.starts_with(&cache_prefix),
+                "only nub's own cache may be marked publishable, but {m} is outside {cache_prefix} \
+                 — publishing it would make it readable to every sandboxed app on the machine"
+            );
+        }
+        let project_prefix = crate::matcher::path::normalize_slashes(&project.to_string_lossy());
+        for m in &marked {
+            assert!(
+                !m.starts_with(&project_prefix),
+                "a PROJECT path ({m}) must never be publishable: it carries the user's source and \
+                 possibly their credentials"
+            );
+        }
+        let home_marked = marked.iter().any(|m| {
+            let h = home.to_string_lossy().replace('\\', "/");
+            m.starts_with(&h) && !m.starts_with(&cache_prefix)
+        });
+        assert!(
+            !home_marked,
+            "no path under the user's HOME (outside nub's cache) may be publishable; got {marked:?}"
+        );
+    }
+
+    /// A `homePaths` carrier that v2 NAMES contributes neither its variable nor its rule.
+    ///
+    /// ⛔ THIS TEST USED TO ASSERT THE OPPOSITE, and the behaviour it asserted is the write escape.
+    /// `homePaths` is v1's live read-write grant on the user's REAL home plus the variable that
+    /// aims the package at it; v2 spells the same need `writePaths`, i.e. promotion out of the
+    /// throwaway home, and v2 is canonical for a package it names (see `curated::V2Coverage`).
+    /// Both carriers in the shipped table — `cypress` and `puppeteer` — have v2 entries, so the
+    /// mechanism now reaches nothing in a shipped build. Reproduced end to end before the change:
+    /// a jailed `puppeteer` install left two archives totalling 241 MB in the real `~/.cache`.
+    ///
+    /// BOTH HALVES, because dropping one alone is worse than dropping neither: without the rule but
+    /// with the variable the package is aimed at a path it may not write, which trades a silent
+    /// escape for an EPERM mid-install.
+    ///
+    /// Asserted against the SHIPPED catalog through the production entry point, on a real tempdir
+    /// home — a synthetic table would not show that the production lookup agrees. The tempdir is
+    /// also what keeps `materialize_home_path` off the developer's own `$HOME`.
+    #[test]
+    fn a_home_cache_grant_is_withheld_from_a_package_the_v2_catalog_names() {
+        let user_home = tempfile::tempdir().expect("user home");
+        let cache = tempfile::tempdir().expect("cache home");
+        let home = crate::matcher::path::canonicalize_including_nonexistent(user_home.path());
+        let project = home.join("proj");
+        let package_dir = project.join("node_modules/cypress");
+        std::fs::create_dir_all(&package_dir).expect("package dir");
+
+        // The premise. If `cypress` ever loses its v2 entry this test proves nothing, and it must
+        // say so here rather than passing for the wrong reason.
+        assert!(
+            crate::catalog_override::v2_grant_for("cypress", Some("1.0.0")).is_some(),
+            "`cypress` is this test's v2-covered fixture and the baked catalog no longer names it \
+             — re-point at another `homePaths` carrier v2 measures"
+        );
+
+        let policy = compile_build_jail(
+            Homes {
+                home: home.clone(),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: crate::matcher::path::canonicalize_including_nonexistent(cache.path()),
+                project,
+            },
+            &package_dir,
+            Some("cypress"),
+            Some("1.0.0"),
+            Vec::new(),
+            Vec::new(),
+            [("HOME".to_string(), "/the/users/home".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("build-jail compiles");
+
+        assert!(
+            !policy.env.constructed.contains_key("CYPRESS_CACHE_FOLDER"),
+            "the cache variable is what aims the package at the real home; v2 names this package, \
+             so v1 must not set it"
+        );
+        let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        for probe in [
+            home.join("Library/Caches/Cypress/13.14.2/Cypress.app"),
+            home.join(".cache/Cypress/13.14.2/Cypress.app"),
+        ] {
+            assert_ne!(
+                matcher.decide(&probe).effect,
+                Effect::Allow,
+                "no live write may remain on the user's real home: {}",
+                probe.display()
+            );
+        }
+        // The private home is the whole reason withholding the grant is safe rather than merely
+        // tighter — the script still has somewhere writable to download into.
+        let private = jail_private_home(
+            &Homes {
+                home: home.clone(),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: crate::matcher::path::canonicalize_including_nonexistent(cache.path()),
+                project: home.join("proj"),
+            },
+            &package_dir,
+        )
+        .expect("the package gets a private home");
+        assert_eq!(
+            matcher.decide(&private.join(".cache/Cypress/x")).effect,
+            Effect::Allow,
+            "the throwaway home stays writable, which is where the artefact now lands"
+        );
+    }
+
+    /// Two packages never share a home. A shared one is a config root both can write —
+    /// package A's `$HOME/.npmrc` steering package B's `node-gyp`/`script-shell` puts A's
+    /// code inside B's jail, and B's compiled addon is `require()`d unconfined.
+    #[test]
+    fn each_package_gets_its_own_home() {
+        let first = only_jail_home(&home_case("alpha").cache);
+        let second = only_jail_home(&home_case("beta").cache);
+        assert_ne!(
+            first.file_name(),
+            second.file_name(),
+            "two packages must not resolve to the same home directory name"
+        );
+    }
+
+    /// The escape the persistence choice opens if the leaf is trusted: a jailed script can
+    /// unlink and recreate its OWN home root (a subpath grant matches its root), so it can
+    /// leave a symlink to the user's home there. Resolving that would hand the NEXT compile
+    /// a read-write grant on `~`. The leaf must be refused, not followed.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_home_root_is_refused_rather_than_resolved() {
+        let case = home_case("somepkg");
+        let jail_home = only_jail_home(&case.cache);
+        let user_home =
+            crate::matcher::path::canonicalize_including_nonexistent(case.user_home.path());
+        std::fs::remove_dir_all(&jail_home).expect("the script can remove its own home");
+        std::os::unix::fs::symlink(&user_home, &jail_home).expect("and put a link there");
+
+        let homes = Homes {
+            home: user_home.clone(),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: crate::matcher::path::canonicalize_including_nonexistent(case.cache.path()),
+            project: user_home.join("proj"),
+        };
+        let package_dir = homes.project.join("node_modules/somepkg");
+        assert_eq!(
+            private_home_dir(&homes, &package_dir),
+            None,
+            "a leaf that is not a real directory must yield no grant at all"
+        );
+        let policy = compile_build_jail(
+            homes,
+            &package_dir,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            [("HOME".to_string(), "/the/users/home".to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("build-jail still compiles");
+        let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        assert_eq!(
+            matcher.decide(&user_home.join(".ssh/id_rsa")).effect,
+            Effect::Deny,
+            "the swapped link must not have resolved into a grant on the real home"
+        );
+    }
+
+    /// The security half, and the regression that would matter most: widening to a writable
+    /// home must not have made the USER's home reachable. Nothing here is a deny — the real
+    /// home is simply outside every grant, which is the only shape the allowlist backends
+    /// can enforce.
+    #[test]
+    fn the_private_home_leaves_the_users_own_home_unreachable() {
+        let case = home_case("somepkg");
+        let (cache, policy) = (&case.cache, &case.policy);
+        let user_home =
+            crate::matcher::path::canonicalize_including_nonexistent(case.user_home.path());
+        let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        for rel in [".ssh/id_rsa", ".aws/credentials", ".npmrc"] {
+            assert_eq!(
+                matcher.decide(&user_home.join(rel)).effect,
+                Effect::Deny,
+                "{rel} in the user's real home must stay ungranted"
+            );
+        }
+        assert_eq!(
+            matcher.decide(&user_home).effect,
+            Effect::Deny,
+            "the user's home directory itself must stay ungranted"
+        );
+        // In production the jail home sits UNDER the real home (`~/.cache/nub/jail-home`),
+        // so the grant must be a leaf: reachable itself, conferring nothing on its parents.
+        for ancestor in only_jail_home(cache).ancestors().skip(1) {
+            assert_eq!(
+                matcher.decide(ancestor).effect,
+                Effect::Deny,
+                "{} must not become writable by way of the home grant",
+                ancestor.display()
+            );
+        }
+    }
+
+    /// The strip is BUILD-JAIL ONLY. A general policy still carries the secret floor, and
+    /// must — it has no narrow compiler-authored grant set to withhold secrets by shape, so
+    /// its `.env` protection genuinely is the deny band. Guards against the `name` gate being
+    /// dropped or `enforce_pure_allowlist` being hoisted into the shared compile path.
+    #[test]
+    fn a_general_policy_keeps_its_secret_floor() {
+        let ctx = CompileCtx::new(
+            Homes {
+                home: PathBuf::from(fx!("/testhome")),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: PathBuf::from(fx!("/testhome/.cache")),
+                project: PathBuf::from(fx!("/proj")),
+            },
+            PathBuf::from(fx!("/proj")),
+            ScopeCapabilities::approved(),
+            BTreeMap::new(),
+        );
+        for surface in [json!(true), json!({ "fs": ["./"] })] {
+            let policy = compile(&surface, &ctx).expect("compiles");
+            assert!(
+                policy
+                    .fs
+                    .rules
+                    .entries
+                    .iter()
+                    .any(|r| r.effect == Effect::Deny),
+                "a general policy ({surface}) must keep its denies — only build-jail is stripped"
+            );
+            let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+            assert_eq!(
+                m.decide(Path::new(fx!("/proj/.env"))).effect,
+                Effect::Deny,
+                "the `.env` floor must still hold for a general policy ({surface})"
+            );
+        }
+    }
+
+    /// The other half of the invariant: dropping the denies must not make anything readable.
+    /// Each secret is now withheld by NOT BEING GRANTED, so the matcher must still refuse it
+    /// — including the `/etc` password hashes, which lost their explicit deny when the
+    /// Seatbelt base stopped granting `/etc` as a subpath.
+    #[test]
+    fn build_jail_withholds_every_secret_without_a_single_deny() {
+        let policy = production_build_jail_policy();
+        let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        for secret in [
+            fx!("/testhome/.ssh/id_rsa"),
+            fx!("/testhome/.aws/credentials"),
+            fx!("/testhome/.npmrc"),
+            fx!("/testhome/.config/gh/hosts.yml"),
+            "/etc/shadow",
+            "/etc/gshadow",
+            fx!("/proj/.env"),
+            fx!("/proj/.env.local"),
+            fx!("/proj/src/index.ts"),
+            fx!("/proj/.git/config"),
+            fx!("/proj/.github/workflows/release.yml"),
+            // The policy file that CONFIGURES this jail. `fold::finalize_policy_file_deny`
+            // used to self-exclude it explicitly; the strip removes that, so the guarantee
+            // now rests entirely on the project root being ungranted. Pinned here because a
+            // future grant that reached the project root would silently reopen it.
+            fx!("/proj/nub.jsonc"),
+        ] {
+            assert_eq!(
+                m.decide(Path::new(secret)).effect,
+                Effect::Deny,
+                "{secret} must be unreachable by construction (ungranted), not by a deny rule"
+            );
+        }
+    }
+
+    /// ⛔ THE SECRET FLOOR MUST SURVIVE AN EXPLICIT `userHome` GRANT — the property the whole
+    /// anti-supply-chain claim rests on, and it was untested until now.
+    ///
+    /// Every other secret-floor test compiles the BASE profile
+    /// ([`build_jail_withholds_every_secret_without_a_single_deny`] uses
+    /// `production_build_jail_policy`), so they prove the floor for a package holding NO grant. But
+    /// 120 of the shipped catalog's 433 cells — 27.7%, across 100 of its 294 packages, counted by
+    /// walking every band and per-OS overlay for a `userHome` read or write — take this path. The
+    /// mechanism is right today (`apply_v2_grant` lowers `Scope::UserHome` through
+    /// `defaults::home_minus_secrets_allows` on BOTH axes), and that is exactly the kind of single
+    /// call one refactor replaces with the un-narrowed variant. This test pins the mechanism on a
+    /// synthetic entry; `no_shipped_catalog_grant_reaches_a_credential_at_any_band_or_platform`
+    /// pins every SHIPPED cell, which is the half this one stopped covering when the last real
+    /// entry that materialised a home rule was narrowed.
+    ///
+    /// `~/.npmrc` is the assertion that matters most: it carries the npm publish token, which is what
+    /// turns a stolen credential into a self-propagating worm. `.ssh` and `.aws` are here because a
+    /// grant that leaked one would leak all three.
+    ///
+    /// THE POSITIVE CONTROL IS LOAD-BEARING. A compile that granted the home NOTHING satisfies every
+    /// negative assertion below, so "the grant never materialised" would read as "the floor held".
+    ///
+    /// VERIFIED RED: lowering `Scope::UserHome`'s read arm un-narrowed — `subtree_globs(home)`, the
+    /// shape the `Project` arm uses — makes this fail on `~/.npmrc` exactly as written. That is the
+    /// refactor it guards.
+    ///
+    /// ⚠️ AND ONE FALSIFICATION THAT DOES *NOT* WORK, which is worth knowing before trusting a future
+    /// edit here: deleting `".npmrc"` from `SECRET_READ_RELPATHS` leaves this test GREEN, because
+    /// `secret_paths` also scans the home's own entries through `is_env_secret_name` and catches the
+    /// file by basename. `.npmrc` is protected twice over. So a change that appears safe because this
+    /// test still passes may only be surviving on the second mechanism — check both.
+    #[test]
+    fn a_user_home_grant_still_cannot_read_npmrc_or_any_other_credential() {
+        let (_guard, homes) = secretful_home();
+        // Written BEFORE the compile: `home_minus_secrets_allows` walks the real directory, so a
+        // secret created afterwards would never enter the walk and the test would prove nothing.
+        std::fs::write(
+            homes.home.join(".npmrc"),
+            "//registry.npmjs.org/:_authToken=decoy",
+        )
+        .expect("mk .npmrc");
+        std::fs::create_dir_all(homes.home.join(".aws")).expect("mk .aws");
+        std::fs::write(homes.home.join(".aws/credentials"), "[default]").expect("mk aws creds");
+        std::fs::write(homes.home.join("Documents/notes.txt"), "ordinary").expect("mk notes");
+
+        // A real catalog entry that holds a `userHome` grant on the platform under test — so this
+        // exercises the production lookup, not a hand-built grant the shipped catalog might not
+        // contain. WAS `@ast-grep/cli`, which lost its macOS userHome read when the collator began
+        // emitting per-OS overlays: the need was measured on another platform and the cross-platform
+        // union had been spreading it here. Then `pre-push`, for the same reason.
+        //
+        // ⛔ THEN `bun`, WHICH BROKE THE TEST ON WINDOWS AND HID IT. Its entry is `write: "disk"`
+        // with a `macos` overlay narrowing to `userHome` and a `linux` overlay withdrawing it —
+        // and NO `win` overlay, so Windows inherits the outer full-disk grant.
+        // `relax_fs_to_full_disk` then CLEARS every rule and flips the default to Allow, which
+        // satisfied the positive control below while granting `~/.npmrc` outright.
+        //
+        // So the fixture must be a package with NO version bands AND no per-OS overlay touching
+        // read/write, which resolves identically on all three platforms. The default-effect guard
+        // below is what makes a future re-point to another disk-tier package fail loudly instead of
+        // passing vacuously.
+        //
+        // ⛔ THEN `ursa-optional`, WHICH THE NARROWING PASS TOOK AWAY — and the guard below caught it
+        // exactly as it promised to. That is the standing hazard here and it is structural, not a
+        // one-off: this test needs a package the catalog still grants the whole home, while the whole
+        // point of the narrowing work is that there should eventually be none. `unrs-resolver` is the
+        // ONLY entry in the shipped catalog that still qualifies (measured over all 294 entries:
+        // flat `write` containing `userHome`, no version bands, no per-OS overlay touching read or
+        // write), and it survives only because its own narrowing was WITHDRAWN for resting on
+        // unfalsifiable arms. When it is finally narrowed there will be no fixture left, and the
+        // right answer then is a synthetic catalog entry compiled through the production lookup —
+        // not a hand-built grant, which is what this comment's first paragraph exists to forbid.
+        // ⛔ A SYNTHETIC CATALOG ENTRY, COMPILED THROUGH THE PRODUCTION LOWERING. This test used to
+        // name a real package the shipped catalog granted `userHome`, which was stronger — it proved
+        // the SHIPPED grants were safe, not merely the mechanism. That fixture is gone: measured
+        // across 13 catalog entries carrying `write.userHome`, only `unrs-resolver` actually
+        // materialised a home rule, and narrowing it (it never needed the home — `deps` carries its
+        // one write) left none. Re-pointing was tried and there is nothing to re-point AT.
+        //
+        // What is preserved: the grant is PARSED from catalog JSON and lowered by
+        // `curated::apply_v2_grant`, the same call production makes at `compile_build_jail`'s v2 arm
+        // — NOT a hand-built `FsRule`, which the paragraph above forbids. `Scope::UserHome` lowers
+        // through `defaults::home_minus_secrets_allows` on both axes, so this exercises the real
+        // exclusion.
+        //
+        // ⛔ WHY APPENDING THE GRANT AFTER THE COMPILE IS FAITHFUL, and the one thing that would
+        // break it: production applies the v2 grant partway through `compile_build_jail`, and the
+        // matcher is LAST-MATCH-WINS, so appending would be wrong if any fs rule were added after
+        // that point. Verified none is — the only later mutation is `relax_fs_to_full_disk`, which
+        // fires solely for a `"disk"`-tier grant and is exactly what the first control below
+        // detects. **If a future change adds an fs rule after the v2 arm, this test silently stops
+        // matching production — re-check that before trusting it.**
+        let (interpreter, extra_reads) = POSIX_LAYOUT;
+        let mut policy = compile_build_jail(
+            homes.clone(),
+            &homes
+                .project
+                .join("node_modules")
+                .join("synthetic-home-grant"),
+            None,
+            None,
+            vec![PathBuf::from(interpreter)],
+            extra_reads.iter().map(PathBuf::from).collect(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        let catalog = crate::catalog_v2::parse(
+            r#"{"packages":{"p":{"default":{"write":{"userHome":true},"notes":"synthetic fixture: the secret floor under an explicit userHome grant"}}}}"#,
+        )
+        .expect("synthetic userHome entry must parse");
+        crate::compiler::curated::apply_v2_grant(
+            &mut policy,
+            &homes,
+            &homes
+                .project
+                .join("node_modules")
+                .join("synthetic-home-grant"),
+            &catalog.packages["p"]
+                .default
+                .on(crate::catalog_v2::Platform::current()),
+        );
+        let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+
+        // FIRST CONTROL, and it has to come first: a `read`/`write` of `"disk"` compiles to
+        // `relax_fs_to_full_disk`, which clears every rule and flips the default to Allow. Under
+        // that policy the readability control below passes and EVERY denial below is vacuous —
+        // measured on Windows, where the fixture package's grant resolved to the disk tier.
+        assert_eq!(
+            policy.fs.rules.default_effect,
+            Effect::Deny,
+            "the fixture package resolved to an UNCONFINED (disk-tier) grant on this platform, so \
+             every assertion below would pass without confining anything — the synthetic entry below stopped resolving to a confined grant"
+        );
+        assert_eq!(
+            m.decide(&homes.home.join("Documents/notes.txt")).effect,
+            Effect::Allow,
+            "the userHome grant did not materialise, so the denials below prove nothing — the synthetic userHome entry stopped lowering to a home allow on this platform"
+        );
+
+        for secret in [".npmrc", ".aws/credentials", ".ssh"] {
+            assert_eq!(
+                m.decide(&homes.home.join(secret)).effect,
+                Effect::Deny,
+                "~/{secret} is reachable under a userHome grant — a jailed install script could \
+                 harvest it, and ~/.npmrc in particular is the npm token a worm republishes with"
+            );
+        }
+    }
+
+    /// ⛔ THE SAME FLOOR, PROVEN ON THE SHIPPED CATALOG RATHER THAN ON ONE SYNTHETIC ENTRY. The test
+    /// above proves the MECHANISM narrows a `userHome` grant; it cannot say whether any grant nub
+    /// actually ships routes around it. This one lowers every grant in `build-jail-catalog-v2.json`
+    /// — every package, every version band, every OS an overlay can name — and asks the matcher
+    /// whether a jailed script could read a credential. The two are not redundant: the mechanism test
+    /// dies the moment `home_minus_secrets_allows` is replaced, and this one dies the moment a
+    /// catalog EDIT hands a package something wider than the vocabulary the mechanism narrows.
+    ///
+    /// ⛔ THE `write:"disk"` TIER IS EXEMPT BY CONSTRUCTION, NOT BY OVERSIGHT. `compile_build_jail`
+    /// answers it with `relax_fs_to_full_disk`, which clears every rule and flips the default to
+    /// Allow — there is no filesystem confinement left to assert about. Skipping those silently would
+    /// hide the tier growing, so they are collected and pinned instead: a new disk-tier entry fails
+    /// this test and has to be argued.
+    ///
+    /// ⛔ `read:"disk"` IS NOT EXEMPT AND MUST NOT BE FOLDED IN WITH IT. It answers through
+    /// `relax_fs_read_to_disk_minus_secrets`, which excludes the credentials by walking them out of
+    /// the allow-set, so the two disk spellings differ on exactly the question this test asks.
+    /// Treating "disk" as one tier would have dropped `@mui/x-telemetry` and
+    /// `appium-uiautomator2-driver` from the assertion — the only two entries whose disk reach is
+    /// read-only, and therefore the only two where the exclusion has to hold under a disk grant.
+    ///
+    /// The project's own `.env` is deliberately NOT in the credential set. A `project` grant hands
+    /// over the consumer's own tree by design, `.env` included (82 combinations today), so asserting
+    /// it denied would be asserting the catalog is something it is not. What IS asserted is the
+    /// implication: nothing reaches that file without a grant that names `project`.
+    #[test]
+    fn no_shipped_catalog_grant_reaches_a_credential_at_any_band_or_platform() {
+        // Home-relative, because a `project` grant legitimately covers the project tree and a
+        // credential planted there would make this test assert the opposite of the design. `.ssh` is
+        // the directory itself: a grant on it confers the private key even if the key's own path
+        // were somehow refused.
+        const HOME_CREDENTIALS: [&str; 4] =
+            [".npmrc", ".aws/credentials", ".ssh/id_ed25519", ".ssh"];
+
+        let (_guard, homes) = secretful_home();
+        // BEFORE any compile: `home_minus_secrets_allows` and `disk_minus_secrets_read_allows` both
+        // WALK the real directory, so a credential created afterwards never enters the walk and every
+        // denial below would be a denial of a path that does not exist — which proves nothing.
+        std::fs::write(
+            homes.home.join(".npmrc"),
+            "//registry.npmjs.org/:_authToken=decoy",
+        )
+        .expect("mk .npmrc");
+        std::fs::create_dir_all(homes.home.join(".aws")).expect("mk .aws");
+        std::fs::write(homes.home.join(".aws/credentials"), "[default]").expect("mk aws creds");
+        std::fs::write(homes.home.join(".ssh/id_ed25519"), "-----BEGIN----").expect("mk ssh key");
+        std::fs::write(homes.home.join("Documents/notes.txt"), "ordinary").expect("mk notes");
+
+        struct Reached {
+            credentials: Vec<&'static str>,
+            /// The ordinary home file. Without it a grant that materialised NOTHING would satisfy
+            /// every credential assertion, and the sweep would report a clean catalog by examining
+            /// an empty allow-set 1,299 times.
+            home: bool,
+            project_env: bool,
+        }
+        let reached = |policy: &SandboxPolicy| -> Reached {
+            let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+            let allow = |p: PathBuf| m.decide(&p).effect == Effect::Allow;
+            Reached {
+                credentials: HOME_CREDENTIALS
+                    .into_iter()
+                    .filter(|s| allow(homes.home.join(s)))
+                    .collect(),
+                home: allow(homes.home.join("Documents/notes.txt")),
+                project_env: allow(homes.project.join(".env")),
+            }
+        };
+
+        let (interpreter, extra_reads) = POSIX_LAYOUT;
+        // ⛔ COMPILED ONCE AND CLONED, AND THE FIDELITY ARGUMENT IS THE ONE ON THE TEST ABOVE:
+        // production applies the v2 grant partway through `compile_build_jail`, no fs rule is added
+        // after that point, and the matcher is last-match-wins — so appending is equivalent. 1,299
+        // real compiles would also make this the slowest test in the crate for an identical answer.
+        // `package_name: None` is what keeps the base free of a catalog grant of its own; it lands on
+        // `baseline_caps`, which grants no home read at all and so cannot mask or manufacture a leak.
+        let package_dir = homes.project.join("node_modules").join("sweep-fixture");
+        let base = compile_build_jail(
+            homes.clone(),
+            &package_dir,
+            None,
+            None,
+            vec![PathBuf::from(interpreter)],
+            extra_reads.iter().map(PathBuf::from).collect(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+        {
+            let r = reached(&base);
+            assert!(
+                r.credentials.is_empty() && !r.home,
+                "fixture precondition: the ungranted base must reach nothing (got {:?}, home={}), \
+                 or a leak found below could have come from the base rather than from the catalog \
+                 grant under test",
+                r.credentials,
+                r.home
+            );
+        }
+
+        // Captured from the production function once. It answers purely from `homes` — the same
+        // allow-set for every package — and it walks the real disk, which cost 13s of suite time when
+        // it ran per combination for a byte-identical result.
+        let disk_read_allows = {
+            let mut scratch = SandboxPolicy::default();
+            relax_fs_read_to_disk_minus_secrets(&mut scratch, &homes);
+            scratch.fs.rules.entries
+        };
+
+        // Both controls drive the SAME `reached` detector the sweep uses, through the SAME catalog
+        // parse and `apply_v2_grant` lowering, so a detector that had stopped answering — a path that
+        // never matches, a scope that stopped lowering — could not pass them.
+        let synthetic = |json: &str| -> SandboxPolicy {
+            let catalog = crate::catalog_v2::parse(json).expect("synthetic entry must parse");
+            let mut policy = base.clone();
+            let out = crate::compiler::curated::apply_v2_grant(
+                &mut policy,
+                &homes,
+                &package_dir,
+                &catalog.packages["p"]
+                    .default
+                    .on(crate::catalog_v2::Platform::current()),
+            );
+            if out.write_disk {
+                relax_fs_to_full_disk(&mut policy);
+            }
+            enforce_pure_allowlist("build-jail", &mut policy);
+            policy
+        };
+
+        let narrow = reached(&synthetic(
+            r#"{"packages":{"p":{"default":{"write":{"userHome":true},"notes":"control: the grant the sweep must find safe"}}}}"#,
+        ));
+        assert!(
+            narrow.home,
+            "control: a userHome grant must actually materialise a home allow — if it does not, the \
+             sweep's clean verdicts are verdicts about a policy that granted nothing"
+        );
+        assert!(
+            narrow.credentials.is_empty(),
+            "control: a narrowed userHome grant must reach no credential, got {:?}",
+            narrow.credentials
+        );
+
+        // The wide half, and the reason the control needs two arms: the narrow arm proves the
+        // detector can say "home reachable", not that it can say "credential reachable". Only a grant
+        // that genuinely opens the filesystem separates a working detector from one wired to a path
+        // that never matches anything.
+        let wide = reached(&synthetic(
+            r#"{"packages":{"p":{"default":{"write":"disk","notes":"control: the detector must fire on an unconfined grant"}}}}"#,
+        ));
+        assert_eq!(
+            wide.credentials.len(),
+            HOME_CREDENTIALS.len(),
+            "control: an unconfined write:\"disk\" grant must report EVERY credential as reached \
+             (got {:?}) — anything less means the detector, not the policy, is what is denying",
+            wide.credentials
+        );
+
+        let catalog =
+            crate::catalog_override::baked_v2().expect("the baked v2 catalog is always in force");
+        let mut combinations = 0usize;
+        let mut grants = 0usize;
+        let mut home_reaching = 0usize;
+        let mut unconfined: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut leaks: Vec<String> = Vec::new();
+        let mut stray_project_env: Vec<String> = Vec::new();
+
+        for (name, entry) in &catalog.packages {
+            let mut bands: Vec<(&str, &crate::catalog_v2::Grant)> =
+                vec![("default", &entry.default)];
+            bands.extend(entry.versions.iter().map(|b| (b.range.as_str(), &b.grant)));
+            grants += bands.len();
+            for (band, grant) in bands {
+                for platform in crate::catalog_v2::Platform::ALL {
+                    combinations += 1;
+                    let caps = grant.on(platform);
+                    let mut policy = base.clone();
+                    let out = crate::compiler::curated::apply_v2_grant(
+                        &mut policy,
+                        &homes,
+                        &package_dir,
+                        &caps,
+                    );
+                    if out.write_disk {
+                        unconfined.insert(name.as_str());
+                        continue;
+                    }
+                    if out.read_disk {
+                        policy
+                            .fs
+                            .rules
+                            .entries
+                            .splice(0..0, disk_read_allows.iter().cloned());
+                    }
+                    enforce_pure_allowlist("build-jail", &mut policy);
+
+                    let r = reached(&policy);
+                    home_reaching += usize::from(r.home);
+                    let cell = || format!("{name} @ {band} on {}", platform.key());
+                    for secret in r.credentials {
+                        leaks.push(format!("{}: reached ~/{secret}", cell()));
+                    }
+                    // A `project` grant covers `.env` by design; ANY OTHER route to it is a defect,
+                    // and this is the only assertion the fixture's project-local `.env` carries.
+                    if r.project_env
+                        && !(caps.read.covers(crate::catalog_v2::Scope::Project)
+                            || caps.write.covers(crate::catalog_v2::Scope::Project))
+                    {
+                        stray_project_env.push(cell());
+                    }
+                }
+            }
+        }
+
+        assert!(
+            leaks.is_empty(),
+            "a shipped catalog grant reaches a credential a jailed lifecycle script could harvest \
+             ({} of {combinations} combinations):\n  {}",
+            leaks.len(),
+            leaks.join("\n  ")
+        );
+        assert!(
+            stray_project_env.is_empty(),
+            "the consuming project's .env is reachable without a grant naming `project`:\n  {}",
+            stray_project_env.join("\n  ")
+        );
+
+        // Floors, not equalities: the catalog grows on its own schedule and pinning exact counts
+        // would make every entry a test edit. Measured 2026-09-04: 294 packages, 433 grants, 1,299
+        // combinations, 136 of them reaching the home. The floors sit far enough below to absorb
+        // ordinary narrowing and high enough that an emptied catalog, a lost band walk, or a
+        // `Platform::ALL` reduced to the host OS cannot pass by examining almost nothing.
+        assert!(
+            catalog.packages.len() >= 250 && grants >= 380 && combinations >= 1_100,
+            "the sweep examined {} packages / {grants} grants / {combinations} combinations, which \
+             is too few to be the shipped catalog — a clean result here would mean nothing",
+            catalog.packages.len()
+        );
+        assert!(
+            home_reaching >= 100,
+            "only {home_reaching} combinations reached the home at all, so the credential \
+             assertions above are near-vacuous — the userHome lowering has stopped materialising"
+        );
+
+        // ⛔ PINNED, WITH THE FULL LIST SPELLED OUT, BECAUSE THIS IS THE NARROWING BACKLOG. Every
+        // name here is a package whose scripts run with NO filesystem confinement, so the credential
+        // assertion above cannot speak for it — the list IS the residual exposure, and it may only
+        // ever shrink without an argument. Provenance for the shape it has today: of the 23 entries
+        // reaching either disk tier, 12 reach it only through an older `<`-bounded band, 12 reach it
+        // only on Windows (a `macos`/`linux` overlay narrows the other two and no `win` overlay
+        // narrows it), and 2 — `@mui/x-telemetry`, `appium-uiautomator2-driver` — are `read:"disk"`
+        // only, so they are asserted above rather than listed here.
+        let expected: std::collections::BTreeSet<&str> = [
+            "@larksuite/cli",
+            "@nuxt/components",
+            "@opencode-ai/cli",
+            "@paloaltonetworks/postman-code-generators",
+            "@sap/hana-client",
+            "@tensorflow/tfjs-backend-wasm",
+            "codeceptjs",
+            "cz-customizable",
+            "dotnet-2.0.0",
+            "flow-bin",
+            "opencode-ai",
+            "pizzip",
+            "pngout-bin",
+            "postman-code-generators",
+            "purescript",
+            "qlobber",
+            "react-native-purchases",
+            "redis-memory-server",
+            "samlify",
+            "tree-sitter-kotlin",
+            "windows-build-tools",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            unconfined,
+            expected,
+            "the set of packages whose scripts run UNCONFINED changed; added {:?}, removed {:?} — an \
+             addition needs the same argument the existing entries carry, a removal is a narrowing \
+             and just needs this list updated",
+            unconfined.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&unconfined).collect::<Vec<_>>()
+        );
+    }
+
+    /// The build jail's toolchain read was CARVED OUT of `$tooldirs`, so it must remain a
+    /// subset of it. If the two anchors ever drift apart the narrowing stops being a
+    /// narrowing and starts granting a directory the broad set never covered — silently,
+    /// and ON ONE PLATFORM AT A TIME, which is the failure this exists to catch.
+    ///
+    /// `cache` is set per-platform to what the embedder actually resolves (`sandbox_homes`
+    /// mirrors the engine's `cache_dir`, `%LOCALAPPDATA%` branch included). Hardcoding the
+    /// POSIX spelling would make this pass on Windows while production aimed the grant at a
+    /// directory node-gyp was never bootstrapped into.
+    #[test]
+    fn the_narrowed_toolchain_grant_stays_inside_tooldirs() {
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: if cfg!(windows) {
+                PathBuf::from(fx!("/testhome/AppData/Local"))
+            } else {
+                PathBuf::from(fx!("/testhome/.cache"))
+            },
+            project: PathBuf::from(fx!("/proj")),
+        };
+        let tooldirs: Vec<String> = crate::compiler::builtin_sets::tooldir_patterns()
+            .iter()
+            .map(|p| crate::matcher::path::expand_symbolic(p, &homes))
+            .collect();
+        for pattern in NUB_PM_CACHE_PATTERNS {
+            let grant = crate::matcher::path::expand_symbolic(pattern, &homes);
+            let inside = tooldirs
+                .iter()
+                .any(|t| &grant == t || grant.starts_with(&format!("{t}/")));
+            assert!(
+                inside,
+                "the build jail's {pattern} grant expanded to {grant}, which no \
+                 $tooldirs pattern covers — the carve-out has drifted from the set it came from"
+            );
+        }
+    }
+
+    /// A git dependency's checkout carries a `.git/config` recording the fetch URL, which
+    /// for a private HTTPS dep can embed a token — so `$cache/nub/pm/git` must stay outside
+    /// the jail's read set while the two subtrees the jail genuinely needs stay inside it.
+    /// The positive half is what makes this non-vacuous: an assertion that `git` is denied
+    /// would pass just as well if the whole PM-cache grant were dropped, which breaks every
+    /// native build and every global-virtual-store resolution.
+    #[test]
+    fn the_pm_cache_grant_reaches_the_store_and_toolchain_but_not_git_checkouts() {
+        let policy = production_build_jail_policy();
+        let m = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        let cache = Path::new(fx!("/testhome/.cache/nub/pm"));
+        for granted in [
+            cache.join("store/left-pad@1.3.0-abc/node_modules/left-pad/index.js"),
+            cache.join("tools/node-gyp/lazy-bin/node-gyp"),
+        ] {
+            assert_eq!(
+                m.decide(&granted).effect,
+                Effect::Allow,
+                "{} is the store/toolchain content every confined build resolves through",
+                granted.display()
+            );
+        }
+        assert_eq!(
+            m.decide(&cache.join("git/aube-git-deadbeef/.git/config"))
+                .effect,
+            Effect::Deny,
+            "a git dependency's clone config records its fetch URL — a private HTTPS dep's \
+             token — and must not be reachable from another package's lifecycle script"
+        );
+    }
+
+    /// The three `$cache/nub/pm/tools` redirect targets, as the paths a backend would install a
+    /// WRITE grant on.
+    ///
+    /// [`FsDecision::access`] is deliberately NOT this model — it is last-match-wins over the
+    /// EFFECT axis, and its own doc comment says a test reading it as backend write access is
+    /// asserting a model no backend shares. Both enforcing backends instead UNION the `ReadWrite`
+    /// Allow rules into a write-grant list (`derive_grants` on Windows, `compile_mount_plan` on
+    /// Linux), so that subset is what the question is asked against.
+    fn write_grant_matcher(policy: &SandboxPolicy) -> crate::matcher::PathMatcher {
+        let mut set = policy.fs.rules.clone();
+        set.entries
+            .retain(|r| r.effect == Effect::Allow && r.access == FsAccess::ReadWrite);
+        set.default_effect = Effect::Deny;
+        crate::matcher::PathMatcher::new(&set)
+    }
+
+    /// A redirect target must EXIST by the time the confined child launches, because the grant
+    /// beside it neither creates it nor survives its absence: `push_rw_path` stamps
+    /// `FsOrigin::Speculative`, and both enforcing backends drop such a rule when the path is
+    /// missing. The package is then left to `mkdir` it against a `tools` that is read-only ON
+    /// PURPOSE — measured on Windows as `EPERM … mkdir '…\nub\pm\tools\electron-cache'`.
+    ///
+    /// The `tools` half is the other side of the same fix and is why this is one test: the repair
+    /// for the mkdir failure that a reviewer must never accept is widening the parent, which would
+    /// let one package's lifecycle script replace the node-gyp binary every later install runs.
+    /// Asserting the leaves exist without also pinning the parent read-only would leave that
+    /// wrong repair passing.
+    #[test]
+    fn the_tool_redirect_leaves_exist_and_tools_itself_stays_read_only() {
+        let case = home_case("somepkg");
+        let tools = case.cache.path().join("nub/pm/tools");
+        let writes = write_grant_matcher(&case.policy);
+
+        for leaf in ["npm-prefix", "ms-playwright", "electron-cache"] {
+            let dir = tools.join(leaf);
+            assert!(
+                dir.is_dir(),
+                "{leaf} is a path nub NAMES for the package (npm_config_prefix, \
+                 PLAYWRIGHT_BROWSERS_PATH, electron_config_cache) but does not create, so the \
+                 write grant on it is dropped as absent and the package's own mkdir is refused \
+                 by the read-only parent"
+            );
+            let decision = writes.decide(&dir.join("downloaded-artifact"));
+            assert_eq!(
+                decision.effect,
+                Effect::Allow,
+                "{leaf} exists but carries no write grant, so the assertion above is measuring a \
+                 directory the confined package still cannot write into"
+            );
+        }
+
+        for read_only in [tools.clone(), tools.join("node-gyp/lazy-bin/node-gyp")] {
+            assert_eq!(
+                writes.decide(&read_only).effect,
+                Effect::Deny,
+                "{} became writable — `tools` holds the node-gyp nub bootstraps for itself and \
+                 executes on every later install, so a write grant spanning it lets one package's \
+                 lifecycle script replace a binary every subsequent install then runs",
+                read_only.display()
+            );
+        }
+    }
+
+    /// Compiling a policy must not touch the host filesystem when `Homes` is synthetic — every
+    /// unit test in this file compiles against `/testhome/.cache`, and a compile that materialized
+    /// its grants would scatter directories across the measuring host and behave differently
+    /// depending on whether the caller could write there.
+    #[test]
+    fn a_compile_against_a_synthetic_cache_materializes_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Inside a real tempdir so the assertion below can see what a compile WOULD have made,
+        // but never itself created — which is exactly the synthetic shape the guard tests for.
+        let cache = tmp.path().join("cache-that-nub-never-established");
+        let policy = compile_build_jail(
+            Homes {
+                home: PathBuf::from(fx!("/testhome")),
+                tmp: PathBuf::from(fx!("/testtmp")),
+                cache: cache.clone(),
+                project: PathBuf::from(fx!("/proj")),
+            },
+            Path::new(fx!("/proj/node_modules/somepkg")),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("build-jail compiles");
+
+        assert!(
+            !cache.exists(),
+            "the compile materialized {} — a policy compiled against a cache root the engine \
+             never established must leave the host alone",
+            cache.display()
+        );
+        // The positive control: the compile really did run the leaf loop, so the assertion above
+        // is the guard holding rather than the code path never having been reached.
+        let leaf = crate::matcher::path::canonicalize_including_nonexistent(
+            &cache.join("nub/pm/tools/electron-cache"),
+        );
+        assert_eq!(
+            write_grant_matcher(&policy)
+                .decide(&leaf.join("artifact"))
+                .effect,
+            Effect::Allow,
+            "no write grant for {} — the leaf loop did not run, so this test proves nothing about \
+             the guard",
+            leaf.display()
+        );
+    }
+}

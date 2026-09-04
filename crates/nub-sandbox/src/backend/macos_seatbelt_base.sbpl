@@ -1,0 +1,402 @@
+; nub-sandbox macOS Seatbelt essential base — the (deny default) bootstrap block.
+;
+; PROVENANCE: ported from OpenAI Codex's `seatbelt_base_policy.sbpl` +
+; `restricted_read_only_platform_defaults.sbpl` (Apache-2.0), themselves derived
+; from Chromium's sandbox policy (BSD). This is the minimum set of process /
+; mach / sysctl / iokit / framework-map / system-read grants a `(deny default)`
+; profile needs so an arbitrary binary can dyld-load and boot on modern macOS
+; (empirically: without `file-map-executable` on the frameworks a plain `/bin/cat`
+; SIGABRTs before main). nub appends its IR-derived read/write/net rules AFTER this
+; block; SBPL is last-match-wins, so a later nub deny overrides any allow here.
+;
+; DELIBERATE DIVERGENCE from the Codex platform defaults: the blanket read+write
+; scratch grants on /tmp, /private/tmp, /var/tmp are REMOVED. Codex grants them as
+; convenience scratch; for nub they would defeat both write-confine (a build could
+; write anywhere under /tmp) and read-confine (arbitrary /tmp files readable).
+; nub governs tmp via the policy IR (tmp posture + the DARWIN confstr grant the
+; backend emits), never a hardcoded world-tmp grant.
+
+(version 1)
+
+; ── closed by default ────────────────────────────────────────────────────────
+(deny default)
+
+; child processes inherit the parent policy (one-way ratchet)
+(allow process-exec)
+(allow process-fork)
+(allow signal (target same-sandbox))
+; NOTE: process-info* is NOT granted here. It is ALLOWED-BY-DEFAULT even under
+; (deny default), so the builder appends an explicit `(deny process-info*)` +
+; self-restore (the env-read closure) AFTER this base. A `(target same-sandbox)`
+; grant here would be an ENV-LEAK footgun: a sandboxed child's own siblings ARE
+; same-sandbox, so it would let one confined process read another's environment
+; via KERN_PROCARGS2 — the exact hole the closure exists to shut.
+
+; the standard null device write (char-device guarded)
+(allow file-write-data
+  (require-all
+    (path "/dev/null")
+    (vnode-type CHARACTER-DEVICE)))
+
+; sysctls a normal libc/runtime startup reads (CPU topology, kernel version, …)
+(allow sysctl-read
+  (sysctl-name "hw.activecpu")
+  (sysctl-name "hw.busfrequency_compat")
+  (sysctl-name "hw.byteorder")
+  (sysctl-name "hw.cacheconfig")
+  (sysctl-name "hw.cachelinesize_compat")
+  (sysctl-name "hw.cpufamily")
+  (sysctl-name "hw.cpufrequency_compat")
+  (sysctl-name "hw.cputype")
+  (sysctl-name "hw.l1dcachesize_compat")
+  (sysctl-name "hw.l1icachesize_compat")
+  (sysctl-name "hw.l2cachesize_compat")
+  (sysctl-name "hw.l3cachesize_compat")
+  (sysctl-name "hw.logicalcpu_max")
+  (sysctl-name "hw.machine")
+  (sysctl-name "hw.model")
+  (sysctl-name "hw.memsize")
+  (sysctl-name "hw.ncpu")
+  (sysctl-name "hw.nperflevels")
+  (sysctl-name-prefix "hw.optional.arm.")
+  (sysctl-name-prefix "hw.optional.armv8_")
+  (sysctl-name "hw.packages")
+  (sysctl-name "hw.pagesize_compat")
+  (sysctl-name "hw.pagesize")
+  (sysctl-name "hw.physicalcpu")
+  (sysctl-name "hw.physicalcpu_max")
+  (sysctl-name "hw.logicalcpu")
+  (sysctl-name "hw.cpufrequency")
+  (sysctl-name "hw.tbfrequency_compat")
+  (sysctl-name "hw.vectorunit")
+  (sysctl-name "machdep.cpu.brand_string")
+  (sysctl-name "kern.argmax")
+  (sysctl-name "kern.hostname")
+  (sysctl-name "kern.maxfilesperproc")
+  (sysctl-name "kern.maxproc")
+  (sysctl-name "kern.osproductversion")
+  (sysctl-name "kern.osrelease")
+  (sysctl-name "kern.ostype")
+  (sysctl-name "kern.osvariant_status")
+  (sysctl-name "kern.osversion")
+  (sysctl-name "kern.secure_kernel")
+  (sysctl-name "kern.usrstack64")
+  (sysctl-name "kern.version")
+  (sysctl-name "sysctl.proc_cputype")
+  (sysctl-name "vm.loadavg")
+  (sysctl-name-prefix "hw.perflevel")
+  (sysctl-name-prefix "kern.proc.pgrp.")
+  (sysctl-name-prefix "kern.proc.pid.")
+  (sysctl-name-prefix "net.routetable."))
+(allow sysctl-write
+  (sysctl-name "kern.grade_cputype"))
+
+; IOKit / power-management the runtime touches at startup
+(allow iokit-open
+  (iokit-registry-entry-class "RootDomainUserClient"))
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.libinfo"))
+(allow mach-lookup
+  (global-name "com.apple.PowerManagement.control"))
+
+; POSIX sem/shm many runtimes (python multiprocessing, libomp) require
+(allow ipc-posix-sem)
+(allow ipc-posix-shm-read-data
+  ipc-posix-shm-write-create
+  ipc-posix-shm-write-unlink
+  (ipc-posix-name-regex #"^/__KMP_REGISTERED_LIB_[0-9]+$"))
+
+; openpty() and existing controlling ttys so interactive tools stay functional
+(allow pseudo-tty)
+(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
+(allow file-read* file-write*
+  (require-all
+    (regex #"^/dev/ttys[0-9]+")
+    (extension "com.apple.sandbox.pty")))
+(allow file-ioctl (regex #"^/dev/ttys[0-9]+"))
+
+; cfprefs bootstrap. The mach port and the shared-memory segment stay granted — CF
+; connects during startup — but `user-preference-read`, the operation that actually
+; returns a domain's CONTENTS, does NOT.
+;
+; It is a BROKER BYPASS, not an ordinary read. `cfprefsd` is a separate, unsandboxed
+; process that resolves HOME from `getpwuid` and reads on the child's behalf, so no path
+; grant or withholding reaches it: measured 2026-07-28, `defaults read -globalDomain`
+; under the compiled build jail returned the same 7917 bytes as unconfined while the
+; underlying `~/Library/Preferences/.GlobalPreferences.plist` was refused at the file
+; layer. Domain ENUMERATION was already closed, so it was guess-the-domain — trivial for
+; any known app.
+;
+; Removing the grant is what closes it, and removing is all that is needed: unlike
+; `process-info*`, `user-preference-read` is NOT allowed-by-default, so it falls to
+; `(deny default)` above. Measured with the plist path denied so the file route could not
+; confound the result: grant present → 7916 bytes rc=0; grant absent → 0 bytes rc=1;
+; grant absent PLUS an explicit `(deny user-preference-read)` → identical 0 bytes rc=1,
+; i.e. the deny buys nothing. That equality is why this is a grant removal — the build
+; jail emits zero deny rules, and an SBPL deny here would also be a rule the Landlock and
+; AppContainer backends have no way to mirror.
+;
+; Compat: `clang`, `make`, `perl`, `python3`, `git`, `xcrun`, `tar`, `curl` and `node` all
+; behave identically with and without it, `node` included down to the resolved `Intl`
+; locale — the one consumer that plausibly needed it.
+(allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow mach-lookup
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.cfprefsd.agent")
+  (local-name "com.apple.cfprefsd.agent"))
+
+; ── system read + framework map (the dyld/boot read surface) ─────────────────
+(allow file-map-executable
+  (subpath "/Library/Apple/System/Library/Frameworks")
+  (subpath "/Library/Apple/System/Library/PrivateFrameworks")
+  (subpath "/Library/Apple/usr/lib")
+  (subpath "/System/Library/Extensions")
+  (subpath "/System/Library/Frameworks")
+  (subpath "/System/Library/PrivateFrameworks")
+  (subpath "/System/Library/SubFrameworks")
+  (subpath "/System/iOSSupport/System/Library/Frameworks")
+  (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")
+  (subpath "/System/iOSSupport/System/Library/SubFrameworks")
+  (subpath "/usr/lib"))
+; Node aborts at init without openssl.cnf — `BIO_new_file` EPERM before any user
+; code runs, so EVERY Node fails under a read-confine that omits this, on every
+; installation (macOS ships no system Node, so there is no configuration that
+; escapes it). World-readable system config; granting read costs nothing.
+(allow file-read* file-test-existence
+  (subpath "/System/Library/OpenSSL"))
+; `/usr/bin/shasum` — and every other system tool that is a `#!/usr/bin/perl`
+; script — dyld-loads `libperl.dylib` from here. The framework grants above name
+; only `/System/Library/{Frameworks,PrivateFrameworks,SubFrameworks,Extensions}`
+; and `/usr/lib`, so a confined `shasum` dies before main with
+; `Library not loaded: …libperl.dylib … (blocked by sandbox)`.
+;
+; MEASURED, and the failure is SILENT rather than loud, which is why it cost five
+; catalog records: detox's `build_framework.ios.sh:9` is
+;     sha1=`(echo "$v" && xcodebuild -version) | shasum | awk '{print $1}'`
+; whose exit status is AWK's, so `bash -e` never fires. `sha1` comes back EMPTY and
+; the framework extracts to `$HOME/Library/Detox/ios/` instead of
+; `$HOME/Library/Detox/ios/<sha1>/` — same rc, same file count, DIFFERENT PATHS,
+; which is exactly the otherwise-baffling record signature (15408 files at every
+; rung, digest differing only between confined and unconfined). detox's own runtime
+; then looks in the sha1 dir and finds nothing.
+; Verified with `sandbox-exec`: the base profile reproduces the CI dyld error
+; verbatim; adding this line alone restores the control digest. `file-map-executable`
+; is not required — same finding as the toolchain-prefix grant below.
+(allow file-read* file-test-existence
+  (subpath "/System/Library/Perl"))
+(allow file-read* file-test-existence
+  (subpath "/Library/Apple")
+  (subpath "/Library/Filesystems/NetFSPlugins")
+  (subpath "/Library/Preferences/Logging")
+  (subpath "/private/var/db/DarwinDirectory/local/recordStore.data")
+  (subpath "/private/var/db/timezone")
+  (subpath "/usr/lib")
+  (subpath "/usr/share")
+  (subpath "/Library/Preferences")
+  (subpath "/var/db")
+  (subpath "/private/var/db"))
+(allow file-read* file-test-existence
+  (subpath "/Library/Apple/System/Library/Frameworks")
+  (subpath "/Library/Apple/System/Library/PrivateFrameworks")
+  (subpath "/Library/Apple/usr/lib")
+  (subpath "/System/Library/Frameworks")
+  (subpath "/System/Library/PrivateFrameworks")
+  (subpath "/System/Library/SubFrameworks")
+  (subpath "/System/iOSSupport/System/Library/Frameworks")
+  (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")
+  (subpath "/System/iOSSupport/System/Library/SubFrameworks")
+  (subpath "/usr/lib"))
+
+; guarded vnodes + Sandbox container probe
+(allow system-mac-syscall (mac-policy-name "vnguard"))
+(allow system-mac-syscall
+  (require-all
+    (mac-policy-name "Sandbox")
+    (mac-syscall-number 67)))
+
+; standard system symlinks + firmlink-parent stat traversal + cwd read
+(allow file-read-metadata file-test-existence
+  (literal "/etc")
+  (literal "/tmp")
+  (literal "/var")
+  (literal "/private/etc/localtime"))
+(allow file-read-metadata file-test-existence
+  (path-ancestors "/System/Volumes/Data/private"))
+(allow file-read* file-test-existence
+  (literal "/"))
+(allow system-fsctl (fsctl-command FSIOC_CAS_BSDFLAGS))
+
+; standard special/config files
+(allow file-read* file-test-existence
+  (literal "/dev/autofs_nowait")
+  (literal "/dev/random")
+  (literal "/dev/urandom")
+  (literal "/private/etc/master.passwd")
+  (literal "/private/etc/passwd")
+  (literal "/private/etc/protocols")
+  (literal "/private/etc/services"))
+(allow file-read* file-test-existence file-write-data
+  (literal "/dev/null")
+  (literal "/dev/zero"))
+(allow file-read-data file-test-existence file-write-data
+  (subpath "/dev/fd"))
+(allow file-read* file-test-existence file-write-data file-ioctl
+  (literal "/dev/dtracehelper"))
+; `/etc` is granted by LEAF, never as a subpath. The wholesale subpath swept in
+; `/etc/shadow` + `/etc/gshadow`, which the build-jail preset then carved back out with a
+; deny — and a deny inside a grant is precisely what the allowlist backends (Landlock,
+; Windows AppContainer) cannot express, so that carve-out made every build-jail policy
+; unenforceable there. Narrowing the grant protects the password hashes by construction on
+; every backend instead. This mirrors what the Linux minimal root already does: its
+; `ESSENTIAL_READ_PATHS` names `/etc` LEAVES and never binds the directory.
+;
+; `/etc` is a firmlink to `/private/etc`, so both spellings are granted. Beyond the standard
+; config files granted above, these are the leaves a lifecycle script actually reaches: TLS
+; trust roots, name resolution, and the `paths`/`paths.d` PATH seed.
+(allow file-read* file-test-existence
+  (subpath "/private/etc/ssl")
+  (subpath "/etc/ssl")
+  (subpath "/private/etc/paths.d")
+  (subpath "/etc/paths.d")
+  (literal "/private/etc/hosts")
+  (literal "/etc/hosts")
+  (literal "/private/etc/resolv.conf")
+  (literal "/etc/resolv.conf")
+  ; ⛔ AND THE SYMLINK TARGET, WITHOUT WHICH THE TWO ABOVE GRANT NOTHING. On macOS
+  ; `/etc/resolv.conf` is a SYMLINK to `../var/run/resolv.conf`, configd-managed, and Seatbelt
+  ; evaluates the RESOLVED path — so granting only the link spellings leaves the read `EPERM`.
+  ; Same link-hop shape the Python dylib grant documents from the other side (granted at the
+  ; Cellar path, still denied through the `opt/<formula>` alias).
+  ;
+  ; MEASURED, and it is not cosmetic: on Node <=8 `dns.js` constructs a c-ares `ChannelWrap` at
+  ; MODULE LOAD, pulled in by `net.js` during `process.stdout` setup whenever stdio is a PIPE —
+  ; which it is for anything node-gyp spawns. The denied read surfaces as `Error: EFILE` from
+  ; `internal/process/stdio.js` and kills the whole lifecycle script, so the package reads as
+  ; broken when only name resolution was ungranted. Isolated to a 2x2 with one variable each:
+  ; Node 8 jailed EFILE / Node 8 unjailed ok / Node 10 jailed ok / Node 10 unjailed ok, on a
+  ; postinstall whose only work is `execSync` of `node -e console.log(1)`.
+  ;
+  ; Safe to grant: the jail denies sockets outright, so a resolver list is useless to a confined
+  ; script, and `/etc/hosts` — which names internal hosts — is already granted above.
+  (literal "/private/var/run/resolv.conf")
+  (literal "/var/run/resolv.conf")
+  (literal "/private/etc/group")
+  (literal "/etc/group")
+  (literal "/private/etc/networks")
+  (literal "/private/etc/paths")
+  (literal "/etc/paths"))
+(allow file-read* file-test-existence
+  (literal "/System/Library/CoreServices")
+  (literal "/System/Library/CoreServices/.SystemVersionPlatform.plist")
+  (literal "/System/Library/CoreServices/SystemVersion.plist"))
+(allow file-read-metadata (subpath "/var"))
+(allow file-read-metadata (subpath "/private/var"))
+
+; opendirectoryd + logging/analytics/trust agents a startup pings
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+(allow mach-lookup
+  (global-name "com.apple.analyticsd")
+  (global-name "com.apple.analyticsd.messagetracer")
+  (global-name "com.apple.appsleep")
+  (global-name "com.apple.bsd.dirhelper")
+  (global-name "com.apple.cfprefsd.agent")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.diagnosticd")
+  (global-name "com.apple.dt.automationmode.reader")
+  (global-name "com.apple.espd")
+  (global-name "com.apple.logd")
+  (global-name "com.apple.logd.events")
+  (global-name "com.apple.runningboard")
+  (global-name "com.apple.secinitd")
+  (global-name "com.apple.system.DirectoryService.libinfo_v1")
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.trustd")
+  (global-name "com.apple.trustd.agent")
+  (global-name "com.apple.xpc.activity.unmanaged")
+  (local-name "com.apple.cfprefsd.agent"))
+(allow network-outbound (literal "/private/var/run/syslog"))
+(allow ipc-posix-shm-read*
+  (ipc-posix-name "apple.shm.notification_center"))
+(allow file-read*
+  (literal "/private/var/db/eligibilityd/eligibility.plist"))
+(allow mach-lookup (global-name "com.apple.audio.audiohald"))
+(allow mach-lookup (global-name "com.apple.audio.AudioComponentRegistrar"))
+
+; the minimum system runtime paths so exec of a system tool works
+(allow file-read-data (subpath "/bin"))
+(allow file-read-metadata (subpath "/bin"))
+(allow file-read-data (subpath "/sbin"))
+(allow file-read-metadata (subpath "/sbin"))
+(allow file-read-data (subpath "/usr/bin"))
+(allow file-read-metadata (subpath "/usr/bin"))
+(allow file-read-data (subpath "/usr/sbin"))
+(allow file-read-metadata (subpath "/usr/sbin"))
+(allow file-read-data (subpath "/usr/libexec"))
+(allow file-read-metadata (subpath "/usr/libexec"))
+(allow file-read* (subpath "/Library/Preferences"))
+(allow file-read* (subpath "/Applications"))
+
+; ── third-party toolchain prefixes ───────────────────────────────────────────
+; EXEC OF A BINARY REQUIRES READ ON THE BINARY. `(allow process-exec)` above is
+; necessary and NOT sufficient: with the path unreadable the kernel refuses the
+; exec itself, and the caller sees EPERM rather than anything naming a sandbox.
+; Measured on macOS 15 (one variable, matched pair):
+;     without these grants   java rc=71  execvp() ... Operation not permitted
+;     with these grants      java rc=0   openjdk version "26.0.1"
+; and identically for `git` (`git version 2.38.1`, rc=0).
+;
+; This block previously bound only `/opt/homebrew/lib` and `/usr/local/lib`, so
+; every Homebrew BINARY — the `bin` symlinks and their `Cellar` targets — stayed
+; unreachable. The cost was not a diagnosable failure: a lifecycle script that
+; shells out to `git`/`java`/`brew` and swallows the error (husky, lefthook and
+; appium-uiautomator2-driver all do, two of them silently) fails to do its work,
+; the harness sees a short artifact set, and the package walks the ladder to
+; `write:"disk"` — which on every backend means NO confinement at all. So an
+; unreadable toolchain path does not merely break a tool, it silently converts a
+; jailable package into an unjailed one.
+;
+; Linux has bound `/usr` WHOLESALE since this backend was written
+; (`linux.rs::ESSENTIAL_READ_PATHS`), which is why `/usr/local/bin` and
+; `/usr/lib/jvm` were never a problem there — this is macOS reaching parity with
+; the platform that measures healthiest, not a new concession.
+;
+; `canonicalize_path_var` (macos.rs) is the OTHER half of this and stays: it
+; demotes an ungranted symlinked PATH entry from fatal to skippable, which is what
+; keeps a bare `make`/`sh`/`cc` reaching `/usr/bin`. It cannot help a tool that
+; exists ONLY under a Homebrew prefix — there is nothing to fall back to — so it
+; mitigated this and never fixed it.
+;
+; READ-ONLY, and deliberately whole-prefix rather than per-tool: these hold
+; world-readable toolchain content, no credentials, and the alternative for any
+; package that shells out is no sandbox whatsoever. `file-map-executable` is NOT
+; required — measured, adding it changed nothing.
+(allow file-read* file-test-existence
+  (subpath "/opt/homebrew")                     ; Homebrew, Apple Silicon
+  (subpath "/usr/local")                        ; Homebrew on Intel; generic /usr/local
+  (subpath "/opt/local")                        ; MacPorts
+  (subpath "/Library/Java"))                    ; installer-placed JDKs (JAVA_HOME on CI runners)
+
+; terminal basics + device metadata traversal
+(allow file-read* (regex "^/dev/fd/(0|1|2)$"))
+(allow file-write* (regex "^/dev/fd/(1|2)$"))
+(allow file-read* file-write* (literal "/dev/null"))
+(allow file-read* file-write* (literal "/dev/tty"))
+(allow file-read-metadata (literal "/dev"))
+(allow file-read-metadata (regex "^/dev/.*$"))
+(allow file-read-metadata (literal "/dev/stdin"))
+(allow file-read-metadata (literal "/dev/stdout"))
+(allow file-read-metadata (literal "/dev/stderr"))
+(allow file-read-metadata (regex "^/dev/tty[^/]*$"))
+(allow file-read-metadata (regex "^/dev/pty[^/]*$"))
+(allow file-read* file-write* (regex "^/dev/ttys[0-9]+$"))
+(allow file-read* file-write* (literal "/dev/ptmx"))
+(allow file-ioctl (regex "^/dev/ttys[0-9]+$"))
+(allow file-read-metadata (literal "/System/Volumes") (vnode-type DIRECTORY))
+(allow file-read-metadata (literal "/System/Volumes/Data") (vnode-type DIRECTORY))
+(allow file-read-metadata (literal "/System/Volumes/Data/Users") (vnode-type DIRECTORY))
+
+; sandbox extensions the launcher may hand down
+(allow file-read* (extension "com.apple.app-sandbox.read"))
+(allow file-read* file-write* (extension "com.apple.app-sandbox.read-write"))
