@@ -3620,18 +3620,27 @@ mod tests {
         assert_eq!(write, vec![dir.path().to_path_buf()]);
     }
 
+    /// ⛔ HERMETIC ON PURPOSE — THIS TEST NAMED `C:/tools` AND ITS OUTCOME DEPENDED ON THE HOST.
+    /// `derive_grants` consults the real filesystem, so a bare read rule diverts to the node
+    /// list only when the path IS a directory. `C:/tools` does not exist on a dev box and DOES
+    /// exist on `windows-latest`, so the same commit passed locally and failed in CI — a green
+    /// local run that proved nothing. A tempdir removes the dependence at the source; the `/**`
+    /// twin states the subtree intent this assertion is about, since `read` is the subtree plan.
     #[test]
     fn read_only_allow_yields_no_write_grant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canon = dir.path().to_string_lossy().replace('\\', "/");
         let p = fs(
             Effect::Deny,
-            vec![rule("C:/tools", Effect::Allow, FsAccess::Read)],
+            vec![
+                rule(&canon, Effect::Allow, FsAccess::Read),
+                rule(&format!("{canon}/**"), Effect::Allow, FsAccess::Read),
+            ],
         );
         let __g = derive_grants(&p);
-        let read = __g.read;
-        let write = __g.write;
-        assert_eq!(read, vec![PathBuf::from("C:/tools")]);
+        assert_eq!(__g.read, vec![dir.path().to_path_buf()]);
         assert!(
-            write.is_empty(),
+            __g.write.is_empty(),
             "a read-only allow must not open a write grant"
         );
     }
