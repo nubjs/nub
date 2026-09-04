@@ -1,0 +1,35 @@
+name: Preamble eval decomposition
+on:
+  push:
+    branches: [preamble-eval]
+    paths:
+      - 'tests/preamble-eval/**'
+      - '.github/workflows/preamble-eval.yml'
+      - 'runtime/compile-preamble.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  decomp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq hyperfine
+      - name: Build nub with the compile feature
+        run: cargo build -p nub-cli --profile fast --features compile
+      # nub-launcher is its OWN cargo workspace, so the line above never builds it
+      # and `nub compile` then fails its self-probe on a template it cannot find.
+      - name: Build the launcher template
+        run: cd crates/nub-launcher && cargo build --release
+      - name: Decompose
+        env:
+          NUB_BIN: ${{ github.workspace }}/target/fast/nub
+          __NUB_LAUNCHER_TEMPLATE: ${{ github.workspace }}/crates/nub-launcher/target/release/nub-launcher
+          REPO: ${{ github.workspace }}
+        run: bash tests/preamble-eval/decomp.sh
