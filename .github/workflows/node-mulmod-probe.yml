@@ -1,0 +1,35 @@
+name: node-mulmod-probe
+
+# Branch-scoped probe: can the 128-bit mul_mod proposed for V8's rapidhash secret generation be
+# compiled and linked by every toolchain Node ships from, and does it reproduce the shipped loop's
+# secrets? Windows with clang-cl is the leg in question: a 128-bit modulo lowers to __umodti3, which
+# lives in compiler-rt, not in MSVC's CRT. See tests/node-mulmod-probe/.
+on:
+  push:
+    branches: [probe/node-startup]
+    paths:
+      - 'tests/node-mulmod-probe/**'
+      - '.github/workflows/node-mulmod-probe.yml'
+  workflow_dispatch:
+
+jobs:
+  windows-clangcl:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - run: bash tests/node-mulmod-probe/run-windows.sh
+        shell: bash
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/node-mulmod-probe/run-unix.sh
+  macos-x64:
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/node-mulmod-probe/run-unix.sh
