@@ -443,10 +443,19 @@ fn configured_audit_ignores(
     if let Some(canonical) = canonical {
         out.extend(canonical);
     } else {
-        if let Some(config) = manifest
-            .extra
-            .get("auditConfig")
-            .and_then(|v| v.as_object())
+        // Manifest-ROOT `auditConfig` is read only by a NAMESPACED embedder.
+        // An un-namespaced top-level `auditConfig` is a name no package manager
+        // reads — npm has no audit-ignore mechanism at all, bun's is the CLI
+        // flag `bun audit --ignore <CVE>`, and pnpm's is a settings key whose
+        // workspace-yaml home is read below. So for a manifest-root embedder
+        // this block would honour a key only that embedder had ever written, at
+        // a `package.json` name the ecosystem is still free to claim.
+        // `--ignore` is the surface that stays.
+        if !aube_util::embedder().manifest_namespace.is_empty()
+            && let Some(config) = manifest
+                .extra
+                .get("auditConfig")
+                .and_then(|v| v.as_object())
         {
             for key in ["ignoreGhsas", "ignoreCves"] {
                 if let Some(values) = config.get(key).and_then(|v| v.as_array()) {

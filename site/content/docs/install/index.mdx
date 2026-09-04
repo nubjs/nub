@@ -109,19 +109,18 @@ Read the [full docs](https://pnpm.io/settings/dependency-resolution#packageexten
 
 ### `patchedDependencies`
 
-Apply a patch file to a package's contents, keyed by name and version. Running `nub patch <pkg>` writes both the patch and this entry. A key matching no installed package fails the install unless `allowUnusedPatches` downgrades it to a warning.
+Apply a patch file to a package's contents, keyed by name and version. Running `nub patch <pkg>` writes both the patch and this entry. A key matching no installed package fails the install, because the usual cause is a patch that silently stopped being applied.
 
 ```json title="package.json"
 {
   "patchedDependencies": {
     "is-odd@3.0.1": "patches/is-odd@3.0.1.patch"
-  },
-  "allowUnusedPatches": true
+  }
 }
 ```
 
 <Callout>
-Read the full docs on [patchedDependencies](https://pnpm.io/cli/patch#patcheddependencies) and [allowUnusedPatches](https://pnpm.io/cli/patch#allowunusedpatches) on pnpm.io.
+Read the [full docs](https://pnpm.io/cli/patch#patcheddependencies) on pnpm.io.
 </Callout>
 
 ### `workspaces`

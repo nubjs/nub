@@ -771,15 +771,26 @@ impl PackageJson {
     /// key that matched no installed package from a hard error to a
     /// warning.
     ///
-    /// Read from exactly the homes `patchedDependencies` itself uses, so
-    /// the setting always travels with the config it governs: the
-    /// branded `pnpm.*` object (only under a pnpm incumbent, per
-    /// `pnpm_aube_objects`), this tool's own namespace, and — for a
-    /// root-namespace embedder — the neutral top-level key, which is
-    /// what keeps a nub-identity project off another tool's brand.
-    /// Deliberately NOT an npmrc/env setting: pnpm 10 honors it only
-    /// here and in the workspace yaml (verified against 10.15.1), and
-    /// accepting it where pnpm doesn't would be its own divergence.
+    /// The MANIFEST half of the lookup, and only that: the branded
+    /// `pnpm.*` object (read solely under a pnpm incumbent, per
+    /// `pnpm_aube_objects`) and this tool's own namespace, which are
+    /// exactly the manifest homes `patchedDependencies` itself uses, so
+    /// the setting travels with the config it governs. pnpm 10 honors
+    /// the knob here and in the workspace yaml and nowhere else
+    /// (verified against 10.15.1); `patches.rs` reads the yaml and
+    /// prefers it over this reader, matching how `patchedDependencies`
+    /// itself merges.
+    ///
+    /// There is deliberately no manifest-ROOT read, and a manifest-root
+    /// embedder therefore has no persistent home for the knob at all.
+    /// That un-namespaced key was nub-only: no package manager reads a
+    /// top-level `allowUnusedPatches`, and npm 12 — which ships the
+    /// feature — makes its own `--allow-unused-patches` command-line
+    /// only on purpose, ignored in `.npmrc` and env and rejected by
+    /// `npm ci`, so it cannot become project policy anywhere. Squatting
+    /// an un-namespaced `package.json` name that only one tool honors
+    /// is what removing the read undoes.
+    ///
     /// `allowNonAppliedPatches` is pnpm's deprecated spelling, still
     /// accepted by pnpm 10; the current name wins when both appear.
     pub fn allow_unused_patches(&self) -> Option<bool> {
@@ -792,13 +803,12 @@ impl PackageJson {
                 }
             }
         }
-        if aube_util::embedder().manifest_namespace.is_empty() {
-            for key in KEYS {
-                if let Some(v) = self.extra.get(key).and_then(|v| v.as_bool()) {
-                    out = Some(v);
-                }
-            }
-        }
+        // No manifest-ROOT read, and no replacement home. The root key was
+        // nub-only — no package manager reads a top-level
+        // `allowUnusedPatches` or `allowNonAppliedPatches` — so nothing
+        // outside nub ever saw it. npm ships the feature and refuses to let it
+        // be project policy at all; the remedy for a key matching no installed
+        // package is to delete the key.
         out
     }
 

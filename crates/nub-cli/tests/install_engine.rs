@@ -2060,3 +2060,97 @@ fn an_owed_dependency_build_stops_the_next_install_reporting_up_to_date() {
         "and that migration must be one-time: the re-check writes the field, so it cannot repeat"
     );
 }
+
+/// The three manifest-ROOT install keys nub used to read, and no longer does.
+///
+/// No package manager reads a top-level `auditConfig`, `allowUnusedPatches` or
+/// `allowNonAppliedPatches` — npm 12 makes its own patch relax flag CLI-only on
+/// purpose and has no audit-ignore at all — so these were nub-only names held on
+/// an un-namespaced `package.json` key. Removing the read is the point of the
+/// change; the two halves asserted here are that the key no longer DOES
+/// anything, and that a project carrying it is told so rather than left to
+/// wonder why its install started failing.
+///
+/// Offline and dependency-free: the unused-patch check runs before any fetch,
+/// so this needs no registry.
+#[test]
+fn a_manifest_root_allow_unused_patches_no_longer_relaxes_the_patch_check() {
+    let dir = pm_tmpdir("root-allow-unused-patches");
+    std::fs::create_dir_all(dir.join("patches")).unwrap();
+    std::fs::write(dir.join("patches/ghost.patch"), "").unwrap();
+    let manifest = |extra: &str| {
+        std::fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{"name":"probe","version":"1.0.0",
+                     "patchedDependencies":{{"ghost@1.0.0":"patches/ghost.patch"}}{extra}}}"#
+            ),
+        )
+        .unwrap();
+    };
+
+    // The control: with no allowance anywhere the install fails. Without it a
+    // read that still worked would be indistinguishable from one that never ran.
+    manifest("");
+    let (_, stderr, code) = run_install(&dir, &["install", "--offline"]);
+    assert_eq!(
+        code, 1,
+        "an unused patch key must fail the install: {stderr}"
+    );
+    assert!(
+        stderr.contains("ERR_NUB_UNUSED_PATCH"),
+        "expected the unused-patch refusal, got: {stderr}"
+    );
+
+    // The root key must not change that verdict, and must say why it did not.
+    manifest(r#","allowUnusedPatches":true"#);
+    let (_, stderr, code) = run_install(&dir, &["install", "--offline"]);
+    assert_eq!(
+        code, 1,
+        "a top-level allowUnusedPatches must no longer relax the check: {stderr}"
+    );
+    assert!(
+        stderr.contains("ERR_NUB_UNUSED_PATCH"),
+        "expected the unused-patch refusal, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("sets a top-level `allowUnusedPatches`"),
+        "a project carrying the dropped key must be told it does nothing, got: {stderr}"
+    );
+}
+
+/// The same notice for the other two, and silence for a manifest carrying none.
+/// One run per key rather than one manifest holding all three, so a notice that
+/// fired for the wrong key cannot hide behind its neighbours.
+#[test]
+fn the_other_dropped_root_install_keys_are_announced_and_only_when_present() {
+    for (key, value) in [
+        ("auditConfig", r#"{"ignoreGhsas":["GHSA-xxxx-yyyy-zzzz"]}"#),
+        ("allowNonAppliedPatches", "true"),
+    ] {
+        let dir = pm_tmpdir(&format!("dropped-{key}"));
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name":"probe","version":"1.0.0","{key}":{value}}}"#),
+        )
+        .unwrap();
+        let (_, stderr, code) = run_install(&dir, &["install", "--offline"]);
+        assert_eq!(code, 0, "the notice must not fail the install: {stderr}");
+        assert!(
+            stderr.contains(&format!("sets a top-level `{key}`")),
+            "{key} must be announced, got: {stderr}"
+        );
+    }
+
+    let clean = pm_tmpdir("dropped-none");
+    std::fs::write(
+        clean.join("package.json"),
+        r#"{"name":"probe","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let (_, stderr, _) = run_install(&clean, &["install", "--offline"]);
+    assert!(
+        !stderr.contains("sets a top-level"),
+        "a manifest carrying none of the keys must say nothing, got: {stderr}"
+    );
+}

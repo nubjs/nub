@@ -10294,8 +10294,9 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
 
     // `use pnpm` regenerates pnpm-workspace.yaml from the nub-mode package.json
     // homes (workspaces + catalogs, top-level overrides/patchedDependencies/
-    // allowScripts/auditConfig) — the exact reverse of `use nub`'s migration.
-    // No-op on a project that never carried them.
+    // allowScripts) — the reverse of `use nub`'s migration, plus a legacy
+    // `auditConfig` a pre-drop conversion may have left behind. No-op on a
+    // project that never carried them.
     if name == "pnpm" {
         for line in crate::pm_engine::use_nub::regenerate_workspace_yaml(&root)? {
             println!("  {line}");

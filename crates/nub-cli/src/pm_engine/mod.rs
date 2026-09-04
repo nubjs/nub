@@ -1374,6 +1374,7 @@ fn apply_config_scope(
         if manifest.has_legacy_root_allow_builds() {
             return Err(legacy_allow_builds_error());
         }
+        warn_dropped_root_install_fields(&manifest);
         // Catalog hard-error: a role that doesn't honor `catalog:` specifiers
         // (npm/yarn/bun, pnpm<9) must mirror the real PM and refuse, rather
         // than silently mis-resolve. nub-branded, role-named.
@@ -1513,6 +1514,62 @@ fn legacy_allow_builds_error() -> anyhow::Error {
          `allowBuilds:` block are pnpm's own surface and still read as-is.) \
          [ERR_NUB_ALLOW_BUILDS_RENAMED]"
     )
+}
+
+/// Manifest-ROOT install keys nub used to read and no longer does, each with
+/// the surface that replaces it.
+///
+/// All three were nub-only. No package manager reads a top-level `auditConfig`,
+/// `allowUnusedPatches` or `allowNonAppliedPatches`: npm 12 ships
+/// `patchedDependencies` but makes its relax flag CLI-ONLY on purpose (ignored
+/// in `.npmrc` and env, rejected by `npm ci`, so it cannot become project
+/// policy) and has no audit-ignore mechanism at all; bun's is `bun audit
+/// --ignore <CVE>`; pnpm keeps both under `pnpm.*` or the workspace yaml, which
+/// nub still reads under a pnpm incumbent. So the root spellings were three
+/// un-namespaced `package.json` names held on the strength of nobody having
+/// claimed them yet — the position `allowBuilds` was in when npm 12 shipped
+/// `allowScripts` into the same slot.
+const DROPPED_ROOT_INSTALL_FIELDS: [(&str, &str); 3] = [
+    (
+        "auditConfig",
+        "pass `nub audit --ignore <id>`, which takes advisory numbers, GHSA ids and CVE ids",
+    ),
+    (
+        "allowUnusedPatches",
+        "remove the `patchedDependencies` entry that matches no installed package",
+    ),
+    (
+        "allowNonAppliedPatches",
+        "remove the `patchedDependencies` entry that matches no installed package",
+    ),
+];
+
+/// Tell a project still carrying one of those keys that it does nothing.
+///
+/// A warning rather than the hard error `allowBuilds` gets: both of these fail
+/// SAFE when unread — advisories the project had muted come back, and an
+/// unmatched patch fails an install that used to warn — where a dropped
+/// `allowBuilds: false` would RUN a script the project denied. Silence is still
+/// the wrong answer, because the key looks like it is doing something.
+///
+/// Says nothing about the branded `pnpm.*` spellings: those are pnpm's own
+/// surface, read under a pnpm incumbent exactly as before.
+fn warn_dropped_root_install_fields(manifest: &aube_manifest::PackageJson) {
+    let dim = scope_warning_uses_dim();
+    for (root, remedy) in DROPPED_ROOT_INSTALL_FIELDS {
+        if !manifest.extra.contains_key(root) {
+            continue;
+        }
+        let line = format!(
+            "nub: package.json sets a top-level `{root}` — no package manager reads that key \
+             there, and nub no longer does either. Instead, {remedy}."
+        );
+        if dim {
+            eprintln!("\x1b[2m{line}\x1b[0m");
+        } else {
+            eprintln!("{line}");
+        }
+    }
 }
 
 fn catalog_unsupported_error(role: config_scope::Role, spec: &str) -> anyhow::Error {

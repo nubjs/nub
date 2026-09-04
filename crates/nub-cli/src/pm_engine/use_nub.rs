@@ -15,7 +15,7 @@
 //! - resolution-bearing keys → `package.json` under ecosystem-standard
 //!   top-level names (`workspaces` incl. the object form,
 //!   `workspaces.catalog(s)`, `overrides`, `patchedDependencies`, the
-//!   three-state `allowScripts` map, `auditConfig`);
+//!   three-state `allowScripts` map);
 //! - settings → `.npmrc` (the same vocabulary, kebab spellings — one engine
 //!   reads both homes, so this is a mechanical move, not a translation);
 //! - engine-unsupported keys → warn-drop naming each (the three repo-wide
@@ -240,6 +240,14 @@ const ENGINE_UNSUPPORTED: &[(&str, &str)] = &[
         "allowUnusedPatches",
         "unreferenced patch files always error in the engine",
     ),
+    // Was migrated to a top-level `auditConfig` until nub stopped reading that
+    // key. Reporting it is the whole point: the alternative is a conversion
+    // that says it succeeded while the project's triaged advisories quietly
+    // come back on the next audit.
+    (
+        "auditConfig",
+        "nub has no persistent audit-ignore config — pass `nub audit --ignore <id>`, which takes advisory numbers, GHSA ids and CVE ids",
+    ),
     (
         "fetchingConcurrency",
         "use network-concurrency in .npmrc instead",
@@ -382,8 +390,6 @@ pub(crate) struct YamlMigration {
     /// / `ignoredBuiltDependencies` → `false` (asked-and-answered, not
     /// security denial). Explicit pnpm `allowBuilds` entries win the fold.
     pub allow_builds: Option<Map<String, Value>>,
-    /// Top-level `auditConfig` (aube's existing extension home).
-    pub audit_config: Option<Value>,
     /// `.npmrc` lines to append, as `(key, value)` (key already kebab).
     pub npmrc: Vec<(String, String)>,
     /// Engine-unsupported keys found, as `key — note` summary lines.
@@ -446,7 +452,6 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
             "catalogs" => m.catalogs = Some(value.clone()),
             "overrides" => m.overrides = value.as_object().cloned(),
             "patchedDependencies" => m.patched_dependencies = value.as_object().cloned(),
-            "auditConfig" => m.audit_config = Some(value.clone()),
             // handled by the folds above
             "allowBuilds"
             | "onlyBuiltDependencies"
@@ -601,7 +606,7 @@ pub(crate) fn write_nub_identity_fields(
 /// - `workspaces` membership + catalogs: the yaml was authoritative under
 ///   pnpm (it shadows `package.json#workspaces`), so yaml values overwrite —
 ///   any differing pre-existing value is named in the returned notes.
-/// - `overrides` / `patchedDependencies` / `allowScripts` / `auditConfig`:
+/// - `overrides` / `patchedDependencies` / `allowScripts`:
 ///   per-key insert; an existing top-level entry wins (the engine's merge
 ///   already ranked top-level above the yaml), conflicts named. pnpm's
 ///   `allowBuilds` map lands under the neutral `allowScripts` name.
@@ -693,14 +698,6 @@ pub(crate) fn apply_manifest_edits(
             }
         }
     }
-    if let Some(audit) = &m.audit_config
-        && obj.get("auditConfig").is_none_or(|prev| prev == audit)
-    {
-        obj.insert("auditConfig".into(), audit.clone());
-    } else if m.audit_config.is_some() {
-        notes.push("auditConfig: package.json already sets a differing value — kept".into());
-    }
-
     obj.remove("pnpm");
     notes
 }
@@ -943,7 +940,6 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
             aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
             migration.allow_builds.is_some(),
         ),
-        ("auditConfig", migration.audit_config.is_some()),
     ] {
         if present {
             println!("  package.json: top-level {key} migrated");
@@ -1126,7 +1122,8 @@ fn merge_root_allow_maps(legacy: Option<&Value>, current: Option<&Value>) -> Opt
 /// The yaml-regeneration half of `nub pm use pnpm` — the exact reverse of
 /// [`run_use_nub`]'s migration: collect the nub-mode homes out of
 /// `package.json` (`workspaces` membership + catalogs, top-level `overrides`
-/// / `patchedDependencies` / `allowScripts` / `auditConfig`), write them into
+/// / `patchedDependencies` / `allowScripts`, plus a legacy `auditConfig` left
+/// by a pre-drop conversion), write them into
 /// `pnpm-workspace.yaml` under pnpm's own key names (`allowScripts` →
 /// `allowBuilds`; the rest keep their spelling), merging into an existing yaml
 /// with package.json values
@@ -1169,6 +1166,11 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
         manifest.get(aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY),
         manifest.get(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY),
     );
+    // Rescue only. `nub pm use nub` no longer writes this key — nub has no
+    // persistent audit-ignore config — but a project converted before that
+    // change still carries one, doing nothing. Carrying it back to pnpm's own
+    // home is the one place it becomes live again, so the switch restores a
+    // policy rather than leaving it stranded at a name nothing reads.
     let audit_config = manifest.get("auditConfig").cloned();
 
     if packages.is_none()
@@ -1234,6 +1236,49 @@ mod tests {
 
     fn src(json: serde_json::Value) -> Map<String, Value> {
         json.as_object().cloned().unwrap()
+    }
+
+    /// `pnpm.auditConfig` has no destination under nub identity, so the
+    /// conversion must NAME it rather than write it somewhere nothing reads.
+    ///
+    /// It used to be migrated to a top-level `package.json` `auditConfig`.
+    /// Once nub stopped reading that key the same write became a silent policy
+    /// loss dressed as a successful migration — the project's triaged
+    /// advisories would come back on the next audit with nothing said. The
+    /// assertions are the two halves of "loud": it must not reach the manifest,
+    /// and the summary must carry the remedy.
+    #[test]
+    fn an_audit_config_is_reported_as_unsupported_rather_than_migrated() {
+        let m = plan_migration(&src(json!({
+            "auditConfig": { "ignoreGhsas": ["GHSA-xxxx-yyyy-zzzz"] }
+        })))
+        .unwrap();
+
+        let dropped = m.dropped.join("\n");
+        assert!(
+            dropped.contains("auditConfig"),
+            "the conversion must name the key it could not carry: {dropped:?}"
+        );
+        assert!(
+            dropped.contains("nub audit --ignore"),
+            "and must name what replaces it: {dropped:?}"
+        );
+        assert!(
+            !m.npmrc.iter().any(|(k, _)| k.contains("audit")),
+            "no invented `.npmrc` home either: {:?}",
+            m.npmrc
+        );
+
+        let mut manifest = Map::new();
+        let notes = apply_manifest_edits(&mut manifest, &m, None, "^0.8.0");
+        assert!(
+            manifest.get("auditConfig").is_none(),
+            "a key nub does not read must not be written to package.json: {manifest:?}"
+        );
+        assert!(
+            !notes.join("\n").contains("auditConfig"),
+            "and it must not be reported as moved: {notes:?}"
+        );
     }
 
     #[test]
