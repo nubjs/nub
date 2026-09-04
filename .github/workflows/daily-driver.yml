@@ -55,7 +55,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      # Trunk writes, pull requests read. A cache saved from a PR ref is visible only to
+      # that ONE pull request, yet it still counts against the repository-wide 10 GB
+      # budget — so unconditional saving here evicted the shared trunk caches that every
+      # other job restores from. Same reasoning in native-deps, lockfile-roundtrip,
+      # aube-parity and verb-dispatch.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320  # v5
         with:
           version: 10

@@ -383,11 +383,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      # Throwaway job: read-only cache (save-if: false) so it never churns the budget.
+      # `save-if: main`, NOT `save-if: false`. This key had no writer anywhere in the
+      # repo, so every run — PR and trunk alike — logged "No cache found." and paid a
+      # cold ~24 min release build of nub.exe before reaching the first gate. A
+      # read-only cache is only cheap when something else fills it; with no writer it
+      # is the most expensive setting available. Trunk fills it, PRs read it.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: ci-win-embed-roundtrip
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             crates/nub-native
@@ -742,9 +746,20 @@ jobs:
   # extract -> verify -> dlopen -> execute -> warm reuse -> R2 zero-false-positive +
   # self-heal. Non-blocking (NOT in ci-gate); the verify LOGIC is ci-gate-required via
   # the embed-runtime macos leg. Delete alongside windows-embed-roundtrip post-decision.
+  #
+  # It now runs on trunk as well as pull requests, for the cache below: the job builds a
+  # release binary from scratch, and a PR-only job can never populate a trunk-scoped
+  # cache, so it was cold on every single run. Trunk pays that cold build once per
+  # Rust-relevant push; every PR after it restores. It is also gated on `run_rust` — a
+  # docs- or site-only PR cannot change what this builds, yet before the gate this job
+  # was the ENTIRE wall time of such a PR's CI run (~17 min on a macos-14 runner, while
+  # every Rust job around it correctly skipped).
   macos-embed-roundtrip:
     name: macOS embed round-trip (TEMPORARY, PR #175)
-    if: github.event_name == 'pull_request'
+    needs: matrix-plan
+    if: >-
+      needs.matrix-plan.outputs.run_rust == 'true' &&
+      (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     runs-on: macos-14
     permissions:
       contents: read
@@ -763,7 +778,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: ci-mac-embed-roundtrip
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             crates/nub-native
@@ -919,8 +934,9 @@ jobs:
           echo "ROUND-TRIP OK (macOS): extract -> verify -> dlopen -> execute -> warm reuse -> R2"
 
       # PUBLISH THE BINARY THIS JOB ALREADY BUILT. The release build above is the whole
-      # cost of a downloadable macOS dev build, and it is paid on every PR either way —
-      # so the artifact is worth seconds of upload rather than a second macOS job. One
+      # cost of a downloadable macOS dev build, and it is paid by every run that reaches
+      # here either way (every Rust-relevant PR, plus trunk, which is what fills the
+      # cache) — so the artifact is worth seconds of upload rather than a second job. One
       # file, not two: --features embed-runtime carries the addon and the vendored
       # runtime inside the binary, so this is standalone and needs no checkout to run.
       # The round-trip step above tampers only with the EXTRACTED cache copy, so
@@ -956,7 +972,9 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: nub-macos-arm64-pr${{ github.event.pull_request.number }}
+          # The job also runs on trunk now, where pull_request.number is empty; name the
+          # trunk artifact by SHA so it is not a bare `-pr` suffix.
+          name: nub-macos-arm64-${{ github.event_name == 'pull_request' && format('pr{0}', github.event.pull_request.number) || format('main-{0}', github.sha) }}
           path: dist/
           retention-days: 7
           if-no-files-found: error

@@ -14,14 +14,28 @@ name: WPT Worker
 # tier), and the latest major.
 #
 # COST MODEL mirrors node-matrix.yml: build nub ONCE, reuse the bundle across every Node
-# leg (the Node version is a setup-node/PATH choice, not a rebuild). The runner is cheap
-# (subprocess-per-file, ~seconds), so every push/PR is fine.
+# leg (the Node version is a setup-node/PATH choice, not a rebuild). The runner legs are
+# cheap (subprocess-per-file, ~seconds); the one real cost is that single build, which is
+# what the path filter below keeps off changes that cannot affect it.
 
+# `paths-ignore` rather than a `paths` allowlist, for the fail-toward-running reason
+# spelled out in node-matrix.yml. `Build nub (WPT)` is ~13 min of Rust that a docs- or
+# site-only change cannot affect, and it was the longest job such a pull request ran.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "wiki/**"
+      - "*.md"
+      - ".claude/**"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "wiki/**"
+      - "*.md"
+      - ".claude/**"
   workflow_dispatch:
 
 concurrency:
