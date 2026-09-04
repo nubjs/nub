@@ -3669,7 +3669,7 @@ mod tests {
         let base = Path::new(r"C:\nub-cache");
         let error = node_spawn_error(
             &base.join("compile-node").join("node.exe"),
-            base,
+            Some(base),
             std::io::Error::from_raw_os_error(5),
         );
         let message = format!("{error:#}");
