@@ -1,0 +1,106 @@
+name: node-startup-probe-xl
+
+# Same probe as node-startup-probe.yml, on the 6-core arm64 larger runner (billed), with ccache
+# persisted across runs so a later iteration only recompiles what its variant changes.
+on:
+  push:
+    branches: [probe/node-startup]
+    paths:
+      - 'tests/node-startup-probe/**'
+      - '.github/workflows/node-startup-probe-xl.yml'
+  workflow_dispatch:
+
+env:
+  NODE_SHA: 53234233acb9a51180043b169e870048f3808d31
+
+jobs:
+  build-and-measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: baseline
+            second: atexit
+          - variant: hasher
+            second: ''
+          - variant: inlines-hidden
+            second: ''
+          - variant: pr65526
+            second: atexit
+    runs-on: macos-15-xlarge
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          brew install ninja hyperfine ccache
+          sw_vers; sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string; clang --version | head -1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-node-${{ env.NODE_SHA }}-${{ matrix.variant }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-node-${{ env.NODE_SHA }}-${{ matrix.variant }}-
+            ccache-node-${{ env.NODE_SHA }}-
+
+      # The checkout lives OUTSIDE the nub tree: Node main builds a Rust staticlib (deps/crates,
+      # Temporal support), and cargo would otherwise treat it as a member of nub's root workspace.
+      - name: Clone Node.js at pinned SHA
+        run: |
+          mkdir "$RUNNER_TEMP/node" && cd "$RUNNER_TEMP/node"
+          git init -q && git remote add origin https://github.com/nodejs/node.git
+          git fetch -q --depth 1 origin "$NODE_SHA" && git checkout -q FETCH_HEAD
+          git log -1 --format='%H %cd'; cargo --version
+
+      - name: Apply variant (${{ matrix.variant }})
+        run: tests/node-startup-probe/apply-variant.sh "${{ matrix.variant }}" "$RUNNER_TEMP/node"
+
+      - name: Configure and build
+        run: |
+          cd "$RUNNER_TEMP/node"
+          export CC="ccache clang" CXX="ccache clang++" CCACHE_MAXSIZE=8G
+          ccache -z
+          ./configure --ninja > configure.log 2>&1 || { tail -30 configure.log; exit 1; }
+          t0=$SECONDS
+          ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja.log 2>&1 || { tail -30 ninja.log; exit 1; }
+          echo "build took $((SECONDS - t0))s"; ls -la out/Release/node; ccache -s | head -6
+
+      - name: Measure (${{ matrix.variant }})
+        run: |
+          mkdir -p results bins
+          tests/node-startup-probe/measure-macos.sh "$RUNNER_TEMP/node/out/Release/node" "${{ matrix.variant }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}.txt"
+          cp "$RUNNER_TEMP/node/out/Release/node" "bins/node-${{ matrix.variant }}"
+
+      - name: Apply second-phase patch (${{ matrix.second }}) and rebuild incrementally
+        if: matrix.second != ''
+        run: |
+          tests/node-startup-probe/apply-variant.sh "${{ matrix.second }}" "$RUNNER_TEMP/node"
+          cd "$RUNNER_TEMP/node"
+          export CC="ccache clang" CXX="ccache clang++" CCACHE_MAXSIZE=8G
+          t0=$SECONDS
+          ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja2.log 2>&1 || { tail -30 ninja2.log; exit 1; }
+          echo "incremental rebuild took $((SECONDS - t0))s"
+
+      - name: Measure (${{ matrix.variant }}+${{ matrix.second }})
+        if: matrix.second != ''
+        run: |
+          tests/node-startup-probe/measure-macos.sh "$RUNNER_TEMP/node/out/Release/node" "${{ matrix.variant }}+${{ matrix.second }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}+${{ matrix.second }}.txt"
+          cp "$RUNNER_TEMP/node/out/Release/node" "bins/node-${{ matrix.variant }}+${{ matrix.second }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xl-results-${{ matrix.variant }}
+          path: results/
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xl-bins-${{ matrix.variant }}
+          path: bins/
+          retention-days: 3
+          compression-level: 1
