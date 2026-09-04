@@ -251,7 +251,7 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
     if files
         .iter()
         .filter(|file| file.name.ends_with(".mjs"))
-        .any(|file| std::str::from_utf8(&file.bytes).is_ok_and(|source| reaches_cluster(source)))
+        .any(|file| std::str::from_utf8(&file.bytes).is_ok_and(reaches_cluster))
     {
         return Ok(Err(Decline::ClusterReentry));
     }
