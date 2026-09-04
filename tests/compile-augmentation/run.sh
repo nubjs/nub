@@ -37,9 +37,13 @@ read -r -a EXTRA_COMPILE_FLAGS <<< "${COMPILE_FLAGS:-}"
 # name is defaulted from the entry — so asking for `./bin` on Windows produces an
 # extensionless file, and whether that runs then depends on the shell rather than
 # on nub. Naming the suffix here keeps the harness saying what it means.
+#
+# Each fixture builds to its OWN name. Reusing one across fixtures let a Windows
+# leg fail on the rename that publishes the next build: the previous artifact
+# had been run and deleted, but a lingering handle kept the name delete-pending,
+# and the replace failed with a sharing violation.
 EXE=""
 case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) EXE=.exe ;; esac
-ARTIFACT="bin$EXE"
 
 rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || exit 1
 printf '%s\n' "$NODE_VERSION" > .node-version
@@ -104,10 +108,11 @@ for fixture in "${fixtures[@]}"; do
   fi
 
   built=1
+  artifact="bin-$name$EXE"
   if "$NUB" compile "$entry" ${compile_flags[@]+"${compile_flags[@]}"} \
-       ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out "./$ARTIFACT" >./build.log 2>&1; then
+       ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out "./$artifact" >./build.log 2>&1; then
     rm -rf ./cache
-    got_out="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/$ARTIFACT" 2>&1)"; got_rc=$?
+    got_out="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/$artifact" 2>&1)"; got_rc=$?
     got="$(printf '%s' "$got_out" | tail -1) rc=$got_rc"
   else
     built=0
@@ -123,7 +128,7 @@ for fixture in "${fixtures[@]}"; do
       echo "--- end $name ---"
     } >&2
   fi
-  rm -f "./$ARTIFACT"
+  rm -f "./$artifact"
 
   # A few augmentations are SUPPOSED to disappear when compiled — .env loading
   # above all, because a baked program's configuration must not depend on the
