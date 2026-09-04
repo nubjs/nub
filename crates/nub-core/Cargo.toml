@@ -33,7 +33,7 @@ repository = "https://github.com/nubjs/nub"
 # it on via `nub-cli/embed-runtime`. The optional deps are pulled in ONLY here:
 # `ruzstd` (pure-Rust decode at runtime) ships in the binary; `zstd`/`tar`/`sha2`
 # (encode + key-hash at build time) are build-deps that never reach the binary.
-embed-runtime = ["dep:ruzstd", "dep:zstd", "dep:tar", "dep:sha2", "dep:blake3"]
+embed-runtime = ["dep:ruzstd", "dep:zstd", "dep:tar", "dep:sha2"]
 
 [dependencies]
 anyhow = "1"
@@ -98,7 +98,14 @@ ruzstd = { version = "0.8", optional = true }
 # win-arm64/musl), vs ~6 ms for BLAKE3's portable SIMD. BLAKE3 is collision/preimage
 # resistant — fully adequate for integrity — and builds identically on every target.
 # (`sha2` stays for the 32-bit cache KEY, which is not on the hot path.)
-blake3 = { version = "1", optional = true }
+#
+# NOT optional, though the R2 digest use above is `embed-runtime`-only: the
+# per-binary Node flag cache (`node::discovery`, `FLAG_ENTRY_DIR`) names its entry
+# files by hashing the binary's path, and that cache is read on every spawn in
+# every build. Unconditional costs the shipped artifacts nothing — nub-launcher
+# already depends on blake3 directly and nub-cli's release build turns
+# `embed-runtime` on — so only a feature-off dev build gains it.
+blake3 = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

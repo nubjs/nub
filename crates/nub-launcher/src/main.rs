@@ -285,6 +285,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         NodeOrigin::Managed => None,
         NodeOrigin::Discovered => discovery::accepted_env_flags(&node_path),
     };
+    phase("  flags: accepted_env_flags");
     let mut inject = flags::compute_inject_flags(
         version.clone(),
         // The compiled entry is already the first positional argument to Node;
@@ -295,6 +296,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         false,
         accepted.as_ref(),
     );
+    phase("  flags: compute_inject_flags");
     // Compiled launchers need the closed 22.4–<25 experimental flag band for
     // sessionStorage. Their compile preamble can neutralize the flag's throwing
     // localStorage getter, but this launcher never synthesizes a storage file or
@@ -328,6 +330,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         flags::argv_inject_flags(argv_probe_path, &version, &[])
     };
     inject.extend(argv_only.iter().copied());
+    phase("  flags: argv_inject_flags");
 
     let mut cmd = Command::new(node_path.as_os_str());
     // Node runs CommonJS preloads before ESM `--import` hooks, including ones
@@ -1420,7 +1423,9 @@ fn discover_external_smol_node(m: &Manifest) -> Result<Option<(PathBuf, NodeVers
     let target = smol_target(m)?;
     let mut trusted: Option<(PathBuf, NodeVersion)> = None;
     let mut ranked: Vec<(PathBuf, NodeVersion)> = Vec::new();
-    for dir in version_manager_dirs() {
+    let roots = version_manager_dirs();
+    phase_with(|| format!("  smol: {} version-manager root(s)", roots.len()));
+    for dir in roots {
         let (owned, candidates) = best_node_in(&dir, &target, &m.triple);
         if let Some(found) = owned {
             if trusted.as_ref().is_none_or(|(_, cur)| found.1 > *cur) {
@@ -1434,12 +1439,14 @@ fn discover_external_smol_node(m: &Manifest) -> Result<Option<(PathBuf, NodeVers
         return Ok(trusted);
     }
     ranked.sort_by(|(_, left), (_, right)| right.cmp(left));
+    phase_with(|| format!("  smol: {} candidate(s) scanned + ranked", ranked.len()));
     // Gate-checked once for the whole pass rather than once per candidate: this
     // loop runs to the END of the ranked list whenever no external Node satisfies
     // the payload (an exact `--target` the user has not installed is the ordinary
     // way to hit that), so the per-lookup cost is multiplied by every Node on the
     // machine.
     let probes = cache::ProbeStore::resolve();
+    phase("  smol: probe store resolved");
     let verified = ranked.into_iter().find_map(|(path, _)| {
         let actual = probe_node_version(&probes, &path)?;
         smol_candidate_matches(&actual, &target).then_some((path, actual))
@@ -1761,15 +1768,24 @@ fn probe_path_node(
     select_path_node((path, ver), target)
 }
 
-/// Counts probe execs for `__NUB_LAUNCHER_TIMING`. Each one is a full `node`
-/// process spawn (~28 ms), so the count is the whole story for smol start-up.
 /// The version of the Node at `path`, from a remembered verdict when one applies
-/// and an exec otherwise.
+/// and an exec otherwise. Logs which of the two happened under
+/// `__NUB_LAUNCHER_TIMING`; an exec is a full `node` process spawn (~28 ms), so on a
+/// COLD probe cache the exec count is the whole story for smol start-up.
 ///
-/// The exec is why `--smol` starts slower than the embed shape: `--smol` discovers
-/// a Node it did not install, so it runs it once per launch to learn what it really
-/// is. That is a full process spawn and it accounts for the whole warm gap between
-/// the two shapes. Embed needs none of this — it knows its Node by content hash.
+/// It is not the story on a WARM one, and this comment used to say it was — that the
+/// exec "accounts for the whole warm gap between the two shapes". A warm launch takes
+/// the cache-hit branch above and execs nothing, so it cannot. Measured on linux-x64,
+/// hello-world artifact, min of 25 interleaved runs, one Node on PATH and no version
+/// manager installed: the launcher's own pre-spawn work is 0.56 ms for embed against
+/// 0.66 ms for smol, and the 0.10 ms between them is ~0.05 ms of
+/// `discover_external_smol_node` (the version-manager root scan plus
+/// `cache::ProbeStore::resolve`, both of which embed skips entirely), ~0.03 ms reading
+/// this verdict back off disk, and ~0.06 ms extra in `discovery::accepted_env_flags`,
+/// because a DISCOVERED Node is probe-gated where a managed one is trusted from its
+/// version. The first two grow with how many Nodes the machine has — ~0.011 ms per
+/// installed version, since every candidate is stat'd (and, on Linux, ELF-checked)
+/// before the ranked list is probed.
 ///
 /// A stale or untrusted entry simply means another exec, so every failure path here
 /// is the slow answer rather than a wrong one.
@@ -2564,15 +2580,16 @@ fn cleanup_launcher_orphans(base: &Path, manifest: &Manifest) {
     cleanup_orphan_entries(base, None, ORPHAN_STAGE_MAX_AGE, |name| {
         launcher_stage_name(name, ".compile-app.") || launcher_stage_name(name, ".compile-node.")
     });
-    for parent in [
-        base.join("compile-app"),
-        base.join("compile-node"),
-        base.join("node"),
-    ] {
+    for parent in [base.join("compile-app"), base.join("compile-node")] {
         cleanup_orphan_entries(&parent, None, ORPHAN_STAGE_MAX_AGE, launcher_stale_name);
     }
+    // The node store's two grammars share ONE pass. Every `cleanup_orphan_entries`
+    // call costs a `cache::revalidate` ancestor walk plus a `read_dir` before it can
+    // reject a single name, and this runs on every launch including a fully warm one
+    // — so scanning the same directory twice to apply two predicates was pure
+    // duplicate syscalls. Same entries removed, same ages, half the walks.
     cleanup_orphan_entries(&base.join("node"), None, ORPHAN_STAGE_MAX_AGE, |name| {
-        launcher_stage_name(name, ".smol.")
+        launcher_stale_name(name) || launcher_stage_name(name, ".smol.")
     });
 
     // Published trees this run does not use. `current` is what keeps a
