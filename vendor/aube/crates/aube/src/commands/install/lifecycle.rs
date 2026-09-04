@@ -6,19 +6,6 @@ use super::side_effects_cache::{
     SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
 };
 
-/// Pinned snapshot of pnpm's lifecycle-script trust list. The release-plz PR
-/// workflow refreshes it with `scripts/update-trusted-dependencies.bash`.
-static DEFAULT_TRUSTED_DEPENDENCIES: std::sync::LazyLock<Box<[String]>> =
-    std::sync::LazyLock::new(|| {
-        serde_json::from_str::<Vec<String>>(include_str!(
-            "../../../assets/trusted-dependencies.json"
-        ))
-        // WHY: this is a repository-owned generated asset validated by the
-        // sync script; invalid JSON is a broken build artifact, not user input.
-        .unwrap_or_else(|error| panic!("invalid bundled trusted-dependencies.json: {error}"))
-        .into_boxed_slice()
-    });
-
 /// Run a root-package lifecycle hook, announcing it to the user if defined
 /// and turning aube_scripts::Error into a miette::Report with context.
 /// Silent when the hook isn't defined in package.json.
@@ -97,7 +84,14 @@ pub(crate) fn build_policy_from_manifest_sources<'a>(
     Vec<aube_scripts::BuildPolicyError>,
 ) {
     let mut merged = std::collections::BTreeMap::new();
-    let mut only_built = DEFAULT_TRUSTED_DEPENDENCIES.to_vec();
+    // The policy holds only what the project declared. Default trust is the
+    // `defaultTrust` floor's job (`default_trust.rs`): it is consulted on
+    // `Unspecified`, gates every listed package on provenance, advisory
+    // vetting and the cooling window, and names what it let through. A
+    // built-in allowlist seeded here (the bundled pnpm trusted list,
+    // `assets/trusted-dependencies.json`) would answer `Allow` ahead of the
+    // floor, skipping those gates and the disclosure.
+    let mut only_built = Vec::new();
     let mut never_built = Vec::new();
     for manifest in manifests {
         for (pattern, allow) in manifest.pnpm_allow_builds() {
@@ -1634,8 +1628,11 @@ mod tests {
         );
     }
 
+    /// A project that declares nothing gets a policy that decides nothing:
+    /// a listed-by-default package is `Unspecified` so the `defaultTrust`
+    /// floor, with its gates and disclosure, is what admits it.
     #[test]
-    fn pnpm_trusted_dependencies_are_allowed_by_default() {
+    fn undeclared_policy_leaves_default_trust_to_the_floor() {
         let manifest = aube_manifest::PackageJson::default();
         let workspace = aube_manifest::WorkspaceConfig::default();
         let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
@@ -1643,14 +1640,10 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(
             policy.decide("esbuild", "0.28.1"),
-            aube_scripts::AllowDecision::Allow
+            aube_scripts::AllowDecision::Unspecified
         );
         assert_eq!(
             policy.decide("sharp", "0.35.2"),
-            aube_scripts::AllowDecision::Allow
-        );
-        assert_eq!(
-            policy.decide("not-on-the-pnpm-trusted-list", "0.28.1"),
             aube_scripts::AllowDecision::Unspecified
         );
     }
