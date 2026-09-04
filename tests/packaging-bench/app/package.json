@@ -1,0 +1,10 @@
+{
+  "name": "packaging-bench-app",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "chalk": "6.0.0",
+    "commander": "15.0.0",
+    "yaml": "2.9.0"
+  }
+}

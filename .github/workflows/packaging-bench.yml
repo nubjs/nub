@@ -1,0 +1,36 @@
+name: Packaging tool warm-start bench
+on:
+  push:
+    branches: [packaging-bench]
+    paths:
+      - 'tests/packaging-bench/**'
+      - '.github/workflows/packaging-bench.yml'
+  workflow_dispatch:
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '26.8.1' }
+      - uses: Swatinem/rust-cache@v2
+      - name: Install hyperfine
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq hyperfine
+          else brew install hyperfine; fi
+      - name: Build nub with the compile feature
+        run: cargo build -p nub-cli --profile fast --features compile
+      # nub-launcher is its OWN cargo workspace, so the line above never builds it
+      # and `nub compile` then fails its self-probe on a template it cannot find.
+      - name: Build the launcher template
+        run: cd crates/nub-launcher && cargo build --release
+      - name: Bench
+        env:
+          NUB_BIN: ${{ github.workspace }}/target/fast/nub
+          __NUB_LAUNCHER_TEMPLATE: ${{ github.workspace }}/crates/nub-launcher/target/release/nub-launcher
+        run: bash tests/packaging-bench/bench.sh
