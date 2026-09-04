@@ -51,3 +51,15 @@ symlink .fray
 # clobbering it for every sibling. A missing source is skipped, so a tree that
 # has never built the addon still creates worktrees fine.
 copy runtime/addons/nub-native.node
+
+# The vendored polyfill packages the compile preamble imports (urlpattern,
+# Temporal, Float16Array). Without them 49 compile bundle tests fail in a fresh
+# worktree with `Cannot find module 'urlpattern-polyfill/urlpattern'` — a
+# confusing failure that looks like a code defect. CI never hits it because a
+# Node 26 target strips those polyfill regions before they are resolved.
+# COPIED, not symlinked, and 5 MB: a symlink resolves into the SHARED tree, which
+# puts the packages outside the worktree's own runtime directory. The compile
+# preamble's builtin-usage scan classifies anything outside that directory as
+# APPLICATION code, so a symlink would make it read nub's own polyfills as app
+# usage and keep eager builtin loads no payload asked for.
+copy runtime/node_modules
