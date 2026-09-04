@@ -32,7 +32,7 @@ CATALOG="${CATALOG:-$REPO/crates/nub-sandbox/data/build-jail-catalog-v2.json}"
 ROOT="$(mktemp -d "$HOME/jail-sweep-XXXXXX")"
 echo "sweep root: $ROOT"
 
-PASS=0; JAILFAIL=0; BOTHFAIL=0; UNCAT_TOTAL=0; ESCAPES=0
+PASS=0; JAILFAIL=0; BOTHFAIL=0; UNCAT_TOTAL=0; ESCAPES=0; METRIC_BROKEN=0
 summary=""
 
 # `SWEEP_ONLY="angular puppeteer"` runs just those projects. Worth a knob: iterating on the escape
@@ -84,9 +84,16 @@ one () { # $1=name  $2=deps-json
       | awk '{printf "    %s bytes  %s\n", $5, $NF}' | sort -rn | head -5)
   fi
 
+  # ⛔ AN UNPARSABLE LINE IS A BROKEN INSTRUMENT, NOT A ZERO. This swallowed stderr and defaulted to
+  # 0, so a crashed metric reported a project as fully measured -- the exact false all-clear the
+  # count exists to prevent. It now says so and fails the run.
   local counts uncat
-  counts="$(node "$HERE/uncatalogued.mjs" --install-log "$log" --catalog "$CATALOG" 2>/dev/null | head -1)"
-  uncat="$(printf '%s' "$counts" | sed -nE 's/.*UNCATALOGUED ([0-9]+).*/\1/p')"; uncat="${uncat:-0}"
+  counts="$(node "$HERE/uncatalogued.mjs" --install-log "$log" --catalog "$CATALOG" 2>&1 | head -1)"
+  uncat="$(printf '%s' "$counts" | sed -nE 's/.*UNCATALOGUED ([0-9]+).*/\1/p')"
+  if [ -z "$uncat" ]; then
+    echo "  ⛔ COVERAGE METRIC FAILED for this project: $counts"
+    METRIC_BROKEN=1; uncat=0
+  fi
   UNCAT_TOTAL=$((UNCAT_TOTAL + uncat))
 
   # ⛔ ONE VERDICT LINE PER PROJECT. An escaping install still exits 0, so without this a project that
@@ -158,7 +165,10 @@ echo "  clean installs:                 $PASS"
 echo "  THE JAIL IS THE DIFFERENCE:     $JAILFAIL"
 echo "  fail both ways (not the jail):  $BOTHFAIL"
 echo "  ⛔ ESCAPED CONFINEMENT:          $ESCAPES"
-echo "  uncatalogued install-script deps across all projects: $UNCAT_TOTAL"
+# UNMEASURED, not merely absent from the catalog: a package that passes at the default grant wants
+# no entry, so `results/baseline-coverage.tsv` records the measurement instead. See uncatalogued.mjs.
+echo "  UNMEASURED install-script deps across all projects: $UNCAT_TOTAL"
+[ "$METRIC_BROKEN" = 0 ] || echo "  ⛔ the coverage metric failed on at least one project - the count above is an UNDERCOUNT"
 echo
 printf '%s' "$summary"
 echo "logs: $ROOT"

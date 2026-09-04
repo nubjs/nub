@@ -111,6 +111,30 @@ PKGS="$(awk -F'\t' '{print $1}' "$POPULATION" | tr '\n' ' ')"
   echo "population is EMPTY ($POPULATION) — refusing to report a sweep that measured nothing" >&2
   exit 2; }
 
+# ⛔⛔ RECONCILE THE DISCOVERED POPULATION AGAINST THE LAST COMMITTED ONE, BECAUSE A SHRINK IS SILENT.
+# Discovery is deliberate (the header says why a hardcoded list rots), but it makes the population a
+# MOVING TARGET, and nothing reported when it moved. Measured 2026-09-04: three same-commit sweeps
+# produced 179/178/179 rows against a committed 180, and the macOS run dropped a DIFFERENT package
+# than the other two — a per-platform difference a pinned file cannot produce. `prisma` was absent
+# from all three despite carrying a `preinstall` at both the latest and the in-use version, and it
+# measures OK when swept explicitly. So the coverage those sweeps claimed was smaller than it read,
+# and the only reason anyone noticed was a hand comparison months later.
+#
+# This does NOT fail the run: real drift is expected and legitimate. It makes the delta impossible to
+# miss, so a shrink is a fact in the log rather than an absence nobody counts.
+POP_DELTA=""
+BASELINE_POP="$HERE/results/install-script-population.tsv"
+if [ -f "$BASELINE_POP" ]; then
+  _now="$(awk -F'\t' '{print $1}' "$POPULATION" | sort -u)"
+  _was="$(awk -F'\t' '{print $1}' "$BASELINE_POP" | sort -u)"
+  _gone="$(comm -23 <(printf '%s\n' "$_was") <(printf '%s\n' "$_now") | tr '\n' ' ')"
+  _new="$(comm -13 <(printf '%s\n' "$_was") <(printf '%s\n' "$_now") | tr '\n' ' ')"
+  if [ -n "$(printf '%s' "$_gone$_new" | tr -d ' ')" ]; then
+    POP_DELTA="population differs from $BASELINE_POP — DROPPED: ${_gone:-none}| ADDED: ${_new:-none}"
+    echo "⛔ $POP_DELTA" >&2
+  fi
+fi
+
 ran_total=0; ok=0; noscript=0; jailcaused=0; nubcaused=0; upstream=0
 # ⛔⛔ THREE ARMS, BECAUSE TWO CANNOT TELL THE ONLY THING THIS SWEEP EXISTS TO SAY. Until now every
 # arm here ran nub with the jail ON, and a failure was classified by grepping the log for a
@@ -322,6 +346,7 @@ done
 
 echo
 echo "── install-script packages, jail DEFAULT-ON, approved builds, cold ──"
+[ -z "$POP_DELTA" ] || echo "⛔ POPULATION DRIFT: $POP_DELTA"
 awk -F'\t' '{print $2}' "$OUT" | sort | uniq -c | sort -rn
 total=$(wc -l < "$OUT" | tr -d ' ')
 echo "packages whose script actually ran: $ran_total / $total"

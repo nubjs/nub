@@ -3,7 +3,18 @@
 // estimate comes out optimistic. Every case below is pinned in that polarity.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { installScriptDeps, specName, partition } from './uncatalogued.mjs';
+import { installScriptDeps, specName, partition, loadCoverage } from './uncatalogued.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const tsv = (rows) => {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cov-')), 'coverage.tsv');
+  fs.writeFileSync(f, '# name\tversion\tplatforms\treason\tmeasured-at\n' + rows.map((r) => r.join('\t')).join('\n') + '\n');
+  return f;
+};
 
 const WARN = (specs) => `WARN ignored build scripts for ${specs.length} package(s): x. `
   + `Run \`nub approve-builds\`. code=WARN_NUB_IGNORED_BUILD_SCRIPTS count=${specs.length} `
@@ -83,4 +94,58 @@ test('an empty or absent catalog makes everything uncatalogued, never everything
   // covered — that is the false all-clear this whole number exists to prevent.
   assert.deepEqual(partition(['a@1.0.0'], {}).uncatalogued, ['a@1.0.0']);
   assert.deepEqual(partition(['a@1.0.0'], null).uncatalogued, ['a@1.0.0']);
+});
+
+test('⛔ a MEASURED package with no catalog entry is not risk — the whole point of the record', () => {
+  // The inversion this file exists to encode. `node-pty` passes at the baseline on all three
+  // platforms, so it wants no catalog entry; counting it as unmeasured made the only way to shrink
+  // the number an under-grant. It is covered, and it is neither catalogued nor at risk.
+  const cov = loadCoverage(tsv([['node-pty', '1.1.0', 'macos,linux,win', 'baseline-measured', 'abc1234']]));
+  const r = partition(['node-pty@1.1.0', 'never-run@1.0.0'], { packages: {} }, cov);
+  assert.deepEqual(r.measured, ['node-pty@1.1.0']);
+  assert.deepEqual(r.uncatalogued, ['never-run@1.0.0'], 'a package in neither source is still risk');
+  assert.deepEqual(r.catalogued, []);
+});
+
+test('a catalog entry outranks the coverage record, so the buckets never double-count', () => {
+  const cov = loadCoverage(tsv([['sharp', '0.33.0', 'macos,linux,win', 'baseline-measured', 'abc1234']]));
+  const r = partition(['sharp@0.33.0'], { packages: { sharp: {} } }, cov);
+  assert.deepEqual(r.catalogued, ['sharp@0.33.0']);
+  assert.deepEqual(r.measured, []);
+});
+
+test('⛔ a row without provenance is DROPPED — a bare name cannot launder itself into coverage', () => {
+  // THE FAIL-SAFE THAT MATTERS. This record is the one place a package can be declared safe without
+  // running anything, so a row that names no commit and no recognised reason must not count. If it
+  // did, appending a line to a TSV would silently clear a package the sweep has never touched.
+  const cov = loadCoverage(tsv([
+    ['no-sha', '1.0.0', 'macos,linux,win', 'baseline-measured', ''],
+    ['bad-reason', '1.0.0', 'macos,linux,win', 'looked-fine-to-me', 'abc1234'],
+    ['good', '1.0.0', 'macos,linux,win', 'v1-curated', 'abc1234'],
+  ]));
+  assert.deepEqual([...cov], ['good']);
+});
+
+test('a missing coverage record reports everything as risk, never as covered', () => {
+  // Same polarity as the absent-catalog case: an unreadable instrument must over-report risk.
+  const cov = loadCoverage('/nonexistent/coverage.tsv');
+  assert.equal(cov.size, 0);
+  assert.deepEqual(partition(['a@1.0.0'], { packages: {} }, cov).uncatalogued, ['a@1.0.0']);
+});
+
+test('partition without a coverage argument behaves as it did before the record existed', () => {
+  const r = partition(['a@1.0.0'], { packages: {} });
+  assert.deepEqual(r.uncatalogued, ['a@1.0.0']);
+  assert.deepEqual(r.measured, []);
+});
+
+test('⛔ KNOWN-ANSWER CONTROL: the SHIPPED record parses and carries both reasons', () => {
+  // A parser change that silently rejected every row would pass every synthetic case above and
+  // quietly restore the old behaviour, because an empty coverage set is indistinguishable from
+  // "nothing measured yet". Run the real file through it.
+  const cov = loadCoverage(path.join(HERE, 'results', 'baseline-coverage.tsv'));
+  assert.ok(cov.size > 100, `shipped coverage record parsed to ${cov.size} rows — the parser is broken`);
+  assert.ok(cov.has('node-pty'), 'node-pty is measured on all three platforms and must be covered');
+  assert.ok(cov.has('@prisma/client'), '@prisma/client holds a v1 CuratedGrant and must be covered');
+  assert.ok(!cov.has('prisma'), 'prisma has never been measured — covering it would be a false all-clear');
 });
