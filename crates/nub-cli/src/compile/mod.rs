@@ -4453,6 +4453,10 @@ mod tests {
                 ("sharp".to_string(), "--external"),
             ],
             deferred: 3,
+            // Consistent with the two rows above rather than picked for variety:
+            // `--external` and a surviving computed `import()` are each exactly
+            // `sealed_module_graph` being false, which is what this variant means.
+            app_extracts: Some(inline::Decline::UnsealedGraph),
             report: Some(PathBuf::from("report.json")),
             elapsed: std::time::Duration::from_millis(8_880),
         }
@@ -4488,6 +4492,7 @@ mod tests {
                 format!("platform={}", host.triple()),
                 "shipped=@napi-rs/nice (native addon), sharp (--external)".to_string(),
                 "deferred=3 dynamic import sites  resolved where the binary runs".to_string(),
+                "app=extracted on first run  it resolves modules at run time".to_string(),
                 "report=report.json  esbuild schema".to_string(),
                 "elapsed=8.9s".to_string(),
             ]
@@ -4521,8 +4526,11 @@ mod tests {
         );
     }
 
-    /// The optional rows are optional. A plain build states four facts, and a
+    /// The optional rows are optional. A plain build states five facts, and a
     /// reader of that block should not have to skip three empty ones to find them.
+    /// `app` is among the five because it is unconditional — whether the binary
+    /// needs a writable directory is the question a self-contained artifact exists
+    /// to answer, so it is stated even when the answer is "no".
     #[test]
     fn a_build_with_nothing_deferred_or_external_prints_no_row_for_it() {
         let host = TargetPlatform::host().unwrap();
@@ -4533,6 +4541,9 @@ mod tests {
             app_bytes: 2_500_000,
             shipped: Vec::new(),
             deferred: 0,
+            // Nothing external and nothing deferred is the sealed graph, so this
+            // build is the one that runs straight out of the executable.
+            app_extracts: None,
             report: None,
             elapsed: std::time::Duration::from_millis(2_400),
         };
@@ -4550,6 +4561,7 @@ mod tests {
                 "output=acme  4.4 MB  (app 2.5 MB · launcher 1.9 MB)".to_string(),
                 "runtime=Node >=22 <23, not embedded  (--target)".to_string(),
                 format!("platform={}", host.triple()),
+                "app=run from the executable  nothing is written to disk".to_string(),
                 "elapsed=2.4s".to_string(),
             ]
         );
@@ -4598,6 +4610,7 @@ mod tests {
                     vec![Ink::Plain, Ink::Muted, Ink::Plain, Ink::Plain, Ink::Muted,],
                 ),
                 ("deferred", vec![Ink::Plain, Ink::Muted]),
+                ("app", vec![Ink::Plain, Ink::Muted]),
                 ("report", vec![Ink::Plain, Ink::Muted]),
                 ("elapsed", vec![Ink::Plain]),
             ],
