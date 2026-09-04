@@ -133,27 +133,28 @@ nub store prune
 ```
 
 ```
-Pruned 0 files (0.0 MB) from the store
-Pruned 2 entries from the virtual store and 0 entries from the extracted-tree tier
+Pruned 4 packages (0.1 MB) from the global virtual store
+Pruned 1 stale project record from the global virtual store registry
+Pruned 4 files (0.0 MB) from the store
 ```
 
-Nub records every project that installs against the shared store. A prune keeps the entries those projects still reach — directly, or through another entry's own dependencies — and removes the rest.
+Nub records every project that installs against the shared store. A prune keeps the entries those projects still link to — directly, or through another entry's own dependencies — and removes the rest. A registered project whose directory is gone stops counting as a store user; the prune drops its record and says so, and whatever only that project reached goes with it. The next install in a project that needs an entry extracts it again.
 
-A registered project that nub cannot find might be deleted, or might be on a disk that is not mounted, and those look identical. It stops counting as a store user and the prune says so, but everything else still gets collected. Whatever only that project reached becomes unreferenced and takes the usual 30-day hold, so remounting the disk before then keeps it.
+`--dry-run` prints the same plan without removing anything, and `--dry-run --json` prints it as JSON.
 
-Removal takes two passes. The first prune to find an entry unreferenced holds it and says so; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
+The extracted-tree cache, the copy of each package that the linker clones into projects, is held rather than collected. The first prune to find an entry unreferenced reports it; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
 
 ```
-Holding 24 entries unreferenced for 30 days before removal.
+Holding 30029 entries of the extracted-tree cache unreferenced for 30 days before removal.
 Install in any project that still needs them and they are kept.
 ```
 
 That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks unreferenced. Without the hold, one install followed by one prune would delete the rest.
 
-With nothing registered at all, a prune skips the store entirely rather than treating an empty registry as an empty store:
+With nothing registered at all, a prune skips that cache rather than treating an empty registry as an empty store:
 
 ```
-No projects are registered against the virtual store; skipping it.
+No projects are registered against the store; skipping the extracted-tree cache.
 Run an install in each project you want kept, then prune again.
 ```
 
