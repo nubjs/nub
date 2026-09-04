@@ -1,0 +1,36 @@
+name: node-cf-instruments
+
+# Round 2 of the nodejs/node#44715 blocker re-test, split out from node-cf-probe.yml
+# so it can be re-run without restarting that workflow's ~90-minute Node build.
+# See tests/node-cf-instruments/probe.sh.
+on:
+  push:
+    branches: [probe/node-startup]
+    paths:
+      - 'tests/node-cf-instruments/**'
+      - '.github/workflows/node-cf-instruments.yml'
+  workflow_dispatch:
+
+jobs:
+  instruments:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo DevToolsSecurity -enable || true
+      - name: Run the Allocations comparison
+        run: tests/node-cf-instruments/probe.sh "$RUNNER_TEMP/cfi" | tee cfi-${{ matrix.os }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cf-instruments-${{ matrix.os }}
+          path: |
+            cfi-${{ matrix.os }}.txt
+            ${{ runner.temp }}/cfi/*.txt
+            ${{ runner.temp }}/cfi/*.xml
+            ${{ runner.temp }}/cfi/*.log
+          retention-days: 7
