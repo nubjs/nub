@@ -38,6 +38,7 @@ use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -707,14 +708,20 @@ fn bundle_inner(
         report.finish(&emitted, &modules, &edge_kinds, &external_imports)
     });
 
+    // Before `root_support_files` reads the decision: islands bypass `transform`,
+    // so this is the only place their usage can be folded in.
+    for file in &native_files {
+        prelude.note_island_usage(&file.bytes);
+    }
+
     Ok(BundleResult {
         entry,
         files,
         detached_maps,
         assets,
-        native_files,
         support_files: prelude.support_files().collect(),
         root_support_files: prelude.root_support_files().collect(),
+        native_files,
         dynamic_import_sites,
         native_addons,
         external_imports,
@@ -1853,6 +1860,12 @@ struct CompilePreamble {
     /// Runtime bootstrap extracted at the payload root rather than beside the
     /// content-addressed bundle layout. The launcher loads it before the entry.
     root_support_files: Vec<(String, Vec<u8>)>,
+    /// Whether an APP module — the graph minus nub's own runtime tree — names a
+    /// builtin the bootstrap would otherwise load eagerly. Written from `transform`,
+    /// which Rolldown drives concurrently, so these are atomics rather than a lock.
+    /// See [`strip_unused_bootstrap_regions`].
+    app_uses_child_process: AtomicBool,
+    app_uses_worker: AtomicBool,
 }
 
 /// Polyfills the compile preamble installs, and the first Node version that ships
@@ -1904,12 +1917,22 @@ fn strip_native_polyfills(source: &str, target: Option<(u64, u64, u64)>) -> Stri
     if native.is_empty() {
         return source.to_string();
     }
+    strip_regions(source, "// #region nub:polyfill:", &native)
+}
+
+/// Remove `<prefix><name>` … `// #endregion` blocks for every name in `drop`.
+///
+/// The region contract is the same wherever it is used and it lives across two
+/// files: each region must be independently removable and must leave valid syntax
+/// behind, so the source it guards is written to survive its own deletion. Regions
+/// do not nest — the first `// #endregion` closes the block.
+fn strip_regions(source: &str, prefix: &str, drop: &[&str]) -> String {
     let mut out = String::with_capacity(source.len());
     let mut skipping = false;
     for line in source.lines() {
         let trimmed = line.trim();
-        if let Some(name) = trimmed.strip_prefix("// #region nub:polyfill:") {
-            if native.contains(&name) {
+        if let Some(name) = trimmed.strip_prefix(prefix) {
+            if drop.contains(&name) {
                 skipping = true;
                 continue;
             }
@@ -1924,6 +1947,40 @@ fn strip_native_polyfills(source: &str, target: Option<(u64, u64, u64)>) -> Stri
         out.push('\n');
     }
     out
+}
+
+/// Drop the bootstrap's eager builtin loads when the APP graph never names them.
+///
+/// Loading `node:child_process` costs ~1.9 ms and `node:worker_threads` ~1.4 ms on
+/// every run of the artifact (measured on a quiet CI runner against interleaved
+/// duplicate baselines; 2.3 ms together, since they share a subgraph). A payload
+/// that touches neither pays that for nothing.
+///
+/// The scan behind `uses_*` covers the graph MINUS nub's own runtime tree, and that
+/// exclusion is what makes it work at all: the preamble bundles `worker-polyfill.mjs`
+/// (which declares `class Worker`) and `preload-common.cjs` (which names
+/// `child_process`), so a scan over the FINISHED chunks matches on every payload —
+/// verified against a bare `console.log("hello")`, which carries all four markers —
+/// and would strip nothing, ever.
+fn strip_unused_bootstrap_regions(
+    source: &[u8],
+    uses_child_process: bool,
+    uses_worker: bool,
+) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(source) else {
+        return source.to_vec();
+    };
+    let mut drop: Vec<&str> = Vec::new();
+    if !uses_child_process {
+        drop.push("childprocess");
+    }
+    if !uses_worker {
+        drop.push("worker");
+    }
+    if drop.is_empty() {
+        return source.to_vec();
+    }
+    strip_regions(text, "// #region nub:compile:", &drop).into_bytes()
 }
 
 impl CompilePreamble {
@@ -1963,6 +2020,48 @@ impl CompilePreamble {
             ]))),
             support_files: Vec::new(),
             root_support_files: Vec::new(),
+            app_uses_child_process: AtomicBool::new(false),
+            app_uses_worker: AtomicBool::new(false),
+        }
+    }
+
+    /// Fold a native-addon island into the same decision.
+    ///
+    /// An island is a verbatim copy of a package directory rather than a bundled
+    /// module, so its files never reach [`Plugin::transform`] and the scan there
+    /// cannot see them. Island code runs in the artifact's own process, so an
+    /// island calling `fork` needs the identity fix-up exactly as application code
+    /// does. Scanned as raw bytes because an island carries binaries as well as
+    /// JavaScript; a stray match inside a `.node` only keeps a load.
+    fn note_island_usage(&self, bytes: &[u8]) {
+        let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        if contains(b"child_process") || contains(b"cluster") {
+            self.app_uses_child_process
+                .store(true, AtomicOrdering::Relaxed);
+        }
+        if contains(b"worker_threads") || contains(b"Worker") {
+            self.app_uses_worker.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Note that an application module names a builtin whose eager load in the
+    /// bootstrap cannot then be stripped.
+    ///
+    /// Substring matching over source text, deliberately. It over-detects — a
+    /// variable named `cluster` or a comment mentioning `Worker` is enough — and
+    /// that is the safe direction: a false positive keeps an eager load the payload
+    /// did not need and costs startup, whereas a false negative ships an artifact
+    /// whose `fork` is never identity-corrected, which is the failure that silently
+    /// bypassed the policy for every cluster worker before it was fixed.
+    fn note_app_builtin_usage(&self, id: &str, code: &str) {
+        if Path::new(clean_url(id)).starts_with(&self.runtime_dir) {
+            return;
+        }
+        if code.contains("child_process") || code.contains("cluster") {
+            self.app_uses_child_process.store(true, AtomicOrdering::Relaxed);
+        }
+        if code.contains("worker_threads") || code.contains("Worker") {
+            self.app_uses_worker.store(true, AtomicOrdering::Relaxed);
         }
     }
 
@@ -1977,13 +2076,23 @@ impl CompilePreamble {
         })
     }
 
+    /// Collected AFTER the graph is walked, which is what makes the strip possible:
+    /// the bootstrap is not bundled, so unlike the preamble it can still be rewritten
+    /// once every application module has been seen.
     fn root_support_files(&self) -> impl Iterator<Item = BundledFile> + '_ {
-        self.root_support_files
-            .iter()
-            .map(|(name, bytes)| BundledFile {
+        let uses_child_process = self.app_uses_child_process.load(AtomicOrdering::Relaxed);
+        let uses_worker = self.app_uses_worker.load(AtomicOrdering::Relaxed);
+        self.root_support_files.iter().map(move |(name, bytes)| {
+            let bytes = if name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
+                strip_unused_bootstrap_regions(bytes, uses_child_process, uses_worker)
+            } else {
+                bytes.clone()
+            };
+            BundledFile {
                 name: name.clone(),
-                bytes: bytes.clone(),
-            })
+                bytes,
+            }
+        })
     }
 
     /// Register `source` as a static worker root and return the virtual entry id
@@ -2266,6 +2375,7 @@ impl Plugin for CompilePreamble {
         _ctx: SharedTransformPluginContext,
         args: &HookTransformArgs<'_>,
     ) -> impl Future<Output = HookTransformReturn> + Send {
+        self.note_app_builtin_usage(args.id, args.code);
         let root = self.is_root_source(args.id);
         let rewritten = if root {
             let cjs = rewrite_entry_main_checks(clean_url(args.id), args.code);
@@ -9722,6 +9832,73 @@ after
         // Surrounding code always survives — otherwise the assertions above could
         // pass by the stripper eating the whole file.
         for out in [&n26, &n24, &n18] {
+            assert!(
+                out.contains("before") && out.contains("after"),
+                "the stripper must only remove its own regions"
+            );
+        }
+    }
+
+    /// The bootstrap keeps an eager builtin load exactly when the app graph names
+    /// it, and the two regions are independent.
+    ///
+    /// The KEPT direction is the one that matters. Dropping the `childprocess`
+    /// region when the payload does use `fork`/`cluster` produces an artifact whose
+    /// child processes silently re-run the executable itself — a wrong answer with
+    /// no error — so every uncertain case must land on "keep".
+    #[test]
+    fn the_bootstrap_keeps_a_builtin_load_the_app_graph_names() {
+        let src = b"\
+before
+let needsChildProcess = false;
+let needsWorker = false;
+// #region nub:compile:childprocess
+needsChildProcess = true;
+// #endregion
+// #region nub:compile:worker
+needsWorker = true;
+// #endregion
+after
+";
+        let text = |v: Vec<u8>| String::from_utf8(v).expect("stripper must emit UTF-8");
+
+        let neither = text(strip_unused_bootstrap_regions(src, false, false));
+        assert!(
+            !neither.contains("needsChildProcess = true")
+                && !neither.contains("needsWorker = true"),
+            "a payload naming neither builtin must carry neither eager load"
+        );
+
+        let both = text(strip_unused_bootstrap_regions(src, true, true));
+        assert_eq!(
+            both,
+            String::from_utf8(src.to_vec()).unwrap(),
+            "a payload naming both must be left exactly as written"
+        );
+
+        // Independence: stripping one region must not disturb the other.
+        let cp_only = text(strip_unused_bootstrap_regions(src, true, false));
+        assert!(
+            cp_only.contains("needsChildProcess = true")
+                && !cp_only.contains("needsWorker = true"),
+            "child_process usage alone must keep only that region"
+        );
+        let worker_only = text(strip_unused_bootstrap_regions(src, false, true));
+        assert!(
+            !worker_only.contains("needsChildProcess = true")
+                && worker_only.contains("needsWorker = true"),
+            "Worker usage alone must keep only that region"
+        );
+
+        // Every variant must still assign the flags and keep surrounding code, or
+        // the assertions above could pass by the stripper eating the whole file and
+        // leaving an undefined binding behind.
+        for out in [&neither, &both, &cp_only, &worker_only] {
+            assert!(
+                out.contains("let needsChildProcess = false")
+                    && out.contains("let needsWorker = false"),
+                "the `false` initializers are what make a region removable"
+            );
             assert!(
                 out.contains("before") && out.contains("after"),
                 "the stripper must only remove its own regions"

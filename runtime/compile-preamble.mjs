@@ -1,9 +1,17 @@
 // Runtime globals compiled artifacts need without Nub's loader or installed runtime.
 const bootstrap = process[Symbol.for("nub.compile.bootstrap")];
 const COMPILED_WORKER_STATE = "nub.compile.worker-state";
-const workerThreads = bootstrap.getBuiltin("node:worker_threads");
+// Loading node:worker_threads costs ~1.4 ms on every run of the artifact, so it is
+// skipped when the payload's sealed graph never reaches Worker or worker_threads.
+// The bootstrap made that call at build time — see its `nub:compile:worker` region
+// — and a null here means no Worker can exist in this process, so there is no
+// state to carry and nothing to publish.
+const workerThreads = bootstrap.needsWorker
+  ? bootstrap.getBuiltin("node:worker_threads")
+  : null;
 
 function readCompiledWorkerState() {
+  if (workerThreads === null) return null;
   let state;
   try {
     state = workerThreads.getEnvironmentData(COMPILED_WORKER_STATE);
@@ -46,7 +54,11 @@ if (
 ) {
   process.env.__NUB_NEUTRALIZE_LOCALSTORAGE = "1";
 }
-if (typeof compiledExecPath === "string" && compiledExecPath.length !== 0) {
+if (
+  workerThreads !== null &&
+  typeof compiledExecPath === "string" &&
+  compiledExecPath.length !== 0
+) {
   workerThreads.setEnvironmentData(COMPILED_WORKER_STATE, {
     compiledExecPath,
     neutralizeLocalStorage,
@@ -113,7 +125,12 @@ export function installCompilePreamble() {
   setBlobUrlModule({ blobUrlSource, installBlobUrlSupport });
   setCompiledBootstrapRequireArg(bootstrap.requireArg);
 
-  installCompiledChildProcess();
+  // Eagerly loads and patches node:child_process — the one place that cost is
+  // unavoidable when the payload uses it, because an ESM `import { spawn }`
+  // bypasses Module._load and so cannot be intercepted lazily. A payload whose
+  // sealed graph never names child_process or cluster skips it and the fork
+  // identity fix-up in the bootstrap together; neither has anything to correct.
+  if (bootstrap.needsChildProcess) installCompiledChildProcess();
   if (compiledExecPath !== undefined) {
     process.execPath = compiledExecPath;
     process.argv[0] = compiledExecPath;
@@ -133,7 +150,7 @@ export function installCompilePreamble() {
   // #region nub:polyfill:navigatorlocks
   installNavigatorLocks();
   // #endregion
-  installWorkerPolyfill();
+  if (bootstrap.needsWorker) installWorkerPolyfill();
   // #region nub:polyfill:temporal
   installTemporalGlobal({ Temporal, toTemporalInstant });
   // #endregion
