@@ -165,7 +165,7 @@ Read the [full docs](https://pnpm.io/catalogs) on pnpm.io. The `catalog:` syntax
 
 ### `allowScripts`
 
-Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts) for the deny-by-default rules around it. A registry dependency is keyed by name, anything else by its full specifier, and an explicit `false` always wins.
+Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts) for the deny-by-default rules around it. A registry dependency is keyed by name, anything else by its full specifier, and an explicit `false` beats any allow in the map.
 
 ```json title="package.json"
 {
@@ -511,7 +511,7 @@ The neutral `allowScripts` field grants permission, and it keys on the package n
   "allowScripts": {
     "esbuild": true,                        // a registry dependency, by name
     "buildy@file:./buildy-1.0.0.tgz": true, // anything else, by full specifier
-    "sharp": false                          // an explicit denial always wins
+    "sharp": false                          // a denial beats any allow in the map
   }
 }
 ```

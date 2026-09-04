@@ -1130,8 +1130,16 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
     // The nub-mode home is the neutral top-level `allowScripts`; pnpm's home
     // for the same map is `allowBuilds`, so this one entry is renamed on the
     // way out rather than moved verbatim.
+    //
+    // The pre-cutover root key is accepted here too. This command never builds
+    // an install session, so the `ERR_NUB_ALLOW_BUILDS_RENAMED` refusal cannot
+    // reach it — a project that predates the rename would otherwise switch to
+    // pnpm with its whole build policy stranded at a root key pnpm does not
+    // read. Migrating it out is strictly better than refusing, because pnpm's
+    // destination key is the legacy spelling anyway.
     let allow_builds = manifest
         .get(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY)
+        .or_else(|| manifest.get(aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY))
         .cloned();
     let audit_config = manifest.get("auditConfig").cloned();
 
@@ -1174,6 +1182,10 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
             "overrides",
             "patchedDependencies",
             aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
+            // Cleared alongside the current spelling: whichever of the two the
+            // project carried was just written into the yaml above, so leaving
+            // it here would strand a duplicate nothing reads.
+            aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY,
             "auditConfig",
         ] {
             obj.remove(key);
@@ -1460,6 +1472,51 @@ mod tests {
 
         // Idempotent rerun: nothing left to move.
         assert!(regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
+    }
+
+    /// A project that predates the `allowBuilds` → `allowScripts` rename can
+    /// reach `nub pm use pnpm` directly: that command builds no install
+    /// session, so the rename refusal never runs. The legacy map must still
+    /// migrate, or the switch strands the whole build policy at a root key
+    /// pnpm does not read.
+    #[test]
+    fn regenerate_migrates_a_pre_cutover_allow_builds_map() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "app",
+                "packageManager": "nub@0.1.0",
+                "allowBuilds": { "esbuild": true, "fsevents": false }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let lines = regenerate_workspace_yaml(dir.path()).unwrap();
+        assert!(
+            !lines.is_empty(),
+            "the legacy map must be migrated, not skipped"
+        );
+
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(dir.path().join("pnpm-workspace.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(yaml["allowBuilds"]["esbuild"], true);
+        assert_eq!(
+            yaml["allowBuilds"]["fsevents"], false,
+            "a denial must survive the switch — losing it runs a script the project refused"
+        );
+
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            manifest.get("allowBuilds").is_none(),
+            "the legacy key must not be left behind as a duplicate"
+        );
     }
 
     #[test]

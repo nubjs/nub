@@ -148,7 +148,9 @@ fn root_embedder_writes_map_settings_at_manifest_root() {
     );
     // Never nested under the foreign `pnpm` brand.
     assert!(
-        obj.get("pnpm").and_then(|p| p.get("allowScripts")).is_none(),
+        obj.get("pnpm")
+            .and_then(|p| p.get("allowScripts"))
+            .is_none(),
         "must never nest the setting under the pnpm namespace, got: {obj:#?}"
     );
 }

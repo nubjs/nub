@@ -314,15 +314,7 @@ fn prune_sidecar_entries_json(obj: &mut serde_json::Map<String, serde_json::Valu
         }
     }
 
-    // The manifest-root build allowlist is a map keyed by package name, so a
-    // removed dep must lose its entry here too — otherwise the grant outlives
-    // the dependency and silently re-applies if the name comes back.
-    let top_keys: [&str; 3] = [
-        "overrides",
-        "resolutions",
-        aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
-    ];
-    for top_key in top_keys {
+    for top_key in ["overrides", "resolutions"] {
         let remove_top = if let Some(top) = obj.get_mut(top_key).and_then(|v| v.as_object_mut()) {
             top.shift_remove(name);
             top.is_empty()
@@ -333,6 +325,40 @@ fn prune_sidecar_entries_json(obj: &mut serde_json::Map<String, serde_json::Valu
             obj.shift_remove(top_key);
         }
     }
+
+    // The manifest-root build allowlist is keyed by package name OR by a
+    // pinned `name@<spec>` form, so a removed dep must lose every key that
+    // targets it — otherwise the grant outlives the dependency and silently
+    // re-applies when that version comes back. npm's `approve-scripts` writes
+    // the pinned form by DEFAULT, so an exact-name removal would miss the
+    // common case entirely.
+    let remove_allow = if let Some(top) = obj
+        .get_mut(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY)
+        .and_then(|v| v.as_object_mut())
+    {
+        top.retain(|key, _| !allow_key_targets(key, name));
+        top.is_empty()
+    } else {
+        false
+    };
+    if remove_allow {
+        obj.shift_remove(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY);
+    }
+}
+
+/// Whether a build-allowlist key targets the package `name`: either the bare
+/// name, or any `name@<spec>` pin (`pkg@1.2.3`, `pkg@1 || 2`, `pkg@file:./x`,
+/// `pkg@git+https://…`).
+///
+/// Anchored on the `@` separator rather than a bare prefix test, which is what
+/// keeps `is-odd` from matching `is-odd-2`, and splitting from the LEFT rather
+/// than the right, which is what keeps a scoped bare name (`@scope/pkg`, whose
+/// only `@` is its first character) from being read as a pin.
+fn allow_key_targets(key: &str, name: &str) -> bool {
+    key == name
+        || key
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with('@'))
 }
 
 /// Prune aube/pnpm sidecar metadata entries that reference `name`.
@@ -420,17 +446,16 @@ fn prune_sidecar_entries(manifest: &mut aube_manifest::PackageJson, name: &str) 
         }
     }
     // The manifest-root build allowlist, for the same reason as above: a grant
-    // must not outlive the dependency it was written for.
+    // must not outlive the dependency it was written for. Pinned `name@<spec>`
+    // keys count — npm writes those by default.
     if let Some(top) = manifest
         .extra
         .get_mut(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY)
         .and_then(|v| v.as_object_mut())
     {
-        top.remove(name);
+        top.retain(|key, _| !allow_key_targets(key, name));
         if top.is_empty() {
-            manifest
-                .extra
-                .remove(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY);
+            manifest.extra.remove(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY);
         }
     }
 }
@@ -438,6 +463,33 @@ fn prune_sidecar_entries(manifest: &mut aube_manifest::PackageJson, name: &str) 
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+
+    /// The allowlist key grammar, exercised on the shapes that actually occur.
+    /// The two rows that matter are the last two: a same-prefix sibling must
+    /// survive (`is-odd` never prunes `is-odd-2`), and a scoped bare name must
+    /// not be mistaken for a pin just because it contains an `@`.
+    #[test]
+    fn allow_key_matching_is_anchored_on_the_pin_separator() {
+        for (key, name, targets) in [
+            ("canvas", "canvas", true),
+            ("canvas@2.11.0", "canvas", true),
+            ("esbuild@0.19.0 || 0.20.0", "esbuild", true),
+            ("buildy@file:./buildy-1.0.0.tgz", "buildy", true),
+            ("pkg@git+https://example.com/pkg.git", "pkg", true),
+            ("@scope/pkg", "@scope/pkg", true),
+            ("@scope/pkg@1.0.0", "@scope/pkg", true),
+            ("is-odd-2", "is-odd", false),
+            ("is-odd-2@1.0.0", "is-odd", false),
+            ("@scope/pkg-2@1.0.0", "@scope/pkg", false),
+            ("other", "canvas", false),
+        ] {
+            assert_eq!(
+                super::allow_key_targets(key, name),
+                targets,
+                "key {key:?} vs name {name:?}"
+            );
+        }
+    }
 
     fn collect_section_order(raw: &str, section: &str) -> Vec<String> {
         let v: Value = serde_json::from_str(raw).unwrap();

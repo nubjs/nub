@@ -116,11 +116,22 @@ pub struct UpdateConfig {
 
 /// The manifest-ROOT (un-branded) key holding the lifecycle-script allowlist,
 /// for embedders whose `manifest_namespace` is empty. npm 12 reads the same
-/// top-level `allowScripts` map out of `package.json` (RFC npm/rfcs#868), with
-/// the same `name`/`name@version` → `true`/`false` shape and the same
-/// deny-wins fold, so sharing the field means one allowlist per project rather
-/// than two competing maps in one file. The pnpm-branded `pnpm.allowBuilds`
-/// map keeps its own spelling — that surface belongs to pnpm.
+/// top-level `allowScripts` map out of `package.json` (RFC npm/rfcs#868), so
+/// sharing the field means one allowlist per project rather than two competing
+/// maps in one file. The pnpm-branded `pnpm.allowBuilds` map keeps its own
+/// spelling — that surface belongs to pnpm.
+///
+/// REGISTRY keys are interchangeable with npm's: a bare `name` and a pinned
+/// `name@version` mean the same thing to both tools, and both fold with
+/// `false` winning. NON-REGISTRY keys are NOT yet interchangeable, and this is
+/// a known gap rather than a claim: npm writes a source-ONLY key for a file,
+/// tarball or Git dependency (`file:../local`, `github:owner/repo#sha` — see
+/// its `lib/utils/allow-scripts-writer.js`), whereas the engine builds a
+/// name-qualified one (`pkg@file:../local`, see
+/// `aube_lockfile::…::source_approval_key`). An npm-authored approval for a
+/// non-registry package therefore reads as unreviewed here. Closing that means
+/// deciding whether a bare source key may grant whatever package occupies that
+/// source, which is a security call, not a parsing one.
 pub const ROOT_ALLOW_SCRIPTS_KEY: &str = "allowScripts";
 
 /// The pre-cutover manifest-root spelling of [`ROOT_ALLOW_SCRIPTS_KEY`]. No
