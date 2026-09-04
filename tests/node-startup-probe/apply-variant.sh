@@ -72,14 +72,13 @@ old = """    // Ensure CSPRNG is properly seeded.
       return true;
     });
 """
-new = """    // OpenSSL activates the default provider lazily, as a fallback that any
-    // explicit provider load (--openssl-legacy-provider) disables, so activate
-    // it here the way the eager seeding check used to. Confirm the CSPRNG is
-    // seeded before V8 starts only when that provider is unavailable or FIPS
-    // is in effect, the cases where a configuration can leave OpenSSL without
-    // a DRBG and an abort beats a hang at the first crypto call. Otherwise
-    // the DRBG is instantiated at the first crypto call instead of on every
-    // startup.
+new = """    // Activating the default provider here keeps --openssl-legacy-provider
+    // working. Its explicit load disables OpenSSL's fallback, and the eager
+    // CSPRNG check used to activate the provider as a side effect. Only
+    // check the seeding when that provider is missing or FIPS is on, so a
+    // configuration without a DRBG still aborts at startup instead of
+    // hanging at the first crypto call. Otherwise the DRBG is instantiated
+    // on first use.
 #if OPENSSL_VERSION_MAJOR >= 3
     const bool check_csprng = ncrypto::isFipsEnabled() ||
                               !OSSL_PROVIDER_available(nullptr, "default");
@@ -91,14 +90,14 @@ new = """    // OpenSSL activates the default provider lazily, as a fallback tha
     }
 
     V8::SetEntropySource([](unsigned char* buffer, size_t length) {
-      // V8 seeds its hash tables, address space layout and Math.random()
-      // from this, none of it cryptographic. Read the OS CSPRNG directly:
-      // going through OpenSSL instantiates its DRBG and constructs the default
-      // provider's algorithm tables on every startup. V8 falls back to very
-      // weak entropy when this function fails, so abort instead.
+      // V8 uses this for hash seeds, ASLR and Math.random(), none of it
+      // cryptographic. Going through OpenSSL would instantiate the DRBG and
+      // build the default provider's algorithm tables on every startup.
+      // V8 falls back to very weak entropy when this function fails, so
+      // abort instead.
 #ifdef _AIX
-      // uv_random() reads /dev/random on AIX, which blocks when the entropy
-      // pool is exhausted; OpenSSL's DRBG seeds from /dev/urandom there.
+      // uv_random() reads /dev/random on AIX, which blocks. OpenSSL seeds
+      // from /dev/urandom there.
       CHECK(ncrypto::CSPRNG(buffer, length));
 #else
       CHECK_EQ(uv_random(nullptr, nullptr, buffer, length, 0, nullptr), 0);
