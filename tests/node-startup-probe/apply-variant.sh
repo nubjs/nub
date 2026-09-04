@@ -17,10 +17,12 @@
 #                   CVE-2026-21717 fix, so it is a measurement, not a candidate) but compute
 #                   mul_mod in deps/v8/third_party/rapidhash-v8/secret.h with a 128-bit multiply
 #                   instead of a 64-iteration shift-add loop: bit-identical secrets, ~17x faster.
-#   entropy         src/node.cc: seed V8 from uv_random() instead of OpenSSL's DRBG, and run the
-#                   eager CSPRNG seeding check only under FIPS or a user-supplied OpenSSL config
-#                   (Node's own config always activates the default provider), so the provider's
-#                   algorithm tables are not constructed before v8Start.
+#   entropy         src/node.cc: seed V8 from uv_random() instead of OpenSSL's DRBG (AIX excepted:
+#                   uv_random() reads the blocking /dev/random there), keep activating the default
+#                   provider at startup (--openssl-legacy-provider's explicit load disables the
+#                   fallback), and run the eager CSPRNG seeding check only when that provider is
+#                   unavailable or FIPS is in effect, so the provider's algorithm tables are not
+#                   constructed before v8Start.
 set -euo pipefail
 variant=$1; dir=$2
 here=$(cd "$(dirname "$0")" && pwd)
@@ -70,15 +72,17 @@ old = """    // Ensure CSPRNG is properly seeded.
       return true;
     });
 """
-new = """    // Node's own OpenSSL configuration always activates the default provider,
-    // so the CSPRNG can only be unavailable when the user supplied a
-    // configuration or FIPS is in effect. Confirm it is seeded before V8 starts
-    // in those cases, where an abort beats a hang at the first crypto call;
-    // otherwise leave OpenSSL's DRBG uninstantiated until crypto is used.
+new = """    // OpenSSL activates the default provider lazily, as a fallback that any
+    // explicit provider load (--openssl-legacy-provider) disables, so activate
+    // it here the way the eager seeding check used to. Confirm the CSPRNG is
+    // seeded before V8 starts only when that provider is unavailable or FIPS
+    // is in effect, the cases where a configuration can leave OpenSSL without
+    // a DRBG and an abort beats a hang at the first crypto call. Otherwise
+    // the DRBG is instantiated at the first crypto call instead of on every
+    // startup.
 #if OPENSSL_VERSION_MAJOR >= 3
     const bool check_csprng = ncrypto::isFipsEnabled() ||
-                              conf_file != nullptr ||
-                              per_process::cli_options->openssl_shared_config;
+                              !OSSL_PROVIDER_available(nullptr, "default");
 #else
     const bool check_csprng = true;
 #endif
@@ -92,10 +96,19 @@ new = """    // Node's own OpenSSL configuration always activates the default pr
       // going through OpenSSL instantiates its DRBG and constructs the default
       // provider's algorithm tables on every startup. V8 falls back to very
       // weak entropy when this function fails, so abort instead.
+#ifdef _AIX
+      // uv_random() reads /dev/random on AIX, which blocks when the entropy
+      // pool is exhausted; OpenSSL's DRBG seeds from /dev/urandom there.
+      CHECK(ncrypto::CSPRNG(buffer, length));
+#else
       CHECK_EQ(uv_random(nullptr, nullptr, buffer, length, 0, nullptr), 0);
+#endif
       return true;
     });
 """
+inc = '#include "ncrypto.h"\n'
+assert s.count(inc) == 1, 'ncrypto include anchor not found in src/node.cc'
+s = s.replace(inc, inc + '#if OPENSSL_VERSION_MAJOR >= 3\n#include <openssl/provider.h>\n#endif\n', 1)
 assert s.count(old) == 1, 'entropy anchor not found in src/node.cc'
 open(p, 'w').write(s.replace(old, new, 1))
 PY2
