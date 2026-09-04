@@ -49,7 +49,7 @@ Nub uses the same stapling. The runtime is a stock Node from nodejs.org, driven 
 
 Nub's augmentations — transpiler-level support for TypeScript, JSX and non-erasable syntax, YAML/TOML/JSONC imports, polyfilled globals like `Temporal` and the browser-style `Worker` — all happen during compilation. Nub is fully _erasable_; it compiles your inputs to something that can run against vanilla Node.js. The output carries no `node_modules` and needs no toolchain on the target machine. The Node it builds against comes from the project's existing pin — a `.node-version` file, or `engines.node` in `package.json`. An import the bundler can't resolve fails the build with the file and line.
 
-The default shape embeds a full Node. A stock `node` binary is 146 MB on darwin-arm64; stripped and recompressed with zstd at level 19, it fits with your app in a 29.5 MB file:
+The default shape embeds a full Node. A stock `node` binary is 145 MB on darwin-arm64; stripped and recompressed with zstd at level 19, it fits with your app in a 29.5 MB file:
 
 <Bench
   label="hello world · compiled executable · size on disk"
