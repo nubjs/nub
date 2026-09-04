@@ -771,16 +771,25 @@ jobs:
           node-version: "24"
       - run: npm install --no-audit --no-fund --loglevel=error
       # Stage the vendored helpers into runtime/ so the embedded blob can transpile
-      # anything, not just the erasable-syntax fixture below. `jsbi` is transitive
-      # (via @js-temporal/polyfill) and arrives hoisted at the node_modules root.
-      # Mirrors the Windows twin, which uses `nub install` because its --smol gate
-      # needs a lockfile-exact tree; a plain npm install is enough here.
+      # anything, not just the erasable-syntax fixture below. The list is exactly the
+      # one nub-core/build.rs enforces once NUB_ALLOW_INCOMPLETE_RUNTIME is gone, and
+      # the copies match the two sibling staging steps in this file.
+      #
+      # `jsbi` is TRANSITIVE (via @js-temporal/polyfill) yet copied from the root,
+      # which holds only because npm hoists it there as a real directory — verified by
+      # running this package.json through `npm install` rather than assumed. Under an
+      # isolated layout it sits in the store with no root entry, so a future installer
+      # swap here breaks this line before it breaks anything else. The Windows twin
+      # pins `--node-linker hoisted` for the same reason.
       - name: Stage runtime dependencies
         shell: bash
         run: |
           set -euo pipefail
           rm -rf runtime/node_modules
-          mkdir -p runtime/node_modules/@js-temporal runtime/node_modules/@oxc-project runtime/node_modules/@petamoriken
+          mkdir -p \
+            runtime/node_modules/@js-temporal \
+            runtime/node_modules/@oxc-project \
+            runtime/node_modules/@petamoriken
           cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
           cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
           cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
