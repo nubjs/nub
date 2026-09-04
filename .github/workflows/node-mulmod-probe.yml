@@ -21,6 +21,17 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - run: bash tests/node-mulmod-probe/run-windows.sh
         shell: bash
+  # Node ships win-arm64 from clang-cl too; _udiv128 is x64-only, so this leg matters on its own.
+  windows-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+      - run: bash tests/node-mulmod-probe/run-windows.sh
+        shell: bash
   linux-arm64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
