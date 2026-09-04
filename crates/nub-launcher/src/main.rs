@@ -857,9 +857,36 @@ fn embedded_node_cache_is_ready(manifest: &Manifest, cache_dir: &Path) -> bool {
     saw_node && saw_marker
 }
 
+/// What an extracted app file is accepted against.
+///
+/// A LENGTH, wherever the payload records one — and it is the only reason a warm
+/// launch costs O(files) rather than O(payload bytes). The byte comparison this
+/// replaces had to materialize the whole app region first, so every start paid a
+/// zstd decode of the entire payload: 0.2 ms on hello world, 45 ms on the same
+/// program with a 20 MB `--include`, 34 ms on a `sharp` app.
+///
+/// Why a length is the right acceptance policy is already argued in full on
+/// `Manifest::node_size`, which converted the embedded Node for exactly these
+/// reasons: the content digest is already in the PATH — the tree lives at
+/// `compile-app/<short_key(app_sha256)>` — so re-reading the bytes established no
+/// identity the directory name did not already assert. All it added was detecting
+/// a change since extraction, and against a same-uid attacker that is nothing:
+/// `cache_metadata_is_trusted` has established the tree is owner-only and
+/// non-group-writable, and that same uid can rewrite the artifact binary itself.
+/// The failure it must catch — an OS or antivirus sweep truncating or clearing a
+/// purgeable cache — changes the length. The app tree simply never got the
+/// treatment the Node beside it did.
+enum Extracted<'a> {
+    Size(u64),
+    /// A payload whose app region predates recorded lengths. Its bytes are the
+    /// only expectation it can offer, so it keeps the original comparison.
+    Bytes(Cow<'a, [u8]>),
+}
+
 /// A completed app cache is an exact materialization of `PayloadView::app_files`
-/// plus the empty marker: no changed bytes, symlinks, special files, empty extra
-/// directories, or package/module-resolution inputs absent from the payload.
+/// plus the empty marker: no file of a different length, symlinks, special files,
+/// empty extra directories, or package/module-resolution inputs absent from the
+/// payload.
 fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
     if !cache_artifact_directory_is_trusted(cache_dir) {
         phase("  app_cache: NOT READY (directory not trusted)");
@@ -875,17 +902,15 @@ fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
         if !is_safe_relative_name(&file.name) || file.name == CACHE_COMPLETE_MARKER {
             return false;
         }
+        let extracted = match file.plain_size {
+            Some(size) => Extracted::Size(size),
+            None => match app_bytes(&view.manifest, file) {
+                Ok(bytes) => Extracted::Bytes(bytes),
+                Err(_) => return false,
+            },
+        };
         if expected
-            .insert(
-                PathBuf::from(&file.name),
-                (
-                    match app_bytes(&view.manifest, file) {
-                        Ok(bytes) => bytes,
-                        Err(_) => return false,
-                    },
-                    file.executable,
-                ),
-            )
+            .insert(PathBuf::from(&file.name), (extracted, file.executable))
             .is_some()
         {
             return false;
@@ -910,7 +935,7 @@ fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
 fn app_cache_tree_matches(
     root: &Path,
     dir: &Path,
-    expected: &mut std::collections::BTreeMap<PathBuf, (Cow<'_, [u8]>, bool)>,
+    expected: &mut std::collections::BTreeMap<PathBuf, (Extracted<'_>, bool)>,
 ) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;
@@ -940,16 +965,25 @@ fn app_cache_tree_matches(
                 }
                 continue;
             }
-            let Some((bytes, executable)) = expected.remove(relative) else {
+            let Some((extracted, executable)) = expected.remove(relative) else {
                 phase_with(|| format!("    MISMATCH: unexpected file on disk {relative:?}"));
                 return false;
             };
-            if !regular_file_matches_bytes(&path, &bytes) {
+            let accepted = match &extracted {
+                // `metadata` is this entry's own, already established trusted and
+                // regular above, so the length is free here.
+                Extracted::Size(size) => metadata.len() == *size,
+                Extracted::Bytes(bytes) => regular_file_matches_bytes(&path, bytes),
+            };
+            if !accepted {
                 phase_with(|| {
+                    let expected = match &extracted {
+                        Extracted::Size(size) => *size,
+                        Extracted::Bytes(bytes) => bytes.len() as u64,
+                    };
                     format!(
-                        "    MISMATCH: bytes differ for {relative:?} (disk {} vs expected {})",
+                        "    MISMATCH: {relative:?} (disk {} vs expected {expected})",
                         metadata.len(),
-                        bytes.len()
                     )
                 });
                 return false;
@@ -3805,15 +3839,18 @@ mod tests {
         fs::write(&entry, b"attacker-controlled JavaScript").unwrap();
         assert!(
             !app_cache_is_ready(&view, &app_dir),
-            "a modified entry must never become executable cache state"
+            "an entry that no longer has its extracted length is not cache state"
         );
         fs::write(&entry, b"app").unwrap();
 
+        // A cleared or truncated file is the failure a purgeable cache actually
+        // produces, and it must be caught anywhere in the tree, not only at the
+        // entry Node executes.
         let nested = app_dir.join("nested/data.json");
-        fs::write(&nested, br#"{"ok":null}"#).unwrap();
+        fs::write(&nested, b"").unwrap();
         assert!(
             !app_cache_is_ready(&view, &app_dir),
-            "every payload file is byte-checked, not only the executable entry"
+            "every payload file is length-checked, not only the executable entry"
         );
         fs::write(&nested, br#"{"ok":true}"#).unwrap();
 
@@ -3842,6 +3879,33 @@ mod tests {
         assert!(
             !app_cache_is_ready(&view, &app_dir),
             "even an empty unexpected directory makes the extracted tree stale"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A warm launch must not read the payload's file BODIES. Doing so cost a zstd
+    /// decode of the whole app region on every start — 0.2 ms on hello world,
+    /// 45 ms on the same program with a 20 MB `--include` — because the cost
+    /// tracked the bundle's size rather than its file count.
+    ///
+    /// Pinned by handing the check a payload whose compressed bodies no decoder
+    /// will accept. The extracted tree is correct, so a warm launch decided from
+    /// recorded lengths accepts it and one that materializes the payload cannot.
+    #[test]
+    fn a_warm_app_cache_is_accepted_without_decompressing_the_payload() {
+        let base = fresh_cache_dir("app-no-decompress");
+        let mut view = test_view();
+        let app_dir = materialize_test_app(&view, &base);
+
+        view.manifest.app_compressed = true;
+        for file in &mut view.app_files {
+            // `plain_size` still describes what is on disk; only the body it would
+            // have had to decompress to get there is now garbage.
+            file.bytes = &b"not a zstd frame"[..];
+        }
+        assert!(
+            app_cache_is_ready(&view, &app_dir),
+            "readiness must come from the recorded extracted lengths, not the payload bytes"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -3937,6 +4001,7 @@ mod tests {
             name: "bin/helper".to_string(),
             bytes: &b"#!/bin/sh\necho hi\n"[..],
             executable: true,
+            plain_size: Some(b"#!/bin/sh\necho hi\n".len() as u64),
         });
 
         let app_dir = ensure_app(&view, &base).unwrap();

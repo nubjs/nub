@@ -397,6 +397,9 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let app_files: Vec<_> = app_files
         .into_iter()
         .map(|file| {
+            // The length the LAUNCHER will find on disk, so it is read before
+            // anything below can compress or move these bytes.
+            let plain_size = file.bytes.len() as u64;
             let bytes = if inline_app {
                 // The bootstrap alone is stored VERBATIM. The launcher reads it out
                 // of the payload to build the `-e` argument, and it carries no
@@ -414,6 +417,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             };
             Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
                 name: file.name,
+                plain_size: Some(plain_size),
                 bytes,
                 executable: file.executable,
             })
@@ -1986,6 +1990,7 @@ fn assemble_app(
         // that can carry an executable — `esbuild`'s Go binary, a vendored helper.
         .chain(bundled.native_files.iter().map(|f| AppFile {
             name: layout.bundle_path(&f.name),
+            plain_size: Some(f.bytes.len() as u64),
             bytes: f.bytes.clone(),
             executable: f.executable,
         }))
