@@ -426,6 +426,29 @@ static WINDOW_ACES: std::sync::Mutex<std::collections::BTreeMap<String, usize>> 
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 impl WindowAceGuard {
+    /// The station and desktop ace state for this guard's SID, read from the DACLs AS THEY
+    /// STAND RIGHT NOW, plus how many guards are live across every SID.
+    ///
+    /// Callers print this beside a finished child's exit code under `NUB_JAIL_DUMP_POLICY`.
+    /// `station_ace=false` next to `code=3221225794` names the fault outright, where the exit
+    /// code alone is indistinguishable from a package that no longer builds — which is exactly
+    /// how one lost ace was scored as thirteen broken packages instead of one sandbox bug.
+    pub(crate) fn probe(&self) -> String {
+        let total: usize = {
+            let live = WINDOW_ACES.lock().unwrap_or_else(|e| e.into_inner());
+            live.values().sum()
+        };
+        let mut out = format!("live={total}");
+        for (i, handle) in self.handles.iter().enumerate() {
+            let label = if i == 0 { "station" } else { "desktop" };
+            match acl::window_object_has_sid(*handle, &self.sid) {
+                Ok(v) => out.push_str(&format!(" {label}_ace={v}")),
+                Err(e) => out.push_str(&format!(" {label}_ace=err({e})")),
+            }
+        }
+        out
+    }
+
     pub(crate) fn grant(sid: &str) -> Self {
         // SAFETY: neither call takes a parameter that can be invalid, and both return a handle
         // owned by the system for this process/thread's lifetime.

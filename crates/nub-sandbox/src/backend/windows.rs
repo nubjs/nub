@@ -2077,7 +2077,7 @@ pub(super) mod launch {
             // (a station whose DACL cannot be rewritten still launches, rather than losing a run
             // that worked before this existed) and removes its own ace again on drop, leaving a
             // concurrent run's alone — which is what makes five parallel lifecycle scripts safe.
-            let _window =
+            let _window: Option<crate::backend::windows_account::launch::WindowAceGuard> =
                 match unsafe { crate::backend::windows_account::account::sid_to_string(ac_sid) } {
                     Ok(sid_str) => Some(
                         crate::backend::windows_account::launch::WindowAceGuard::grant(&sid_str),
@@ -2646,6 +2646,18 @@ pub(super) mod launch {
                     code
                 }
             };
+
+            // ⛔ THE ONE LINE THAT MAKES A LOST WINDOW-OBJECT ACE VISIBLE. `0xC0000142` arrives
+            // as an ordinary non-zero exit with nothing in it naming the sandbox, so a run that
+            // lost its station ace to a concurrent teardown is indistinguishable from a package
+            // that stopped building — which is how thirteen such rows were scored as broken
+            // packages across a three-platform sweep. Reading the DACL HERE, after the child has
+            // exited and while the guard is still live, answers it directly.
+            if std::env::var_os("NUB_JAIL_DUMP_POLICY").is_some()
+                && let Some(w) = _window.as_ref()
+            {
+                eprintln!("JAILDUMP winace code={code} {}", w.probe());
+            }
 
             // Join the relays before reporting the status, so the caller never prints its own
             // "done" line ahead of output the script already produced. `drain_job_and_status`

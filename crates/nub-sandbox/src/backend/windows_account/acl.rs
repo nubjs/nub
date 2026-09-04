@@ -358,7 +358,12 @@ pub(crate) fn strip_window_object(handle: HANDLE, sid: &str) -> io::Result<()> {
 /// Does this window object's DACL currently carry an ALLOW ace for `sid`? The direct question
 /// the guard's regression test asks — "is a concurrent run's ace still there?" — rather than
 /// inferring it from a child's exit code.
-#[cfg(test)]
+///
+/// Compiled outside `cfg(test)` too, because the same question is the one worth asking of a
+/// REAL confined child: [`super::launch::WindowAceGuard::probe`] answers it at the moment the
+/// child exits, and `NUB_JAIL_DUMP_POLICY` prints it beside the exit code. A `false` next to
+/// `0xC0000142` is the whole diagnosis; without it the exit code alone reads as a broken
+/// package, which is how this defect stayed invisible across three platform sweeps.
 pub(crate) fn window_object_has_sid(handle: HANDLE, sid: &str) -> io::Result<bool> {
     let sid = OwnedSid::parse(sid)?;
     let read = ReadWindowDacl::open(handle)?;
