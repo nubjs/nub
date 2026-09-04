@@ -57,35 +57,36 @@
 //! So the script takes the missing-dependency workaround branch and falls through to a registry
 //! DOWNLOAD on every platform; it never reaches whatever the home write exists for.
 //!
-//! ⛔⛔ WHAT THAT DOES TO THE OBVIOUS EXPERIMENT, AND WHY IT IS A TRAP RATHER THAN A NULL RESULT.
-//! A two-arm catalog-override run (`write.userHome` present vs OMITTED -- `false` is rejected by
-//! the schema) verdicts `OK` on BOTH arms on ALL THREE platforms, with the grant-set diff showing
-//! the home grant removed and NOTHING else moving. That reads exactly like a clean narrowing and
-//! it is worthless: both arms ran the fallback branch, so neither one tested the grant. **A valid
-//! experiment must first make the fixture install the platform `optionalDependency`, so the script
-//! takes its REAL branch.** Until someone does that, this package keeps its grant.
+//! ⛔⛔ WHY THE OBVIOUS EXPERIMENT IS A TRAP, AND WHAT REPLACES IT. A two-arm catalog-override run
+//! (`write.userHome` present vs OMITTED -- `false` is rejected by the schema) verdicts `OK` on BOTH
+//! arms on ALL THREE platforms. That reads like a clean narrowing and it is worthless, because the
+//! VERDICT cannot discriminate here: `napi-postinstall` catches a failed `installUsingNPM` and
+//! falls through to a registry download, so the script exits 0 either way.
 //!
-//! ⛔⛔ WHY THE GRANT IS `userHome` AT ALL, WHICH IS NOT WHAT IT LOOKS LIKE. Two mechanisms were
-//! checked and both say the home is not what this script needs:
+//! ⛔ AN EARLIER VERSION OF THIS NOTE PRESCRIBED THE WRONG FIX -- it said a valid experiment must
+//! first install the platform `optionalDependency` so the script takes its "real" branch. That is
+//! backwards. The missing-dependency branch IS the operative one: the write under test happens at
+//! `napi-postinstall/lib/index.js:222`, inside the `catch` that runs when `downloadedNodePath`
+//! fails, and it resolves `meta.name` (napi-postinstall ITSELF) to reach
+//! `<napi-postinstall entry>/node_modules/unrs-resolver`. Installing the optionalDependency makes
+//! the script exit before ever reaching it, testing nothing.
 //!
-//! 1. `napi-postinstall@0.3.4` touches NO home directory -- grep of the published tarball for
-//!    `homedir|process.env.HOME|USERPROFILE|.cache` returns nothing. Its only filesystem staging
-//!    is `os.tmpdir()` (`lib/fallback.js`), and tmp is already covered on every platform: POSIX
-//!    takes the `$tmp` rw MODE, and a Windows AppContainer's TEMP resolves into its own
-//!    `…\Packages\<profile>\AC\Temp`, which the backend `create_dir_all`s before launch. So the
-//!    tmp staging never reaches the real profile and cannot be what `userHome` is paying for.
-//! 2. What the script actually writes is recorded in `compiler::curated::resolve_declared_dep`:
-//!    it mkdirs `<napi-postinstall entry>/node_modules/unrs-resolver`, a SIBLING of the
-//!    dependency's package dir inside that dependency's store ENTRY. That doc names this exact
-//!    package -- "`unrs-resolver` settled on `userHome` (cost 7) when `deps` (cost 3) was meant
-//!    to carry it" -- and `resolve_declared_dep` was WIDENED from the package dir to the entry
-//!    in response.
+//! ⇒ JUDGE BY THE ARTIFACT, NOT THE VERDICT: does `<napi-postinstall entry>/node_modules/
+//! unrs-resolver` exist after the run? MEASURED on macOS at `b36de9ea2c` with three arms, one of
+//! which is a NEGATIVE CONTROL that must fail:
 //!
-//! ⇒ THE SHIPPED `userHome` ENTRY LOOKS STALE RELATIVE TO THAT WIDENING: the ladder search that
-//! produced it ran while `deps` still stopped one level short. `write: {deps, project}` is the
-//! candidate replacement. That is a MECHANISM argument, not a measurement, so it does not by
-//! itself license the edit -- it says what a valid experiment should expect to find, once the
-//! fixture above makes the real branch run.
+//! ```text
+//! wide    write {deps, project, userHome}  home ACE granted      artifact PRESENT   rc=0
+//! narrow  write {deps, project}            home ACE NOT granted  artifact PRESENT   rc=0
+//! minimal write {project}                  home ACE NOT granted  artifact ABSENT    rc=1
+//!         `-> EPERM: operation not permitted, mkdir
+//!             '…/store/napi-postinstall@0.3.4-…/node_modules/unrs-resolver'
+//! ```
+//!
+//! The control failed loudly at exactly the predicted path, which is what makes the other two arms
+//! readable: the artifact discriminates, and `deps` is what carries the write -- dropping `deps`
+//! breaks the install, dropping `userHome` does not. That is `resolve_declared_dep`'s entry
+//! widening doing precisely the job its doc says it was widened for.
 //!
 //! ⛔ A SECOND, DIFFERENTLY-SHAPED MEASUREMENT LIVES HERE TOO, and conflating the two would put a
 //! claim on rows that never earned it. `WITHDRAWN` above is the five-arm ladder. `WITHDRAWN_BANDS`
