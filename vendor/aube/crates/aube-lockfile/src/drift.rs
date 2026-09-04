@@ -301,7 +301,7 @@ impl LockfileGraph {
         // is hash-against-hash too. The path-against-path comparison below
         // is only meaningful for bun, whose reader stores a real path.
         if matches!(kind, LockfileKind::Pnpm | LockfileKind::Aube) {
-            return self.check_patched_dependency_hashes_drift(effective_hashes);
+            return self.check_patched_dependency_hashes_drift(effective_paths, effective_hashes);
         }
         // Both directions matter, exactly like pnpm: a lockfile entry
         // whose selector the project no longer declares is as stale as
@@ -349,18 +349,28 @@ impl LockfileGraph {
         DriftStatus::Fresh
     }
 
-    /// Hash-only patched-dependency drift, for pnpm lockfiles whose
+    /// Hash-first patched-dependency drift, for pnpm lockfiles whose
     /// `patchedDependencies` value is the patch's per-file hash. Fires in
     /// both directions: a selector the lockfile records but the project
     /// no longer declares, a declared selector the lockfile is missing,
     /// or a hash mismatch (the patch file's contents changed). Mirrors
     /// pnpm's `getOutdatedLockfileSetting` `patchedDependencies` check.
+    ///
+    /// The reader keeps an entry that carries no hash (the legacy
+    /// `{ path }` shape) in the path map only, so such a selector is judged
+    /// on its path instead: there is no hash to compare, and treating it
+    /// as unrecorded would re-resolve a lockfile that still names the patch.
     fn check_patched_dependency_hashes_drift(
         &self,
+        effective_paths: &BTreeMap<String, String>,
         effective_hashes: &BTreeMap<String, String>,
     ) -> DriftStatus {
-        for selector in self.patched_dependency_hashes.keys() {
-            if !effective_hashes.contains_key(selector) {
+        for selector in self
+            .patched_dependency_hashes
+            .keys()
+            .chain(self.patched_dependencies.keys())
+        {
+            if !effective_hashes.contains_key(selector) && !effective_paths.contains_key(selector) {
                 return DriftStatus::Stale {
                     reason: format!(
                         "patchedDependencies.{selector}: recorded in the lockfile but no longer declared in the project"
@@ -370,13 +380,26 @@ impl LockfileGraph {
         }
         for (selector, effective_hash) in effective_hashes {
             match self.patched_dependency_hashes.get(selector) {
-                None => {
-                    return DriftStatus::Stale {
-                        reason: format!(
-                            "patchedDependencies.{selector}: declared in the project but missing from the lockfile"
-                        ),
-                    };
-                }
+                None => match (
+                    self.patched_dependencies.get(selector),
+                    effective_paths.get(selector),
+                ) {
+                    (Some(locked_path), Some(path)) if locked_path == path => {}
+                    (Some(locked_path), Some(path)) => {
+                        return DriftStatus::Stale {
+                            reason: format!(
+                                "patchedDependencies.{selector}: project says {path}, lockfile says {locked_path}"
+                            ),
+                        };
+                    }
+                    _ => {
+                        return DriftStatus::Stale {
+                            reason: format!(
+                                "patchedDependencies.{selector}: declared in the project but missing from the lockfile"
+                            ),
+                        };
+                    }
+                },
                 Some(locked_hash) if locked_hash != effective_hash => {
                     return DriftStatus::Stale {
                         reason: format!(
@@ -2798,6 +2821,40 @@ mod drift_tests {
                 &effective_paths,
                 &effective_hashes
             ),
+            DriftStatus::Stale { .. }
+        ));
+    }
+
+    #[test]
+    fn pnpm_patched_dep_without_recorded_hash_is_judged_on_its_path() {
+        // The legacy `{ path }` entry carries no hash, and the reader keeps
+        // it in the path map only. A matching declared path is Fresh, a
+        // moved one is Stale, and neither reads as "missing from the
+        // lockfile".
+        let graph = LockfileGraph {
+            patched_dependencies: map(&[("ms@2.1.3", "patches/ms@2.1.3.patch")]),
+            ..Default::default()
+        };
+        let effective_hashes = map(&[("ms@2.1.3", "abc123")]);
+        assert_eq!(
+            graph.check_patched_dependencies_drift(
+                LockfileKind::Pnpm,
+                &map(&[("ms@2.1.3", "patches/ms@2.1.3.patch")]),
+                &effective_hashes
+            ),
+            DriftStatus::Fresh,
+        );
+        match graph.check_patched_dependencies_drift(
+            LockfileKind::Pnpm,
+            &map(&[("ms@2.1.3", "patches/moved.patch")]),
+            &effective_hashes,
+        ) {
+            DriftStatus::Stale { reason } => assert!(reason.contains("moved.patch"), "{reason}"),
+            other => panic!("expected stale on a moved path, got {other:?}"),
+        }
+        // A path-only entry the project no longer declares is stale too.
+        assert!(matches!(
+            graph.check_patched_dependencies_drift(LockfileKind::Pnpm, &map(&[]), &map(&[])),
             DriftStatus::Stale { .. }
         ));
     }
