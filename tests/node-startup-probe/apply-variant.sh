@@ -70,7 +70,7 @@ old = """    // Ensure CSPRNG is properly seeded.
       return true;
     });
 """
-    // Node's own OpenSSL configuration always activates the default provider,
+new = """    // Node's own OpenSSL configuration always activates the default provider,
     // so the CSPRNG can only be unavailable when the user supplied a
     // configuration or FIPS is in effect. Confirm it is seeded before V8 starts
     // in those cases, where an abort beats a hang at the first crypto call;
