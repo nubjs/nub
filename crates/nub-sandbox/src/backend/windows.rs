@@ -1276,9 +1276,34 @@ pub(super) mod launch {
     static ACL_LOCK: Mutex<()> = Mutex::new(());
 
     /// Verify that `cwd` is rooted beneath a protected DACL and that neither it nor any
-    /// ancestor up to that boundary grants ALL APPLICATION PACKAGES access. The LowBox
-    /// allowlist is default-deny only under this precondition; inherited AAP access would
-    /// otherwise let the child reach files nub never granted.
+    /// ancestor up to that boundary grants ALL APPLICATION PACKAGES access. Inherited AAP
+    /// access would otherwise let the child reach files nub never granted.
+    ///
+    /// ⛔ AAP IS NOT THE ONLY SID THAT GRANTS A LOWBOX CHILD, SO THIS IS A NARROWER
+    /// PRECONDITION THAN "the allowlist is default-deny" — which is what this comment used to
+    /// claim, and it was never true. Measured on Windows Server 2022 (20348.5499), each arm
+    /// with its capability-free negative control:
+    ///   - `ALL RESTRICTED APPLICATION PACKAGES` (`S-1-15-2-2`) grants a plain non-LPAC
+    ///     AppContainer holding ZERO capabilities. That follows from the token model — a
+    ///     regular AppContainer is a member of both AAP and ARAP, and only an LPAC drops AAP —
+    ///     and the kernel synthesises the match during the access check rather than
+    ///     materialising either SID as a token group, so it cannot be detected by enumerating
+    ///     the child's token.
+    ///   - A CAPABILITY ace grants whenever the token holds that capability. nub's own token
+    ///     holds `internetClient` (`S-1-15-3-1`) on every egress-allowed launch, so an
+    ///     `S-1-15-3-1` ace on the working root is reach this scan does not see.
+    ///
+    /// ⛔ SCANNING FOR THOSE TOO WAS CONSIDERED AND REJECTED, DELIBERATELY. A hit here returns a
+    /// `fs-root` degradation, which makes the install REFUSE the package — so widening the scan
+    /// buys a smaller residual at the price of refusing to build on a tree nub does not
+    /// understand. This jail is defence in depth, and a package that cannot install is a worse
+    /// outcome than a residual. The prevalence that settles it, measured the same day: across
+    /// 60 directories of a real project tree, the user profile, `%LOCALAPPDATA%`, `C:\` and
+    /// `C:\Users`, the count of ARAP and `S-1-15-3-*` aces was ZERO — they appear only under
+    /// `Program Files` and the OS-owned roots, which are not working roots. The same scan found
+    /// 18 of 20 `Program Files` directories carrying both, so it was capable of seeing them.
+    /// ⇒ Widening would refuse installs to remove a residual nothing was hitting. Revisit if a
+    /// real working root is ever measured carrying one.
     ///
     /// `published` is [`AppContainerLaunch::publishable_grants`] — the subtrees nub ITSELF
     /// publishes to AAP, and the reason this takes an argument at all. The predicate's premise
