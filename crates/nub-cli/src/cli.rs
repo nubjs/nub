@@ -1341,7 +1341,7 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["canary", "stable"])]
         version: Option<String>,
 
-        /// Upgrade to the latest canary build (rebuilt from every commit).
+        /// Upgrade to the latest canary build (rebuilt nightly from main).
         #[arg(long, conflicts_with = "stable")]
         canary: bool,
 
@@ -7752,7 +7752,7 @@ const RELEASE_DOWNLOAD_BASE_ENV: &str = "NUB_RELEASE_BASE_URL";
 const RELEASE_LATEST_API_ENV: &str = "NUB_RELEASE_LATEST_URL";
 
 /// The rolling release tag the canary channel publishes under — release.yml's
-/// canary-release job recreates it at every built main commit, so the archive
+/// canary-release job recreates it at each nightly build, so the archive
 /// lives at `<base>/canary/nub-<target>.<ext>` with no `v` prefix (bun's exact
 /// layout). npm carries the same builds under the `canary` dist-tag; Homebrew
 /// and winget carry only stable releases.

@@ -6,30 +6,48 @@ name: Release
 #   - TAG (v*): stage + verify the immutable versioned assets, publish npm
 #     `latest`, promote the GitHub Release, then docker/homebrew/winget and
 #     post-publish install smokes.
-#   - CANARY (push to main): bun-style rolling prerelease. Every code push to
-#     main builds the full 8-platform matrix with an uncommitted
-#     `<base>-canary.<yyyymmdd>.<run#>` version stamp, publishes all packages to
-#     npm under the `canary` dist-tag after its immutable versioned assets are
-#     complete, then recreates the rolling `canary` GitHub prerelease at the
-#     built commit. Docs-only pushes are skipped (the
-#     `verify` job's canary gate); the test/conformance gates are skipped too —
-#     ci.yml runs them on the same commit, and the canary contract is "newest
-#     main, built and installable," not a second CI.
+#   - CANARY (nightly schedule): bun-style rolling prerelease, built ONCE A DAY
+#     from the head of main rather than on every push. The nightly builds the
+#     full 8-platform matrix with an uncommitted `<base>-canary.<yyyymmdd>.<run#>`
+#     version stamp, publishes all packages to npm under the `canary` dist-tag
+#     after its immutable versioned assets are complete, then recreates the
+#     rolling `canary` GitHub prerelease at the built commit. A nightly whose
+#     only new commits are inert is skipped, as is one where main has not moved
+#     at all (the `verify` job's canary gate); the test/conformance gates are
+#     skipped too — ci.yml runs them on the same commit, and the canary contract
+#     is "newest main, built and installable," not a second CI.
+#
+#     CADENCE IS A PACKUMENT BUDGET, not a scheduling preference. Every canary
+#     publish appends a permanent version entry to the packument of all 19
+#     published packages, and npm serves that document on every install — so the
+#     publish rate is a tax every user pays forever. Measured over the
+#     per-push channel's first 42 days: 82 canary versions, already 45% of
+#     `@nubjs/nub`'s 183-version packument, at up to 9 in a single day. Only 23
+#     of those 42 days carried any code change, so a once-a-day build that skips
+#     an unchanged main cuts the rate ~3.6x. Do not restore a per-push trigger.
 # Stable publishing jobs gate on verify's validated tag output; canary-only jobs
-# gate on `github.ref == 'refs/heads/main'` under a push event. A main push must
-# never reach the stable publish path.
+# gate on verify's `is_canary` output. A canary run must never reach the stable
+# publish path.
 on:
   push:
-    branches: [main]
     tags: ["v*"]
+  schedule:
+    # The nightly canary. Off the hour because GitHub delays :00 crons hardest
+    # under load, and clear of the repo's other nightlies (00:15 through 08:00
+    # UTC) so the 8-platform matrix is not queued behind them.
+    - cron: "20 9 * * *"
   workflow_dispatch:
     inputs:
       publish:
         description: "Publish the selected v<semver> tag across release channels. Default off = build + assemble only (for CI debugging)."
         type: boolean
         default: false
+      canary:
+        description: "Run the nightly canary now against the head of main, instead of waiting for the schedule. Mutually exclusive with publish."
+        type: boolean
+        default: false
       linux_only:
-        description: "Build only the Linux targets — cheap iteration that skips the 10×-billed macOS and 2× Windows runners. Tag pushes and publishing dispatches always build the full matrix."
+        description: "Build only the Linux targets — cheap iteration that skips the 10×-billed macOS and 2× Windows runners. Ignored on tag pushes and on publishing or canary dispatches, which always build the full matrix."
         type: boolean
         default: false
 
@@ -38,14 +56,15 @@ on:
 # immutable/presentation release jobs that create, upload, or promote releases).
 permissions: {}
 
-# Canary runs coalesce WITHOUT cancellation: all main pushes share one group, a
-# running build always finishes (cancelling mid-`npm publish` could strand a
-# half-published canary version), and GitHub keeps only the NEWEST pending run —
-# intermediate pushes are superseded, so the rolling canary converges on the
-# newest commit at a max lag of one build. Tag/dispatch runs get per-run groups:
+# Canary runs coalesce WITHOUT cancellation: the scheduled nightly and any manual
+# canary dispatch share one group, and a running build always finishes
+# (cancelling mid-`npm publish` could strand a half-published canary version).
+# One run a day rarely contends, but the group is what stops a manual dispatch
+# from interleaving with the schedule inside canary-release's delete-then-
+# recreate of the rolling tag. Tag/stable-dispatch runs get per-run groups:
 # never queued against each other, never cancelled.
 concurrency:
-  group: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'canary' || format('release-{0}', github.run_id) }}
+  group: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.canary)) && 'canary' || format('release-{0}', github.run_id) }}
   cancel-in-progress: false
 
 env:
@@ -67,8 +86,13 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
-      # Canary plumbing (empty on tag/dispatch runs): whether this main push
-      # warrants a canary build, and the prerelease version it publishes as.
+      # Whether this run is a canary run AT ALL (the nightly schedule, or a
+      # manual canary dispatch) - computed once here because GitHub Actions has
+      # no workflow-level alias for a job `if:`, and six jobs need the same
+      # predicate. Every canary-gated job already `needs: verify`.
+      is_canary: ${{ steps.channel.outputs.is_canary }}
+      # Canary plumbing (empty on tag/stable-dispatch runs): whether the nightly
+      # found anything worth building, and the prerelease version it publishes as.
       canary: ${{ steps.canary.outputs.canary }}
       canary_version: ${{ steps.canary.outputs.canary_version }}
       # Stable publication is allowed only after this step validates the selected
@@ -82,6 +106,22 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] verify is a check-only gate; nothing built here is published
         with:
           node-version: "24"
+      # Fail rather than silently pick a channel: `publish` selects a stable tag
+      # and `canary` builds the head of main, so a dispatch asking for both has
+      # no correct interpretation.
+      - id: channel
+        name: Resolve release channel
+        env:
+          IS_CANARY: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.canary) }}
+          WANT_CANARY: ${{ inputs.canary }}
+          WANT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          if [ "$WANT_CANARY" = "true" ] && [ "$WANT_PUBLISH" = "true" ]; then
+            echo "::error::publish and canary are mutually exclusive - publish releases a v* tag, canary builds the head of main"
+            exit 1
+          fi
+          echo "is_canary=$IS_CANARY" >> "$GITHUB_OUTPUT"
       # Internal consistency: all npm packages + Cargo.toml + preload.mjs agree.
       - name: Check internal version consistency
         run: make version-check
@@ -124,7 +164,9 @@ jobs:
           echo "✓ Stable publication tag $TAG matches committed version"
       # Build matrix as data, so a non-publishing debug dispatch with
       # linux_only=true can drop the 10×-billed macOS + 2× Windows targets. Tag
-      # pushes and publishing dispatches always get the full 8-platform matrix.
+      # pushes and publishing dispatches always get the full 8-platform matrix —
+      # and so does a canary dispatch, which publishes all eight platform
+      # packages and would otherwise ship a partial set under the canary tag.
       - id: matrix
         name: Compute build matrix
         run: |
@@ -138,23 +180,39 @@ jobs:
             {"platform":"win32-x64","runner":"windows-latest","target":"x86_64-pc-windows-msvc","cross":false},
             {"platform":"win32-arm64","runner":"windows-latest","target":"aarch64-pc-windows-msvc","cross":false}
           ]'
-          if [ "${{ inputs.linux_only }}" = "true" ] && [ "${{ inputs.publish }}" != "true" ]; then
+          if [ "${{ inputs.linux_only }}" = "true" ] && [ "${{ inputs.publish }}" != "true" ] && [ "${{ inputs.canary }}" != "true" ]; then
             SEL=$(echo "$FULL" | jq -c '[.[] | select(.platform | startswith("linux"))]')
             echo "linux_only debug build — Linux targets only"
           else
             SEL=$(echo "$FULL" | jq -c '.')
           fi
           echo "matrix={\"include\":$SEL}" >> "$GITHUB_OUTPUT"
-      # Canary gate + version, main pushes only. The version mirrors bun's
+      # Canary gate + version, canary runs only. The version mirrors bun's
       # scheme (`1.3.13-canary.20260425.1`): the committed base version plus
       # `-canary.<utc-date>.<run#>` — run_number is monotonic per workflow, so
       # every canary version is unique and semver-orders after the previous one.
-      # The gate skips the 8-platform build for pushes that cannot change the
-      # binary or its packaging. Polarity is deliberate: BUILD unless every
-      # changed file is provably inert (markdown anywhere; site/; .claude/;
-      # .github/ except this workflow), and BUILD on any compare-API failure,
-      # force-push, or truncated file list — a wasted build is cheap, a missing
-      # canary is a silent gap.
+      #
+      # THE BASELINE IS THE LAST PUBLISHED CANARY, not a push's `before` SHA,
+      # because a nightly has no push event behind it: it wakes on a timer and
+      # must decide for itself what has landed since the channel last moved. The
+      # rolling `canary` tag is that record — canary-release recreates it at each
+      # built commit — so `canary...HEAD` is exactly the span this build would
+      # newly ship. It answers both halves of the gate at once: an empty span
+      # means main has not moved since the last nightly, and a span of purely
+      # inert files means nothing in it can change the binary. Under the old
+      # per-push trigger the first case could not arise; on a timer it is the
+      # common one (19 of the channel's first 42 days carried no code change at
+      # all), and skipping it is most of what makes the nightly cheaper than a
+      # per-push build in packument terms.
+      #
+      # Polarity is deliberate and unchanged: BUILD unless every changed file is
+      # provably inert (markdown anywhere; site/; .claude/; .github/ except this
+      # workflow), and BUILD on any compare-API failure, a missing canary tag
+      # (first run after this trigger changed, or a manually deleted release), or
+      # a truncated file list — a wasted build is cheap, a missing canary is a
+      # silent gap. The 300-file truncation cap is hit more readily now that a
+      # span is a day of commits rather than one push, which costs an occasional
+      # unnecessary build and never a skipped one.
       #
       # The release-bump commit is NOT exempt, though the v* tag run builds the
       # same tree. That exemption cost one extra matrix per release and left the
@@ -164,21 +222,21 @@ jobs:
       # disjoint artifacts (`X.Y.Z` under `latest` and the immutable `vX.Y.Z`
       # release; `X.Y.Z-canary.<date>.<run>` under `canary`), and they sit in
       # different concurrency groups, so they run side by side rather than
-      # queueing. If a later main push supersedes this one while it is pending,
-      # the window still closes: the base version does not move again until the
-      # next release bump, so the superseding run stamps the same base.
+      # queueing.
       - id: canary
-        name: Canary gate + version (main pushes only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        name: Canary gate + version (canary runs only)
+        if: steps.channel.outputs.is_canary == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          # Event data flows in via env, not ${{ }}-interpolation into the
-          # script body.
-          BEFORE: ${{ github.event.before }}
-          HEAD_TS: ${{ github.event.head_commit.timestamp }}
         run: |
           BUILD=true
-          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+          # The commit the rolling canary release currently points at. Absent on
+          # the first run after this trigger changed; `|| true` keeps BUILD=true.
+          BEFORE=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/canary" --jq '.object.sha' 2>/dev/null) || BEFORE=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" = "$GITHUB_SHA" ]; then
+            BUILD=false
+            REASON="main has not moved since the last canary"
+          elif [ -n "$BEFORE" ]; then
             COMPARE=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BEFORE}...${GITHUB_SHA}" 2>/dev/null) || COMPARE=""
             if [ -n "$COMPARE" ]; then
               COUNT=$(echo "$COMPARE" | jq '.files | length')
@@ -186,6 +244,7 @@ jobs:
               # a code file, so only trust a complete one.
               if [ "$COUNT" -gt 0 ] && [ "$COUNT" -lt 300 ]; then
                 BUILD=false
+                REASON="no code change since the last canary"
                 while IFS= read -r f; do
                   case "$f" in
                     .github/workflows/release.yml) BUILD=true; break ;;
@@ -198,11 +257,13 @@ jobs:
             fi
           fi
           BASE=$(node -e "console.log(require('./npm/nub/package.json').version)")
-          # Date from the head commit's timestamp, not wall clock: a re-run of a
+          # Date from the built commit's timestamp, not wall clock: a re-run of a
           # failed canary run keeps its run_number, and a wall-clock date would
           # mint a DIFFERENT version for the same run after UTC midnight —
           # semver-sorting it past newer same-base canaries. The commit
-          # timestamp is stable across re-runs.
+          # timestamp is stable across re-runs. Read from the checkout because a
+          # schedule event carries no head_commit payload.
+          HEAD_TS=$(git log -1 --format=%cI "$GITHUB_SHA" 2>/dev/null) || HEAD_TS=""
           DATE=$(date -u -d "$HEAD_TS" +%Y%m%d 2>/dev/null) || DATE=$(date -u +%Y%m%d)
           CANARY_VERSION="${BASE}-canary.${DATE}.${GITHUB_RUN_NUMBER}"
           echo "canary=$BUILD" >> "$GITHUB_OUTPUT"
@@ -210,17 +271,17 @@ jobs:
           if [ "$BUILD" = "true" ]; then
             echo "canary build: $CANARY_VERSION at ${GITHUB_SHA}"
           else
-            echo "docs-only push — skipping the canary build"
+            echo "skipping the canary build — ${REASON}"
           fi
 
   primer:
     name: Generate metadata primer (once, shared to all builds)
     needs: verify
-    # Runs for tag + dispatch always; for a main push only when the canary gate
+    # Runs for the stable paths always; for a canary run only when the gate
     # said build. Skipping primer here is what skips the whole canary pipeline
-    # on a docs-only push — build `needs:` primer, and everything heavier
-    # `needs:` build, so the skip cascades.
-    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || needs.verify.outputs.canary == 'true'
+    # on a nightly with nothing new to ship — build `needs:` primer, and
+    # everything heavier `needs:` build, so the skip cascades.
+    if: needs.verify.outputs.is_canary != 'true' || needs.verify.outputs.canary == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -479,11 +540,11 @@ jobs:
   test:
     name: Test gate (cargo test)
     needs: verify
-    # Tag + dispatch only. Canary runs skip this gate: ci.yml runs the same
-    # suite on the same commit, and the canary contract is "newest main, built
-    # and installable" — a broken canary is what canary means, and doubling the
-    # test run per main push only burns the shared runner pool.
-    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    # Tag + stable-dispatch only. Canary runs skip this gate: ci.yml runs the
+    # same suite on the same commit, and the canary contract is "newest main,
+    # built and installable" — a broken canary is what canary means, and
+    # doubling the test run per nightly only burns the shared runner pool.
+    if: ${{ needs.verify.outputs.is_canary != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -537,9 +598,9 @@ jobs:
   conformance:
     name: Lockfile conformance gate (real PMs)
     needs: verify
-    # Tag + dispatch only — same rationale as the `test` gate above: the
+    # Tag + stable-dispatch only — same rationale as the `test` gate above: the
     # aube-parity workflow covers main, and canary doesn't re-gate.
-    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ needs.verify.outputs.is_canary != 'true' }}
     # The lockfile-compat regression gate that 0.0.35/0.0.36 slipped through:
     # those releases shipped with the conformance suite RED because publish only
     # gated on the fast `test:` job, and the conformance/daily-driver/native-dep
@@ -682,7 +743,7 @@ jobs:
       # `--locked` in THIS job, and `--locked` refuses to reconcile a lock rather
       # than doing it, so a stamp that skipped them failed all eight targets.
       - name: Stamp canary version (uncommitted)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: needs.verify.outputs.is_canary == 'true'
         shell: bash
         env:
           CANARY_VERSION: ${{ needs.verify.outputs.canary_version }}
@@ -1033,8 +1094,8 @@ jobs:
     # then compiles + executes both supported artifact shapes. The default shape
     # runs cold and warm from an isolated runtime cache with no host Node on PATH.
     name: Pre-publish smoke gate (${{ matrix.platform }})
-    if: ${{ github.event_name == 'push' || inputs.publish }}
-    # verify supplies the expected canary version on main pushes.
+    if: ${{ github.event_name == 'push' || inputs.publish || needs.verify.outputs.is_canary == 'true' }}
+    # verify supplies the expected canary version on canary runs.
     needs: [verify, build]
     # actions:read is for the container legs' REST artifact download below —
     # the JS download-artifact action cannot run at all in an Alpine container
@@ -1147,8 +1208,8 @@ jobs:
           REPORTED="${REPORTED#v}"
           echo "${{ matrix.platform }} binary reports: '$REPORTED'"
           # A stable publication gets its expected version only from verify's
-          # validated tag output. A canary main push uses its stamped version;
-          # a non-publishing dispatch only checks that the binary is runnable.
+          # validated tag output. A canary run uses its stamped version; a
+          # non-publishing dispatch only checks that the binary is runnable.
           EXPECTED=""
           if [ -n "$PUBLISH_VERSION" ]; then
             EXPECTED="$PUBLISH_VERSION"
@@ -1608,7 +1669,7 @@ jobs:
     # assets first. That prevents npm from exposing a package whose cross-target
     # compile launcher or installer archive is still absent. This job remains
     # idempotent so a rerun can skip packages already on the registry.
-    # Canary (main) pushes never reach this job; canary-publish-npm owns them.
+    # Canary runs never reach this job; canary-publish-npm owns them.
     if: ${{ needs.verify.outputs.publish_version != '' }}
     # Gate on the test, conformance, glibc-floor, AND pre-publish smoke jobs: a
     # broken test, a lockfile-compat regression, a glibc-floor regression, or a
@@ -1787,8 +1848,8 @@ jobs:
     # URLs are live while the ordinary release presentation remains post-npm.
     # A rerun compares every existing asset byte-for-byte, uploads only missing
     # assets, and fails if this commit would change a versioned release.
-    # A validated stable tag only — canary (main) pushes update the rolling
-    # `canary` prerelease via canary-release below.
+    # A validated stable tag only — canary runs update the rolling `canary`
+    # prerelease via canary-release below.
     if: ${{ needs.verify.outputs.publish_tag != '' }}
     needs: [verify, build, test, conformance, glibc-floor-guard, pre-publish-gate]
     runs-on: ubuntu-24.04
@@ -2119,7 +2180,7 @@ jobs:
     # fetches launchers only from this immutable release, so its complete 32-asset
     # set is a publication prerequisite. The rolling `canary` installer and
     # self-upgrade release remains a separate post-npm job below.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: needs.verify.outputs.is_canary == 'true'
     needs: [verify, build, glibc-floor-guard, pre-publish-gate]
     runs-on: ubuntu-24.04
     permissions:
@@ -2361,7 +2422,7 @@ jobs:
 
   canary-publish-npm:
     name: Publish canary to npm
-    # Canary (main) pushes only — npm advances only after the immutable release
+    # Canary runs only — npm advances only after the immutable release
     # matching this package version is complete, so cross-target compile fetches
     # cannot observe a published package whose versioned launcher assets are absent.
     # Mirrors publish-npm above (keep the two in sync) with three differences:
@@ -2375,7 +2436,7 @@ jobs:
     # platform packages first, the root package LAST — so `@nubjs/nub@canary`
     # only ever resolves to a version whose exact-pinned platform deps all
     # published.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: needs.verify.outputs.is_canary == 'true'
     needs: [verify, canary-immutable-release]
     runs-on: ubuntu-latest
     permissions:
@@ -2538,7 +2599,7 @@ jobs:
     # The rolling `canary` prerelease remains installer/self-upgrade-facing and
     # is updated only after npm succeeds. It carries the same 32 assets as the
     # immutable versioned release but is never used by `nub compile` lookup.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: needs.verify.outputs.is_canary == 'true'
     needs: [verify, canary-publish-npm]
     runs-on: ubuntu-24.04
     permissions:
@@ -2609,13 +2670,13 @@ jobs:
             gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/canary"
           fi
           {
-            echo "Rolling canary build of \`main\`, rebuilt on every code push."
+            echo "Rolling canary build of \`main\`, rebuilt nightly."
             echo
             echo "- Version: \`$VERSION\`"
             echo "- Commit: $GITHUB_SHA"
             echo "- Install: \`npm install -g @nubjs/nub@canary\`"
             echo
-            echo "Prerelease channel — the assets below always track the newest main commit."
+            echo "Prerelease channel — the assets below track the head of main as of the last nightly build."
           } > canary-notes.md
           gh release create canary \
             --target "$GITHUB_SHA" \
@@ -2702,7 +2763,7 @@ jobs:
     # `workflow_call` runs the build+push INSIDE this run (no cascade) and `needs:
     # publish-npm` sequences it after `@nubjs/nub@<version>` is live on npm, which the
     # image installs at build time. The validated stable-tag path only includes
-    # publishing dispatches; a build-only dispatch or canary main push cannot
+    # publishing dispatches; a build-only dispatch or a canary run cannot
     # push an image.
     needs: [verify, publish-npm]
     if: needs.verify.outputs.publish_tag != ''
@@ -2821,7 +2882,7 @@ jobs:
   bump-homebrew-tap:
     name: Bump Homebrew tap formula
     # Update the nubjs/homebrew-tap formula after a validated stable release. A
-    # build-only dispatch and a canary main push do not reach this job. Gated on
+    # build-only dispatch and a canary run do not reach this job. Gated on
     # `verify`'s computed output rather than re-deriving the condition from the
     # event, because this branch adds release jobs main does not have and the
     # output is the one place that already decides "is this a real publish".
