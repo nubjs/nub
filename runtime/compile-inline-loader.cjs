@@ -95,11 +95,17 @@
     fs.closeSync(fd);
   }
 
-  // The payload's V2 app region, which is the one container structure this file
+  // The payload's V3 app region, which is the one container structure this file
   // knows: [u32 files][u32 records][per file: u16 nameLen, name, u32 dataIndex]
-  // [per record: u64 len, bytes]. Bit 31 of dataIndex is the executable flag,
-  // which an inline payload never sets — it ships no verbatim file — and is
-  // masked off rather than asserted so the parse stays a pure reader.
+  // [per record: u64 len, u64 plainLen, bytes]. Bit 31 of dataIndex is the
+  // executable flag, which an inline payload never sets — it ships no verbatim
+  // file — and is masked off rather than asserted so the parse stays a pure reader.
+  //
+  // `plainLen` is the pre-compression size the warm-cache check compares against;
+  // this reader decompresses, so it skips the field rather than using it. It MUST
+  // still be skipped: the encoder writes V3 unconditionally, so reading V2's
+  // two-field record here walks the pointer 8 bytes off at the first record and
+  // every subsequent read is garbage.
   let p = 0;
   const u32 = () => {
     const v = region.readUInt32LE(p);
@@ -120,6 +126,7 @@
   for (let i = 0; i < recordCount; i++) {
     const len = Number(region.readBigUInt64LE(p));
     p += 8;
+    p += 8; // plainLen, written by the encoder and unused here
     records.push(region.subarray(p, p + len));
     p += len;
   }

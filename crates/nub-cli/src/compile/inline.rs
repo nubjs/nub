@@ -4,9 +4,14 @@
 //! on first run, because Node has to be handed a `--require` preload and an entry
 //! by PATH. A payload that reduces to generated JavaScript needs neither: the
 //! launcher passes the bootstrap as `-e` and the bootstrap serves each chunk to
-//! `import()` as a `data:` URL read straight out of the executable. Nothing on the
-//! path to running such an artifact touches the filesystem, so it starts under a
-//! read-only `HOME` and `TMPDIR`, where today it refuses to start at all.
+//! `import()` as a `data:` URL read straight out of the executable.
+//!
+//! That removes the APP's write, which is the only one this module can remove. The
+//! DEFAULT shape still extracts its embedded Node to the cache to exec it, so an
+//! inline payload alone does not survive a read-only `HOME` — measured, both shapes
+//! failing identically on the same fixture. It is `--smol` plus an inline payload
+//! that writes nothing at all: no Node to extract, no app to unpack, and it runs
+//! under a read-only `HOME` and `TMPDIR` where every other shape refuses to start.
 //!
 //! Everything here runs AFTER bundling, on the emitted chunks. That is the design
 //! constraint, not an implementation detail: whether a payload qualifies is not
@@ -121,6 +126,12 @@ pub enum Rewritten {
 /// cross-chunk specifiers replaced, and the bootstrap entry carries the loader that
 /// reads them back out of the executable. The caller compresses the result with
 /// brotli and sets `Manifest::inline_app`.
+/// The root manifest `assemble_app` synthesizes for the extracted tree. Spelled
+/// here rather than shared, because the two uses are independent: that one exists
+/// so a walk-up finds a package boundary on disk, and this one drops it again
+/// because an inline payload has no disk to walk.
+const ROOT_MANIFEST_NAME: &str = "package.json";
+
 pub fn rewrite(files: AppFiles, inputs: &Inputs<'_>) -> Result<Rewritten> {
     match classify(&files, inputs)? {
         Err(decline) => Ok(Rewritten::Extract(files, decline)),
@@ -129,6 +140,10 @@ pub fn rewrite(files: AppFiles, inputs: &Inputs<'_>) -> Result<Rewritten> {
             let bootstrap_name = nub_core::compile::COMPILE_BOOTSTRAP_NAME;
             let rewritten = files
                 .into_iter()
+                // Dropped, not rewritten: nothing resolves through it once the
+                // payload never lands on disk, and the arm below would otherwise
+                // hand its JSON to the chunk rewriter as if it were a module.
+                .filter(|file| file.name != ROOT_MANIFEST_NAME)
                 .map(|mut file| {
                     if file.name == bootstrap_name {
                         file.bytes.push(b'\n');
@@ -159,14 +174,23 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
         return Ok(Err(Decline::SourceMap));
     }
     let bootstrap_name = nub_core::compile::COMPILE_BOOTSTRAP_NAME;
-    // Every file is the bootstrap or a chunk. `--include`s, emitted assets and
-    // native islands are already excluded by the sealed-graph check above; what this
-    // catches is the compiler's OWN non-chunk output, which today means a
-    // `--sourcemap=linked` map travelling beside the bundle.
-    if files
-        .iter()
-        .any(|file| file.name != bootstrap_name && !file.name.ends_with(".mjs"))
-    {
+    // Every file is the bootstrap, a chunk, or the root manifest `assemble_app`
+    // synthesizes. `--include`s, emitted assets and native islands are already
+    // excluded by the sealed-graph check above; what this catches is the compiler's
+    // OWN non-chunk output, which today means a `--sourcemap=linked` map travelling
+    // beside the bundle.
+    //
+    // The manifest is exempt because it exists only for a walk-up through the
+    // EXTRACTED tree, and an inline payload is never on disk for anything to walk.
+    // A user-supplied `package.json` cannot reach here: it arrives via `--include`,
+    // which unseals the graph and is declined above. So dropping it below loses
+    // nothing, and keeping it would decline every build — the manifest is
+    // unconditional, so this check rejected 100% of payloads once it landed.
+    if files.iter().any(|file| {
+        file.name != bootstrap_name
+            && file.name != ROOT_MANIFEST_NAME
+            && !file.name.ends_with(".mjs")
+    }) {
         return Ok(Err(Decline::NonChunkFile));
     }
     let chunk_names: BTreeSet<String> = files
@@ -312,9 +336,79 @@ fn loader_source(entry: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `AppFiles` is the alias this module works in; the element type is only named
+    // here, to build payloads by hand.
+    use nub_core::compile::AppFile;
 
     fn chunks(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    fn sealed(entry: &str) -> Inputs<'_> {
+        Inputs {
+            sealed_module_graph: true,
+            worker_roots: 0,
+            worker_wrappers: 0,
+            sourcemap: false,
+            entry,
+        }
+    }
+
+    /// `assemble_app` puts a root `package.json` in EVERY payload, so a decline on
+    /// any non-chunk file declines every build — which is exactly what happened, and
+    /// silently, because nothing exercised the inline path. The manifest is for a
+    /// walk-up through the extracted tree; an inline payload has no tree, so it is
+    /// dropped rather than shipped.
+    #[test]
+    fn the_synthesized_root_manifest_neither_declines_the_payload_nor_rides_in_it() {
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), b"console.log(1);\n".to_vec()),
+            AppFile::plain(ROOT_MANIFEST_NAME.to_string(), b"{\"private\":true}\n".to_vec()),
+        ];
+
+        match rewrite(files, &sealed("main.mjs")).expect("classification succeeds") {
+            Rewritten::Extract(_, why) => {
+                panic!("the manifest declined an otherwise inlinable payload: {why:?}")
+            }
+            Rewritten::Inline(out) => {
+                assert!(
+                    !out.iter().any(|f| f.name == ROOT_MANIFEST_NAME),
+                    "the manifest must be dropped: nothing can resolve through it off disk, \
+                     and the chunk rewriter would otherwise treat its JSON as a module"
+                );
+                assert!(
+                    out.iter().any(|f| f.name == "main.mjs"),
+                    "the chunk still ships"
+                );
+            }
+        }
+    }
+
+    /// The complement, so the exemption above cannot silently widen into "any
+    /// non-chunk file is fine" — a `--sourcemap=linked` map must still decline.
+    #[test]
+    fn a_non_chunk_file_that_is_not_the_manifest_still_declines() {
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), b"console.log(1);\n".to_vec()),
+            AppFile::plain("main.mjs.map".to_string(), b"{}\n".to_vec()),
+        ];
+
+        match rewrite(files, &sealed("main.mjs")).expect("classification succeeds") {
+            Rewritten::Extract(_, why) => assert_eq!(
+                why,
+                Decline::NonChunkFile,
+                "a linked source map declines for being a non-chunk file"
+            ),
+            Rewritten::Inline(_) => panic!("a linked source map cannot be served from a data: URL"),
+        }
     }
 
     #[test]
