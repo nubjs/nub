@@ -26,6 +26,8 @@ jobs:
             second: ''
           - variant: pr65526
             second: atexit
+          - variant: hasher
+            second: ''
     runs-on: macos-15
     timeout-minutes: 355
     steps:

@@ -12,7 +12,8 @@ Builds Node.js at a pinned `main` SHA on a real macOS arm64 runner in several bu
 | `baseline` | pinned `main`, default `./configure --ninja` |
 | `inlines-hidden` | `-fvisibility-inlines-hidden` only, for node/ada/icu/abseil (every non-inline symbol stays exported) |
 | `pr65526` | nodejs/node#65526 as-is: `-fvisibility=hidden` plus `-fvisibility-inlines-hidden` |
-| `+atexit` | nodejs/node#65549 applied on top as an incremental rebuild |
+| `hasher` | `V8_USE_DEFAULT_HASHER_SECRET=1` in `tools/v8_gypfiles/features.gypi`: V8's own default, which Node's gyp build omits, so every isolate start runs a Miller-Rabin search for three random 64-bit primes (`rapidhash_make_secret`), the top symbol in a Linux `perf` profile of Node 25 and 26 at 12-14% of samples |
+| `+atexit` | the `src/node.cc` half of nodejs/node#65549 applied on top as an incremental rebuild (the lazy cipher-table half already landed on main) |
 
 ## Running it
 
