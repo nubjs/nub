@@ -36,19 +36,21 @@ jobs:
           brew install ninja hyperfine
           sw_vers; sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string; clang --version | head -1
 
+      # The checkout lives OUTSIDE the nub tree: Node main builds a Rust staticlib (deps/crates,
+      # Temporal support), and cargo would otherwise treat it as a member of nub's root workspace.
       - name: Clone Node.js at pinned SHA
         run: |
-          mkdir node && cd node
+          mkdir "$RUNNER_TEMP/node" && cd "$RUNNER_TEMP/node"
           git init -q && git remote add origin https://github.com/nodejs/node.git
           git fetch -q --depth 1 origin "$NODE_SHA" && git checkout -q FETCH_HEAD
-          git log -1 --format='%H %cd'
+          git log -1 --format='%H %cd'; cargo --version
 
       - name: Apply variant (${{ matrix.variant }})
-        run: tests/node-startup-probe/apply-variant.sh "${{ matrix.variant }}" node
+        run: tests/node-startup-probe/apply-variant.sh "${{ matrix.variant }}" "$RUNNER_TEMP/node"
 
       - name: Configure and build
         run: |
-          cd node
+          cd "$RUNNER_TEMP/node"
           ./configure --ninja > configure.log 2>&1 || { tail -30 configure.log; exit 1; }
           t0=$SECONDS
           ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja.log 2>&1 || { tail -30 ninja.log; exit 1; }
@@ -57,14 +59,14 @@ jobs:
       - name: Measure (${{ matrix.variant }})
         run: |
           mkdir -p results bins
-          tests/node-startup-probe/measure-macos.sh node/out/Release/node "${{ matrix.variant }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}.txt"
-          cp node/out/Release/node "bins/node-${{ matrix.variant }}"
+          tests/node-startup-probe/measure-macos.sh "$RUNNER_TEMP/node/out/Release/node" "${{ matrix.variant }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}.txt"
+          cp "$RUNNER_TEMP/node/out/Release/node" "bins/node-${{ matrix.variant }}"
 
       - name: Apply second-phase patch (${{ matrix.second }}) and rebuild incrementally
         if: matrix.second != ''
         run: |
-          tests/node-startup-probe/apply-variant.sh "${{ matrix.second }}" node
-          cd node
+          tests/node-startup-probe/apply-variant.sh "${{ matrix.second }}" "$RUNNER_TEMP/node"
+          cd "$RUNNER_TEMP/node"
           t0=$SECONDS
           ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja2.log 2>&1 || { tail -30 ninja2.log; exit 1; }
           echo "incremental rebuild took $((SECONDS - t0))s"
@@ -72,8 +74,8 @@ jobs:
       - name: Measure (${{ matrix.variant }}+${{ matrix.second }})
         if: matrix.second != ''
         run: |
-          tests/node-startup-probe/measure-macos.sh node/out/Release/node "${{ matrix.variant }}+${{ matrix.second }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}+${{ matrix.second }}.txt"
-          cp node/out/Release/node "bins/node-${{ matrix.variant }}+${{ matrix.second }}"
+          tests/node-startup-probe/measure-macos.sh "$RUNNER_TEMP/node/out/Release/node" "${{ matrix.variant }}+${{ matrix.second }}" tests/node-startup-probe/harness | tee "results/${{ matrix.variant }}+${{ matrix.second }}.txt"
+          cp "$RUNNER_TEMP/node/out/Release/node" "bins/node-${{ matrix.variant }}+${{ matrix.second }}"
 
       - uses: actions/upload-artifact@v4
         if: always()
