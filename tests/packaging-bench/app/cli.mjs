@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // A representative small CLI: argument parsing, colour, and a config parser —
 // three dependencies with real module graphs, so the measurement covers module
 // load and compile rather than only a runtime's fixed startup cost.

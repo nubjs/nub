@@ -24,6 +24,15 @@ NODE_PIN="${NODE_PIN:-26.5.1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WARMUP="${WARMUP:-30}"
 MIN_RUNS="${MIN_RUNS:-150}"
+# Three sizes, 1 / 8 / 84 modules, because the interesting quantity is a CURVE and
+# not a bar. A compiled artifact's overhead is roughly FIXED — the same bootstrap
+# and preamble whether the app is 22 bytes or a real CLI — while the unbundled and
+# globally-installed baselines scale with the module graph. So the same few
+# milliseconds is a large fraction of a trivial script and a small one of a real
+# tool, and only three points show that. `mid` is one real published dependency
+# rather than generated modules: a fixture engineered to a shape would deserve
+# exactly the accusation a skeptical reader would make of it.
+FIXTURES="${FIXTURES:-hello mid cli}"
 
 case "$(uname -s)" in
   Linux)  OS=linux;  PKG_PLAT=linux;  CAXA_OK=1 ;;
@@ -57,6 +66,34 @@ echo "$NODE_PIN" > .node-version
 echo "== installing tooling and app dependencies"
 npm install --silent --no-audit --no-fund --prefix "$W/app" > install-app.log 2>&1
 echo "  app deps: $?"
+
+# The globally-installed CLI baseline. Built as the genuine article rather than
+# simulated: npm pack, npm install -g, and every row below invokes it by its BIN
+# NAME so the PATH lookup, the bin shim and the `#!/usr/bin/env node` shebang are
+# all actually exercised.
+#
+# This matters for fairness in the direction that costs us. A global install pays
+# an exec indirection before Node even starts — exactly as a compiled launcher
+# does — where `node bundle.cjs` gets that for free. Comparing only against the
+# bundled baseline hands the rival a head start on the one axis where a compiled
+# artifact looks worst, and the comparison then turns on bundling versus
+# resolution, which is the real question.
+#
+# --prefix into the workdir rather than the machine's real global root: it is a
+# real prefix with a real bin dir and a real node_modules tree, and it needs no
+# sudo on either runner.
+GLOBAL_ROOT="$W/globalroot"
+GLOBAL_OK=""
+( cd "$W/app" && npm pack --silent ) > pack.log 2>&1
+TGZ=$(ls "$W/app"/*.tgz 2>/dev/null | head -1)
+if [ -n "$TGZ" ] && npm install -g --silent --no-audit --no-fund \
+     --prefix "$GLOBAL_ROOT" "./${TGZ#"$W/"}" > install-global.log 2>&1; then
+  export PATH="$GLOBAL_ROOT/bin:$PATH"
+  GLOBAL_OK=1
+  echo "  global install: ok -> $GLOBAL_ROOT/bin"
+else
+  echo "  global install: FAILED — $(tail -2 install-global.log | tr '\n' ' ')"
+fi
 npm install --silent --no-audit --no-fund --no-save \
   esbuild@0.28.2 @yao-pkg/pkg@6.22.0 @cdxgen/caxa@3.1.1 postject@1.0.0-alpha.6 \
   > install-tools.log 2>&1
@@ -71,7 +108,7 @@ CAXA=./node_modules/.bin/caxa
 # default — an unminified shared bundle would hand nub a smaller parse job than
 # its competitors on the row that is meant to hold the application constant.
 mkdir -p bundles
-for F in hello cli; do
+for F in $FIXTURES; do
   "$ESBUILD" "app/$F.mjs" --bundle --minify --platform=node --format=cjs \
     --target=node26 --outfile="bundles/$F.cjs" --metafile="bundles/$F.meta.json" \
     > "esbuild-$F.log" 2>&1
@@ -84,7 +121,7 @@ done
 declare -a BUILT=() DROPPED=()
 note_drop() { DROPPED+=("$1: $2"); echo "  DROPPED $1 — $2"; }
 
-for F in hello cli; do
+for F in $FIXTURES; do
   B="$W/bundles/$F.cjs"
 
   echo "== $F / Node SEA"
@@ -189,7 +226,7 @@ elif command -v gtimeout >/dev/null 2>&1; then GUARD="gtimeout 30"
 else GUARD=""; fi
 echo
 echo "== verifying output and warming (ulimit -u 800, guard: ${GUARD:-none})"
-for F in hello cli; do
+for F in $FIXTURES; do
   EXPECTED=$(node "bundles/$F.cjs")
   for A in "sea-$F" "seacc-$F" "pkg-$F" "caxa-$F" "nub-$F" "nubown-$F" "nubts-$F"; do
     [ -x "art/$A" ] || continue
@@ -206,7 +243,7 @@ for F in hello cli; do
   done
 done
 
-for F in hello cli; do
+for F in $FIXTURES; do
   mkdir -p "$W/nodecc-$F.v8"
   NODE_COMPILE_CACHE="$W/nodecc-$F.v8" node "bundles/$F.cjs" > /dev/null 2>&1
   echo "  ok   nodecc-$F (plain node, warm V8 compile cache)"
@@ -222,6 +259,30 @@ done
 #
 # They run DIFFERENT source from the bundle, so unlike nodecc-* the output check
 # here is load-bearing rather than a formality.
+# The globally-installed rows, one per fixture. Verified the same way, plus a
+# check that the bin shim really resolves INTO the install prefix — a row that
+# silently re-ran the source tree would answer a different question entirely.
+GLOBAL_ROWS=""
+if [ -n "$GLOBAL_OK" ]; then
+  for F in $FIXTURES; do
+    BIN="bench$F"
+    RESOLVED=$(command -v "$BIN" 2>/dev/null || true)
+    REAL=$(node -e 'try{console.log(require("fs").realpathSync(process.argv[1]))}catch(e){}' "$RESOLVED" 2>/dev/null || true)
+    GOT=$( (ulimit -u 800; $GUARD "$BIN") 2>"err-nodeglob-$F.log" )
+    case "$REAL" in
+      "$GLOBAL_ROOT"/*|/private"$GLOBAL_ROOT"/*) INSIDE=1 ;;
+      *) INSIDE="" ;;
+    esac
+    if [ -n "$INSIDE" ] && [ "$GOT" = "$(node "bundles/$F.cjs")" ]; then
+      (ulimit -u 800; $GUARD "$BIN") >/dev/null 2>&1
+      GLOBAL_ROWS="$GLOBAL_ROWS nodeglob-$F"
+      echo "  ok   nodeglob-$F ($BIN -> $REAL)"
+    else
+      note_drop "nodeglob-$F" "resolved=[$REAL] inside_prefix=[${INSIDE:-no}] got=[$GOT]; stderr: $(tr '\n' ' ' < "err-nodeglob-$F.log" | cut -c1-160)"
+    fi
+  done
+fi
+
 UNBUNDLED_OK=""
 EXPECTED_CLI=$(node "bundles/cli.cjs")
 for U in "nodeunb-cli:$W/app/cli.mjs" "nodets-cli:$W/app/cli.ts"; do
@@ -286,9 +347,14 @@ echo "                     necessity. Holding the bundle constant is what isolat
 echo "                     packaging overhead — but nobody ships a bundle they did not"
 echo "                     make, so this baseline is the artificial one."
 echo "  nodeunb-cli        plain node on the REAL node_modules tree: 84 module"
-echo "                     resolutions and 84 file reads no packaged row pays."
-echo "                     This is what a user runs today, and the honest thing to"
-echo "                     compare a compiled artifact against."
+echo "                     resolutions and 84 file reads no packaged row pays,"
+echo "                     but no shim and no exec indirection."
+echo "  nodeglob-*         the package globally installed and invoked BY BIN NAME:"
+echo "                     PATH lookup + bin shim + '#!/usr/bin/env node' shebang,"
+echo "                     then unbundled resolution. This is what a user runs"
+echo "                     today, and the like-for-like row — it pays an exec"
+echo "                     indirection just as a compiled launcher does, where"
+echo "                     'node bundle.cjs' gets that for free."
 echo "  nodets-cli         the same, entered at a .ts file through Node's own"
 echo "                     type-stripping loader."
 echo "  => a packaged row's margin over baseline-* is packaging OVERHEAD; its margin"
@@ -298,7 +364,7 @@ echo "     over nodeunb-cli is what a user would actually feel. Report both."
 run_table() {
   local F="$1"
   local base="node $W/bundles/$F.cjs"
-  local letters=(A B C D E F G)
+  local letters=(A B C D E F G H I J K L)
   local -a args=()
   local n=0
   args+=(-n "baseline-${letters[0]} (plain node)" "$base")
@@ -313,13 +379,16 @@ run_table() {
   # while its margin over `nodecc-*` is the packaging overhead alone.
   # `nodeunb-*` / `nodets-*` / `nubts-*` exist for `cli` only: with one module there
   # is nothing to unbundle, and no TypeScript question to ask.
-  local rows="nodecc-$F sea-$F seacc-$F pkg-$F caxa-$F caxanocc-$F nub-$F nubown-$F"
+  local rows="nodecc-$F nodeglob-$F sea-$F seacc-$F pkg-$F caxa-$F caxanocc-$F nub-$F nubown-$F"
   if [ "$F" = cli ]; then rows="$rows nodeunb-$F nodets-$F nubts-$F"; fi
   for A in $rows; do
     local art="$A" pre="" full=""
     case "$A" in
       nodecc-*)   full="NODE_COMPILE_CACHE=$W/nodecc-$F.v8 node $W/bundles/$F.cjs" ;;
       caxanocc-*) art="caxa-$F"; pre="CAXA_DISABLE_COMPILE_CACHE=1 " ;;
+      # Invoked by BARE BIN NAME on purpose: that is what exercises the PATH
+      # lookup and the shim, which is the whole point of this row.
+      nodeglob-*) case " $GLOBAL_ROWS " in *" $A "*) full="bench$F" ;; *) continue ;; esac ;;
       nodeunb-*)  case " $UNBUNDLED_OK " in *" $A "*) full="node $W/app/cli.mjs" ;; *) continue ;; esac ;;
       nodets-*)   case " $UNBUNDLED_OK " in *" $A "*) full="node $W/app/cli.ts"  ;; *) continue ;; esac ;;
     esac
@@ -344,7 +413,7 @@ run_table() {
 }
 
 ulimit -u 800
-for F in hello cli; do run_table "$F"; done
+for F in $FIXTURES; do run_table "$F"; done
 
 # ------------------------------------------------------------ 6. first-run cost
 # nub extracts its embedded Node into XDG_CACHE_HOME on first run; caxa extracts
@@ -360,7 +429,7 @@ for F in hello cli; do run_table "$F"; done
 # reports a "first run" an order of magnitude below the real one.
 echo
 echo "######## FIRST RUN (extraction) — $OS-$ARCH"
-for F in hello cli; do
+for F in $FIXTURES; do
   for A in "nub-$F" "nubown-$F" "caxa-$F"; do
     [ -x "art/$A" ] || continue
     case "$A" in

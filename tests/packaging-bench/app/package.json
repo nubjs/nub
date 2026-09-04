@@ -1,7 +1,13 @@
 {
   "name": "packaging-bench-app",
   "private": true,
+  "version": "1.0.0",
   "type": "module",
+  "bin": {
+    "benchhello": "./hello.mjs",
+    "benchmid": "./mid.mjs",
+    "benchcli": "./cli.mjs"
+  },
   "dependencies": {
     "chalk": "6.0.0",
     "commander": "15.0.0",
