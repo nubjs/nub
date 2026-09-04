@@ -1,0 +1,171 @@
+From 086eea1c111583938b6b0523710423f11aaf9050 Mon Sep 17 00:00:00 2001
+From: wave <wave@example.com>
+Date: Fri, 4 Sep 2026 16:35:14 -0700
+Subject: [PATCH] build: delay-load CoreFoundation and Security on macOS
+
+A macOS node process runs about 660 dyld initializers before main. Only
+253 of them are node's own; the other ~404 belong to the dependency tree
+CoreFoundation and Security drag in (Foundation, libobjc, the Swift
+runtime, SkyLight, CoreDisplay, and Network.framework, whose
+initializers alone number 365). Measured on macOS 26.6.2 arm64:
+
+  DYLD_PRINT_INITIALIZERS=1 <trivial C binary>                       2
+  DYLD_PRINT_INITIALIZERS=1 <the same, -framework CoreFoundation>  404
+  DYLD_PRINT_INITIALIZERS=1 node -e 0                               657
+
+Nothing on the startup path uses either framework. The imports are 14
+Security symbols reached only from --use-system-ca
+(src/crypto/crypto_context.cc) and, through CoreFoundation, two more
+from cctz's local_time_zone().
+
+Mark both frameworks delay-init so dyld defers the load, and the
+initializers, until the first call. The dependency itself is unchanged:
+otool -L still lists both, a dlopen or any call still loads them, and
+dyld before macOS 15 ignores the marker and loads eagerly as it does
+today. That is the difference from removing the link outright, which was
+considered and dropped in 2022.
+
+The four kSecTrustSettings* dictionary keys are the one thing that
+cannot be delayed: the SDK spells them as CFSTR() macros, which emit
+__DATA_CONST,__cfstring literals whose isa pointer binds to
+CoreFoundation's constant-string class before main. ld rejects the link
+with "ptr64 use of '___CFConstantStringClassReference' in 'anon' cannot
+be delayed". Build the four strings on first use instead.
+
+Refs: https://github.com/nodejs/node/issues/44715
+Refs: https://github.com/nodejs/node/commit/b1741ea1fadf
+---
+ node.gypi                    | 14 ++++++++---
+ src/crypto/crypto_context.cc | 47 ++++++++++++++++++++++++++++++------
+ tools/v8_gypfiles/abseil.gyp |  6 ++++-
+ 3 files changed, 54 insertions(+), 13 deletions(-)
+
+diff --git a/node.gypi b/node.gypi
+index 104e884e6..aae9f5d5f 100644
+--- a/node.gypi
++++ b/node.gypi
+@@ -265,10 +265,16 @@
+     }],
+ 
+     [ 'OS=="mac"', {
+-      # linking Corefoundation is needed since certain macOS debugging tools
+-      # like Instruments require it for some features. Security is needed for
+-      # --use-system-ca.
+-      'libraries': [ '-framework CoreFoundation -framework Security' ],
++      # CoreFoundation is only reached through cctz's local_time_zone(), and
++      # Security only through --use-system-ca; between them they are ~400 of
++      # the ~660 dyld initializers a node process runs at launch. Delay-init
++      # keeps the dependency -- Instruments still resolves it, and a dlopen or
++      # the first call loads it -- but moves the load off the launch path.
++      # dyld before macOS 15 ignores the marker and loads eagerly, as today.
++      'libraries': [
++        '-Wl,-delay_framework,CoreFoundation',
++        '-Wl,-delay_framework,Security',
++      ],
+       'defines!': [
+         'NODE_PLATFORM="mac"',
+       ],
+diff --git a/src/crypto/crypto_context.cc b/src/crypto/crypto_context.cc
+index 9dc68f4d9..64d937d86 100644
+--- a/src/crypto/crypto_context.cc
++++ b/src/crypto/crypto_context.cc
+@@ -325,11 +325,38 @@ bool isSelfIssued(X509* cert) {
+ // See https://chromium.googlesource.com/chromium/src/+/HEAD/LICENSE for
+ // details.
+ #ifdef __APPLE__
++enum class TrustSettingsKey { kApplication, kPolicy, kPolicyString, kResult };
++
++// The SDK spells these dictionary keys as CFSTR() literals. A CFSTR() literal
++// lands in __DATA_CONST,__cfstring with its isa pointer bound to
++// CoreFoundation's constant-string class, and dyld resolves that bind before
++// main -- which pins CoreFoundation to the launch path of every process even
++// though only --use-system-ca ever reads these keys. Building the strings on
++// first use is what lets node.gypi delay-load the framework.
++CFStringRef GetTrustSettingsKey(TrustSettingsKey key) {
++  static const CFStringRef keys[] = {
++      CFStringCreateWithCString(kCFAllocatorDefault,
++                                "kSecTrustSettingsApplication",
++                                kCFStringEncodingASCII),
++      CFStringCreateWithCString(kCFAllocatorDefault,
++                                "kSecTrustSettingsPolicy",
++                                kCFStringEncodingASCII),
++      CFStringCreateWithCString(kCFAllocatorDefault,
++                                "kSecTrustSettingsPolicyString",
++                                kCFStringEncodingASCII),
++      CFStringCreateWithCString(kCFAllocatorDefault,
++                                "kSecTrustSettingsResult",
++                                kCFStringEncodingASCII),
++  };
++  return keys[static_cast<size_t>(key)];
++}
++
+ TrustStatus IsTrustDictionaryTrustedForPolicy(CFDictionaryRef trust_dict,
+                                               bool is_self_issued) {
+   // Trust settings may be scoped to a single application
+   // skip as this is not supported
+-  if (CFDictionaryContainsKey(trust_dict, kSecTrustSettingsApplication)) {
++  if (CFDictionaryContainsKey(
++          trust_dict, GetTrustSettingsKey(TrustSettingsKey::kApplication))) {
+     return TrustStatus::UNSPECIFIED;
+   }
+ 
+@@ -338,7 +365,8 @@ TrustStatus IsTrustDictionaryTrustedForPolicy(CFDictionaryRef trust_dict,
+   // settings specific to a particular WiFi network.
+   // As this is not presently supported, skip any policy-specific trust
+   // settings.
+-  if (CFDictionaryContainsKey(trust_dict, kSecTrustSettingsPolicyString)) {
++  if (CFDictionaryContainsKey(
++          trust_dict, GetTrustSettingsKey(TrustSettingsKey::kPolicyString))) {
+     return TrustStatus::UNSPECIFIED;
+   }
+ 
+@@ -346,9 +374,11 @@ TrustStatus IsTrustDictionaryTrustedForPolicy(CFDictionaryRef trust_dict,
+   // kSecTrustSettingsPolicy), ensure that the policy is the same policy as
+   // |kSecPolicyAppleSSL|. If there is no kSecTrustSettingsPolicy key, it's
+   // considered a match for all policies.
+-  if (CFDictionaryContainsKey(trust_dict, kSecTrustSettingsPolicy)) {
+-    SecPolicyRef policy_ref = reinterpret_cast<SecPolicyRef>(const_cast<void*>(
+-        CFDictionaryGetValue(trust_dict, kSecTrustSettingsPolicy)));
++  if (CFDictionaryContainsKey(trust_dict,
++                              GetTrustSettingsKey(TrustSettingsKey::kPolicy))) {
++    SecPolicyRef policy_ref =
++        reinterpret_cast<SecPolicyRef>(const_cast<void*>(CFDictionaryGetValue(
++            trust_dict, GetTrustSettingsKey(TrustSettingsKey::kPolicy))));
+ 
+     if (!policy_ref) {
+       return TrustStatus::UNSPECIFIED;
+@@ -369,10 +399,11 @@ TrustStatus IsTrustDictionaryTrustedForPolicy(CFDictionaryRef trust_dict,
+   }
+ 
+   int trust_settings_result = kSecTrustSettingsResultTrustRoot;
+-  if (CFDictionaryContainsKey(trust_dict, kSecTrustSettingsResult)) {
++  if (CFDictionaryContainsKey(trust_dict,
++                              GetTrustSettingsKey(TrustSettingsKey::kResult))) {
+     CFNumberRef trust_settings_result_ref =
+-        reinterpret_cast<CFNumberRef>(const_cast<void*>(
+-            CFDictionaryGetValue(trust_dict, kSecTrustSettingsResult)));
++        reinterpret_cast<CFNumberRef>(const_cast<void*>(CFDictionaryGetValue(
++            trust_dict, GetTrustSettingsKey(TrustSettingsKey::kResult))));
+ 
+     if (!trust_settings_result_ref ||
+         !CFNumberGetValue(trust_settings_result_ref,
+diff --git a/tools/v8_gypfiles/abseil.gyp b/tools/v8_gypfiles/abseil.gyp
+index 1a1de3378..48d4256e6 100644
+--- a/tools/v8_gypfiles/abseil.gyp
++++ b/tools/v8_gypfiles/abseil.gyp
+@@ -13,7 +13,11 @@
+           '<(ABSEIL_ROOT)',
+         ],
+         'xcode_settings': {
+-          'OTHER_LDFLAGS': ['-framework CoreFoundation'],
++          # cctz's local_time_zone() is the only user; delay-init keeps the
++          # framework and its ~400 initializers off the launch path. Must match
++          # the spelling in node.gypi -- an eager -framework anywhere on the
++          # link line wins over a delay-init one.
++          'OTHER_LDFLAGS': ['-Wl,-delay_framework,CoreFoundation'],
+         },
+       },
+       'include_dirs': [
+-- 
+2.38.1
+

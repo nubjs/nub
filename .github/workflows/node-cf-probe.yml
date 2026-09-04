@@ -1,0 +1,134 @@
+name: node-cf-probe
+
+# Branch-scoped probe for nodejs/node#44715: does delay-loading CoreFoundation and
+# Security on macOS pay, and does it still break Instruments' Heap Allocations
+# recorder the way removing the link did on macOS 12.6 in 2022? No PR is involved;
+# pushing to the probe branch is the trigger. See tests/node-cf-probe/README.md.
+on:
+  push:
+    branches: [probe/node-startup]
+    paths:
+      - 'tests/node-cf-probe/**'
+      - '.github/workflows/node-cf-probe.yml'
+  workflow_dispatch:
+
+env:
+  NODE_SHA: f85bb5ed783a4b40f90d55a45099c8dbc853d47c
+
+jobs:
+  # Cheap and first: the 2022 blocker, on control binaries. No Node build.
+  instruments:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable developer mode
+        run: sudo DevToolsSecurity -enable || true
+      - name: Run the Allocations comparison
+        run: tests/node-cf-probe/instruments-probe.sh "$RUNNER_TEMP/inst" | tee inst-${{ matrix.os }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: instruments-${{ matrix.os }}
+          path: |
+            inst-${{ matrix.os }}.txt
+            ${{ runner.temp }}/inst/*.xml
+            ${{ runner.temp }}/inst/*.log
+          retention-days: 7
+
+  # Expensive: baseline Node, then the delay-init variant as an incremental rebuild.
+  node-build:
+    runs-on: macos-15
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          brew install ninja hyperfine
+          sw_vers; sysctl -n hw.ncpu machdep.cpu.brand_string; clang --version | head -1
+          sudo DevToolsSecurity -enable || true
+
+      # Outside the nub tree: Node main builds a Rust staticlib and cargo would
+      # otherwise treat it as a member of nub's root workspace.
+      - name: Clone Node.js at pinned SHA
+        run: |
+          mkdir "$RUNNER_TEMP/node" && cd "$RUNNER_TEMP/node"
+          git init -q && git remote add origin https://github.com/nodejs/node.git
+          git fetch -q --depth 1 origin "$NODE_SHA" && git checkout -q FETCH_HEAD
+          git log -1 --format='%H %cd'
+
+      - name: Build baseline
+        run: |
+          cd "$RUNNER_TEMP/node"
+          ./configure --ninja > configure.log 2>&1 || { tail -30 configure.log; exit 1; }
+          t0=$SECONDS
+          ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja.log 2>&1 || { tail -40 ninja.log; exit 1; }
+          echo "build took $((SECONDS - t0))s"
+
+      - name: Measure baseline
+        run: |
+          mkdir -p results bins
+          tests/node-startup-probe/measure-macos.sh "$RUNNER_TEMP/node/out/Release/node" baseline tests/node-startup-probe/harness | tee results/baseline.txt
+          tests/node-cf-probe/node-instruments.sh "$RUNNER_TEMP/node/out/Release/node" baseline "$RUNNER_TEMP/inst" | tee results/instruments-baseline.txt
+          cp "$RUNNER_TEMP/node/out/Release/node" bins/node-baseline
+
+      - name: Apply macos-cf and rebuild
+        run: |
+          cd "$RUNNER_TEMP/node"
+          git apply --3way "$GITHUB_WORKSPACE/tests/node-cf-probe/patches/macos-cf.patch"
+          ./configure --ninja > configure2.log 2>&1 || { tail -30 configure2.log; exit 1; }
+          t0=$SECONDS
+          ninja -C out/Release node -j"$(sysctl -n hw.ncpu)" > ninja2.log 2>&1 || { tail -60 ninja2.log; exit 1; }
+          echo "incremental rebuild took $((SECONDS - t0))s"
+          echo '--- linker warnings mentioning delay-init:'
+          grep -i 'delay' ninja2.log || echo '(none)'
+
+      - name: Measure macos-cf
+        run: |
+          tests/node-startup-probe/measure-macos.sh "$RUNNER_TEMP/node/out/Release/node" macos-cf tests/node-startup-probe/harness | tee results/macos-cf.txt
+          tests/node-cf-probe/node-instruments.sh "$RUNNER_TEMP/node/out/Release/node" macos-cf "$RUNNER_TEMP/inst" | tee results/instruments-macos-cf.txt
+          cp "$RUNNER_TEMP/node/out/Release/node" bins/node-macos-cf
+
+      - name: Interleaved hyperfine, baseline vs macos-cf
+        run: |
+          printf 'console.log("hi")\n' > "$RUNNER_TEMP/hello.js"
+          hyperfine -N --warmup 20 --runs 200 --export-json results/ab-e0.json \
+            'bins/node-baseline -e 0' 'bins/node-macos-cf -e 0' | tee results/ab-e0.txt
+          hyperfine -N --warmup 20 --runs 200 --export-json results/ab-hello.json \
+            "bins/node-baseline $RUNNER_TEMP/hello.js" "bins/node-macos-cf $RUNNER_TEMP/hello.js" | tee results/ab-hello.txt
+
+      - name: Node's own tests for the touched area
+        run: |
+          cd "$RUNNER_TEMP/node"
+          j=$(sysctl -n hw.ncpu)
+          shell="$GITHUB_WORKSPACE/bins/node-macos-cf"
+          r="$GITHUB_WORKSPACE/results/tests.txt"
+          { echo '=== the --use-system-ca tests and the bootstrap-module pin'
+            python3 tools/test.py -j "$j" --mode=release --shell "$shell" \
+              $(cd test/parallel && ls test-tls-get-ca-certificates-*.js | sed 's#^#parallel/#') \
+              parallel/test-bootstrap-modules.js 2>&1 | tail -40
+            echo '=== every tls and crypto test in parallel/'
+            python3 tools/test.py -j "$j" --mode=release --shell "$shell" \
+              $(cd test/parallel && ls test-tls-*.js test-crypto-*.js | sed 's#^#parallel/#') 2>&1 | tail -40
+          } | tee "$r" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cf-results
+          path: |
+            results/
+            ${{ runner.temp }}/inst/*.xml
+            ${{ runner.temp }}/inst/*.log
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cf-bins
+          path: bins/
+          retention-days: 3
+          compression-level: 1
