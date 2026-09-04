@@ -5,7 +5,7 @@ set -u; cd "$(dirname "$0")"; export MSYS_NO_PATHCONV=1  # keep /O2-style option
 uname -m; command -v clang-cl && clang-cl --version | head -1; cl 2>&1 | head -1; echo "VSCMD_ARG_TGT_ARCH=${VSCMD_ARG_TGT_ARCH:-}"
 try() { local label=$1; shift; rm -f "$label.exe"
   if "$@" > "$label.log" 2>&1 && [ -f "$label.exe" ]; then
-    if ./"$label.exe" 2000 > "$label.run" 2>&1; then echo "$label: OK   $(grep -E 'candidate|speedup' "$label.run" | tr '\n' ' ')"
+    if ./"$label.exe" "${MULMOD_SEEDS:-50000}" > "$label.run" 2>&1; then echo "$label: OK   $(grep -E 'candidate|speedup' "$label.run" | tr '\n' ' ')"
     else echo "$label: RUN FAIL rc=$?"; tail -3 "$label.run"; fi
   else echo "$label: BUILD FAIL"; grep -iE 'error|unresolved|warning|cannot' "$label.log" | head -4; [ -s "$label.log" ] || echo "(empty log)"; fi; }
 try clangcl-loop   clang-cl -nologo -O2 -EHsc -DMULMOD_LOOP   mulmod-probe.cc -Fe:clangcl-loop.exe
