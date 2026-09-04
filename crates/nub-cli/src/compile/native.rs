@@ -1637,19 +1637,18 @@ enum Classification {
 /// the platform defines make resolution pick the TARGET's platform package
 /// whenever one is installed, so a mismatch means it genuinely is not there.
 fn check_target(bytes: &[u8], path: &Path, target: &TargetPlatform) -> Result<()> {
-    // Leads with Nub's own `--os` / `--cpu` / `--libc` install flags, which work
-    // in every project. `supportedArchitectures` is the persistent form of the
-    // same selection, but the engine reads it only from an incumbent pnpm or
-    // yarn's config, so it is the second suggestion rather than the first.
+    // Names only Nub's own `--os` / `--cpu` / `--libc` install flags, which work
+    // in every project. The persistent `supportedArchitectures` setting is not
+    // offered: the engine reads it only from an incumbent pnpm or yarn's config,
+    // so for a nub, npm or bun project it is advice that cannot be followed.
     let advice = "\x20\x20A native addon is machine code for one platform, and a compiled binary \
                   loads it\n\x20\x20from a real file at run time — there is no later step that \
                   could translate it. The\n\x20\x20install has to put the target's own platform \
                   package on disk before you compile.\n\
-                  \n\x20\x20Select it for one install with nub install --os <os> --cpu <cpu> \
-                  --libc <libc>, or set\n\x20\x20supportedArchitectures.os, .cpu and .libc in \
-                  the project config and install again.\n\x20\x20If no prebuilt exists for the \
-                  target, install on the target platform itself — a\n\x20\x20container is the \
-                  usual way — or drop --platform to build for this machine.";
+                  \n\x20\x20Select it with nub install --os <os> --cpu <cpu> --libc <libc>, then \
+                  compile again.\n\x20\x20If no prebuilt exists for the target, install on the \
+                  target platform itself — a\n\x20\x20container is the usual way — or drop \
+                  --platform to build for this machine.";
     let found = match classify(bytes) {
         Some(Classification::Object(found)) => found,
         Some(Classification::UnsupportedMachine { os }) => bail!(
