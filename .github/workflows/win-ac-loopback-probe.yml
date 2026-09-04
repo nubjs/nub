@@ -1,0 +1,64 @@
+# Branch-scoped ad-hoc probe, NO pull request required (`.claude/skills/ci-adhoc-test/SKILL.md`).
+#
+# THE QUESTION (W1): can an AppContainer process holding NO capabilities reach a loopback TCP
+# listener running in ANOTHER AppContainer process that bears the SAME package sid, with no
+# `internetClient`, no `CheckNetIsolation LoopbackExempt`, and no elevation at any point?
+#
+# WHY IT MATTERS: withholding `internetClient` is the only unprivileged Windows egress lever, and
+# it denies loopback too, so a nub-owned filtering proxy currently has no way to be reached from
+# inside the jail. If the WFP `IsAppContainerLoopback` permit really is keyed on a SHARED package
+# sid, a proxy launched in a same-package AppContainer is exactly one unprivileged loopback hole
+# and Windows reaches macOS-grade per-host enforcement.
+#
+# CI IS THE ONLY VENUE. An AppContainer cannot be launched over OpenSSH: sshd lands in services
+# session 0, which has no window station a LowBox token can attach to, and every launch returns
+# 0xC0000142 (MECHANISM-FACTS 5e/5h). The standing `nub-win` VM cannot answer this.
+#
+# NO RUST BUILD: PowerShell + a C# P/Invoke launcher and a `csc`-compiled child, so a run is
+# minutes rather than the 35+ a cold Windows cargo cache costs.
+#
+# BOTH IMAGES, `fail-fast: false`: a single-image answer to a kernel-physics question is a guess
+# about the other one, and one image's failure must never hide the other's table.
+name: win-ac-loopback-probe
+
+on:
+  push:
+    branches: [probe/win-ac-loopback]
+  workflow_dispatch: # inert until this file reaches the default branch; `push` is what fires it
+
+permissions:
+  contents: read
+
+jobs:
+  loopback:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Probe - same-package AppContainer loopback
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          pwsh -NoLogo -NonInteractive -File tests/win-ac-loopback/probe.ps1 *>&1 |
+            Tee-Object -FilePath acloop-${{ matrix.os }}.log
+          exit 0
+
+      - name: Upload the raw log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acloop-${{ matrix.os }}
+          path: |
+            acloop-${{ matrix.os }}.log
+            w1-logs/
+          if-no-files-found: warn
