@@ -156,23 +156,10 @@ features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"
 [lints]
 workspace = true
 
-# Purpose-built integration harness: unlike libtest's generated main, this can
-# install the retained-monitor hook before any test/runtime initialization.
-[[bin]]
-name = "nub-sandbox-monitor-harness"
-path = "src/bin/nub-sandbox-monitor-harness.rs"
-test = false
-bench = false
-
-# Direct-nesting composition harness (epic D7/D8): drives three real nested levels
-# through the production apply_with_runtime path. Like the monitor harness it owns a
-# real main so earliest_bootstrap runs before anything else — and it is ALSO the
-# runtime image + PID-1 monitor for every level it launches.
-[[bin]]
-name = "nub-sandbox-nesting-harness"
-path = "src/bin/nub-sandbox-nesting-harness.rs"
-test = false
-bench = false
+# The `nub-sandbox-monitor-harness` and `nub-sandbox-nesting-harness` bins were dropped with the
+# bubblewrap teardown (epic 1.1): both drove the retained PID-1 monitor and the bubblewrap nesting
+# chain, which no longer exist. The zero-privilege Landlock + seccomp-supervisor tier defines its
+# own harnesses in a later epic phase.
 
 # The zero-privilege curated-import skeleton (epic row 0.3) drops the privileged-tier
 # integration tests along with the backends they drove; the `tests/` tree is not vendored

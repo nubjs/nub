@@ -150,7 +150,6 @@ pub use backend::windows_publish_appcontainer_read;
 pub use backend::{
     CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget,
     RuntimeCapability, StatusReport, apply, apply_with_runtime, earliest_bootstrap,
-    validate_adjacent_resource_bundle,
 };
 // The retained-monitor exercisers and `PreparedSignalCallback` were re-exported from the
 // dropped `linux_monitor` backend (privileged PID-1 monitor tier). Removed with the curated
@@ -160,15 +159,13 @@ pub use backend::{
 #[doc(hidden)]
 pub use backend::{windows_leaf_grant_redundant, windows_object_traverse_ace};
 
-/// The Linux enforcement suites' skip gate, resolving Bubblewrap candidates the way
-/// production does. Test support, not an embedder API.
+/// The Linux enforcement suites' skip gate. Test support, not an embedder API. The Bubblewrap
+/// probe re-exports (`skip_without_bwrap`, `usable_bwrap`, …) were dropped with `linux_probe`
+/// (epic 1.1); only the Landlock ABI gate remains.
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod host_probe {
     pub use crate::backend::landlock_abi;
-    pub use crate::backend::linux_probe::{
-        BwrapProbe, cached_probe, probe, skip_without_bwrap, skip_without_bwrap_with, usable_bwrap,
-    };
 }
 
 // `windows_admin` re-exported the dropped `windows_account` backend (privileged dedicated-account

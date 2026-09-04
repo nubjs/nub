@@ -784,7 +784,7 @@ unsafe fn install_confinement_pre_exec(
         // FIRST, before any restriction is installed: the sweep's fallback path opens
         // `/proc/self/fd`, which the ruleset below makes unreadable. Ordering it here keeps
         // that fallback usable on a kernel without `CLOSE_RANGE_CLOEXEC`.
-        super::linux_monitor::mark_inherited_fds_cloexec()?;
+        super::linux_supervisor::mark_inherited_fds_cloexec()?;
         // Both Landlock and seccomp REFUSE an unprivileged caller that could still gain
         // privileges through a setuid execve, so this gates everything below it.
         if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
@@ -793,7 +793,7 @@ unsafe fn install_confinement_pre_exec(
         unsafe { drop_all_capabilities() }?;
         unsafe { restrict_self(ruleset_fd) }.map_err(std::io::Error::from_raw_os_error)?;
         if let Some(filter) = &seccomp {
-            super::linux_monitor::install_target_seccomp(filter)
+            super::linux_supervisor::install_target_seccomp(filter)
                 .map_err(std::io::Error::from_raw_os_error)?;
         }
         Ok(())

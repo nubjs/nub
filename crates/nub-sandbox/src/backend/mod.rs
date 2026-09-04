@@ -63,35 +63,19 @@ pub mod macos_denials;
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[cfg(target_os = "linux")]
-pub use linux::validate_adjacent_resource_bundle;
-
-#[cfg(not(target_os = "linux"))]
-pub fn validate_adjacent_resource_bundle() -> Result<(), String> {
-    Ok(())
-}
-
-/// Every path the single-level resolver will try, in its order. Surfaced so the preflight
-/// probe asks about the SAME candidates production launches, rather than a second hardcoded
-/// list that can drift out of step with the resolver.
-#[cfg(target_os = "linux")]
-pub(crate) fn bwrap_candidate_paths() -> Vec<std::path::PathBuf> {
-    let (dedicated, system, bundled) = linux::single_level_bwrap_candidate_paths();
-    dedicated.into_iter().chain(system).chain(bundled).collect()
-}
-
-#[cfg(target_os = "linux")]
-pub mod linux_probe;
-
-// DROPPED with the curated zero-privilege import (epic row 0.3): `linux_setup` (the privileged
-// helper-account / AppArmor host-setup tier), `linux_monitor` (the retained PID-1 monitor),
-// `linux_net_bridge` (the host-side net bridge), and `linux_runtime_stage` (bubblewrap runtime
-// pinning). The zero-privilege enforcement tier (Landlock + a seccomp user-notify supervisor)
-// replaces them in a later epic phase. The reusable primitives `linux_landlock` (the Landlock
-// ABI probe) and `linux_grants` (the OS-agnostic mount/grant derivation) are kept below.
+// DROPPED with the bubblewrap teardown (epic 1.1): `linux_setup` (the privileged helper-account /
+// AppArmor host-setup tier), `linux_monitor` (the retained PID-1 monitor), `linux_net_bridge` (the
+// host-side net bridge), `linux_runtime_stage` (bubblewrap runtime pinning), and `linux_probe` (the
+// bubblewrap host probe, along with `linux::single_level_bwrap_candidate_paths` /
+// `validate_adjacent_resource_bundle` / `bwrap_candidate_paths` that fed it). The zero-privilege
+// enforcement tier is Landlock (`linux_landlock`) plus the seccomp user-notify egress supervisor
+// (`linux_supervisor`); `linux_grants` (the OS-agnostic mount/grant derivation) stays below.
 
 #[cfg(target_os = "linux")]
 mod linux_landlock;
+
+#[cfg(target_os = "linux")]
+mod linux_supervisor;
 
 /// The Landlock suite's skip gate — `None` when this kernel has no usable Landlock.
 /// Test support, not an embedder API.
@@ -418,21 +402,11 @@ pub struct Prepared {
     /// value stops the listener. `None` when net is unconfined or coarse-deny (no
     /// proxy needed). Set by [`apply`], not the per-OS backends.
     pub(crate) proxy: Option<EgressProxy>,
-    /// The host-side per-host egress bridge (C3), when the policy enforces per-host net
-    /// on Linux. It carries the `--unshare-net` child's proxy traffic across the empty
-    /// netns to [`proxy`](Self::proxy), runs in the nub PARENT, and MUST outlive the
-    /// child (same lifetime as `proxy`). `None` off Linux or when net is unconfined /
-    /// coarse-deny. Set by [`apply`], not the per-OS backends.
-    #[cfg(target_os = "linux")]
-    pub(crate) net_bridge: Option<linux_net_bridge::HostNetBridge>,
-    /// Files whose descriptors Bubblewrap consumes while constructing the mount
-    /// view (currently the empty regular-file source used for exact deny masks).
-    /// Keeping them here guarantees they remain open until `command` is spawned.
+    /// Files whose descriptors the Landlock backend consumes after fork (the ruleset fd its
+    /// `pre_exec` hook restricts against). Keeping them here guarantees they remain open until
+    /// `command` is spawned.
     #[cfg(target_os = "linux")]
     pub(crate) _inherited_files: Vec<std::fs::File>,
-    /// One-shot authority for the authenticated Linux PID-1 monitor launch.
-    #[cfg(target_os = "linux")]
-    pub(crate) retained_monitor: Option<linux_monitor::RetainedMonitorLaunch>,
     /// Signal and reap the child's whole PROCESS GROUP rather than just the child.
     ///
     /// Set by the two paths whose `pre_exec` makes the child its own group leader: the
@@ -474,28 +448,21 @@ pub struct PreparedChild {
     child_id: u32,
     #[cfg(unix)]
     signal_target: Option<i32>,
-    #[cfg(target_os = "linux")]
-    retained_monitor: Option<linux_monitor::RetainedMonitorSession>,
     #[cfg(unix)]
     signal_process_group: bool,
     _proxy: Option<EgressProxy>,
-    #[cfg(target_os = "linux")]
-    _net_bridge: Option<linux_net_bridge::HostNetBridge>,
     _private_tmp: Option<tempfile::TempDir>,
 }
 
 /// The signal destination authenticated during [`Prepared::spawn_with_signal_target`].
+///
+/// The retained-monitor `Callback` variant was dropped with `linux_monitor` (epic 1.1); the
+/// Landlock path — the only supervised Linux launch today — reaps its child's process group by a
+/// `Direct` negative pgid, so this carries a plain signal target.
 #[doc(hidden)]
 pub enum PreparedSignalTarget {
     Direct(i32),
-    #[cfg(target_os = "linux")]
-    Callback(PreparedSignalCallback),
 }
-
-#[cfg(target_os = "linux")]
-#[doc(hidden)]
-pub type PreparedSignalCallback =
-    Arc<dyn Fn(libc::c_int) -> std::io::Result<()> + Send + Sync + 'static>;
 
 impl PreparedChild {
     pub fn id(&self) -> u32 {
@@ -532,36 +499,21 @@ impl PreparedChild {
             .child
             .as_mut()
             .ok_or_else(|| prepared_child_reaped_error("wait"))?;
-        #[cfg(target_os = "linux")]
-        let result = match self.retained_monitor.as_mut() {
-            Some(session) => session.wait(child),
-            None => wait_child_eintr(child),
-        };
-        #[cfg(not(target_os = "linux"))]
         let result = wait_child_eintr(child);
-        #[cfg(target_os = "linux")]
-        let cleanup_complete = self
-            .retained_monitor
-            .as_ref()
-            .is_some_and(linux_monitor::RetainedMonitorSession::cleanup_complete);
-        #[cfg(not(target_os = "linux"))]
-        let cleanup_complete = false;
-        if result.is_ok() || cleanup_complete {
-            // The jailed script may have forked a build daemon that outlived it. The
-            // bubblewrap path's PID namespace reaped those implicitly when PID 1 exited;
-            // signalling the group is this path's only equivalent. Best-effort: an empty
-            // group is ESRCH, which is the normal case and not an error.
+        if result.is_ok() {
+            // The jailed script may have forked a build daemon that outlived it. Signalling the
+            // child's own process group is the Landlock path's only equivalent of the removed
+            // bubblewrap PID namespace's implicit reap. Best-effort: an empty group is ESRCH,
+            // which is the normal case and not an error.
             //
-            // Reaping on the SUCCESSFUL return too is the point, not a side effect: the
-            // measured leak is a script that exits 0 having backgrounded a writer, whose
-            // output then keeps landing in a package dir the installer already snapshotted.
+            // Reaping on the SUCCESSFUL return too is the point, not a side effect: the measured
+            // leak is a script that exits 0 having backgrounded a writer, whose output then keeps
+            // landing in a package dir the installer already snapshotted.
             #[cfg(unix)]
             if self.signal_process_group {
                 unsafe { libc::kill(-(self.child_id as i32), libc::SIGKILL) };
             }
             self.child.take();
-            #[cfg(target_os = "linux")]
-            self.retained_monitor.take();
             self.release_resources();
         }
         result
@@ -609,10 +561,7 @@ impl PreparedChild {
     }
 
     fn release_resources(&mut self) {
-        // Drop order matters: tear the in-netns child down (already reaped by the monitor
-        // by this point), THEN the host bridge, THEN the proxy — nearest the child first.
-        #[cfg(target_os = "linux")]
-        self._net_bridge.take();
+        // Drop order matters: the proxy before the private tmp dir it may have written into.
         self._proxy.take();
         self._private_tmp.take();
     }
@@ -630,14 +579,6 @@ impl Drop for PreparedChild {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        #[cfg(target_os = "linux")]
-        if let Some(mut session) = self.retained_monitor.take() {
-            if let Err(error) = session.fail_closed(&mut child) {
-                eprintln!("fatal: retained sandbox cleanup failed: {error}");
-                std::process::abort();
-            }
-            return;
-        }
         #[cfg(unix)]
         kill_and_reap(&mut child, self.signal_target);
         #[cfg(not(unix))]
@@ -777,9 +718,8 @@ impl Prepared {
         }
         #[allow(unused_mut)]
         let mut child = self.command.spawn()?;
-        // Bubblewrap inherited its setup-data descriptors across spawn. The parent
-        // copies can close immediately; in particular, do not retain the serialized
-        // target environment in the long-lived PreparedChild handle.
+        // The Landlock backend inherits its ruleset descriptor across spawn; the parent copy
+        // can close the moment the child holds it (the `pre_exec` hook consumes it after fork).
         #[cfg(target_os = "linux")]
         self._inherited_files.clear();
         // A REQUEST until the kernel confirms it. `confirm_group_leader` is what turns it
@@ -796,47 +736,16 @@ impl Prepared {
                  and keep writing after this command returns"
             );
         }
-        #[cfg(target_os = "linux")]
-        let (launched_child, child_id, signal_target, retained_monitor) =
-            match self.retained_monitor.take() {
-                Some(launch) => {
-                    let (mut outer, mut session) = launch.start(child)?;
-                    let child_id = session.target_pid() as u32;
-                    if let Err(error) =
-                        ready(PreparedSignalTarget::Callback(session.signal_callback()))
-                    {
-                        return match session.fail_closed(&mut outer) {
-                            Ok(()) => Err(error),
-                            Err(cleanup) => Err(std::io::Error::new(
-                                error.kind(),
-                                format!("{error}; retained sandbox cleanup also failed: {cleanup}"),
-                            )),
-                        };
-                    }
-                    (outer, child_id, None, Some(session))
-                }
-                None => {
-                    // Negative = the whole process group, and only ever after
-                    // `confirm_group_leader`; see `signal_process_group`.
-                    let target = if signal_process_group {
-                        -(child.id() as i32)
-                    } else {
-                        child.id() as i32
-                    };
-                    if let Err(error) = ready(PreparedSignalTarget::Direct(target)) {
-                        kill_and_reap(&mut child, Some(target));
-                        return Err(error);
-                    }
-                    let child_id = child.id();
-                    (child, child_id, Some(target), None)
-                }
-            };
-        #[cfg(target_os = "linux")]
-        let child = launched_child;
-        #[cfg(all(unix, not(target_os = "linux")))]
+        // Negative = the whole process group, and only ever after `confirm_group_leader`; see
+        // `signal_process_group`. The retained-monitor launch that used to fork here was removed
+        // with `linux_monitor` (epic 1.1); the Landlock path signals its child's group directly.
+        #[cfg(unix)]
         let signal_target = {
-            let pid = child.id() as i32;
-            let target = if signal_process_group { -pid } else { pid };
+            let target = if signal_process_group {
+                -(child.id() as i32)
+            } else {
+                child.id() as i32
+            };
             if let Err(error) = ready(PreparedSignalTarget::Direct(target)) {
                 kill_and_reap(&mut child, Some(target));
                 return Err(error);
@@ -845,36 +754,17 @@ impl Prepared {
         };
         #[cfg(not(unix))]
         let _ = ready;
-        #[cfg(not(target_os = "linux"))]
         let child_id = child.id();
         Ok(PreparedChild {
             child: Some(child),
             child_id,
             #[cfg(unix)]
             signal_target,
-            #[cfg(target_os = "linux")]
-            retained_monitor,
             #[cfg(unix)]
             signal_process_group,
             _proxy: self.proxy.take(),
-            #[cfg(target_os = "linux")]
-            _net_bridge: self.net_bridge.take(),
             _private_tmp: self._private_tmp.take(),
         })
-    }
-
-    /// Test/debug-only: this run's host bridge socket dir, when per-host net (C3) is
-    /// active. Exists so integration tests can assert the EXACT dir a specific bridge
-    /// instance created is gone after teardown — scanning the shared OS temp dir by this
-    /// process's pid is not hermetic across concurrently-running test threads, which all
-    /// share one pid (only the trailing nonce in `nub-net-<pid>-<nonce>` differs). Not
-    /// part of the stable API.
-    #[cfg(target_os = "linux")]
-    #[doc(hidden)]
-    pub fn debug_net_bridge_dir(&self) -> Option<&std::path::Path> {
-        self.net_bridge
-            .as_ref()
-            .map(linux_net_bridge::HostNetBridge::socket_dir)
     }
 
     /// Launch the prepared child and wait for it, returning its exit status. The
@@ -1187,7 +1077,9 @@ fn apply_inner(
     spec: CommandSpec,
     runtime: Option<&RuntimeCapability>,
 ) -> Result<Prepared, Degradation> {
-    #[cfg(not(target_os = "linux"))]
+    // The Linux confinement path no longer consumes the embedder runtime capability: the
+    // retained-monitor tier that materialized a runtime image was dropped with `linux_monitor`
+    // (epic 1.1). The seam stays on the public API for the supervisor phase (epic 1.1d).
     let _ = runtime;
     if !policy.env.resolved {
         return Err(Degradation {
@@ -1226,7 +1118,7 @@ fn apply_inner(
     };
     let policy = &runtime_policy;
     #[cfg(target_os = "linux")]
-    let linux_preflight = linux::preflight(policy, &spec, runtime)?;
+    let linux_preflight = linux::preflight(policy, &spec)?;
     // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
     // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
     // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`
@@ -1253,21 +1145,20 @@ fn apply_inner(
     // presence as `proxy_port` (both derive from `proxy`), threaded into each backend so
     // the child authenticates to the loopback proxy.
     let proxy_token = proxy.as_ref().map(EgressProxy::token);
-    // The child CA bundle, when TLS termination engaged. Linux receives the proxy's
-    // sealed descriptor; other backends receive its ephemeral path.
+    // The Linux Landlock backend takes neither: it confines egress with a coarse seccomp family
+    // ceiling and has no proxy to authenticate to. Both are threaded into the mac/win/generic
+    // backends below, which are cfg'd out here. (epic 1.1d wires the supervisor into this seam.)
+    #[cfg(target_os = "linux")]
+    let _ = (proxy_port, proxy_token);
+    // The child CA bundle, when TLS termination engaged — its ephemeral path, threaded into the
+    // mac/win/generic backends. On Linux the only wired backend is the Landlock build jail, which
+    // starts no proxy and terminates no TLS, so there is never a CA bundle to hand it or announce.
     #[cfg(not(target_os = "linux"))]
     let ca_bundle = proxy.as_ref().and_then(|p| p.ca_bundle_path());
-    #[cfg(target_os = "linux")]
-    let ca_bundle = proxy
-        .as_ref()
-        .map(EgressProxy::ca_bundle_file)
-        .transpose()
-        .map_err(|error| Degradation {
-            lost: vec!["net-per-host".to_string()],
-            reason: Some(format!("cloning sealed CA bundle: {error}")),
-        })?
-        .flatten();
+    #[cfg(not(target_os = "linux"))]
     let ca_bundle_present = ca_bundle.is_some();
+    #[cfg(target_os = "linux")]
+    let ca_bundle_present = false;
 
     // Create the fresh per-run PRIVATE tmp dir up front (when the policy asks), so its
     // path is threaded into the backend BEFORE the child profile is built — the backend
@@ -1277,32 +1168,14 @@ fn apply_inner(
     let private_tmp = make_private_tmp(policy);
     let tmp_dir = private_tmp.as_ref().map(|d| d.path());
 
-    // C3: on Linux, per-host net needs a bridge from the `--unshare-net` child's empty
-    // netns to the loopback proxy — the netns has no route to the parent's proxy port. The
-    // host-side half runs here in the parent; its 0700 socket dir is bind-mounted into the
-    // sandbox and the monitor's in-netns half connects to it. A start failure leaves
-    // `net_bridge` None so the backend fail-SAFE degrades per-host to coarse-deny.
-    #[cfg(target_os = "linux")]
-    let net_bridge = proxy_port.and_then(|port| linux_net_bridge::start(port).ok());
-    #[cfg(target_os = "linux")]
-    let net_bridge_dir = net_bridge
-        .as_ref()
-        .map(linux_net_bridge::HostNetBridge::socket_dir);
-
     #[cfg(target_os = "macos")]
     let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
+    // The Linux backend takes neither the proxy nor a net bridge: the Landlock build jail confines
+    // egress with a coarse seccomp family ceiling and has no netns to route through, and the
+    // retained-monitor net bridge was dropped with `linux_monitor` (epic 1.1). The non-Landlock
+    // seam that would drive `linux_supervisor` is epic 1.1(d).
     #[cfg(target_os = "linux")]
-    let mut prepared = linux::apply(
-        policy,
-        spec,
-        proxy_port,
-        proxy_token,
-        ca_bundle,
-        tmp_dir,
-        net_bridge_dir,
-        runtime,
-        linux_preflight,
-    )?;
+    let mut prepared = linux::apply(policy, spec, tmp_dir, linux_preflight)?;
     #[cfg(target_os = "windows")]
     let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -1323,10 +1196,6 @@ fn apply_inner(
     }
 
     prepared.proxy = proxy;
-    #[cfg(target_os = "linux")]
-    {
-        prepared.net_bridge = net_bridge;
-    }
     prepared._private_tmp = private_tmp;
     prepared.redact_stdout = redact_stdout;
     prepared.redact_stderr = redact_stderr;

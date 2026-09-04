@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 //! Zero-privilege transparent per-hostname TCP egress supervisor (Linux).
 //!
 //! This is a Rust port of the reviewed, measured C prototype `route.c`. It gives the
