@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '26.8.1' }
+        with: { node-version: '26.5.1' }
       - uses: Swatinem/rust-cache@v2
       - name: Install hyperfine
         run: |

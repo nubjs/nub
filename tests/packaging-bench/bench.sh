@@ -15,7 +15,12 @@
 set -uo pipefail
 
 NUB_BIN="${NUB_BIN:?set NUB_BIN to a nub built with --features compile}"
-NODE_PIN="${NODE_PIN:-26.8.1}"
+# 26.5.1, not the newest 26: it is the newest Node the INSTALLED @yao-pkg/pkg-fetch
+# can build (patches.json in 3.6.5), and a single-Node comparison is worth more
+# than three fresher patch releases. Everything — the runner's node, SEA, caxa,
+# pkg and nub — is on this one version. Re-check with:
+#   node -p 'Object.keys(require("@yao-pkg/pkg-fetch/patches/patches.json")).at(-1)'
+NODE_PIN="${NODE_PIN:-26.5.1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WARMUP="${WARMUP:-30}"
 MIN_RUNS="${MIN_RUNS:-150}"
@@ -103,6 +108,16 @@ EOF
   else note_drop "sea-$F" "$(tail -3 "build-sea-$F.log" | tr '\n' ' ')"; fi
   echo "  sea built via: ${SEA_HOW:-FAILED}"
 
+  # SEA again with `useCodeCache`, its own supported option. Without it SEA is the
+  # only packaged row with no bytecode cache at all, which would flatter caxa and
+  # nub on the fixture that has a module graph.
+  cat > "sea-cc-$F.json" <<EOF
+{ "main": "$B", "output": "$W/art/seacc-$F", "disableExperimentalSEAWarning": true, "useCodeCache": true }
+EOF
+  if node --build-sea "sea-cc-$F.json" > "build-seacc-$F.log" 2>&1; then
+    chmod +x "art/seacc-$F"; BUILT+=("seacc-$F")
+  else note_drop "seacc-$F" "$(tail -3 "build-seacc-$F.log" | tr '\n' ' ')"; fi
+
   echo "== $F / @yao-pkg/pkg"
   # NODE_PIN must be a version pkg-fetch can actually build, or every pkg row drops
   # with "No available node version satisfies 'vX'". The gate is the `patches.json`
@@ -161,6 +176,12 @@ for F in hello cli; do
   done
 done
 
+for F in hello cli; do
+  mkdir -p "$W/nodecc-$F.v8"
+  NODE_COMPILE_CACHE="$W/nodecc-$F.v8" node "bundles/$F.cjs" > /dev/null 2>&1
+  echo "  ok   nodecc-$F (plain node, warm V8 compile cache)"
+done
+
 echo
 echo "== versions"
 echo "  host node          $(node -v)   ($OS-$ARCH)"
@@ -175,7 +196,9 @@ echo "  nub runtime        node ${NODE_PIN}, embedded"
 echo
 echo "== V8 compile cache (NODE_COMPILE_CACHE) — NOT uniform across these rows"
 echo "  plain node         off"
+echo "  nodecc             ON    (plain node, NODE_COMPILE_CACHE set by this script)"
 echo "  sea                off   (the sea config sets no useCodeCache)"
+echo "  seacc              ON    (sea config useCodeCache: true)"
 echo "  caxa               ON    (stub childEnv, stubs/stub.go — points at its extraction dir)"
 echo "  nub / nubown       ON    (launcher compile_cache_dir — \$cache/compile-v8/<key>)"
 echo "  => on a fixture with a real module graph, caxa and nub start with warm V8"
@@ -197,13 +220,21 @@ run_table() {
   # baseline on a fixture with a module graph is stub overhead MINUS a bytecode-cache
   # saving that plain node and SEA never get. This row separates the two, and the
   # difference between it and `caxa-*` is what the cache is worth on this fixture.
-  for A in "sea-$F" "pkg-$F" "caxa-$F" "caxanocc-$F" "nub-$F" "nubown-$F"; do
-    local art="$A" pre=""
+  # `nodecc-*` is plain node with the SAME V8 compile cache caxa and nub give
+  # themselves. It is the row that makes the comparison separable: a packaged
+  # row's margin over `baseline-*` is packaging overhead MINUS a cache saving,
+  # while its margin over `nodecc-*` is the packaging overhead alone.
+  for A in "nodecc-$F" "sea-$F" "seacc-$F" "pkg-$F" "caxa-$F" "caxanocc-$F" "nub-$F" "nubown-$F"; do
+    local art="$A" pre="" full=""
     case "$A" in
+      nodecc-*)   full="NODE_COMPILE_CACHE=$W/nodecc-$F.v8 node $W/bundles/$F.cjs" ;;
       caxanocc-*) art="caxa-$F"; pre="CAXA_DISABLE_COMPILE_CACHE=1 " ;;
     esac
-    [ -x "art/$art" ] || continue
-    args+=(-n "$A" "$pre$W/art/$art")
+    if [ -z "$full" ]; then
+      [ -x "art/$art" ] || continue
+      full="$pre$W/art/$art"
+    fi
+    args+=(-n "$A" "$full")
     n=$((n + 1))
     # A duplicate baseline every two artifacts: the drift between these identical
     # commands is the only honest error bar on the rows around them.
