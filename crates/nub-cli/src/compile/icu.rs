@@ -37,24 +37,16 @@ const MAGIC: (u8, u8) = (0xDA, 0x27);
 const ITEM_ALIGN: usize = 16;
 
 /// What a trim did, for the build report.
+///
+/// Counts only. The bytes freed inside the binary are not carried, because the
+/// figure a caller would want — how much smaller the artifact gets — is decided by
+/// zstd afterwards, and the raw number is about four times larger. Reporting it
+/// promised a saving the build does not deliver.
 pub struct TrimReport {
-    /// Package size before, in bytes.
-    pub before: usize,
-    /// Package size after, in bytes.
-    pub after: usize,
     /// Items retained.
     pub kept: usize,
     /// Items the original package held.
     pub total: usize,
-}
-
-impl TrimReport {
-    /// Bytes the trim freed inside the binary. They do not shrink the file — the
-    /// package is overwritten in place and zero-padded — but zstd removes almost
-    /// all of them from the artifact.
-    pub fn freed(&self) -> usize {
-        self.before - self.after
-    }
 }
 
 /// The one ICU common-data package in `bytes`.
@@ -251,17 +243,16 @@ pub fn trim(bytes: &mut [u8], locales: &[String]) -> Result<TrimReport> {
         body.resize(body.len().div_ceil(ITEM_ALIGN) * ITEM_ALIGN, 0);
     }
 
-    let before = end - header;
-    let after = (toc - header) + body.len();
-    if after > before {
+    // Dropping items can only shrink the package, so this cannot fire on any input
+    // the filter above produces. It is here because the alternative to failing is
+    // writing past `end` into whatever the linker put next.
+    if (toc - header) + body.len() > end - header {
         bail!("the trimmed ICU package is larger than the one it replaces");
     }
     bytes[toc..toc + body.len()].copy_from_slice(&body);
     bytes[toc + body.len()..end].fill(0);
 
     Ok(TrimReport {
-        before,
-        after,
         kept: kept.len(),
         total: count,
     })
@@ -302,12 +293,18 @@ pub fn parse_locales(value: &str) -> Result<Option<Vec<String>>> {
 mod tests {
     use super::*;
 
+    /// `root` is deliberately absent from the locale list below. Its four letters
+    /// fail the language-subtag length bound, so it is classified as supplemental
+    /// and retained by that path — and `wanted` names it explicitly as well, so
+    /// widening the bound later could not start dropping it. Both trim tests assert
+    /// `root.res` survives, which is the property that actually matters.
     #[test]
     fn locale_shape_separates_locales_from_supplemental_data() {
-        for locale in ["en", "de", "root", "zh_Hans_CN", "en_GB", "haw", "sr_Latn"] {
+        for locale in ["en", "de", "zh_Hans_CN", "en_GB", "haw", "sr_Latn"] {
             assert!(is_locale(locale), "{locale} is a locale id");
         }
         for other in [
+            "root",
             "supplementalData",
             "zoneinfo64",
             "likelySubtags",
@@ -378,8 +375,7 @@ mod tests {
                 "icudt78l/supplementalData.res"
             ]
         );
-        assert!(report.after < report.before, "the package must shrink");
-        assert!(report.freed() > 0);
+        assert!(report.kept < report.total, "the package must shrink");
     }
 
     #[test]

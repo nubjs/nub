@@ -2086,12 +2086,16 @@ fn prepare_node_bytes(
         Some(locales) => {
             let mut bytes = original.clone();
             let report = icu::trim(&mut bytes, locales)?;
+            // Resource counts, not the bytes freed. The rewrite vacates ~19 MB of a
+            // ~107 MB binary, but most of that is zeros by the time zstd sees it, so
+            // reporting the raw figure would promise an artifact four times smaller
+            // than the one this build is about to produce. The `output` row below
+            // states the size that actually ships.
             note(&format!(
-                "Trimmed ICU to {} ({} of {} resources, −{:.0} MB before compression)",
+                "Trimmed ICU to {} ({} of {} locale resources kept)",
                 locales.join(", "),
                 report.kept,
-                report.total,
-                report.freed() as f64 / 1_000_000.0
+                report.total
             ));
             bytes
         }
