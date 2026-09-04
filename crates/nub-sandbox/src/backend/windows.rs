@@ -82,6 +82,10 @@ pub(crate) struct AppContainerLaunch {
     cwd: Option<PathBuf>,
     /// Subtrees the AppContainer SID is granted inheritable read-execute.
     read_grants: Vec<PathBuf>,
+    /// Directory OBJECTS the AppContainer SID is granted list+traverse on, with NO
+    /// inheritance — [`derive_grants`]'s `read_nodes`. Granted through the same writer as
+    /// the ancestor chain, so they propagate nothing and revoke through `AceGuard::objects`.
+    read_node_grants: Vec<PathBuf>,
     /// Subtrees the AppContainer SID is granted inheritable modify (read+write).
     write_grants: Vec<PathBuf>,
     /// The subset of `read_grants` marked [`FsOrigin::NubOwnedPublic`] — nub's OWN public
@@ -177,6 +181,13 @@ pub(super) struct FsDegrade {
 /// fourth independent list, and a bare 4-tuple gives a reader no way to see that.
 pub(super) struct DerivedGrants {
     pub(super) read: Vec<PathBuf>,
+    /// Read grants naming the directory OBJECT and not its subtree — the Windows spelling of
+    /// Linux's [`MountAccess::ListOnly`]. Kept apart from `read` because the two compile to
+    /// different ACEs through different writers: an inheritable read that propagates, versus a
+    /// non-inherited list+traverse that does not. See [`derive_grants`] for why the distinction
+    /// is both a confinement fact and the largest per-spawn saving on this backend.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(super) read_nodes: Vec<PathBuf>,
     pub(super) write: Vec<PathBuf>,
     /// The subset of `read` marked [`FsOrigin::NubOwnedPublic`] — nub's own public caches,
     /// which a backend may satisfy with one persistent machine-wide read instead of an ACE
@@ -193,6 +204,7 @@ pub(super) struct DerivedGrants {
 
 pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
     let mut read = Vec::new();
+    let mut read_nodes = Vec::new();
     let mut write = Vec::new();
     let mut publishable = Vec::new();
     let mut degrade = FsDegrade {
@@ -200,12 +212,27 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
         ..Default::default()
     };
 
-    for rule in &fs.rules.entries {
+    for (index, rule) in fs.rules.entries.iter().enumerate() {
         // Denies are implicit in the allowlist (ungranted = denied); their one hole (a
         // deny inside a granted subtree) is checked in `apply` post-program-dir.
         if rule.effect == Effect::Deny {
             continue;
         }
+        // A subtree is the PAIR `[P, P/**]`, so a bare `P` whose own twin does not follow it
+        // names the directory NODE. Matching `linux_grants::compile_mount_plan`, which reads
+        // the same IR: the twin must agree on effect AND access, since an adjacent `P/**`
+        // that denies, or grants differently, is a different rule and does not make `P` a
+        // subtree head.
+        let node_only = {
+            let pattern = rule.matcher.as_str();
+            let twin = format!("{pattern}/**");
+            !pattern.ends_with("/**")
+                && fs.rules.entries.get(index + 1).is_none_or(|t| {
+                    t.matcher.as_str() != twin.as_str()
+                        || t.effect != rule.effect
+                        || t.access != rule.access
+                })
+        };
         match literal_subtree(rule.matcher.as_str()) {
             Some(dir) => {
                 // An ACE can only be installed on a path that exists, and `set_ace` fails
@@ -221,6 +248,35 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
                 // no hole: a path that does not exist grants nothing, and an authored rule
                 // naming the same path still pushes it and still fails hard.
                 if rule.origin.tolerates_absent() && !dir.exists() {
+                    continue;
+                }
+                // ⛔ A NODE-ONLY READ IS THE DIRECTORY OBJECT, NEVER ITS SUBTREE, AND WINDOWS
+                // WAS THE ONE BACKEND THAT IGNORED THE DISTINCTION. `preset::project_cwd_node`
+                // emits a bare rule on the CONSUMER'S PROJECT ROOT for exactly this shape, and
+                // its own doc calls the node/subtree split "the entire safety argument": a
+                // confined lifecycle script gets a working `getcwd` and no read of `src/`,
+                // `.git/` or a root `.env`. Linux compiles it to `MountAccess::ListOnly` and
+                // macOS to a Seatbelt `(literal ...)`; here `literal_subtree` answered `Some`
+                // for any glob-free path and the launch granted it `inherit = true`, i.e. an
+                // inheritable read over the whole project — which a pure allowlist with no
+                // denies has nothing to subtract back. Measured on a Windows VM before this
+                // change: a jailed script read a project-root `.env` while an out-of-project
+                // control was correctly refused, so the exposure was this grant and not an
+                // ambient one.
+                //
+                // The SAME fix is the largest single per-spawn saving on this backend.
+                // `SetNamedSecurityInfoW` materializes an inheritable ace by walking every
+                // existing descendant, on the set AND on the revoke, so the project root alone
+                // cost 108 ms to grant plus 75 ms to revoke on a small project. A node grant
+                // goes through `set_ace_on_object`, which writes the object's own descriptor
+                // and propagates nothing (140 µs, measured in `windows_jail_repairs.rs`).
+                //
+                // Only READ diverts. A node-only ReadWrite keeps today's grant: an over-grant
+                // is recoverable, and an under-grant strands a build on a laundered EPERM.
+                if rule.access == FsAccess::Read && node_only && dir.is_dir() {
+                    if !read_nodes.contains(&dir) {
+                        read_nodes.push(dir.clone());
+                    }
                     continue;
                 }
                 if !read.contains(&dir) {
@@ -250,12 +306,72 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
             None => {}
         }
     }
+    // Fold away a read grant that a WIDER read grant already reaches. An inheritable read ace
+    // on an ancestor covers every descendant, so the inner grant installs the same access a
+    // second time and pays a second propagation walk for it — measured, the store cell's
+    // `node_modules` nested inside `<project>/node_modules` is ~63 ms to grant and ~60 ms to
+    // revoke, for access the outer grant had already given.
+    //
+    // ⛔ THREE THINGS IT MUST NOT FOLD, EACH A SILENT UNDER-GRANT IF IT DID:
+    //   - a WRITE into a read ancestor — the read ace carries no `GENERIC_WRITE`, so `write`
+    //     is not touched here at all;
+    //   - anything into a NODE-ONLY ancestor — those do not inherit, which is their purpose,
+    //     and they live in a separate list so they cannot be picked as an `outer`;
+    //   - a descendant reached through a REPARSE POINT. Containment here is lexical while
+    //     inheritance follows the REAL tree, and the virtual store is laid out as directory
+    //     links: `<project>/node_modules/.store/a@1/node_modules/b` is under the outer grant
+    //     by path and NOT under it by dacl. Every component from the inner path up to the
+    //     outer one is stat'd, and any link — or any stat that fails — keeps today's grant.
+    let read_outers: Vec<PathBuf> = read.clone();
+    read.retain(|dir| {
+        !read_outers.iter().any(|outer| {
+            outer != dir
+                && dir.starts_with(outer)
+                && !publishable.contains(dir)
+                && !crosses_reparse_point(outer, dir)
+        })
+    });
+
+    // The same fold for writes, against WRITE outers only — never a read ancestor, whose ace
+    // carries no `GENERIC_WRITE`. Every write grant asks for the identical mask, so a nested one
+    // is pure duplication: measured, a store cell's package directory sits inside that cell's own
+    // root and cost 53 ms to grant plus 54 ms to revoke for access the cell grant already gave.
+    let write_outers: Vec<PathBuf> = write.clone();
+    write.retain(|dir| {
+        !write_outers.iter().any(|outer| {
+            outer != dir && dir.starts_with(outer) && !crosses_reparse_point(outer, dir)
+        })
+    });
+
     DerivedGrants {
         read,
+        read_nodes,
         write,
         publishable,
         degrade,
     }
+}
+
+/// Whether reaching `inner` from `outer` passes through a link, so an inheritable ace on
+/// `outer` cannot be assumed to reach it. `inner` ITSELF counts: granting a directory link
+/// grants its target, while inheritance from the ancestor would only ever reach the link.
+///
+/// Any uncertainty answers YES — an unreadable component is a reason to keep the explicit
+/// grant, never to drop it.
+fn crosses_reparse_point(outer: &Path, inner: &Path) -> bool {
+    let mut cur = inner;
+    while cur != outer {
+        match std::fs::symlink_metadata(cur) {
+            Ok(md) if md.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+        match cur.parent() {
+            Some(parent) => cur = parent,
+            None => return true,
+        }
+    }
+    false
 }
 
 /// Whether any read DENY could match a path inside a granted read subtree — an
@@ -737,6 +853,7 @@ pub(crate) fn apply(
     }
 
     let read_grants = derived.read;
+    let read_node_grants = derived.read_nodes;
     let write_grants = derived.write;
     let publishable_grants = derived.publishable;
     let fs_degrade = derived.degrade;
@@ -850,6 +967,7 @@ pub(crate) fn apply(
         args: spec.args,
         cwd: spec.cwd,
         read_grants,
+        read_node_grants,
         write_grants,
         publishable_grants,
         env: build_child_env(&policy.env, tier1, proxy_port, proxy_token, ca_bundle),
@@ -1456,6 +1574,7 @@ pub(super) mod launch {
         let leaves: Vec<&Path> = launch
             .read_grants
             .iter()
+            .chain(launch.read_node_grants.iter())
             .chain(launch.write_grants.iter())
             .chain(launch.cwd.iter())
             .map(PathBuf::as_path)
@@ -2233,6 +2352,20 @@ pub(super) mod launch {
                 }
             }
 
+            // 2a'. NODE-ONLY READS — the directory object, never its subtree. Same writer and
+            //      same mask as the ancestor chain below, so this grant propagates nothing and
+            //      tears down through the existing `objects` path. Best-effort for the same
+            //      reason a read leaf is: a grant not installed leaves the child with LESS.
+            for dir in &self.read_node_grants {
+                if timed(&format!("grant.node {}", dir.display()), || {
+                    set_ace_on_object(dir, ac_sid, TRAVERSE_MASK, GRANT_ACCESS)
+                })
+                .is_ok()
+                {
+                    _aces.objects.push(dir.clone());
+                }
+            }
+
             // 2b. THE ANCESTOR CHAIN, which the leaf grants alone do not cover.
             //
             // Traverse-bypass exempts INTERMEDIATE components of one open; it does not make
@@ -2472,7 +2605,7 @@ pub(super) mod launch {
                 //
                 // So drain the JOB before letting it close. Polled rather than event-driven because
                 // a completion port needs `Win32_System_IO`, which this crate does not enable, and
-                // widening the feature set to avoid a 50 ms poll would buy nothing.
+                // widening the feature set to avoid a short poll would buy nothing.
                 let handed_off = timed("drain_job", || drain_job_and_status(job, pi.dwProcessId));
                 let mut code: u32 = 0;
                 GetExitCodeProcess(pi.hProcess, &mut code);
@@ -2879,7 +3012,14 @@ pub(super) mod launch {
     /// could not be trusted. The cost is that a script deliberately backgrounding a failing process
     /// now surfaces as a failure; for a build jail that is the right way to be wrong.
     fn drain_job_and_status(job: HANDLE, direct_child_pid: u32) -> Option<u32> {
-        const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+        // 5 ms, not 50. The loop breaks as soon as the job reports no active processes, so
+        // the poll interval is pure over-wait added to EVERY confined spawn — and the direct
+        // child is itself a job member, which makes this the wait for the script rather than
+        // something that runs after it. A tenth of the interval costs ten cheap
+        // `QueryInformationJobObject` calls per 50 ms of a build that already runs for
+        // seconds, and removes the tail latency from the short scripts that dominate an
+        // install's fixed cost.
+        const POLL: std::time::Duration = std::time::Duration::from_millis(5);
         const CAP: std::time::Duration = std::time::Duration::from_secs(90);
         // Bounded so a runaway script cannot make this allocate without limit. Far above any real
         // lifecycle script's process count; anything beyond it is simply not tracked.
@@ -3412,19 +3552,29 @@ mod tests {
         let missing = dir.path().join("missing");
         let canon = |p: &Path| p.to_string_lossy().replace('\\', "/");
 
-        let with_origin = |origin: FsOrigin| FsRule {
-            matcher: CanonGlob(canon(&missing)),
-            effect: Effect::Allow,
-            access: FsAccess::Read,
-            origin,
+        // ⛔ THE `/**` TWINS ARE LOAD-BEARING, NOT NOISE. This test is about ORIGIN and
+        // ABSENCE, and it asserts on `read` — the SUBTREE plan. A bare literal with no twin is
+        // a node-only grant now (see `derive_grants`) and lands in `read_nodes` instead, so
+        // dropping the twins would make both assertions vacuous while still compiling. The
+        // node/subtree split itself is pinned by `a_bare_literal_grants_the_node_not_the_subtree`.
+        let subtree = |p: &Path, origin: FsOrigin| {
+            let mk = |m: String| FsRule {
+                matcher: CanonGlob(m),
+                effect: Effect::Allow,
+                access: FsAccess::Read,
+                origin,
+            };
+            vec![mk(canon(p)), mk(format!("{}/**", canon(p)))]
         };
+        let with_origin = |origin: FsOrigin| subtree(&missing, origin);
 
         let __g = derive_grants(&fs(
             Effect::Deny,
-            vec![
-                rule(&canon(&present), Effect::Allow, FsAccess::Read),
+            [
+                subtree(&present, FsOrigin::Authored),
                 with_origin(FsOrigin::Speculative),
-            ],
+            ]
+            .concat(),
         ));
         let read = __g.read;
         assert_eq!(
@@ -3435,10 +3585,11 @@ mod tests {
 
         let __g = derive_grants(&fs(
             Effect::Deny,
-            vec![
-                rule(&canon(&present), Effect::Allow, FsAccess::Read),
+            [
+                subtree(&present, FsOrigin::Authored),
                 with_origin(FsOrigin::Authored),
-            ],
+            ]
+            .concat(),
         ));
         let read = __g.read;
         assert_eq!(
@@ -3482,6 +3633,104 @@ mod tests {
         assert!(
             write.is_empty(),
             "a read-only allow must not open a write grant"
+        );
+    }
+
+    /// A bare literal grants the directory NODE; only the `[P, P/**]` pair grants the subtree.
+    ///
+    /// ⛔ WHAT GOES WRONG WITHOUT THIS. `preset::project_cwd_node` emits a bare rule on the
+    /// consumer's project root precisely so a confined lifecycle script can `getcwd` and still
+    /// not read `src/`, `.git/` or a root `.env` — its own doc calls the distinction "the entire
+    /// safety argument". Linux honours it (`MountAccess::ListOnly`) and macOS honours it (a
+    /// Seatbelt `literal`), while this backend granted an INHERITABLE read over the whole
+    /// project, which a pure allowlist has no deny to subtract back. Nothing pinned the split
+    /// here, so the divergence was invisible to every gate.
+    ///
+    /// Both directions are asserted. The subtree arm is the one that catches over-correction: a
+    /// node-only rule that swallowed real subtree grants would silently under-grant every
+    /// lifecycle script, which surfaces as a laundered EPERM rather than as a failure here.
+    #[test]
+    fn a_bare_literal_grants_the_node_not_the_subtree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("proj");
+        std::fs::create_dir(&target).expect("create proj");
+        let canon = target.to_string_lossy().replace('\\', "/");
+
+        let node = derive_grants(&fs(
+            Effect::Deny,
+            vec![rule(&canon, Effect::Allow, FsAccess::Read)],
+        ));
+        assert_eq!(
+            node.read_nodes,
+            vec![target.clone()],
+            "a bare literal must grant the directory node"
+        );
+        assert!(
+            node.read.is_empty(),
+            "a bare literal must NOT reach the inheritable subtree plan: {:?}",
+            node.read
+        );
+
+        let whole = derive_grants(&fs(
+            Effect::Deny,
+            vec![
+                rule(&canon, Effect::Allow, FsAccess::Read),
+                rule(&format!("{canon}/**"), Effect::Allow, FsAccess::Read),
+            ],
+        ));
+        assert_eq!(
+            whole.read,
+            vec![target],
+            "the `[P, P/**]` pair must still grant the whole subtree"
+        );
+        assert!(
+            whole.read_nodes.is_empty(),
+            "a real subtree grant must not be downgraded to its node: {:?}",
+            whole.read_nodes
+        );
+    }
+
+    /// A read grant nested inside a wider read grant is dropped — the inheritable ace on the
+    /// outer already reaches it, so the inner one buys nothing and pays a second propagation
+    /// walk. Writes are folded only into WRITE outers, never a read one, whose ace carries no
+    /// `GENERIC_WRITE`; that direction is what an over-eager fold would turn into a silent
+    /// under-grant, so it is asserted rather than assumed.
+    #[test]
+    fn a_nested_grant_folds_into_its_ancestor_but_a_write_never_folds_into_a_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outer = dir.path().join("outer");
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).expect("create tree");
+        let c = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        let sub = |p: &Path, a: FsAccess| {
+            vec![
+                rule(&c(p), Effect::Allow, a),
+                rule(&format!("{}/**", c(p)), Effect::Allow, a),
+            ]
+        };
+
+        let folded = derive_grants(&fs(
+            Effect::Deny,
+            [sub(&outer, FsAccess::Read), sub(&inner, FsAccess::Read)].concat(),
+        ));
+        assert_eq!(
+            folded.read,
+            vec![outer.clone()],
+            "a read nested in a wider read must fold away"
+        );
+
+        let kept = derive_grants(&fs(
+            Effect::Deny,
+            [
+                sub(&outer, FsAccess::Read),
+                sub(&inner, FsAccess::ReadWrite),
+            ]
+            .concat(),
+        ));
+        assert!(
+            kept.write.contains(&inner),
+            "a WRITE must never fold into a read ancestor: {:?}",
+            kept.write
         );
     }
 

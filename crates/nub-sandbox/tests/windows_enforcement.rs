@@ -348,13 +348,24 @@ mod win {
 
     // ── policy builders (direct IR — full control over each axis) ─────────────────
 
+    /// ⛔ A SUBTREE IS THE PAIR `[P, P/**]`, and hand-rolling the bare half was expressing
+    /// subtree intent in NODE syntax. `compiler::defaults::subtree_globs` — which every
+    /// production path goes through — returns both globs, and the bare form on its own is what
+    /// `preset::project_cwd_node` uses to grant a directory and deliberately NOT its contents.
+    /// This helper emitted only the bare half while its probes read files INSIDE the granted
+    /// directory, so it was asserting against a policy shape the compiler never produces. It
+    /// passed only because this backend used to ignore the distinction that Linux and macOS
+    /// both enforce; the moment Windows honoured it, the probe read its own grant as node-only
+    /// and the child was correctly refused.
     fn read_confine(read: &[&Path], write: &[&Path]) -> SandboxPolicy {
         let mut entries = Vec::new();
         for r in read {
             entries.push(rule(r, Effect::Allow, FsAccess::Read));
+            entries.push(subtree_twin(r, Effect::Allow, FsAccess::Read));
         }
         for w in write {
             entries.push(rule(w, Effect::Allow, FsAccess::ReadWrite));
+            entries.push(subtree_twin(w, Effect::Allow, FsAccess::ReadWrite));
         }
         SandboxPolicy {
             fs: FsPolicy {
@@ -369,6 +380,17 @@ mod win {
             pid: PidPolicy::default(),
             // These probes drive the `nub sandbox` scope, not the dependency build jail.
             build_jail: false,
+        }
+    }
+
+    /// The `/**` half of a subtree pair. Must directly follow its bare twin and agree with it
+    /// on effect and access, which is exactly what the backends test for.
+    fn subtree_twin(p: &Path, effect: Effect, access: FsAccess) -> FsRule {
+        FsRule {
+            matcher: CanonGlob(format!("{}/**", canon(p))),
+            effect,
+            access,
+            origin: FsOrigin::Authored,
         }
     }
 
