@@ -749,10 +749,11 @@ jobs:
     permissions:
       contents: read
     # This leg now stages the vendored runtime like its Windows twin, so the binary it
-    # builds is COMPLETE rather than `enum`-only, and `NUB_ALLOW_INCOMPLETE_RUNTIME` is
-    # gone with it — AGENTS.md forbids that flag on any binary meant to be run, and this
-    # one is uploaded for people to run. Staging widens what the round-trip proves (the
-    # transpile path, not just extract/dlopen) at the cost of one `npm install`.
+    # builds is COMPLETE, and `NUB_ALLOW_INCOMPLETE_RUNTIME` is gone with it — AGENTS.md
+    # forbids that flag on any binary meant to be run, and this one is uploaded for
+    # people to run. Staging a tree is not the same as PROVING it resolves, so the
+    # round-trip fixture below carries the legacy-decorator detector rather than `enum`
+    # alone; `enum` inlines and would pass over an empty node_modules.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -833,14 +834,37 @@ jobs:
           work="$RUNNER_TEMP/fixture"
           rm -rf "$work"; mkdir -p "$work"
           fixture="$work/embed.ts"
-          # `enum` is NON-ERASABLE — see the Windows twin of this step. Node strips
-          # type ANNOTATIONS natively since 23.6, so a types-only fixture proves
-          # nothing about nub; Node rejects `enum`, so this file executes only if
-          # the extract -> dlopen -> transpile round-trip really happened.
+          # Two constructs, because they fail on different halves of the blob — the
+          # same pair the Windows twin carries, for the reasons documented there.
+          #
+          # `enum` is NON-ERASABLE: Node has stripped type ANNOTATIONS natively since
+          # 23.6, so a types-only fixture proves nothing about nub. Node rejects
+          # `enum`, so this file executes only if extract -> dlopen -> transpile
+          # really happened.
+          #
+          # `enum` alone is BLIND to the vendored node_modules, though — oxc inlines
+          # it and it pulls no helper. That is why this job could stage a runtime
+          # tree, upload a binary built from it, and never once prove the tree
+          # resolves. The legacy DECORATOR is the detector: its transpiled output
+          # requires `@oxc-project/runtime/helpers/decorateMetadata`, and an extracted
+          # tree has no parent node_modules to reach it through — only its own
+          # (`vendored_node_path`, crates/nub-core/src/node/spawn.rs). Measured by the
+          # Windows twin against a binary staged with an EMPTY runtime/node_modules:
+          # the enum-only fixture exits 0 and prints the success marker, this one
+          # exits 1 with MODULE_NOT_FOUND.
+          #
+          # CommonJS entry (no package.json) is deliberate and depends on the Node 24
+          # pin above: down-levelling a legacy decorator is version-independent, but
+          # RESOLVING its helper from a CJS entry is unsupported below require(esm)
+          # (Node <20.19 / 22.0-22.11).
+          cat > "$work/tsconfig.json" <<'EOF'
+          {"compilerOptions":{"experimentalDecorators":true,"emitDecoratorMetadata":true}}
+          EOF
           cat > "$fixture" <<'EOF'
           enum Answer { Value = 42 }
-          const greeting: string = "embed-roundtrip-ok";
-          console.log(`${greeting}-${Answer.Value}`);
+          function tag(_t: any, _k: string, d: PropertyDescriptor) { return d; }
+          class Probe { @tag greet(): string { return "embed-roundtrip-ok"; } }
+          console.log(`${new Probe().greet()}-${Answer.Value}`);
           EOF
 
           # --- First run: extract -> verify -> dlopen -> transpile -> execute ---
