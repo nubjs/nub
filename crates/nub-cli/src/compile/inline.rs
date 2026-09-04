@@ -61,23 +61,34 @@ const ENTRY_PLACEHOLDER: &str = "__NUB_INLINE_ENTRY__";
 /// measured, an inline artifact carried 44 globals the same file run through
 /// `nub <file>` did not.
 ///
-/// Three of those names are ALSO real globals and must survive: `process`,
-/// `console` and `crypto` (the WebCrypto one, distinct from the module). Deleting
-/// the rest restores parity exactly — 141 = 141 on Node 26, 135 = 135 on Node 24,
-/// with nothing over-deleted in either direction. The keep-set is spelled out
-/// rather than derived because nothing distinguishes the two kinds at run time:
-/// `process` is a lazy getter exactly like `fs`, and `builtinModules` lists it.
-/// `a-global-parity` is the guard if Node ever adds a fourth.
+/// The DESCRIPTOR is what identifies an injected name, and it is chosen over
+/// comparing the global against the module it would load. `addBuiltinLibsToObject`
+/// installs a lazy ACCESSOR and skips any name globalThis already owns, so a
+/// preload that assigned its own `globalThis.fs` leaves a DATA property, which is
+/// kept. Reading the value instead would be correct too, and was measured to cost
+/// far more than it is worth: it instantiates every builtin at startup, and
+/// touching the deprecated ones emits four `DeprecationWarning`s — DEP0192 twice,
+/// DEP0040 and DEP0025 — on stderr of every artifact that starts.
 ///
-/// The list comes from the bootstrap's own builtin accessor rather than the
+/// `crypto` is the one name a descriptor cannot settle, because it is an accessor
+/// either way: Node 18 has no WebCrypto global, so `-e` injects the MODULE and it
+/// must go, while from Node 19 the global is a `Crypto` instance that must stay.
+/// Its constructor name separates them, and reading that one value loads nothing
+/// that warns. `process` and `console` are accessors too and are simply named —
+/// both are real globals on every supported version.
+///
+/// Measured exact on three majors, nothing over-deleted and nothing left behind:
+/// 113 = 113 on Node 18, 135 = 135 on Node 24, 141 = 141 on Node 26.
+///
+/// The name list comes from the bootstrap's own builtin accessor rather than the
 /// `module` global, because that global is itself one of the injected names — it
 /// is the `node:module` NAMESPACE, not a CJS module instance, so the
 /// `module.constructor.builtinModules` that works in a real `-e` script reads
-/// `undefined` here. Going through the accessor also survives the deletions below,
-/// which take `module` with them.
+/// `undefined` here. The accessor also survives the deletions below, which take
+/// `module` with them.
 ///
 /// One line, so the source-map shift stays exactly one generated line.
-const EVAL_GLOBAL_CLEANUP: &str = "{const B=process[Symbol.for(\"nub.compile.bootstrap\")]?.getBuiltin(\"node:module\")?.builtinModules;for(const k of[\"require\",\"module\",\"exports\",\"__filename\",\"__dirname\"])delete globalThis[k];if(B)for(const k of B)if(k!==\"process\"&&k!==\"console\"&&k!==\"crypto\")delete globalThis[k];}";
+const EVAL_GLOBAL_CLEANUP: &str = "{const L=process[Symbol.for(\"nub.compile.bootstrap\")]?.getBuiltin(\"node:module\")?.builtinModules;for(const k of[\"require\",\"module\",\"exports\",\"__filename\",\"__dirname\"])delete globalThis[k];if(L)for(const k of L){if(k===\"process\"||k===\"console\")continue;const d=Object.getOwnPropertyDescriptor(globalThis,k);if(!d||!d.get)continue;if(k===\"crypto\"&&globalThis.crypto?.constructor?.name===\"Crypto\")continue;delete globalThis[k];}}";
 
 /// Why a payload cannot run inline. Reported in the build summary rather than as an
 /// error: each of these is a payload that works, just not without extracting.
@@ -281,15 +292,20 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
 ///
 /// Both spellings reach the emitted bundle: the authored ESM `node:cluster` keeps
 /// its prefix, and the interop shim Rolldown writes around it is a bare
-/// `require("cluster")`. AST rather than a substring search because the word is an
-/// ordinary English one — a payload logging "cluster failed" resolves nothing and
-/// must still inline. A chunk that fails to parse yields false: the bundler
-/// already emitted it, so a parse failure here is this pass being wrong about the
-/// syntax, and it must never be what fails or degrades a build.
+/// `require("cluster")`. Import syntax is not the only route — a chunk can also
+/// take the module from `createRequire(import.meta.url)(…)`, from
+/// `process.getBuiltinModule(…)`, or from the renamed `__require` a bundler emits —
+/// and every one of them ends in the same re-entry crash, so the callee shapes in
+/// `resolves_builtin` count too. AST rather than a substring search because the
+/// word is an ordinary English one — a payload logging "cluster failed" resolves
+/// nothing and must still inline. A chunk that fails to parse yields false: the
+/// bundler already emitted it, so a parse failure here is this pass being wrong
+/// about the syntax, and it must never be what fails or degrades a build.
 fn reaches_cluster(source: &str) -> bool {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::{
-        CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression, ImportDeclaration,
+        CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression,
+        ImportDeclaration, MemberExpression,
     };
     use oxc_ast_visit::{Visit, walk};
     use oxc_parser::Parser;
@@ -309,6 +325,28 @@ fn reaches_cluster(source: &str) -> bool {
                 .first()
                 .map(|q| q.value.cooked.as_ref().unwrap_or(&q.value.raw).as_str()),
             _ => None,
+        }
+    }
+
+    /// Whether a callee is a plausible way to obtain a builtin module by name.
+    ///
+    /// Targeted on purpose: an unnecessary decline costs a real optimization, so
+    /// this matches the shapes that hand back the module — a `require` binding under
+    /// whatever name the bundler renamed it to, the three property names that stand
+    /// in for one, and the require a `createRequire` call returns — and leaves
+    /// `logger.info("cluster")` alone.
+    fn resolves_builtin(callee: &Expression<'_>) -> bool {
+        match callee.get_inner_expression() {
+            Expression::Identifier(id) => id.name.ends_with("require"),
+            // `createRequire(import.meta.url)("cluster")`: the require is the value a
+            // call produced, so the callee is itself a call.
+            Expression::CallExpression(_) => true,
+            other => other
+                .as_member_expression()
+                .and_then(MemberExpression::static_property_name)
+                .is_some_and(|property| {
+                    matches!(property, "require" | "getBuiltinModule" | "createRequire")
+                }),
         }
     }
 
@@ -345,8 +383,7 @@ fn reaches_cluster(source: &str) -> bool {
         }
 
         fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-            if let Expression::Identifier(callee) = &call.callee
-                && callee.name == "require"
+            if resolves_builtin(&call.callee)
                 && let Some(argument) = call.arguments.first().and_then(|a| a.as_expression())
                 && let Some(specifier) = literal_specifier(argument)
             {
@@ -511,11 +548,11 @@ mod tests {
 
     /// `cluster.fork()` re-runs `process.argv[1]`, which an inline artifact
     /// publishes as the executable — so the child feeds the binary to Node and dies
-    /// on the first byte. Both spellings survive into the emitted chunk, and the
-    /// word on its own decides nothing: a substring search would decline a payload
-    /// that only mentions clusters in a message.
+    /// on the first byte. Every route to the module ends there, import syntax or
+    /// not, and the word on its own decides nothing: a substring search would
+    /// decline a payload that only mentions clusters in a message.
     #[test]
-    fn a_payload_that_names_the_cluster_builtin_declines_but_the_bare_word_does_not() {
+    fn a_payload_that_reaches_the_cluster_builtin_declines_but_a_mere_mention_does_not() {
         assert_eq!(
             decline_of("import cluster from\"node:cluster\";cluster.fork();"),
             Some(Decline::ClusterReentry),
@@ -527,9 +564,32 @@ mod tests {
             "the interop shim requires the bare builtin name"
         );
         assert_eq!(
+            decline_of("const cluster = __require(\"cluster\");cluster.fork();"),
+            Some(Decline::ClusterReentry),
+            "a bundler renames the require binding and the call still resolves"
+        );
+        assert_eq!(
+            decline_of(
+                "import{createRequire}from\"node:module\";\
+                 createRequire(import.meta.url)(\"cluster\").fork();"
+            ),
+            Some(Decline::ClusterReentry),
+            "the callee is the require a createRequire call returned"
+        );
+        assert_eq!(
+            decline_of("process.getBuiltinModule(\"node:cluster\").fork();"),
+            Some(Decline::ClusterReentry),
+            "getBuiltinModule hands back the builtin with no import at all"
+        );
+        assert_eq!(
             decline_of("const msg = \"cluster failed\";console.log(msg);"),
             None,
             "the word in a string literal resolves nothing, so the payload still inlines"
+        );
+        assert_eq!(
+            decline_of("logger.info(\"cluster\");"),
+            None,
+            "an unrelated call passing the word resolves nothing either"
         );
     }
 
