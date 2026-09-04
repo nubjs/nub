@@ -917,6 +917,10 @@ cargo build -p nub-cli --profile fast || echo "WARM-WARN: nub-cli warm-up failed
 # The test job runs on the DEFAULT profile (matching ci.yml), a separate artifact universe
 # from \`fast\`. --no-run stops at link, which is all the warming needs.
 cargo test --workspace --no-run || echo "WARM-WARN: test warm-up failed; the test job will cold-compile"
+# jobScript("test")'s SECOND leg. \`--features compile\` is a different feature set, so the
+# line above warms none of it — and \`compile\` pulls the bundler in, which is the most
+# expensive graph either job compiles.
+cargo test -p nub-cli --features compile --bin nub compile:: --no-run || echo "WARM-WARN: compile-feature warm-up failed; the test job will cold-compile it"
 # nub-native is an EXCLUDED workspace (panic=unwind cdylib), so --workspace never reaches it,
 # and the clippy line above is both a different profile directory and a different driver. Its
 # heavy deps (oxc with features=["full"], napi 3, oxc_napi, oxc_sourcemap[napi]) are declared

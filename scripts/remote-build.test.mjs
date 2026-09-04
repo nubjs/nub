@@ -107,7 +107,15 @@ test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
 // make them fail on a malformed library rather than skip.
 test("jobScript(test) matches CI: whole workspace, real addon staged over the placeholder", () => {
   const s = jobScript("test", "fast");
-  assert.match(s, /\ncargo test$/, "CI runs the whole workspace, not -p nub-cli");
+  // Two legs, and both are load-bearing. Anchored on the trailing NEWLINE rather than
+  // end-of-string: the whole-workspace run stopped being the last command when the
+  // compile-feature leg was added below it, and a `$` here silently pinned that ordering.
+  assert.match(s, /\ncargo test\n/, "CI runs the whole workspace, not -p nub-cli");
+  assert.match(
+    s,
+    /\ncargo test -p nub-cli --features compile --bin nub compile::/,
+    "`compile` is not a default feature, so the whole-workspace run covers none of it",
+  );
   assert.match(s, /crates\/nub-native && cargo build/);
   assert.match(s, /cp "\$CARGO_TARGET_DIR\/debug\/libnub_native\.so" runtime\/addons\/nub-native\.node/);
   // Anchored to the COMMAND, not the raw text: PREPARE is shared by both jobs and its
