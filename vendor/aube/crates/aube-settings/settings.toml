@@ -2600,8 +2600,9 @@ Opt-in floor under the `allowBuilds` allowlist. When enabled, a
 dependency whose build scripts would otherwise be skipped as
 unreviewed may still run them if every gate holds: the package's
 registry name is on the vendored default-trust list (Bun's curated
-`default-trusted-dependencies.txt`, provenance recorded in the data
-file), the package resolved from a registry (git / file / link /
+`default-trusted-dependencies.txt` plus the names pnpm's
+trusted-dependencies list adds to it, provenance for both in the
+data file), the package resolved from a registry (git / file / link /
 tarball sources never qualify), an OSV `MAL-*` advisory gate covered
 this install, and the resolved version has aged past the
 `minimumReleaseAge` window (per its recorded publish time; an unknown
