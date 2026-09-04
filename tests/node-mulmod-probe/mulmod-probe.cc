@@ -45,7 +45,7 @@ static inline u64 mul_mod_128(u64 a, u64 b, u64 m) {
 }
 #endif
 // --- alternative for a compiler without __int128 division: MSVC-style intrinsics ---
-#if defined(_MSC_VER) && defined(_M_X64)
+#if defined(MULMOD_INTRIN)
 static inline u64 mul_mod_intrin(u64 a, u64 b, u64 m) {
   g_mulmod_calls++;
   u64 hi, rem; u64 lo = _umul128(a, b, &hi); _udiv128(hi, lo, m, &rem); return rem;
