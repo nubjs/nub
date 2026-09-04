@@ -200,7 +200,7 @@ setInterval(() => {}, 1000);
 
     $nubRoot = Join-Path $cache 'nub'
     $runtimeDirs = @(Get-ChildItem -LiteralPath $nubRoot -Directory -Filter 'runtime-*')
-    # nub names the reason it declined a cache base on stderr ("… is not usable for
+    # Nub names the reason it declined a cache base on stderr ("… is not usable for
     # the runtime cache (<reason>)"); without it a relocation reads as a bare count.
     if ($runtimeDirs.Count -ne 1) { throw "expected exactly one extracted runtime, got $($runtimeDirs.Count); cold-run stderr: $($cold.Stderr)" }
     $runtime = $runtimeDirs[0].FullName
