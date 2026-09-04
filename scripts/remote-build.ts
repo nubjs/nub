@@ -92,7 +92,14 @@ const SSH_KEY = join(homedir(), ".ssh", "nub-vm");
 const CRED = join(homedir(), ".config", "pullfrog", "vertex-service-account.json");
 // Server-side backstop (layer 2). Generous enough for a cold release build (~7 min) plus
 // sync and toolchain, tight enough that a stray cannot bill for hours.
-const MAX_RUN = "45m";
+// 45m covers every GATE this tool was built for (clippy, test), and the cap is what stops a stray
+// from billing indefinitely. It is NOT enough for every legitimate job: the install-script sweep runs
+// ~179 cold installs and takes about two hours, and it was silently DELETED mid-run at 46 minutes
+// with its results still on the box — "Instance deleted by Compute Engine", which reads exactly like
+// a spot preemption and is not one. `--max-run` raises it for a job that genuinely needs it; the
+// default is unchanged, so nothing gets a longer leash by accident.
+const MAX_RUN_DEFAULT = "45m";
+let MAX_RUN = MAX_RUN_DEFAULT;
 // The bake is longer (apt + rustup + cargo-install + a cold dependency compile) and must not
 // be DELETEd — it stops the instance and images the disk. STOP is a valid termination action
 // for --max-run-duration (gcloud documents it for "automatic instance termination", not only
@@ -131,6 +138,8 @@ Options:
   --source <dir>     Worktree to build (default: the git root of the cwd).
   --machine <type>   GCE machine type (default: ${MACHINE_TYPE}).
   --on-demand        Use on-demand rather than spot provisioning.
+  --max-run <dur>    Raise the instance's max-run-duration (default ${MAX_RUN_DEFAULT}). A job that
+                     outruns it is DELETED mid-run, taking its results with it.
   --keep             Do not delete the VM on exit (debugging; it still self-deletes at ${MAX_RUN}).
   --build-image      Bake the golden image, then exit.
   --reap             Delete builder VMs older than 90m (definitionally stray), then exit.
@@ -177,6 +186,16 @@ export function parseArgs(argv: string[]) {
     else if (v === "--script") a.script = argv[++i];
     else if (v === "--machine") a.machine = argv[++i];
     else if (v === "--on-demand") a.onDemand = true;
+    else if (v === "--max-run") {
+      const d = argv[++i];
+      // Validated rather than trusted: it reaches gcloud as argv, but a malformed duration fails the
+      // create AFTER provisioning has started, which is the expensive place to find out.
+      if (!/^[1-9][0-9]{0,3}[smh]$/.test(d ?? "")) {
+        process.stderr.write(`remote-build: --max-run must look like 90m, 3h or 5400s\n`);
+        process.exit(2);
+      }
+      MAX_RUN = d;
+    }
     else if (v === "--keep") a.keep = true;
     else if (v === "--build-image") a.buildImage = true;
     else if (v === "--reap") a.reap = true;
