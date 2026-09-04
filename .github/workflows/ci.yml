@@ -820,6 +820,16 @@ jobs:
         env:
           AUBE_REQUIRE_PRIMER: "1"
         run: cargo build -p nub-cli --release --features embed-runtime
+      # The libsui signing-determinism test is `cfg(target_vendor = "apple")`, and the
+      # per-OS launcher step in the test job reaches macOS only on push:main and
+      # nightly. This is the one macOS leg every pull request runs, so a
+      # filename-dependent signature regresses here rather than on the next main run.
+      - name: libsui units (macOS, pull requests)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd crates/nub-launcher
+          cargo test --locked -p libsui --lib
       - name: Round-trip — extract, verify, dlopen, execute, warm cache, R2 self-heal
         shell: bash
         run: |
