@@ -1990,7 +1990,15 @@ fn argument_is_one_static_string(after_paren: &str) -> bool {
         match bytes.get(i) {
             // Unterminated within this slice — unreadable, so treat it as computed.
             None => return false,
-            Some(b'\\') => i += 2,
+            // An ESCAPE makes the literal's VALUE differ from its SPELLING, and the
+            // marker check that follows reads the spelling. A specifier written with
+            // `_` in place of the underscore is perfectly static and resolves
+            // the builtin at run time, while containing no contiguous marker — so
+            // accepting it would strip the fork patch for a payload that really
+            // forks. Decoding would be the precise answer; declining to read an
+            // escaped literal is the cheap one, and costs an eager load only on a
+            // spelling almost nobody writes.
+            Some(b'\\') => return false,
             Some(&c) if c == quote => break i + 1,
             _ => i += 1,
         }
@@ -10007,6 +10015,11 @@ after
             r#"require("child" + "_process")"#,
             r#"await import("node:" + name)"#,
             r#"require("fs".concat(""))"#,
+            // An ESCAPED literal is static, but its spelling is not the marker, so
+            // the substring scan that follows finds nothing in it. Both spellings
+            // resolve the builtin at run time.
+            r#"require("child\u005fprocess")"#,
+            r#"require("child\x5fprocess")"#,
         ] {
             assert!(
                 has_computed_module_access(computed),
@@ -10059,6 +10072,21 @@ after
             split.app_uses_child_process.load(AtomicOrdering::Relaxed)
                 && split.app_uses_worker.load(AtomicOrdering::Relaxed),
             "a quoted-prefix concatenation must keep every eager load"
+        );
+
+        // And for a literal whose SPELLING is not its value. This one is fully
+        // static, so the specifier reader would accept it, while the marker scan
+        // that follows reads the raw text and finds nothing.
+        let escaped = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        escaped.note_app_builtin_usage("/app/entry.ts", r#"require("child\u005fprocess").fork(m)"#);
+        assert!(
+            escaped.app_uses_child_process.load(AtomicOrdering::Relaxed)
+                && escaped.app_uses_worker.load(AtomicOrdering::Relaxed),
+            "an escaped builtin spelling must keep every eager load"
         );
     }
 
