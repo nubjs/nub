@@ -97,7 +97,15 @@ const VERSION_ENV = "__NUB_VERSION";
 // feature-matrix `import-text` bands cover every release that KNOWS the flag: on a
 // version nub steps aside on but does not inject for, the import falls through to
 // Node's default loader and dies with ERR_UNKNOWN_FILE_EXTENSION (#688).
-const NATIVE_IMPORT_TEXT = process.allowedNodeEnvironmentFlags.has("--experimental-import-text");
+// Read LAZILY. The first touch of `process.allowedNodeEnvironmentFlags` materialises
+// Node's entire accepted-flag set, and as a top-level const that cost 0.355 ms of
+// this module's evaluation (child CPU, 200 runs, against a 0.000 ms control) on
+// every nub process and inside every compiled artifact — where this module is a
+// static import of the preamble, so nothing call-gated can reach it. Both readers
+// sit inside the load hook's `type: "text"` arm, which most programs never take.
+let __nativeImportText;
+const nativeImportText = () =>
+  (__nativeImportText ??= process.allowedNodeEnvironmentFlags.has("--experimental-import-text"));
 
 // ── data: URL unknown-format fidelity helpers ───────────────────────
 // Mirror Node's internal/modules/esm/get_format.js so nub's sync registerHooks load
@@ -720,7 +728,7 @@ function makeHooks(core, watchReporting) {
 
     // Import Text (attribute-keyed): honor `with { type: "text" }` on ANY extension,
     // ahead of extension dispatch so `import s from "./c.yaml" with {type:"text"}`
-    // returns raw text, not parsed YAML. Where Node knows the flag (NATIVE_IMPORT_TEXT
+    // returns raw text, not parsed YAML. Where Node knows the flag (`nativeImportText()`
     // — 24.19+ on the 24.x line, 26.5+ on 26.x) step aside and let Node's own
     // textStrategy own it — nub injects --experimental-import-text there, so the
     // additive "would plain Node + the flag do the same?" test holds and users get
@@ -741,8 +749,8 @@ function makeHooks(core, watchReporting) {
     // the unknown-data-URL-format trap below instead of Node's own text answer.
     // A non-`file:` URL on the polyfill tier falls through to `nextLoad` with
     // every other unclaimed URL.
-    if (context?.importAttributes?.type === "text" && (NATIVE_IMPORT_TEXT || core.isFileUrl(url))) {
-      return NATIVE_IMPORT_TEXT ? nextLoad(url, context) : core.loadTextImport(url);
+    if (context?.importAttributes?.type === "text" && (nativeImportText() || core.isFileUrl(url))) {
+      return nativeImportText() ? nextLoad(url, context) : core.loadTextImport(url);
     }
 
     // A USER resolve hook (a ts-node/tsx-style transpiler registered AFTER nub's

@@ -342,7 +342,7 @@ fn data_handlers_do_not_join_extensionless_resolution() {
 /// Import Text on the FAST tier where the flag does NOT exist (Node 24.4.0): sync
 /// `module.registerHooks`, but native `--experimental-import-text` is absent — it landed
 /// at 26.5.0 and was backported no lower than 24.19.0 — so nub serves text imports via
-/// its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
+/// its own `loadTextImport` short-circuit (the `nativeImportText() === false` arm of the
 /// makeHooks load hook). Pins the polyfill path deterministically — the host-Node
 /// `integration.rs` cases migrate to the native-defer path on any host that knows the
 /// flag, leaving the polyfill band otherwise uncovered.
@@ -369,7 +369,7 @@ fn import_text_works_on_fast_tier_without_native_flag() {
 
 /// Import Text on the NATIVE tier (Node >= 26.5.0). There nub injects
 /// `--experimental-import-text` and its preload DEFERS `with { type: "text" }` to
-/// Node's native text translator (feature-detected via the `NATIVE_IMPORT_TEXT` const
+/// Node's native text translator (feature-detected via the `nativeImportText()` probe
 /// in preload-common.cjs, `process.allowedNodeEnvironmentFlags`) instead of
 /// serving it with nub's own `loadTextImport`. The user-visible result must be
 /// byte-identical to the compat/host tiers — SAME fixture, SAME assertions — proving

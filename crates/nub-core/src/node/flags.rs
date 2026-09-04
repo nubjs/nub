@@ -848,7 +848,7 @@ mod tests {
 
     /// The CONVERSE invariant, for `--experimental-import-text` specifically: if the host
     /// Node KNOWS the flag, nub must inject it at that version. The preload's step-aside
-    /// (`NATIVE_IMPORT_TEXT` in preload-common.cjs) keys off exactly this accepted-flag
+    /// (`nativeImportText()` in preload-common.cjs) keys off exactly this accepted-flag
     /// set, so a release that knows the flag but sits outside the feature-matrix band
     /// hands `with { type: "text" }` to Node's default loader with the feature off —
     /// ERR_UNKNOWN_FILE_EXTENSION. That is #688: Node backported the flag to 24.19.0 while
