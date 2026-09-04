@@ -484,6 +484,19 @@ fn report_resolved_build(
 /// CI runner. Matches `install_report.rs`.
 const FALLBACK_COLS: usize = 80;
 
+/// A string's width in TERMINAL CELLS, which is what a wrap decision needs.
+///
+/// `chars().count()` counts Unicode scalar values, and the two disagree on
+/// exactly the text a user controls: a path, a package name or a `--platform`
+/// value carrying CJK or emoji is two cells per scalar, so counting scalars
+/// wraps a full column late and the line the tier just indented soft-wraps at
+/// column zero anyway. `console` is already a dependency here — it is what
+/// measures the terminal — and it strips SGR while measuring, so this stays
+/// correct if it is ever handed painted text.
+fn cells(text: &str) -> usize {
+    console::measure_text_width(text)
+}
+
 /// The width everything this module prints wraps to. Read once per surface
 /// rather than threaded down, and named so the block and the diagnostics
 /// demonstrably wrap to the same number.
@@ -567,7 +580,7 @@ fn render_row(
         for (lead, word) in words(text) {
             // The separator belongs to whichever line the word lands on, so a
             // wrapped word sheds it and no continuation opens with stray spaces.
-            let needed = if at_line_start { 0 } else { lead } + word.chars().count();
+            let needed = if at_line_start { 0 } else { lead } + cells(word);
             if !at_line_start && col + needed > limit {
                 flush!();
                 lines.push(std::mem::take(&mut line));
@@ -580,7 +593,7 @@ fn render_row(
                 col += lead;
             }
             run.push_str(word);
-            col += word.chars().count();
+            col += cells(word);
             at_line_start = false;
         }
     }
@@ -957,14 +970,31 @@ fn error_lines(err: &anyhow::Error, cols: usize, color: bool) -> Vec<String> {
     }));
 
     // A cause is the tier's own composition — anyhow gives it as a bare string
-    // with no formatting — so it does hang under the headline.
+    // with no formatting around it — so it does hang under the headline.
+    //
+    // Per PHYSICAL line, though, not once per cause. A cause is frequently
+    // multiline itself: `inject::inject` builds `setting the executable icon:
+    // …\n  The container parsed, so one of the images inside it did not. …`,
+    // and `run` wraps that with `writing <staged path>`, so the icon message
+    // arrives here as a chained cause carrying its own newlines. Prefixing the
+    // whole string once indents its first line and leaves every later one back
+    // at the column it was authored in — the same defect the message body had,
+    // one level down. The line's own relative indent is kept on top of the
+    // hanging one, so the cause's internal structure survives.
     let indent = Tier::Error.label().len() + GAP;
-    lines.extend(err.chain().skip(1).map(|cause| {
-        format!(
-            "{}{}",
-            " ".repeat(indent),
-            paint(&cause.to_string(), Ink::Muted, color)
-        )
+    let pad = " ".repeat(indent);
+    lines.extend(err.chain().skip(1).flat_map(|cause| {
+        cause
+            .to_string()
+            .lines()
+            .map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{pad}{}", paint(line, Ink::Muted, color))
+                }
+            })
+            .collect::<Vec<_>>()
     }));
     lines
 }
@@ -1045,7 +1075,7 @@ fn wrapped(text: &str, indent: usize, cols: usize) -> Vec<String> {
     let mut line = String::new();
     let mut col = indent;
     for (lead, word) in words(text) {
-        let needed = if line.is_empty() { 0 } else { lead } + word.chars().count();
+        let needed = if line.is_empty() { 0 } else { lead } + cells(word);
         if !line.is_empty() && col + needed > limit {
             out.push(std::mem::take(&mut line));
             col = indent;
@@ -1055,7 +1085,7 @@ fn wrapped(text: &str, indent: usize, cols: usize) -> Vec<String> {
             col += lead;
         }
         line.push_str(word);
-        col += word.chars().count();
+        col += cells(word);
     }
     out.push(line);
     out
@@ -4435,6 +4465,56 @@ mod tests {
                 "       no such file or directory".to_string(),
             ],
             "every cause is stated; none is dropped and none repeats the headline"
+        );
+
+        // A cause is frequently multiline itself. This is the real one, shortened:
+        // `inject::inject` builds the icon message with its own second line, and
+        // `run` wraps it with `writing <staged path>`. Indenting the cause once
+        // leaves that second line back at the column it was authored in.
+        let multiline_cause = anyhow::anyhow!(
+            "setting the executable icon: PngNotRgba\n  The container parsed, so one of the images inside it did not."
+        )
+        .context("writing /tmp/app.staged");
+        assert_eq!(
+            error_lines(&multiline_cause, 200, false),
+            vec![
+                "error  writing /tmp/app.staged".to_string(),
+                "       setting the executable icon: PngNotRgba".to_string(),
+                "         The container parsed, so one of the images inside it did not."
+                    .to_string(),
+            ],
+            "every physical line of a cause hangs, keeping the relative indent it came with"
+        );
+    }
+
+    /// A wide character occupies two terminal cells, and the wrap has to know.
+    ///
+    /// `chars().count()` and the rendered width agree on ASCII, which is why
+    /// every other test here would pass with either. They disagree on exactly
+    /// the text a user controls — a path, a package name, a `--platform` value —
+    /// so counting scalars wraps a column late and the line lands past the edge,
+    /// where the terminal breaks it back to column zero and the hanging indent
+    /// the tier just applied is lost.
+    #[test]
+    fn a_wide_character_counts_as_the_two_cells_it_occupies() {
+        // Eight per word, so a scalar count says 8 where the terminal says 16.
+        let headline = "unknown --platform \"日本語テスト\". Supported: 日本語テスト, 日本語テスト, 日本語テスト";
+        let lines = diagnostic_lines(Tier::Error, headline, &[], 40, false);
+
+        assert!(lines.len() > 1, "must wrap at 40 cells: {lines:?}");
+        for line in &lines {
+            assert!(
+                cells(line) <= 40,
+                "line renders {} cells, over the 40 asked for: {line:?}",
+                cells(line)
+            );
+        }
+        let words_in: Vec<&str> = headline.split_whitespace().collect();
+        let words_out: Vec<&str> = lines.iter().flat_map(|l| l.split_whitespace()).collect();
+        assert_eq!(
+            words_out[1..],
+            words_in[..],
+            "wrapping dropped or reordered a word (the leading `error` label aside)"
         );
     }
 

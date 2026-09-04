@@ -10125,3 +10125,49 @@ fn yaml_alias_reuse_within_the_budget_still_loads() {
         "every alias must expand to its anchored value; stderr: {stderr}"
     );
 }
+
+/// A failed compile reports itself, and does not also reach `Termination`.
+///
+/// The unit tests around `error_lines` and `diagnostic_lines` all stay green if
+/// the `.or_else` in `cli.rs` is deleted, returns zero, or lets the error escape
+/// — they test the renderer, and nothing tests that anything calls it. This
+/// spawns the real binary so the wiring is what is under test.
+///
+/// `--platform` is the cheapest failure that reaches it: it is refused while
+/// resolving arguments, so no launcher template, no Node download and no bundler
+/// run are needed, and the test costs a process spawn.
+///
+/// The absence assertion is the load-bearing half. Returning the error instead
+/// of reporting it would still exit 1 and still print the message — just under
+/// `Termination`'s own `Error:` framing — so an exit-code check alone cannot
+/// tell the two apart.
+#[cfg(feature = "compile")]
+#[test]
+fn a_failed_compile_prints_the_error_tier_rather_than_escaping_to_termination() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("app.ts"), "console.log(1);\n").unwrap();
+
+    let output = Command::new(nub_binary())
+        .args(["compile", "app.ts", "--platform", "sunos-sparc"])
+        .current_dir(&dir)
+        .env("NO_COLOR", "1")
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a refused --platform exits 1; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("error  unknown --platform"),
+        "expected the error tier's label and two-space gap, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Error:"),
+        "the error must not ALSO escape to Termination; got: {stderr:?}"
+    );
+}
