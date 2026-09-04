@@ -83,7 +83,18 @@ for (const drop of drops) {
     // work: an eager `node:worker_threads` load for execArgv hygiene, and building
     // the whole accepted-flag Set to feature-detect --experimental-import-text.
     case "pc-argvflags":
-      cutBalanced("try {\n  const workerThreads = getBuiltin(\"node:worker_threads\");", "{", "}", "argv-only-flags block");
+      cut(/^const workerless = .*\n/m, "workerless gate");
+      cutBalanced("try {\n  const workerThreads =", "{", "}", "argv-only-flags block");
+      break;
+    // Put the eager load back, so ONE hyperfine invocation carries both sides of
+    // the gate and the A/B never has to be read across two runners.
+    case "pc-ungate":
+      cut(/^const workerless = .*\n/m, "workerless gate");
+      src = src.replace(
+        "const workerThreads = workerless ? null : getBuiltin(\"node:worker_threads\");",
+        "const workerThreads = getBuiltin(\"node:worker_threads\");",
+      );
+      if (src.includes("workerless")) throw new Error("ablate: pc-ungate left the gate behind");
       break;
     case "pc-anef":
       cut(/^const NATIVE_IMPORT_TEXT = process\.allowedNodeEnvironmentFlags\.has\(.*\);\n/m, "NATIVE_IMPORT_TEXT");

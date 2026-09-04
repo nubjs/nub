@@ -51,36 +51,29 @@ build() {
 
 echo "--- building variants ---"
 build full
+build ungate preload:pc-ungate
 build nowp   preamble:worker
 build nopc   preamble:childprocess
-build nosp   preamble:syncpolyfills
-build nowt   preload:pc-argvflags
-build noanef preload:pc-anef
-build nowtaf preload:pc-argvflags preload:pc-anef
 build min    preamble:worker preamble:childprocess preamble:syncpolyfills
 restore
 
 echo "--- sanity: every variant runs ---"
 export XDG_CACHE_HOME="$D/cache"
-for v in full nowp nopc nosp nowt noanef nowtaf min; do
+for v in full ungate nowp nopc min; do
   printf '%-10s %s\n' "$v" "$("$D/art-$v")"
 done
 
 echo "--- measuring ---"
-hyperfine -i --warmup 50 --min-runs "${RUNS:-400}" --style none --export-json "$D/r.json" \
+hyperfine -i --warmup 50 --min-runs "${RUNS:-700}" --style none --export-json "$D/r.json" \
   -n 'baseline-A' 'node nil.js' \
   -n 'full'       "$D/art-full" \
-  -n 'nowp'       "$D/art-nowp" \
+  -n 'ungate'     "$D/art-ungate" \
   -n 'baseline-B' 'node nil.js' \
+  -n 'nowp'       "$D/art-nowp" \
   -n 'nopc'       "$D/art-nopc" \
-  -n 'nosp'       "$D/art-nosp" \
   -n 'baseline-C' 'node nil.js' \
-  -n 'nowt'       "$D/art-nowt" \
-  -n 'noanef'     "$D/art-noanef" \
-  -n 'baseline-D' 'node nil.js' \
-  -n 'nowtaf'     "$D/art-nowtaf" \
   -n 'min'        "$D/art-min" \
-  -n 'baseline-E' 'node nil.js' || true
+  -n 'baseline-D' 'node nil.js' || true
 
 node -e '
 const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).results;
