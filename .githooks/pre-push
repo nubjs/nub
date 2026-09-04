@@ -150,17 +150,18 @@ if [ -n "$SKILLS_ROOT" ] && [ -e "$SKILLS_ROOT/.claude/skills" ]; then
   fi
 fi
 
-[ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
-
 ROOT="$SKILLS_ROOT"
 [ -n "$ROOT" ] || exit 0
-[ -d "$ROOT/site" ] || exit 0
 
+# ⛔ THE STDIN LOOP RUNS BEFORE THE SITE-ONLY BYPASSES, AND THAT ORDER IS LOAD-BEARING. The jail gate
+# below must not be switched off by `NUB_SKIP_SITE_CHECK=1` or by a checkout with no `site/` — a gate
+# an unrelated flag disables is worse than no gate, because it still reads as covered.
 # Decide whether the pushed range touches site/**. FAIL SAFE, matching the
 # matrix-plan job's philosophy in ci.yml: a range we cannot resolve runs the
 # check rather than skipping it. Skipping costs a broken deployment; running
 # costs 20 seconds.
 site_touched=0
+jail_touched=0
 undecidable=0
 while read -r _local_ref local_sha _remote_ref remote_sha; do
   # An all-zero local sha is a branch deletion — nothing to build.
@@ -177,9 +178,35 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   fi
   changed=$(git diff --name-only "$base" "$local_sha" -- site/ 2>/dev/null) || undecidable=1
   [ -n "$changed" ] && site_touched=1
+  # Folded into the SAME loop deliberately: this loop consumes stdin, and a second
+  # `while read` would get nothing and silently disable whichever gate ran second.
+  jchanged=$(git diff --name-only "$base" "$local_sha" -- tests/jail-acceptance/ 2>/dev/null) || undecidable=1
+  [ -n "$jchanged" ] && jail_touched=1
 done
 
+# ⛔ NOTHING ELSE GATES tests/jail-acceptance/**. It sits outside every workflow path filter in
+# .github/workflows, so the harness that decides whether the build jail ships default-on has no CI at
+# all -- six consecutive commits to it triggered zero checks. Its own unit tests are the only thing
+# standing between a broken metric and a sweep that reports a false pass, and they cost ~100ms. A
+# broken coverage metric is not loud: it reports a clean number over packages nobody measured.
+if [ "$jail_touched" = 1 ] || [ "$undecidable" = 1 ]; then
+  if command -v node >/dev/null 2>&1; then
+    for t in "$ROOT"/tests/jail-acceptance/*.test.mjs; do
+      [ -f "$t" ] || continue
+      if ! node --test "$t" >/tmp/jail-acceptance-hook.log 2>&1; then
+        echo "pre-push: jail-acceptance tests FAILED ($t)" >&2
+        tail -25 /tmp/jail-acceptance-hook.log >&2
+        echo "pre-push: bypass with NUB_SKIP_JAIL_TESTS=1 if this is genuinely unrelated" >&2
+        [ "${NUB_SKIP_JAIL_TESTS:-}" = "1" ] || exit 1
+      fi
+    done
+  fi
+fi
+
 [ "$site_touched" = 1 ] || [ "$undecidable" = 1 ] || exit 0
+
+[ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
+[ -d "$ROOT/site" ] || exit 0
 
 if [ ! -x "$ROOT/site/node_modules/.bin/next" ]; then
   if ! command -v pnpm >/dev/null 2>&1; then
