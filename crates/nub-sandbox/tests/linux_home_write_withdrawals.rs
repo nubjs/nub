@@ -65,6 +65,28 @@
 //! experiment must first make the fixture install the platform `optionalDependency`, so the script
 //! takes its REAL branch.** Until someone does that, this package keeps its grant.
 //!
+//! ⛔⛔ WHY THE GRANT IS `userHome` AT ALL, WHICH IS NOT WHAT IT LOOKS LIKE. Two mechanisms were
+//! checked and both say the home is not what this script needs:
+//!
+//! 1. `napi-postinstall@0.3.4` touches NO home directory -- grep of the published tarball for
+//!    `homedir|process.env.HOME|USERPROFILE|.cache` returns nothing. Its only filesystem staging
+//!    is `os.tmpdir()` (`lib/fallback.js`), and tmp is already covered on every platform: POSIX
+//!    takes the `$tmp` rw MODE, and a Windows AppContainer's TEMP resolves into its own
+//!    `…\Packages\<profile>\AC\Temp`, which the backend `create_dir_all`s before launch. So the
+//!    tmp staging never reaches the real profile and cannot be what `userHome` is paying for.
+//! 2. What the script actually writes is recorded in `compiler::curated::resolve_declared_dep`:
+//!    it mkdirs `<napi-postinstall entry>/node_modules/unrs-resolver`, a SIBLING of the
+//!    dependency's package dir inside that dependency's store ENTRY. That doc names this exact
+//!    package -- "`unrs-resolver` settled on `userHome` (cost 7) when `deps` (cost 3) was meant
+//!    to carry it" -- and `resolve_declared_dep` was WIDENED from the package dir to the entry
+//!    in response.
+//!
+//! ⇒ THE SHIPPED `userHome` ENTRY LOOKS STALE RELATIVE TO THAT WIDENING: the ladder search that
+//! produced it ran while `deps` still stopped one level short. `write: {deps, project}` is the
+//! candidate replacement. That is a MECHANISM argument, not a measurement, so it does not by
+//! itself license the edit -- it says what a valid experiment should expect to find, once the
+//! fixture above makes the real branch run.
+//!
 //! ⛔ A SECOND, DIFFERENTLY-SHAPED MEASUREMENT LIVES HERE TOO, and conflating the two would put a
 //! claim on rows that never earned it. `WITHDRAWN` above is the five-arm ladder. `WITHDRAWN_BANDS`
 //! below is a TWO-BINARY DIFFERENTIAL against `46b623e352`, which made
