@@ -2075,7 +2075,8 @@ pub(super) mod launch {
             //
             // The same guard the dedicated-account backend uses, deliberately: it FAILS FORWARD
             // (a station whose DACL cannot be rewritten still launches, rather than losing a run
-            // that worked before this existed) and RESTORES the prior DACL on drop.
+            // that worked before this existed) and removes its own ace again on drop, leaving a
+            // concurrent run's alone — which is what makes five parallel lifecycle scripts safe.
             let _window =
                 match unsafe { crate::backend::windows_account::account::sid_to_string(ac_sid) } {
                     Ok(sid_str) => Some(

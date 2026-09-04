@@ -357,9 +357,9 @@ seclogon's window-station auto-grant covers `WinSta0` only. A NON-INTERACTIVE ca
 service, a CI agent — runs on a per-logon `Service-0x0-…$` station instead, where the auto-grant
 does not apply and the child dies in loader init with `0xC0000142 STATUS_DLL_INIT_FAILED`. The
 launch therefore aces the caller's own window station and desktop for the sandbox SID before
-spawning, and restores both DACLs when the run ends. `READ_CONTROL` in the station mask is
-load-bearing: without it the child HANGS in loader init rather than failing. Setting `lpDesktop`
-explicitly does not substitute for the aces.
+spawning, and removes exactly those aces again when the run ends. `READ_CONTROL` in the station
+mask is load-bearing: without it the child HANGS in loader init rather than failing. Setting
+`lpDesktop` explicitly does not substitute for the aces.
 
 - **Verified in session 0 only.** The failure and the fix were both reproduced from a
   non-interactive session. The interactive `WinSta0` path — where seclogon's auto-grant should

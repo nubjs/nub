@@ -366,7 +366,7 @@ fn inheritable_std_handles() -> Option<(HANDLE, HANDLE, HANDLE)> {
     Some((i, o, e))
 }
 
-/// The window-station and desktop aces the child needs, restored on drop.
+/// The window-station and desktop aces the child needs, removed again on drop.
 ///
 /// WHY THIS EXISTS (VM-diagnosed 2026-07-24, reproduced with a bare P/Invoke on a throwaway
 /// account and no nub code): a NON-INTERACTIVE caller — SSH, a service, a CI agent — runs on a
@@ -385,9 +385,45 @@ fn inheritable_std_handles() -> Option<(HANDLE, HANDLE, HANDLE)> {
 /// `hostname.exe` ran fine. Keep this ONE implementation: the restore-on-drop and the
 /// fail-forward behaviour below are security-relevant and must not diverge between backends.
 pub(crate) struct WindowAceGuard {
-    /// `(handle, the DACL that was there before this run)`. `None` restores a NULL DACL.
-    restore: Vec<(HANDLE, Option<Vec<u32>>)>,
+    /// The trustee this guard granted: the key into [`WINDOW_ACES`], and what the teardown
+    /// strip matches on.
+    sid: String,
+    /// The station and desktop handles to clean up — captured here rather than re-derived in
+    /// [`Drop`] so teardown cannot address a different desktop than the grant did. Recorded
+    /// whether or not the grant itself succeeded: a mixed outcome across two guards sharing
+    /// one SID must still leave the last of them able to remove whichever ace did land.
+    handles: Vec<HANDLE>,
 }
+
+/// Every window-object grant this process holds, keyed by SID, with the number of live
+/// [`WindowAceGuard`]s behind each. The Mutex serializes the DACL read-modify-write itself,
+/// not just the bookkeeping.
+///
+/// ⛔ THE STATION AND THE DESKTOP ARE PROCESS-GLOBAL, SO A PER-RUN DACL SNAPSHOT IS WRONG BY
+/// CONSTRUCTION. `child_concurrency` defaults to 5, so five lifecycle scripts launch at once,
+/// each guarding these same two handles. The design this replaced saved the DACL each guard
+/// found and restored that snapshot on drop, which loses an ace two independent ways:
+///
+///   1. Two grants interleave their read-modify-write, and the later write drops the earlier
+///      ace — the ordinary lost update, which a lock alone does fix.
+///   2. A guard restores a snapshot taken BEFORE a sibling granted, deleting that sibling's
+///      ace while its child is still in loader init. A LOCK CANNOT FIX THIS ONE: the snapshot
+///      is already stale by the time the restore is correctly serialized.
+///
+/// The child then dies `0xC0000142 STATUS_DLL_INIT_FAILED` before `main`, which reads as the
+/// jail breaking the package rather than as a sandbox fault. Measured 2026-09-04 over SSH (a
+/// non-interactive `Service-0x0-…$` station, where these aces are load-bearing): 6 of 7
+/// concurrent installs found the object carrying NO ace for their SID with three guards still
+/// live, and each lost a lifecycle script to that exit code.
+///
+/// So nothing is snapshotted. A grant is an additive read-modify-write under this lock, and
+/// teardown removes exactly the aces naming this guard's SID — also under this lock, against
+/// the DACL as it stands at that moment. The refcount is what makes the shared-SID case safe:
+/// the AppContainer backend mints a fresh container SID per run, but the dedicated-account
+/// backend grants ONE account SID for every run, so a strip on first drop would revoke an ace
+/// a sibling's child still needs. Only the last live guard for a SID strips it.
+static WINDOW_ACES: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 impl WindowAceGuard {
     pub(crate) fn grant(sid: &str) -> Self {
@@ -399,38 +435,57 @@ impl WindowAceGuard {
                 GetThreadDesktop(GetCurrentThreadId()).cast::<std::ffi::c_void>(),
             )
         };
-        let mut guard = WindowAceGuard {
-            restore: Vec::with_capacity(2),
-        };
+        // Poison-tolerant: a panicking holder leaves the map itself consistent, and refusing
+        // to grant here would cost a run for nothing.
+        let mut live = WINDOW_ACES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handles = Vec::with_capacity(2);
         for (handle, mask) in [(station, WINSTA_GRANT), (desktop, DESKTOP_GRANT)] {
             if handle.is_null() {
                 continue;
             }
+            handles.push(handle);
             // FAIL FORWARD, never abort. On an interactive `WinSta0` these aces are redundant
             // — seclogon's auto-grant already covers it — so a station whose DACL nub cannot
             // rewrite (a locked-down remoting host, some CI agents) must still launch rather
             // than lose a run that worked before this ace existed. The one case where the ace
             // IS load-bearing surfaces instead as the mapped `STATUS_DLL_INIT_FAILED` exit.
-            match acl::grant_window_object(handle, sid, mask) {
-                Ok(saved) => guard.restore.push((handle, saved)),
-                Err(e) => tracing::debug!(
+            if let Err(e) = acl::grant_window_object(handle, sid, mask) {
+                tracing::debug!(
                     error = %e,
                     "sandbox: could not grant the sandbox account window-object access — a \
                      child on a non-interactive station may fail loader init"
-                ),
+                );
             }
         }
-        guard
+        // Counted even when no grant landed, so the count stays balanced against `Drop`.
+        *live.entry(sid.to_string()).or_insert(0) += 1;
+        WindowAceGuard {
+            sid: sid.to_string(),
+            handles,
+        }
     }
 }
 
 impl Drop for WindowAceGuard {
     fn drop(&mut self) {
-        for (handle, dacl) in &self.restore {
-            if let Err(e) = acl::restore_window_object(*handle, dacl.as_deref()) {
+        let mut live = WINDOW_ACES.lock().unwrap_or_else(|e| e.into_inner());
+        match live.get_mut(&self.sid) {
+            // A sibling run still has a child alive under this same SID. Stripping now is the
+            // exact bug this guard exists to avoid, so leave the ace and let the last one out
+            // remove it.
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                return;
+            }
+            _ => {
+                live.remove(&self.sid);
+            }
+        }
+        for handle in &self.handles {
+            if let Err(e) = acl::strip_window_object(*handle, &self.sid) {
                 tracing::debug!(
                     error = %e,
-                    "sandbox: could not restore the window-station DACL — the sandbox account \
+                    "sandbox: could not remove the sandbox account's window-object ace — it \
                      keeps station access until this session ends"
                 );
             }
@@ -492,5 +547,75 @@ fn map_spawn_error(e: io::Error) -> io::Error {
              may be disabled by group policy).",
         ),
         _ => e,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GetProcessWindowStation, WindowAceGuard, acl};
+    use windows_sys::Win32::Foundation::HANDLE;
+
+    /// Three synthetic account SIDs. `ConvertStringSidToSidW` parses the string form without
+    /// resolving it, so an ALLOW ace naming one of these grants nobody anything — the test can
+    /// write them onto the caller's real window station and take them off again.
+    const SID_A: &str = "S-1-5-21-1111111111-2222222222-3333333333-4001";
+    const SID_B: &str = "S-1-5-21-1111111111-2222222222-3333333333-4002";
+    const SID_SHARED: &str = "S-1-5-21-1111111111-2222222222-3333333333-4003";
+
+    fn station() -> HANDLE {
+        // SAFETY: takes no parameter that can be invalid and returns a handle owned by the
+        // system for this process's lifetime.
+        unsafe { GetProcessWindowStation().cast::<std::ffi::c_void>() }
+    }
+
+    fn has(sid: &str) -> bool {
+        acl::window_object_has_sid(station(), sid).unwrap()
+    }
+
+    /// Both lost-update shapes concurrent lifecycle scripts hit on the process-global window
+    /// station, in one deterministic sequence — no threads and no sleeps, because the defect
+    /// is in the ORDER of grant and teardown rather than in their timing.
+    ///
+    /// Written as a single test on purpose: `cargo test` runs test functions in parallel and
+    /// these all write the same object's DACL, so splitting them would put the suite's own
+    /// concurrency in the way of reading the result.
+    #[test]
+    fn a_guard_teardown_leaves_a_concurrent_guards_ace_in_place() {
+        assert!(!station().is_null(), "no window station for this process");
+
+        let a = WindowAceGuard::grant(SID_A);
+        if !has(SID_A) {
+            // This host will not let nub re-acl its own station at all. The guard fails
+            // forward by design, so there is no invariant left to check — asserting anything
+            // here would be a green with nothing behind it.
+            return;
+        }
+        let b = WindowAceGuard::grant(SID_B);
+        assert!(has(SID_B), "the second guard's grant did not land");
+
+        // THE REGRESSION. Teardown used to restore the DACL `a` snapshotted, which predates
+        // `b`'s grant — so `b` lost its ace while its child was still in loader init and died
+        // `0xC0000142`.
+        drop(a);
+        assert!(
+            has(SID_B),
+            "tearing down one guard deleted a concurrent guard's window-station ace"
+        );
+        assert!(!has(SID_A), "the torn-down guard left its own ace behind");
+
+        drop(b);
+        assert!(!has(SID_B), "the last guard left its own ace behind");
+
+        // THE SHARED-SID CASE the dedicated-account backend is in: every run grants the SAME
+        // account SID, so a strip on the first drop would revoke an ace a sibling still needs.
+        let first = WindowAceGuard::grant(SID_SHARED);
+        let second = WindowAceGuard::grant(SID_SHARED);
+        drop(first);
+        assert!(
+            has(SID_SHARED),
+            "the first of two guards sharing a SID stripped the ace the second still needs"
+        );
+        drop(second);
+        assert!(!has(SID_SHARED), "the shared ace outlived its last guard");
     }
 }

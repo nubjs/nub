@@ -288,44 +288,90 @@ fn read_token_user(token: HANDLE) -> io::Result<Vec<u64>> {
 
 // ── window station + desktop: the launch's other securable objects ──────────────
 
-/// Add an ALLOW ace for `sid` on a window-station or desktop HANDLE, returning the DACL that
-/// was there first so [`restore_window_object`] can put it back byte-exactly.
+/// Neither the window station nor the desktop has a named-path form, so the pseudo-path the
+/// shared ace machinery reports errors against names the object class instead.
+const WINDOW_OBJECT: &str = "<window-object>";
+
+/// Add an ALLOW ace for `sid` on a window-station or desktop HANDLE.
 ///
 /// These are `SE_WINDOW_OBJECT`s — handle-addressed, with no named-path form — so this is the
 /// `Get`/`SetSecurityInfo` twin of [`add_ace`] rather than a variant of it. The ace is NOT
 /// inheritable: the caller aces the desktop directly rather than relying on propagation from
 /// the station.
-pub(crate) fn grant_window_object(
-    handle: HANDLE,
-    sid: &str,
-    mask: u32,
-) -> io::Result<Option<Vec<u32>>> {
+///
+/// NOTHING IS SNAPSHOTTED HERE, DELIBERATELY. The station and desktop are process-global and
+/// concurrent runs ace them at the same time, so a per-run snapshot is stale the moment a
+/// sibling grants (see [`super::launch::WindowAceGuard`]). Teardown is
+/// [`strip_window_object`], which re-reads the DACL as it stands and removes only this SID.
+pub(crate) fn grant_window_object(handle: HANDLE, sid: &str, mask: u32) -> io::Result<()> {
     let sid = OwnedSid::parse(sid)?;
     let existing = ReadWindowDacl::open(handle)?;
-    let saved = copy_acl(existing.acl);
+
+    // A NULL DACL is UNRESTRICTED access, not an empty allow-set — the same trap [`add_ace`]
+    // guards on a file path. Merging into it would produce a DACL holding ONLY our ace, and
+    // the teardown could not undo that: [`rebuild_without_sid`] refuses to write an empty
+    // DACL, so the station would keep a lockout nothing removes. There is also nothing to
+    // grant, since a NULL DACL already admits the sandbox principal.
+    if existing.acl.is_null() {
+        tracing::debug!(
+            "sandbox: window-object grant skipped — the object has a NULL DACL, so access is \
+             already unrestricted"
+        );
+        return Ok(());
+    }
 
     let ea = explicit_access(sid.0, mask, GRANT_ACCESS, false);
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
     // SAFETY: `ea` and the SID it points at outlive the call; `existing.acl` came from
-    // GetSecurityInfo and may legitimately be NULL.
+    // GetSecurityInfo and is non-NULL by the check above.
     let rc = unsafe { SetEntriesInAclW(1, &ea, existing.acl, &mut new_dacl) };
     if rc != 0 {
         return Err(win32_obj_err("SetEntriesInAclW", rc));
     }
     let _guard = LocalFreeGuard(new_dacl.cast());
-    set_window_dacl(handle, new_dacl)?;
-    Ok(saved)
+    set_window_dacl(handle, new_dacl)
 }
 
-/// Put back what [`grant_window_object`] returned; `None` restores the NULL DACL the object
-/// had. A byte-exact restore rather than a trustee-keyed strip because this module already
-/// documents that `SetEntriesInAclW(REVOKE_ACCESS)` cannot be trusted to remove an ace (see
-/// [`strip`]). It is NOT better under concurrency — restoring the DACL the FIRST run saw
-/// discards a second run's ace while its child is still alive, and a SID-keyed strip would
-/// too, since every run shares the account (recorded in LIMITATIONS.md).
-pub(crate) fn restore_window_object(handle: HANDLE, dacl: Option<&[u32]>) -> io::Result<()> {
-    let ptr = dacl.map_or(std::ptr::null(), |d| d.as_ptr().cast::<ACL>());
-    set_window_dacl(handle, ptr)
+/// Remove every explicit ace naming `sid` from a window station or desktop, leaving every
+/// other ace — including a concurrent run's — exactly where it was. The `SE_WINDOW_OBJECT`
+/// twin of [`strip`], sharing its hand-rolled rebuild for the same reason: on Windows 11
+/// `SetEntriesInAclW(REVOKE_ACCESS)` cannot be trusted to remove an ace.
+///
+/// This REPLACED a byte-exact restore of the DACL each run found. The restore was correct in
+/// isolation and wrong under `child_concurrency`: the DACL a run snapshots predates every
+/// sibling that granted after it, so putting it back deletes a live sibling's ace and its
+/// child dies in loader init (see [`super::launch::WindowAceGuard`]). A SID-keyed strip has
+/// no snapshot to go stale. Its own hazard — the dedicated-account backend grants ONE shared
+/// account SID for every run, so the first teardown would strip an ace the others still need
+/// — is handled by the refcount in that guard, not here.
+pub(crate) fn strip_window_object(handle: HANDLE, sid: &str) -> io::Result<()> {
+    let sid = OwnedSid::parse(sid)?;
+    let read = ReadWindowDacl::open(handle)?;
+    let Some(rebuilt) = rebuild_without_sid(Path::new(WINDOW_OBJECT), read.acl, &sid)? else {
+        // Nothing named this SID, or our aces were the only ones on the object. Writing
+        // anything back would be a no-op at best and an empty deny-everyone DACL at worst.
+        return Ok(());
+    };
+    set_window_dacl(handle, rebuilt.as_ptr().cast::<ACL>())
+}
+
+/// Does this window object's DACL currently carry an ALLOW ace for `sid`? The direct question
+/// the guard's regression test asks — "is a concurrent run's ace still there?" — rather than
+/// inferring it from a child's exit code.
+#[cfg(test)]
+pub(crate) fn window_object_has_sid(handle: HANDLE, sid: &str) -> io::Result<bool> {
+    let sid = OwnedSid::parse(sid)?;
+    let read = ReadWindowDacl::open(handle)?;
+    let mut found = false;
+    walk_aces(read.acl, Path::new(WINDOW_OBJECT), |_i, header, ace| {
+        if header.AceType == ACCESS_ALLOWED_ACE_TYPE
+            // SAFETY: type checked above, so `SidStart` sits at the ACCESS_ALLOWED_ACE offset.
+            && unsafe { EqualSid(sid_of(ace), sid.0) } != 0
+        {
+            found = true;
+        }
+    })?;
+    Ok(found)
 }
 
 fn set_window_dacl(handle: HANDLE, dacl: *const ACL) -> io::Result<()> {
@@ -347,23 +393,6 @@ fn set_window_dacl(handle: HANDLE, dacl: *const ACL) -> io::Result<()> {
         return Err(win32_obj_err("SetSecurityInfo", rc));
     }
     Ok(())
-}
-
-/// A DWORD-aligned byte copy of `acl`, or `None` for a NULL (no-DACL) descriptor. The source
-/// lives inside a descriptor freed the moment the read guard drops, so a later restore has to
-/// own its bytes.
-fn copy_acl(acl: *mut ACL) -> Option<Vec<u32>> {
-    if acl.is_null() {
-        return None;
-    }
-    // SAFETY: `acl` is a live ACL, whose `AclSize` is its own total length in bytes.
-    let size = usize::from(unsafe { (*acl).AclSize });
-    let mut buf: Vec<u32> = vec![0; size.div_ceil(4)];
-    // SAFETY: source and destination are both at least `size` bytes and cannot overlap.
-    unsafe {
-        std::ptr::copy_nonoverlapping(acl.cast::<u8>(), buf.as_mut_ptr().cast::<u8>(), size);
-    }
-    Some(buf)
 }
 
 /// A window object's DACL plus the descriptor owning its storage — the `SE_WINDOW_OBJECT` twin
