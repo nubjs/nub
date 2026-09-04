@@ -135,6 +135,22 @@ pub enum Decline {
     /// re-entry fixup because an inline payload writes nothing to disk, so no
     /// JavaScript file exists to point the child at; the extracted tree has one.
     ClusterReentry,
+    /// The artifact embeds a Node, so it extracts that to the cache to exec it
+    /// whatever this module decides — and then serving the app from memory buys
+    /// nothing, while costing a measurable amount. Measured on an identical
+    /// hello-world payload, macOS arm64, the two shapes byte-for-byte the same
+    /// size: 47.2 ms inline against 39.8 ms extracted, +19%. The `-e` script is
+    /// parsed with no code cache, the chunks are brotli-decoded in JavaScript and
+    /// re-encoded as base64 `data:` URLs, and none of that is cached between runs
+    /// the way the extracted tree's compile cache is.
+    ///
+    /// So the no-write shape is `--smol` plus an inline payload, which is the pair
+    /// that runs under a read-only `HOME` — measured, an embedding artifact fails
+    /// there identically whether its app inlined or not. Paying 19% for a property
+    /// the artifact does not end up having is the wrong default, and the build
+    /// summary would have claimed "nothing is written to disk" beside a 28 MB Node
+    /// being unpacked.
+    EmbeddedNode,
     /// The build asked for source maps. Measured on Node 26.7: `--enable-source-maps`
     /// does not apply an inline map to a `data:` URL module at all — with or without
     /// a `//# sourceURL` — so an inline artifact would report unmapped frames where
@@ -152,6 +168,7 @@ impl Decline {
             Self::StaticWorker => "it carries a worker chunk",
             Self::NonChunkFile => "it carries a file that is not a compiled chunk",
             Self::CyclicChunks => "its chunks import each other in a cycle",
+            Self::EmbeddedNode => "it extracts its embedded Node anyway",
             Self::ClusterReentry => "it uses node:cluster, which re-runs the executable",
             Self::SourceMap => "it was built with source maps",
         }
@@ -167,6 +184,8 @@ pub struct Inputs<'a> {
     pub worker_wrappers: usize,
     /// Whether any source map was asked for.
     pub sourcemap: bool,
+    /// Whether the artifact carries a Node of its own — everything but `--smol`.
+    pub embeds_node: bool,
     /// The entry chunk's payload name.
     pub entry: &'a str,
 }
@@ -244,6 +263,11 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
     }
     if inputs.sourcemap {
         return Ok(Err(Decline::SourceMap));
+    }
+    // Cheap and last of the caller-supplied checks, so a payload that could never
+    // inline still reports the reason it could never inline rather than this one.
+    if inputs.embeds_node {
+        return Ok(Err(Decline::EmbeddedNode));
     }
     let bootstrap_name = nub_core::compile::COMPILE_BOOTSTRAP_NAME;
     // Every file is the bootstrap, a chunk, or the root manifest `assemble_app`
@@ -553,6 +577,7 @@ mod tests {
             worker_roots: 0,
             worker_wrappers: 0,
             sourcemap: false,
+            embeds_node: false,
             entry,
         }
     }
@@ -684,6 +709,30 @@ mod tests {
                 "a linked source map declines for being a non-chunk file"
             ),
             Rewritten::Inline(_) => panic!("a linked source map cannot be served from a data: URL"),
+        }
+    }
+
+    /// An embedding artifact unpacks its Node to the cache to exec it, so inlining
+    /// its app removes one write out of two and the binary still needs a writable
+    /// cache. Measured, it costs 19% of warm start to remove that one write, so the
+    /// shape declines and the no-write claim belongs to `--smol` alone.
+    #[test]
+    fn a_payload_that_embeds_its_own_node_declines_however_inlinable_it_is() {
+        let files = vec![AppFile::plain(
+            nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+            b"//boot\n".to_vec(),
+        )];
+        let inputs = Inputs {
+            embeds_node: true,
+            ..sealed("main.mjs")
+        };
+        match rewrite(files, &inputs).expect("classification succeeds") {
+            Rewritten::Extract(_, why) => assert_eq!(why, Decline::EmbeddedNode),
+            Rewritten::Inline(_) => {
+                panic!(
+                    "an embedding artifact writes its Node out regardless, so inlining is a cost"
+                )
+            }
         }
     }
 

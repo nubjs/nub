@@ -300,6 +300,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             worker_roots: bundled.worker_roots.len(),
             worker_wrappers: worker_wrappers.len(),
             sourcemap: opts.bundle.sourcemap != bundle::SourcemapMode::None,
+            embeds_node: !opts.smol,
             entry: &entry_name,
         },
     )? {
