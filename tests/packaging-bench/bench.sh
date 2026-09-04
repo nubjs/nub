@@ -104,6 +104,13 @@ EOF
   echo "  sea built via: ${SEA_HOW:-FAILED}"
 
   echo "== $F / @yao-pkg/pkg"
+  # NODE_PIN must be a version pkg-fetch can actually build, or every pkg row drops
+  # with "No available node version satisfies 'vX'". The gate is the `patches.json`
+  # baked into the INSTALLED @yao-pkg/pkg-fetch, not the assets on its GitHub
+  # release — 3.6.5 (the newest, and what pkg 6.22.0 pins) tops out at v26.5.1 even
+  # though the v3.6 release has `node-v26.8.1-linux-x64` uploaded. To keep every
+  # tool on one Node, pin to the newest version this prints:
+  #   node -p 'Object.keys(require("@yao-pkg/pkg-fetch/patches/patches.json"))'
   if "$PKG" "$B" --target "node${NODE_PIN}-${PKG_PLAT}-${ARCH}" \
        --output "art/pkg-$F" > "build-pkg-$F.log" 2>&1; then
     BUILT+=("pkg-$F")
@@ -165,6 +172,17 @@ echo "  SEA runtime        $(node -v)  (--build-sea copies the running node)"
 echo "  caxa runtime       $(node -v)  (copies process.execPath)"
 echo "  pkg runtime        node ${NODE_PIN} from pkg-fetch (a PATCHED Node build, not stock)"
 echo "  nub runtime        node ${NODE_PIN}, embedded"
+echo
+echo "== V8 compile cache (NODE_COMPILE_CACHE) — NOT uniform across these rows"
+echo "  plain node         off"
+echo "  sea                off   (the sea config sets no useCodeCache)"
+echo "  caxa               ON    (stub childEnv, stubs/stub.go — points at its extraction dir)"
+echo "  nub / nubown       ON    (launcher compile_cache_dir — \$cache/compile-v8/<key>)"
+echo "  => on a fixture with a real module graph, caxa and nub start with warm V8"
+echo "     bytecode that plain node and SEA do not have, so their margins over the"
+echo "     baseline understate their true packaging overhead. The 'hello' fixture has"
+echo "     nothing to cache, which is why it is the clean apples-to-apples row, and"
+echo "     'caxa-nocc-*' below isolates the same effect directly."
 
 # ------------------------------------------------------------- 5. warm measure
 run_table() {
@@ -174,9 +192,18 @@ run_table() {
   local -a args=()
   local n=0
   args+=(-n "baseline-${letters[0]} (plain node)" "$base")
-  for A in "sea-$F" "pkg-$F" "caxa-$F" "nub-$F" "nubown-$F"; do
-    [ -x "art/$A" ] || continue
-    args+=(-n "$A" "$W/art/$A")
+  # `caxa-nocc-*` is the SAME caxa artifact with its V8 compile cache switched off.
+  # caxa's stub sets NODE_COMPILE_CACHE unconditionally, so its margin over the
+  # baseline on a fixture with a module graph is stub overhead MINUS a bytecode-cache
+  # saving that plain node and SEA never get. This row separates the two, and the
+  # difference between it and `caxa-*` is what the cache is worth on this fixture.
+  for A in "sea-$F" "pkg-$F" "caxa-$F" "caxanocc-$F" "nub-$F" "nubown-$F"; do
+    local art="$A" pre=""
+    case "$A" in
+      caxanocc-*) art="caxa-$F"; pre="CAXA_DISABLE_COMPILE_CACHE=1 " ;;
+    esac
+    [ -x "art/$art" ] || continue
+    args+=(-n "$A" "$pre$W/art/$art")
     n=$((n + 1))
     # A duplicate baseline every two artifacts: the drift between these identical
     # commands is the only honest error bar on the rows around them.
@@ -199,6 +226,14 @@ for F in hello cli; do run_table "$F"; done
 # nub extracts its embedded Node into XDG_CACHE_HOME on first run; caxa extracts
 # its payload into TMPDIR. Both are one-time, and blending them into the warm
 # table would misrepresent both numbers, so they get their own table.
+#
+# The nub prepare wipes the WHOLE cache root, not just `compile-app`. A compiled
+# artifact keeps three separate trees under it — `compile-node` (the zstd Node it
+# decompresses once), `compile-app` (the bundle), and `compile-v8` (Node's code
+# cache) — and step 2 of the launcher explicitly skips the Node decompression
+# when a compatible Node is already cached. Clearing only `compile-app` therefore
+# re-extracts the cheapest tree against a warm Node and a warm V8 cache, and
+# reports a "first run" an order of magnitude below the real one.
 echo
 echo "######## FIRST RUN (extraction) — $OS-$ARCH"
 for F in hello cli; do
@@ -206,7 +241,7 @@ for F in hello cli; do
     [ -x "art/$A" ] || continue
     case "$A" in
       caxa-*) PREP="rm -rf $TMPDIR/caxa" ;;
-      *)      PREP="rm -rf $XDG_CACHE_HOME/nub/compile-app" ;;
+      *)      PREP="rm -rf $XDG_CACHE_HOME/nub" ;;
     esac
     hyperfine -i --warmup 0 --runs 12 --style none --prepare "$PREP" \
       --export-json "cold-$A.json" -n "$A (cold)" "$W/art/$A" > /dev/null 2>&1
@@ -217,21 +252,6 @@ for F in hello cli; do
     ' "cold-$A.json"
   done
 done
-
-if [ -n "$NEXE_BUILT" ]; then
-  echo
-  echo "######## nexe FOOTNOTE — hello only, Node $NEXE_TARGET, NOT comparable to the tables above"
-  GOT=$( (ulimit -u 800; timeout 30 ./art/nexe-hello) 2>/dev/null )
-  echo "  output check: [$GOT]"
-  (ulimit -u 800; timeout 30 ./art/nexe-hello) >/dev/null 2>&1
-  hyperfine -i --warmup "$WARMUP" --min-runs "$MIN_RUNS" --style none \
-    --export-json warm-nexe.json \
-    -n "baseline-A (plain node)" "node $W/bundles/hello.cjs" \
-    -n "nexe-hello (Node $NEXE_TARGET)" "$W/art/nexe-hello" \
-    -n "baseline-Z (plain node)" "node $W/bundles/hello.cjs" \
-    > hyperfine-nexe.log 2>&1
-  node "$HERE/summarize.mjs" warm-nexe.json
-fi
 
 echo
 echo "######## ARTIFACT SIZES"
