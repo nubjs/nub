@@ -748,11 +748,11 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: read
-    # Its fixture is `enum`-only, which needs no vendored helper, so this leg covers the
-    # extract/dlopen round-trip rather than the transpile path. Its Windows twin DOES
-    # stage node_modules (for the offline `--smol` compile gate) and so keeps the gate on.
-    env:
-      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
+    # This leg now stages the vendored runtime like its Windows twin, so the binary it
+    # builds is COMPLETE rather than `enum`-only, and `NUB_ALLOW_INCOMPLETE_RUNTIME` is
+    # gone with it — AGENTS.md forbids that flag on any binary meant to be run, and this
+    # one is uploaded for people to run. Staging widens what the round-trip proves (the
+    # transpile path, not just extract/dlopen) at the cost of one `npm install`.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -769,6 +769,36 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
+      - run: npm install --no-audit --no-fund --loglevel=error
+      # Stage the vendored helpers into runtime/ so the embedded blob can transpile
+      # anything, not just the erasable-syntax fixture below. `jsbi` is transitive
+      # (via @js-temporal/polyfill) and arrives hoisted at the node_modules root.
+      # Mirrors the Windows twin, which uses `nub install` because its --smol gate
+      # needs a lockfile-exact tree; a plain npm install is enough here.
+      - name: Stage runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf runtime/node_modules
+          mkdir -p runtime/node_modules/@js-temporal runtime/node_modules/@oxc-project runtime/node_modules/@petamoriken
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
+      # Without the typosquat corpus, aube-resolver/build.rs ships an EMPTY primer and
+      # says so only in a cargo warning — the binary then falls back to network
+      # packument fetches at exit 0, which would silently turn any install benchmark
+      # run against this artifact into a measurement of the network. AUBE_REQUIRE_PRIMER
+      # on the build below turns that warning into a hard failure; this step supplies
+      # what it then demands. Same pair as mac-build.yml, and the reason is the same.
+      - name: Generate typosquat popularity corpus
+        run: |
+          set -euo pipefail
+          cd vendor/aube
+          node scripts/generate-primer.mjs \
+            --top 1 \
+            --out "$RUNNER_TEMP/primer-discard.json" \
+            --popular-names-out crates/aube-resolver/data/popular-top100000-v1.json
       - name: Build + stage release nub-native addon
         shell: bash
         run: |
@@ -777,6 +807,8 @@ jobs:
           mkdir -p runtime/addons
           cp target/release/libnub_native.dylib runtime/addons/nub-native.node
       - name: Build release nub (--features embed-runtime)
+        env:
+          AUBE_REQUIRE_PRIMER: "1"
         run: cargo build -p nub-cli --release --features embed-runtime
       - name: Round-trip — extract, verify, dlopen, execute, warm cache, R2 self-heal
         shell: bash
@@ -842,6 +874,42 @@ jobs:
           [ "$orig" = "$healed" ] || { echo "self-heal did not restore the dylib ($orig -> $healed)"; exit 1; }
           echo "R2 self-heal confirmed: tampered dylib detected, re-extracted, restored, still executed"
           echo "ROUND-TRIP OK (macOS): extract -> verify -> dlopen -> execute -> warm reuse -> R2"
+
+      # PUBLISH THE BINARY THIS JOB ALREADY BUILT. The release build above is the whole
+      # cost of a downloadable macOS dev build, and it is paid on every PR either way —
+      # so the artifact is worth seconds of upload rather than a second macOS job. One
+      # file, not two: --features embed-runtime carries the addon and the vendored
+      # runtime inside the binary, so this is standalone and needs no checkout to run.
+      # The round-trip step above tampers only with the EXTRACTED cache copy, so
+      # target/release/nub is untouched by the time it is staged here.
+      - name: Stage the downloadable binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/nub dist/nub
+          # arm64 macOS SIGKILLs an unsigned binary, and the signature does not survive
+          # the artifact zip round-trip either — hence the re-sign note below.
+          codesign --verify --verbose=1 dist/nub || codesign -s - dist/nub
+          file dist/nub
+          (cd dist && shasum -a 256 nub | tee SHA256SUMS)
+          ./dist/nub --version
+          # A browser download also carries com.apple.quarantine, which Gatekeeper
+          # enforces before anything else. Both fixes are one line each, and finding
+          # that out the hard way reads exactly like a broken build.
+          cat > dist/HOW-TO-RUN.txt <<'EOF'
+          shasum -a 256 -c SHA256SUMS
+          xattr -d com.apple.quarantine nub 2>/dev/null || true
+          codesign -s - nub
+          chmod +x nub && ./nub --version
+          EOF
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nub-macos-arm64-pr${{ github.event.pull_request.number }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
 
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})
