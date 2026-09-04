@@ -1221,10 +1221,20 @@ jobs:
       # where the inherit-only-ACE defect lived: it made every Windows cache base
       # unusable, and no CI leg could see it. The launcher is already built above,
       # so covering the OS legs it actually targets costs one `cargo test`.
-      - name: nub-launcher cache chain (per-OS)
+      - name: nub-launcher cache chain + libsui units (per-OS)
         if: matrix.node == '24' && runner.os != 'Linux'
         shell: bash
-        run: cd crates/nub-launcher && cargo test --locked
+        run: |
+          set -euo pipefail
+          cd crates/nub-launcher
+          cargo test --locked
+          # vendor/libsui reaches every workspace as a path/patch dependency and is
+          # a MEMBER of none, so until now nothing anywhere ran its unit tests —
+          # `cargo test -p libsui` from the repo root fails outright. This
+          # workspace patches it in, so `-p` resolves here. `--lib` scopes it to
+          # the units: a crate-doc doctest reads a fixture file that does not
+          # exist and has always failed.
+          cargo test --locked -p libsui --lib
       # The default compile shape builds from the runtime extracted out of the
       # feature-on nub binary, so it cannot resolve these package imports from the
       # checkout's root node_modules. Copy the same locked pure-JS set release.yml

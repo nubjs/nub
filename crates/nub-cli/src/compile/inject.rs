@@ -24,10 +24,12 @@ use nub_core::compile::{ContainerFormat, TargetArch, TargetPlatform};
 /// Inject `payload` into a copy of `template`, writing the artifact to `out`.
 ///
 /// Signing policy is per format and lives here because it is inseparable from
-/// the write: Mach-O is ad-hoc signed by libsui's pure-Rust signer (arm64 refuses
-/// to execute an unsigned image, and Gatekeeper rejects an invalid one), while
-/// ELF and PE are never signed — an unsigned ELF is normal, and Authenticode is
-/// deliberately out of scope (an unsigned PE runs; SmartScreen may warn).
+/// the write: Mach-O is ad-hoc signed (arm64 refuses to execute an unsigned
+/// image, and Gatekeeper rejects an invalid one) — arm64 by libsui's pure-Rust
+/// signer, x86_64 by `codesign` on a staged temp file — while ELF and PE are
+/// never signed, an unsigned ELF being normal and Authenticode deliberately out
+/// of scope (an unsigned PE runs; SmartScreen may warn). Both Mach-O legs pin
+/// the same CodeDirectory identifier, so the artifact is byte-reproducible.
 pub fn inject(
     target: &TargetPlatform,
     template: &[u8],

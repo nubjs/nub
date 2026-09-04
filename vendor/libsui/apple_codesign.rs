@@ -99,6 +99,13 @@ const SEC_CODE_SIGNATURE_HASH_SHA256: u8 = 2;
 
 const CS_EXECSEG_MAIN_BINARY: u64 = 0x1; // executable segment denotes main binary
 
+/// The CodeDirectory identifier every ad-hoc signature this crate produces
+/// carries, on both macOS architectures. A CONSTANT, because the identifier is
+/// part of the signed image: anything derived from the file name or the signing
+/// process makes two builds of one input differ. `crate::codesign_adhoc` passes
+/// it to `codesign -i` for the same reason.
+pub(crate) const ADHOC_IDENTIFIER: &str = "a.out";
+
 impl MachoSigner {
     pub fn new(obj: Vec<u8>) -> Result<Self, Error> {
         let header = Header64::read_from_prefix(&obj)
@@ -178,7 +185,9 @@ impl MachoSigner {
     pub fn sign<W: std::io::Write>(mut self, mut writer: W) -> Result<(), Error> {
         const PAGE_SIZE: usize = 1 << 12;
 
-        let id = b"a.out\0";
+        // CodeDirectory identifiers are NUL-terminated.
+        let id = format!("{ADHOC_IDENTIFIER}\0");
+        let id = id.as_bytes();
         let n_hashes = self.sig_off.div_ceil(PAGE_SIZE);
         let id_off = size_of::<CodeDirectory>();
         let hash_off = id_off + id.len();

@@ -585,6 +585,56 @@ pub struct Macho {
 
 pub(crate) const SEGNAME: [u8; 16] = *b"__SUI\0\0\0\0\0\0\0\0\0\0\0";
 
+/// Ad-hoc sign `data` by staging it at `tmp_path` and handing that file to
+/// Apple's `codesign`, returning the signed bytes. This is the x86_64 leg of
+/// [`Macho::build_and_sign`]; arm64 is signed in-process instead.
+///
+/// `-i` is load-bearing, not cosmetic. Without it `codesign` derives the
+/// CodeDirectory identifier from the staged file's BASENAME, and that name
+/// carries the compiling process's PID — so two compiles of an unchanged tree
+/// produced artifacts differing in exactly the ASCII digits of that PID, and a
+/// reproducible build was impossible. `ADHOC_IDENTIFIER` is what the arm64
+/// signer writes, so both macOS legs now agree on one stable value.
+///
+/// A missing or failing `codesign` leaves `data` unsigned rather than failing
+/// the build: an unsigned x86_64 image still executes.
+#[cfg(target_vendor = "apple")]
+fn codesign_adhoc(data: &[u8], tmp_path: &std::path::Path) -> Result<Vec<u8>, Error> {
+    if let Some(parent) = tmp_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(tmp_path, data)?;
+
+    match std::process::Command::new("codesign")
+        .arg("-s")
+        .arg("-")
+        .arg("-i")
+        .arg(apple_codesign::ADHOC_IDENTIFIER)
+        .arg(tmp_path)
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!(
+                    "Warning: Failed to adhoc codesign binary: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // codesign not found, skip it
+        }
+        Err(e) => {
+            std::fs::remove_file(tmp_path).ok();
+            return Err(e.into());
+        }
+    }
+
+    let signed = std::fs::read(tmp_path)?;
+    std::fs::remove_file(tmp_path).ok();
+    Ok(signed)
+}
+
 impl Macho {
     pub fn from(obj: Vec<u8>) -> Result<Self, Error> {
         let header = Header64::read_from_prefix(&obj)
@@ -937,44 +987,11 @@ impl Macho {
             // For Intel binaries, build to a temporary file and run adhoc codesign
             #[cfg(target_vendor = "apple")]
             {
-                let tmp_dir = std::env::temp_dir();
-                std::fs::create_dir_all(&tmp_dir)?;
-                let tmp_path = tmp_dir.join(format!("sui_sign_{}", std::process::id()));
-
-                {
-                    let mut tmp_file = std::fs::File::create(&tmp_path)?;
-                    self.build(&mut tmp_file)?;
-                }
-
-                // Run adhoc codesign
-                match std::process::Command::new("codesign")
-                    .arg("-s")
-                    .arg("-")
-                    .arg(&tmp_path)
-                    .output()
-                {
-                    Ok(output) => {
-                        if !output.status.success() {
-                            eprintln!(
-                                "Warning: Failed to adhoc codesign binary: {}",
-                                String::from_utf8_lossy(&output.stderr)
-                            );
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // codesign not found, skip it
-                    }
-                    Err(e) => {
-                        std::fs::remove_file(&tmp_path).ok();
-                        return Err(e.into());
-                    }
-                }
-
-                // Read the (possibly signed) binary and write to output
-                let signed_data = std::fs::read(&tmp_path)?;
-                writer.write_all(&signed_data)?;
-                std::fs::remove_file(&tmp_path).ok();
-
+                let mut data = Vec::new();
+                self.build(&mut data)?;
+                let tmp_path =
+                    std::env::temp_dir().join(format!("sui_sign_{}", std::process::id()));
+                writer.write_all(&codesign_adhoc(&data, &tmp_path)?)?;
                 Ok(())
             }
 
@@ -1762,6 +1779,46 @@ pub mod utils {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Two compiles of one tree stage the x86_64 image at `sui_sign_<pid>`, so the
+    // staged file's NAME is the only per-run input `codesign` sees. Signing
+    // identical bytes under two names must therefore yield identical bytes.
+    //
+    // The input is a signature-stripped copy of the test binary — an arm64 image
+    // on an arm64 host, which is fine: `codesign_adhoc` never parses what it
+    // signs, and the arch dispatch it serves lives in `build_and_sign`.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn adhoc_signature_is_independent_of_the_staged_file_name() {
+        let dir = std::env::temp_dir().join(format!("sui_sign_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let input = dir.join("input");
+        std::fs::copy(std::env::current_exe().unwrap(), &input).unwrap();
+        // `codesign` refuses to sign an already-signed image, and the production
+        // x86_64 path is handed one `Macho::from` has already stripped.
+        let stripped = std::process::Command::new("codesign")
+            .arg("--remove-signature")
+            .arg(&input)
+            .status()
+            .unwrap();
+        assert!(stripped.success(), "could not strip the test input");
+        let data = std::fs::read(&input).unwrap();
+
+        let a = codesign_adhoc(&data, &dir.join("sui_sign_11111")).unwrap();
+        let b = codesign_adhoc(&data, &dir.join("sui_sign_22222")).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Positive control: a failing or absent `codesign` returns the input
+        // untouched, and the equality below would then hold for the wrong reason.
+        // Compared with `assert!` rather than `assert_ne!`/`assert_eq!` so a
+        // failure does not dump two multi-megabyte images into the output.
+        assert!(a != data, "codesign did not sign the staged image");
+        assert!(
+            a == b,
+            "the ad-hoc signature depends on the staged file's name"
+        );
+    }
 
     // Build a minimal arm64 Mach-O containing __TEXT, __LINKEDIT, and the
     // dyld-1284.13 commands LC_FUNCTION_VARIANTS / LC_FUNCTION_VARIANT_FIXUPS,
