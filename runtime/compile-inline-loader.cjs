@@ -181,6 +181,6 @@
   const entryUrl = urlFor(ENTRY);
   // Not awaited, and deliberately not wrapped: an import failure must surface as
   // the ordinary unhandled rejection Node prints for a failed ESM entry, with the
-  // `file:///$nub/…` frames the sourceURL above establishes.
+  // `ROOT`-rooted frames the sourceURL above establishes.
   import(entryUrl);
 })();
