@@ -39,7 +39,8 @@ function cutBalanced(head, open, close, what) {
     }
     if (depth !== 0) throw new Error(`ablate: unbalanced ${open}${close} after ${what}`);
     end = i + 1;
-    if (src.slice(end).trimStart().startsWith("else")) continue;
+    const next = src.slice(end).trimStart();
+    if (["else", "catch", "finally"].some(k => next.startsWith(k))) continue;
     break;
   }
   if (src[end] === ";") end++;
@@ -75,6 +76,20 @@ for (const drop of drops) {
       src = src.replace(
         /^import \{ installSyncPolyfills \} from "\.\/polyfills\.cjs";$/m,
         'import { installSyncPolyfills } from "./polyfills.cjs";\nif (globalThis.__never) installSyncPolyfills({});',
+      );
+      break;
+    // preload-common.cjs ablations. Its module EVALUATION is part of the preamble's
+    // static graph on every artifact, and two top-level statements in it do real
+    // work: an eager `node:worker_threads` load for execArgv hygiene, and building
+    // the whole accepted-flag Set to feature-detect --experimental-import-text.
+    case "pc-argvflags":
+      cutBalanced("try {\n  const workerThreads = getBuiltin(\"node:worker_threads\");", "{", "}", "argv-only-flags block");
+      break;
+    case "pc-anef":
+      cut(/^const NATIVE_IMPORT_TEXT = process\.allowedNodeEnvironmentFlags\.has\(.*\);\n/m, "NATIVE_IMPORT_TEXT");
+      src = src.replace(
+        /^const VERSION_ENV = /m,
+        "const NATIVE_IMPORT_TEXT = false;\nconst VERSION_ENV = ",
       );
       break;
     case "empty":
