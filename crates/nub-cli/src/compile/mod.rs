@@ -536,7 +536,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // Measured off the published file rather than predicted: the signature's
         // size is a function of the final image, which nothing before the write
         // knows. A failure to read it back is not worth failing a verified build
-        // over — the component simply reports zero and lands in `overhead`.
+        // over — the component simply reports zero and goes unnamed.
         signature_bytes: inject::code_signature_size_of(target.format(), &out_path).unwrap_or(0),
         shipped,
         deferred: bundled.dynamic_import_sites,
@@ -1337,6 +1337,10 @@ impl LiveLine {
         if !crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr())) {
             return Self(None);
         }
+        // clx redraws every 200 ms by default, which reads as a stutter rather
+        // than a spinner. 80 ms is ora's cadence. The setting is process-global,
+        // and `nub compile` owns the only progress job in this process.
+        clx::progress::set_interval(std::time::Duration::from_millis(80));
         let job = clx::progress::ProgressJobBuilder::new()
             .body("{{header}}  {{ spinner() }} {{phase}}{{detail}}")
             .prop("header", &banner(true))
@@ -1427,26 +1431,19 @@ impl BuildFacts {
     ///
     /// This is the number someone shrinking a binary actually wants; the total on
     /// its own cannot tell them whether their code or the runtime is the problem.
-    /// Every component is therefore MEASURED, and only `overhead` is a remainder.
-    ///
-    /// It used to be the other way round: `launcher` was `size - node - app`, so
-    /// it swallowed the ad-hoc code signature as well. That is not a rounding
-    /// error — the CodeDirectory carries one SHA-256 per 4 KiB page, so on a
-    /// 29 MB embed build a fixed 851 KB launcher was reported as 1.2 MB, and the
-    /// row said the launcher alone outweighed a whole `--smol` binary.
-    ///
-    /// `overhead` is what is left: the payload container's header, the manifest,
+    /// Every part named here is MEASURED, so they deliberately do NOT sum to the
+    /// total. What is left over is the payload container's header, the manifest,
     /// the per-file framing, and the alignment of the payload region to a 64 KiB
-    /// boundary. Structurally non-negative on Mach-O and ELF, where injection only
-    /// ever appends; `saturating_sub` covers PE, whose resource directory libsui
-    /// rebuilds rather than extends.
+    /// boundary — a few tens of kilobytes nobody can act on. Naming it took the
+    /// row past 100 columns on a real build, which wraps on an 80-column terminal,
+    /// so it is left out and the parts that answer the question stay on one line.
+    ///
+    /// `launcher` used to BE the remainder — `size - node - app` — so it swallowed
+    /// the ad-hoc code signature as well. That is not a rounding error: the
+    /// CodeDirectory carries one SHA-256 per 4 KiB page, so on a 29 MB embed build
+    /// a fixed 851 KB launcher was reported as 1.2 MB, and the row said the
+    /// launcher alone outweighed a whole `--smol` binary.
     fn size_split(&self) -> String {
-        let overhead = self
-            .size
-            .saturating_sub(self.node_bytes)
-            .saturating_sub(self.app_bytes)
-            .saturating_sub(self.launcher_bytes)
-            .saturating_sub(self.signature_bytes);
         let mut parts = Vec::new();
         if self.node_bytes > 0 {
             parts.push(format!("node {}", mb(self.node_bytes)));
@@ -1456,7 +1453,6 @@ impl BuildFacts {
         if self.signature_bytes > 0 {
             parts.push(format!("signature {}", mb(self.signature_bytes)));
         }
-        parts.push(format!("overhead {}", mb(overhead)));
         format!("  ({})", parts.join(" · "))
     }
 }
@@ -4636,7 +4632,7 @@ mod tests {
             )),
             vec![
                 "output=acme  29.4 MB  (node 28.2 MB · app 57 KB · launcher 851 KB · \
-                 signature 228 KB · overhead 66 KB)"
+                 signature 228 KB)"
                     .to_string(),
                 "runtime=Node 26.8.1, embedded  (package.json#engines.node)".to_string(),
                 // No aside: building for the host is the default, and a note on
@@ -4650,7 +4646,8 @@ mod tests {
         );
     }
 
-    /// Every component of the split is measured; only `overhead` is a remainder.
+    /// Every part of the split is measured, and the container's own bytes are not
+    /// named at all — so the parts stay under the total rather than reaching it.
     ///
     /// The regression this pins: `launcher` used to BE the remainder, so it
     /// swallowed the ad-hoc code signature — which grows at one SHA-256 per 4 KiB
@@ -4660,13 +4657,14 @@ mod tests {
         let signed = full_facts();
         assert_eq!(
             signed.size_split(),
-            "  (node 28.2 MB · app 57 KB · launcher 851 KB · signature 228 KB · overhead 66 KB)",
+            "  (node 28.2 MB · app 57 KB · launcher 851 KB · signature 228 KB)",
         );
         let components =
             signed.node_bytes + signed.app_bytes + signed.launcher_bytes + signed.signature_bytes;
         assert!(
             components < signed.size,
-            "the measured components must leave a non-negative overhead: {components} vs {}",
+            "the measured parts must stay under the total, since the container's \
+             header, manifest and alignment padding go unnamed: {components} vs {}",
             signed.size
         );
 
@@ -4679,7 +4677,7 @@ mod tests {
         };
         assert_eq!(
             unsigned.size_split(),
-            "  (node 28.2 MB · app 57 KB · launcher 851 KB · overhead 66 KB)",
+            "  (node 28.2 MB · app 57 KB · launcher 851 KB)",
         );
     }
 
@@ -4739,9 +4737,7 @@ mod tests {
                 &host,
             )),
             vec![
-                "output=acme  3.4 MB  (app 2.5 MB · launcher 851 KB · signature 27 KB · \
-                 overhead 56 KB)"
-                    .to_string(),
+                "output=acme  3.4 MB  (app 2.5 MB · launcher 851 KB · signature 27 KB)".to_string(),
                 "runtime=Node >=22 <23, not embedded  (--target)".to_string(),
                 format!("platform={}", host.triple()),
                 "app=run from the executable  nothing is written to disk".to_string(),
