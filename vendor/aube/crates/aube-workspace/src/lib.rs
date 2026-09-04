@@ -334,22 +334,36 @@ fn pattern_matches_path(pattern: &str, path: &str) -> bool {
 }
 
 /// Render a workspace pattern in the same frame as a lockfile importer
-/// key: no `.` components, no empty ones, no trailing slash.
+/// key: no `.` components, no empty ones, no trailing slash, and an
+/// in-root `normal/..` pair collapsed.
 ///
 /// This is what the filesystem does for the non-recursive discovery
 /// branch when it joins the pattern onto a real directory, which is why
 /// `./packages/*`, `packages/./*` and `packages/*/` all find
 /// `packages/app` there. A lexical matcher has to do it explicitly.
 ///
-/// Splitting on `/` is safe for glob metacharacters: a `.` is only dropped
-/// when it is a WHOLE component, never when it sits inside one, and `..`
-/// is preserved because parent-relative patterns (`../**`) are supported.
+/// Splitting on `/` is safe for glob metacharacters: `.` and `..` are only
+/// ever acted on as a WHOLE component, never inside one.
+///
+/// A LEADING `..` has nothing to pop and must survive. The two cases are
+/// genuinely different frames rather than two spellings of one: npm
+/// accepts `packages/../apps/*`, discovers `apps/a` and keys it `apps/a`,
+/// so failing to collapse that dropped a real importer — while `../**`
+/// deliberately reaches OUTSIDE the project, and the walk renders what it
+/// finds there as `../sibling`. Collapsing the first and preserving the
+/// second is what keeps both answers right.
 fn normalize_member_pattern(pattern: &str) -> String {
-    pattern
-        .split('/')
-        .filter(|component| !component.is_empty() && *component != ".")
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut components: Vec<&str> = Vec::new();
+    for component in pattern.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if matches!(components.last(), Some(&last) if last != "..") => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    components.join("/")
 }
 
 fn expand_braces(pattern: &str) -> Vec<String> {
@@ -714,6 +728,28 @@ mod tests {
         assert!(
             !matches_member_patterns("packages/app", &shouty),
             "a differently-cased pattern must not match, as `MatchOptions::new()` would not"
+        );
+    }
+
+    /// An in-root `normal/..` pair collapses; a leading `..` does not.
+    ///
+    /// Asserted lexically rather than through the walk because the two
+    /// render in different frames, which is the whole point. npm accepts
+    /// `packages/../apps/*`, discovers `apps/a` and keys it `apps/a` in
+    /// the lockfile, so the matcher has to answer for `apps/a` — whereas
+    /// the walk hands its caller an absolute path that `pathdiff` renders
+    /// back as `packages/../apps/a`. Comparing those two spellings would
+    /// be testing the rendering, not the membership question the npm
+    /// reader actually asks.
+    #[test]
+    fn in_root_parent_components_collapse_but_leading_ones_do_not() {
+        assert!(
+            matches_member_patterns("apps/a", &["packages/../apps/*".to_string()]),
+            "npm keys this member `apps/a`; not collapsing the `..` dropped a real importer"
+        );
+        assert!(
+            !matches_member_patterns("apps/a", &["../apps/*".to_string()]),
+            "a leading `..` points outside the project and must not collapse into `apps/*`"
         );
     }
 
