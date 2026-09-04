@@ -55,8 +55,29 @@ const ENTRY_PLACEHOLDER: &str = "__NUB_INLINE_ENTRY__";
 /// delete before the first `import()` is undone. Every chunk carries it and the
 /// first one evaluated does the work; the rest are five failed lookups.
 ///
+/// `-e` also publishes every BUILTIN MODULE NAME as a lazy global — `fs`, `http`,
+/// `node:sqlite`, 46 of them on Node 26 — which a plain script does not have. That
+/// is the larger half of the divergence and the one `a-global-parity` catches:
+/// measured, an inline artifact carried 44 globals the same file run through
+/// `nub <file>` did not.
+///
+/// Three of those names are ALSO real globals and must survive: `process`,
+/// `console` and `crypto` (the WebCrypto one, distinct from the module). Deleting
+/// the rest restores parity exactly — 141 = 141 on Node 26, 135 = 135 on Node 24,
+/// with nothing over-deleted in either direction. The keep-set is spelled out
+/// rather than derived because nothing distinguishes the two kinds at run time:
+/// `process` is a lazy getter exactly like `fs`, and `builtinModules` lists it.
+/// `a-global-parity` is the guard if Node ever adds a fourth.
+///
+/// The list comes from the bootstrap's own builtin accessor rather than the
+/// `module` global, because that global is itself one of the injected names — it
+/// is the `node:module` NAMESPACE, not a CJS module instance, so the
+/// `module.constructor.builtinModules` that works in a real `-e` script reads
+/// `undefined` here. Going through the accessor also survives the deletions below,
+/// which take `module` with them.
+///
 /// One line, so the source-map shift stays exactly one generated line.
-const EVAL_GLOBAL_CLEANUP: &str = "for(const k of[\"require\",\"module\",\"exports\",\"__filename\",\"__dirname\"])delete globalThis[k];";
+const EVAL_GLOBAL_CLEANUP: &str = "{const B=process[Symbol.for(\"nub.compile.bootstrap\")]?.getBuiltin(\"node:module\")?.builtinModules;for(const k of[\"require\",\"module\",\"exports\",\"__filename\",\"__dirname\"])delete globalThis[k];if(B)for(const k of B)if(k!==\"process\"&&k!==\"console\"&&k!==\"crypto\")delete globalThis[k];}";
 
 /// Why a payload cannot run inline. Reported in the build summary rather than as an
 /// error: each of these is a payload that works, just not without extracting.
@@ -78,6 +99,13 @@ pub enum Decline {
     /// another needs a topological order and a cycle has none. Rolldown's manual
     /// CommonJS boundary makes this reachable rather than theoretical.
     CyclicChunks,
+    /// The payload reaches the `cluster` builtin. `cluster.fork()` defaults the
+    /// child's module to `process.argv[1]`, and an inline artifact publishes the
+    /// EXECUTABLE there — so the fork hands a Mach-O/ELF/PE to the real Node, which
+    /// parses it as JavaScript and dies. Declining is the answer rather than a
+    /// re-entry fixup because an inline payload writes nothing to disk, so no
+    /// JavaScript file exists to point the child at; the extracted tree has one.
+    ClusterReentry,
     /// The build asked for source maps. Measured on Node 26.7: `--enable-source-maps`
     /// does not apply an inline map to a `data:` URL module at all — with or without
     /// a `//# sourceURL` — so an inline artifact would report unmapped frames where
@@ -95,6 +123,7 @@ impl Decline {
             Self::StaticWorker => "it carries a worker chunk",
             Self::NonChunkFile => "it carries a file that is not a compiled chunk",
             Self::CyclicChunks => "its chunks import each other in a cycle",
+            Self::ClusterReentry => "it uses node:cluster, which re-runs the executable",
             Self::SourceMap => "it was built with source maps",
         }
     }
@@ -146,8 +175,22 @@ pub fn rewrite(files: AppFiles, inputs: &Inputs<'_>) -> Result<Rewritten> {
                 .filter(|file| file.name != ROOT_MANIFEST_NAME)
                 .map(|mut file| {
                     if file.name == bootstrap_name {
-                        file.bytes.push(b'\n');
-                        file.bytes.extend_from_slice(loader.as_bytes());
+                        // Wrapped, because this pair is handed to Node as `-e`, where
+                        // a top-level function declaration becomes a GLOBAL. The
+                        // bootstrap has one — `installCompiledForkIdentity` — and it
+                        // showed up in `a-global-parity`'s diff beside the builtins
+                        // `EVAL_GLOBAL_CLEANUP` removes. Under `--require`, which is
+                        // how the extracted shape loads the same file, CJS module
+                        // scope already contained it, so only this path needs it.
+                        // Nothing here reads top-level `this` or exports anything;
+                        // the bootstrap publishes through `process[Symbol.for(…)]`,
+                        // which an arrow body reaches unchanged.
+                        let mut wrapped = b"(()=>{\n".to_vec();
+                        wrapped.append(&mut file.bytes);
+                        wrapped.push(b'\n');
+                        wrapped.extend_from_slice(loader.as_bytes());
+                        wrapped.extend_from_slice(b"\n})();\n");
+                        file.bytes = wrapped;
                         return Ok(file);
                     }
                     let source = String::from_utf8(std::mem::take(&mut file.bytes))
@@ -205,6 +248,14 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
         );
     }
 
+    if files
+        .iter()
+        .filter(|file| file.name.ends_with(".mjs"))
+        .any(|file| std::str::from_utf8(&file.bytes).is_ok_and(|source| reaches_cluster(source)))
+    {
+        return Ok(Err(Decline::ClusterReentry));
+    }
+
     // The chunk graph, read the way the loader will read it: a chunk depends on
     // another when it names it in a relative specifier. Textual on both sides on
     // purpose — the loader has no bundler metadata, so a graph derived from anything
@@ -224,6 +275,95 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
         return Ok(Err(Decline::CyclicChunks));
     }
     Ok(Ok(chunk_names))
+}
+
+/// Whether a chunk names the `cluster` builtin as a module specifier.
+///
+/// Both spellings reach the emitted bundle: the authored ESM `node:cluster` keeps
+/// its prefix, and the interop shim Rolldown writes around it is a bare
+/// `require("cluster")`. AST rather than a substring search because the word is an
+/// ordinary English one — a payload logging "cluster failed" resolves nothing and
+/// must still inline. A chunk that fails to parse yields false: the bundler
+/// already emitted it, so a parse failure here is this pass being wrong about the
+/// syntax, and it must never be what fails or degrades a build.
+fn reaches_cluster(source: &str) -> bool {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::{
+        CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression, ImportDeclaration,
+    };
+    use oxc_ast_visit::{Visit, walk};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    fn is_cluster(specifier: &str) -> bool {
+        matches!(specifier, "cluster" | "node:cluster")
+    }
+
+    /// A no-substitution template literal is as static as a string literal, and
+    /// the minifier emits both.
+    fn literal_specifier<'a>(expr: &'a Expression<'_>) -> Option<&'a str> {
+        match expr.get_inner_expression() {
+            Expression::StringLiteral(s) => Some(s.value.as_str()),
+            Expression::TemplateLiteral(t) if t.expressions.is_empty() => t
+                .quasis
+                .first()
+                .map(|q| q.value.cooked.as_ref().unwrap_or(&q.value.raw).as_str()),
+            _ => None,
+        }
+    }
+
+    #[derive(Default)]
+    struct Visitor {
+        found: bool,
+    }
+
+    impl<'a> Visit<'a> for Visitor {
+        fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
+            self.found |= is_cluster(it.source.value.as_str());
+            walk::walk_import_declaration(self, it);
+        }
+
+        fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
+            if let Some(source) = &it.source {
+                self.found |= is_cluster(source.value.as_str());
+            }
+            walk::walk_export_named_declaration(self, it);
+        }
+
+        fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
+            self.found |= is_cluster(it.source.value.as_str());
+            walk::walk_export_all_declaration(self, it);
+        }
+
+        fn visit_expression(&mut self, expr: &Expression<'a>) {
+            if let Expression::ImportExpression(import) = expr
+                && let Some(specifier) = literal_specifier(&import.source)
+            {
+                self.found |= is_cluster(specifier);
+            }
+            walk::walk_expression(self, expr);
+        }
+
+        fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+            if let Expression::Identifier(callee) = &call.callee
+                && callee.name == "require"
+                && let Some(argument) = call.arguments.first().and_then(|a| a.as_expression())
+                && let Some(specifier) = literal_specifier(argument)
+            {
+                self.found |= is_cluster(specifier);
+            }
+            walk::walk_call_expression(self, call);
+        }
+    }
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
+    if parsed.panicked {
+        return false;
+    }
+    let mut visitor = Visitor::default();
+    visitor.visit_program(&parsed.program);
+    visitor.found
 }
 
 /// Every spelling Rolldown can emit for a sibling chunk's specifier.
@@ -354,6 +494,45 @@ mod tests {
         }
     }
 
+    /// Classify a one-chunk payload that is inlinable but for `source` itself.
+    fn decline_of(source: &str) -> Option<Decline> {
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), source.as_bytes().to_vec()),
+        ];
+        match rewrite(files, &sealed("main.mjs")).expect("classification succeeds") {
+            Rewritten::Extract(_, why) => Some(why),
+            Rewritten::Inline(_) => None,
+        }
+    }
+
+    /// `cluster.fork()` re-runs `process.argv[1]`, which an inline artifact
+    /// publishes as the executable — so the child feeds the binary to Node and dies
+    /// on the first byte. Both spellings survive into the emitted chunk, and the
+    /// word on its own decides nothing: a substring search would decline a payload
+    /// that only mentions clusters in a message.
+    #[test]
+    fn a_payload_that_names_the_cluster_builtin_declines_but_the_bare_word_does_not() {
+        assert_eq!(
+            decline_of("import cluster from\"node:cluster\";cluster.fork();"),
+            Some(Decline::ClusterReentry),
+            "the authored ESM spelling keeps its node: prefix"
+        );
+        assert_eq!(
+            decline_of("const cluster = require(\"cluster\");cluster.fork();"),
+            Some(Decline::ClusterReentry),
+            "the interop shim requires the bare builtin name"
+        );
+        assert_eq!(
+            decline_of("const msg = \"cluster failed\";console.log(msg);"),
+            None,
+            "the word in a string literal resolves nothing, so the payload still inlines"
+        );
+    }
+
     /// `assemble_app` puts a root `package.json` in EVERY payload, so a decline on
     /// any non-chunk file declines every build — which is exactly what happened, and
     /// silently, because nothing exercised the inline path. The manifest is for a
@@ -425,8 +604,9 @@ mod tests {
             lines[0]
         );
         assert!(
-            lines[0].starts_with("for(const k of["),
-            "and the `-e` global cleanup opens it"
+            lines[0].starts_with(EVAL_GLOBAL_CLEANUP),
+            "and the `-e` global cleanup opens it: {}",
+            lines[0]
         );
         assert_eq!(
             lines[1], "import{a}from\"nub-inline:dep-A1.mjs\";",
