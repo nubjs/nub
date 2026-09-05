@@ -113,7 +113,11 @@ if [ -z "$POPULATION" ]; then
   node "$HERE/discover-install-scripts.mjs" --out "$POPULATION" || {
     echo "could not discover the population; pass --population <file>" >&2; exit 2; }
 fi
-PKGS="$(awk -F'\t' '{print $1}' "$POPULATION" | tr '\n' ' ')"
+# ⛔ SKIP COMMENT AND BLANK LINES. Without this, `awk '{print $1}'` over a population file carrying a
+# provenance header turns `# name<TAB>version` into a package named `#`, and the sweep spends an arm
+# trying to install it. results/baseline-coverage.tsv and results/uncovered-carriers.tsv both carry
+# such a header, so a population assembled by concatenating one of them would hit exactly that.
+PKGS="$(awk -F'\t' '$0 !~ /^[[:space:]]*(#|$)/ {print $1}' "$POPULATION" | tr '\n' ' ')"
 # ⛔⛔ AN EMPTY POPULATION IS A HARD FAILURE, NOT AN EMPTY SWEEP — and this guard matters more than the
 # fix above it. The bug there was one line of shell; its DAMAGE was that every count downstream read 0,
 # every verdict bucket read 0, and the gate passed, so a sweep that confined nothing reported success.
