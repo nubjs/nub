@@ -354,6 +354,22 @@ fn a_smol_payload_records_whether_it_needs_the_register_hooks_shim() {
     );
 }
 
+/// Whether a target Node can carry the single-executable container at all.
+///
+/// The blob's `execArgv` field is what the container needs and it reached release
+/// as three backports, so the band is not one floor: 24.7 and later, or the 22.20
+/// line, with 23.x excluded because it went end of life before any of them landed.
+/// Kept here rather than reached for through the compiler so a test asserting what
+/// the compiler chose cannot agree with it by construction.
+#[cfg(feature = "compile")]
+fn sea_container_is_available(target: &str) -> bool {
+    let Some((major, minor, patch)) = parse_node_version(target) else {
+        return false;
+    };
+    let version = (major, minor, patch);
+    version >= (24, 7, 0) || (version >= (22, 20, 0) && major < 23)
+}
+
 /// The single-executable container refuses `child_process.fork`, because a fork
 /// there would re-run the whole application rather than the named module.
 ///
@@ -423,11 +439,27 @@ try {
         String::from_utf8_lossy(&compiled.stderr)
     );
     if !summary.contains("a single-executable application") {
-        // Not a failure. The scan learning to follow this shape, or a target Node
-        // below the bands that container needs, both land here — and in either case
-        // the artifact is a launcher, where a fork is correct and this guard is not
-        // the thing under test.
-        eprintln!("skipped: this fixture no longer selects the single-executable container");
+        // Two very different reasons land here, and only one of them is this
+        // test's business.
+        //
+        // A target Node below the bands the container needs gets no
+        // single-executable at all, whatever the payload looks like. That is the
+        // host, not the code, so it returns rather than failing — otherwise the
+        // test is red for everyone on an older Node.
+        //
+        // Anything else means the payload DECLINED, which is the premise breaking,
+        // and a silent pass there is the trap this test exists to avoid: the scan
+        // learning to follow the holder shape is a fix, but the guard is still
+        // needed for the flows it has not learned, and a test that quietly stops
+        // exercising it reads as coverage while covering nothing. So it fails, and
+        // whoever taught the scan this shape has to find one it still misses.
+        assert!(
+            !sea_container_is_available(&runtime.node_target),
+            "the payload declined the single-executable container, so this test stopped \
+             exercising the fork guard. The scan has learned this fixture's shape — replace it \
+             with one the scan still misses rather than deleting the case, because the guard \
+             still covers every flow the scan has not learned. Compile summary:\n{summary}"
+        );
         return;
     }
 

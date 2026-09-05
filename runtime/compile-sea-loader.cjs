@@ -186,16 +186,36 @@
   // `internal/cluster/primary` destructures `fork` into a module-local const the
   // first time cluster is required — which is inside the application's graph, so
   // a patch applied later would never reach it.
+  //
+  // It is a runtime patch and therefore revocable, which bounds what it can be:
+  // a `NODE_OPTIONS` preload runs BEFORE this main and can keep the original
+  // function or hand it back afterwards. That limit is not closable — it is true
+  // of every runtime patch in every JavaScript program — and the alternative of
+  // keeping any payload that MIGHT fork on the launcher is the same undecidable
+  // question the scan already answers as well as it can. What is closable is the
+  // one route a preload takes without meaning to, and the branch below takes it.
   {
     const childProcess = boot.getBuiltin("node:child_process");
-    childProcess.fork = (modulePath) => {
+    const refuse = (what) => (modulePath) => {
       throw new Error(
-        `child_process.fork(${JSON.stringify(String(modulePath))}) cannot run in this ` +
-          "executable: the child would re-run the whole application instead of that module. " +
-          "The build is meant to detect a program that forks and produce a different kind of " +
-          "executable, so this is a bug worth reporting.",
+        `${what}(${JSON.stringify(String(modulePath))}) cannot run in this executable: the ` +
+          "child would re-run the whole application instead of that module. The build is " +
+          "meant to detect a program that forks and produce a different kind of executable, " +
+          "so this is a bug worth reporting.",
       );
     };
+    childProcess.fork = refuse("child_process.fork");
+
+    // The one case where replacing `child_process.fork` is already too late. A
+    // preload that loaded `node:cluster` gave `internal/cluster/primary` its
+    // module-local `fork` before this ran, and nothing reaches that const —
+    // but every use of it goes through `cluster.fork`, which is still ours to
+    // take. Conditional because reading the module would otherwise LOAD it,
+    // which costs every artifact a builtin it does not use and would capture
+    // the original itself.
+    if (process.moduleLoadList.some((entry) => entry.endsWith("internal/cluster/primary"))) {
+      boot.getBuiltin("node:cluster").fork = refuse("cluster.fork");
+    }
   }
 
   // `nub compile`'s build-time self-check, the counterpart to the launcher's
