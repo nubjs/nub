@@ -253,6 +253,36 @@ pub fn script_settings_snapshot() -> ScriptSettings {
     script_settings()
 }
 
+/// A caller-injected sandbox engine for dependency lifecycle scripts.
+///
+/// When an embedder installs one via [`set_script_sandbox`], the lifecycle runner delegates
+/// confinement to it INSTEAD of the embedded Landlock/Seatbelt jail, so the build jail and the
+/// embedder's own sandbox share a single enforcement implementation. The hook confines the
+/// prepared command IN PLACE — installing a `pre_exec` on Linux, rewriting the program to
+/// `sandbox-exec` on macOS — and returns an OPAQUE guard the runner holds until AFTER the child is
+/// spawned. The guard exists for one reason: on Linux it keeps the Landlock ruleset descriptor
+/// open, which the post-`fork` `restrict_self` consumes. An `Err` fails the launch CLOSED (the
+/// script does not run unconfined). The hook is deliberately opaque so this crate takes no
+/// dependency on the embedder's sandbox types.
+pub type ScriptSandboxHook = std::sync::Arc<
+    dyn Fn(&mut tokio::process::Command, &ScriptJail, &Path) -> std::io::Result<Box<dyn Send>>
+        + Send
+        + Sync,
+>;
+
+static SCRIPT_SANDBOX: std::sync::OnceLock<ScriptSandboxHook> = std::sync::OnceLock::new();
+
+/// Install the sandbox engine that confines dependency lifecycle scripts. Called once at process
+/// startup by the embedder; the first call wins and later calls are ignored. With none installed,
+/// the runner falls back to aube's embedded jail (today's behavior).
+pub fn set_script_sandbox(hook: ScriptSandboxHook) {
+    let _ = SCRIPT_SANDBOX.set(hook);
+}
+
+fn script_sandbox() -> Option<&'static ScriptSandboxHook> {
+    SCRIPT_SANDBOX.get()
+}
+
 #[cfg(test)]
 mod scoped_settings_tests {
     use super::*;
@@ -1194,10 +1224,23 @@ pub async fn run_script(
         std::fs::create_dir_all(home)
             .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
     }
-    let mut cmd = match (jail, jail_home.as_deref()) {
-        (Some(jail), Some(home)) => spawn_jailed_shell(script_cmd, &settings, jail, home),
-        _ => spawn_shell_with_settings(script_cmd, &settings),
-    };
+    // `_sandbox_guard` holds any confinement resource the injected engine needs kept alive until
+    // the child is spawned (on Linux, the Landlock ruleset descriptor consumed by the post-`fork`
+    // `restrict_self`). It lives in this frame across `run_command_killing_descendants` below,
+    // which spawns the child, so the descriptor is open at `fork` and released once the run ends.
+    let (mut cmd, _sandbox_guard): (tokio::process::Command, Option<Box<dyn Send>>) =
+        match (jail, jail_home.as_deref()) {
+            (Some(jail), Some(home)) => match script_sandbox() {
+                Some(hook) => {
+                    let mut cmd = spawn_shell_with_settings(script_cmd, &settings);
+                    let guard = hook(&mut cmd, jail, home)
+                        .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
+                    (cmd, Some(guard))
+                }
+                None => (spawn_jailed_shell(script_cmd, &settings, jail, home), None),
+            },
+            _ => (spawn_shell_with_settings(script_cmd, &settings), None),
+        };
     cmd.current_dir(script_dir)
         .stderr(child_stderr())
         .env("PATH", &new_path)

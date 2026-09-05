@@ -2952,6 +2952,7 @@ dependencies = [
  "nub-json-guard",
  "nub-phantom-core",
  "nub-phantom-scan",
+ "nub-sandbox",
  "nub-tsconfig",
  "num_cpus",
  "oxc_allocator",

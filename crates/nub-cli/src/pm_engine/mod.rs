@@ -68,6 +68,7 @@ pub mod present;
 pub mod publish_family;
 mod remix_compat;
 mod resource_limits;
+mod sandbox_closure;
 pub mod store_config_family;
 pub mod unsupported_config;
 pub mod use_align;
@@ -795,6 +796,11 @@ fn engine_session_inner(
     // seam it's a no-op and the install path is byte-identical (pure symlink).
     // Idempotent set-once, like `identity::register()`.
     phantom_closure::register();
+    // Inject nub's shared zero-privilege sandbox engine as the enforcement backend for dependency
+    // lifecycle scripts, so the build jail and the agent sandbox run one implementation (epic 4.1).
+    // Idempotent set-once; a no-op on platforms whose lifecycle seam is not yet wired (currently
+    // everything but Linux), where aube's embedded jail stays in force.
+    sandbox_closure::register();
     // Arm the dynamic per-version phantom PRODUCER: an extract-time store hook
     // that scans each fetched package and writes a per-content verdict sidecar
     // (`phantom_closure`, above, is the CONSUMER that reads those sidecars to seed

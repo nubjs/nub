@@ -1,0 +1,19 @@
+# epic 4.1 proof: the injected sandbox seam confines a REAL dependency lifecycle script driven
+# through `aube_scripts::run_script`, using a hook that mirrors nub-cli's `sandbox_closure`. Own
+# workspace, Linux-only — Landlock is the enforcement primitive. The analog of build-jail-landlock
+# but exercising the aube-scripts SEAM (hook consulted + opaque guard threaded across the async
+# spawn) rather than nub-sandbox's `apply` directly.
+[workspace]
+
+[package]
+name = "build-jail-seam-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+aube-scripts = { path = "../../vendor/aube/crates/aube-scripts" }
+aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
+nub-sandbox = { path = "../../crates/nub-sandbox" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
