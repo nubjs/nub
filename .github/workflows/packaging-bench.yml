@@ -46,7 +46,7 @@ jobs:
             @oxc-project/runtime urlpattern-polyfill \
             @js-temporal/polyfill @petamoriken/float16 jsbi 2>&1 | tail -4
           rm -f package.json package-lock.json node_modules/.package-lock.json
-          ls node_modules @js-temporal 2>/dev/null | head
+          ls node_modules || true
       - name: Bench
         env:
           NUB_BIN: ${{ github.workspace }}/target/fast/nub
