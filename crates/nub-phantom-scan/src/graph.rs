@@ -414,14 +414,27 @@ impl SelfTree {
 }
 
 /// Module roots a published `tsconfig.json` declares: `compilerOptions.baseUrl`,
-/// plus each `compilerOptions.paths["*"]` target with its trailing `*` stripped,
-/// resolved under `baseUrl`.
+/// plus each `compilerOptions.paths["*"]` target with a `*` in it, resolved under
+/// `baseUrl` with the trailing `*` stripped.
 ///
 /// Only the `"*"` key qualifies. A prefixed mapping like `"@app/*"` governs
 /// specifiers that start `@app/` and is not a general module root, so admitting
 /// its target would resolve unrelated bare specifiers against it. `extends` is
 /// not chased and a comment-bearing (JSONC) file simply yields nothing — both
 /// degrade to the ancestor roots, which is the conservative direction.
+///
+/// THE PACKAGE ROOT ITSELF IS NEVER A DECLARED ROOT, and that asymmetry is
+/// deliberate rather than an oversight. `baseUrl: "."` — and the absent case,
+/// which defaults to it — normalizes to the empty path and is dropped. Honoring
+/// it would probe the package root with `index_only` off, so ANY bare specifier
+/// matching a root-level file would be suppressed: a package shipping a root
+/// `lodash.js` alongside an undeclared `require('lodash')` would lose a real
+/// phantom, silently. TypeScript would indeed resolve that import to the local
+/// file, but tsc does NOT rewrite a `baseUrl`-resolved specifier at emit, so the
+/// published JavaScript still carries a bare `lodash` that Node resolves from
+/// `node_modules` — the dependency is real. Dropping the empty root costs only a
+/// missed SUPPRESSION (the reference stays reported), which is the safe
+/// direction and the never-false-flag bar this scanner is held to.
 fn config_roots(text: &str) -> Vec<String> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();
