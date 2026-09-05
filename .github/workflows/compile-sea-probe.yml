@@ -26,6 +26,14 @@ on:
 permissions:
   contents: read
 
+# Matching ci.yml. Load-bearing now that the filter is an exclude list: a run
+# takes half an hour across five runners, two of them scarce (macos-15-intel,
+# windows-11-arm), and without this every push in a working session piles another
+# five on top of the ones it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   probe:
     name: ${{ matrix.name }}
