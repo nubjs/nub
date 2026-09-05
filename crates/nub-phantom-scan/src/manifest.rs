@@ -338,7 +338,7 @@ pub(crate) fn is_sfc_like(path: &str) -> bool {
     matches!(extension(path), Some("astro" | "vue" | "svelte"))
 }
 
-fn extension(path: &str) -> Option<&str> {
+pub(crate) fn extension(path: &str) -> Option<&str> {
     let file = path.rsplit('/').next().unwrap_or(path);
     file.rsplit_once('.').map(|(_, e)| e)
 }
