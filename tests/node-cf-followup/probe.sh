@@ -49,6 +49,17 @@ for cmd in "--version" "-e 0" "hello.js"; do
   hyperfine -N --warmup 20 --runs 300 --export-json "ab-$(echo "$cmd" | tr -dc 'a-z0-9').json" \
     "$base $cmd" "$var $cmd"
 done
-echo "########## first --use-system-ca call (the cost delay-init moves, not removes)"
-hyperfine -N --warmup 10 --runs 100 --export-json ab-systemca.json \
+echo "########## the cost delay-init moves rather than removes"
+# --use-system-ca reads the keychain on its own thread, so the delayed load has
+# main-thread bootstrap to overlap with. fs.watch does not: libuv dlopens
+# CoreFoundation on the main thread, which is a refcount bump today and a real
+# load under the patch. Measure both.
+cat > watchy.js <<'EOF'
+const fs = require('fs');
+const w = fs.watch(process.cwd(), () => {});
+w.close();
+EOF
+hyperfine -N --warmup 10 --runs 200 --export-json ab-systemca.json \
   "$base --use-system-ca -e 0" "$var --use-system-ca -e 0"
+hyperfine -N --warmup 10 --runs 200 --export-json ab-fswatch.json \
+  "$base watchy.js" "$var watchy.js"
