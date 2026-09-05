@@ -184,21 +184,35 @@
   // in an unsettled top-level await exits 0 rather than 13, and a throwing entry
   // under `--unhandled-rejections=warn` exits 0 rather than 1. Both measured
   // against the same file run through `nub`.
+  // The diagnostic goes on `beforeExit` and the exit code on `exit`, for the
+  // reason the single-executable loader spells out: `process.emitWarning` queues
+  // its write behind a tick, so one emitted from `exit` is composed and dropped,
+  // while the exit code must be set at the only point nothing further can settle
+  // the entry.
   let settled = false;
+  let warned = false;
+  const warn = () => {
+    if (settled || warned) return;
+    warned = true;
+    process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
+  };
   const unsettled = () => {
     if (settled || process.exitCode !== undefined) return;
     process.exitCode = 13;
-    process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
   };
+  const done = () => {
+    settled = true;
+    process.off("beforeExit", warn);
+    process.off("exit", unsettled);
+  };
+  process.on("beforeExit", warn);
   process.on("exit", unsettled);
   import(entryUrl).then(
     () => {
-      settled = true;
-      process.off("exit", unsettled);
+      done();
     },
     (error) => {
-      settled = true;
-      process.off("exit", unsettled);
+      done();
       // Rethrown rather than reported, because a failed ESM ENTRY is an uncaught
       // exception in Node and not an unhandled rejection — so it must fail the
       // process whatever `--unhandled-rejections` says, and it must still reach an

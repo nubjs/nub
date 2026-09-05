@@ -27,11 +27,19 @@ const CASES = [
     // starts the entry and does not observe the promise exits 0 instead.
     source: 'console.log("before"); await new Promise(() => {}); console.log("never");',
     node: "26.7.0",
+    // Asserted on BOTH sides, because the exit code alone passed while the
+    // artifact said nothing at all: the diagnostic was emitted from an `exit`
+    // listener, where `process.emitWarning` composes the warning and then never
+    // gets a turn to write it. A substring rather than the whole line — Node
+    // prints the stalled module's own position and a source excerpt, and a
+    // compiled artifact can only name the chunk.
+    stderrIncludes: "Detected unsettled top-level await",
   },
   {
     name: "throwing entry",
     source: 'throw new Error("boom");',
     node: "26.7.0",
+    stderrIncludes: "Error: boom",
   },
   {
     name: "throwing entry under --unhandled-rejections=warn",
@@ -40,6 +48,18 @@ const CASES = [
     source: 'throw new Error("boom");',
     node: "26.7.0",
     env: { NODE_OPTIONS: "--unhandled-rejections=warn" },
+    stderrIncludes: "Error: boom",
+  },
+  {
+    name: "unsettled top-level await under --no-warnings",
+    // The diagnostic goes through `process.emitWarning` rather than a write to
+    // stderr, so the flags that govern a warning still govern this one. Node's
+    // own copy is a raw write gated on the same option, which is what makes the
+    // two agree here.
+    source: 'console.log("before"); await new Promise(() => {}); console.log("never");',
+    node: "26.7.0",
+    env: { NODE_OPTIONS: "--no-warnings" },
+    stderrExcludes: "Detected unsettled top-level await",
   },
   {
     name: "explicit process.exitCode",
@@ -87,6 +107,20 @@ for (const [index, testCase] of cases.entries()) {
   const wanted = (control.stdout ?? "").trim();
   const carried = (ran.stdout ?? "").trim();
   if (carried !== wanted) fail(`${testCase.name}: printed ${JSON.stringify(carried)}, nub printed ${JSON.stringify(wanted)}`);
+
+  // Stderr is checked by marker rather than by equality: a diagnostic names the
+  // position it was raised at, and a compiled artifact's positions are its
+  // chunks'. Both sides are asserted, so a marker that stops appearing anywhere
+  // fails the case instead of passing it.
+  for (const [side, out] of [["nub", control.stderr], ["the artifact", ran.stderr]]) {
+    const text = out ?? "";
+    if (testCase.stderrIncludes && !text.includes(testCase.stderrIncludes)) {
+      fail(`${testCase.name}: ${side} did not print ${JSON.stringify(testCase.stderrIncludes)} on stderr`);
+    }
+    if (testCase.stderrExcludes && text.includes(testCase.stderrExcludes)) {
+      fail(`${testCase.name}: ${side} printed ${JSON.stringify(testCase.stderrExcludes)} on stderr, which should have been suppressed`);
+    }
+  }
 }
 
 if (failed > 0) process.exit(1);

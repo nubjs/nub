@@ -177,21 +177,42 @@
   // against `nub app.mjs` on the same file: an entry ending in an unsettled
   // top-level await exited 0 rather than 13, and a throwing entry under
   // `--unhandled-rejections=warn` exited 0 rather than 1.
+  // The diagnostic and the exit code are raised at DIFFERENT points, and that is
+  // the whole subtlety. `process.emitWarning` queues its write behind a tick, so
+  // one emitted from an `exit` listener is composed and then dropped — the loop is
+  // already finished. `beforeExit` is the last moment a turn can still run. The
+  // exit code has the opposite requirement and stays on `exit`, which is the only
+  // point at which nothing further can settle the entry.
+  //
+  // Node itself writes this line synchronously from C++ (`ModuleWrap`, gated on
+  // `--no-warnings`). Going through `emitWarning` instead is deliberate: it is
+  // what keeps `--no-warnings`, `--trace-warnings` and the `warning` event
+  // working, and for a compiled artifact `NODE_OPTIONS` is the only way those
+  // arrive.
   let settled = false;
+  let warned = false;
+  const warn = () => {
+    if (settled || warned) return;
+    warned = true;
+    process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
+  };
   const unsettled = () => {
     if (settled || process.exitCode !== undefined) return;
     process.exitCode = 13;
-    process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
   };
+  const done = () => {
+    settled = true;
+    process.off("beforeExit", warn);
+    process.off("exit", unsettled);
+  };
+  process.on("beforeExit", warn);
   process.on("exit", unsettled);
   shim.exports.then(
     () => {
-      settled = true;
-      process.off("exit", unsettled);
+      done();
     },
     (error) => {
-      settled = true;
-      process.off("exit", unsettled);
+      done();
       // Rethrown rather than reported, because a failed ESM ENTRY is an uncaught
       // exception in Node and not an unhandled rejection — so it must fail the
       // process whatever `--unhandled-rejections` says, and it must still reach an
