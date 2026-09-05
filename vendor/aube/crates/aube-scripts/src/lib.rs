@@ -973,6 +973,62 @@ pub const DEP_LIFECYCLE_HOOKS: [LifecycleHook; 3] = [
     LifecycleHook::PostInstall,
 ];
 
+/// Who wrote the code whose ROOT lifecycle scripts are about to run.
+///
+/// Root scripts are exempt from the embedder's dependency build-jail because they
+/// are the user's own code — the exemption is grounded in authorship, not in a
+/// package's position in the graph. A git dependency breaks that equivalence: it is
+/// prepared by a nested install in which the fetched checkout *is* the root, so its
+/// `preinstall`/`install`/`postinstall`/`prepare` would inherit an exemption meant
+/// for the user's project while being third-party code. Callers state the provenance
+/// so that distinction is made where it is known, never inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootProvenance<'a> {
+    /// The user's own project — the directory they ran the package manager in.
+    UserAuthored,
+    /// A checkout the package manager fetched on the user's behalf: a git
+    /// dependency being prepared. Same threat model as a registry dependency.
+    ///
+    /// `checkout_root` is the whole fetched tree, which is the unit of third-party
+    /// code here and so the unit of confinement — NOT the importer whose script is
+    /// running. A git dep may be a workspace, and a member's `prepare` legitimately
+    /// reaches the checkout root for shared config and tooling; scoping to the member
+    /// instead breaks such a dep outright. The tree is a throwaway scratch copy that is
+    /// packed and deleted, so granting the checkout to code that already owns all of it
+    /// concedes nothing.
+    Fetched { checkout_root: &'a std::path::Path },
+}
+
+/// The two anchors an embedder-confined lifecycle spawn is scoped by.
+///
+/// They are carried together because the jail needs BOTH and they can disagree: the
+/// write grant is keyed on `package_dir` while the project READ grant expands against
+/// `project_root`. Leaving the read anchor implicit (the caller's `project_root`) let a
+/// fetched checkout steer it — a `workspaces: ["../**"]` entry in the checkout's own
+/// manifest resolves an importer OUTSIDE the fetched tree, and the read grant followed
+/// it onto a sibling of the scratch directory.
+#[derive(Debug, Clone, Copy)]
+pub struct SandboxScope<'a> {
+    /// The one subtree the confined script may WRITE.
+    pub package_dir: &'a std::path::Path,
+    /// What the jail's project read grant expands against. For a dependency build this
+    /// is the user's project; for a fetched checkout it is the checkout itself.
+    pub project_root: &'a std::path::Path,
+    /// The INSTALLER-RESOLVED name of the package whose script this is — the same
+    /// identity `BuildPolicy` decides on, not the manifest's self-declared `name`.
+    ///
+    /// Set ONLY when `project_root` is also the CONSUMER's own project root; that
+    /// pairing is the guarantee, and it is what lets an embedder look this package up in
+    /// root-authored config. `None` whenever aube's root is a checkout it FETCHED, where
+    /// `project_root` is attacker-authored. Handing over a name there would invite the
+    /// embedder to read a dependency's own manifest as if it were the consumer's.
+    pub package_name: Option<&'a str>,
+    /// The resolved version of that same package, so an embedder can scope a per-package
+    /// policy to the versions it measured. Set and withheld exactly with `package_name` —
+    /// they are one identity, and a version without its name selects nothing.
+    pub package_version: Option<&'a str>,
+}
+
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
 /// `/dev/null` under `--silent`. Child processes spawned through
 /// `child_stderr()` get a fresh dup of this fd so their stderr still
@@ -1173,6 +1229,7 @@ pub async fn run_script(
     script_cmd: &str,
     extra_bin_dirs: &[&Path],
     jail: Option<&ScriptJail>,
+    sandbox: Option<SandboxScope<'_>>,
 ) -> Result<(), Error> {
     // Per-script diag span. Tags the package name (when present) and the
     // script name so the analyzer can attribute postinstall / preinstall /
@@ -1275,7 +1332,50 @@ pub async fn run_script(
     apply_npm_manifest_env(&mut cmd, manifest, script_dir, script_cmd);
 
     tracing::debug!("lifecycle: {script_name} → {script_cmd}");
-    let status = run_command_killing_descendants(cmd, script_name).await?;
+    // Embedder-owned confinement: a spawn of third-party code (`sandbox` set, the
+    // embedder hook installed) runs through the host's sandbox INSTEAD of aube's own
+    // spawn/jail. Only USER-AUTHORED root scripts pass `None` and run unconfined here —
+    // a fetched git checkout occupying the root slot is confined like any dependency
+    // (see `RootProvenance`). The scope carries its OWN project anchor rather than
+    // reusing `project_root`, which for a fetched checkout is the importer dir the
+    // checkout's own manifest chose. The two mechanisms are mutually exclusive: the
+    // embedder that installs the hook also gates aube's own jail off
+    // (`embedder_owns_lifecycle_sandbox`), so `jail` is `None` on this path. A `None`
+    // hook (or no scope) falls through to the normal aube spawn.
+    //
+    // A hook that declines this package (`confines` false) falls through to the ordinary
+    // arm below, so an unconfined dependency script is spawned by the SAME code path as
+    // an uninterposed aube — descendant reaping included — instead of a second
+    // implementation living in the embedder.
+    let status = match sandbox
+        .and_then(|scope| {
+            aube_util::engine_context()
+                .lifecycle_sandbox
+                .map(|hook| (scope, hook))
+        })
+        .filter(|(scope, hook)| {
+            hook.confines(
+                scope.package_name,
+                scope.package_version,
+                scope.project_root,
+            )
+        }) {
+        Some((scope, hook)) => {
+            let spawn = lifecycle_sandbox_spawn(
+                &cmd,
+                script_dir,
+                &scope,
+                verbatim_tail(script_cmd, &settings, jail.is_some()),
+            );
+            // The host sandbox owns a synchronous spawn+wait (nub-sandbox drives an outer
+            // Landlock / Seatbelt / AppContainer child), so run it off the async runtime.
+            tokio::task::spawn_blocking(move || hook.run(spawn))
+                .await
+                .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?
+                .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?
+        }
+        None => run_command_killing_descendants(cmd, script_name).await?,
+    };
 
     if !status.success() {
         return Err(Error::NonZeroExit {
@@ -1291,6 +1391,68 @@ pub async fn run_script(
     Ok(())
 }
 
+/// The pre-encoded `cmd.exe` command-line tail this spawn was built with, so an
+/// embedder can reproduce it byte-for-byte. `None` whenever the tail is ordinary argv the
+/// embedder can re-encode itself: every Unix spawn, and on Windows a user-configured
+/// `script-shell` (which takes `-c <script>`) or the jailed builder.
+///
+/// ⛔ THE ENCODING IS CMD.EXE-SPECIFIC, so it is gated on cmd.exe actually being the shell.
+/// It must mirror `spawn_shell_with_settings`'s Windows arm exactly — that arm uses
+/// `raw_arg` precisely because `cmd.exe` does not implement the `CommandLineToArgvW` rules
+/// Rust's encoder targets, so an embedder reading `get_args` back would re-encode the
+/// pieces and hand `cmd.exe` a line it cannot parse.
+fn verbatim_tail(
+    script_cmd: &str,
+    settings: &ScriptSettings,
+    jailed: bool,
+) -> Option<std::ffi::OsString> {
+    #[cfg(windows)]
+    {
+        (!jailed && settings.script_shell.is_none()).then(|| {
+            let mut tail = std::ffi::OsString::from("/d /s /c \"");
+            tail.push(script_cmd);
+            tail.push("\"");
+            tail
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (script_cmd, settings, jailed);
+        None
+    }
+}
+
+/// Build the plain-data spawn description the embedder's confiner consumes.
+///
+/// `verbatim` is threaded in rather than read off `cmd` because `Command::get_args`
+/// erases the raw marker `raw_arg` sets: the pieces come back looking like ordinary argv.
+fn lifecycle_sandbox_spawn(
+    cmd: &tokio::process::Command,
+    script_dir: &Path,
+    scope: &SandboxScope<'_>,
+    verbatim: Option<std::ffi::OsString>,
+) -> aube_util::LifecycleSandboxSpawn {
+    let std_cmd = cmd.as_std();
+    aube_util::LifecycleSandboxSpawn {
+        program: std_cmd.get_program().to_os_string(),
+        args: match verbatim {
+            Some(line) => aube_util::LifecycleSpawnArgs::WindowsVerbatim(line),
+            None => aube_util::LifecycleSpawnArgs::Argv(
+                std_cmd.get_args().map(|a| a.to_os_string()).collect(),
+            ),
+        },
+        cwd: script_dir.to_path_buf(),
+        project_root: scope.project_root.to_path_buf(),
+        package_dir: scope.package_dir.to_path_buf(),
+        package_name: scope.package_name.map(str::to_string),
+        package_version: scope.package_version.map(str::to_string),
+        env_delta: std_cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+            .collect(),
+    }
+}
+
 /// Run a lifecycle hook against the root package, if a script for it is
 /// defined. Returns `Ok(false)` if the hook wasn't defined (no-op),
 /// `Ok(true)` if it ran successfully.
@@ -1301,8 +1463,16 @@ pub async fn run_root_hook(
     modules_dir_name: &str,
     manifest: &PackageJson,
     hook: LifecycleHook,
+    provenance: RootProvenance<'_>,
 ) -> Result<bool, Error> {
-    run_root_script_by_name(project_dir, modules_dir_name, manifest, hook.script_name()).await
+    run_root_script_by_name(
+        project_dir,
+        modules_dir_name,
+        manifest,
+        hook.script_name(),
+        provenance,
+    )
+    .await
 }
 
 /// Run a named root-package script if it's defined. Used by commands
@@ -1316,9 +1486,27 @@ pub async fn run_root_script_by_name(
     modules_dir_name: &str,
     manifest: &PackageJson,
     name: &str,
+    provenance: RootProvenance<'_>,
 ) -> Result<bool, Error> {
     let Some(script_cmd) = manifest.scripts.get(name) else {
         return Ok(false);
+    };
+    // The root exemption from the embedder's build jail covers USER-AUTHORED code only.
+    // A fetched checkout occupying the root slot (`RootProvenance::Fetched`) is
+    // third-party, so it is confined like a dependency — BOTH axes keyed on the checkout
+    // root, never on `project_dir`. For a workspace git dep those differ, and
+    // `project_dir` is chosen by the checkout's own `workspaces` globs: a `../**` entry
+    // resolves outside the fetched tree, so anchoring the read grant there would let
+    // attacker-authored content widen its own grant. Default-preserving: standalone aube
+    // leaves `embedder_owns_lifecycle_sandbox` false, so the hook is `None` either way.
+    let sandbox = match provenance {
+        RootProvenance::UserAuthored => None,
+        RootProvenance::Fetched { checkout_root } => Some(SandboxScope {
+            package_dir: checkout_root,
+            project_root: checkout_root,
+            package_name: None,
+            package_version: None,
+        }),
     };
     run_script(
         project_dir,
@@ -1329,6 +1517,7 @@ pub async fn run_root_script_by_name(
         script_cmd,
         &[],
         None,
+        sandbox,
     )
     .await?;
     Ok(true)
@@ -1592,6 +1781,7 @@ pub async fn run_dep_hook(
     hook: LifecycleHook,
     tool_bin_dirs: &[&Path],
     jail: Option<&ScriptJail>,
+    sandbox: Option<SandboxScope<'_>>,
 ) -> Result<bool, Error> {
     let name = hook.script_name();
     let script_cmd: &str = match manifest.scripts.get(name) {
@@ -1617,6 +1807,7 @@ pub async fn run_dep_hook(
         script_cmd,
         &bin_dirs,
         jail,
+        sandbox,
     )
     .await?;
     Ok(true)

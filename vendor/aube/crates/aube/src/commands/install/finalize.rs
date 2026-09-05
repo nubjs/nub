@@ -15,6 +15,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct FinalizePhaseInput<'a> {
     pub(super) cwd: &'a std::path::Path,
+    /// Who authored the code whose ROOT lifecycle scripts this phase runs. A nested
+    /// git-dep `prepare` install roots at the FETCHED checkout, so its root scripts are
+    /// third-party and must be confined like a dependency rather than inheriting the
+    /// user-project exemption.
+    pub(super) root_provenance: aube_scripts::RootProvenance<'a>,
     pub(super) settings_ctx: &'a aube_settings::ResolveCtx<'a>,
     pub(super) store: &'a aube_store::Store,
     pub(super) graph: &'a aube_lockfile::LockfileGraph,
@@ -244,6 +249,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         start,
         prog_ref,
         phase_timings,
+        root_provenance,
     } = input;
 
     let placements_ref = stats.hoisted_placements.as_ref();
@@ -438,7 +444,14 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
                 aube_scripts::LifecycleHook::PostInstall,
                 aube_scripts::LifecycleHook::Prepare,
             ] {
-                run_root_lifecycle(&project_dir, modules_dir_name, importer_manifest, hook).await?;
+                run_root_lifecycle(
+                    &project_dir,
+                    modules_dir_name,
+                    importer_manifest,
+                    hook,
+                    root_provenance,
+                )
+                .await?;
             }
         }
         phase_timings.record("root_lifecycle", phase_start.elapsed());

@@ -190,9 +190,15 @@ pub(crate) async fn run_root_lifecycle_script(
     super::configure_script_settings_for_cwd(project_root, Some("pack"))?;
     let modules_dir_name = super::resolve_modules_dir_name_for_cwd(project_root);
     tracing::debug!("lifecycle: {script_name}");
-    aube_scripts::run_root_script_by_name(project_root, &modules_dir_name, manifest, script_name)
-        .await
-        .map_err(|e| miette!("root `{script_name}` script failed: {e}"))?;
+    aube_scripts::run_root_script_by_name(
+        project_root,
+        &modules_dir_name,
+        manifest,
+        script_name,
+        aube_scripts::RootProvenance::UserAuthored,
+    )
+    .await
+    .map_err(|e| miette!("root `{script_name}` script failed: {e}"))?;
     Ok(())
 }
 

@@ -14,6 +14,7 @@ pub(super) async fn run_root_lifecycle(
     modules_dir_name: &str,
     manifest: &aube_manifest::PackageJson,
     hook: aube_scripts::LifecycleHook,
+    provenance: aube_scripts::RootProvenance<'_>,
 ) -> miette::Result<()> {
     // Only announce when the hook is actually defined, so projects without
     // lifecycle scripts don't get noise in their install output.
@@ -21,7 +22,7 @@ pub(super) async fn run_root_lifecycle(
         return Ok(());
     }
     tracing::debug!("Running {} script...", hook.script_name());
-    aube_scripts::run_root_hook(project_dir, modules_dir_name, manifest, hook)
+    aube_scripts::run_root_hook(project_dir, modules_dir_name, manifest, hook, provenance)
         .await
         .map_err(|e| {
             // Old message was just the bare error string. User got
@@ -134,8 +135,18 @@ impl JailBuildPolicy {
         workspace: &aube_manifest::WorkspaceConfig,
     ) -> (Self, Vec<String>) {
         // `paranoid=true` forces the jail on regardless of `jailBuilds`.
-        let enabled =
-            aube_settings::resolved::jail_builds(ctx) || aube_settings::resolved::paranoid(ctx);
+        //
+        // ⛔ An embedder that OWNS lifecycle confinement gates aube's own jail off
+        // entirely, whatever the user configured. The two mechanisms are mutually
+        // exclusive by construction — the embedder interposes its own sandbox through
+        // `EngineContext::lifecycle_sandbox`, and `run_script`'s hook arm assumes `jail`
+        // is `None` on that path. Forcing it here rather than trusting the settings is
+        // what stops a user `jailBuilds=true`/`paranoid=true` swapping the host's jail
+        // back to aube's. Standalone aube leaves the flag false, so this is a no-op and
+        // the built-in jail behaves byte-for-byte as before.
+        let enabled = !aube_util::embedder().embedder_owns_lifecycle_sandbox
+            && (aube_settings::resolved::jail_builds(ctx)
+                || aube_settings::resolved::paranoid(ctx));
         let jail_exclusions = aube_settings::resolved::jail_build_exclusions(ctx);
         let (denylist, denylist_warnings) = aube_scripts::BuildPolicy::denylist(&jail_exclusions);
         let mut warnings = denylist_warnings
@@ -774,6 +785,17 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                 &project_dir,
             );
             let _jail_home_cleanup = jail.as_ref().map(aube_scripts::ScriptJailHomeCleanup::new);
+            // The scope an embedder-owned sandbox confines this dependency by. The name and
+            // version are the INSTALLER-RESOLVED identity (`job.registry_name`), not the
+            // manifest's self-declared `name` — the same identity the build policy decided
+            // on — so an embedder can key a per-package policy on it. Both are set because
+            // `project_dir` here IS the consumer's own project root.
+            let scope = aube_scripts::SandboxScope {
+                package_dir: &job.package_dir,
+                project_root: &project_dir,
+                package_name: Some(job.registry_name.as_str()),
+                package_version: Some(job.version.as_str()),
+            };
             let mut ran_here = 0usize;
             for hook in aube_scripts::DEP_LIFECYCLE_HOOKS {
                 let did_run = aube_scripts::run_dep_hook(
@@ -784,6 +806,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     hook,
                     &tool_dirs,
                     jail.as_ref(),
+                    Some(scope),
                 )
                 .await
                 .map_err(|e| {

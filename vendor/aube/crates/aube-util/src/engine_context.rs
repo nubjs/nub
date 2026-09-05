@@ -27,7 +27,145 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
+
+/// The data a dependency lifecycle spawn hands to an embedder's confinement hook.
+///
+/// Plain data — aube fills it from the fully-configured lifecycle command and hands
+/// it to [`LifecycleSandbox::run`], which owns the confined spawn+wait. The embedder
+/// reconstructs the effective child env from `env_delta` (the command's explicit env
+/// operations layered over the inherited aube-process env — the unconfined spawn does
+/// not clear the environment) before scrubbing and confining it, exactly as the
+/// unconfined spawn would have resolved it.
+#[derive(Debug, Clone)]
+pub struct LifecycleSandboxSpawn {
+    /// The shell program (`sh` / `cmd.exe`) the script line runs through.
+    pub program: OsString,
+    /// How the shell's argument tail is spelled — see [`LifecycleSpawnArgs`].
+    pub args: LifecycleSpawnArgs,
+    /// The working directory (the package dir the script runs in).
+    pub cwd: PathBuf,
+    /// The project root, for the embedder's project-read grant + `./` anchor.
+    pub project_root: PathBuf,
+    /// The dependency's own package dir — the one subtree the build may WRITE.
+    pub package_dir: PathBuf,
+    /// The INSTALLER-RESOLVED name of the package whose script this is — the same
+    /// identity [`LifecycleSandbox::confines`] is offered, carried through to `run` so a
+    /// hook can key a curated per-package policy on it and not only an accept/decline.
+    ///
+    /// `None` carries the same meaning it does on `confines`: `project_root` is NOT the
+    /// consumer's own project, so there is no consumer-anchored identity here. An
+    /// embedder must read it as "no policy", never as "no confinement" — a fetched
+    /// checkout's only name is the one it wrote into its own manifest.
+    pub package_name: Option<String>,
+    /// The INSTALLER-RESOLVED version of that same package, carried so an embedder can
+    /// scope a per-package policy to the versions it was measured against rather than
+    /// to the name alone.
+    ///
+    /// Withheld exactly when `package_name` is: the two are one identity, and a version
+    /// without the name it belongs to selects nothing.
+    pub package_version: Option<String>,
+    /// The command's explicit env operations (set = `Some`, removed = `None`), read
+    /// back from the built command. Layered over the inherited aube-process env by the
+    /// embedder to reconstruct the effective child env the unconfined spawn would have.
+    pub env_delta: Vec<(OsString, Option<OsString>)>,
+}
+
+/// The shell argument tail of a lifecycle spawn, in the shape the embedder must
+/// reproduce to launch the SAME command aube would have.
+///
+/// Two shapes because Windows has no argv. On the default `cmd.exe` path aube builds
+/// the command line itself with `CommandExt::raw_arg` (see `spawn_shell_with_settings`
+/// in `aube-scripts` for why: `cmd.exe` does not implement the `CommandLineToArgvW`
+/// rules Rust's encoder targets, and reads a `\"` escape as two literal characters). A
+/// `Vec<OsString>` cannot carry that distinction — `Command::get_args` yields the raw
+/// pieces with their rawness erased — so an embedder reading the args back would
+/// re-encode them and hand `cmd.exe` a line it cannot parse. This enum is that
+/// distinction, made explicit at the seam.
+#[derive(Debug, Clone)]
+pub enum LifecycleSpawnArgs {
+    /// Ordinary argv: `-c <script>` for `sh`, or for a user-configured `script-shell`.
+    Argv(Vec<OsString>),
+    /// The pre-encoded `cmd.exe` command-line tail, to reach `CreateProcessW` verbatim.
+    WindowsVerbatim(OsString),
+}
+
+impl LifecycleSpawnArgs {
+    /// The tail as one line, for an embedder heuristic that pattern-matches the script
+    /// TEXT (`prebuild-install …`) rather than argv positions.
+    ///
+    /// The two shapes render identically on the Windows default path: `raw_arg` joins
+    /// its pieces with a single space, so space-joining the old three-element argv
+    /// produced exactly the verbatim tail this now carries whole.
+    pub fn command_line(&self) -> String {
+        match self {
+            Self::Argv(v) => v
+                .iter()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" "),
+            Self::WindowsVerbatim(line) => line.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+/// An embedder-supplied confiner for dependency lifecycle-script spawns. Set on the
+/// [`EngineContext`] by a host (nub) that owns lifecycle-script confinement
+/// ([`Embedder::embedder_owns_lifecycle_sandbox`](crate::identity::Embedder::embedder_owns_lifecycle_sandbox)),
+/// so aube runs the dep spawn through the host's sandbox INSTEAD of its own build jail
+/// (`aube-scripts::ScriptJail`). Aube assigns the hook no meaning beyond "confine this
+/// spawn and return its exit status"; the implementor builds the confined child. The
+/// call is synchronous (aube drives it off the async runtime via `spawn_blocking`).
+/// `None` (the default) = no interposition — aube spawns exactly as before.
+pub trait LifecycleSandbox: Send + Sync + std::fmt::Debug {
+    /// Spawn `spawn` fully confined, wait for it, and return its exit status.
+    fn run(&self, spawn: LifecycleSandboxSpawn) -> std::io::Result<std::process::ExitStatus>;
+
+    /// Whether this hook wants to confine `package_name`'s script at all — the
+    /// DECISION, and the one method an embedder overrides to make it.
+    ///
+    /// MUST BE PURE. aube also asks this during PLANNING, for packages that may never
+    /// spawn: a build's writes OUTSIDE its own package tree land somewhere else under
+    /// confinement (a private HOME rather than the user's), so the side-effects cache
+    /// keys its entries on the answer and must have it before it decides whether to
+    /// restore. Announcing or recording here would fire for a package whose cached tree
+    /// is about to be restored without running anything. [`confines`] is the spawn-time
+    /// call and is where an embedder puts a user-visible notice.
+    ///
+    /// A `None` name means `project_root` is NOT the consumer's own project, so an
+    /// embedder keying policy off the root manifest must read it as "no policy" rather
+    /// than "no confinement". `package_version` is that same identity's resolved version,
+    /// withheld on exactly the same condition. Defaults to `true`: an embedder that does
+    /// not override this confines everything exactly as before.
+    ///
+    /// [`confines`]: LifecycleSandbox::confines
+    fn would_confine(
+        &self,
+        package_name: Option<&str>,
+        package_version: Option<&str>,
+        project_root: &std::path::Path,
+    ) -> bool {
+        let _ = (package_name, package_version, project_root);
+        true
+    }
+
+    /// The same question at SPAWN time. `false` routes the spawn back through aube's
+    /// ORDINARY unconfined path — the identical spawn + descendant-reaping wait an
+    /// uninterposed aube performs — rather than asking the embedder to reimplement it.
+    ///
+    /// Delegates to [`would_confine`] so the two cannot disagree; override it only to add
+    /// a side effect the planning call must not have.
+    ///
+    /// [`would_confine`]: LifecycleSandbox::would_confine
+    fn confines(
+        &self,
+        package_name: Option<&str>,
+        package_version: Option<&str>,
+        project_root: &std::path::Path,
+    ) -> bool {
+        self.would_confine(package_name, package_version, project_root)
+    }
+}
 
 /// Command-line platform selection, one entry per axis.
 ///
@@ -59,6 +197,15 @@ impl CliSupportedArchitectures {
 /// (whole-struct replace).
 #[derive(Clone, Debug)]
 pub struct EngineContext {
+    /// Embedder-supplied confiner for dependency lifecycle-script spawns. `Some`
+    /// (set only by a host whose
+    /// [`Embedder::embedder_owns_lifecycle_sandbox`](crate::identity::Embedder::embedder_owns_lifecycle_sandbox)
+    /// is `true`) makes aube run each dep spawn through the host sandbox instead of
+    /// its own build jail. `None` (default) = no interposition — aube spawns as before.
+    /// Same additive shape as the other embedder fields: default-empty is
+    /// behavior-preserving.
+    pub lifecycle_sandbox: Option<Arc<dyn LifecycleSandbox>>,
+
     /// Replacement dependency-override source. `Some(map)` makes the supplied
     /// map the *sole* override source — `PackageJson::overrides_map` returns it
     /// verbatim instead of folding the manifest's `resolutions` /
@@ -420,6 +567,7 @@ impl Default for EngineContext {
     fn default() -> Self {
         Self {
             embedder_overrides: None,
+            lifecycle_sandbox: None,
             trusted_dependencies_honored: true,
             read_branded_pnpm_config: true,
             read_pnpm_global_config: true,

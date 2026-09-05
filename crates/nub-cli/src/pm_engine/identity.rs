@@ -378,6 +378,12 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
              or pass `--frozen-lockfile` / `--no-frozen-lockfile` to pin the install mode.",
         ),
     ],
+    // ⛔ STILL `false`: nub does not own lifecycle confinement YET. Flipping this gates
+    // aube's own build jail off entirely (`jail_enabled` in aube's install::lifecycle), so
+    // it may only flip in the SAME change that installs nub's replacement hook on
+    // `EngineContext::lifecycle_sandbox` — otherwise dependency lifecycle scripts run with
+    // no jail at all. Epic row 6.2 makes both edits together.
+    embedder_owns_lifecycle_sandbox: false,
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's

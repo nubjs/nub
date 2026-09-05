@@ -436,6 +436,17 @@ pub struct Embedder {
     /// Standalone aube consumes its own whole table, so `&[]` — every lookup and
     /// enumeration is byte-for-byte unchanged.
     pub unsupported_settings: &'static [(&'static str, &'static str)],
+    /// When `true`, the EMBEDDER owns dependency-lifecycle-script confinement, so
+    /// aube's own build jail (`aube-scripts::ScriptJail` — Landlock/seccomp on Linux,
+    /// `sandbox-exec` on macOS) never engages: the jail policy forces `enabled = false`
+    /// regardless of `jailBuilds`/`paranoid`, and the embedder interposes its own sandbox
+    /// around each dep spawn through the `EngineContext::lifecycle_sandbox` hook.
+    /// `false` (aube's default) keeps aube's jail exactly as before — a user
+    /// `jailBuilds=true`/`paranoid=true` engages the built-in jail, byte-for-byte
+    /// standalone behavior. Embedder-fixed: it is the host's confinement-ownership call,
+    /// not a per-project knob, so the choice of jail can never be swapped back to aube's
+    /// by a user setting.
+    pub embedder_owns_lifecycle_sandbox: bool,
 }
 
 /// Standalone aube's embedder profile. Reproduces every hardcoded branding
@@ -500,6 +511,7 @@ pub const AUBE: Embedder = Embedder {
     // Standalone aube routes every verb in its own table, so nothing in it is
     // inert — the settings surface is unchanged.
     unsupported_settings: &[],
+    embedder_owns_lifecycle_sandbox: false,
 };
 
 static ACTIVE: OnceLock<&'static Embedder> = OnceLock::new();
