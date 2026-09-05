@@ -1819,6 +1819,13 @@ fn js_transpilation_smoke_guard() {
 }
 
 #[test]
+fn esm_source_reuse_preserves_loaded_bytes_and_module_identity() {
+    let (stdout, stderr, code) = run_nub("loader-source-reuse", "main.mjs");
+    assert_eq!(code, 0, "source reuse contract failed: {stdout}\n{stderr}");
+    assert!(stdout.contains("source-reuse:ok"), "{stdout}\n{stderr}");
+}
+
+#[test]
 fn project_js_using_down_levels() {
     // `using` is a SyntaxError on every supported Node's V8; this project `.js`
     // must be down-leveled (the transformableSyntax verdict flags it) and run, just

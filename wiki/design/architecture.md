@@ -64,6 +64,8 @@ The load hook handles type stripping, the non-erasable syntax other strippers re
 
 The resolve hook is additive only. It layers tsconfig path aliases, extensionless probing for TypeScript extensions, and Yarn Plug'n'Play reads on top of Node's own resolver, and returns nothing when it has no additive answer — at which point resolution falls straight through. There is no reimplementation of Node's resolution algorithm anywhere in Nub, which confines the risk to what Nub adds. That is validated by running Node's own resolution test subset twice, once in passthrough and once augmented, and asserting parity: [[research/resolution-conformance]].
 
+When JavaScript syntax inspection identifies a required transform, the transform reuses the inspected bytes instead of reading the file again. Loader execution order remains unchanged on both tiers.
+
 Background: [[research/tsgo-vs-oxc-for-transpile]], [[research/wasm-vs-napi-for-transpile]], [[research/emit-decorator-metadata]], [[research/tsconfig-paths]], [[research/ts-extension-precedence]].
 
 ## Composition

@@ -920,10 +920,10 @@ export function noteRuntimeV8FlagSource(result) {
 // from extension alone), so a CommonJS-syntax `.ts` is reported `commonjs` — the
 // fix that makes `require()` of a TS file work on the compat tier, where Node's
 // CJS translator loads it via this hook and keys on the returned format.
-export function loadTranspile(url, ext) {
+export function loadTranspile(url, ext, source) {
   __ensureBuiltins();
   const filePath = fileURLToPath(url);
-  const source = readFileSync(filePath, "utf8");
+  source ??= readFileSync(filePath, "utf8");
   const dir = dirname(filePath);
   // The transform-relevant compilerOptions slice + the byte-for-byte cache-key
   // component (`tsconfigHash`) both come from the native tsconfig reader.
@@ -1024,7 +1024,7 @@ export function loadTranspile(url, ext) {
 // sites (the byte-parity boundary). JSX-in-`.js` is out of scope for the syntax
 // gate (lang is "ts", which does not parse JSX); use `.jsx`, or say so explicitly
 // with a `loader` entry, which takes the unconditional path below instead.
-export function maybeTranspilePlainJs(url, ext) {
+export function maybeTranspilePlainJs(url, ext, source) {
   __ensureBuiltins();
   // An explicit `loader` entry pointing this extension at a code dialect moved it
   // into TRANSPILE_EXTS, which for every other member means "always compile". Only
@@ -1035,11 +1035,10 @@ export function maybeTranspilePlainJs(url, ext) {
   // while the ESM path transpiles the same file on both tiers. The registration
   // loop deliberately skips `.js`/`.cjs` because this wrapper owns them, so there
   // is nothing else downstream to catch it.
-  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext);
+  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext, source);
   const filePath = fileURLToPath(url);
-  let source;
   try {
-    source = readFileSync(filePath, "utf8");
+    source ??= readFileSync(filePath, "utf8");
   } catch {
     // Unreadable here → let Node's loader surface its own error.
     return null;
@@ -1050,10 +1049,10 @@ export function maybeTranspilePlainJs(url, ext) {
     return null; // no-op: Node's native loader handles it, byte-identical.
   }
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,
-  // source maps, the Stage-3 decorator guard, format detection, cache). loadTranspile
-  // re-reads + re-parses, but only for the rare file that actually needs lowering.
+  // source maps, the Stage-3 decorator guard, format detection, cache), reusing
+  // the bytes already inspected by the gate.
   try {
-    return loadTranspile(url, ext);
+    return loadTranspile(url, ext, source);
   } catch (err) {
     // #225: a plain-JS file the transformable verdict flagged (a `using` decl or
     // `v`-flag RegExp somewhere) but whose transform oxc then REJECTS — V8 tolerates
