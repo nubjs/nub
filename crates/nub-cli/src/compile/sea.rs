@@ -311,8 +311,22 @@ pub fn inject(
             // Same builder-chain ordering as the launcher leg: libsui rebuilds
             // the resource directory from scratch, so an icon or version
             // resource set anywhere but inside this chain is discarded.
+            //
+            // Which is why the manifest is carried across HERE, and why the SEA
+            // shape needs it where the launcher shape did not: this image is
+            // Node's own binary, and Node's `wmain` refuses to start when
+            // `IsWindows10OrGreater` says no — which is what Windows tells any
+            // image declaring no `<supportedOS>` GUID. Dropping the manifest
+            // produced an artifact that printed "Node.js is only supported on
+            // Windows 10, Windows Server 2016, or higher" and exited 216 on both
+            // Windows targets.
+            let manifest = super::inject::find_manifest_resource(&image)
+                .context("reading the target Node's application manifest")?;
             let mut pe = libsui::PortableExecutable::from(&image)
                 .map_err(|e| anyhow!("parsing the target's Node as PE: {e:?}"))?;
+            if let Some((manifest, language)) = manifest {
+                pe = pe.set_manifest(manifest.to_vec(), language);
+            }
             if let Some(icon) = icon {
                 pe = pe
                     .set_icon(icon)
@@ -648,6 +662,24 @@ pub fn verify_artifact(
     if magic != Some(MAGIC) {
         bail!(
             "the written artifact's single-executable blob does not start with Node's magic number"
+        );
+    }
+
+    // The manifest, which is this container's own Windows requirement rather than
+    // part of the dressing: the launcher shape hands Node's binary to the target
+    // untouched, and only here is that binary the thing being rewritten. Without
+    // it Windows reports 6.2 to `IsWindows10OrGreater` and Node's `wmain` exits
+    // 216 before any nub code runs. Every shipping Node carries one — an image
+    // without it could not start on Windows 10 either — so its absence is a
+    // failure rather than a case to tolerate.
+    if target.format() == ContainerFormat::Pe
+        && super::inject::find_manifest_resource(&image)
+            .context("scanning the written artifact for its application manifest")?
+            .is_none()
+    {
+        bail!(
+            "the written artifact carries no application manifest, so Windows would refuse to \
+             start it"
         );
     }
 

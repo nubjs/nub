@@ -337,6 +337,44 @@ pub fn find_version_resource(image: &[u8]) -> Result<Option<&[u8]>> {
     resource_leaf_data(image, base, &sections, leaf).map(Some)
 }
 
+/// Find the application manifest in a PE, walking `RT_MANIFEST` → name 1 → the
+/// first language, and returning that language along with the bytes.
+///
+/// The one resource that has to survive a rewrite rather than merely look right
+/// afterwards. Windows' version-lie shim reports 6.2 to an image that declares no
+/// `<supportedOS>` GUID, and Node's `wmain` calls `IsWindows10OrGreater` before
+/// anything else and exits 216 when it fails — so a Node binary rewritten without
+/// its manifest does not start. Read off the INPUT here and handed back to
+/// libsui, which builds its resource directory from scratch.
+pub fn find_manifest_resource(image: &[u8]) -> Result<Option<(&[u8], u32)>> {
+    /// `RT_MANIFEST`.
+    const RT_MANIFEST: u32 = 24;
+    /// `CREATEPROCESS_MANIFEST_RESOURCE_ID` — the only name the loader reads for
+    /// an executable.
+    const CREATEPROCESS_MANIFEST: u32 = 1;
+
+    let Some((base, sections)) = pe_resource_root(image)? else {
+        return Ok(None);
+    };
+    let Some(types) = resource_subdir(image, base, base, |e| e == ResourceKey::Id(RT_MANIFEST))?
+    else {
+        return Ok(None);
+    };
+    let Some(named) = resource_subdir(image, base, types, |e| {
+        e == ResourceKey::Id(CREATEPROCESS_MANIFEST)
+    })?
+    else {
+        return Ok(None);
+    };
+    let Some(leaf) = resource_entries(image, named)?.first().copied() else {
+        return Ok(None);
+    };
+    // A language level is always keyed by id, so the high bit cannot be set here
+    // and the key is the language itself.
+    let language = leaf.0;
+    resource_leaf_data(image, base, &sections, leaf).map(|data| Some((data, language)))
+}
+
 // ---- little-endian readers ----------------------------------------------------
 //
 // Every target nub compiles for is little-endian, so the scanners read LE

@@ -71,7 +71,7 @@
 use core::mem::size_of;
 use pe_edit::{
     IconDirectory, IconDirectoryEntry, ResourceData, ResourceEntry, ResourceEntryName,
-    ResourceTable, CODE_PAGE_ID_EN_US, RT_GROUP_ICON, RT_ICON, RT_RCDATA, RT_VERSION,
+    ResourceTable, CODE_PAGE_ID_EN_US, RT_GROUP_ICON, RT_ICON, RT_MANIFEST, RT_RCDATA, RT_VERSION,
 };
 
 // libsui: the resource-directory language for the version resource. US English
@@ -149,6 +149,9 @@ pub struct PortableExecutable<'a> {
     // table is emitted in insertion order and RT_VERSION must sort after
     // RT_GROUP_ICON. See set_version_info.
     version_info: Option<Vec<u8>>,
+    // libsui: likewise deferred, and emitted after the version resource, because
+    // RT_MANIFEST (24) is the highest id of the five this builder can write.
+    manifest: Option<(Vec<u8>, u32)>,
 }
 
 impl<'a> PortableExecutable<'a> {
@@ -160,6 +163,7 @@ impl<'a> PortableExecutable<'a> {
             resource_dir: pe_edit::ResourceDirectory::default(),
             icons: Vec::new(),
             version_info: None,
+            manifest: None,
         })
     }
 
@@ -286,6 +290,30 @@ impl<'a> PortableExecutable<'a> {
         self
     }
 
+    /// Set the `RT_MANIFEST` resource — the application manifest Windows reads
+    /// before the process starts.
+    ///
+    /// libsui: this builder replaces the resource directory wholesale, so an
+    /// input whose manifest matters has to hand it back here. It matters more
+    /// than it looks: `IsWindows10OrGreater` and the rest of `VersionHelpers.h`
+    /// are subject to Windows' version-lie shim, which reports 6.2 to any image
+    /// that does not declare a `<supportedOS>` GUID in its manifest. Node's own
+    /// `wmain` calls exactly that helper and exits 216 when it fails, so a Node
+    /// binary rewritten without its manifest refuses to start at all.
+    ///
+    /// Deferred to [`Self::build`] for [`Self::set_version_info`]'s reason, and
+    /// emitted after it: `RT_MANIFEST` is 24, the highest of the ids this builder
+    /// writes.
+    ///
+    /// `language` is carried from the input rather than fixed, because a manifest
+    /// is the one resource here whose bytes come from somewhere else — the caller
+    /// read it off the image being rewritten, and a manifest under a language the
+    /// image never used is a resource the loader may not find.
+    pub fn set_manifest(mut self, resource: Vec<u8>, language: u32) -> Self {
+        self.manifest = Some((resource, language));
+        self
+    }
+
     /// Build and write the modified PE file
     pub fn build<W: std::io::Write>(mut self, writer: &mut W) -> Result<(), Error> {
         // TODO: the order of the table entries matters. this works for now.
@@ -338,8 +366,9 @@ impl<'a> PortableExecutable<'a> {
             );
         }
 
-        // libsui: last, so the root table's ID entries stay ascending — RT_ICON
-        // (3), RT_RCDATA (10), RT_GROUP_ICON (14), RT_VERSION (16).
+        // libsui: last two, so the root table's ID entries stay ascending —
+        // RT_ICON (3), RT_RCDATA (10), RT_GROUP_ICON (14), RT_VERSION (16),
+        // RT_MANIFEST (24).
         if let Some(resource) = self.version_info.take() {
             let root = self.resource_dir.root_mut();
             let mut data = ResourceData::default();
@@ -357,6 +386,28 @@ impl<'a> PortableExecutable<'a> {
             );
             root.insert(
                 ResourceEntryName::ID(RT_VERSION as u32),
+                ResourceEntry::Table(name_table),
+            );
+        }
+
+        if let Some((resource, language)) = self.manifest.take() {
+            let root = self.resource_dir.root_mut();
+            let mut data = ResourceData::default();
+            // A manifest is XML in whatever encoding its own declaration names,
+            // so it carries no code page of its own and the field stays 0 — the
+            // value every manifest-bearing image observed here writes.
+            data.set_data(resource);
+            let mut language_table = ResourceTable::default();
+            language_table.insert(ResourceEntryName::ID(language), ResourceEntry::Data(data));
+            // Name 1 is CREATEPROCESS_MANIFEST_RESOURCE_ID, the id the loader
+            // reads for an EXE. A manifest under any other name is ignored.
+            let mut name_table = ResourceTable::default();
+            name_table.insert(
+                ResourceEntryName::ID(1),
+                ResourceEntry::Table(language_table),
+            );
+            root.insert(
+                ResourceEntryName::ID(RT_MANIFEST as u32),
                 ResourceEntry::Table(name_table),
             );
         }
