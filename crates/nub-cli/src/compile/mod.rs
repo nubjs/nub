@@ -235,6 +235,8 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         gate_version.0.minor,
         gate_version.0.patch,
     ));
+    opts.bundle.eager_startup =
+        bundle::eager_startup_compilation_supported(opts.bundle.target_node);
 
     // 2. Bundle (Rolldown, in-process). The target's platform/arch are baked in
     //    as defines UNDER the user's, so a cross-compiled `process.platform`
@@ -4223,6 +4225,7 @@ mod tests {
                 drop_debugger: false,
                 metafile: false,
                 target_node: None,
+                eager_startup: false,
             },
         }
     }

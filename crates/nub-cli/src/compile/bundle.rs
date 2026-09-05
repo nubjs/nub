@@ -168,6 +168,11 @@ pub struct BundleOptions {
     /// Keeping the accepted set from reaching below it is the caller's job; see
     /// `smol_version_range` in `compile/mod.rs`.
     pub target_node: Option<(u64, u64, u64)>,
+    /// Shape the chunks for a complete V8 code cache ([`finish_eager_startup`]).
+    /// The CLI sets it from the target with [`eager_startup_compilation_supported`];
+    /// an option rather than a version rule inside the bundler so a test can hold
+    /// the target fixed and vary only the shape.
+    pub eager_startup: bool,
 }
 
 /// One emitted file: a chunk, or a source map that travels with it.
@@ -389,7 +394,11 @@ fn bundle_inner(
         &loader_plan,
         Arc::clone(&collected),
     ));
-    let prelude = Arc::new(CompilePreamble::new(entry_abs, opts.target_node)?);
+    let prelude = Arc::new(CompilePreamble::new(
+        entry_abs,
+        opts.target_node,
+        opts.eager_startup,
+    )?);
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
@@ -586,6 +595,31 @@ fn bundle_inner(
     // Rolldown marks an emitted worker chunk `is_entry` exactly like the program's
     // own, so the filenames are the only thing telling them apart here.
     let worker_names = new_urls.worker_names();
+    // The eager-startup finish runs after Rolldown's minifier, so its map is
+    // composed here rather than returned from a hook, and a `.map` asset Rolldown
+    // already emitted for a finished chunk is replaced by the composed one.
+    let chunk_count = output
+        .assets
+        .iter()
+        .filter(|asset| matches!(asset, Output::Chunk(_)))
+        .count();
+    let mut finished_chunks: BTreeMap<String, String> = BTreeMap::new();
+    let mut finished_maps: BTreeMap<String, String> = BTreeMap::new();
+    if opts.eager_startup {
+        for asset in &output.assets {
+            let Output::Chunk(c) = asset else {
+                continue;
+            };
+            let Some((code, edit_map)) = finish_eager_startup(&c.code, chunk_count == 1)? else {
+                continue;
+            };
+            let (code, map) = finish_chunk_map(code, &edit_map, c.map.as_ref(), opts.sourcemap);
+            if let (Some(map), Some(name)) = (map, c.sourcemap_filename.as_deref()) {
+                finished_maps.insert(name.to_string(), map);
+            }
+            finished_chunks.insert(c.filename.to_string(), code);
+        }
+    }
     for asset in &output.assets {
         match asset {
             Output::Chunk(c) => {
@@ -597,13 +631,18 @@ fn bundle_inner(
                 }
                 files.push(BundledFile {
                     name: c.filename.to_string(),
-                    bytes: c.code.as_bytes().to_vec(),
+                    bytes: finished_chunks
+                        .remove(c.filename.as_str())
+                        .map_or_else(|| c.code.as_bytes().to_vec(), String::into_bytes),
                 });
             }
             Output::Asset(a) => {
-                let bytes = match &a.source {
-                    StrOrBytes::Str(s) => s.as_bytes().to_vec(),
-                    StrOrBytes::Bytes(b) => b.clone(),
+                let bytes = match finished_maps.remove(a.filename.as_str()) {
+                    Some(map) => map.into_bytes(),
+                    None => match &a.source {
+                        StrOrBytes::Str(s) => s.as_bytes().to_vec(),
+                        StrOrBytes::Bytes(b) => b.clone(),
+                    },
                 };
                 let file = BundledFile {
                     name: a.filename.to_string(),
@@ -1725,6 +1764,248 @@ fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
     }
     Ok(rewrote.then(|| magic.to_string()))
 }
+
+/// The oldest Node whose `NODE_COMPILE_CACHE` persists a V8 code cache for an
+/// ES module entry (22.1.0). Below it, or with the target unknown (`--smol`),
+/// eager compilation would only make every start slower.
+const COMPILE_CACHE_FROM: (u64, u64, u64) = (22, 1, 0);
+
+pub fn eager_startup_compilation_supported(target_node: Option<(u64, u64, u64)>) -> bool {
+    target_node.is_some_and(|target| target >= COMPILE_CACHE_FROM)
+}
+
+/// Wraps a runtime module's hoisted function declaration between the transform
+/// hook and [`finish_eager_startup`], which deletes the name and keeps the
+/// parentheses. A free identifier, so neither Rolldown nor the minifier renames
+/// or removes it; a chunk that still contains it after the finish is a build error.
+const EAGER_MARKER: &str = "__nubEager";
+
+/// Move a runtime module's top-level function declarations to the top of the
+/// module as `var f = __nubEager(function f(…) {…});`, in source order, right
+/// after its directives.
+///
+/// A declaration is initialized when its scope is entered, so hoisting the
+/// assignments above every other statement is what keeps a helper callable from
+/// the code that used to run before its line. The named function expression
+/// keeps `f.name` and lets the body call itself; a name the module reassigns is
+/// left as a declaration, since the expression's inner binding would shadow the
+/// new value. Only nub's own runtime is treated this way: it runs on every start,
+/// so a complete code cache for it is pure win, while an application's helpers
+/// mostly do not and would only inflate the cache.
+fn hoist_runtime_declarations(path: &str, source: &str) -> Option<MagicString<'static>> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::Statement;
+    use oxc_parser::Parser;
+    use oxc_span::{GetSpan, SourceType};
+
+    if !source.contains("function") {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::cjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked {
+        return None;
+    }
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .build(&parsed.program)
+        .semantic;
+    let scoping = semantic.scoping();
+    let hoisted = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let Statement::FunctionDeclaration(function) = statement else {
+                return None;
+            };
+            let id = function.id.as_ref()?;
+            let symbol = id.symbol_id.get()?;
+            (!function.declare && !scoping.symbol_is_mutated(symbol))
+                .then(|| (function.span.start, function.span.end, id.name.as_str()))
+        })
+        .collect::<Vec<_>>();
+    if hoisted.is_empty() {
+        return None;
+    }
+    let mut anchor = parsed.program.directives.last().map_or_else(
+        || parsed.program.body.first().map_or(0, |s| s.span().start),
+        |directive| directive.span.end,
+    );
+    let mut magic = MagicString::new(source.to_owned());
+    for (start, end, name) in hoisted {
+        magic.prepend_right(start, format!("var {name} = {EAGER_MARKER}("));
+        magic.append_left(end, ");");
+        // A declaration already at the anchor stays; later ones land after it.
+        if start == anchor {
+            anchor = end;
+        } else {
+            magic.relocate(start, end, anchor).ok()?;
+        }
+    }
+    Some(magic)
+}
+
+/// Shape a finished chunk so Node's compile cache holds ALL of its startup code.
+///
+/// Node serializes a module's V8 code cache right after compiling it, before a
+/// line has run (`CompileCacheHandler::MaybeSave`), so the cache holds bytecode
+/// only for what V8 compiled at parse time. Every other function that runs is
+/// compiled again, from source, on every warm start — for a hello-world artifact
+/// on Node 26.7 that was more than half of the preamble's in-process time. V8
+/// compiles a function literal eagerly when it is parenthesized, and that
+/// eagerness reaches the parenthesized literals nested inside it, so the chain
+/// from the chunk's top level down to each helper the preamble calls is made of
+/// parenthesized function expressions:
+///
+/// ```js
+/// var require_polyfills=(function require_polyfills(){return(e??=__commonJSMin(((e,t)=>{
+///   var installSyncPolyfills=(function installSyncPolyfills(e){…});
+///   …
+/// }))).apply(this,arguments)});
+/// ```
+///
+/// Rolldown's wrapper callback stays the arrow it emits: with the forwarder
+/// parenthesized, the helpers inside the callback are compiled with it all the
+/// same — converting the callback to a function expression changed neither the
+/// cache size nor the time. The minifier drops parentheses the AST does not
+/// need, so the runtime helpers take their expression form before minification
+/// ([`hoist_runtime_declarations`]) and every parenthesis is added here, after
+/// it. The wrapper forwarders become `var`s only in a single-chunk bundle:
+/// across chunks a forwarder must be callable from the instant its chunk is
+/// instantiated, which only a function declaration gives (see
+/// [`hoist_module_wrappers`]), and a `var` is read too early in exactly that
+/// shape. Within one chunk every reference is checked to follow the declaration.
+///
+/// Measured on one box, min of 150: the entry's cache grew from 7 KB to 80 KB
+/// and the in-process time from bootstrap to user code fell by 0.6 ms.
+fn finish_eager_startup(
+    code: &str,
+    single_chunk: bool,
+) -> Result<Option<(String, rolldown_sourcemap::SourceMap)>> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::AstKind;
+    use oxc_ast::ast::{Expression, Statement};
+    use oxc_parser::Parser;
+    use oxc_span::{GetSpan, SourceType};
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if parsed.panicked {
+        // Reported by `reject_invalid_chunks`; one error path.
+        return Ok(None);
+    }
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+    let mut magic = MagicString::new(code.to_owned());
+    let mut edited = false;
+    for node in semantic.nodes().iter() {
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            continue;
+        };
+        let first = call
+            .arguments
+            .first()
+            .and_then(|argument| argument.as_expression());
+        if callee.name == EAGER_MARKER {
+            if call.arguments.len() != 1
+                || !matches!(first, Some(Expression::FunctionExpression(_)))
+            {
+                bail!(
+                    "the compile runtime's `{EAGER_MARKER}` marker reached the chunk in an unexpected shape"
+                );
+            }
+            magic
+                .remove(callee.span.start, callee.span.end)
+                .map_err(|err| anyhow!("finishing an eager runtime helper: {err}"))?;
+            edited = true;
+        } else if ROLLDOWN_MODULE_WRAPPERS.contains(&callee.name.as_str()) {
+            if let Some(Expression::FunctionExpression(function)) = first {
+                magic.prepend_right(function.span.start, "(");
+                magic.append_left(function.span.end, ")");
+                edited = true;
+            }
+        }
+    }
+    if single_chunk {
+        let scoping = semantic.scoping();
+        for statement in &parsed.program.body {
+            let Statement::FunctionDeclaration(function) = statement else {
+                continue;
+            };
+            let Some(id) = &function.id else {
+                continue;
+            };
+            let Some(symbol) = id.symbol_id.get() else {
+                continue;
+            };
+            let referenced_early = scoping.get_resolved_references(symbol).any(|reference| {
+                semantic
+                    .nodes()
+                    .get_node(reference.node_id())
+                    .kind()
+                    .span()
+                    .start
+                    < function.span.end
+            });
+            if referenced_early {
+                continue;
+            }
+            magic.prepend_right(function.span.start, format!("var {}=(", id.name));
+            magic.append_left(function.span.end, ");");
+            edited = true;
+        }
+    }
+    if !edited {
+        return Ok(None);
+    }
+    let finished = magic.to_string();
+    if finished.contains(EAGER_MARKER) {
+        bail!("the compile runtime's `{EAGER_MARKER}` marker survived the eager finish");
+    }
+    // The composed map takes its tokens from this one, so a token per word
+    // boundary keeps it as precise as Rolldown's; one per edited span (the
+    // default) would collapse everything between two edits onto one position.
+    let map = magic.source_map(SourceMapOptions {
+        hires: Hires::Boundary,
+        include_content: false,
+        source: "".into(),
+    });
+    Ok(Some((finished, map)))
+}
+
+/// Compose a post-minify rewrite's map onto the chunk's own and re-emit it the
+/// way the sourcemap mode expects: the inline data URL replaced in place, or the
+/// JSON for the `.map` asset Rolldown already emitted.
+fn finish_chunk_map(
+    code: String,
+    edit_map: &rolldown_sourcemap::SourceMap,
+    chunk_map: Option<&rolldown_sourcemap::SourceMap>,
+    mode: SourcemapMode,
+) -> (String, Option<String>) {
+    let Some(chunk_map) = chunk_map else {
+        return (code, None);
+    };
+    let composed = rolldown_sourcemap::collapse_sourcemaps(&[chunk_map, edit_map]);
+    match mode {
+        SourcemapMode::Inline => {
+            let mut code = code;
+            if let Some(at) = code.rfind("\n//# sourceMappingURL=") {
+                code.truncate(at);
+            }
+            code.push_str("\n//# sourceMappingURL=");
+            code.push_str(&composed.to_data_url());
+            (code, None)
+        }
+        SourcemapMode::Linked | SourcemapMode::External => (code, Some(composed.to_json_string())),
+        SourcemapMode::None => (code, None),
+    }
+}
 /// Supplies the program and worker root wrappers plus the prelude source itself.
 ///
 /// A wrapper, rather than a textual import prepended to every authored root, is
@@ -1763,6 +2044,9 @@ struct CompilePreamble {
     /// See [`strip_unused_bootstrap_regions`].
     app_uses_child_process: AtomicBool,
     app_uses_worker: AtomicBool,
+    /// Whether the emitted chunk is shaped for a complete V8 code cache — see
+    /// [`finish_eager_startup`]. Decided by the target Node, never by the host.
+    eager: bool,
 }
 
 /// Polyfills the compile preamble installs, and the first Node version that ships
@@ -1959,7 +2243,7 @@ fn strip_unused_bootstrap_regions(
 }
 
 impl CompilePreamble {
-    fn new(entry: &Path, target_node: Option<(u64, u64, u64)>) -> Result<Self> {
+    fn new(entry: &Path, target_node: Option<(u64, u64, u64)>, eager: bool) -> Result<Self> {
         let runtime_dir = compile_runtime_dir()?;
         let prelude = runtime_dir.join("compile-preamble.mjs");
         let source = std::fs::read_to_string(&prelude)
@@ -1977,6 +2261,7 @@ impl CompilePreamble {
             )
         })?;
         let mut prelude = Self::from_source(entry, runtime_dir, source);
+        prelude.eager = eager;
         prelude.root_support_files.push((
             nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
             bootstrap_bytes,
@@ -1997,6 +2282,7 @@ impl CompilePreamble {
             root_support_files: Vec::new(),
             app_uses_child_process: AtomicBool::new(false),
             app_uses_worker: AtomicBool::new(false),
+            eager: false,
         }
     }
 
@@ -2401,8 +2687,17 @@ impl Plugin for CompilePreamble {
             // entry chunk, where a raw `import.meta.main` would accidentally
             // observe the chunk's main-ness. Preserve Node/Deno's per-module
             // rule before chunking: only the executable root may see `true`.
+            let in_runtime = self.eager
+                && !args.id.starts_with('\0')
+                && Path::new(path).starts_with(&self.runtime_dir);
             rewrite_non_root_import_meta_main(path, code)
                 .map(|magic| import_meta_transform_output(args.id, magic))
+                .or_else(|| {
+                    in_runtime
+                        .then(|| hoist_runtime_declarations(path, code))
+                        .flatten()
+                        .map(|magic| import_meta_transform_output(args.id, magic))
+                })
                 .or_else(|| esm.map(|code| (code, HookTransformOutputMap::Null)))
         };
         async move {
@@ -5635,6 +5930,7 @@ mod tests {
             drop_debugger: false,
             metafile: false,
             target_node: None,
+            eager_startup: false,
         }
     }
 
@@ -7849,6 +8145,373 @@ mod tests {
             "the CommonJS wrapper must bind the loader as its own require:\n{all}"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Names of the chunk's top-level function declarations, in order.
+    fn top_level_function_declarations(code: &str) -> Vec<String> {
+        use oxc_allocator::Allocator;
+        use oxc_ast::ast::Statement;
+        use oxc_parser::Parser;
+        use oxc_span::SourceType;
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+        assert!(!parsed.panicked, "an emitted chunk must parse:\n{code}");
+        parsed
+            .program
+            .body
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::FunctionDeclaration(function) => {
+                    function.id.as_ref().map(|id| id.name.to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn entry_chunk(res: &BundleResult) -> String {
+        let chunk = res
+            .files
+            .iter()
+            .find(|file| file.name == res.entry)
+            .expect("the entry chunk is among the files");
+        String::from_utf8_lossy(&chunk.bytes).into_owned()
+    }
+
+    /// The chain [`finish_eager_startup`] describes, through the real bundler
+    /// and minifier: every forwarder a `var` bound to a parenthesized function
+    /// expression, every runtime helper the same, the marker gone.
+    #[test]
+    fn eager_startup_parenthesizes_the_chain_for_a_compile_cache_target() {
+        let dir = fixture_dir("eager-chain");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "console.log('hello, nub');\n").unwrap();
+        let mut o = opts();
+        o.target_node = Some((26, 0, 0));
+        o.eager_startup = true;
+        let res = bundle(&entry, &o).expect("hello must compile");
+        let code = entry_chunk(&res);
+
+        assert!(
+            !code.contains(EAGER_MARKER),
+            "the runtime marker must not reach the artifact:\n{code}"
+        );
+        assert!(
+            code.contains("=(function require_polyfills(")
+                && code.contains("=(function init__nub_compile_preamble("),
+            "each forwarder must be a var bound to a parenthesized function expression:\n{}",
+            &code[..code.len().min(800)]
+        );
+        assert!(
+            code.contains("(function installSyncPolyfills("),
+            "a runtime helper must be a parenthesized named function expression:\n{code}"
+        );
+        assert!(
+            top_level_function_declarations(&code).is_empty(),
+            "no forwarder may remain a lazily compiled declaration: {:?}",
+            top_level_function_declarations(&code)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Below 22.1 Node persists no code cache, so the eager shape would only
+    /// make every start compile more; the floor itself is in. The bundler reads
+    /// the option, not the target: with it off, a cache-capable target still
+    /// gets the lazy shape.
+    #[test]
+    fn eager_startup_waits_for_a_target_with_a_compile_cache() {
+        for target in [None, Some((20, 19, 0)), Some((22, 0, 99))] {
+            assert!(
+                !eager_startup_compilation_supported(target),
+                "target {target:?} has no compile cache"
+            );
+        }
+        assert!(eager_startup_compilation_supported(Some(
+            COMPILE_CACHE_FROM
+        )));
+        assert!(eager_startup_compilation_supported(Some((26, 0, 0))));
+
+        let dir = fixture_dir("eager-gate");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "console.log('hello, nub');\n").unwrap();
+        let mut o = opts();
+        o.target_node = Some((26, 0, 0));
+        let code = entry_chunk(&bundle(&entry, &o).expect("hello must compile"));
+        assert!(
+            !code.contains("=(function require_") && !code.contains(EAGER_MARKER),
+            "with the option off the chunk keeps the lazy shape:\n{}",
+            &code[..code.len().min(800)]
+        );
+        assert!(
+            top_level_function_declarations(&code)
+                .iter()
+                .any(|name| name == "require_polyfills"),
+            "with the option off the forwarders stay declarations"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A forwarder another chunk can call before this one's body has run must
+    /// stay a declaration (see [`hoist_module_wrappers`]); the runtime helpers
+    /// inside it are still parenthesized, they just wait for their forwarder.
+    #[test]
+    fn eager_startup_keeps_forwarders_as_declarations_across_chunks() {
+        let dir = fixture_dir("eager-two-chunks");
+        let pkg = dir.join("node_modules/cjsdyn");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"cjsdyn","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            "module.exports = { data: require('./data.json') };\n",
+        )
+        .unwrap();
+        std::fs::write(pkg.join("data.json"), r#"{"v":1}"#).unwrap();
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "const m = await import('cjsdyn'); console.log(m.default.data.v);\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        o.target_node = Some((26, 0, 0));
+        o.eager_startup = true;
+        let res = bundle(&entry, &o).expect("a dynamic CommonJS import must compile");
+        let chunks = res
+            .files
+            .iter()
+            .filter(|file| !file.name.ends_with(".map"))
+            .collect::<Vec<_>>();
+        assert!(
+            chunks.len() >= 2,
+            "the dynamic import must split a chunk off"
+        );
+        for chunk in &chunks {
+            let code = String::from_utf8_lossy(&chunk.bytes);
+            assert!(
+                !code.contains("=(function require_") && !code.contains("=(function init_"),
+                "{}: a forwarder must stay a declaration across chunks:\n{}",
+                chunk.name,
+                &code[..code.len().min(800)]
+            );
+            assert!(!code.contains(EAGER_MARKER), "{}: marker left", chunk.name);
+        }
+        let code = entry_chunk(&res);
+        assert!(
+            code.contains("(function installSyncPolyfills("),
+            "runtime helpers keep their parenthesized form:\n{code}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runtime_declarations_hoist_in_source_order_after_the_directive() {
+        let src = "// header\n\"use strict\";\nconst first = 1;\nfunction b() { return a(); }\nlet mid = b;\nfunction a() { return 1; }\nfunction c() {}\nc = 2;\nmodule.exports = { a, b };\n";
+        let out = hoist_runtime_declarations("/runtime/x.cjs", src)
+            .expect("declarations hoist")
+            .to_string();
+        let directive = out.find("\"use strict\";").unwrap();
+        let b = out
+            .find("var b = __nubEager(function b() { return a(); });")
+            .unwrap_or_else(|| panic!("b must hoist as a marked expression:\n{out}"));
+        let a = out
+            .find("var a = __nubEager(function a() { return 1; });")
+            .unwrap_or_else(|| panic!("a must hoist as a marked expression:\n{out}"));
+        let first = out.find("const first = 1;").unwrap();
+        assert!(
+            directive < b && b < a && a < first,
+            "hoisted in source order, right after the directive:\n{out}"
+        );
+        assert!(
+            out.contains("function c() {}") && !out.contains("__nubEager(function c"),
+            "a reassigned name stays a declaration:\n{out}"
+        );
+
+        // The first statement is itself a declaration: it stays, the rest follow it.
+        let out = hoist_runtime_declarations(
+            "/runtime/y.cjs",
+            "function a() {}\nconst k = 1;\nfunction b() {}\n",
+        )
+        .expect("declarations hoist")
+        .to_string();
+        assert_eq!(
+            out,
+            "var a = __nubEager(function a() {});var b = __nubEager(function b() {});\nconst k = 1;\n\n",
+        );
+
+        assert!(
+            hoist_runtime_declarations("/runtime/z.mjs", "export function e() {}\nconst k = 1;\n")
+                .is_none(),
+            "an exported declaration is not a plain statement and stays"
+        );
+        assert!(hoist_runtime_declarations("/runtime/w.cjs", "const k = 1;\n").is_none());
+    }
+
+    /// The finish inserts text on the minified chunk's one line, so every
+    /// column after the first insertion moves; the composed map must still
+    /// take the authored string back to its file and line.
+    #[test]
+    fn eager_startup_keeps_the_inline_source_map_pointing_at_authored_code() {
+        let dir = fixture_dir("eager-map");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "const greeting = 'hello, nub';\nconsole.log(greeting);\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        o.target_node = Some((26, 0, 0));
+        o.eager_startup = true;
+        let res = bundle(&entry, &o).expect("hello must compile");
+        let code = entry_chunk(&res);
+        assert!(code.contains("=(function require_polyfills("));
+
+        let (body, tail) = code
+            .rsplit_once("base64,")
+            .expect("the chunk carries an inline sourcemap comment");
+        let json = {
+            use base64::Engine as _;
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(tail.trim())
+                    .expect("the inline map must be valid base64"),
+            )
+            .expect("the decoded map must be UTF-8")
+        };
+        // The alias is `SourceMap<'static>`, so the JSON it borrows must be too.
+        let json: &'static str = Box::leak(json.into_boxed_str());
+        let map = rolldown_sourcemap::SourceMap::from_json_string(json)
+            .expect("the inline map must parse");
+        // The minifier inlines the constant into the call on the second authored
+        // line, so the call is the position with one right answer. The entry's
+        // wrapper is the last module in the chunk, hence the last `console.log(`.
+        let at = body
+            .rfind("console.log(")
+            .expect("the authored call is in the chunk");
+        let line = body[..at].matches('\n').count() as u32;
+        let col = (at - body[..at].rfind('\n').map_or(0, |n| n + 1)) as u32;
+        let table = map.generate_lookup_table();
+        let token = map
+            .lookup_token(&table, line, col)
+            .unwrap_or_else(|| panic!("no mapping at {line}:{col} in:\n{json}"));
+        let source = token
+            .get_source_id()
+            .and_then(|id| map.get_source(id))
+            .unwrap_or_else(|| panic!("the token must name a source:\n{json}"));
+        assert!(
+            source.ends_with("entry.mjs") && token.get_src_line() == 1,
+            "the call must map to line 2 of the entry, got {source}:{}",
+            token.get_src_line() + 1
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn host_node_version() -> Option<(u64, u64, u64)> {
+        let out = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()?;
+        let text = String::from_utf8(out.stdout).ok()?;
+        let mut parts = text
+            .trim()
+            .strip_prefix('v')?
+            .split('.')
+            .map(|part| part.parse::<u64>().ok());
+        Some((parts.next()??, parts.next()??, parts.next()??))
+    }
+
+    fn largest_file_len(dir: &Path) -> u64 {
+        let mut largest = 0;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    largest = largest.max(meta.len());
+                }
+            }
+        }
+        largest
+    }
+
+    /// Positive control on the real runtime: after one run, Node's compile cache
+    /// for the finished chunk holds the runtime's startup functions, while the
+    /// lazy shape — the same sources for a target without a compile cache — leaves
+    /// an order of magnitude less on the same Node. The lazy run is the control
+    /// that proves the instrument. Skips without a Node 22.1+ on PATH.
+    #[test]
+    fn eager_startup_fills_the_compile_cache_on_the_first_run() {
+        let Some(version) = host_node_version() else {
+            eprintln!("skipping: no node on PATH");
+            return;
+        };
+        if version < COMPILE_CACHE_FROM {
+            eprintln!("skipping: Node {version:?} persists no compile cache");
+            return;
+        }
+        let cache_bytes = |eager: bool, tag: &str| -> u64 {
+            let dir = fixture_dir(tag);
+            let entry = dir.join("entry.mjs");
+            std::fs::write(&entry, "console.log('hello, nub');\n").unwrap();
+            let mut o = opts();
+            o.target_node = Some(version);
+            o.eager_startup = eager;
+            // V8 serializes the script's source-map URL into the code cache, so
+            // an inline map would put the map's bytes in the number under test.
+            o.sourcemap = SourcemapMode::None;
+            let res = bundle(&entry, &o).expect("hello must compile");
+            let out = dir.join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            for file in res
+                .files
+                .iter()
+                .chain(&res.root_support_files)
+                .chain(&res.support_files)
+            {
+                std::fs::write(out.join(&file.name), &file.bytes).unwrap();
+            }
+            let cache = dir.join("cc");
+            for _ in 0..2 {
+                let run = std::process::Command::new("node")
+                    .arg(out.join(&res.entry))
+                    .env("NODE_COMPILE_CACHE", &cache)
+                    .env(
+                        "__NUB_COMPILED_BOOTSTRAP",
+                        out.join(nub_core::compile::COMPILE_BOOTSTRAP_NAME),
+                    )
+                    .output()
+                    .expect("spawn node");
+                assert!(
+                    run.status.success()
+                        && String::from_utf8_lossy(&run.stdout).contains("hello, nub"),
+                    "the chunk must run under plain node (eager {eager}):\n{}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+            }
+            let largest = largest_file_len(&cache);
+            let _ = std::fs::remove_dir_all(&dir);
+            largest
+        };
+        let lazy = cache_bytes(false, "eager-cache-control");
+        let eager = cache_bytes(true, "eager-cache");
+        assert!(
+            lazy < 20_000,
+            "control: the lazy shape must leave an eager-only cache, got {lazy} bytes"
+        );
+        assert!(
+            eager >= 40_000 && eager > 4 * lazy,
+            "the finished chunk's cache must hold the runtime's functions: {eager} bytes against {lazy} lazy"
+        );
     }
 
     /// A dynamically imported CommonJS package emits an eager
