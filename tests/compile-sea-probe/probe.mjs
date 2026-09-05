@@ -2,12 +2,12 @@
 // single-executable application that still carries nub's augmentation.
 //
 // Written as one Node script rather than per-OS shell so the five runners assert
-// exactly the same things. The only per-OS knob is `--run-with`, for a musl
+// exactly the same things. The only per-OS knob is `--docker`, for a musl
 // artifact that has to execute inside an Alpine container.
 //
 // usage:
 //   node probe.mjs --nub <path> --out <path> [--platform <target>]
-//                  [--run-with "docker run --rm -v {dir}:{dir} -w {dir} alpine:3.20"]
+//                  [--docker alpine:3.20]
 //                  [--expect sea|launcher] [--target <node-version>]
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -76,11 +76,22 @@ mkdirSync(join(home, "tmp"));
 const runEnv = { ...env, HOME: home, USERPROFILE: home, XDG_CACHE_HOME: join(home, "cache"), TMPDIR: join(home, "tmp") };
 
 let cmd = out, argv = ["a", "b"];
-if (args.get("run-with")) {
-  const parts = args.get("run-with").replaceAll("{dir}", dirname(out)).split(" ").filter(Boolean);
-  [cmd, ...argv] = [...parts, out, "a", "b"];
+if (args.get("docker")) {
+  // `sh -c '… exec "$0" "$@"' <bin> a b` puts the artifact in $0 and its
+  // arguments in $@, which is the only shape that survives without quoting the
+  // path. The `apk add` is not incidental: a musl Node links against
+  // `libgcc_s.so.1`, which a bare Alpine image does not ship, so the artifact
+  // dies at relocation with exit 127 and says nothing about nub.
+  const dir = dirname(out);
+  cmd = "docker";
+  argv = ["run", "--rm", "-e", "NUB_SEA_PROBE=live", "-v", `${dir}:${dir}`, "-w", dir,
+    args.get("docker"), "/bin/sh", "-c",
+    'apk add --no-cache libgcc libstdc++ >/dev/null 2>&1 || true; exec "$0" "$@"', out, "a", "b"];
 }
-const ran = spawnSync(cmd, argv, { encoding: "utf8", env: runEnv });
+// The fresh HOME isolates the ARTIFACT's cache, so it is wrong for the docker
+// CLI, which reads its context out of `$HOME/.docker` and otherwise cannot find
+// the daemon. Inside the container the artifact gets the container's own HOME.
+const ran = spawnSync(cmd, argv, { encoding: "utf8", env: args.get("docker") ? env : runEnv });
 process.stderr.write(ran.stderr ?? "");
 if (ran.error) fail(`could not run ${cmd}: ${ran.error.message}`);
 if (ran.status !== 0) {
@@ -88,11 +99,34 @@ if (ran.status !== 0) {
 }
 const got = (ran.stdout ?? "").trim().split("\n").pop();
 say(`artifact: ${got}`);
-if (got !== control) fail(`artifact printed '${got}', control printed '${control}'`);
+
+// A cross-target artifact cannot match the control field for field: it reports
+// its own platform, and a path separator follows that platform. So the fields
+// that must be identical are compared by name, and the platform is compared
+// against the target that was asked for — which is the stronger assertion
+// anyway, since it catches a build that resolved the wrong triple.
+const fields = (line) => Object.fromEntries(line.split(" ").map((p) => {
+  const at = p.indexOf(":");
+  return [p.slice(0, at), p.slice(at + 1)];
+}));
+const wanted = fields(control);
+const carried = fields(got);
+const shared = args.get("platform") ? ["argv", "worker", "env"] : Object.keys(wanted);
+for (const key of shared) {
+  if (carried[key] !== wanted[key]) {
+    fail(`artifact reported ${key}:${carried[key]}, control reported ${key}:${wanted[key]}`);
+  }
+}
+if (args.get("platform")) {
+  const expected = args.get("platform").replace(/-musl$/, "");
+  if (carried.platform !== expected) {
+    fail(`artifact reports platform ${carried.platform}, but was built for ${expected}`);
+  }
+}
 
 // Nothing under the fresh cache root may be a compile extraction. Skipped for a
 // containerised run, whose writes land in the container's own filesystem.
-if (isSea && !args.get("run-with")) {
+if (isSea && !args.get("docker")) {
   const cache = join(home, "cache", "nub");
   const extracted = existsSync(cache) ? readdirSync(cache).filter((d) => d.startsWith("compile-app")) : [];
   if (extracted.length > 0) fail(`a single-executable application still extracted: ${extracted.join(", ")}`);

@@ -75,8 +75,7 @@ jobs:
         shell: bash
         run: |
           node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/musl-probe" \
-            --platform ${{ matrix.musl }} \
-            --run-with "docker run --rm -v {dir}:{dir} -w {dir} alpine:3.20"
+            --platform ${{ matrix.musl }} --docker alpine:3.20
 
       # The version gate that decides the container is deliberately not probed
       # here. Compiling for a Node below the execArgv floor pulls in the Temporal,
