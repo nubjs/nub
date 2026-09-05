@@ -63,6 +63,7 @@ unsafe extern "system" {
         sacl: *mut *mut Acl,
         descriptor: *mut *mut c_void,
     ) -> u32;
+    #[cfg(feature = "embed-runtime")]
     fn SetNamedSecurityInfoW(
         name: *mut u16,
         object_type: u32,
@@ -72,6 +73,7 @@ unsafe extern "system" {
         dacl: *mut Acl,
         sacl: *mut Acl,
     ) -> u32;
+    #[cfg(feature = "embed-runtime")]
     fn GetSecurityDescriptorDacl(
         descriptor: *mut c_void,
         present: *mut i32,
@@ -81,6 +83,7 @@ unsafe extern "system" {
     fn GetAce(acl: *const Acl, index: u32, ace: *mut *mut c_void) -> i32;
     fn EqualSid(first: Sid, second: Sid) -> i32;
     fn IsWellKnownSid(sid: Sid, kind: i32) -> i32;
+    #[cfg(test)]
     fn CreateWellKnownSid(kind: i32, domain: Sid, sid: *mut c_void, size: *mut u32) -> i32;
     fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
     fn GetTokenInformation(
@@ -105,6 +108,7 @@ const SDDL_REVISION_1: u32 = 1;
 const SE_FILE_OBJECT: u32 = 1;
 const OWNER_SECURITY_INFORMATION: u32 = 0x1;
 const DACL_SECURITY_INFORMATION: u32 = 0x4;
+#[cfg(feature = "embed-runtime")]
 const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 const TOKEN_QUERY: u32 = 0x8;
 const TOKEN_USER_CLASS: i32 = 1;
@@ -164,7 +168,7 @@ struct CurrentUserSid {
 
 /// Protected DACL: object/container-inheritable full access for the object owner,
 /// LocalSystem, and Administrators only. `P` blocks inheritance from the parent,
-/// which is the entire point — see [`harden_private_directory`].
+/// so a newly created cache does not inherit broader access.
 const PRIVATE_DACL: &str = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 
 pub fn create_private_directory(path: &Path) -> io::Result<()> {
@@ -186,6 +190,7 @@ pub fn create_private_directory(path: &Path) -> io::Result<()> {
 /// Administrators. Refuses unless the OWNER is already trusted — hardening a
 /// directory somebody else created would adopt a tree an attacker may have
 /// planted and hide it behind a now-clean DACL, so a foreign owner stays declined.
+#[cfg(feature = "embed-runtime")]
 pub(crate) fn harden_private_directory(path: &Path) -> io::Result<()> {
     let current = current_user_sid()?;
     let wide = wide_path(path);

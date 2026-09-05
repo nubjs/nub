@@ -2882,7 +2882,10 @@ mod tests {
     /// is pure formatting and is deliberately not gated to Windows.
     #[test]
     fn parse_win_shim_target_recovers_what_generate_cmd_shim_embeds() {
-        for launch in [BinLaunch::Direct, BinLaunch::Interpreter("node".to_string())] {
+        for launch in [
+            BinLaunch::Direct,
+            BinLaunch::Interpreter("node".to_string()),
+        ] {
             let rel = r"..\share\nub\global\1a-2b\node_modules\pkg\cli.js";
             let text = generate_cmd_shim(&launch, rel, None);
             assert_eq!(
@@ -2945,8 +2948,11 @@ mod tests {
     #[test]
     fn parse_win_shim_target_ignores_the_node_path_line() {
         let rel = r"..\pkg\cli.js";
-        let text = generate_cmd_shim(&BinLaunch::Interpreter("node".to_string()), rel, Some("%~dp0\\..\\node_modules"));
+        let text = generate_cmd_shim(
+            &BinLaunch::Interpreter("node".to_string()),
+            rel,
+            Some("%~dp0\\..\\node_modules"),
+        );
         assert_eq!(parse_win_shim_target(&text).as_deref(), Some(rel));
     }
-
 }

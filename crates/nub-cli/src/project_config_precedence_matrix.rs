@@ -280,11 +280,19 @@ fn specs() -> Vec<KeySpec> {
             set_empty: Some(|c| c.dlx.consent = Some(ImplicitDlx::Never)),
             is_empty: Some(|c| c.dlx.consent == Some(ImplicitDlx::Never)),
         },
+        KeySpec {
+            key: ConfigKey::InstallBuildJail,
+            name: "install.buildJail",
+            set: |c, t| c.install.build_jail = Some(t.is_multiple_of(2)),
+            matches: |c, t| c.install.build_jail == Some(t.is_multiple_of(2)),
+            set_empty: Some(|c| c.install.build_jail = Some(false)),
+            is_empty: Some(|c| c.install.build_jail == Some(false)),
+        },
     ]
 }
 
 /// One per `ConfigKey` variant; [`ordinal`] is what keeps it honest.
-const KEY_COUNT: usize = 21;
+const KEY_COUNT: usize = 22;
 
 /// Exhaustive by construction: adding a `ConfigKey` variant breaks this match,
 /// forcing the new key into the spec table.
@@ -311,6 +319,7 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::InstallMinimumReleaseAge => 18,
         ConfigKey::InstallMinimumReleaseAgeExclude => 19,
         ConfigKey::DlxConsent => 20,
+        ConfigKey::InstallBuildJail => 21,
     }
 }
 

@@ -26,10 +26,10 @@
 //! recursive `install --ignore-scripts --silent` would be parsed as
 //! host arguments.
 //!
-//! The outer project's `.npmrc` (if any) is copied into the tool dir
+//! The outer project's `.npmrc` (if any) is copied into private staging
 //! as its own project-level `.npmrc` so private-registry URLs and
 //! auth tokens configured by monorepo / enterprise setups flow
-//! through to the bootstrap install, which resolves against the tool
+//! through to the bootstrap install, which resolves against that temporary
 //! dir and would otherwise only pick up `~/.npmrc`.
 //!
 //! The tool dir is its own single-package project (stub workspace
@@ -81,65 +81,91 @@ fn tool_root() -> miette::Result<PathBuf> {
     Ok(cache.join("tools").join("node-gyp"))
 }
 
-/// Install (or reuse) the pinned node-gyp under the tool dir and return its
-/// `.bin`. Reached only through the lazy shims — nothing bootstraps eagerly,
-/// so an install whose builds never invoke node-gyp never pays for this.
-///
-/// `project_dir` is the outer install's project root; its `.npmrc`
-/// (if any) is propagated to the tool dir so the bootstrap inherits
-/// the same registry/auth configuration.
+/// Remove registry configuration left in public tool buckets by older versions.
+/// A confining embedder must propagate failure before granting this cache to a child.
+pub fn clear_legacy_registry_configs() -> miette::Result<()> {
+    let root = tool_root()?;
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).into_diagnostic(),
+    };
+    for entry in entries {
+        let entry = entry.into_diagnostic()?;
+        if entry.file_type().into_diagnostic()?.is_dir() {
+            remove_legacy_registry_config(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_legacy_registry_config(tool_dir: &Path) -> miette::Result<()> {
+    match std::fs::remove_file(tool_dir.join(".npmrc")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e)
+            .into_diagnostic()
+            .wrap_err("removing cached node-gyp credentials"),
+    }
+}
+
+/// Install the pinned node-gyp outside child-readable caches, then publish only
+/// its modules. Project registry credentials stay in the private staging directory.
 pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
     let root = tool_root()?;
     let tool_dir = root.join(BUCKET);
     let bin_dir = tool_dir.join("node_modules").join(".bin");
-    if node_gyp_bin_exists(&bin_dir) {
-        return Ok(bin_dir);
-    }
-    let tool_dir_blocking = tool_dir.clone();
-    let project_npmrc = project_dir.join(".npmrc");
-    tokio::task::spawn_blocking(move || {
-        write_bootstrap_project(&tool_dir_blocking, &project_npmrc)
-    })
-    .await
-    .into_diagnostic()
-    .wrap_err("node-gyp bootstrap task panicked")??;
-
-    // The tool dir is its own single-package project (see the stub workspace
-    // yaml written above), so this lock is keyed on `tool_dir` and cannot
-    // contend with the outer install's lock on the real project.
-    let lock = crate::commands::take_project_lock(&tool_dir)?;
-    // Re-check under the lock: another process may have raced us between the
-    // check above and acquisition.
-    if node_gyp_bin_exists(&bin_dir) {
+    std::fs::create_dir_all(&tool_dir).into_diagnostic()?;
+    let _publish_lock = crate::commands::take_project_lock(&tool_dir)?;
+    // Retire configuration copied by older versions before exposing a cached tool.
+    remove_legacy_registry_config(&tool_dir)?;
+    if tool_tree_usable(&tool_dir, &bin_dir) {
         return Ok(bin_dir);
     }
 
-    tracing::info!("bootstrapping node-gyp {SPEC} into {}", tool_dir.display());
+    let cache = aube_store::dirs::cache_dir()
+        .ok_or_else(|| miette!("could not resolve node-gyp staging directory"))?;
+    let staging_root = cache.join("tool-bootstrap");
+    std::fs::create_dir_all(&staging_root).into_diagnostic()?;
+    let stage = tempfile::Builder::new()
+        .prefix("node-gyp-")
+        .tempdir_in(staging_root)
+        .into_diagnostic()?;
+    write_bootstrap_project(stage.path(), &project_dir.join(".npmrc"))?;
+    let stage_lock = crate::commands::take_project_lock(stage.path())?;
     let mut opts = super::InstallOptions::with_mode(super::FrozenMode::Prefer);
-    // Equivalent of the `install --ignore-scripts --silent` this used to shell
-    // out for. node-gyp's own dependency tree needs no build scripts, and
-    // running them here would recurse straight back into this bootstrap.
     opts.ignore_scripts = true;
+    opts.register_in_store = false;
+    // Publish a self-contained tree: Windows isolated-layout junctions retain
+    // absolute staging targets and become dangling when the staging dir drops.
+    opts.cli_flags
+        .push(("node-linker".into(), "hoisted".into()));
     opts.control = super::InstallControl::silent();
-    super::run_with_project_lock(opts, &lock)
+    super::run_with_project_lock(opts, &stage_lock)
         .await
-        .wrap_err_with(|| {
-            format!(
-                "failed to bootstrap node-gyp {SPEC} into {} — \
-                 pre-populate it or run `{}` once while online",
-                tool_dir.display(),
-                aube_util::cmd("install")
-            )
-        })?;
+        .wrap_err("bootstrapping node-gyp in private staging directory")?;
 
-    if !node_gyp_bin_exists(&bin_dir) {
+    let modules = tool_dir.join("node_modules");
+    if modules.exists() {
+        std::fs::remove_dir_all(&modules).into_diagnostic()?;
+    }
+    std::fs::rename(stage.path().join("node_modules"), &modules)
+        .into_diagnostic()
+        .wrap_err("publishing node-gyp modules")?;
+    if !tool_tree_usable(&tool_dir, &bin_dir) {
         return Err(miette!(
-            "node-gyp bootstrap into {} reported success but left no node-gyp binary in {}",
-            tool_dir.display(),
-            bin_dir.display()
+            "node-gyp bootstrap left no usable tool in {}",
+            tool_dir.display()
         ));
     }
     Ok(bin_dir)
+}
+
+fn tool_tree_usable(tool_dir: &Path, bin_dir: &Path) -> bool {
+    node_gyp_bin_exists(bin_dir)
+        && tool_dir
+            .join("node_modules/node-gyp/package.json")
+            .is_file()
 }
 
 /// Eager counterpart to [`lazy_shim_bin_dir`], for builds that will run jailed.
@@ -152,19 +178,16 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
 /// Resolving out here, outside the jail, puts a directly executable node-gyp on
 /// the script's PATH.
 ///
-/// This covers the PATH channel only. `npm_config_node_gyp` is a separate one:
-/// [`lazy_js_shim_path`] is stamped unconditionally and jail-unaware, so a
-/// consumer reading that variable still re-enters from inside the jail and hits
-/// the same empty tool dir. That is pre-existing rather than new — the variable
-/// already pointed at the lazy shim — but it is the half this function does not
-/// close.
+/// `npm_config_node_gyp` is a separate channel: its JS shim resolves this same
+/// prepared tree directly, without a package-manager re-entry or PATH search.
 ///
-/// `None` when node-gyp already resolves without us, same as the lazy path.
+/// A project-local tool wins. Ambient tools may sit outside the jail's read grants,
+/// so they are not sufficient for the confined path.
 pub(crate) async fn ensure_bin_dir_for_jail(
     project_bin_dir: &Path,
     project_dir: &Path,
 ) -> miette::Result<Option<PathBuf>> {
-    if node_gyp_bin_exists(project_bin_dir) || node_gyp_on_path() {
+    if node_gyp_bin_exists(project_bin_dir) {
         return Ok(None);
     }
     ensure_cached(project_dir).await.map(Some)
@@ -248,13 +271,26 @@ exec "$real" "$@"
 // when something actually invokes it. Bare `require` (no `node:` prefix)
 // so the shim runs under any Node the user drives, including pre-16.
 const { execFileSync, spawnSync } = require("child_process");
+const { existsSync } = require("fs");
+const { join } = require("path");
 const isWin = process.platform === "win32";
+const cached = join(__dirname, "..", "__NODE_GYP_BUCKET__", "node_modules", "node-gyp", "bin", "node-gyp.js");
+if (existsSync(cached)) {
+  require(cached);
+  return;
+}
 let real;
 const exe = process.env.AUBE_NODE_GYP_EXE;
 if (exe) {
   const dir = process.env.AUBE_NODE_GYP_PROJECT_DIR || process.cwd();
   real = execFileSync(exe, ["__node-gyp-bootstrap", dir], { encoding: "utf8" }).trim();
 } else {
+  const depth = Number(process.env.AUBE_NODE_GYP_SHIM_DEPTH || 0) + 1;
+  if (depth > 3) {
+    console.error("node-gyp shim re-entered without reaching a prepared node-gyp");
+    process.exit(1);
+  }
+  process.env.AUBE_NODE_GYP_SHIM_DEPTH = String(depth);
   real = isWin ? "node-gyp.cmd" : "node-gyp";
 }
 const result = spawnSync(real, process.argv.slice(2), { stdio: "inherit", shell: isWin });
@@ -263,7 +299,7 @@ if (result.error) {
   process.exit(1);
 }
 process.exit(result.status === null ? 1 : result.status);
-"#;
+"#.replace("__NODE_GYP_BUCKET__", BUCKET);
     let js_path = shim_dir.join("node-gyp.js");
     aube_util::fs_atomic::atomic_write(&js_path, js.as_bytes()).into_diagnostic()?;
     #[cfg(unix)]
@@ -360,4 +396,66 @@ fn write_bootstrap_project(tool_dir: &Path, project_npmrc: &Path) -> miette::Res
         let _ = std::fs::remove_file(&tool_npmrc);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_config_cleanup_is_idempotent_and_does_not_hide_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join(".npmrc");
+        std::fs::write(&config, "//registry.invalid/:_authToken=fixture").unwrap();
+        remove_legacy_registry_config(root.path()).unwrap();
+        assert!(!config.exists());
+        remove_legacy_registry_config(root.path()).unwrap();
+        std::fs::create_dir(&config).unwrap();
+        assert!(remove_legacy_registry_config(root.path()).is_err());
+    }
+
+    #[test]
+    fn cached_js_shim_uses_the_terminal_tool_without_reentering_the_installer() {
+        let root = tempfile::tempdir().unwrap();
+        let shim_dir = root.path().join("lazy-bin");
+        std::fs::create_dir(&shim_dir).unwrap();
+        write_lazy_shims(&shim_dir).unwrap();
+        let real_dir = root.path().join(BUCKET).join("node_modules/node-gyp/bin");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::write(
+            real_dir.join("node-gyp.js"),
+            "require('fs').writeFileSync(process.argv[2], process.argv[3]);",
+        )
+        .unwrap();
+        let marker = root.path().join("marker");
+        let output = std::process::Command::new("node")
+            .arg(shim_dir.join("node-gyp.js"))
+            .arg(&marker)
+            .arg("terminal-tool-ran")
+            .env("AUBE_NODE_GYP_EXE", root.path().join("must-not-execute"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "terminal-tool-ran"
+        );
+    }
+
+    #[test]
+    fn a_leftover_bin_shim_does_not_make_a_missing_tool_usable() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(primary_binary_name()), "shim").unwrap();
+        assert!(!tool_tree_usable(root.path(), &bin));
+        let package = root.path().join("node_modules/node-gyp");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(package.join("package.json"), "{}").unwrap();
+        assert!(tool_tree_usable(root.path(), &bin));
+    }
 }

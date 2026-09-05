@@ -186,6 +186,12 @@ const FIELDS: &[Field] = &[
         global_only: false,
     },
     Field {
+        address: "install.buildJail",
+        path: "install.buildJail",
+        shape: Shape::Bool,
+        global_only: false,
+    },
+    Field {
         address: "install.publicHoist",
         path: "install.publicHoist",
         shape: Shape::StrList,

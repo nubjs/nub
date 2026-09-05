@@ -221,7 +221,7 @@ const WATCH_ENV_GUARD_ENV: &str = "__NUB_WATCH_ENV_GUARD";
 /// zero-privilege per-host sandbox funnel. `nub-sandbox`'s AppContainer backend launches nub with
 /// this as argv[1] and a base64(JSON) net policy as argv[2]; the dispatch in [`run`] hands off to
 /// `nub_sandbox::serve_windows_egress_helper`. Registered as the helper launch command in
-/// `pm_engine::sandbox_closure`. An internal re-entry belonging to its parent (like
+/// `main`. An internal re-entry belonging to its parent (like
 /// `__node-gyp-bootstrap`), so it is exempt from the fresh-invocation environment restore.
 pub(crate) const EGRESS_FUNNEL_HELPER_FLAG: &str = "__egress-funnel-helper";
 

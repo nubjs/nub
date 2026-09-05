@@ -25,6 +25,7 @@ pub const WARN_AUBE_DEFAULT_TRUST_BUILDS: &str = "WARN_AUBE_DEFAULT_TRUST_BUILDS
 #[rustfmt::skip] pub const WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED: &str = "WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED";
 #[rustfmt::skip] pub const WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT: &str = "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT";
 #[rustfmt::skip] pub const WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE: &str = "WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE";
+#[rustfmt::skip] pub const WARN_AUBE_UNIX_PROCESS_GROUP_UNAVAILABLE: &str = "WARN_AUBE_UNIX_PROCESS_GROUP_UNAVAILABLE";
 pub const WARN_AUBE_MISSING_INTEGRITY: &str = "WARN_AUBE_MISSING_INTEGRITY";
 pub const WARN_AUBE_CACHE_WRITE_FAILED: &str = "WARN_AUBE_CACHE_WRITE_FAILED";
 pub const WARN_AUBE_CLONE_STRATEGY_FALLBACK: &str = "WARN_AUBE_CLONE_STRATEGY_FALLBACK";
@@ -250,6 +251,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE,
         category: category::INSTALL_LIFECYCLE,
         description: "Windows: couldn't create or assign a kill-on-job-close job object for a lifecycle script. The script still runs, but on abort/failure its grandchildren (node-gyp / MSBuild / node) may be orphaned. Usually caused by a restrictive parent job or enterprise policy.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_UNIX_PROCESS_GROUP_UNAVAILABLE,
+        category: category::INSTALL_LIFECYCLE,
+        description: "The lifecycle shell could not be registered for descendant cleanup.",
         exit_code: None,
     },
     CodeMeta {

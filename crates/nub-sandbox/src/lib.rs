@@ -1,100 +1,37 @@
-//! nub-sandbox — the OS-enforced sandbox ENGINE, PM-pure by construction.
+//! OS-enforced sandbox engine with no package-manager dependency.
 //!
-//! This crate is the frontend-less confinement engine. It has NO command grammar,
-//! reads NO config file, and knows nothing about the package manager. A *front-end*
-//! (the build-jail, a runtime profile, `nub sandbox -- <cmd>`) is the EMBEDDER: it
-//! discovers config, parses it, resolves the host's paths/env, then drives this
-//! engine through the two-call data seam below. Linux additionally installs an
-//! earliest process hook. The companion `EMBEDDER.md` is the full
-//! integration guide (usage sketch, boundary tables, launcher-handoff contract);
-//! this module doc is the authoritative summary that lives with the code.
+//! Embedders provide parsed configuration, host paths, an ambient environment snapshot,
+//! and per-source [`ScopeCapabilities`]. The engine does not discover project configuration.
 //!
-//! # The embedder seam — two calls over already-parsed data
+//! # Compile and apply
 //!
-//! The data path has two calls over the plain-data types below (the two boundaries
-//! of design.md §2). On Linux, the embedder also calls [`earliest_bootstrap`] as its
-//! first main action and passes that capability to [`apply_with_runtime`]:
+//! [`compile`] resolves a surface and [`CompileCtx`] into a [`SandboxPolicy`].
+//! [`compile_build_jail`] resolves the catalog-driven dependency-build profile.
+//! [`apply`] combines that policy with a [`CommandSpec`] and returns a [`Prepared`]
+//! launch, or a [`Degradation`] error when a required guarantee cannot be enforced.
+//! Launch through [`Prepared::spawn`], [`Prepared::status`], or [`Prepared::output`]
+//! so process cleanup, proxies and temporary directories retain their owners.
 //!
-//!   - [`compile`]`(surface: &Value, ctx: &`[`CompileCtx`]`) -> Result<`[`SandboxPolicy`]`, `[`CompileError`]`>`
-//!     — **Boundary A**: the surface `sandbox` JSON (a parsed `serde_json::Value`)
-//!     plus host context (homes/cwd/trust/ambient-env) resolve to the flat policy
-//!     IR. This is the ONLY code that understands surface syntax (presets, `...:#/pointer`
-//!     list reuse, glob ordering, the env grammar); a backend never sees any of it.
-//!     Use [`compile_with_warnings`] to also surface non-fatal [`CompileWarning`]s.
-//!   - [`apply_with_runtime`]`(policy: &`[`SandboxPolicy`]`, spec: `[`CommandSpec`]`, runtime: &`[`RuntimeCapability`]`) -> Result<`[`Prepared`]`, `[`Degradation`]`>`
-//!     — **Boundary B**: a resolved policy plus a host-provided command produce a
-//!     launch-ready child, or a fail-closed [`Degradation`] when a required axis is
-//!     unenforceable. The embedder then surfaces [`Prepared::degradation`] and
-//!     launches through [`Prepared::spawn`], [`Prepared::status`], or
-//!     [`Prepared::output`]. The backend command is private so Linux verification,
-//!     Windows enforcement, and per-launch resource ownership cannot be bypassed.
+//! Linux uses Landlock and seccomp, macOS uses Seatbelt, and Windows uses AppContainer.
+//! None requires an elevated helper, account creation, or an early bootstrap capability.
+//! Environment filtering constructs the child's environment rather than editing the parent.
+//! Unsupported platforms report filesystem and network enforcement as unavailable.
 //!
-//! Other platforms retain [`apply`], and bare `apply` remains valid for an unconfined
-//! Linux command; Linux confinement fails closed without the early capability.
+//! # Embedder obligations and limits
 //!
-//! The model is COMPILE-THEN-APPLY: the IR is compiled once and consumed in-process
-//! by the apply seam; it is `serde`-round-trippable for fixtures/debug-dump but is NEVER
-//! deserialized on the enforcement path (no config re-read between compile and
-//! apply). One policy can drive many [`apply`] calls.
+//! Supply toolchain read paths for interpreters installed outside system directories.
+//! Assign capabilities per configuration source; dependency-authored policy must not gain
+//! the dynamic environment or credential-broker capabilities of root-authored policy.
+//! Windows per-host networking requires a registered co-package egress helper through
+//! [`set_windows_egress_helper_command`], not a machine-wide loopback exemption.
+//! Its helper supports connection rules; unsupported TLS-inspection/broker policies fail closed.
 //!
-//! # PM-purity invariant (the Boundary-B guarantee — a done-gate assertion)
+//! The build jail is a compatibility-oriented profile. In particular, its Windows full-disk
+//! catalog tier omits the AppContainer token and therefore has no OS filesystem/network
+//! boundary. Environment filtering still applies. Other reported losses are carried by
+//! [`Prepared::degradation`]; an embedder must surface them rather than claiming enforcement.
+//! Windows also rejects an already-shared working root that would defeat its allowlist.
 //!
-//! NO `nub-cli` / `nub-core` / `vendor/aube` (PM) type crosses either boundary, and
-//! this crate declares NO dependency on any of them (see `Cargo.toml`). Everything
-//! the seam moves is plain data owned here — a `serde_json::Value` in, the IR
-//! ([`SandboxPolicy`]) through, [`Prepared`]/[`Degradation`]/[`CompileError`] out.
-//! That is what keeps the embedder seam clean: aube's lifecycle wires to these two
-//! fns without dragging a PM type across the line. Do NOT add a PM dependency here;
-//! an impact-analysis review leg asserts the dependency graph.
-//!
-//! # Launcher-handoff contract (the embedder's obligations)
-//!
-//! For some guarantees the engine constructs the child's confinement correctly but
-//! a COMPLETE guarantee needs the launcher (which owns the parent process + the
-//! work-dir layout) to satisfy a contract the frontend-less engine cannot. These
-//! are NOT engine defects — they define the seam. The current set (full detail in
-//! `LIMITATIONS.md` "Launcher-handoff items"):
-//!
-//!   - **macOS toolchain read-confine** — a non-system interpreter (Homebrew/nvm
-//!     Node) needs its toolchain dir in the read-allow set; the engine grants the
-//!     program file only and does not probe the host for it.
-//!   - **Windows loopback exemption** — per-host egress (and the MITM tier) need a
-//!     registered loopback exemption so the child can reach the proxy. The sibling
-//!     clean-DACL work-root obligation is retired: the engine checks the work root for
-//!     `ALL APPLICATION PACKAGES` reach itself, and FAILS CLOSED on `fs-root` when it finds
-//!     reach it did not put there — an ACE the engine published on its own
-//!     [`policy::FsOrigin::NubOwnedPublic`] caches is excused, since the child already holds
-//!     a read grant on that subtree. "Degrades" here previously read as a soft loss; it is
-//!     an `Err`, and the embedder refuses the launch. See `LIMITATIONS.md`.
-//!   - **Per-host proxy wiring** — the launcher provisions/exempts the loopback
-//!     proxy path per OS as above.
-//!   - **Untrusted-config trust boundary** — the engine CANNOT detect trust; the
-//!     CALLER assigns the compile its [`ScopeCapabilities`] (via [`CompileCtx::caps`])
-//!     — the `env_substitution` / `credential_broker` gates — and secures untrusted-config
-//!     usage (e.g. PR-CI). A `dependenciesMeta` scope compiles with no capabilities.
-//!
-//! # Net axis — the per-host egress proxy and the MITM tier
-//!
-//! When a policy enforces per-host net, [`apply`] starts a loopback [`EgressProxy`]
-//! and stashes it on [`Prepared`] so it outlives the child. The connection tier gates
-//! the CONNECT/SOCKS target + cleartext TLS SNI, then blind-forwards. The
-//! capability-derived MITM tier terminates only exact brokered hosts (or all allowed
-//! hosts in explicit terminate mode), verifies the real upstream, and replaces opaque
-//! markers only in HTTP/1.1 request-header values. The per-host decision remains the
-//! same [`GrantDecider`] seam ([`StaticDecider`] here).
-//!
-//! # Backend status
-//!
-//! The compiler + IR + matcher are complete and exhaustively tested. [`apply`]
-//! enforces fs/net/env on macOS (Seatbelt), real-kernel Linux (Bubblewrap),
-//! and Windows (AppContainer LowBox), each proven by per-axis enforcement tests with
-//! negative controls; any other OS runs an env-scrub-only skeleton that reports fs/net
-//! as NOT enforced (never silent). The [`conformance`] harness evaluates
-//! compiler/matcher verdicts against committed fixtures — the engine-pure half of the
-//! cross-platform bar. Bounded residuals + the launcher-handoff contract are recorded
-//! honestly in `LIMITATIONS.md` alongside the runtime [`Degradation`] signals; read it
-//! before relying on any single-axis guarantee.
-
 pub mod arm;
 pub mod backend;
 // The catalog PARSER is compiled into the crate only for the dev-only override; `build.rs`
@@ -139,7 +76,6 @@ pub fn catalog_override_v2_grant(
 pub mod conformance;
 pub mod matcher;
 pub mod policy;
-pub mod preflight;
 pub mod proxy;
 
 /// What the kernel refused a confined launch, keyed by [`CommandSpec::audit_label`]. macOS
@@ -148,8 +84,7 @@ pub use backend::macos_denials;
 #[cfg(target_os = "windows")]
 pub use backend::windows_publish_appcontainer_read;
 pub use backend::{
-    CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget,
-    RuntimeCapability, StatusReport, apply, apply_with_runtime, earliest_bootstrap,
+    CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget, apply,
 };
 // The Windows zero-privilege per-host egress FUNNEL seam: an embedder registers HOW to launch nub
 // as the co-package egress-proxy helper (`set_...`, OS-agnostic so nub-cli registers with no
@@ -157,39 +92,17 @@ pub use backend::{
 pub use backend::set_windows_egress_helper_command;
 #[cfg(target_os = "windows")]
 pub use backend::{serve_windows_egress_helper, windows_token_report};
-// The retained-monitor exercisers and `PreparedSignalCallback` were re-exported from the
-// dropped `linux_monitor` backend (privileged PID-1 monitor tier). Removed with the curated
-// zero-privilege import (epic row 0.3); the Landlock + seccomp user-notify supervisor that
-// replaces the monitor tier lands in a later epic phase.
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
 pub use backend::{windows_leaf_grant_redundant, windows_object_traverse_ace};
 
-/// The Linux enforcement suites' skip gate. Test support, not an embedder API. The Bubblewrap
-/// probe re-exports (`skip_without_bwrap`, `usable_bwrap`, …) were dropped with `linux_probe`
-/// (epic 1.1); only the Landlock ABI gate remains.
+/// The Linux enforcement suites' Landlock ABI skip gate. Test support, not an embedder API.
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod host_probe {
     pub use crate::backend::landlock_abi;
 }
 
-/// The Linux half of the aube-scripts embedder seam (epic 4.1): confine an embedder-owned
-/// command (e.g. a `tokio::process::Command`) with nub's build-jail Landlock + seccomp ceiling,
-/// so the shipping build jail runs on this shared engine rather than a second implementation.
-#[cfg(target_os = "linux")]
-pub use backend::{BuildJailConfinement, confine_build_jail_command};
-
-/// The macOS half of the aube-scripts embedder seam (epic 4.1): [`build_jail_seatbelt_profile`]
-/// returns the SBPL profile a caller wraps its own lifecycle command with
-/// (`sandbox-exec -p <profile> -- <cmd>`, [`SANDBOX_EXEC_PATH`]), running it on the shared engine.
-#[cfg(target_os = "macos")]
-pub use backend::{SANDBOX_EXEC_PATH, build_jail_seatbelt_profile};
-
-// `windows_admin` re-exported the dropped `windows_account` backend (privileged dedicated-account
-// + WFP tier). Removed with the curated zero-privilege import (epic row 0.3): the AppContainer
-// backend (`backend::windows`) needs no machine administration, and the account tier is not part
-// of the zero-privilege skeleton.
 pub use compiler::jail_private_home;
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS,

@@ -48,6 +48,26 @@ fn main() -> Result<()> {
     // than fixing one call site at a time; preflight still re-registers
     // (set-once, idempotent) so pm_engine stays self-contained under test.
     pm_engine::identity::register();
+    #[cfg(windows)]
+    nub_sandbox::set_windows_egress_helper_command(vec![
+        std::env::current_exe()?.into_os_string(),
+        std::ffi::OsString::from(cli::EGRESS_FUNNEL_HELPER_FLAG),
+    ]);
+    pm_engine::build_jail::install();
+    if let Some(data_dir) = pm_engine::nub_data_dir() {
+        nub_sandbox::catalog_update::install(data_dir);
+    }
+    let arm = nub_sandbox::arm::init_from_env().map_err(anyhow::Error::msg)?;
+    if let Some(banner) = arm.banner() {
+        eprintln!("{banner}");
+    }
+    let catalog = nub_sandbox::catalog_override::init_from_env().map_err(anyhow::Error::msg)?;
+    if let Some(banner) = catalog.banner() {
+        eprintln!("{banner}");
+    }
+    if let Some(banner) = nub_sandbox::catalog_update::decision().banner() {
+        eprintln!("{banner}");
+    }
 
     // Engine-aware subscriber: surfaces the embedded engine's warning
     // channel (brand-rewritten) by default; RUST_LOG still owns the

@@ -282,6 +282,11 @@
           ],
           "description": "Reject package versions newer than this duration."
         },
+        "buildJail": {
+          "type": "boolean",
+          "default": true,
+          "description": "Confine dependency lifecycle scripts with the unprivileged build jail."
+        },
         "minimumReleaseAgeExclude": {
           "$ref": "#/$defs/stringArray",
           "description": "Package patterns exempt from minimumReleaseAge."

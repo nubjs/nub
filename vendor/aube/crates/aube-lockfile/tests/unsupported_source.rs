@@ -52,6 +52,7 @@ static STRICT: Embedder = Embedder {
     trust_policy_ignore_after_default: None,
     extra_settings_fingerprint: None,
     unsupported_settings: &[],
+    embedder_owns_lifecycle_sandbox: false,
 };
 
 fn parse(files: &[(&str, &str)]) -> Result<LockfileGraph, Error> {

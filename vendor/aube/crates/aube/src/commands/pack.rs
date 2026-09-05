@@ -196,6 +196,7 @@ pub(crate) async fn run_root_lifecycle_script(
         manifest,
         script_name,
         aube_scripts::RootProvenance::UserAuthored,
+        &[],
     )
     .await
     .map_err(|e| miette!("root `{script_name}` script failed: {e}"))?;

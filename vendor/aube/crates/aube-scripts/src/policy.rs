@@ -118,6 +118,11 @@ impl BuildPolicy {
         for (pattern, value) in allow_builds {
             let bool_value = match value {
                 AllowBuildRaw::Bool(b) => *b,
+                AllowBuildRaw::Other(raw)
+                    if raw == aube_manifest::workspace::ALLOW_BUILDS_NO_JAIL =>
+                {
+                    true
+                }
                 AllowBuildRaw::Other(raw) => {
                     // The canonical "set this to true or false" placeholder
                     // is what pnpm auto-seeds for unreviewed builds. Aube
@@ -633,6 +638,18 @@ fn is_exact_semver(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_jail_still_approves_the_script() {
+        let values = [(
+            "fixture".to_string(),
+            AllowBuildRaw::Other(aube_manifest::workspace::ALLOW_BUILDS_NO_JAIL.to_string()),
+        )]
+        .into_iter()
+        .collect();
+        let (policy, warnings) = BuildPolicy::from_config(&values, &[], &[], false);
+        assert!(warnings.is_empty());
+        assert_eq!(policy.decide("fixture", "1.0.0"), AllowDecision::Allow);
+    }
     use super::*;
 
     fn policy(pairs: &[(&str, bool)]) -> BuildPolicy {

@@ -54,6 +54,7 @@ pub(crate) const ROOT_KEYS: &[&str] = &[
     "dlx",
 ];
 pub(crate) const INSTALL_KEYS: &[&str] = &[
+    "buildJail",
     "linker",
     "publicHoist",
     "minimumReleaseAge",
@@ -317,6 +318,7 @@ pub enum DecoratorMode {
 /// bridge.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InstallConfig {
+    pub build_jail: Option<bool>,
     pub linker: Option<LinkerConfig>,
     pub public_hoist: Option<PublicHoist>,
     pub minimum_release_age: Option<Duration>,
@@ -442,6 +444,7 @@ pub enum ConfigKey {
     InstallPublicHoist,
     InstallMinimumReleaseAge,
     InstallMinimumReleaseAgeExclude,
+    InstallBuildJail,
     DlxConsent,
 }
 
@@ -1055,6 +1058,7 @@ fn merge_layer(
         ConfigKey::InstallMinimumReleaseAgeExclude
     );
 
+    merge!(install.build_jail, ConfigKey::InstallBuildJail);
     merge!(dlx.consent, ConfigKey::DlxConsent);
 }
 
@@ -1528,6 +1532,9 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
         let p = child(path, "minimumReleaseAgeExclude");
         install.minimum_release_age_exclude = Some(as_string_array(v, &p)?);
     }
+    if let Some(v) = obj.get("buildJail") {
+        install.build_jail = Some(as_bool(v, &child(path, "buildJail"))?);
+    }
     Ok(install)
 }
 
@@ -1611,6 +1618,24 @@ mod precedence_matrix;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn build_jail_requires_an_explicit_boolean() {
+        let parse = |source| super::parse_project_config(source).unwrap();
+        assert_eq!(parse("{}").install.build_jail, None);
+        assert_eq!(
+            parse(r#"{"install":{"buildJail":false}}"#)
+                .install
+                .build_jail,
+            Some(false)
+        );
+        assert_eq!(
+            parse(r#"{"install":{"buildJail":true}}"#)
+                .install
+                .build_jail,
+            Some(true)
+        );
+        assert!(super::parse_project_config(r#"{"install":{"buildJail":"off"}}"#).is_err());
+    }
     use super::*;
 
     fn parse(text: &str) -> ProjectConfig {

@@ -51,6 +51,8 @@
 //! branding in the document body — info_family module doc) — which error
 //! with honest per-verb messages in their family dispatchers.
 
+pub mod build_jail;
+mod build_prefetch;
 mod bun_config;
 pub mod config_scope;
 mod duplicate_home;
@@ -59,6 +61,8 @@ pub mod identity;
 pub mod info_family;
 pub mod install_family;
 mod install_report;
+mod jail_bin;
+mod jail_msvc;
 pub mod log;
 pub mod min_release_age;
 pub mod output;
@@ -68,7 +72,6 @@ pub mod present;
 pub mod publish_family;
 mod remix_compat;
 mod resource_limits;
-mod sandbox_closure;
 pub mod store_config_family;
 pub mod unsupported_config;
 pub mod use_align;
@@ -800,7 +803,6 @@ fn engine_session_inner(
     // lifecycle scripts, so the build jail and the agent sandbox run one implementation (epic 4.1).
     // Idempotent set-once; a no-op on platforms whose lifecycle seam is not yet wired (currently
     // everything but Linux), where aube's embedded jail stays in force.
-    sandbox_closure::register();
     // Arm the dynamic per-version phantom PRODUCER: an extract-time store hook
     // that scans each fetched package and writes a per-content verdict sidecar
     // (`phantom_closure`, above, is the CONSUMER that reads those sidecars to seed
@@ -3826,6 +3828,7 @@ mod tests {
     /// settings lowered once and scoped two ways.
     fn both_axes() -> InstallConfig {
         InstallConfig {
+            build_jail: None,
             linker: Some(LinkerConfig::Hoisted),
             public_hoist: Some(vec!["@types/*".to_string()]),
             minimum_release_age: Some(std::time::Duration::from_secs(3600)),

@@ -30,9 +30,11 @@ tracing = { workspace = true }
 # a direct dep keeps the workspace honest about who actually uses it.
 regex = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = { workspace = true }
-libc = { workspace = true }
 seccompiler = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

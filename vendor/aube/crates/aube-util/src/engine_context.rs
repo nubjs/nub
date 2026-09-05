@@ -39,6 +39,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// unconfined spawn would have resolved it.
 #[derive(Debug, Clone)]
 pub struct LifecycleSandboxSpawn {
+    /// Set when the async lifecycle owner is dropped. A blocking confiner must
+    /// stop its process tree and finish cleanup before returning.
+    pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The shell program (`sh` / `cmd.exe`) the script line runs through.
     pub program: OsString,
     /// How the shell's argument tail is spelled — see [`LifecycleSpawnArgs`].
@@ -49,14 +52,10 @@ pub struct LifecycleSandboxSpawn {
     pub project_root: PathBuf,
     /// The dependency's own package dir — the one subtree the build may WRITE.
     pub package_dir: PathBuf,
-    /// The INSTALLER-RESOLVED name of the package whose script this is — the same
-    /// identity [`LifecycleSandbox::confines`] is offered, carried through to `run` so a
-    /// hook can key a curated per-package policy on it and not only an accept/decline.
-    ///
-    /// `None` carries the same meaning it does on `confines`: `project_root` is NOT the
-    /// consumer's own project, so there is no consumer-anchored identity here. An
-    /// embedder must read it as "no policy", never as "no confinement" — a fetched
-    /// checkout's only name is the one it wrote into its own manifest.
+    /// The installer-resolved package identity for catalog selection, including nested
+    /// dependencies of fetched checkouts. This does not authorize reading root opt-outs;
+    /// `confines` receives an identity only for consumer-authored roots.
+    /// `None` means no installer-resolved identity, as with the fetched checkout itself.
     pub package_name: Option<String>,
     /// The INSTALLER-RESOLVED version of that same package, carried so an embedder can
     /// scope a per-package policy to the versions it was measured against rather than

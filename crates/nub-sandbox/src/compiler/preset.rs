@@ -1034,7 +1034,7 @@ pub fn build_jail_net_allowed_for(
 ///   catch-all Allow lifts exactly `AF_INET`/`AF_INET6` out of that ceiling and leaves the rest
 ///   denied, which is the coarse grant with the non-egress protections intact. Zero named hosts
 ///   means nothing here reads as a gate, and zero *authored* hosts keeps `mode` off the
-///   proxy-starting path (`apply_inner`'s Landlock arm skips the proxy outright).
+///   proxy-starting path (`apply`'s Landlock arm skips the proxy outright).
 fn build_jail_net(package_name: Option<&str>, package_version: Option<&str>) -> Value {
     let allowed = build_jail_net_allowed_for(package_name, package_version);
     if !allowed {
@@ -3423,11 +3423,24 @@ mod tests {
             "@nuxt/components",
             "@opencode-ai/cli",
             "@paloaltonetworks/postman-code-generators",
+            // Windows paired installs fail under scoped deps/project/home grants but pass
+            // with the full-disk tier: native MSBuild/Node tools and profile cache discovery.
+            "@prisma/engines",
             "@sap/hana-client",
             "@tensorflow/tfjs-backend-wasm",
+            "@tensorflow/tfjs-node",
+            // Windows native-build controls pass only without the LowBox token:
+            // sqlite 11.8.1 cannot load its gyp dependency; buildcheck cannot discover MSVC.
+            // The catalog limits sqlite to <11.8.2 and both additions to Windows.
+            "better-sqlite3",
+            "bluetooth-hci-socket",
+            "chromedriver",
             "codeceptjs",
+            "cpu-features",
+            "cwebp-bin",
             "cz-customizable",
             "dotnet-2.0.0",
+            "epoll",
             "flow-bin",
             "opencode-ai",
             "pizzip",

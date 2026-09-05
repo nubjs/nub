@@ -65,9 +65,37 @@ impl<'a> SideEffectsCacheConfig<'a> {
     }
 }
 
+/// Whether the lifecycle spawn this entry describes runs confined.
+///
+/// Part of the cache key because it decides WHERE a build's writes outside its own
+/// package tree land, and the entry captures only the tree. Confined, `$HOME` is a
+/// private per-package directory; unconfined it is the user's own, which is
+/// machine-wide and therefore still there on the next install — so an unconfined
+/// entry replays soundly and a confined one does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Confinement {
+    Confined,
+    Unconfined,
+}
+
+impl Confinement {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Confined => "confined",
+            Self::Unconfined => "unconfined",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct SideEffectsCacheEntry {
-    engine: String,
+    /// Everything about the build environment an entry is only valid under:
+    /// the Node engine that compiled its addons, the shell that ran the
+    /// build, and whether it ran confined. One string because all three are
+    /// the same kind of fact — "this output is only meaningful under X" — and
+    /// all must appear in the path AND the marker or a mismatched directory
+    /// gets skipped instead of rebuilt.
+    build_env: String,
     input_hash: String,
     path: std::path::PathBuf,
 }
@@ -84,6 +112,7 @@ impl SideEffectsCacheEntry {
         name: &str,
         version: &str,
         package_dir: &std::path::Path,
+        confinement: Confinement,
     ) -> miette::Result<Self> {
         // Take only the hash half of the marker: it fingerprints the
         // package *before* its scripts ran, which is what keys this entry
@@ -104,20 +133,50 @@ impl SideEffectsCacheEntry {
             Some(v) => aube_lockfile::graph_hash::engine_name_default(v).0,
             None => aube_lockfile::graph_hash::platform_name(),
         };
+        // The shell belongs in the key because a build run under a different
+        // one can be WRONG, not merely stale: `cmd.exe` exits 0 while writing
+        // an unexpanded `${VAR:-default}` literally, so a Windows tree cached
+        // under cmd.exe must be rebuilt — not restored — once the lifecycle
+        // shell becomes POSIX `sh`. Read from the same `ScriptSettings` the
+        // spawn resolves, so a user `script-shell` participates too.
+        //
+        // Confinement joins them for the same reason one step out: a script
+        // that writes OUTSIDE its own package tree — a browser into
+        // `$HOME/Library/Caches`, the shape `cypress`/`puppeteer`/`*driver`
+        // all have — puts that artifact somewhere the entry does not capture,
+        // and confinement decides where. Under a jail it is a private
+        // per-package HOME; unconfined it is the user's own. Restoring a
+        // jail-built entry into an unconfined install therefore SKIPS the
+        // script and lands the artifact NOWHERE, which made the per-package
+        // opt-out (`dependenciesMeta.<pkg>.sandbox: false`) non-functional on
+        // any machine that had once installed the package jailed — the miss
+        // that healed it was purging this directory by hand. Naming it here
+        // makes the two modes different entries instead of one poisoned one,
+        // and busts every entry written before this existed, which is what
+        // heals an already-poisoned machine without the user knowing to.
+        let build_env = format!(
+            "{engine}-{}-{}",
+            aube_scripts::resolved_shell_id(),
+            confinement.id()
+        );
         Ok(Self {
             path: location
                 .root
                 .join(format!("{safe_name}@{version}"))
-                .join(&engine)
+                .join(&build_env)
                 .join(&input_hash),
-            engine,
+            build_env,
             input_hash,
         })
     }
 
+    /// `mode` is the caller's, not this type's: a hardlinked restore shares the cache
+    /// entry's inode, which a Windows build jail cannot read through (see
+    /// `lifecycle::jail_forces_copy`), so the confinement-aware caller picks.
     pub(super) fn restore_if_available(
         &self,
         package_dir: &std::path::Path,
+        mode: CopyMode,
     ) -> miette::Result<SideEffectsCacheRestore> {
         if self.marker_matches(package_dir) && self.path.is_dir() {
             tracing::debug!(
@@ -129,7 +188,7 @@ impl SideEffectsCacheEntry {
         if !self.path.is_dir() {
             return Ok(SideEffectsCacheRestore::Miss);
         }
-        copy_dir(&self.path, package_dir, CopyMode::HardlinkOrCopy).wrap_err_with(|| {
+        copy_dir(&self.path, package_dir, mode).wrap_err_with(|| {
             format!(
                 "failed to restore side effects cache from {}",
                 self.path.display()
@@ -149,22 +208,23 @@ impl SideEffectsCacheEntry {
         // The copy carries the entry's own marker across, so restamping is
         // a no-op except for an entry saved before markers named an engine
         // — that one would fail every future match and re-copy forever.
-        write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+        write_side_effects_marker(package_dir, &self.build_env, &self.input_hash)?;
         tracing::debug!("side-effects-cache: restored {}", self.path.display());
         Ok(SideEffectsCacheRestore::Restored)
     }
 
     /// True when this package directory's contents were produced by *this*
-    /// entry. Both halves are load-bearing: entries segregate by engine, so
-    /// several now share one input hash, and matching on the hash alone
-    /// would let the skip above fire for a build made under a different
-    /// Node ABI — leaving that build's `.node` in place for a runtime
-    /// `NODE_MODULE_VERSION` failure. A marker with no engine (written
-    /// before this was recorded) never matches, so it degrades to a restore
-    /// or a rebuild, never to a silent skip.
+    /// entry. Both halves are load-bearing: entries segregate by build
+    /// environment, so several now share one input hash, and matching on the
+    /// hash alone would let the skip above fire for a build made under a
+    /// different Node ABI (a runtime `NODE_MODULE_VERSION` failure), a
+    /// different shell (bytes the shell mis-expanded), or a different
+    /// confinement (out-of-tree writes that went to a private HOME). A marker naming a
+    /// different — or no — build environment never matches, so it degrades to
+    /// a restore or a rebuild, never to a silent skip.
     fn marker_matches(&self, package_dir: &std::path::Path) -> bool {
         read_valid_side_effects_marker(package_dir).is_some_and(|marker| {
-            marker.engine.as_deref() == Some(self.engine.as_str())
+            marker.build_env.as_deref() == Some(self.build_env.as_str())
                 && marker.input_hash == self.input_hash
         })
     }
@@ -180,7 +240,7 @@ impl SideEffectsCacheEntry {
                     .into_diagnostic()
                     .wrap_err_with(|| format!("failed to remove {}", self.path.display()))?;
             } else {
-                write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+                write_side_effects_marker(package_dir, &self.build_env, &self.input_hash)?;
                 return Ok(());
             }
         }
@@ -194,7 +254,7 @@ impl SideEffectsCacheEntry {
             .into_diagnostic()
             .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
         sweep_stale_side_effects_tmp_dirs(parent);
-        write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+        write_side_effects_marker(package_dir, &self.build_env, &self.input_hash)?;
 
         let tmp = parent.join(format!(
             "{SIDE_EFFECTS_CACHE_TMP_PREFIX}{}-{}",
@@ -272,26 +332,28 @@ pub(crate) fn side_effects_cache_root(store: &aube_store::Store) -> std::path::P
         .join("side-effects-v1")
 }
 
-/// Parsed marker contents: `<engine>:<input_hash>`. `engine` is `None` for
-/// the bare-hash form written before the engine was recorded.
+/// Parsed marker contents: `<build_env>:<input_hash>`. `build_env` is `None`
+/// for the bare-hash form written before the build environment was recorded;
+/// a marker from an older build that recorded only the engine simply names a
+/// different build environment, which is already a non-match.
 struct SideEffectsMarker {
-    engine: Option<String>,
+    build_env: Option<String>,
     input_hash: String,
 }
 
 /// Only the hash half is validated, because only the hash is ever joined
-/// into a path — the engine a lookup keys on comes from the install's own
-/// resolved Node, and the marker's copy is compared, never trusted as a
-/// path segment.
+/// into a path — the build environment a lookup keys on comes from the
+/// install's own resolved Node and shell, and the marker's copy is compared,
+/// never trusted as a path segment.
 fn read_valid_side_effects_marker(package_dir: &std::path::Path) -> Option<SideEffectsMarker> {
     let marker = std::fs::read_to_string(package_dir.join(side_effects_cache_marker())).ok()?;
     let marker = marker.trim();
-    let (engine, hash) = match marker.rsplit_once(':') {
-        Some((engine, hash)) => (Some(engine), hash),
+    let (build_env, hash) = match marker.rsplit_once(':') {
+        Some((build_env, hash)) => (Some(build_env), hash),
         None => (None, marker),
     };
     is_side_effects_cache_hash(hash).then(|| SideEffectsMarker {
-        engine: engine.map(str::to_owned),
+        build_env: build_env.map(str::to_owned),
         input_hash: hash.to_ascii_lowercase(),
     })
 }
@@ -302,12 +364,12 @@ fn is_side_effects_cache_hash(value: &str) -> bool {
 
 fn write_side_effects_marker(
     package_dir: &std::path::Path,
-    engine: &str,
+    build_env: &str,
     input_hash: &str,
 ) -> miette::Result<()> {
     aube_util::fs_atomic::atomic_write(
         &package_dir.join(side_effects_cache_marker()),
-        format!("{engine}:{input_hash}").as_bytes(),
+        format!("{build_env}:{input_hash}").as_bytes(),
     )
     .into_diagnostic()
     .wrap_err_with(|| {
@@ -527,11 +589,21 @@ mod tests {
         package_dir: &std::path::Path,
         node_version: Option<&str>,
     ) -> SideEffectsCacheEntry {
+        entry_confined(root, package_dir, node_version, Confinement::Unconfined)
+    }
+
+    fn entry_confined(
+        root: &std::path::Path,
+        package_dir: &std::path::Path,
+        node_version: Option<&str>,
+        confinement: Confinement,
+    ) -> SideEffectsCacheEntry {
         SideEffectsCacheEntry::new(
             SideEffectsCacheLocation { root, node_version },
             "p",
             "1.0.0",
             package_dir,
+            confinement,
         )
         .unwrap()
     }
@@ -562,6 +634,68 @@ mod tests {
         assert!(
             s.contains(&segment),
             "cache path lacks platform segment {segment}: {s}"
+        );
+    }
+
+    /// Output built under one shell can be WRONG under another, not merely
+    /// stale — `cmd.exe` exits 0 having written `${VAR:-default}` literally —
+    /// so an entry must not be restorable across a shell change. Asserted
+    /// against the resolved id rather than by flipping shells: `ScriptSettings`
+    /// is process-global outside an install scope, and mutating it here would
+    /// leak into the sibling tests. `aube-scripts` owns the id's own coverage.
+    #[test]
+    fn cache_path_segregates_by_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        let path = entry_path(dir.path(), &pkg, Some("22.15.0"));
+        let build_env = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let shell = aube_scripts::resolved_shell_id();
+        assert!(
+            build_env.contains(&format!("-{shell}-")),
+            "build-env segment {build_env} does not name the resolved shell {shell}"
+        );
+    }
+
+    /// A build's writes OUTSIDE its own package tree — the `cypress`/`puppeteer` shape,
+    /// a browser into `$HOME` — are not in the entry, and confinement decides where they
+    /// went: a private per-package HOME, or the user's own. So a jail-built entry must
+    /// not be restorable into an unconfined install, which would skip the script and
+    /// land that artifact nowhere at all, making
+    /// `dependenciesMeta.<pkg>.sandbox: false` non-functional.
+    #[test]
+    fn cache_path_segregates_by_confinement() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        let root = dir.path().join("cache");
+
+        let confined = entry_confined(&root, &pkg, Some("26.5.0"), Confinement::Confined);
+        let unconfined = entry_confined(&root, &pkg, Some("26.5.0"), Confinement::Unconfined);
+        assert_ne!(
+            confined.path, unconfined.path,
+            "a jail-built entry must not be reachable from an unconfined install"
+        );
+
+        confined.save(&pkg, false).unwrap();
+        assert!(
+            matches!(
+                unconfined
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
+                    .unwrap(),
+                SideEffectsCacheRestore::Miss
+            ),
+            "the opt-out must miss the jail-built entry and rebuild"
+        );
+        // The marker the confined save stamped names the confined build env, so the skip
+        // cannot fire off it either — the path alone would still let `AlreadyApplied`
+        // return for a directory the other mode built.
+        assert!(
+            !unconfined.marker_matches(&pkg),
+            "a confined marker must not satisfy an unconfined entry"
         );
     }
 
@@ -605,7 +739,7 @@ mod tests {
 
         std::fs::write(
             &marker_path,
-            format!("darwin-arm64-node26:{}", "z".repeat(128)),
+            format!("darwin-arm64-node26-sh-confined:{}", "z".repeat(128)),
         )
         .unwrap();
         assert!(
@@ -615,16 +749,19 @@ mod tests {
 
         std::fs::write(&marker_path, format!("{}\n", "A".repeat(128))).unwrap();
         let legacy = read_valid_side_effects_marker(dir.path()).unwrap();
-        assert_eq!(legacy.engine, None);
+        assert_eq!(legacy.build_env, None);
         assert_eq!(legacy.input_hash, "a".repeat(128));
 
         std::fs::write(
             &marker_path,
-            format!("darwin-arm64-node26:{}\n", "A".repeat(128)),
+            format!("darwin-arm64-node26-sh-confined:{}\n", "A".repeat(128)),
         )
         .unwrap();
         let current = read_valid_side_effects_marker(dir.path()).unwrap();
-        assert_eq!(current.engine.as_deref(), Some("darwin-arm64-node26"));
+        assert_eq!(
+            current.build_env.as_deref(),
+            Some("darwin-arm64-node26-sh-confined")
+        );
         assert_eq!(current.input_hash, "a".repeat(128));
     }
 
@@ -640,7 +777,7 @@ mod tests {
         assert!(
             matches!(
                 entry(&root, &pkg, Some("26.5.0"))
-                    .restore_if_available(&pkg)
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
                     .unwrap(),
                 SideEffectsCacheRestore::AlreadyApplied
             ),
@@ -650,7 +787,9 @@ mod tests {
         let node22 = entry(&root, &pkg, Some("22.15.0"));
         assert!(
             matches!(
-                node22.restore_if_available(&pkg).unwrap(),
+                node22
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
+                    .unwrap(),
                 SideEffectsCacheRestore::Miss
             ),
             "another engine's marker must not stand in for this engine's missing entry"
@@ -663,7 +802,7 @@ mod tests {
         assert!(
             matches!(
                 entry(&root, &pkg, Some("26.5.0"))
-                    .restore_if_available(&pkg)
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
                     .unwrap(),
                 SideEffectsCacheRestore::Restored
             ),
@@ -688,7 +827,9 @@ mod tests {
         );
         assert!(
             matches!(
-                reread.restore_if_available(&pkg).unwrap(),
+                reread
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
+                    .unwrap(),
                 SideEffectsCacheRestore::Restored
             ),
             "an engineless marker must degrade to a restore, never to a skip"
@@ -696,7 +837,7 @@ mod tests {
         assert!(
             matches!(
                 entry(&root, &pkg, Some("26.5.0"))
-                    .restore_if_available(&pkg)
+                    .restore_if_available(&pkg, CopyMode::HardlinkOrCopy)
                     .unwrap(),
                 SideEffectsCacheRestore::AlreadyApplied
             ),

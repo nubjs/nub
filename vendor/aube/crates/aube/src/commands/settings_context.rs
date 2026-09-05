@@ -579,8 +579,8 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
             )
         })
     };
-    let ctx =
-        crate::pnpmfile::PreResolutionContext::from_existing(crate::pnpmfile::PreResolutionInputs {
+    let ctx = crate::pnpmfile::PreResolutionContext::from_existing(
+        crate::pnpmfile::PreResolutionInputs {
             lockfile_dir: cwd,
             store_dir: store_dir.as_deref(),
             existing,
@@ -589,7 +589,8 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
             settings,
             peers_suffix_max_length,
             registries,
-        });
+        },
+    );
     crate::pnpmfile::run_pre_resolution_chain(paths, cwd, &ctx)
         .await
         .wrap_err("pnpmfile preResolution hook failed")

@@ -32,7 +32,7 @@ use nub_sandbox::{
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The OS-essential ambient env a Windows child needs to launch (SystemRoot/PATH/ComSpec/...).
 /// An EMPTY ambient env makes `CreateProcessW` fail with `ERROR_ENVVAR_NOT_FOUND` (os error 203).
@@ -105,8 +105,7 @@ fn run(label: &str, policy: &SandboxPolicy, spec: CommandSpec) -> i32 {
 
 fn cmd_write(path: &Path, cwd: &Path) -> CommandSpec {
     CommandSpec::new(r"C:\Windows\System32\cmd.exe")
-        .arg("/c")
-        .arg(format!("echo hi > {}", path.display()))
+        .verbatim_command_line(format!("/d /s /c \"echo hi > \"{}\"\"", path.display()))
         .cwd(cwd.to_path_buf())
 }
 
@@ -115,7 +114,12 @@ fn first_existing(paths: &[&str]) -> Option<String> {
 }
 
 fn main() {
-    let base = PathBuf::from(format!(r"C:\nub-wac-{}", std::process::id()));
+    let helper = std::env::var_os("NUB_BIN").expect("NUB_BIN names the matching CLI artifact");
+    nub_sandbox::set_windows_egress_helper_command(vec![
+        helper,
+        "__egress-funnel-helper".into(),
+    ]);
+    let base = std::env::temp_dir().join(format!("nub-wac-{}", std::process::id()));
     let project = base.join("proj");
     // A: a package's own dir inside the project node_modules — write-granted by the jail.
     let pkg_a = project.join("node_modules").join("esbuild");
@@ -180,6 +184,19 @@ fn main() {
     let net_compat = run("net compat (net:true)", &net_on, curl_spec());
     let net_attack = run("net attack (net:false)", &net_off, curl_spec());
 
+    let per_host = policy(&base, json!({ "fs": true, "net": ["example.com"] }));
+    let request = |url: &str, direct: bool| {
+        let mut spec = CommandSpec::new(curl)
+            .arg("-sS").arg("-4")
+            .arg("--connect-timeout").arg("8").arg("--max-time").arg("20");
+        if direct { spec = spec.arg("--noproxy").arg("*"); }
+        spec.arg(url).cwd(base.clone())
+    };
+    let proxy_allow = run("proxy allow", &per_host, request("https://example.com/", false));
+    let proxy_deny = run("proxy deny", &per_host, request("https://www.google.com/", false));
+    let direct_allow = run("direct allowed host", &per_host, request("https://example.com/", true));
+    let direct_ip = run("direct IP", &per_host, request("https://1.1.1.1/", true));
+
     let out_written = pkg_a.join("out").exists();
     let _ = std::fs::remove_dir_all(&base);
 
@@ -192,14 +209,18 @@ fn main() {
     println!("net attack  (net:false)               -> exit {net_attack}   [want != 0]");
     println!("oracle package_dir\\out exists={out_written} [want true]");
 
-    let ace_ok = ace_code == 0 || ace_code == -2;
+    let ace_ok = ace_code == 0;
     let pass = compat == 0
-        && attack != 0
+        && attack > 0
         && !escaped
         && control == 0
         && ace_ok
         && net_compat == 0
-        && net_attack != 0
+        && net_attack > 0
+        && proxy_allow == 0
+        && proxy_deny > 0
+        && direct_allow > 0
+        && direct_ip > 0
         && out_written;
     println!("RESULT: {}", if pass { "PASS" } else { "FAIL" });
     std::process::exit(if pass { 0 } else { 1 });

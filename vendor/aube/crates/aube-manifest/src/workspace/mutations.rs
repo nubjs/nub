@@ -92,7 +92,10 @@ fn root_write_unread_but_yaml_read() -> bool {
         && ctx.read_branded_pnpm_config
 }
 
-/// Force-approve `names` in the project's `allowBuilds` map.
+/// Approve a lifecycle script and request that an embedder run it without confinement.
+pub const ALLOW_BUILDS_NO_JAIL: &str = "no-jail";
+
+/// Force-approve `names` in the project's build-approval map.
 pub fn add_to_allow_builds(project_dir: &Path, names: &[String]) -> Result<PathBuf, crate::Error> {
     set_allow_builds(project_dir, names, true)
 }

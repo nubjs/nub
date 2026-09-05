@@ -65,13 +65,11 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 pem = "3"
 tempfile = "3"
 
-# libc: macOS needs it for confstr scratch-dir lookup; Linux uses it for secure
-# descriptor inheritance and the Bubblewrap launcher boundary.
+# libc supplies native process, descriptor and scratch-directory operations.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = { workspace = true }
 
-# Bubblewrap installs this classic BPF program only when network confinement is
-# requested. Filesystem confinement remains mount-only and pays no syscall-filter cost.
+# The Linux backend installs seccomp filters alongside Landlock confinement.
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = "0.5"
 
@@ -79,9 +77,6 @@ seccompiler = "0.5"
 # (CreateProcessW + STARTUPINFOEX + SECURITY_CAPABILITIES), per-run inheritable
 # allow-ACE grants (Get/SetNamedSecurityInfoW + SetEntriesInAclW), the
 # CreateAppContainerProfile identity, and the Job-Object KILL_ON_JOB_CLOSE reap.
-# The strict-Windows net tier adds the loopback-exemption RMW
-# (NetworkIsolationGet/SetAppContainerConfig, WindowsFirewall) + the elevation query
-# (OpenProcessToken/GetTokenInformation, Threading/Security).
 # 0.61 is already in the workspace lockfile (transitive via clap/anstyle) — no
 # new supply-chain surface. Raw FFI (no COM), gated `#[cfg(target_os = "windows")]`.
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
@@ -93,20 +88,7 @@ features = [
   "Win32_Security_Isolation",
   "Win32_System_Threading",
   "Win32_System_JobObjects",
-  "Win32_System_Memory",
-  "Win32_NetworkManagement_WindowsFirewall",
-  # The dedicated-account + WFP backend (backend/windows_account/): the SID-keyed egress
-  # fence (WindowsFilteringPlatform; System_Rpc only because FwpmEngineOpen0's signature
-  # names SEC_WINNT_AUTH_IDENTITY_W), local-account lifecycle (NetManagement), the
-  # DPAPI-sealed credential (Security_Cryptography), the Winlogon user-picker hide
-  # (System_Registry), profile deletion (DeleteProfileW lives under UI_Shell), and the FILE_GENERIC_* access
-  # masks the grant/deny aces are built from (Storage_FileSystem).
-  "Win32_NetworkManagement_WindowsFilteringPlatform",
-  "Win32_System_Rpc",
-  "Win32_NetworkManagement_NetManagement",
-  "Win32_Security_Cryptography",
-  "Win32_System_Registry",
-  "Win32_UI_Shell",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_Storage_FileSystem",
   # Window-station / desktop aces for the launch. A non-interactive caller (a service, an SSH
   # session, a CI agent) runs on a per-logon `Service-0x0-…$` station, NOT `WinSta0`, and the

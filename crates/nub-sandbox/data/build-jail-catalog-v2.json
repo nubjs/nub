@@ -799,7 +799,10 @@
     "network": true,
     "writePaths": [
      ".cache/prisma"
-    ]
+    ],
+    "win": {
+     "write": "disk"
+    }
    },
    "versions": {
     "<7.9.1": {
@@ -1327,7 +1330,10 @@
   },
   "@tensorflow/tfjs-node": {
    "default": {
-    "network": true
+    "network": true,
+    "win": {
+     "write": "disk"
+    }
    }
   },
   "@tloncorp/tlon-skill": {
@@ -1659,6 +1665,22 @@
        "deps": true
       }
      }
+    },
+    "<11.8.2": {
+     "network": true,
+     "macos": {
+      "write": {
+       "deps": true
+      }
+     },
+     "linux": {
+      "write": {
+       "deps": true
+      }
+     },
+     "win": {
+      "write": "disk"
+     }
     }
    }
   },
@@ -1712,6 +1734,14 @@
      },
      "network": null,
      "writePaths": null
+    }
+   }
+  },
+  "bluetooth-hci-socket": {
+   "default": {
+    "network": true,
+    "win": {
+     "write": "disk"
     }
    }
   },
@@ -1801,9 +1831,7 @@
      "write": null
     },
     "win": {
-     "write": {
-      "deps": true
-     }
+     "write": "disk"
     }
    }
   },
@@ -1916,6 +1944,14 @@
     }
    }
   },
+  "cpu-features": {
+   "default": {
+    "network": true,
+    "win": {
+     "write": "disk"
+    }
+   }
+  },
   "ctrlc-windows": {
    "default": {},
    "versions": {
@@ -1937,9 +1973,7 @@
      "write": null
     },
     "win": {
-     "write": {
-      "deps": true
-     }
+     "write": "disk"
     }
    }
   },
@@ -2334,6 +2368,14 @@
    "default": {
     "network": true,
     "write": null
+   }
+  },
+  "epoll": {
+   "default": {
+    "network": true,
+    "win": {
+     "write": "disk"
+    }
    }
   },
   "es-check": {

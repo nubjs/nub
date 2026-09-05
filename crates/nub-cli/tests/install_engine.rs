@@ -1209,8 +1209,9 @@ fn a_stale_top_level_allow_builds_map_is_refused_with_the_rename() {
 }
 
 #[test]
-fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
+fn unjailed_build_that_never_calls_node_gyp_installs_with_no_registry() {
     let dir = pm_tmpdir("no-gyp-bootstrap");
+    std::fs::write(dir.join("nub.jsonc"), r#"{"install":{"buildJail":false}}"#).unwrap();
     let dep = dir.join("plainbuild");
     std::fs::create_dir_all(&dep).unwrap();
     // Writes relative to its own cwd (the materialized package dir) rather than
@@ -1258,10 +1259,7 @@ fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
     );
 }
 
-/// `jailBuilds` is the one case the lazy shim cannot serve on its own: the jail
-/// clears the environment and substitutes a temporary HOME, so a shim re-entry
-/// resolves the tool dir under *that* home, finds nothing, and cannot refetch
-/// because the jail denies network too. Jailed jobs therefore get node-gyp
+/// The jail cannot use the lazy shim's unconfined installer re-entry. Jailed jobs get node-gyp
 /// resolved up front — but best-effort, so failing to reach a registry cannot
 /// sink an install whose builds never wanted node-gyp.
 ///
@@ -1275,6 +1273,7 @@ fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
 #[test]
 fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
     let dir = pm_tmpdir("jail-no-gyp");
+    std::fs::write(dir.join("nub.jsonc"), r#"{"install":{"buildJail":true}}"#).unwrap();
     let dep = dir.join("plainbuild");
     std::fs::create_dir_all(&dep).unwrap();
     // `echo x > file` is spelled the same for sh and cmd.exe, so this needs no
@@ -1330,14 +1329,6 @@ fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
         "the failed up-front resolve must warn rather than abort the install: {stderr}"
     );
 
-    // Windows aborts node at startup under the build jail (`ncrypto::CSPRNG`
-    // assertion), so the build script cannot run there at all and the install
-    // fails for a reason this test does not own. Asserting success anyway would
-    // pin an unrelated platform defect. Where the jail can run node, the full
-    // contract holds.
-    if stderr.contains("ncrypto::CSPRNG") {
-        return;
-    }
     assert_eq!(
         out.status.code(),
         Some(0),

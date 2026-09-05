@@ -83,6 +83,7 @@ pub async fn run(
             &manifest,
             LifecycleHook::PreInstall,
             aube_scripts::RootProvenance::UserAuthored,
+            &[],
         )
         .await
         .map_err(|e| miette!("{}", e))?;
@@ -213,6 +214,7 @@ pub async fn run(
                 &jail_policy,
                 None,
                 selected.as_ref(),
+                true,
             )
             .await?;
         }
@@ -230,6 +232,7 @@ pub async fn run(
                 &manifest,
                 hook,
                 aube_scripts::RootProvenance::UserAuthored,
+                &[],
             )
             .await
             .map_err(|e| miette!("{}", e))?;

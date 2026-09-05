@@ -7,23 +7,17 @@
 //! loss in [`Degradation`] so the caller surfaces a WARNING; a hard fail-closed
 //! (a required axis unenforceable) is `Err(Degradation)`.
 //!
-//! BACKEND STATUS: macOS (Seatbelt, [`macos`]), Linux (Bubblewrap mount/PID views,
+//! BACKEND STATUS: macOS (Seatbelt, [`macos`]), Linux (Landlock and seccomp,
 //! [`linux`]), and Windows (AppContainer LowBox, [`windows`]) are wired; any other
 //! OS runs the env-scrub-only [`generic_apply`] skeleton — which constructs the
 //! child env and reports fs/net as NOT enforced. Every path preserves the API shape
-//! (`apply(policy, spec) -> Result<Prepared, Degradation>`) the future embedder
-//! seam slots into.
+//! (`apply(policy, spec) -> Result<Prepared, Degradation>`).
 //!
 //! LAUNCH SEAM: every backend returns a [`Prepared`] plan whose command is private.
 //! Callers launch through [`Prepared::spawn`], [`Prepared::status`], or
 //! [`Prepared::output`], preserving startup verification and resource ownership.
-//! Windows owns the full synchronous spawn lifecycle because NEITHER of its launches
-//! can be a pre-built `std::process::Command`: the AppContainer one needs
-//! `CreateProcessW` with `STARTUPINFOEX`/`SECURITY_CAPABILITIES` plus a Job Object,
-//! the dedicated-account one needs `CreateProcessWithLogonW`, and BOTH need per-run
-//! ACL grants torn down after the child exits. [`Prepared::status`] is the uniform
-//! verb: macOS/Linux/skeleton delegate to the configured command; Windows runs
-//! whichever launcher its plan names (setup → spawn → wait → RAII teardown).
+//! Windows AppContainer launches own CreateProcessW, Job Object and ACL lifetimes.
+//! Plain Windows launches keep Command's argument/stdio handling and own a process-tree job.
 
 use crate::policy::{Effect, Inspection, ProxyMode, SandboxPolicy};
 use crate::proxy::mitm::{BrokerSession, MitmEngine, RuntimeCredentialBroker};
@@ -39,8 +33,7 @@ use std::sync::OnceLock;
 /// AppContainer backend uses as the image + command line for a per-host net launch's helper
 /// process (typically `[current_exe(), "<hidden-flag>"]`). The backend appends the per-run
 /// serialized net policy as a final argument at launch. `None` (unset) ⇒ the backend cannot spawn
-/// the helper, so a per-host policy stays on the elevated Tier-1 / fail-closed path — behavior is
-/// UNCHANGED when no embedder registers one.
+/// the helper, so a per-host policy fails closed. No elevated fallback exists.
 ///
 /// OS-agnostic by design: the setter compiles everywhere so an embedder registers once at startup
 /// without a `cfg`; only the Windows backend reads it (via [`windows_egress_helper_command`]).
@@ -115,30 +108,8 @@ pub fn serve_windows_egress_helper() -> ! {
     }
 }
 
-/// What `nub setup-sandbox --check` found: the report a human reads, plus the single fact a script
-/// needs. `ready` answers exactly one question — can the sandbox enforce for THIS caller, right
-/// now — which is narrower than "is the host set up": a Linux host can be fully installed while
-/// the calling shell still lacks the group. Carrying it as a field is what lets every platform
-/// map the same question onto the same exit status instead of a caller parsing prose.
-pub struct StatusReport {
-    pub text: String,
-    pub ready: bool,
-}
-
 #[cfg(target_os = "macos")]
 mod macos;
-
-// `macos_setup` (the no-op macOS half of `nub setup-sandbox`) was dropped with the curated
-// zero-privilege import (epic row 0.3). Seatbelt needs no host provisioning; the readiness
-// probe that lived there is inlined at its one caller (`preflight`), which reads the stock
-// Seatbelt entry point through this re-export.
-//
-// `SANDBOX_EXEC_PATH` and `build_jail_seatbelt_profile` are the macOS half of the aube-scripts
-// embedder seam (epic 4.1): a caller wraps its own lifecycle command as
-// `sandbox-exec -p <profile> -- <cmd>` to run it on the shared engine, the analog of the Linux
-// `confine_build_jail_command` `pre_exec` seam.
-#[cfg(target_os = "macos")]
-pub use macos::{SANDBOX_EXEC_PATH, build_jail_seatbelt_profile};
 
 // NOT macOS-gated, unlike its siblings: only the `log show` call inside is, and compiling the
 // module everywhere keeps its record parser under test on every platform's CI leg rather than the
@@ -147,18 +118,6 @@ pub mod macos_denials;
 
 #[cfg(target_os = "linux")]
 mod linux;
-// The Linux half of the aube-scripts embedder seam (epic 4.1): install nub's build-jail
-// confinement onto a caller-owned command, so the lifecycle jail runs on the shared engine.
-#[cfg(target_os = "linux")]
-pub use linux::{BuildJailConfinement, confine_build_jail_command};
-
-// DROPPED with the bubblewrap teardown (epic 1.1): `linux_setup` (the privileged helper-account /
-// AppArmor host-setup tier), `linux_monitor` (the retained PID-1 monitor), `linux_net_bridge` (the
-// host-side net bridge), `linux_runtime_stage` (bubblewrap runtime pinning), and `linux_probe` (the
-// bubblewrap host probe, along with `linux::single_level_bwrap_candidate_paths` /
-// `validate_adjacent_resource_bundle` / `bwrap_candidate_paths` that fed it). The zero-privilege
-// enforcement tier is Landlock (`linux_landlock`) plus the seccomp user-notify egress supervisor
-// (`linux_supervisor`); `linux_grants` (the OS-agnostic mount/grant derivation) stays below.
 
 #[cfg(target_os = "linux")]
 mod linux_landlock;
@@ -174,24 +133,15 @@ pub fn landlock_abi() -> Option<u32> {
     linux_landlock::probe_abi()
 }
 
-/// The explicit startup/apply seam carries no platform runtime image in the zero-privilege
-/// skeleton. The privileged retained-monitor `RuntimeCapability` was dropped with `linux_monitor`
-/// (epic row 0.3); the seccomp user-notify supervisor that replaces it defines its own capability
-/// in a later phase. Kept as a unit struct on every target so the [`apply_with_runtime`] seam and
-/// its `lib.rs` re-export stay uniform.
-#[derive(Debug, Clone, Default)]
-pub struct RuntimeCapability;
-
-pub fn earliest_bootstrap() -> std::io::Result<RuntimeCapability> {
-    Ok(RuntimeCapability)
-}
-
 // The Windows AppContainer backend. Compiled on Windows (its real consumer) and
 // under `test` on any host — so its OS-agnostic IR→plan derivation (grant carve,
 // capability selection, dangerous-root guard) is unit-tested on the macOS dev host
 // without a Windows machine (the FFI launcher itself stays `#[cfg(windows)]`).
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+
+#[cfg(windows)]
+mod windows_job;
 #[cfg(target_os = "windows")]
 pub use windows::windows_publish_appcontainer_read;
 #[cfg(target_os = "windows")]
@@ -206,13 +156,8 @@ pub use windows::{windows_leaf_grant_redundant, windows_object_traverse_ace};
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_jail_bin;
 
-// The Windows dedicated-account + WFP backend (`windows_account`) was DROPPED with the curated
-// zero-privilege import (epic row 0.3): it was the privileged second-principal tier, and the
-// zero-privilege skeleton keeps only the unprivileged AppContainer backend (`windows`).
-
 // The window-station / desktop ACE machinery the AppContainer backend needs (a USER32-importing
-// child on a non-interactive station dies in loader init without it) — resurrected from the
-// dropped `windows_account` module, which is where it happened to live (epic row 3.2).
+// child on a non-interactive station dies in loader init without it).
 #[cfg(target_os = "windows")]
 mod windows_ace;
 
@@ -333,13 +278,6 @@ pub struct CommandSpec {
     /// bounded deny globs such as `.env*` and `*.sandbox.json`. The frontend adds
     /// the workspace root and each package root; no backend recursively walks them.
     pub deny_search_roots: Vec<std::path::PathBuf>,
-    /// This launch must be able to create nested sandboxes. On Linux under an
-    /// AppArmor-restricted host that forces the dedicated administrator-installed
-    /// helper as the level-1 launcher (a stock outer cannot transition to the
-    /// helper's profile under `no_new_privs`) and fails the launch closed when the
-    /// host is not set up for nesting. Default `false` leaves single-level launch
-    /// candidate selection unchanged.
-    pub require_nesting: bool,
     /// Pipe the child's stdout so the host can stream it through a redactor before
     /// forwarding. ONLY the request crosses this boundary — never the secret values
     /// (the host holds those and does the scrub). Default `false` = inherit (today's
@@ -353,8 +291,7 @@ pub struct CommandSpec {
     /// killing the shell alone leaves them reparented to init and still writing.
     ///
     /// THE CANONICAL ACCOUNT OF WHO REAPS WHAT — the other sites reference this one. Each
-    /// backend already has a mechanism except macOS: bubblewrap reaps through its PID
-    /// namespace, Landlock through a group it takes unconditionally (its `setsid` is also
+    /// Linux takes a process group unconditionally (its `setsid` is also
     /// its terminal hardening), the Windows AppContainer through a `KILL_ON_JOB_CLOSE` job
     /// object the child is assigned to while still suspended. So this flag is honored by the
     /// macOS backend alone, and as an OPT-IN rather than a default: leaving nub's process group
@@ -387,7 +324,6 @@ impl CommandSpec {
             args: CommandArgs::default(),
             cwd: None,
             deny_search_roots: Vec::new(),
-            require_nesting: false,
             redact_stdout: false,
             redact_stderr: false,
             reap_descendants: false,
@@ -442,10 +378,6 @@ impl CommandSpec {
     {
         self.deny_search_roots
             .extend(dirs.into_iter().map(Into::into));
-        self
-    }
-    pub fn require_nesting(mut self, require: bool) -> Self {
-        self.require_nesting = require;
         self
     }
     pub fn redact_stdout(mut self, redact: bool) -> Self {
@@ -503,9 +435,8 @@ pub struct Prepared {
     #[cfg(unix)]
     pub(crate) signal_process_group: bool,
     /// Windows launch plan — the backend owns spawn+wait+teardown when this is `Some`.
-    /// A two-variant enum, one per Windows mechanism: the per-run AppContainer (LowBox
-    /// token) and the dedicated local account (`CreateProcessWithLogonW`, no LowBox
-    /// token). Absent (or on other OSes) → [`Prepared::status`] spawns `command`.
+    /// A per-run AppContainer plan. Without one, `status` uses the plain command
+    /// path, retaining process-tree ownership without a LowBox token.
     #[cfg(target_os = "windows")]
     pub(crate) launch: Option<windows::WindowsLaunch>,
     /// The fresh per-run PRIVATE tmp dir (`TmpMode::Private`), owned here so it lives for
@@ -514,7 +445,7 @@ pub struct Prepared {
     /// the value threaded into their `apply` before it moves here.
     pub(crate) _private_tmp: Option<tempfile::TempDir>,
     /// Pipe stdout/stderr at spawn so the host can drain them through an output redactor.
-    /// Copied from [`CommandSpec`] in [`apply_inner`], applied in
+    /// Copied from [`CommandSpec`] in [`apply`], applied in
     /// [`Prepared::spawn_with_signal_target`]. Both `false` (the default) = inherit,
     /// byte-for-byte today's behavior.
     pub(crate) redact_stdout: bool,
@@ -582,6 +513,8 @@ impl SupervisedPlan {
 pub struct PreparedChild {
     child: Option<std::process::Child>,
     child_id: u32,
+    #[cfg(windows)]
+    windows_job: Option<windows_job::Job>,
     #[cfg(unix)]
     signal_target: Option<i32>,
     #[cfg(unix)]
@@ -655,6 +588,36 @@ impl PreparedChild {
         result
     }
 
+    /// Wait for completion, or drop the confined process tree when its owner cancels.
+    pub fn wait_cancellable(
+        &mut self,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        loop {
+            let child = self
+                .child
+                .as_mut()
+                .ok_or_else(|| prepared_child_reaped_error("wait_cancellable"))?;
+            if try_wait_child_eintr(child)?.is_some() {
+                return self.wait();
+            }
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                if let Some(mut child) = self.child.take() {
+                    #[cfg(unix)]
+                    kill_and_reap(&mut child, self.signal_target);
+                    #[cfg(not(unix))]
+                    kill_and_reap(&mut child);
+                }
+                self.release_resources();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "sandbox launch cancelled",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     pub fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
         use std::io::Read;
 
@@ -697,6 +660,8 @@ impl PreparedChild {
     }
 
     fn release_resources(&mut self) {
+        #[cfg(windows)]
+        self.windows_job.take();
         // Drop order matters: the proxy before the private tmp dir it may have written into.
         self._proxy.take();
         self._private_tmp.take();
@@ -724,6 +689,13 @@ impl Drop for PreparedChild {
 
 #[cfg(unix)]
 fn kill_and_reap(child: &mut std::process::Child, signal_target: Option<i32>) {
+    // The leader can exit between a cancellation poll and teardown while its
+    // descendants remain. Reap the confirmed group even if try_wait reaps the leader.
+    if let Some(group) = signal_target.filter(|target| *target < 0) {
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
+    }
     if try_wait_child_eintr(child).ok().flatten().is_some() {
         return;
     }
@@ -864,7 +836,10 @@ impl Prepared {
             self.command.stderr(std::process::Stdio::piped());
         }
         #[allow(unused_mut)]
+        #[cfg(not(windows))]
         let mut child = self.command.spawn()?;
+        #[cfg(windows)]
+        let (child, windows_job) = windows_job::spawn(&mut self.command)?;
         // The Landlock backend inherits its ruleset descriptor across spawn; the parent copy
         // can close the moment the child holds it (the `pre_exec` hook consumes it after fork).
         #[cfg(target_os = "linux")]
@@ -905,6 +880,8 @@ impl Prepared {
         Ok(PreparedChild {
             child: Some(child),
             child_id,
+            #[cfg(windows)]
+            windows_job: Some(windows_job),
             #[cfg(unix)]
             signal_target,
             #[cfg(unix)]
@@ -914,16 +891,7 @@ impl Prepared {
         })
     }
 
-    /// Launch the prepared child and wait for it, returning its exit status. The
-    /// UNIFORM launch verb across backends: mac/linux/skeleton spawn `command`;
-    /// Windows runs whichever launcher its plan names when one is attached — both
-    /// follow the same shape (ACL setup → a custom spawn → wait → RAII teardown), and
-    /// differ in the spawn: `CreateProcessW` under a LowBox token for the AppContainer,
-    /// `CreateProcessWithLogonW` as the dedicated account for the other.
-    ///
-    /// The egress proxy (`self.proxy`) is held for the child's whole run and dropped
-    /// (listener shut down) only after the child exits — `self` owns it until this
-    /// method returns.
+    /// Launch and wait, retaining the backend's process-tree and resource ownership.
     #[allow(unused_mut)]
     pub fn status(mut self) -> std::io::Result<std::process::ExitStatus> {
         #[cfg(target_os = "windows")]
@@ -938,6 +906,25 @@ impl Prepared {
         }
         let mut child = self.spawn()?;
         child.wait()
+    }
+
+    /// Launch with cancellation, preserving the backend's process-tree cleanup.
+    #[allow(unused_mut)]
+    pub fn status_cancellable(
+        mut self,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "sandbox launch cancelled",
+            ));
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(launch) = self.launch.take() {
+            return launch.run_cancellable(cancelled);
+        }
+        self.spawn()?.wait_cancellable(cancelled)
     }
 
     /// Launch, wait, and capture stdout/stderr through the supervised seam.
@@ -996,26 +983,16 @@ fn start_proxy_if_needed(
         }
         Inspection::Connection => None,
     };
-    // start_in_range carries #561's WFP loopback-window binding; the fail-closed
+    // A required proxy must fail closed if its listener cannot start.
     // Result mapping is the epic branch's posture and is what `proxy_needed`'s doc
     // promises — a required proxy that fails to start is an apply error, never a
     // silent `None` that would launch the child with no egress mediation.
-    EgressProxy::start_in_range(decider, mitm, proxy_port_range(policy))
+    EgressProxy::start_in_range(decider, mitm, None)
         .map(Some)
         .map_err(|error| Degradation {
             lost: vec!["net-per-host".to_string()],
             reason: Some(format!("starting required egress proxy: {error}")),
         })
-}
-
-/// The loopback window the proxy must bind inside, when one applies. Always `None` now: the only
-/// backend that needed a fixed window was Windows' dedicated-account + WFP tier (its elevated
-/// setup pre-authorized one port range, so the proxy bound into it rather than a filter chasing
-/// an ephemeral port), and that tier was dropped with the curated import (epic row 0.3). Every
-/// surviving backend carves the exact proxy port at launch, so the proxy is free to take an
-/// ephemeral one. Kept as a seam because Phase 5.1's per-host proxy may reintroduce a window.
-fn proxy_port_range(_policy: &SandboxPolicy) -> Option<(u16, u16)> {
-    None
 }
 
 /// The CA-trust env keys pointed at the child CA bundle (ephemeral CA + real roots).
@@ -1150,43 +1127,10 @@ fn set_proxy_blackhole(command: &mut Command) {
     }
 }
 
-/// Apply a resolved policy to a command, dispatching to the per-OS backend.
-///
-/// The env axis is enforced by CONSTRUCTION (not an OS primitive): when the policy
-/// enforces env, the child env is cleared and set to exactly the policy's
-/// constructed map. Each OS backend additionally hardens a scrubbed env so the
-/// withheld secret can't be recovered from a co-resident same-uid process: Linux via
-/// a fresh PID namespace and procfs (the host parent is not visible); macOS via the
-/// Seatbelt env-read closure
-/// (`deny process-info*` + self-restore, which shuts the `KERN_PROCARGS2` argv/env
-/// read). Because the macOS closure lives in the SBPL profile, a policy that withholds
-/// a secret is wrapped even when fs/net are relaxed (see `macos::needs_wrap`). fs/net
-/// enforcement is the backend's job; on an OS whose backend has not landed,
-/// [`generic_apply`] reports them as not-enforced (never silent).
+/// Apply a resolved policy to the unprivileged backend for this operating system.
+/// Environment filtering constructs the child's environment. Unsupported required
+/// guarantees fail closed; best-effort losses remain visible on `Prepared`.
 pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
-    apply_inner(policy, spec, None)
-}
-
-/// Apply with the verified runtime capability returned by [`earliest_bootstrap`].
-/// Linux confinement requires this explicit embedder seam; other platforms accept
-/// the value and retain their existing launch behavior.
-pub fn apply_with_runtime(
-    policy: &SandboxPolicy,
-    spec: CommandSpec,
-    runtime: &RuntimeCapability,
-) -> Result<Prepared, Degradation> {
-    apply_inner(policy, spec, Some(runtime))
-}
-
-fn apply_inner(
-    policy: &SandboxPolicy,
-    spec: CommandSpec,
-    runtime: Option<&RuntimeCapability>,
-) -> Result<Prepared, Degradation> {
-    // The Linux confinement path no longer consumes the embedder runtime capability: the
-    // retained-monitor tier that materialized a runtime image was dropped with `linux_monitor`
-    // (epic 1.1). The seam stays on the public API for the supervisor phase (epic 1.1d).
-    let _ = runtime;
     if !policy.env.resolved {
         return Err(Degradation {
             lost: vec!["env-unresolved".to_string()],
@@ -1654,6 +1598,45 @@ fn fs_confines(policy: &SandboxPolicy) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn teardown_reaps_descendants_after_the_leader_was_already_waited() {
+        use std::io::Read;
+        use std::os::unix::process::CommandExt;
+        struct GroupCleanup(i32);
+        impl Drop for GroupCleanup {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(-self.0, libc::SIGKILL);
+                }
+            }
+        }
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & printf ready"])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let group = GroupCleanup(child.id() as i32);
+        let mut output = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            output.read_to_end(&mut bytes).unwrap();
+            let _ = tx.send(bytes);
+        });
+        assert!(child.wait().unwrap().success());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        super::kill_and_reap(&mut child, Some(-group.0));
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(group);
+        reader.join().unwrap();
+        assert_eq!(result.unwrap(), b"ready");
+    }
+
     use super::*;
 
     #[test]

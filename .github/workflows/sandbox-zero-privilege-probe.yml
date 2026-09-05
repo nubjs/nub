@@ -1,0 +1,84 @@
+name: Privilege-free sandbox probe
+
+on:
+  push:
+    branches: [sandbox-zero-priv]
+    paths:
+      - .github/workflows/sandbox-zero-privilege-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 180
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      NUB_BIN: ${{ github.workspace }}/target/fast/nub
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: sandbox-zero-priv-macos
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22.23.2
+      - name: Preparing native build tools
+        run: |
+          npm install --no-audit --no-fund --loglevel=error
+          npm install --global node-gyp@12.4.0 --no-audit --no-fund
+          mkdir -p "$RUNNER_TEMP/sandbox-fixtures" reports
+          echo "TMPDIR=$RUNNER_TEMP/sandbox-fixtures" >> "$GITHUB_ENV"
+      - name: Building the current artifact
+        run: |
+          (cd crates/nub-native && cargo build --profile fast)
+          mkdir -p runtime/addons
+          cp target/fast/libnub_native.dylib runtime/addons/nub-native.node
+          cargo build -p nub-cli --profile fast
+          { git rev-parse HEAD; shasum -a 256 "$NUB_BIN"; id; uname -a; node --version; } > reports/artifact.txt
+      - name: Testing engine and lifecycle contracts
+        run: |
+          cargo test -p nub-sandbox --profile fast
+          cargo test -p nub-cli --profile fast --test build_jail
+          node tests/build-jail-corpus/packages.mjs
+      - name: Measuring both package populations
+        run: |
+          set +e
+          node tests/build-jail-corpus/population.mjs > reports/population.log 2>&1
+          original=$?
+          mkdir -p "$RUNNER_TEMP/supplemental"
+          cp tests/build-jail-corpus/population.mjs "$RUNNER_TEMP/supplemental/population.mjs"
+          cp tests/build-jail-corpus/supplemental.tsv "$RUNNER_TEMP/supplemental/population.tsv"
+          node "$RUNNER_TEMP/supplemental/population.mjs" > reports/supplemental.log 2>&1
+          supplemental=$?
+          printf 'original=%s\nsupplemental=%s\n' "$original" "$supplemental" > reports/exit-codes.txt
+          test "$original" -eq 0 && test "$supplemental" -eq 0
+      - name: Collecting fixture evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          destination = pathlib.Path('reports')
+          destination.mkdir(exist_ok=True)
+          for root in pathlib.Path(os.environ['RUNNER_TEMP'], 'sandbox-fixtures').glob('nub-jail-*'):
+              if not root.is_dir():
+                  continue
+              files = list(root.glob('*.json')) + list(root.glob('logs/*.log')) + list(root.glob('*/*.log'))
+              for source in files:
+                  target = destination / root.name / source.relative_to(root)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(source, target)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sandbox-macos-evidence
+          path: reports
+          retention-days: 14

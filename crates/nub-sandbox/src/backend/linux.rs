@@ -144,7 +144,7 @@ pub(crate) struct LinuxPreflight {
 }
 
 impl LinuxPreflight {
-    /// Whether this launch will take the Landlock arm. Read by [`super::apply_inner`] BEFORE it
+    /// Whether this launch will take the Landlock arm. Read by [`super::apply`] BEFORE it
     /// starts the egress proxy, because this mechanism can never route a child through one.
     pub(crate) fn uses_landlock(&self) -> bool {
         self.landlock.is_some()
@@ -868,59 +868,6 @@ fn apply_landlock(
         redact_stdout: false,
         redact_stderr: false,
         supervised: None,
-    })
-}
-
-/// Holds a build-jail Landlock ruleset descriptor open until the confined command is spawned.
-/// [`confine_build_jail_command`] installs the `pre_exec` hook that enforces the ruleset AFTER
-/// fork, and the hook needs the descriptor live at that moment — so the caller MUST keep this
-/// guard alive until after it has spawned the command, then may drop it (dropping closes the fd).
-pub struct BuildJailConfinement {
-    _ruleset_fd: std::fs::File,
-}
-
-/// Install nub's build-jail confinement — allow-only Landlock filesystem plus the enforce-time
-/// seccomp family ceiling — onto a caller-OWNED command. This is the Linux half of the
-/// aube-scripts embedder seam: aube's lifecycle jail reaches the shared engine through here, on
-/// its OWN `tokio::process::Command` (generic over [`CommandExt`]), so no tokio dependency crosses
-/// into PM-pure nub-sandbox and there is no second Landlock implementation to keep in step.
-///
-/// `policy` is a [`compile_build_jail`](crate::compile_build_jail) policy; `entry_program` is the
-/// resolved lifecycle interpreter/shell to grant read+execute; `tmp_dir` is the per-run scratch
-/// dir (the caller also points `TMPDIR` at it — this installs confinement only, never env). The
-/// returned guard must outlive the spawn.
-///
-/// [`CommandExt`]: std::os::unix::process::CommandExt
-pub fn confine_build_jail_command<C: std::os::unix::process::CommandExt>(
-    command: &mut C,
-    policy: &SandboxPolicy,
-    entry_program: Option<&Path>,
-    tmp_dir: Option<&Path>,
-) -> Result<BuildJailConfinement, Degradation> {
-    let seccomp = build_seccomp(
-        policy.net.enforce,
-        ip_egress_for(&policy.net),
-        protects_ambient_credentials(policy),
-        false,
-        true,
-    )
-    .map_err(|reason| Degradation {
-        lost: vec!["net".to_string()],
-        reason: Some(reason),
-    })?;
-    let ruleset = super::linux_landlock::install_landlock_confinement(
-        command,
-        policy,
-        seccomp,
-        tmp_dir,
-        entry_program,
-    )
-    .map_err(|reason| Degradation {
-        lost: vec!["fs".to_string()],
-        reason: Some(reason),
-    })?;
-    Ok(BuildJailConfinement {
-        _ruleset_fd: std::fs::File::from(ruleset.into_fd()),
     })
 }
 

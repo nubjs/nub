@@ -15,6 +15,8 @@
 pub mod content_sniff;
 pub mod default_trust;
 pub mod policy;
+#[cfg(unix)]
+pub mod unix_group;
 
 #[cfg(target_os = "linux")]
 mod linux_jail;
@@ -254,34 +256,6 @@ pub fn script_settings_snapshot() -> ScriptSettings {
 }
 
 /// A caller-injected sandbox engine for dependency lifecycle scripts.
-///
-/// When an embedder installs one via [`set_script_sandbox`], the lifecycle runner delegates
-/// confinement to it INSTEAD of the embedded Landlock/Seatbelt jail, so the build jail and the
-/// embedder's own sandbox share a single enforcement implementation. The hook confines the
-/// prepared command IN PLACE — installing a `pre_exec` on Linux, rewriting the program to
-/// `sandbox-exec` on macOS — and returns an OPAQUE guard the runner holds until AFTER the child is
-/// spawned. The guard exists for one reason: on Linux it keeps the Landlock ruleset descriptor
-/// open, which the post-`fork` `restrict_self` consumes. An `Err` fails the launch CLOSED (the
-/// script does not run unconfined). The hook is deliberately opaque so this crate takes no
-/// dependency on the embedder's sandbox types.
-pub type ScriptSandboxHook = std::sync::Arc<
-    dyn Fn(&mut tokio::process::Command, &ScriptJail, &Path) -> std::io::Result<Box<dyn Send>>
-        + Send
-        + Sync,
->;
-
-static SCRIPT_SANDBOX: std::sync::OnceLock<ScriptSandboxHook> = std::sync::OnceLock::new();
-
-/// Install the sandbox engine that confines dependency lifecycle scripts. Called once at process
-/// startup by the embedder; the first call wins and later calls are ignored. With none installed,
-/// the runner falls back to aube's embedded jail (today's behavior).
-pub fn set_script_sandbox(hook: ScriptSandboxHook) {
-    let _ = SCRIPT_SANDBOX.set(hook);
-}
-
-fn script_sandbox() -> Option<&'static ScriptSandboxHook> {
-    SCRIPT_SANDBOX.get()
-}
 
 #[cfg(test)]
 mod scoped_settings_tests {
@@ -355,6 +329,33 @@ pub fn prepend_paths(bin_dirs: &[PathBuf]) -> std::ffi::OsString {
 pub fn spawn_shell(script_cmd: &str) -> tokio::process::Command {
     let settings = script_settings();
     spawn_shell_with_settings(script_cmd, &settings)
+}
+
+/// Stable shell identity for post-build cache entries, safe as a path segment.
+pub fn resolved_shell_id() -> String {
+    let settings = script_settings();
+    let default = if cfg!(windows) { "cmd.exe" } else { "sh" };
+    let shell = settings
+        .script_shell
+        .as_deref()
+        .unwrap_or_else(|| Path::new(default));
+    let raw = shell.file_stem().unwrap_or_default().to_string_lossy();
+    let id: String = raw
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if id.is_empty() {
+        "shell".to_string()
+    } else {
+        id
+    }
 }
 
 fn spawn_shell_with_settings(
@@ -1017,16 +1018,15 @@ pub struct SandboxScope<'a> {
     /// The INSTALLER-RESOLVED name of the package whose script this is — the same
     /// identity `BuildPolicy` decides on, not the manifest's self-declared `name`.
     ///
-    /// Set ONLY when `project_root` is also the CONSUMER's own project root; that
-    /// pairing is the guarantee, and it is what lets an embedder look this package up in
-    /// root-authored config. `None` whenever aube's root is a checkout it FETCHED, where
-    /// `project_root` is attacker-authored. Handing over a name there would invite the
-    /// embedder to read a dependency's own manifest as if it were the consumer's.
+    /// Retained for catalog selection inside fetched checkouts too. Root-config authority
+    /// is separate: `root_is_user_authored` controls whether `confines` receives this name.
     pub package_name: Option<&'a str>,
     /// The resolved version of that same package, so an embedder can scope a per-package
     /// policy to the versions it measured. Set and withheld exactly with `package_name` —
     /// they are one identity, and a version without its name selects nothing.
     pub package_version: Option<&'a str>,
+    /// Whether the project root may supply a per-package confinement opt-out.
+    pub root_is_user_authored: bool,
 }
 
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
@@ -1162,9 +1162,13 @@ async fn run_command_killing_descendants(
     mut cmd: tokio::process::Command,
     script_name: &str,
 ) -> Result<std::process::ExitStatus, Error> {
+    #[cfg(unix)]
+    unix_group::group_on_spawn(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
+    #[cfg(unix)]
+    let _group = unix_group::ProcessGroupReaper::arm(&child, script_name);
     #[cfg(windows)]
     let _job = match windows_job::JobObject::new() {
         Ok(job) => {
@@ -1281,23 +1285,10 @@ pub async fn run_script(
         std::fs::create_dir_all(home)
             .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
     }
-    // `_sandbox_guard` holds any confinement resource the injected engine needs kept alive until
-    // the child is spawned (on Linux, the Landlock ruleset descriptor consumed by the post-`fork`
-    // `restrict_self`). It lives in this frame across `run_command_killing_descendants` below,
-    // which spawns the child, so the descriptor is open at `fork` and released once the run ends.
-    let (mut cmd, _sandbox_guard): (tokio::process::Command, Option<Box<dyn Send>>) =
-        match (jail, jail_home.as_deref()) {
-            (Some(jail), Some(home)) => match script_sandbox() {
-                Some(hook) => {
-                    let mut cmd = spawn_shell_with_settings(script_cmd, &settings);
-                    let guard = hook(&mut cmd, jail, home)
-                        .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
-                    (cmd, Some(guard))
-                }
-                None => (spawn_jailed_shell(script_cmd, &settings, jail, home), None),
-            },
-            _ => (spawn_shell_with_settings(script_cmd, &settings), None),
-        };
+    let mut cmd = match (jail, jail_home.as_deref()) {
+        (Some(jail), Some(home)) => spawn_jailed_shell(script_cmd, &settings, jail, home),
+        _ => spawn_shell_with_settings(script_cmd, &settings),
+    };
     cmd.current_dir(script_dir)
         .stderr(child_stderr())
         .env("PATH", &new_path)
@@ -1331,6 +1322,10 @@ pub async fn run_script(
     // engines/config/bin, and the raw script body (`npm_lifecycle_script`).
     apply_npm_manifest_env(&mut cmd, manifest, script_dir, script_cmd);
 
+    if sandbox.is_some() && aube_util::identity::embedder().embedder_owns_lifecycle_sandbox {
+        use_resolved_dependency_node(&mut cmd);
+    }
+
     tracing::debug!("lifecycle: {script_name} → {script_cmd}");
     // Embedder-owned confinement: a spawn of third-party code (`sandbox` set, the
     // embedder hook installed) runs through the host's sandbox INSTEAD of aube's own
@@ -1355,8 +1350,10 @@ pub async fn run_script(
         })
         .filter(|(scope, hook)| {
             hook.confines(
-                scope.package_name,
-                scope.package_version,
+                scope.package_name.filter(|_| scope.root_is_user_authored),
+                scope
+                    .package_version
+                    .filter(|_| scope.root_is_user_authored),
                 scope.project_root,
             )
         }) {
@@ -1367,6 +1364,7 @@ pub async fn run_script(
                 &scope,
                 verbatim_tail(script_cmd, &settings, jail.is_some()),
             );
+            let _cancel = CancelLifecycleOnDrop(spawn.cancelled.clone());
             // The host sandbox owns a synchronous spawn+wait (nub-sandbox drives an outer
             // Landlock / Seatbelt / AppContainer child), so run it off the async runtime.
             tokio::task::spawn_blocking(move || hook.run(spawn))
@@ -1434,6 +1432,7 @@ fn lifecycle_sandbox_spawn(
 ) -> aube_util::LifecycleSandboxSpawn {
     let std_cmd = cmd.as_std();
     aube_util::LifecycleSandboxSpawn {
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         program: std_cmd.get_program().to_os_string(),
         args: match verbatim {
             Some(line) => aube_util::LifecycleSpawnArgs::WindowsVerbatim(line),
@@ -1453,6 +1452,41 @@ fn lifecycle_sandbox_spawn(
     }
 }
 
+struct CancelLifecycleOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelLifecycleOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Keep dependency Node children in the lifecycle process group. Re-entering a
+/// runtime shim can create a new group that the installer's reaper cannot reach.
+/// Root scripts keep their embedder runtime; dependency preloads remain unchanged.
+fn use_resolved_dependency_node(cmd: &mut tokio::process::Command) {
+    let env_value = |name: &str| {
+        cmd.as_std()
+            .get_envs()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+    };
+    let Some(node) = env_value("npm_node_execpath") else {
+        return;
+    };
+    let node_path = Path::new(&node);
+    if !node_path.is_absolute() {
+        return;
+    }
+    let Some(bin) = node_path.parent() else {
+        return;
+    };
+    let path = env_value("PATH").unwrap_or_default();
+    let entries = std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&path));
+    if let Ok(path) = std::env::join_paths(entries) {
+        cmd.env("PATH", path).env("NODE", node);
+    }
+}
+
 /// Run a lifecycle hook against the root package, if a script for it is
 /// defined. Returns `Ok(false)` if the hook wasn't defined (no-op),
 /// `Ok(true)` if it ran successfully.
@@ -1464,6 +1498,7 @@ pub async fn run_root_hook(
     manifest: &PackageJson,
     hook: LifecycleHook,
     provenance: RootProvenance<'_>,
+    extra_bin_dirs: &[&Path],
 ) -> Result<bool, Error> {
     run_root_script_by_name(
         project_dir,
@@ -1471,6 +1506,7 @@ pub async fn run_root_hook(
         manifest,
         hook.script_name(),
         provenance,
+        extra_bin_dirs,
     )
     .await
 }
@@ -1487,6 +1523,7 @@ pub async fn run_root_script_by_name(
     manifest: &PackageJson,
     name: &str,
     provenance: RootProvenance<'_>,
+    extra_bin_dirs: &[&Path],
 ) -> Result<bool, Error> {
     let Some(script_cmd) = manifest.scripts.get(name) else {
         return Ok(false);
@@ -1506,6 +1543,7 @@ pub async fn run_root_script_by_name(
             project_root: checkout_root,
             package_name: None,
             package_version: None,
+            root_is_user_authored: false,
         }),
     };
     run_script(
@@ -1515,7 +1553,7 @@ pub async fn run_root_script_by_name(
         manifest,
         name,
         script_cmd,
-        &[],
+        extra_bin_dirs,
         None,
         sandbox,
     )

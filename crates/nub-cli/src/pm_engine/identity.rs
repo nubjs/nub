@@ -383,7 +383,7 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // it may only flip in the SAME change that installs nub's replacement hook on
     // `EngineContext::lifecycle_sandbox` — otherwise dependency lifecycle scripts run with
     // no jail at all. Epic row 6.2 makes both edits together.
-    embedder_owns_lifecycle_sandbox: false,
+    embedder_owns_lifecycle_sandbox: true,
 };
 
 /// Register [`NUB`] as the active embedder profile. Idempotent (the engine's

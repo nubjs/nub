@@ -22,9 +22,8 @@ impl Drop for ScratchDir {
 /// Recursively copy `src` into a fresh temp directory and return it
 /// wrapped in a [`ScratchDir`]. `.git/` is intentionally skipped —
 /// prepare scripts never need the history, and dropping it keeps the
-/// copy an order of magnitude smaller on large repos. Uses `cp -a`
-/// so symlinks + file modes survive (matters for repos that ship
-/// executable bits their prepare script relies on).
+/// copy smaller on large repos. The shared native tree copier preserves
+/// symlinks and file modes without requiring a Unix `cp` on Windows.
 pub(super) fn prepare_scratch_copy(
     src: &std::path::Path,
     spec: &str,
@@ -49,31 +48,14 @@ pub(super) fn prepare_scratch_copy(
     std::fs::create_dir_all(&dst)
         .map_err(|e| miette!("git dep {spec}: create scratch dir {}: {e}", dst.display()))?;
 
-    // Wrap the directory in `ScratchDir` *before* running any of
-    // the fallible work below. Handing ownership of cleanup to
-    // the Drop impl immediately means a failure to spawn `cp`, a
-    // non-zero cp exit, or any panic between here and the `Ok`
-    // return still removes the partially-populated temp dir
-    // instead of leaking it under `<tmp>/<tool>-git-prep-*`.
+    // Own cleanup before any fallible copy work.
     let scratch = ScratchDir(dst);
-
-    // `cp -a src/. dst/` — the trailing `/.` copies src's contents
-    // (including dotfiles) into dst rather than creating `dst/<src>`.
-    // `-a` preserves perms/symlinks/timestamps. We exclude `.git`
-    // manually afterwards rather than with `--exclude` (non-POSIX,
-    // GNU-only).
-    let out = std::process::Command::new("cp")
-        .arg("-a")
-        .arg(format!("{}/.", src.display()))
-        .arg(scratch.path())
-        .output()
-        .map_err(|e| miette!("git dep {spec}: spawn cp for scratch copy: {e}"))?;
-    if !out.status.success() {
-        return Err(miette!(
-            "git dep {spec}: scratch copy failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
+    super::side_effects_cache::copy_dir(
+        src,
+        scratch.path(),
+        super::side_effects_cache::CopyMode::Copy,
+    )
+    .wrap_err_with(|| format!("git dep {spec}: scratch copy failed"))?;
     let _ = std::fs::remove_dir_all(scratch.path().join(".git"));
 
     Ok(scratch)
@@ -83,6 +65,55 @@ pub(super) fn prepare_scratch_copy(
 /// than any real-world chain we've seen and prevents a pathological repo
 /// from wedging install in an infinite clone loop.
 const GIT_PREPARE_MAX_DEPTH: u32 = 4;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_copy_preserves_dotfiles_and_does_not_share_file_writes() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join(".git")).unwrap();
+        std::fs::write(
+            source.path().join(".npmrc"),
+            "registry=https://example.invalid\n",
+        )
+        .unwrap();
+        let script = source.path().join("prepare.js");
+        std::fs::write(&script, "original").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let scratch = prepare_scratch_copy(source.path(), "fixture").unwrap();
+        let path = scratch.path().to_path_buf();
+        assert!(!path.join(".git").exists());
+        assert!(path.join(".npmrc").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path.join("prepare.js"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            std::os::unix::fs::symlink("prepare.js", source.path().join("link.js")).unwrap();
+            let linked = prepare_scratch_copy(source.path(), "symlink fixture").unwrap();
+            assert_eq!(
+                std::fs::read_link(linked.path().join("link.js")).unwrap(),
+                std::path::Path::new("prepare.js")
+            );
+        }
+        std::fs::write(path.join("prepare.js"), "changed").unwrap();
+        assert_eq!(std::fs::read_to_string(script).unwrap(), "original");
+        drop(scratch);
+        assert!(!path.exists());
+    }
+}
 
 /// Run a nested `aube install` inside a git-dep checkout so its
 /// devDependencies are linked and its root `prepare` script runs

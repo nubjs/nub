@@ -468,6 +468,8 @@ fn an_optional_dependency_that_is_also_required_still_fails_the_install() {
         .args(["install", "--dangerously-allow-all-builds"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("lifecycle script postinstall failed"))
+        .stderr(predicates::str::contains(
+            "lifecycle script postinstall failed",
+        ))
         .stderr(predicates::str::contains("optional-dep@1.0.0"));
 }

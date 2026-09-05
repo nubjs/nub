@@ -3,7 +3,7 @@ use miette::{Context, IntoDiagnostic, miette};
 use super::bin_linking::materialized_pkg_dir;
 use super::node_gyp_bootstrap;
 use super::side_effects_cache::{
-    SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
+    Confinement, CopyMode, SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
 };
 
 /// Run a root-package lifecycle hook, announcing it to the user if defined
@@ -21,18 +21,49 @@ pub(super) async fn run_root_lifecycle(
     if !manifest.scripts.contains_key(hook.script_name()) {
         return Ok(());
     }
-    tracing::debug!("Running {} script...", hook.script_name());
-    aube_scripts::run_root_hook(project_dir, modules_dir_name, manifest, hook, provenance)
+    let prepared_bin = if let aube_scripts::RootProvenance::Fetched { checkout_root } = provenance
+        && aube_util::engine_context()
+            .lifecycle_sandbox
+            .is_some_and(|sandbox| sandbox.would_confine(None, None, checkout_root))
+    {
+        match node_gyp_bootstrap::ensure_bin_dir_for_jail(
+            &project_dir.join(modules_dir_name).join(".bin"),
+            project_dir,
+        )
         .await
-        .map_err(|e| {
-            // Old message was just the bare error string. User got
-            // a cryptic "exit status 1" with no hook name, no script
-            // path, nothing. Tag with which hook fired so the log
-            // line is self-documenting. This is the common case
-            // (failed preinstall on `aube install`) so the regression
-            // really hurt triage.
-            miette!("root {} script failed: {e}", hook.script_name())
-        })?;
+        {
+            Ok(dir) => dir,
+            Err(err) => {
+                tracing::warn!(
+                    code = aube_codes::warnings::WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED,
+                    "could not prepare node-gyp for jailed builds: {err:#}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let extra_bins: Vec<&std::path::Path> = prepared_bin.as_deref().into_iter().collect();
+    tracing::debug!("Running {} script...", hook.script_name());
+    aube_scripts::run_root_hook(
+        project_dir,
+        modules_dir_name,
+        manifest,
+        hook,
+        provenance,
+        &extra_bins,
+    )
+    .await
+    .map_err(|e| {
+        // Old message was just the bare error string. User got
+        // a cryptic "exit status 1" with no hook name, no script
+        // path, nothing. Tag with which hook fired so the log
+        // line is self-documenting. This is the common case
+        // (failed preinstall on `aube install`) so the regression
+        // really hurt triage.
+        miette!("root {} script failed: {e}", hook.script_name())
+    })?;
     Ok(())
 }
 
@@ -384,7 +415,57 @@ pub(super) fn resolve_link_strategy(
             }
         }
     };
-    Ok(strategy)
+    Ok(jail_forces_copy(
+        strategy,
+        cfg!(windows),
+        embedder_confines_any(cwd),
+    ))
+}
+
+// Hardlinked CAS files retain their original Windows security descriptor rather
+// than inheriting the package directory's AppContainer grant. Copying also keeps
+// grant/revoke operations from changing a shared CAS file through another name.
+fn jail_forces_copy(
+    strategy: aube_linker::LinkStrategy,
+    windows: bool,
+    confines: bool,
+) -> aube_linker::LinkStrategy {
+    if windows && confines {
+        aube_linker::LinkStrategy::Copy
+    } else {
+        strategy
+    }
+}
+
+fn embedder_confines_any(project_dir: &std::path::Path) -> bool {
+    aube_util::embedder().embedder_owns_lifecycle_sandbox
+        && aube_util::engine_context()
+            .lifecycle_sandbox
+            .as_ref()
+            .is_some_and(|hook| hook.would_confine(None, None, project_dir))
+}
+
+fn dep_confinement(
+    jail_policy: &JailBuildPolicy,
+    name: &str,
+    version: &str,
+    source_key: Option<&str>,
+    git_repository_key: Option<&str>,
+    package_name: Option<&str>,
+    project_dir: &std::path::Path,
+) -> Confinement {
+    let embedder_confines = aube_util::embedder().embedder_owns_lifecycle_sandbox
+        && aube_util::engine_context()
+            .lifecycle_sandbox
+            .as_ref()
+            .is_some_and(|hook| {
+                hook.would_confine(package_name, package_name.map(|_| version), project_dir)
+            });
+    if embedder_confines || jail_policy.should_jail(name, version, source_key, git_repository_key) {
+        Confinement::Confined
+    } else {
+        Confinement::Unconfined
+    }
 }
 
 /// What [`run_dep_lifecycle_scripts`] did.
@@ -438,6 +519,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // gates which ones actually run. Match is by `pkg.name`, matching
     // pnpm's `pnpm rebuild <name>`.
     selected_names: Option<&std::collections::HashSet<String>>,
+    root_is_user_authored: bool,
 ) -> miette::Result<DepLifecycleOutcome> {
     // Pass 1 (serial, cheap): walk the graph, keep only the packages
     // the policy allows AND that actually define at least one dep
@@ -583,9 +665,20 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         if !aube_scripts::has_dep_lifecycle_work(&package_dir, &dep_manifest) {
             continue;
         }
+        let confinement = dep_confinement(
+            jail_policy,
+            pkg.registry_name(),
+            &pkg.version,
+            pkg.source_approval_key().as_deref(),
+            pkg.git_repository_approval_key().as_deref(),
+            root_is_user_authored.then_some(pkg.registry_name()),
+            project_dir,
+        );
         let cache_entry = side_effects_cache
             .location()
-            .map(|loc| SideEffectsCacheEntry::new(loc, &pkg.name, &pkg.version, &package_dir))
+            .map(|loc| {
+                SideEffectsCacheEntry::new(loc, &pkg.name, &pkg.version, &package_dir, confinement)
+            })
             .transpose()?;
         if via_floor {
             floor_trusted.push(pkg.spec_key());
@@ -659,12 +752,15 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // own error rather than this one.
     let project_bin_dir = project_dir.join(modules_dir_name).join(".bin");
     let any_jailed = jobs.iter().any(|job| {
-        jail_policy.should_jail(
+        dep_confinement(
+            jail_policy,
             &job.registry_name,
             &job.version,
             job.source_key.as_deref(),
             job.git_repository_key.as_deref(),
-        )
+            root_is_user_authored.then_some(job.registry_name.as_str()),
+            project_dir,
+        ) == Confinement::Confined
     });
     let node_gyp_bin_dir = std::sync::Arc::new(if any_jailed {
         match node_gyp_bootstrap::ensure_bin_dir_for_jail(&project_bin_dir, project_dir).await {
@@ -701,6 +797,11 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     let project_dir = project_dir.to_path_buf();
     let modules_dir_name = modules_dir_name.to_string();
     let should_restore_side_effects_cache = side_effects_cache.should_restore();
+    let restore_mode = if cfg!(windows) && embedder_confines_any(&project_dir) {
+        CopyMode::Copy
+    } else {
+        CopyMode::HardlinkOrCopy
+    };
     let should_save_side_effects_cache = side_effects_cache.should_save();
     let overwrite_side_effects_cache = side_effects_cache.overwrite_existing();
     let jail_policy = std::sync::Arc::new((*jail_policy).clone());
@@ -723,7 +824,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             {
                 let package_dir = job.package_dir.clone();
                 let restore_result = tokio::task::spawn_blocking(move || {
-                    cache_entry.restore_if_available(&package_dir)
+                    cache_entry.restore_if_available(&package_dir, restore_mode)
                 })
                 .await
                 .map_err(|e| {
@@ -788,13 +889,14 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             // The scope an embedder-owned sandbox confines this dependency by. The name and
             // version are the INSTALLER-RESOLVED identity (`job.registry_name`), not the
             // manifest's self-declared `name` — the same identity the build policy decided
-            // on — so an embedder can key a per-package policy on it. Both are set because
-            // `project_dir` here IS the consumer's own project root.
+            // on — so an embedder can key a per-package policy on it. Fetched roots retain
+            // that catalog identity without gaining authority to opt out of confinement.
             let scope = aube_scripts::SandboxScope {
                 package_dir: &job.package_dir,
                 project_root: &project_dir,
                 package_name: Some(job.registry_name.as_str()),
                 package_version: Some(job.version.as_str()),
+                root_is_user_authored,
             };
             let mut ran_here = 0usize;
             for hook in aube_scripts::DEP_LIFECYCLE_HOOKS {
@@ -1520,6 +1622,30 @@ pub(super) fn unreviewed_dep_builds(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_windows_build_jail_forces_copy_over_every_linking_strategy() {
+        use aube_linker::LinkStrategy::{Copy, Hardlink, Reflink, ReflinkAuto};
+        // The defect: a hardlink into the jail keeps the CAS file object's descriptor, so
+        // the confined script cannot read its own entry point. Reflink is downgraded for
+        // the same reason — `ReflinkAuto` falls back to `hard_link` on a filesystem that
+        // refuses the clone, which is exactly NTFS.
+        for probed in [Hardlink, ReflinkAuto, Reflink, Copy] {
+            assert!(
+                matches!(jail_forces_copy(probed, true, true), Copy),
+                "windows + a confining embedder must copy, whatever {probed:?} was probed"
+            );
+        }
+        // Neither half alone changes anything: the other platforms' jails carry no per-file
+        // ACLs, and an unconfined Windows install keeps the hardlink fast path.
+        assert!(matches!(jail_forces_copy(Hardlink, false, true), Hardlink));
+        assert!(matches!(jail_forces_copy(Hardlink, true, false), Hardlink));
+        assert!(matches!(
+            jail_forces_copy(ReflinkAuto, false, false),
+            ReflinkAuto
+        ));
+    }
+
     use super::*;
 
     #[test]

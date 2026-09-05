@@ -14,6 +14,9 @@ name = "nub"
 path = "src/main.rs"
 
 [features]
+prefetch-github-hosts = []
+build-jail-project-grant-arm = ["nub-sandbox/build-jail-project-grant-arm"]
+build-jail-catalog-override = ["nub-sandbox/build-jail-catalog-override"]
 # Single self-contained binary: embed the `runtime/` tree as a compressed blob and
 # JIT-extract it on first run (forwards to nub-core, where the extract module +
 # build.rs blob generation live). OFF by default — the `--profile fast` dev loop
@@ -245,6 +248,9 @@ pathdiff = { version = "0.2", optional = true }
 # `serde_yaml` so the source paths are unchanged.
 serde_yaml = { package = "yaml_serde", version = "0.10" }
 sha2.workspace = true
+reqwest.workspace = true
+tar.workspace = true
+flate2.workspace = true
 hex = "0.4"
 # Records the embedded Node's optional BLAKE3 format-headroom field. The launcher
 # does not hash the extracted runtime on its current warm path.
