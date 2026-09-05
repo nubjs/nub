@@ -417,12 +417,14 @@ fn is_child_process(specifier: &str) -> bool {
 fn reaches_builtin(source: &str, is_target: fn(&str) -> bool) -> bool {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::{
-        CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression,
-        ImportDeclaration, MemberExpression,
+        AssignmentExpression, AssignmentTarget, CallExpression, ExportAllDeclaration,
+        ExportNamedDeclaration, Expression, ImportDeclaration, MemberExpression,
+        VariableDeclarator,
     };
     use oxc_ast_visit::{Visit, walk};
     use oxc_parser::Parser;
     use oxc_span::SourceType;
+    use std::collections::BTreeSet;
 
     /// A no-substitution template literal is as static as a string literal, and
     /// the minifier emits both.
@@ -437,16 +439,42 @@ fn reaches_builtin(source: &str, is_target: fn(&str) -> bool) -> bool {
         }
     }
 
+    /// Whether an identifier NAMES a require.
+    ///
+    /// Case-insensitive and a substring, which is wider than it looks and has to
+    /// be. The suffix test this replaced missed nub's OWN emitted helper: a
+    /// CommonJS wrapper opens `const require = __nubCjsRequire`, and
+    /// `__nubCjsRequire` ends in a capital R, so `ends_with("require")` was false
+    /// for every CommonJS payload the compiler produces. Minification then renames
+    /// the wrapper's own `require` binding, leaving `let e = __nubCjsRequire` and a
+    /// call site reading `e("node:cluster")` with nothing left to match on. A
+    /// suffix test also misses `require$1`, which the comment it carried claimed
+    /// it caught.
+    ///
+    /// The cost of the width is a payload whose `requireAuth("cluster")` resolves
+    /// nothing and extracts anyway. That is the direction this pass is documented
+    /// to err in, and the call must additionally pass one of four exact builtin
+    /// specifiers as its first argument.
+    fn names_require(name: &str) -> bool {
+        name.to_ascii_lowercase().contains("require")
+    }
+
     /// Whether a callee is a plausible way to obtain a builtin module by name.
     ///
     /// Targeted on purpose: an unnecessary decline costs a real optimization, so
-    /// this matches the shapes that hand back the module — a `require` binding under
-    /// whatever name the bundler renamed it to, the three property names that stand
-    /// in for one, and the require a `createRequire` call returns — and leaves
-    /// `logger.info("cluster")` alone.
-    fn resolves_builtin(callee: &Expression<'_>) -> bool {
+    /// this matches the shapes that hand back the module — a name containing
+    /// `require` under any casing, a name bound to one of those, the three property
+    /// names that stand in for one, and the require a `createRequire` call returns —
+    /// and leaves `logger.info("cluster")` alone.
+    fn resolves_builtin(callee: &Expression<'_>, aliases: &BTreeSet<String>) -> bool {
         match callee.get_inner_expression() {
-            Expression::Identifier(id) => id.name.ends_with("require"),
+            // `aliases` is what closes the one shape the name test cannot reach:
+            // `const load = require` rebinds it under a name that says nothing, and
+            // the emitted chunk then reads `load("child_process")`. See
+            // [`require_aliases`].
+            Expression::Identifier(id) => {
+                names_require(&id.name) || aliases.contains(id.name.as_str())
+            }
             // `createRequire(import.meta.url)("cluster")`: the require is the value a
             // call produced, so the callee is itself a call. ANY call, deliberately.
             // Requiring the inner callee to name `createRequire` was tried and
@@ -475,12 +503,13 @@ fn reaches_builtin(source: &str, is_target: fn(&str) -> bool) -> bool {
         }
     }
 
-    struct Visitor {
+    struct Visitor<'s> {
         is_target: fn(&str) -> bool,
+        aliases: &'s BTreeSet<String>,
         found: bool,
     }
 
-    impl<'a> Visit<'a> for Visitor {
+    impl<'a> Visit<'a> for Visitor<'_> {
         fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
             self.found |= (self.is_target)(it.source.value.as_str());
             walk::walk_import_declaration(self, it);
@@ -508,7 +537,7 @@ fn reaches_builtin(source: &str, is_target: fn(&str) -> bool) -> bool {
         }
 
         fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-            if resolves_builtin(&call.callee)
+            if resolves_builtin(&call.callee, self.aliases)
                 && let Some(argument) = call.arguments.first().and_then(|a| a.as_expression())
                 && let Some(specifier) = literal_specifier(argument)
             {
@@ -518,13 +547,81 @@ fn reaches_builtin(source: &str, is_target: fn(&str) -> bool) -> bool {
         }
     }
 
+    /// Every local name this chunk binds to a require, directly or through another
+    /// such name.
+    ///
+    /// `resolves_builtin` recognizes a require by its NAME, which covers every
+    /// renaming that keeps the word — `__require`, `require$1`, `__nubCjsRequire`.
+    /// An alias keeps nothing: `const load = require` produces a call
+    /// site reading `load("child_process")`, where neither the callee nor anything
+    /// else in the expression says what `load` is. That shape reached the emitted
+    /// chunk from ordinary authored CommonJS, and before the scan replaced a
+    /// substring search it was caught by accident, because the specifier's own
+    /// letters were in the file.
+    ///
+    /// One pass in source order is enough for the chained case. A binding can only
+    /// alias a name declared before it — the reverse is a temporal-dead-zone error
+    /// at run time — so `const a = require; const b = a;` adds `a` before `b` is
+    /// reached, and nothing needs a second pass.
+    fn require_aliases(program: &oxc_ast::ast::Program<'_>) -> BTreeSet<String> {
+        struct Collect {
+            names: BTreeSet<String>,
+        }
+
+        impl Collect {
+            /// Whether an initializer hands back a require: the builtin under any
+            /// name the bundler gave it, one of the property spellings, or a name
+            /// already known to be one.
+            fn is_require(&self, expr: &Expression<'_>) -> bool {
+                match expr.get_inner_expression() {
+                    Expression::Identifier(id) => {
+                        names_require(&id.name) || self.names.contains(id.name.as_str())
+                    }
+                    other => other
+                        .as_member_expression()
+                        .and_then(MemberExpression::static_property_name)
+                        .is_some_and(|property| matches!(property, "require" | "createRequire")),
+                }
+            }
+        }
+
+        impl<'a> Visit<'a> for Collect {
+            fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+                if let Some(init) = &it.init
+                    && self.is_require(init)
+                    && let Some(name) = it.id.get_identifier_name()
+                {
+                    self.names.insert(name.to_string());
+                }
+                walk::walk_variable_declarator(self, it);
+            }
+
+            fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
+                if self.is_require(&it.right)
+                    && let AssignmentTarget::AssignmentTargetIdentifier(id) = &it.left
+                {
+                    self.names.insert(id.name.to_string());
+                }
+                walk::walk_assignment_expression(self, it);
+            }
+        }
+
+        let mut collect = Collect {
+            names: BTreeSet::new(),
+        };
+        collect.visit_program(program);
+        collect.names
+    }
+
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
     if parsed.panicked {
         return false;
     }
+    let aliases = require_aliases(&parsed.program);
     let mut visitor = Visitor {
         is_target,
+        aliases: &aliases,
         found: false,
     };
     visitor.visit_program(&parsed.program);
@@ -746,6 +843,68 @@ mod tests {
             sea_decline_of("console.log(\"child_process spawn failed\");"),
             None,
             "and neither does a message naming one"
+        );
+    }
+
+    /// The one shape a name test cannot reach, and the one the replaced substring
+    /// search caught by accident: an alias keeps none of the letters that identify
+    /// a require, so the call site says nothing about what it resolves. Both
+    /// builtins go through the same scan, so both are covered here.
+    #[test]
+    fn a_require_reached_through_an_alias_still_declines() {
+        assert_eq!(
+            sea_decline_of("const load = require;load(\"node:child_process\").fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "a plain rebinding is the shape authored CommonJS produces"
+        );
+        assert_eq!(
+            sea_decline_of("const r = __require;const load = r;load(\"child_process\").fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "and it chains, from the name the bundler emitted"
+        );
+        assert_eq!(
+            sea_decline_of("let load;load = require;load(\"child_process\").fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "an assignment binds it as surely as a declaration"
+        );
+        assert_eq!(
+            decline_of("const load = require;load(\"cluster\").fork();"),
+            Some(Decline::ClusterReentry),
+            "the cluster decline reads the same aliases, for both containers"
+        );
+        assert_eq!(
+            sea_decline_of("const load = makeLoader;load(\"child_process\");"),
+            None,
+            "a name bound to something that is not a require resolves nothing"
+        );
+    }
+
+    /// The shape the compiler emits for its OWN CommonJS wrapper, minified, which
+    /// is what every CommonJS payload actually carries. Written out rather than
+    /// paraphrased: `__nubCjsRequire` ends in a capital R, so a suffix test on the
+    /// word was false here, and the minifier had already renamed the wrapper's
+    /// `require` binding to a single letter — which left a real `node:cluster`
+    /// payload with nothing for the scan to match and the wrong container.
+    #[test]
+    fn the_compilers_own_commonjs_require_is_recognized_after_minification() {
+        assert_eq!(
+            sea_decline_of(
+                "var f=(function f(){let e=__nubCjsRequire;\
+                 return(R??=__commonJSMin(((t,n)=>{let r=e(`node:child_process`);r.fork(n)}))).\
+                 apply(this,arguments)});"
+            ),
+            Some(Decline::ChildProcessReentry),
+            "the emitted CommonJS wrapper, minified, is the common case and not a corner"
+        );
+        assert_eq!(
+            decline_of("let e=__nubCjsRequire;e(`cluster`).fork();"),
+            Some(Decline::ClusterReentry),
+            "and the cluster decline reads the same binding, for both containers"
+        );
+        assert_eq!(
+            decline_of("const cluster = require$1(\"cluster\");cluster.fork();"),
+            Some(Decline::ClusterReentry),
+            "a suffixed rename resolves the builtin as surely as a prefixed one"
         );
     }
 

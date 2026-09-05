@@ -3358,6 +3358,18 @@ fn run_self_probe(bin: &Path) -> Result<std::process::Output> {
 fn probe_once(bin: &Path) -> std::io::Result<std::process::Output> {
     std::process::Command::new(bin)
         .env("__NUB_COMPILED_LAUNCHER_MODE", "probe")
+        // The same scrub, and the same reason, as [`node_runs`] — and it binds
+        // harder here, because a single-executable artifact IS a Node and reads
+        // this itself. A developer machine routinely carries a `NODE_OPTIONS`
+        // aimed at some other Node (nub's own dev shell exports one), and Node
+        // rejects the whole invocation over one flag it does not know, so the
+        // probe would fail a perfectly good artifact. A preload named there is
+        // worse than that: `--require`/`--import` runs BEFORE the blob's main, so
+        // anything it prints lands on stdout ahead of the probe's reply and the
+        // response no longer matches. Either way the check would be reading the
+        // build machine's environment rather than the bytes just written.
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_REPL_EXTERNAL_MODULE")
         .output()
 }
 
