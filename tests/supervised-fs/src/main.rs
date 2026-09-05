@@ -135,6 +135,26 @@ fn main() {
     let escaped = Path::new(&escape).exists();
     let _ = std::fs::remove_file(&escape);
 
+    // ---- supervisor hardening (epic 1.4d): the child cannot ptrace. The probe calls
+    // ptrace(PTRACE_TRACEME); the seccomp ceiling returns EPERM (r == -1) so it exits 0, while an
+    // UNCONFINED launch (no filter installed) lets it succeed (r == 0) and exits 7 — a failing
+    // control that proves the block is the filter, not a broken probe. `fs: true` keeps python
+    // unrestricted so only the syscall deny is under test; `net` confinement is what puts the
+    // launch on the supervised (filtered) path.
+    let ptrace_probe = "python3 -c \"import ctypes,sys; libc=ctypes.CDLL(None,use_errno=True); r=libc.ptrace(0,0,0,0); sys.exit(7 if r==0 else 0)\"";
+    let ptrace_conf = policy(json!({ "fs": true, "net": ["example.com"] }));
+    let ptrace_attack = run("ptrace  attack", &ptrace_conf, ptrace_probe);
+    // Control: the SAME probe with no nub involvement at all, so no seccomp filter — proves
+    // ptrace(TRACEME) genuinely succeeds (exit 7) here and the attack's 0 is the filter's EPERM.
+    let ptrace_control = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(ptrace_probe)
+        .status()
+        .expect("raw ptrace control")
+        .code()
+        .unwrap_or(-1);
+    eprintln!("<<< ptrace  control (raw, no nub): exited {ptrace_control}");
+
     // Independent oracle: the allowlisted file exists, the denied one does not.
     let allowed_written = Path::new(&format!("{allowed}/f")).exists();
     let denied_written = Path::new(&format!("{denied}/f")).exists();
@@ -150,6 +170,8 @@ fn main() {
     println!("carve   control (write .git/hooks, no deny) -> exit {carve_control}   [want 0], hook_written={hook_after_control} [want true]");
     println!("tmp     compat  (write $TMPDIR, private tmp) -> exit {tmp_compat}   [want 0]");
     println!("tmp     attack  (write shared /tmp)          -> exit {tmp_attack}   [want != 0], escaped={escaped} [want false]");
+    println!("ptrace  attack  (TRACEME, confined)          -> exit {ptrace_attack}   [want 0 = denied]");
+    println!("ptrace  control (TRACEME, unconfined)        -> exit {ptrace_control}   [want 7 = succeeded]");
     println!("oracle  <allowed>/f exists={allowed_written} (want true)");
 
     let _ = std::fs::remove_dir_all(&base);
@@ -168,7 +190,9 @@ fn main() {
         && hook_after_control // same write lands when the carve-out is absent
         && tmp_compat == 0
         && tmp_attack != 0
-        && !escaped; // shared /tmp is not reachable from a private-tmp launch
+        && !escaped // shared /tmp is not reachable from a private-tmp launch
+        && ptrace_attack == 0 // ptrace(TRACEME) refused by the seccomp ceiling
+        && ptrace_control == 7; // ...and succeeds unconfined, so the block is the filter
     println!("RESULT: {}", if pass { "PASS" } else { "FAIL" });
     std::process::exit(if pass { 0 } else { 1 });
 }

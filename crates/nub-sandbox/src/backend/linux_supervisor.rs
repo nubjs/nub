@@ -256,7 +256,24 @@ fn notifier_program(write_broker: bool) -> Vec<seccompiler::sock_filter> {
         Ins::Stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         Ins::Label("nr"),
         Ins::Stmt(ld, OFF_NR),
-        Ins::Jump(jeq, nr(libc::SYS_io_uring_setup), "eperm", "n0"),
+        // Unconditional scalar EPERM denies (like io_uring, these cannot be mediated per-op):
+        //  - io_uring_setup: its SQEs never re-enter this filter, so a submitted openat/connect
+        //    would bypass every notifier.
+        //  - ptrace / process_vm_readv / process_vm_writev: cross-process memory access — a
+        //    confined child has no legitimate use and it is a direct route to tamper with a peer
+        //    (or the supervisor). Also closes the `/proc/<pid>/mem`-via-ptrace path.
+        //  - pidfd_getfd: steals an fd from another process (the supervisor's own listener among
+        //    them); the child never needs it. The supervisor's own pidfd_getfd runs in the PARENT
+        //    and is unaffected.
+        Ins::Jump(jeq, nr(libc::SYS_io_uring_setup), "eperm", "h0"),
+        Ins::Label("h0"),
+        Ins::Jump(jeq, nr(libc::SYS_ptrace), "eperm", "h1"),
+        Ins::Label("h1"),
+        Ins::Jump(jeq, nr(libc::SYS_process_vm_readv), "eperm", "h2"),
+        Ins::Label("h2"),
+        Ins::Jump(jeq, nr(libc::SYS_process_vm_writev), "eperm", "h3"),
+        Ins::Label("h3"),
+        Ins::Jump(jeq, nr(libc::SYS_pidfd_getfd), "eperm", "n0"),
         Ins::Label("n0"),
         Ins::Jump(jeq, nr(libc::SYS_sendto), "notify", "n1"),
         Ins::Label("n1"),
@@ -1679,8 +1696,9 @@ pub(super) struct SupervisedChild {
     /// The `pidfd` opened to grab the listener; retained for a race-free kill in `Drop`.
     pidfd: RawFd,
     /// The supervisor loop thread, held only so it is DETACHED (not joined) on wait/drop — see
-    /// [`SupervisedChild::wait`]. `NOTIF_RECV` does not reliably wake on target death, so joining
-    /// would hang; the process reaps the detached thread at exit.
+    /// [`SupervisedChild::wait`]. The thread self-terminates when the target dies (its filter is
+    /// torn down and `NOTIF_RECV` returns ENOENT); joining is still avoided so a stuck target
+    /// cannot block the reap.
     supervisor: Option<std::thread::JoinHandle<()>>,
     /// Set once `waitpid` has reaped `pid`, so `Drop` neither re-kills nor double-reaps.
     reaped: bool,
@@ -1720,10 +1738,13 @@ impl SupervisedChild {
         if self.group_leader {
             unsafe { libc::kill(-self.pid, libc::SIGKILL) };
         }
-        // DETACH, never join: `SECCOMP_IOCTL_NOTIF_RECV` does not reliably return when the target
-        // dies, so joining here blocks forever. Dropping the handle detaches the thread, which the
-        // process reaps at exit. Clean per-launch shutdown (closing the listener to unblock RECV)
-        // is a supervisor-lifecycle hardening item (epic 1.4).
+        // DETACH, never join. The thread self-terminates: once the target exits, its seccomp
+        // filter is torn down and the blocked `NOTIF_RECV` returns ENOENT, so the loop returns and
+        // the thread ends on its own (measured: one `RECV: No such file or directory` per launch).
+        // So this is not a leak — dropping the handle detaches a thread already on its way out. A
+        // JOIN here is nonetheless avoided: a stuck target (e.g. the pre-1.3 O_NONBLOCK hang, where
+        // the child never exited) would block the join forever, and reaping the child is the
+        // caller's contract, not "wait for the supervisor to notice." (epic 1.4d)
         drop(self.supervisor.take());
         Ok(std::process::ExitStatus::from_raw(status))
     }
