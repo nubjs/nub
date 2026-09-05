@@ -200,8 +200,8 @@ pub struct Inputs<'a> {
     pub sourcemap: bool,
     /// Whether the artifact carries a Node of its own — everything but `--smol`.
     pub embeds_node: bool,
-    /// `BundleResult::app_names_child_process`.
-    pub names_child_process: bool,
+    /// `BundleResult::app_computes_module_specifier`.
+    pub computes_module_specifier: bool,
     /// The entry chunk's payload name.
     pub entry: &'a str,
 }
@@ -341,15 +341,26 @@ pub fn classify(
         );
     }
 
-    if files
-        .iter()
-        .filter(|file| file.name.ends_with(".mjs"))
-        .any(|file| std::str::from_utf8(&file.bytes).is_ok_and(reaches_cluster))
-    {
+    let any_chunk_reaches = |is_target: fn(&str) -> bool| {
+        files
+            .iter()
+            .filter(|file| file.name.ends_with(".mjs"))
+            .any(|file| {
+                std::str::from_utf8(&file.bytes)
+                    .is_ok_and(|source| reaches_builtin(source, is_target))
+            })
+    };
+
+    if any_chunk_reaches(is_cluster) {
         return Ok(Err(Decline::ClusterReentry));
     }
 
-    if mode == Mode::Sea && inputs.names_child_process {
+    // A computed specifier is checked FIRST because it is the case the scan cannot
+    // answer: a module that builds its specifier resolves something this pass
+    // never sees, so the only safe reading is that it might be `child_process`.
+    if mode == Mode::Sea
+        && (inputs.computes_module_specifier || any_chunk_reaches(is_child_process))
+    {
         return Ok(Err(Decline::ChildProcessReentry));
     }
 
@@ -374,20 +385,36 @@ pub fn classify(
     Ok(Ok(chunk_names))
 }
 
-/// Whether a chunk names the `cluster` builtin as a module specifier.
+/// `node:cluster` under both spellings the emitted bundle can carry.
 ///
-/// Both spellings reach the emitted bundle: the authored ESM `node:cluster` keeps
-/// its prefix, and the interop shim Rolldown writes around it is a bare
-/// `require("cluster")`. Import syntax is not the only route — a chunk can also
-/// take the module from `createRequire(import.meta.url)(…)`, from
-/// `process.getBuiltinModule(…)`, or from the renamed `__require` a bundler emits —
-/// and every one of them ends in the same re-entry crash, so the callee shapes in
-/// `resolves_builtin` count too. AST rather than a substring search because the
-/// word is an ordinary English one — a payload logging "cluster failed" resolves
-/// nothing and must still inline. A chunk that fails to parse yields false: the
-/// bundler already emitted it, so a parse failure here is this pass being wrong
-/// about the syntax, and it must never be what fails or degrades a build.
-fn reaches_cluster(source: &str) -> bool {
+/// The authored ESM `node:cluster` keeps its prefix, and the interop shim Rolldown
+/// writes around it is a bare `require("cluster")`.
+fn is_cluster(specifier: &str) -> bool {
+    matches!(specifier, "cluster" | "node:cluster")
+}
+
+/// `node:child_process`, likewise.
+fn is_child_process(specifier: &str) -> bool {
+    matches!(specifier, "child_process" | "node:child_process")
+}
+
+/// Whether a chunk names a builtin `is_target` accepts as a module specifier.
+///
+/// Import syntax is not the only route — a chunk can also take the module from
+/// `createRequire(import.meta.url)(…)`, from `process.getBuiltinModule(…)`, or from
+/// the renamed `__require` a bundler emits — and every one of them ends in the same
+/// re-entry crash, so the callee shapes in `resolves_builtin` count too. AST rather
+/// than a substring search because both builtins this is asked about are spelled
+/// with ordinary English words: a payload logging "cluster failed", or one whose
+/// dependency ships a `clusterApiUrl` export, resolves nothing and must still take
+/// the no-extract container. A chunk that fails to parse yields false: the bundler
+/// already emitted it, so a parse failure here is this pass being wrong about the
+/// syntax, and it must never be what fails or degrades a build.
+///
+/// What it cannot see is a COMPUTED specifier, and nothing reading the emitted
+/// chunks can. `Inputs::computes_module_specifier` carries that case, from a scan
+/// of the application's own modules before they were bundled.
+fn reaches_builtin(source: &str, is_target: fn(&str) -> bool) -> bool {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::{
         CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression,
@@ -396,10 +423,6 @@ fn reaches_cluster(source: &str) -> bool {
     use oxc_ast_visit::{Visit, walk};
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-
-    fn is_cluster(specifier: &str) -> bool {
-        matches!(specifier, "cluster" | "node:cluster")
-    }
 
     /// A no-substitution template literal is as static as a string literal, and
     /// the minifier emits both.
@@ -452,26 +475,26 @@ fn reaches_cluster(source: &str) -> bool {
         }
     }
 
-    #[derive(Default)]
     struct Visitor {
+        is_target: fn(&str) -> bool,
         found: bool,
     }
 
     impl<'a> Visit<'a> for Visitor {
         fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
-            self.found |= is_cluster(it.source.value.as_str());
+            self.found |= (self.is_target)(it.source.value.as_str());
             walk::walk_import_declaration(self, it);
         }
 
         fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
             if let Some(source) = &it.source {
-                self.found |= is_cluster(source.value.as_str());
+                self.found |= (self.is_target)(source.value.as_str());
             }
             walk::walk_export_named_declaration(self, it);
         }
 
         fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
-            self.found |= is_cluster(it.source.value.as_str());
+            self.found |= (self.is_target)(it.source.value.as_str());
             walk::walk_export_all_declaration(self, it);
         }
 
@@ -479,7 +502,7 @@ fn reaches_cluster(source: &str) -> bool {
             if let Expression::ImportExpression(import) = expr
                 && let Some(specifier) = literal_specifier(&import.source)
             {
-                self.found |= is_cluster(specifier);
+                self.found |= (self.is_target)(specifier);
             }
             walk::walk_expression(self, expr);
         }
@@ -489,7 +512,7 @@ fn reaches_cluster(source: &str) -> bool {
                 && let Some(argument) = call.arguments.first().and_then(|a| a.as_expression())
                 && let Some(specifier) = literal_specifier(argument)
             {
-                self.found |= is_cluster(specifier);
+                self.found |= (self.is_target)(specifier);
             }
             walk::walk_call_expression(self, call);
         }
@@ -500,7 +523,10 @@ fn reaches_cluster(source: &str) -> bool {
     if parsed.panicked {
         return false;
     }
-    let mut visitor = Visitor::default();
+    let mut visitor = Visitor {
+        is_target,
+        found: false,
+    };
     visitor.visit_program(&parsed.program);
     visitor.found
 }
@@ -630,7 +656,7 @@ mod tests {
             worker_wrappers: 0,
             sourcemap: false,
             embeds_node: false,
-            names_child_process: false,
+            computes_module_specifier: false,
             entry,
         }
     }
@@ -650,6 +676,27 @@ mod tests {
         }
     }
 
+    /// Classify the same one-chunk payload for a single-executable container.
+    fn sea_decline_of(source: &str) -> Option<Decline> {
+        sea_decline_with(source, false)
+    }
+
+    /// As above, with the caller's "this payload can compute a specifier" signal.
+    fn sea_decline_with(source: &str, computes_module_specifier: bool) -> Option<Decline> {
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), source.as_bytes().to_vec()),
+        ];
+        let mut inputs = sealed("main.mjs");
+        inputs.computes_module_specifier = computes_module_specifier;
+        classify(&files, &inputs, Mode::Sea)
+            .expect("classification succeeds")
+            .err()
+    }
+
     /// A single-executable artifact's `process.execPath` is the artifact, and Node
     /// ignores a single-executable's `argv[1]`, so the bootstrap's `fork()` fix-up
     /// would point every fork back at the application. Only that container is
@@ -657,25 +704,48 @@ mod tests {
     /// the same payload stays eligible for the inline shape.
     #[test]
     fn a_payload_that_forks_declines_the_sea_shape_only() {
-        let files = vec![
-            AppFile::plain(
-                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
-                b"// bootstrap\n".to_vec(),
-            ),
-            AppFile::plain("main.mjs".to_string(), b"export default 1;".to_vec()),
-        ];
-        let mut inputs = sealed("main.mjs");
-        inputs.names_child_process = true;
-
+        let source = "import{fork}from\"node:child_process\";fork(\"./w.js\");";
+        assert_eq!(sea_decline_of(source), Some(Decline::ChildProcessReentry));
         assert_eq!(
-            classify(&files, &inputs, Mode::Sea).expect("classification succeeds"),
-            Err(Decline::ChildProcessReentry),
-        );
-        assert!(
-            classify(&files, &inputs, Mode::Inline)
-                .expect("classification succeeds")
-                .is_ok(),
+            decline_of(source),
+            None,
             "the inline shape keeps a real Node to fork, so it must stay eligible"
+        );
+    }
+
+    /// The routes are the ones `Decline::ClusterReentry` already covers, because
+    /// both declines read the emitted chunks through the same scan — and the last
+    /// two cases are the reason that scan replaced a substring search. `cluster` and
+    /// `child_process` are both spellings a payload can carry without resolving
+    /// anything: `clusterApiUrl` is a real export of a published package, and a
+    /// message naming either builtin is ordinary.
+    #[test]
+    fn the_fork_decline_reads_what_a_chunk_resolves_rather_than_what_it_spells() {
+        assert_eq!(
+            sea_decline_of("const cp = require(\"child_process\");cp.fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "the interop shim requires the bare builtin name"
+        );
+        assert_eq!(
+            sea_decline_of("process.getBuiltinModule(\"node:child_process\").fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "getBuiltinModule hands back the builtin with no import at all"
+        );
+        assert_eq!(
+            sea_decline_with("export default 1;", true),
+            Some(Decline::ChildProcessReentry),
+            "a payload that can build its own specifier resolves something this scan \
+             never sees, so the only safe reading is that it might fork"
+        );
+        assert_eq!(
+            sea_decline_of("import{clusterApiUrl}from\"./rpc.mjs\";clusterApiUrl(\"devnet\");"),
+            None,
+            "a published export whose NAME contains the word resolves no builtin"
+        );
+        assert_eq!(
+            sea_decline_of("console.log(\"child_process spawn failed\");"),
+            None,
+            "and neither does a message naming one"
         );
     }
 

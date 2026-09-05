@@ -325,7 +325,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         worker_wrappers: worker_wrappers.len(),
         sourcemap: opts.bundle.sourcemap != bundle::SourcemapMode::None,
         embeds_node: !opts.smol,
-        names_child_process: bundled.app_names_child_process,
+        computes_module_specifier: bundled.app_computes_module_specifier,
         entry: &entry_name,
     };
     // WHICH CONTAINER: a Node single-executable application, or nub's launcher
@@ -641,8 +641,19 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     sync_file(staged.path())?;
     live.phase("verifying", "");
     if use_sea {
+        // The entry's own length, which the self-probe compares against what the
+        // artifact's `sea.getRawAsset` hands back. `build_blob` has already
+        // refused a payload whose entry is not among the emitted chunks, so the
+        // lookup cannot miss — and a zero would simply fail the probe, which is
+        // the safe way for an impossible case to land.
+        let entry_len = app_files
+            .iter()
+            .find(|file| file.name == manifest.entry)
+            .map_or(0, |file| file.bytes.len());
         sea::verify_artifact(
             staged.path(),
+            &manifest.entry,
+            entry_len,
             &target,
             version_info.as_deref(),
             opts.hide_console,
@@ -3274,6 +3285,26 @@ fn verify_artifact(
         return Ok(());
     }
 
+    let out = run_self_probe(bin)?;
+    let ok =
+        out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("nub-probe ok");
+    if !ok {
+        bail!(
+            "the produced executable failed its self-probe (exit {:?}) — the launcher template \
+             likely has insufficient Mach-O header padding for section injection (see \
+             crates/nub-launcher/build.rs)",
+            out.status.code()
+        );
+    }
+    Ok(())
+}
+
+/// Run an artifact in probe mode and hand back what it printed.
+///
+/// Shared by both containers: the launcher answers on its own probe path, the
+/// single-executable shape from inside its blob's main, and neither caller cares
+/// which of the two spawn hazards below it was saved from.
+fn run_self_probe(bin: &Path) -> Result<std::process::Output> {
     // `Command::new` PATH-searches a bare name, so the default `--out` (the entry
     // stem, no directory component) would probe a stray PATH binary or fail to
     // spawn. Anchor a relative path to the cwd the file was just written to.
@@ -3282,8 +3313,8 @@ fn verify_artifact(
     } else {
         Path::new(".").join(bin)
     };
-    let out = match probe_once(&bin) {
-        Ok(out) => out,
+    match probe_once(&bin) {
+        Ok(out) => Ok(out),
         // A deep enough `--out` yields a binary every FILE api can read and sign
         // but that Windows will not spawn. MEASURED with this crate's own
         // artifact on Windows Server 2022: `--out` at 285 characters compiles
@@ -3316,24 +3347,12 @@ fn verify_artifact(
                     "running the self-probe on a short copy of {}, which did not spawn in place: {error}",
                     bin.display()
                 )
-            })?
+            })
         }
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("running the self-probe on {}", bin.display()));
+            Err(error).with_context(|| format!("running the self-probe on {}", bin.display()))
         }
-    };
-    let ok =
-        out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("nub-probe ok");
-    if !ok {
-        bail!(
-            "the produced executable failed its self-probe (exit {:?}) — the launcher template \
-             likely has insufficient Mach-O header padding for section injection (see \
-             crates/nub-launcher/build.rs)",
-            out.status.code()
-        );
     }
-    Ok(())
 }
 
 fn probe_once(bin: &Path) -> std::io::Result<std::process::Output> {
@@ -5490,7 +5509,7 @@ mod tests {
             support_files: Vec::new(),
             root_support_files: Vec::new(),
             bootstrap_optional: false,
-            app_names_child_process: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5567,7 +5586,7 @@ mod tests {
             support_files: Vec::new(),
             root_support_files: Vec::new(),
             bootstrap_optional: false,
-            app_names_child_process: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5621,7 +5640,7 @@ mod tests {
                 bytes: b"require('module');".to_vec(),
             }],
             bootstrap_optional: false,
-            app_names_child_process: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5692,7 +5711,7 @@ mod tests {
                 bytes: Vec::new(),
             }],
             bootstrap_optional: false,
-            app_names_child_process: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5735,7 +5754,7 @@ mod tests {
             support_files: Vec::new(),
             root_support_files: Vec::new(),
             bootstrap_optional: false,
-            app_names_child_process: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5785,7 +5804,7 @@ mod tests {
                 support_files: Vec::new(),
                 root_support_files: Vec::new(),
                 bootstrap_optional: false,
-                app_names_child_process: false,
+                app_computes_module_specifier: false,
                 dynamic_import_sites: 0,
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),

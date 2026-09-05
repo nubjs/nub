@@ -635,8 +635,18 @@ fn exec_argv(version: &NodeVersion, node_flags: &[String]) -> Vec<String> {
 /// diagnose without it: a blob present with an unflipped fuse produces a binary
 /// that runs as a plain `node` REPL, because `postject_has_resource()` returns
 /// false and Node never looks.
+///
+/// And for a host target the artifact is RUN, which is the only check that can
+/// catch the risk this shape carries and the launcher does not: the blob's layout
+/// is Node's, nub writes it by hand, and Node has already changed it once (the
+/// `mainFormat` byte at 25.7). A future field would leave every length after it
+/// misread, and no amount of reading our own bytes back would notice — the
+/// producer and the checker would share the mistake. Running it asks the only
+/// party that knows.
 pub fn verify_artifact(
     path: &Path,
+    entry: &str,
+    entry_len: usize,
     target: &TargetPlatform,
     version_info: Option<&[u8]>,
     hide_console: bool,
@@ -689,7 +699,43 @@ pub fn verify_artifact(
     // target — an un-hidden console, or an Explorer Details tab showing nothing.
     // Shared with the launcher path, which carries the full account of how the
     // resource directory's ascending-id rule loses the icon along with them.
-    super::verify_windows_dressing(&image, version_info, hide_console)
+    super::verify_windows_dressing(&image, version_info, hide_console)?;
+
+    if !target.is_host() {
+        super::note(&format!(
+            "note: cross-compiled for {} — blob verified statically; the run-it \
+             self-check needs a {} host",
+            target.triple(),
+            target.triple()
+        ));
+        return Ok(());
+    }
+
+    // The run. Its reply is the entry's own name and byte length, which is a check
+    // on the asset TABLE rather than on the blob's presence: everything above
+    // walked the container the way the runtime's `postject_find_resource` does,
+    // and nothing above could tell whether Node then read the blob's INSIDE the
+    // way nub wrote it. A drift in the header — Node has already moved it once —
+    // shifts every length after it, and the failure surfaces here as a V8 abort or
+    // as an asset that comes back the wrong size.
+    let out = super::run_self_probe(path)?;
+    let want = format!("nub-probe ok {entry} {entry_len}");
+    if !out.status.success() || String::from_utf8_lossy(&out.stdout).trim_end() != want {
+        // The tail rather than the whole of it: a misread blob aborts inside V8,
+        // and what names the abort is its last few lines under a stack that can
+        // run to hundreds.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let mut tail: Vec<&str> = stderr.lines().rev().take(10).collect();
+        tail.reverse();
+        bail!(
+            "the produced single-executable application failed its self-probe (exit {:?}) — its \
+             Node did not run the blob's main and hand back {want:?}\nstdout: {:?}\nstderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).trim_end(),
+            tail.join("\n")
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

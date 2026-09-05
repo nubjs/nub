@@ -163,6 +163,22 @@
     },
   });
 
+  // `nub compile`'s build-time self-check, the counterpart to the launcher's
+  // probe mode and deliberately the LAST thing before the app would start: every
+  // line above has already run, so reaching here proves Node accepted the blob,
+  // found the main, and got the whole loader installed. Reading the entry asset
+  // proves the chunks are in the blob and reachable through the official
+  // `getRawAsset` — which is what a drift in Node's blob layout would break, and
+  // what nothing static can check, because the layout is Node's rather than ours.
+  //
+  // Placed after the hooks rather than beside the licenses gate for exactly that
+  // reason: an early return would prove only that Node ran SOMETHING.
+  if (process.env.__NUB_COMPILED_LAUNCHER_MODE === "probe" && process.argv.length === 2) {
+    const bytes = sea.getRawAsset(ENTRY);
+    process.stdout.write(`nub-probe ok ${ENTRY} ${bytes.byteLength}\n`);
+    return;
+  }
+
   // The one line a SEA needs that no other shape does. `import()` from here is the
   // embedder's and throws ERR_UNKNOWN_BUILTIN_MODULE for anything that is not a
   // builtin — the hooks above are irrelevant to it, because the rejection happens

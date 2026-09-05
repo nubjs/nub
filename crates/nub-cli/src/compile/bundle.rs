@@ -211,14 +211,11 @@ pub struct BundleResult {
     /// regions — so the bootstrap has nothing left to do BEFORE the ESM graph and
     /// the preamble may publish the record itself (`Manifest::standalone_preamble`).
     pub bootstrap_optional: bool,
-    /// Whether an application module names `child_process`/`cluster`, which is
-    /// exactly when the bootstrap installs its `fork()` identity fix-up. That
-    /// fix-up points a fork at the Node the artifact runs on, and inside a
-    /// single-executable application there is no such Node to point at: the
-    /// artifact IS Node, and Node ignores a single-executable's `argv[1]`, so the
-    /// fork re-runs the application instead of the requested module. Read by
-    /// `compile::inline::classify` under `Mode::Sea`.
-    pub app_names_child_process: bool,
+    /// Whether an application module can compute a module specifier, so no pass
+    /// that reads the emitted chunks can know what it resolves. Read by
+    /// `compile::inline::classify` under `Mode::Sea`, which otherwise decides its
+    /// fork decline by scanning those chunks.
+    pub app_computes_module_specifier: bool,
     /// Computed `import()` sites `--allow-dynamic-import` let through. Zero
     /// unless the flag is set; the build would otherwise have failed. This is
     /// what decides whether the artifact needs a runtime resolve hook at all.
@@ -776,7 +773,7 @@ fn bundle_inner(
         support_files: prelude.support_files().collect(),
         root_support_files: prelude.root_support_files().collect(),
         bootstrap_optional: prelude.bootstrap_optional(),
-        app_names_child_process: prelude.app_names_child_process(),
+        app_computes_module_specifier: prelude.app_computes_module_specifier(),
         native_files,
         dynamic_import_sites,
         native_addons,
@@ -2071,6 +2068,12 @@ struct CompilePreamble {
     /// See [`strip_unused_bootstrap_regions`].
     app_uses_child_process: AtomicBool,
     app_uses_worker: AtomicBool,
+    /// Whether an APP module can COMPUTE a module specifier, which is the one
+    /// thing that defeats reading the emitted chunks for what they name. Set from
+    /// the same scan and on the same modules, kept apart from the flags above
+    /// because it is read for a different decision — see
+    /// [`Self::app_computes_module_specifier`].
+    app_computes_module_specifier: AtomicBool,
     /// Whether the emitted chunk is shaped for a complete V8 code cache — see
     /// [`finish_eager_startup`]. Decided by the target Node, never by the host.
     eager: bool,
@@ -2309,6 +2312,7 @@ impl CompilePreamble {
             root_support_files: Vec::new(),
             app_uses_child_process: AtomicBool::new(false),
             app_uses_worker: AtomicBool::new(false),
+            app_computes_module_specifier: AtomicBool::new(false),
             eager: false,
         }
     }
@@ -2356,6 +2360,8 @@ impl CompilePreamble {
             self.app_uses_child_process
                 .store(true, AtomicOrdering::Relaxed);
             self.app_uses_worker.store(true, AtomicOrdering::Relaxed);
+            self.app_computes_module_specifier
+                .store(true, AtomicOrdering::Relaxed);
             return;
         }
         if code.contains("child_process") || code.contains("cluster") {
@@ -2385,10 +2391,19 @@ impl CompilePreamble {
             && !self.app_uses_worker.load(AtomicOrdering::Relaxed)
     }
 
-    /// The `child_process` half of [`Self::bootstrap_optional`], read on its own
-    /// because only that half is incompatible with a single-executable container.
-    fn app_names_child_process(&self) -> bool {
-        self.app_uses_child_process.load(AtomicOrdering::Relaxed)
+    /// Whether any application module could name a builtin this compiler cannot
+    /// see — a `createRequire`, a `getBuiltinModule`, a `process.binding`, or a
+    /// `require()`/`import()` whose argument is not one static string.
+    ///
+    /// The escape hatch for every pass that decides something by reading what the
+    /// emitted chunks NAME. Read for the single-executable container's fork
+    /// decline, which is otherwise an AST scan and would be blind to exactly these
+    /// shapes. Deliberately not the `app_uses_*` flags: those over-detect on the
+    /// bare words `cluster` and `Worker` on purpose, because their consequence is
+    /// keeping an eager load, and a decline is a much more expensive answer.
+    fn app_computes_module_specifier(&self) -> bool {
+        self.app_computes_module_specifier
+            .load(AtomicOrdering::Relaxed)
     }
 
     /// Collected AFTER the graph is walked, which is what makes the strip possible:
