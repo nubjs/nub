@@ -2887,6 +2887,7 @@ dependencies = [
  "rolldown",
  "rolldown_common",
  "rolldown_error",
+ "rolldown_sourcemap",
  "rolldown_utils",
  "rustc-hash",
  "semver",

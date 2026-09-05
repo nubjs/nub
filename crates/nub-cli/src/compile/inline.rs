@@ -158,6 +158,19 @@ pub enum Decline {
     /// build was asked to produce, so a build that wants them gets exactly today's
     /// behavior.
     SourceMap,
+    /// The payload names `child_process`, so the bootstrap installs its `fork()`
+    /// identity fix-up — which sets the fork's executable to the Node the artifact
+    /// runs on. A single-executable artifact IS that Node, and Node ignores a
+    /// single-executable's `argv[1]`, so such a fork re-runs the application
+    /// rather than the requested module, and an application that forks forks
+    /// itself without end. Measured, not reasoned: a two-line `fork()` fixture
+    /// printed its first line until it was killed.
+    ///
+    /// A launcher artifact has a real Node path to hand the child, so this is a
+    /// [`Mode::Sea`] decline only. [`Self::ClusterReentry`] is the same hazard
+    /// reached through `node:cluster` and is refused for both shapes, because
+    /// `cluster` re-executes the entry rather than forking a named module.
+    ChildProcessReentry,
 }
 
 impl Decline {
@@ -171,6 +184,7 @@ impl Decline {
             Self::EmbeddedNode => "it extracts its embedded Node anyway",
             Self::ClusterReentry => "it uses node:cluster, which re-runs the executable",
             Self::SourceMap => "it was built with source maps",
+            Self::ChildProcessReentry => "it forks child processes, which re-run the executable",
         }
     }
 }
@@ -186,8 +200,30 @@ pub struct Inputs<'a> {
     pub sourcemap: bool,
     /// Whether the artifact carries a Node of its own — everything but `--smol`.
     pub embeds_node: bool,
+    /// `BundleResult::app_names_child_process`.
+    pub names_child_process: bool,
     /// The entry chunk's payload name.
     pub entry: &'a str,
+}
+
+/// Which no-extract container is asking. The eligibility rules are ALMOST the
+/// same, and the two differences are both about what a chunk's identity is.
+///
+/// The inline shape serves each chunk as a `data:` URL, which has no base: a
+/// relative specifier cannot resolve against one, so the compiler substitutes
+/// every cross-chunk specifier ahead of time and needs a topological order to do
+/// it — hence [`Decline::CyclicChunks`]. A SEA serves the same chunks from
+/// `module.registerHooks` at ordinary `file:` URLs, where relative specifiers
+/// resolve the way they do in the extracted tree and a cycle is just an ESM
+/// cycle. And [`Decline::EmbeddedNode`] is the reverse: it exists because an
+/// artifact that unpacks a Node to the cache gains nothing from serving its app
+/// from memory. A SEA unpacks nothing, so the whole premise is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// `-e` plus `data:` URLs, read back out of the executable's own tail.
+    Inline,
+    /// A Node single-executable blob, with the chunks as assets.
+    Sea,
 }
 
 /// What [`rewrite`] decided. The files come back either way: a declined payload
@@ -210,7 +246,7 @@ const ROOT_MANIFEST_NAME: &str = "package.json";
 /// reads them back out of the executable. The caller compresses the result with
 /// brotli and sets `Manifest::inline_app`.
 pub fn rewrite(files: AppFiles, inputs: &Inputs<'_>) -> Result<Rewritten> {
-    match classify(&files, inputs)? {
+    match classify(&files, inputs, Mode::Inline)? {
         Err(decline) => Ok(Rewritten::Extract(files, decline)),
         Ok(chunk_names) => {
             let loader = loader_source(inputs.entry)?;
@@ -254,7 +290,11 @@ pub fn rewrite(files: AppFiles, inputs: &Inputs<'_>) -> Result<Rewritten> {
 
 /// The eligibility half, kept separate so the borrow of `files` ends before the
 /// rewrite consumes it. Returns the chunk names on success.
-fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<String>, Decline>> {
+pub fn classify(
+    files: &AppFiles,
+    inputs: &Inputs<'_>,
+    mode: Mode,
+) -> Result<Result<BTreeSet<String>, Decline>> {
     if !inputs.sealed_module_graph {
         return Ok(Err(Decline::UnsealedGraph));
     }
@@ -266,7 +306,7 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
     }
     // Cheap and last of the caller-supplied checks, so a payload that could never
     // inline still reports the reason it could never inline rather than this one.
-    if inputs.embeds_node {
+    if mode == Mode::Inline && inputs.embeds_node {
         return Ok(Err(Decline::EmbeddedNode));
     }
     let bootstrap_name = nub_core::compile::COMPILE_BOOTSTRAP_NAME;
@@ -309,6 +349,10 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
         return Ok(Err(Decline::ClusterReentry));
     }
 
+    if mode == Mode::Sea && inputs.names_child_process {
+        return Ok(Err(Decline::ChildProcessReentry));
+    }
+
     // The chunk graph, read the way the loader will read it: a chunk depends on
     // another when it names it in a relative specifier. Textual on both sides on
     // purpose — the loader has no bundler metadata, so a graph derived from anything
@@ -324,7 +368,7 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
             .collect();
         edges.insert(file.name.as_str(), deps);
     }
-    if has_cycle(&edges) {
+    if mode == Mode::Inline && has_cycle(&edges) {
         return Ok(Err(Decline::CyclicChunks));
     }
     Ok(Ok(chunk_names))
@@ -586,6 +630,7 @@ mod tests {
             worker_wrappers: 0,
             sourcemap: false,
             embeds_node: false,
+            names_child_process: false,
             entry,
         }
     }
@@ -603,6 +648,35 @@ mod tests {
             Rewritten::Extract(_, why) => Some(why),
             Rewritten::Inline(_) => None,
         }
+    }
+
+    /// A single-executable artifact's `process.execPath` is the artifact, and Node
+    /// ignores a single-executable's `argv[1]`, so the bootstrap's `fork()` fix-up
+    /// would point every fork back at the application. Only that container is
+    /// affected: a launcher artifact hands the child a real Node path, which is why
+    /// the same payload stays eligible for the inline shape.
+    #[test]
+    fn a_payload_that_forks_declines_the_sea_shape_only() {
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), b"export default 1;".to_vec()),
+        ];
+        let mut inputs = sealed("main.mjs");
+        inputs.names_child_process = true;
+
+        assert_eq!(
+            classify(&files, &inputs, Mode::Sea).expect("classification succeeds"),
+            Err(Decline::ChildProcessReentry),
+        );
+        assert!(
+            classify(&files, &inputs, Mode::Inline)
+                .expect("classification succeeds")
+                .is_ok(),
+            "the inline shape keeps a real Node to fork, so it must stay eligible"
+        );
     }
 
     /// `cluster.fork()` re-runs `process.argv[1]`, which an inline artifact

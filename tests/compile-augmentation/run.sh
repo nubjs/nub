@@ -53,6 +53,14 @@ npm init -y >/dev/null 2>&1
 # resolving. Installed once here rather than vendored into the repo.
 npm i --silent --no-audit --no-fund react reflect-metadata >/dev/null 2>&1 \
   || { echo "could not install the fixture dependencies (offline?)" >&2; exit 2; }
+# The manifest as the setup left it, restored before every fixture. A sidecar that
+# overwrites `package.json` would otherwise decide how every LATER fixture is
+# classified — see the reset at the top of the loop.
+cp package.json .pristine-package.json
+
+# The built N-API addon, for a fixture that needs a REAL `.node` to load. Per
+# platform, so it cannot be committed beside the fixture that wants it.
+NATIVE_ADDON="${NUB_NATIVE_ADDON:-$HERE/../../runtime/addons/nub-native.node}"
 
 # The Node the artifact will embed, so the plain-node column is the SAME build
 # the other two columns run — otherwise a difference could be a version gap
@@ -81,9 +89,39 @@ for fixture in "${fixtures[@]}"; do
   name="${base%.*}"
   ext="${base##*.}"
   entry="app.$ext"
+
+  # Every fixture starts from the tree the setup built, and nothing the last one
+  # staged survives into it. The work directory is REUSED — reinstalling
+  # `node_modules` per fixture would dominate the run — so without this reset a
+  # sidecar leaks: three of them drop a `{"type":"module"}` manifest at the root,
+  # and whichever ran first then decided how every later fixture was classified.
+  # That is ordering coupling in a shared harness, which is the shape that turns
+  # into a flake nobody can reproduce. It also makes a fixture possible that
+  # NEEDS an ESM manifest without imposing one on its neighbours.
+  find . -mindepth 1 -maxdepth 1 \
+    ! -name node_modules ! -name package.json ! -name package-lock.json \
+    ! -name .node-version ! -name .pristine-package.json \
+    -exec rm -rf {} +
+  cp .pristine-package.json package.json
+
   cp "$fixture" "./$entry"
   # Anything the fixture needs beside it (a data file, a tsconfig, a worker entry).
   [ -d "$HERE/fixtures/$name.d" ] && cp -R "$HERE/fixtures/$name.d/." ./
+
+  # A fixture that needs a real native addon staged at a path of its own. Kept in
+  # a `.addon` file for the same reason `.flags` is: a table in here would drift
+  # from the fixtures it describes. A hard error rather than a skip — the addon is
+  # present wherever this harness is meant to run, and a fixture that quietly
+  # disappears is how a gate stops gating without anyone noticing.
+  if [ -f "$HERE/fixtures/$name.addon" ]; then
+    addon_rel="$(head -1 "$HERE/fixtures/$name.addon")"
+    if [ ! -f "$NATIVE_ADDON" ]; then
+      echo "fixture $name needs $NATIVE_ADDON — build it with 'make addon-fast'" >&2
+      exit 2
+    fi
+    mkdir -p "$(dirname "./$addon_rel")"
+    cp "$NATIVE_ADDON" "./$addon_rel"
+  fi
 
   # Last line AND exit status. A compiled CLI's exit code is contract — a binary
   # that returns 0 where the program returned 1 breaks every script wrapping it,

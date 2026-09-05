@@ -179,8 +179,45 @@
   };
 
   const entryUrl = urlFor(ENTRY);
-  // Not awaited, and deliberately not wrapped: an import failure must surface as
-  // the ordinary unhandled rejection Node prints for a failed ESM entry, with the
-  // `ROOT`-rooted frames the sourceURL above establishes.
-  import(entryUrl);
+  // The promise has to be OBSERVED, because Node decides two things by watching
+  // its own entry module's evaluation and this import is not that: an entry ending
+  // in an unsettled top-level await exits 0 rather than 13, and a throwing entry
+  // under `--unhandled-rejections=warn` exits 0 rather than 1. Both measured
+  // against the same file run through `nub`.
+  // Both raised from `exit`, and the line written rather than emitted, for the
+  // reasons the single-executable loader spells out: `beforeExit` can run any
+  // number of times so it proves nothing, `process.emitWarning` cannot write from
+  // `exit`, and `process.noProcessWarnings` is the parsed option Node's own copy
+  // of this diagnostic is gated on.
+  const warningsEnabled = !process.noProcessWarnings;
+
+  let settled = false;
+  const unsettled = () => {
+    if (settled || process.exitCode !== undefined) return;
+    process.exitCode = 13;
+    if (warningsEnabled) {
+      fs.writeSync(2, `Warning: Detected unsettled top-level await at ${ROOT}${ENTRY}\n`);
+    }
+  };
+  const done = () => {
+    settled = true;
+    process.off("exit", unsettled);
+  };
+  process.on("exit", unsettled);
+  import(entryUrl).then(
+    () => {
+      done();
+    },
+    (error) => {
+      done();
+      // Rethrown rather than reported, because a failed ESM ENTRY is an uncaught
+      // exception in Node and not an unhandled rejection — so it must fail the
+      // process whatever `--unhandled-rejections` says, and it must still reach an
+      // `uncaughtException` handler the application installed. The `ROOT`-rooted
+      // frames the `sourceURL` above establishes are preserved either way.
+      process.nextTick(() => {
+        throw error;
+      });
+    },
+  );
 })();

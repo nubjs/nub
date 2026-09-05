@@ -43,6 +43,7 @@ mod loaders;
 mod metafile;
 mod native;
 mod native_layout;
+mod sea;
 mod unbundlable;
 mod version_info;
 
@@ -177,13 +178,6 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         )
     );
 
-    // Resolved AND verified before any real work: a cross-compile whose launcher
-    // template is missing, or is not that platform's executable, must fail in the
-    // first second — not after downloading and recompressing a ~100 MB Node for
-    // the target. For a foreign target this may fetch the template from this
-    // release, a few hundred KB, still the cheapest step to fail on.
-    let template = launcher::locate(&target)?;
-
     // 1. Resolve `--include`/`--exclude` BEFORE bundling: a typo'd include is a
     //    sub-second failure, and paying for a full bundle first would hide that
     //    behind the slowest step in the pipeline.
@@ -235,6 +229,26 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         gate_version.0.minor,
         gate_version.0.patch,
     ));
+    opts.bundle.eager_startup =
+        bundle::eager_startup_compilation_supported(opts.bundle.target_node);
+
+    // Resolved AND verified before any real work: a cross-compile whose launcher
+    // template is missing, or is not that platform's executable, must fail in the
+    // first second — not after downloading and recompressing a ~100 MB Node for
+    // the target. For a foreign target this may fetch the template from this
+    // release, a few hundred KB, still the cheapest step to fail on.
+    //
+    // A single-executable application opens no template at all — it IS a Node —
+    // so this asks the same question the container decision below asks, minus the
+    // payload-shape half that is not known yet. Being conservative here only costs
+    // a lookup nothing reads; being eager would fail a perfectly good SEA build on
+    // a platform whose launcher this release never published, and would fetch a
+    // template over the network to do it.
+    let template = if opts.smol || !sea::supports_blob_exec_argv(&gate_version) {
+        Some(launcher::locate(&target)?)
+    } else {
+        None
+    };
 
     // 2. Bundle (Rolldown, in-process). The target's platform/arch are baked in
     //    as defines UNDER the user's, so a cross-compiled `process.platform`
@@ -305,19 +319,82 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // `--sourcemap=linked` map are both files the bundler itself parsed, so the
     // graph is sealed with either present, and neither can be reached from a
     // `data:` URL. See `compile::inline`.
-    let (app_files, inline_app, inline_decline) = match inline::rewrite(
-        app_files,
-        &inline::Inputs {
-            sealed_module_graph,
-            worker_roots: bundled.worker_roots.len(),
-            worker_wrappers: worker_wrappers.len(),
-            sourcemap: opts.bundle.sourcemap != bundle::SourcemapMode::None,
-            embeds_node: !opts.smol,
-            entry: &entry_name,
-        },
-    )? {
-        inline::Rewritten::Inline(files) => (files, true, None),
-        inline::Rewritten::Extract(files, why) => (files, false, Some(why)),
+    let no_extract_inputs = inline::Inputs {
+        sealed_module_graph,
+        worker_roots: bundled.worker_roots.len(),
+        worker_wrappers: worker_wrappers.len(),
+        sourcemap: opts.bundle.sourcemap != bundle::SourcemapMode::None,
+        embeds_node: !opts.smol,
+        names_child_process: bundled.app_names_child_process,
+        entry: &entry_name,
+    };
+    // WHICH CONTAINER: a Node single-executable application, or nub's launcher
+    // with a payload appended to it?
+    //
+    // The SEA is the default for an embedding build, and it is the same payload in
+    // a different container — the bundle, the bootstrap, the flags and the virtual
+    // root are all shared, and only the delivery differs. It wins because it drops
+    // the two terms the launcher shape cannot: the launcher process itself, and
+    // unpacking ~110 MB of Node to the cache on first run. Measured on Linux
+    // against plain `node` running the same source, 300-run minimums with a 1.49 ms
+    // baseline spread: the launcher artifact +7.20 ms, the single-executable one
+    // +0.53 — at parity with plain Node, and 1.2 ms from a SEA carrying no nub code
+    // at all.
+    //
+    // It is declined in exactly two situations. A Node too old to read `execArgv`
+    // out of the blob cannot be handed nub's flags at all
+    // (`sea::supports_blob_exec_argv`), and `--smol` embeds no Node — a SEA IS a
+    // Node, so a shape whose whole point is not carrying one cannot be one. Beyond
+    // those, a payload that needs real filesystem paths (`--external`, a surviving
+    // computed `import()`, `--include`d files, a native addon, a traced worker
+    // chunk, a linked source map) still extracts, and the eligibility pass that
+    // decides is the one the inline shape already uses.
+    let sea_capable = !opts.smol && sea::supports_blob_exec_argv(&gate_version);
+    let sea_decline = if sea_capable {
+        inline::classify(&app_files, &no_extract_inputs, inline::Mode::Sea)?.err()
+    } else {
+        None
+    };
+    let use_sea = sea_capable && sea_decline.is_none();
+
+    // The lookup above was skipped for anything that COULD be a SEA, and a decline
+    // is how that guess turns out wrong: the payload needs real paths after all, so
+    // the launcher is back and its template has to be fetched now. Still ahead of
+    // the Node download, which is the step worth failing before.
+    let template = match template {
+        _ if use_sea => Vec::new(),
+        Some(template) => template,
+        None => launcher::locate(&target)?,
+    };
+
+    // A SEA takes the chunks VERBATIM, so it skips this rewrite entirely: its
+    // loader serves them from `module.registerHooks` at real `file:` URLs, where
+    // `import.meta.url` and every relative specifier already mean what they mean in
+    // the extracted tree. See `compile::sea::payload`.
+    let (app_files, inline_app, app_delivery) = if use_sea {
+        (app_files, false, AppDelivery::Sea)
+    } else {
+        match inline::rewrite(app_files, &no_extract_inputs)? {
+            inline::Rewritten::Inline(files) => (files, true, AppDelivery::Inline),
+            inline::Rewritten::Extract(files, why) => {
+                // An embedding build reports why it is not a SEA, which is a
+                // different question from why it is not inline and has a better
+                // answer. `Decline::EmbeddedNode` — "it extracts its embedded Node
+                // anyway" — is the inline answer, and it is both uninformative and
+                // now premise-free: an embedding artifact is a SEA by default and
+                // extracts nothing. The version gate has no inline counterpart at
+                // all, so without this the artifact silently loses the SEA shape
+                // and the build says something true about a different question.
+                let why = if opts.smol {
+                    why.reason()
+                } else if let Some(sea_decline) = sea_decline {
+                    sea_decline.reason()
+                } else {
+                    "its Node predates single-executable flag support"
+                };
+                (files, false, AppDelivery::Extracted(why))
+            }
+        }
     };
     let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
@@ -387,7 +464,18 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let exact =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
-        let node = build_node_blob(&exact, &target, &cache_root, &source, opts.icu.as_deref())?;
+        let node = build_node_blob(
+            &exact,
+            &target,
+            &cache_root,
+            &source,
+            opts.icu.as_deref(),
+            if use_sea {
+                NodeDelivery::Verbatim
+            } else {
+                NodeDelivery::Compressed
+            },
+        )?;
         let summary = RuntimeSummary {
             fact: format!("Node {exact}, embedded"),
             provenance: source.to_string(),
@@ -407,35 +495,51 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // 23.5 and 23.6 while brotli is on every supported version. Nothing in Rust ever
     // decompresses these bytes, which is why the manifest's `app_compressed` — the
     // launcher's per-file zstd flag — stays false for them.
-    let app_files: Vec<_> = app_files
-        .into_iter()
-        .map(|file| {
-            // The length the LAUNCHER will find on disk, so it is read before
-            // anything below can compress or move these bytes.
-            let plain_size = file.bytes.len() as u64;
-            let bytes = if inline_app {
-                // The bootstrap alone is stored VERBATIM. The launcher reads it out
-                // of the payload to build the `-e` argument, and it carries no
-                // decompressor for this codec by design — nub-launcher is a
-                // deliberately minimal binary. Storing ~13 KB raw is what buys that.
-                if file.name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
-                    file.bytes
-                } else {
-                    brotli_encode(&file.bytes)
-                        .with_context(|| format!("brotli-compressing {}", file.name))?
-                }
-            } else {
-                zstd::encode_all(&file.bytes[..], 19)
-                    .with_context(|| format!("zstd-compressing {}", file.name))?
-            };
-            Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
+    let app_files: Vec<_> = if use_sea {
+        // Raw. A SEA's assets are mapped from the executable and handed to Node as
+        // the `ArrayBuffer` `getRawAsset` returns; compressing them would force a
+        // JavaScript decode into a string on every start, which is the copy the
+        // loader exists to avoid. They sit beside a ~110 MB Node either way.
+        app_files
+            .into_iter()
+            .map(|file| nub_core::compile::AppFile {
+                plain_size: Some(file.bytes.len() as u64),
                 name: file.name,
-                plain_size: Some(plain_size),
-                bytes,
+                bytes: file.bytes,
                 executable: file.executable,
             })
-        })
-        .collect::<Result<_>>()?;
+            .collect()
+    } else {
+        app_files
+            .into_iter()
+            .map(|file| {
+                // The length the LAUNCHER will find on disk, so it is read before
+                // anything below can compress or move these bytes.
+                let plain_size = file.bytes.len() as u64;
+                let bytes = if inline_app {
+                    // The bootstrap alone is stored VERBATIM. The launcher reads it out
+                    // of the payload to build the `-e` argument, and it carries no
+                    // decompressor for this codec by design — nub-launcher is a
+                    // deliberately minimal binary. Storing ~13 KB raw is what buys that.
+                    if file.name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
+                        file.bytes
+                    } else {
+                        brotli_encode(&file.bytes)
+                            .with_context(|| format!("brotli-compressing {}", file.name))?
+                    }
+                } else {
+                    zstd::encode_all(&file.bytes[..], 19)
+                        .with_context(|| format!("zstd-compressing {}", file.name))?
+                };
+                Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
+                    name: file.name,
+                    plain_size: Some(plain_size),
+                    bytes,
+                    executable: file.executable,
+                })
+            })
+            .collect::<Result<_>>()?
+    };
 
     // 4. Manifest + payload.
     let manifest = Manifest {
@@ -479,8 +583,20 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // giving one to the Node it spawns.
         hide_console: opts.hide_console,
         inline_app,
+        // An inline payload runs the bootstrap as `-e` and has no preload to save.
+        standalone_preamble: !inline_app
+            && bundled.bootstrap_optional
+            && supports_standalone_preamble(opts.bundle.target_node),
     };
-    let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
+    // A SEA carries no nub payload at all: the manifest above describes the
+    // launcher's container, and the launcher is not in this artifact. Everything
+    // the manifest would have told the launcher is either already true in a SEA
+    // (the entry, the exact Node) or is baked into the blob (the flags).
+    let payload = if use_sea {
+        Vec::new()
+    } else {
+        encode_with_license(&manifest, &app_files, &node.blob, &node.license)
+    };
 
     // 5. Build and verify a staged artifact before replacing the requested
     // destination. A late signing/permission/static/native-probe failure must
@@ -488,25 +604,57 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     live.phase("linking", &target.triple());
     let staged_maps = stage_detached_maps(&bundled, &out_path)?;
     let staged = StagedArtifact::new(&out_path, "artifact")?;
-    inject::inject(
-        &target,
-        &template,
-        &payload,
-        icon.as_deref(),
-        version_info.as_deref(),
-        opts.hide_console,
-        staged.path(),
-    )
-    .with_context(|| format!("writing {}", staged.path().display()))?;
+    let sea_blob_len = if use_sea {
+        let blob = sea::build_blob(&sea::Inputs {
+            app_files: &app_files,
+            entry: &manifest.entry,
+            app_sha: &manifest.app_sha256,
+            node_license: &node.license,
+            node_version: &node_version,
+            node_flags: &manifest.node_flags,
+        })?;
+        sea::inject(
+            &target,
+            &node.blob,
+            &blob,
+            icon.as_deref(),
+            version_info.as_deref(),
+            opts.hide_console,
+            staged.path(),
+        )
+        .with_context(|| format!("writing {}", staged.path().display()))?;
+        blob.len() as u64
+    } else {
+        inject::inject(
+            &target,
+            &template,
+            &payload,
+            icon.as_deref(),
+            version_info.as_deref(),
+            opts.hide_console,
+            staged.path(),
+        )
+        .with_context(|| format!("writing {}", staged.path().display()))?;
+        0
+    };
     set_executable(staged.path())?;
     sync_file(staged.path())?;
     live.phase("verifying", "");
-    verify_artifact(
-        staged.path(),
-        &target,
-        version_info.as_deref(),
-        opts.hide_console,
-    )?;
+    if use_sea {
+        sea::verify_artifact(
+            staged.path(),
+            &target,
+            version_info.as_deref(),
+            opts.hide_console,
+        )?;
+    } else {
+        verify_artifact(
+            staged.path(),
+            &target,
+            version_info.as_deref(),
+            opts.hide_console,
+        )?;
+    }
     staged.publish(&out_path)?;
 
     // Detached maps are optional debugging companions rather than part of the
@@ -528,11 +676,23 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // launcher's warm-start check — so using it here would report a Node
         // component four times the space it takes in the file.
         node_bytes: (node.blob.len() + node.license.len()) as u64,
-        app_bytes: app_files.iter().map(|f| f.bytes.len() as u64).sum(),
+        // For a SEA the app's contribution is the whole blob — the assets plus the
+        // generated main that serves them, which is the payload's real cost.
+        app_bytes: if use_sea {
+            sea_blob_len
+        } else {
+            app_files.iter().map(|f| f.bytes.len() as u64).sum()
+        },
         // Injection re-signs the whole image, so the template's own ad-hoc
         // signature never reaches the artifact and must come off its size.
-        launcher_bytes: (template.len() as u64)
-            .saturating_sub(inject::code_signature_size(target.format(), &template)),
+        // Zero for a SEA, whose container is the Node binary itself rather than a
+        // launcher template — the `node` part above already accounts for it.
+        launcher_bytes: if use_sea {
+            0
+        } else {
+            (template.len() as u64)
+                .saturating_sub(inject::code_signature_size(target.format(), &template))
+        },
         // Measured off the published file rather than predicted: the signature's
         // size is a function of the final image, which nothing before the write
         // knows. A failure to read it back is not worth failing a verified build
@@ -540,7 +700,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         signature_bytes: inject::code_signature_size_of(target.format(), &out_path).unwrap_or(0),
         shipped,
         deferred: bundled.dynamic_import_sites,
-        app_extracts: inline_decline,
+        app_delivery,
         report: opts.metafile.clone(),
         elapsed: started.elapsed(),
     };
@@ -975,14 +1135,22 @@ fn resolved_build_rows(
     // makes the answer actionable when it is the wrong one.
     rows.push((
         "app",
-        match facts.app_extracts {
-            None => vec![
+        match facts.app_delivery {
+            AppDelivery::Inline => vec![
                 ("run from the executable".to_string(), Ink::Plain),
                 ("  nothing is written to disk".to_string(), Ink::Muted),
             ],
-            Some(why) => vec![
+            // Deliberately not "nothing is written to disk": a single-executable
+            // artifact unpacks nothing, but it still writes Node's compile cache,
+            // exactly as `node app.js` does. Claiming otherwise would be the one
+            // sentence in this block a reader could act on and be wrong about.
+            AppDelivery::Sea => vec![
+                ("run from the executable".to_string(), Ink::Plain),
+                ("  a single-executable application".to_string(), Ink::Muted),
+            ],
+            AppDelivery::Extracted(why) => vec![
                 ("extracted on first run".to_string(), Ink::Plain),
-                (format!("  {}", why.reason()), Ink::Muted),
+                (format!("  {why}"), Ink::Muted),
             ],
         },
     ));
@@ -1397,6 +1565,21 @@ impl Drop for LiveLine {
 /// Every field is already in hand at the point the artifact is finished. Deriving
 /// one again at report time — re-reading the blob, re-stat'ing a payload — is how
 /// a report starts describing something other than the file that was written.
+/// How a finished artifact hands its app to Node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppDelivery {
+    /// Written to the cache on first run, for the reason given. A borrowed
+    /// reason rather than a [`inline::Decline`] because the answer comes from
+    /// whichever no-extract shape was actually refused — the single-executable
+    /// one for an embedding build, the inline one for `--smol` — and from the
+    /// Node version gate, which is neither.
+    Extracted(&'static str),
+    /// Served from the executable's own bytes as `data:` URLs, writing nothing.
+    Inline,
+    /// Served out of a Node single-executable blob.
+    Sea,
+}
+
 struct BuildFacts {
     /// The finished file, from `metadata` on what was published.
     size: u64,
@@ -1418,9 +1601,8 @@ struct BuildFacts {
     shipped: Vec<(String, &'static str)>,
     /// Surviving computed `import()` sites, from `--allow-dynamic-import`.
     deferred: usize,
-    /// `None` when the app runs straight out of the executable; otherwise why it
-    /// has to be written to the cache on first run.
-    app_extracts: Option<inline::Decline>,
+    /// How the app reaches Node at run time.
+    app_delivery: AppDelivery,
     /// Where `--metafile` wrote the build report, if it was asked for.
     report: Option<PathBuf>,
     elapsed: std::time::Duration,
@@ -1449,7 +1631,11 @@ impl BuildFacts {
             parts.push(format!("node {}", mb(self.node_bytes)));
         }
         parts.push(format!("app {}", mb(self.app_bytes)));
-        parts.push(format!("launcher {}", mb(self.launcher_bytes)));
+        // Zero for a single-executable artifact, which has no launcher at all —
+        // the container is the Node binary already named on the `node` part.
+        if self.launcher_bytes > 0 {
+            parts.push(format!("launcher {}", mb(self.launcher_bytes)));
+        }
         if self.signature_bytes > 0 {
             parts.push(format!("signature {}", mb(self.signature_bytes)));
         }
@@ -1582,6 +1768,15 @@ fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<
 /// The HOST is not checked, only the target. Everything the flag does is byte
 /// editing plus one payload field, so a hidden Windows binary cross-compiles
 /// from macOS or Linux exactly like an icon does.
+/// Whether every Node this artifact accepts has `process.getBuiltinModule`, which
+/// is how a standalone preamble reaches builtins without the bootstrap's early CJS
+/// `require` (`runtime/compile-record.mjs`). Landed at 22.3.0 with a 20.16 backport;
+/// the 20.x band is left out because a `--smol` floor there admits 21.x, which
+/// never had it, and the bootstrap preload is only ~1 ms.
+fn supports_standalone_preamble(target: Option<(u64, u64, u64)>) -> bool {
+    matches!(target, Some((major, minor, _)) if major > 22 || (major == 22 && minor >= 3))
+}
+
 fn reject_non_windows_hide_console(hide_console: bool, target: &TargetPlatform) -> Result<()> {
     if hide_console && target.format() != ContainerFormat::Pe {
         bail!(
@@ -2412,9 +2607,22 @@ struct StagedDetachedMap {
 /// the launcher checks on a warm start.
 ///
 /// `Default` is the `smol` shape: no embedded Node, so no blob, no digests, no size.
+/// How the target's Node travels inside the artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeDelivery {
+    /// zstd-19 into the launcher's payload, decompressed to the cache on first
+    /// run. The Node is a passenger; the artifact is nub's launcher.
+    Compressed,
+    /// Verbatim, because the artifact IS this binary — the single-executable
+    /// shape writes its blob into it rather than carrying it.
+    Verbatim,
+}
+
 #[derive(Default)]
 struct EmbeddedNode {
-    /// zstd-19 compressed Node binary.
+    /// The Node bytes as they go into the artifact: zstd-19 compressed under
+    /// [`NodeDelivery::Compressed`], the prepared image itself under
+    /// [`NodeDelivery::Verbatim`].
     blob: Vec<u8>,
     /// SHA-256 of the DECOMPRESSED bytes — the extraction cache key.
     sha256: String,
@@ -2422,7 +2630,7 @@ struct EmbeddedNode {
     blake3: String,
     /// Length of the same bytes — the launcher's warm-start check.
     size: u64,
-    /// zstd-19 compressed Node LICENSE.
+    /// The Node LICENSE, compressed or plain to match `blob`.
     license: Vec<u8>,
     /// The locales `--icu` kept, comma-joined, or empty for an untrimmed Node.
     /// Reaches the manifest, where it gates the launcher's official-Node dedup.
@@ -2435,6 +2643,7 @@ fn build_node_blob(
     cache_root: &Path,
     resolved_from: &str,
     icu: Option<&[String]>,
+    delivery: NodeDelivery,
 ) -> Result<EmbeddedNode> {
     let (os, arch, musl) = dist_platform(target);
     // Provisioning prints the `Using Node.js <v> (resolved from <source>)` line +
@@ -2465,6 +2674,19 @@ fn build_node_blob(
     // single compile even though the input never changes for a given Node and
     // target. Keyed by the hash of the bytes being compressed, so a stale entry
     // is not expressible: different bytes are a different key.
+    // A single-executable artifact IS this binary, so there is nothing to
+    // compress and nothing to decompress at start — which is also what removes
+    // the ~20 s zstd-19 pass on a cache miss below.
+    if delivery == NodeDelivery::Verbatim {
+        return Ok(EmbeddedNode {
+            size: bytes.len() as u64,
+            blob: bytes,
+            sha256: sha,
+            blake3: b3,
+            license,
+            icu: icu.map(|l| l.join(",")).unwrap_or_default(),
+        });
+    }
     let cached = cache_root
         .join("compile-node-blob")
         .join(format!("{sha}.zst"));
@@ -2946,32 +3168,17 @@ fn node_runs(node: &Path) -> bool {
 
 // ---- artifact verification ----------------------------------------------------
 
-/// Check the artifact before handing it to the user. Two layers, the second
-/// available only natively:
+/// The two things about a Windows artifact that only a read-back can establish,
+/// shared by both containers.
 ///
-/// 1. **Static scan (always).** Locate the payload in the produced file the way
-///    the target's loader will, and decode it. Catches a malformed injection on
-///    every target, including the cross ones that cannot be run here.
-/// 2. **Probe-mode self-check (target == host only).** Executes the artifact so it
-///    reads its own section and touches a heap allocation — the exact path an
-///    under-padded Mach-O injection corrupts into a SIGILL trap, which no static
-///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
-///    the scan but was never executed is a weaker guarantee, and the user should
-///    know which one they got.
-fn verify_artifact(
-    bin: &Path,
-    target: &TargetPlatform,
+/// A Windows binary is routinely cross-compiled and so is never executed on the
+/// build host — and both of these fail SILENTLY on the target machine: an
+/// un-hidden console window, or an Explorer Details tab showing nothing at all.
+fn verify_windows_dressing(
+    bytes: &[u8],
     version_info: Option<&[u8]>,
     hide_console: bool,
 ) -> Result<()> {
-    let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
-    let payload = inject::find_payload(target.format(), &bytes)
-        .with_context(|| format!("scanning {} for its payload", bin.display()))?
-        .context("the produced executable carries no payload — the injection did not take")?;
-    let view = nub_core::compile::decode(payload)
-        .context("the produced executable's payload does not decode")?;
-    verify_payload_shape(&view)?;
-
     // The version resource is re-read here for the same reason the payload is,
     // and it needs it more. A cross-compiled Windows binary cannot be executed
     // on this host, so this parse is the only evidence the resource is REACHABLE
@@ -2984,7 +3191,7 @@ fn verify_artifact(
     // subsystem back is the only thing standing between a silently un-hidden
     // binary and the user discovering it on the target machine.
     if hide_console {
-        let subsystem = inject::pe_subsystem(&bytes).context(
+        let subsystem = inject::pe_subsystem(bytes).context(
             "the produced executable's PE optional header is unreadable, so \
              --hide-console cannot be confirmed",
         )?;
@@ -2998,8 +3205,8 @@ fn verify_artifact(
     }
 
     if let Some(encoded) = version_info {
-        let found = inject::find_version_resource(&bytes)
-            .with_context(|| format!("scanning {} for its version resource", bin.display()))?
+        let found = inject::find_version_resource(bytes)
+            .context("scanning the produced executable for its version resource")?
             .context(
                 "the produced executable carries no version resource, so its metadata \
                  would not appear in Explorer — the injection did not take",
@@ -3026,6 +3233,36 @@ fn verify_artifact(
             );
         }
     }
+    Ok(())
+}
+
+/// Check the artifact before handing it to the user. Two layers, the second
+/// available only natively:
+///
+/// 1. **Static scan (always).** Locate the payload in the produced file the way
+///    the target's loader will, and decode it. Catches a malformed injection on
+///    every target, including the cross ones that cannot be run here.
+/// 2. **Probe-mode self-check (target == host only).** Executes the artifact so it
+///    reads its own section and touches a heap allocation — the exact path an
+///    under-padded Mach-O injection corrupts into a SIGILL trap, which no static
+///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
+///    the scan but was never executed is a weaker guarantee, and the user should
+///    know which one they got.
+fn verify_artifact(
+    bin: &Path,
+    target: &TargetPlatform,
+    version_info: Option<&[u8]>,
+    hide_console: bool,
+) -> Result<()> {
+    let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
+    let payload = inject::find_payload(target.format(), &bytes)
+        .with_context(|| format!("scanning {} for its payload", bin.display()))?
+        .context("the produced executable carries no payload — the injection did not take")?;
+    let view = nub_core::compile::decode(payload)
+        .context("the produced executable's payload does not decode")?;
+    verify_payload_shape(&view)?;
+
+    verify_windows_dressing(&bytes, version_info, hide_console)?;
 
     if !target.is_host() {
         note(&format!(
@@ -4210,6 +4447,7 @@ mod tests {
                 drop_debugger: false,
                 metafile: false,
                 target_node: None,
+                eager_startup: false,
             },
         }
     }
@@ -4237,6 +4475,7 @@ mod tests {
             sealed_module_graph: false,
             hide_console: false,
             inline_app: false,
+            standalone_preamble: false,
         };
         let app = vec![AppFile::plain("main.js", b"app".to_vec())];
         let missing = nub_core::compile::encode_with_license(&manifest, &app, b"node", &[]);
@@ -4602,7 +4841,7 @@ mod tests {
             // Consistent with the rest of these facts rather than an arbitrary
             // pick: `--external` and a surviving computed import are exactly what
             // leaves the graph unsealed, and this build has both.
-            app_extracts: Some(inline::Decline::UnsealedGraph),
+            app_delivery: AppDelivery::Extracted(inline::Decline::UnsealedGraph.reason()),
             report: Some(PathBuf::from("report.json")),
             elapsed: std::time::Duration::from_millis(8_880),
         }
@@ -4722,7 +4961,7 @@ mod tests {
             signature_bytes: 26_744,
             shipped: Vec::new(),
             deferred: 0,
-            app_extracts: None,
+            app_delivery: AppDelivery::Inline,
             report: None,
             elapsed: std::time::Duration::from_millis(2_400),
         };
@@ -5250,6 +5489,8 @@ mod tests {
             native_files: Vec::new(),
             support_files: Vec::new(),
             root_support_files: Vec::new(),
+            bootstrap_optional: false,
+            app_names_child_process: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5325,6 +5566,8 @@ mod tests {
             native_files: Vec::new(),
             support_files: Vec::new(),
             root_support_files: Vec::new(),
+            bootstrap_optional: false,
+            app_names_child_process: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5377,6 +5620,8 @@ mod tests {
                 name: COMPILE_BOOTSTRAP_NAME.into(),
                 bytes: b"require('module');".to_vec(),
             }],
+            bootstrap_optional: false,
+            app_names_child_process: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5446,6 +5691,8 @@ mod tests {
                 name: "a\\..\\escaped.cjs".into(),
                 bytes: Vec::new(),
             }],
+            bootstrap_optional: false,
+            app_names_child_process: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5487,6 +5734,8 @@ mod tests {
             native_files: Vec::new(),
             support_files: Vec::new(),
             root_support_files: Vec::new(),
+            bootstrap_optional: false,
+            app_names_child_process: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -5535,6 +5784,8 @@ mod tests {
                 native_files: Vec::new(),
                 support_files: Vec::new(),
                 root_support_files: Vec::new(),
+                bootstrap_optional: false,
+                app_names_child_process: false,
                 dynamic_import_sites: 0,
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),

@@ -3314,6 +3314,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 // Filled in by `compile()` once the pin chain resolves the exact
                 // target Node; the CLI layer does not know it yet.
                 target_node: None,
+                eager_startup: false,
             },
         })
         // A failed compile reports itself, in the same shape as the `warn` tier

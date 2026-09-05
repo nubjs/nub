@@ -10,6 +10,8 @@
 //!      curl/wget and extracts it through nub-core's capped archive reader,
 //!   3. extracts the bundled app into the cache,
 //!   4. injects version-appropriate Node flags via nub-core's `compute_inject_flags`,
+//!      and hands over the compiled bootstrap — as a `--require` preload, or as a
+//!      path for the preamble to bootstrap from (`configure_compiled_bootstrap`),
 //!   5. spawns Node on the app entry, forwarding signals + the exit code
 //!      (nub-core's `status_forwarding_signals`, the same machinery as `nub run`).
 //!
@@ -47,6 +49,10 @@ const INTERNAL_MODE_ENV: &str = "__NUB_COMPILED_LAUNCHER_MODE";
 /// Private process-identity channel. The launcher always overwrites this on the
 /// child Command, so an inherited value can never spoof the compiled executable.
 const COMPILED_EXEC_PATH_ENV: &str = "__NUB_COMPILED_EXEC_PATH";
+/// The extracted bootstrap's path, for a payload the preamble bootstraps itself
+/// (`Manifest::standalone_preamble`). Consumed by `runtime/compile-record.mjs`
+/// before application code runs, so no child inherits it.
+const COMPILED_BOOTSTRAP_ENV: &str = "__NUB_COMPILED_BOOTSTRAP";
 
 /// The flags an INLINE artifact would have had in `process.execArgv`, as a JSON
 /// array. `-e` puts the script itself there instead, and the compiled bootstrap
@@ -383,10 +389,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
 
     let mut cmd = Command::new(node_path.as_os_str());
     if let Some((_, bootstrap)) = &extracted {
-        // Node runs CommonJS preloads before ESM `--import` hooks, including ones
-        // inherited through NODE_OPTIONS. Keep this absolute payload preload ahead
-        // of Nub's injected flags and the compiled entry on every supported Node.
-        cmd.arg(compiled_bootstrap_require_arg(bootstrap));
+        configure_compiled_bootstrap(&mut cmd, &view.manifest, bootstrap);
     }
     // argv0 fidelity: process.argv0 / process.title report "node", matching
     // nub-core's spawn path. The compile preamble separately restores execPath
@@ -631,6 +634,30 @@ fn compiled_bootstrap_require_arg(bootstrap: &Path) -> std::ffi::OsString {
     let mut arg = std::ffi::OsString::from("--require=");
     arg.push(bootstrap);
     arg
+}
+
+/// Hand the extracted bootstrap to Node.
+///
+/// As a `--require` preload by default: Node runs CommonJS preloads before ESM
+/// `--import` hooks, including ones inherited through NODE_OPTIONS, and the fork
+/// identity fix-up has to bind before the entry chunk hoists `node:cluster`. It goes
+/// FIRST, ahead of Nub's injected flags and the compiled entry, on every supported
+/// Node.
+///
+/// A `standalone_preamble` payload gets the bootstrap's PATH in the environment
+/// instead and publishes the record from inside the bundle
+/// (`runtime/compile-record.mjs`). The preload is the expensive half of the
+/// bootstrap: measured on darwin-arm64 in child CPU time, `--require` of an EMPTY
+/// file costs ~0.7 ms per start at any path depth (`--import` the same), and the
+/// bootstrap's own evaluation ~0.45 ms more, against a hello-world artifact's
+/// ~3.7 ms of total Node-side overhead. The compiler sets the flag only when the
+/// fix-up region is already stripped, so nothing is lost by not preloading.
+fn configure_compiled_bootstrap(cmd: &mut Command, manifest: &Manifest, bootstrap: &Path) {
+    if manifest.standalone_preamble {
+        cmd.env(COMPILED_BOOTSTRAP_ENV, bootstrap);
+    } else {
+        cmd.arg(compiled_bootstrap_require_arg(bootstrap));
+    }
 }
 
 /// Point Node's compile cache at a directory BESIDE the app extraction, never
@@ -3234,6 +3261,39 @@ mod tests {
         );
     }
 
+    /// A standalone-preamble payload passes the bootstrap through the environment
+    /// and puts NOTHING on Node's argv for it; a legacy manifest (the field absent,
+    /// so `false`) keeps the preload exactly where it was.
+    #[test]
+    fn a_standalone_preamble_payload_gets_the_bootstrap_path_not_a_preload() {
+        let bootstrap =
+            Path::new("/absolute/cache/compile-app/key").join(compile::COMPILE_BOOTSTRAP_NAME);
+        let mut manifest = test_manifest();
+        manifest.standalone_preamble = true;
+        let mut cmd = Command::new("node");
+        configure_compiled_bootstrap(&mut cmd, &manifest, &bootstrap);
+        assert_eq!(cmd.get_args().count(), 0);
+        let handed: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+            .collect();
+        assert_eq!(
+            handed,
+            vec![(
+                std::ffi::OsString::from(COMPILED_BOOTSTRAP_ENV),
+                Some(bootstrap.clone().into_os_string())
+            )]
+        );
+
+        let mut legacy = Command::new("node");
+        configure_compiled_bootstrap(&mut legacy, &test_manifest(), &bootstrap);
+        assert_eq!(legacy.get_envs().count(), 0);
+        assert_eq!(
+            legacy.get_args().collect::<Vec<_>>(),
+            vec![compiled_bootstrap_require_arg(&bootstrap).as_os_str()]
+        );
+    }
+
     /// `cache::resolve` canonicalizes, so on Windows every cache path arrives in
     /// the verbatim `\\?\` spelling — and Node cannot resolve a module through
     /// one: its CJS loader's `fs.realpathSync` dies `EISDIR: … lstat 'C:'`. That
@@ -3366,6 +3426,7 @@ mod tests {
             sealed_module_graph: false,
             hide_console: false,
             inline_app: false,
+            standalone_preamble: false,
         }
     }
 

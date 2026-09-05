@@ -9,6 +9,25 @@ const key = Symbol.for("nub.compile.bootstrap");
 // value as "do not prepend a preload", which is the truth there — a Worker started
 // from such an artifact runs without this bootstrap.
 const requireArg = __filename === "[eval]" ? undefined : `--require=${__filename}`;
+// Whether the payload's sealed graph reaches these builtins. Loading either costs
+// real startup time on EVERY run (measured on a quiet runner: child_process 1.9 ms,
+// worker_threads 1.4 ms, 2.3 ms together), and a payload that touches neither pays
+// it for nothing.
+//
+// The compiler removes a region only when its scan of the APP modules — the graph
+// minus nub's own runtime tree — found no mention of the marker at all. That scan
+// deliberately over-detects: keeping a region costs startup, whereas dropping one
+// that was needed disables the fork policy below. Each region is independently
+// removable and leaves the `false` initializer behind, so a removal cannot produce
+// a syntax error or an undefined binding.
+let needsChildProcess = false;
+let needsWorker = false;
+// #region nub:compile:childprocess
+needsChildProcess = true;
+// #endregion
+// #region nub:compile:worker
+needsWorker = true;
+// #endregion
 const descriptor = Object.getOwnPropertyDescriptor(process, key);
 const existing = descriptor?.value;
 let validExisting = false;
@@ -22,10 +41,12 @@ if (immutableDescriptor && existing !== null && typeof existing === "object") {
     const fields = Reflect.ownKeys(existing);
     validExisting =
       Object.isFrozen(existing) &&
-      fields.length === 3 &&
+      fields.length === 5 &&
       Object.hasOwn(existing, "createRequire") &&
       Object.hasOwn(existing, "getBuiltin") &&
       Object.hasOwn(existing, "requireArg") &&
+      Object.hasOwn(existing, "needsChildProcess") &&
+      Object.hasOwn(existing, "needsWorker") &&
       typeof existing.createRequire === "function" &&
       typeof existing.getBuiltin === "function" &&
       existing.requireArg === requireArg;
@@ -48,6 +69,12 @@ if (!validExisting) {
     createRequire: module_.createRequire,
     getBuiltin,
     requireArg,
+    // Published so the bundled preamble can skip its own eager loads of the same
+    // two builtins. The preamble is an INPUT to bundling, so it cannot be stripped
+    // against the finished graph the way this file is; reading the decision off
+    // the record is what lets one build-time scan drive both.
+    needsChildProcess,
+    needsWorker,
   });
 
   Object.defineProperty(process, key, {
@@ -57,7 +84,9 @@ if (!validExisting) {
     writable: false,
   });
 
-  installCompiledForkIdentity(getBuiltin("node:child_process"), process.execPath);
+  if (needsChildProcess) {
+    installCompiledForkIdentity(getBuiltin("node:child_process"), process.execPath);
+  }
 }
 
 // A compiled artifact publishes the outer executable as `process.execPath`, and

@@ -1,6 +1,6 @@
 ---
 name: gcloud-vm
-description: Provision, start, reach, and use Google Cloud VMs for nub — for any real-OS work the local macOS host and Docker can't do (real Linux-kernel enforcement, real Windows/AppContainer/MSVC, a clean multi-GB build box). Invoke whenever you think "I need a Linux box" or "I need a Windows box" — you can START the existing `nub-linux`/`nub-win` instances OR CREATE a fresh one on demand with `gcloud compute instances create`. Encodes the load-bearing gotchas: IPs change on every restart (never trust a hardcoded one), SSH user is `nub` with key `~/.ssh/nub-vm`, a RUNNING box can be a wedged box (read the serial console), size any nub-building Linux box at ≥16 GB, and prefer cross-compiling on the Mac + scp'ing the artifact over building on the VM. AUTH IS NOT A BLOCKER — `gcloud` USER auth expires constantly (org session-control revokes the refresh token), but a durable SERVICE-ACCOUNT KEY makes every VM op work non-interactively: prefix any command with `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=~/.config/pullfrog/vertex-service-account.json`. Never conclude "the VMs are unavailable" from a `Reauthentication failed. cannot prompt during non-interactive execution` error until you have tried that override.
+description: Provision, start, reach, and use Google Cloud VMs for nub — for any real-OS work the local macOS host and Docker can't do (real Linux-kernel enforcement, real Windows/AppContainer/MSVC, a clean multi-GB build box). Invoke whenever you think "I need a Linux box" or "I need a Windows box" — you can START the existing `nub-linux`/`nub-win` instances OR CREATE a fresh one on demand with `gcloud compute instances create`. Encodes the load-bearing gotchas: IPs change on every restart (never trust a hardcoded one), SSH user is `nub` with key `~/.ssh/nub-vm`, a RUNNING box can be a wedged box (read the serial console), size any nub-building Linux box at ≥16 GB, and prefer cross-compiling on the Mac + scp'ing the artifact over building on the VM. AUTH IS NOT A BLOCKER — `gcloud` USER auth expires constantly (org session-control revokes the refresh token), but a durable SERVICE-ACCOUNT KEY makes every VM op work non-interactively: prefix any command with `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=~/.config/pullfrog/vertex-service-account.json`. Never conclude "the VMs are unavailable" from a `Reauthentication failed. cannot prompt during non-interactive execution` error until you have tried that override. Boxes you create do NOT get `--max-run-duration`: it cannot be changed while the instance runs, so it strands long jobs — use the guest-side idle auto-stop instead, and delete the box when done.
 ---
 
 # Google Cloud VMs for nub
@@ -15,11 +15,86 @@ Project `pullfrog`. **An instruction that "the AWS account is frozen" says NOTHI
 
 | Name | OS | Purpose |
 |---|---|---|
-| `nub-linux` | Ubuntu 24.04 LTS, e2-standard-4 | Linux-kernel enforcement (Landlock/seccomp/bwrap/netns); carries a path-bound AppArmor `bwrap-userns` profile + `apparmor_restrict_unprivileged_userns=1` reproducing a locked-down 24.04 host |
-| `nub-corpus-linux` | Ubuntu, e2-standard-8 | corpus / harness work |
-| `nub-win2`, `nub-win3` | Windows Server 2022, e2-standard-8 | Windows AppContainer / DACL / MSVC — the only place real-MSVC FFI/runtime behavior surfaces. **Both confirmed admin (`IsInRole(Administrator)=True`) with `logman`/`wpr`/`tracerpt` present, so full ETW kernel tracing is available.** |
+| `nub-linux` | Ubuntu 24.04 LTS, e2-standard-4 | Linux-kernel enforcement (Landlock/seccomp/bwrap/netns); carries a path-bound AppArmor `bwrap-userns` profile + `apparmor_restrict_unprivileged_userns=1` reproducing a locked-down 24.04 host. **The one box worth preserving** — that profile is hand-built, so it auto-STOPs rather than auto-deletes. It carries an 8h `maxRunDuration` from before that flag was dropped for new boxes; that cap CANNOT be raised while it runs, so a job here longer than 8h gets stopped mid-flight. `STOP` keeps the disk, so restart and resume rather than losing it |
 
-They are usually TERMINATED to save billing. Start what you need; stop it when done.
+**`nub-corpus-linux`, `nub-win2` and `nub-win3` were DELETED 2026-09-01** as part of the billing cleanup below, along with `nub-win`, `nub-devloop` and `nub-win4` before them. Do not go looking for them, and do not treat their absence as an outage: recreate what you need from the recipes below, at the spec the job actually needs. The Windows boxes in particular were confirmed admin (`IsInRole(Administrator)=True`) with `logman`/`wpr`/`tracerpt` present, so a fresh Server 2022 box gives you full ETW kernel tracing the same way.
+
+They are usually TERMINATED to save billing. Start what you need, and DELETE it when done — deleting is what stops the disk charge.
+
+## ⛔ DO NOT PUT `--max-run-duration` ON A BOX YOU CREATE (reversed 2026-09-04)
+
+**A run-duration budget cannot be changed while the instance is running, and that is disqualifying.** Measured 2026-09-04, on a box holding a 1h25m acceptance sweep that needed more time than its budget allowed:
+
+```
+ERROR: Max run duration cannot be changed while the instance is running.
+```
+
+`gcloud compute instances update` does not accept the flag at all; `set-scheduling` accepts it and the API refuses. `--termination-time` is refused the same way, and *clearing* the duration counts as changing it. The only way out is to stop the instance — which kills the work the box exists for. So the flag turns a recoverable "this is taking longer than I thought" into an unrecoverable one, and it does it at the exact moment the box is most valuable.
+
+Use idle auto-stop instead (below). It targets the actual waste — a box sitting doing nothing — rather than capping useful work, and it can be tuned from inside the guest at any time.
+
+**The cost facts that motivated the budget are still true, and still worth knowing.** Measured 2026-09-01: five boxes alive, four idle between 10 hours and 26 days, carrying **$94/mo of disk that bills while TERMINATED**. `nub-win3` alone was ~$205/mo of runtime — 322 running hours in 30 days, of which **$119 was Windows licensing rather than compute** — on top of $34/mo for its 200 GB `pd-ssd`.
+
+- **`DELETE` is what stops the standing charge.** The boot disk is `autoDelete` by default, so deleting the VM takes it too; merely stopping one leaves a 200 GB `pd-ssd` billing ~$34/mo forever. Delete anything named `-tmp`, `-probe` or a builder the moment it is done.
+- **Windows is where the money is.** The licence is [$0.046 per vCPU-hour](https://docs.cloud.google.com/compute/docs/instances/windows/ms-licensing-faq), so an `e2-standard-8` Windows box costs **more in licence than in compute** ($0.368/h vs $0.268/h). Size Windows boxes by what the job needs, and prefer `--boot-disk-type pd-balanced` ($0.10/GB/mo) over `pd-ssd` ($0.17) unless the disk is genuinely the bottleneck.
+- **Verify a cleanup by listing EVERY instance and reading the list** — never by grepping for the name you expected. A cleanup check that matched `nub-win` passed while its own box, named `wingrants-…`, ran on for hours.
+
+Automated short-lived builders under `scripts/remote-build.ts` are a separate case and still carry the flag: they run ~45m unattended, nobody is there to extend anything, and the launcher dying is a real leak path.
+
+### Idle auto-stop — the mechanism that replaces a run-duration cap
+
+This is the cost mechanism, now that the run-duration cap is gone: it targets idleness directly rather than capping useful work. Ship it in the same `create` call so no box exists without it, and the box powers itself off once nothing is happening. GCE reports a guest `poweroff` as `TERMINATED`, so the disk survives and a `start` brings it back.
+
+```sh
+cat > /tmp/idle-stop.sh <<'SH'
+#!/usr/bin/env bash
+# power off once nothing has happened for $IDLE_MIN minutes
+set -euo pipefail
+IDLE_MIN=30
+STAMP=/var/tmp/nub-idle-since
+busy() {
+  who | grep -q .                     && return 0   # an SSH session is attached
+  pgrep -x 'cargo|rustc|nub' >/dev/null && return 0  # a build is running detached
+  awk '{exit ($1 > 0.2) ? 0 : 1}' /proc/loadavg      # 1-min load says real work
+}
+if busy; then rm -f "$STAMP"; exit 0; fi
+now=$(date +%s); [ -f "$STAMP" ] || printf '%s' "$now" > "$STAMP"
+if [ $(( (now - $(cat "$STAMP")) / 60 )) -ge "$IDLE_MIN" ]; then
+  logger -t nub-idle "idle ${IDLE_MIN}m, powering off"
+  systemctl poweroff
+fi
+SH
+
+cat > /tmp/idle-startup.sh <<'SH'
+#!/bin/bash
+install -m 0755 /dev/stdin /usr/local/sbin/nub-idle-stop <<'INNER'
+__IDLE_SCRIPT__
+INNER
+cat > /etc/systemd/system/nub-idle.service <<'UNIT'
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nub-idle-stop
+UNIT
+cat > /etc/systemd/system/nub-idle.timer <<'UNIT'
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload && systemctl enable --now nub-idle.timer
+SH
+python3 - <<'PY'
+p='/tmp/idle-startup.sh'; s=open(p).read()
+open(p,'w').write(s.replace('__IDLE_SCRIPT__', open('/tmp/idle-stop.sh').read().rstrip()))
+PY
+# then add to the create call:
+#   --metadata-from-file startup-script=/tmp/idle-startup.sh
+```
+
+- **`who` is the load-bearing check**, because an agent driving a long `cargo build` over SSH holds a session the whole time — the timer must not shoot the box out from under it. The `pgrep` arm covers a build detached from any session, and the load arm covers everything else.
+- **Tune `IDLE_MIN` up, never down, for a box you interact with by hand.** Thirty minutes is chosen so a poweroff never lands mid-thought. There is no run-duration backstop behind it any more, so a wedged timer means a box that bills until someone deletes it — check `instances list` when you finish with a box.
+- **Windows has no equivalent here.** Nothing reaps a Windows box for you, so DELETE it explicitly when the job is done and confirm with a full `instances list`.
 
 ## ⛔ LIFECYCLE HYGIENE — DIAGNOSE AT FIRST DETECTION, THEN DELETE
 
@@ -61,11 +136,13 @@ For an isolated/ephemeral box (a clean first-run env, a second Linux box so you 
 
 ```sh
 # Linux — size ≥16 GB if it will COMPILE nub (see the OOM gotcha); e2-standard-4 is the proven size.
+# The last two lines are NOT optional: they are what stop a forgotten box billing for weeks.
 gcloud compute instances create nub-linux-tmp \
   --zone us-central1-a --project pullfrog \
   --machine-type e2-standard-4 \
   --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud \
-  --boot-disk-size 30GB
+  --boot-disk-size 30GB \
+  --metadata-from-file startup-script=/tmp/idle-startup.sh
 
 # Wire the `nub` SSH key so you can reach it the same way (Linux):
 gcloud compute instances add-metadata nub-linux-tmp --zone us-central1-a \
@@ -103,6 +180,8 @@ icacls \$ak /grant 'Administrators:F' /grant 'SYSTEM:F'   # sshd REFUSES a loose
 Restart-Service sshd
 PS
 
+# There is no guest-side idle timer for Windows and no run-duration cap, and the licence makes this
+# the most expensive box shape in the project — so delete it explicitly the moment the job is done.
 gcloud compute instances create nub-win-tmp \
   --zone us-central1-a --project pullfrog \
   --machine-type e2-standard-8 \
@@ -165,6 +244,8 @@ CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=~/.config/pullfrog/vertex-service-account
 ```
 
 The SA (`pullfrog-vertex-e2e@pullfrog.iam.gserviceaccount.com`, project `pullfrog`) has Owner, so `list`/`describe`/`start`/`stop`/`create` all work through the override. **This is the preferred path.** Fall back to `! gcloud auth login` only if the override itself errors `Reauthentication failed. cannot prompt during non-interactive execution` (key removed/rotated).
+
+⛔ **That Owner grant is wider than this skill needs, and it is shared with something else — do not "fix" it by narrowing this SA.** The same key is the `VERTEX_SERVICE_ACCOUNT_JSON` GitHub Actions secret in `pullfrog/app`, where it is used *only* to authenticate Gemini inference. Narrowing it to `roles/aiplatform.user` — the obvious tightening if you look at the pullfrog side alone — silently breaks **every VM operation in this skill**, because that role carries no compute permission at all. The correct shape is two accounts: leave CI with a Vertex-only SA, and mint a separate `roles/compute.instanceAdmin.v1` key for VM ops that never enters CI. Until that split exists, treat this key as an operator credential and keep it off any surface an untrusted run can read.
 
 ## Gotchas
 
