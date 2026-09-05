@@ -1,0 +1,14 @@
+# Phase-2-exit probe (epic 2.1): the compiler + CATALOG + matcher drive the new Landlock
+# build-jail primitive (`apply_landlock`) end-to-end. supervised-fs proved the separate
+# `confine_without_landlock` fork path; this proves the build-jail Command+pre_exec path,
+# and that the per-package catalog egress verdict reaches enforcement. Own workspace, Linux-only.
+[workspace]
+
+[package]
+name = "build-jail-landlock-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nub-sandbox = { path = "../../crates/nub-sandbox" }
