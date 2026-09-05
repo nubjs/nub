@@ -211,6 +211,14 @@ pub struct BundleResult {
     /// regions — so the bootstrap has nothing left to do BEFORE the ESM graph and
     /// the preamble may publish the record itself (`Manifest::standalone_preamble`).
     pub bootstrap_optional: bool,
+    /// Whether an application module names `child_process`/`cluster`, which is
+    /// exactly when the bootstrap installs its `fork()` identity fix-up. That
+    /// fix-up points a fork at the Node the artifact runs on, and inside a
+    /// single-executable application there is no such Node to point at: the
+    /// artifact IS Node, and Node ignores a single-executable's `argv[1]`, so the
+    /// fork re-runs the application instead of the requested module. Read by
+    /// `compile::inline::classify` under `Mode::Sea`.
+    pub app_names_child_process: bool,
     /// Computed `import()` sites `--allow-dynamic-import` let through. Zero
     /// unless the flag is set; the build would otherwise have failed. This is
     /// what decides whether the artifact needs a runtime resolve hook at all.
@@ -768,6 +776,7 @@ fn bundle_inner(
         support_files: prelude.support_files().collect(),
         root_support_files: prelude.root_support_files().collect(),
         bootstrap_optional: prelude.bootstrap_optional(),
+        app_names_child_process: prelude.app_names_child_process(),
         native_files,
         dynamic_import_sites,
         native_addons,
@@ -2374,6 +2383,12 @@ impl CompilePreamble {
     fn bootstrap_optional(&self) -> bool {
         !self.app_uses_child_process.load(AtomicOrdering::Relaxed)
             && !self.app_uses_worker.load(AtomicOrdering::Relaxed)
+    }
+
+    /// The `child_process` half of [`Self::bootstrap_optional`], read on its own
+    /// because only that half is incompatible with a single-executable container.
+    fn app_names_child_process(&self) -> bool {
+        self.app_uses_child_process.load(AtomicOrdering::Relaxed)
     }
 
     /// Collected AFTER the graph is walked, which is what makes the strip possible:

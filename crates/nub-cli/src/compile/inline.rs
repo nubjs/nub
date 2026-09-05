@@ -158,6 +158,19 @@ pub enum Decline {
     /// build was asked to produce, so a build that wants them gets exactly today's
     /// behavior.
     SourceMap,
+    /// The payload names `child_process`, so the bootstrap installs its `fork()`
+    /// identity fix-up — which sets the fork's executable to the Node the artifact
+    /// runs on. A single-executable artifact IS that Node, and Node ignores a
+    /// single-executable's `argv[1]`, so such a fork re-runs the application
+    /// rather than the requested module, and an application that forks forks
+    /// itself without end. Measured, not reasoned: a two-line `fork()` fixture
+    /// printed its first line until it was killed.
+    ///
+    /// A launcher artifact has a real Node path to hand the child, so this is a
+    /// [`Mode::Sea`] decline only. [`Self::ClusterReentry`] is the same hazard
+    /// reached through `node:cluster` and is refused for both shapes, because
+    /// `cluster` re-executes the entry rather than forking a named module.
+    ChildProcessReentry,
 }
 
 impl Decline {
@@ -171,6 +184,9 @@ impl Decline {
             Self::EmbeddedNode => "it extracts its embedded Node anyway",
             Self::ClusterReentry => "it uses node:cluster, which re-runs the executable",
             Self::SourceMap => "it was built with source maps",
+            Self::ChildProcessReentry => {
+                "it forks child processes, which re-run the executable"
+            }
         }
     }
 }
@@ -186,6 +202,8 @@ pub struct Inputs<'a> {
     pub sourcemap: bool,
     /// Whether the artifact carries a Node of its own — everything but `--smol`.
     pub embeds_node: bool,
+    /// `BundleResult::app_names_child_process`.
+    pub names_child_process: bool,
     /// The entry chunk's payload name.
     pub entry: &'a str,
 }
@@ -331,6 +349,10 @@ pub fn classify(
         .any(|file| std::str::from_utf8(&file.bytes).is_ok_and(reaches_cluster))
     {
         return Ok(Err(Decline::ClusterReentry));
+    }
+
+    if mode == Mode::Sea && inputs.names_child_process {
+        return Ok(Err(Decline::ChildProcessReentry));
     }
 
     // The chunk graph, read the way the loader will read it: a chunk depends on
@@ -610,6 +632,7 @@ mod tests {
             worker_wrappers: 0,
             sourcemap: false,
             embeds_node: false,
+            names_child_process: false,
             entry,
         }
     }
@@ -627,6 +650,35 @@ mod tests {
             Rewritten::Extract(_, why) => Some(why),
             Rewritten::Inline(_) => None,
         }
+    }
+
+    /// A single-executable artifact's `process.execPath` is the artifact, and Node
+    /// ignores a single-executable's `argv[1]`, so the bootstrap's `fork()` fix-up
+    /// would point every fork back at the application. Only that container is
+    /// affected: a launcher artifact hands the child a real Node path, which is why
+    /// the same payload stays eligible for the inline shape.
+    #[test]
+    fn a_payload_that_forks_declines_the_sea_shape_only() {
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), b"export default 1;".to_vec()),
+        ];
+        let mut inputs = sealed("main.mjs");
+        inputs.names_child_process = true;
+
+        assert_eq!(
+            classify(&files, &inputs, Mode::Sea).expect("classification succeeds"),
+            Err(Decline::ChildProcessReentry),
+        );
+        assert!(
+            classify(&files, &inputs, Mode::Inline)
+                .expect("classification succeeds")
+                .is_ok(),
+            "the inline shape keeps a real Node to fork, so it must stay eligible"
+        );
     }
 
     /// `cluster.fork()` re-runs `process.argv[1]`, which an inline artifact

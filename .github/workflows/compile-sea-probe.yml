@@ -68,13 +68,6 @@ jobs:
         shell: bash
         run: node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/native-probe"
 
-      # Below the execArgv backport floor nub cannot hand the artifact its Node
-      # flags through the blob, so the container decision has to fall back. This
-      # is the only assertion that the gate is a gate rather than a constant.
-      - name: A Node below the execArgv floor keeps the launcher
-        shell: bash
-        run: node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/old-probe" --target 22.19.0 --expect launcher
-
       - name: musl target, run in Alpine
         if: matrix.musl
         shell: bash
@@ -82,3 +75,10 @@ jobs:
           node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/musl-probe" \
             --platform ${{ matrix.musl }} \
             --run-with "docker run --rm -v {dir}:{dir} -w {dir} alpine:3.20"
+
+      # Below the execArgv backport floor nub cannot hand the artifact its Node
+      # flags through the blob, so the container decision has to fall back. This
+      # is the only assertion that the gate is a gate rather than a constant.
+      - name: A Node below the execArgv floor keeps the launcher
+        shell: bash
+        run: node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/old-probe" --target 22.19.0 --expect launcher
