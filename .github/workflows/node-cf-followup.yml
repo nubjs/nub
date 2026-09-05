@@ -32,7 +32,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh run download "${{ inputs.run_id || env.RUN_ID }}" -n cf-bins -D bins -R "$GITHUB_REPOSITORY"
       - name: Measure
-        run: tests/node-cf-followup/probe.sh bins/node-baseline bins/node-macos-cf "$RUNNER_TEMP/fu" | tee followup.txt
+        run: tests/node-cf-followup/phases.sh bins/node-baseline bins/node-macos-cf tests/node-startup-probe/harness "$RUNNER_TEMP/fu" | tee followup.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
