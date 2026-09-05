@@ -340,8 +340,8 @@ fn build_supervised_plan(
     // Allow-only FS boundary: build the same Landlock ruleset the build-jail path uses, granting
     // the authored allow-set plus the system read floor plus the entry program. `None` when the
     // policy does not confine the filesystem (a pure net/env policy) — the child then skips
-    // `restrict_self`. Deny-inside-allow write carve-outs (the USER_NOTIF write-broker) layer on
-    // top of this in a later 1.4 step.
+    // `restrict_self`. The Landlock UNION cannot subtract, so a Deny rule INSIDE a granted
+    // subtree (`.git/hooks`, `.git/config`, the policy file) is carried by the write broker below.
     let ruleset = if fs_confines(&policy.fs) {
         Some(
             super::linux_landlock::build(policy, tmp_dir, Some(&program_abs)).map_err(|reason| {
@@ -354,8 +354,28 @@ fn build_supervised_plan(
     } else {
         None
     };
+    // When fs is confined the write broker becomes THE write-intent authority (it performs opens
+    // outside Landlock), so it carries the write-side of exactly what Landlock grants PLUS the
+    // deny-inside-allow carve-outs — `write_broker_ruleset` derives both from the same grants the
+    // ruleset above is built from. `None` for a pure net/env policy, so no write-intent syscall
+    // is trapped. Armed in lock-step with the ruleset (both gate on `fs_confines`).
+    let write_policy = if ruleset.is_some() {
+        Some(
+            super::linux_landlock::write_broker_ruleset(policy, tmp_dir, Some(&program_abs))
+                .map_err(|reason| Degradation {
+                    lost: vec!["fs".to_string()],
+                    reason: Some(reason),
+                })?,
+        )
+    } else {
+        None
+    };
     Ok(super::SupervisedPlan {
-        egress: super::linux_supervisor::EgressPolicy { allow_all, allow },
+        egress: super::linux_supervisor::EgressPolicy {
+            allow_all,
+            allow,
+            write_policy,
+        },
         argv,
         envp,
         cwd,

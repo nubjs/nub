@@ -86,6 +86,41 @@ fn main() {
         "curl -sS -4 -o /dev/null --connect-timeout 8 --max-time 15 https://www.google.com/",
     );
 
+    // ---- deny-inside-allow WRITE carve-out (the USER_NOTIF write broker) ----
+    // A repo the child may write, with `.git/hooks` carved out even though it sits inside the
+    // granted subtree — the self-protection Landlock's union cannot express.
+    let repo = format!("{base}/repo");
+    let hooks = format!("{repo}/.git/hooks");
+    std::fs::create_dir_all(format!("{repo}/src")).expect("mkdir repo/src");
+    std::fs::create_dir_all(&hooks).expect("mkdir repo/.git/hooks");
+    let carve = policy(json!({ "fs": { &repo: "rw", &hooks: false } }));
+    let nocarve = policy(json!({ "fs": { &repo: "rw" } }));
+    // Show the compiled Deny rules so a false negative (broker never armed) is visible.
+    let denies: Vec<&str> = carve
+        .fs
+        .rules
+        .entries
+        .iter()
+        .filter(|r| r.effect == nub_sandbox::policy::Effect::Deny)
+        .map(|r| r.matcher.as_str())
+        .collect();
+    eprintln!("carve policy Deny rules: {denies:?}");
+
+    let carve_compat = run("carve   compat", &carve, &format!("echo ok > {repo}/src/a"));
+    let carve_attack = run(
+        "carve   attack",
+        &carve,
+        &format!("echo evil > {hooks}/pre-commit"),
+    );
+    let hook_after_attack = Path::new(&format!("{hooks}/pre-commit")).exists();
+    let _ = std::fs::remove_file(format!("{hooks}/pre-commit"));
+    let carve_control = run(
+        "carve   control",
+        &nocarve,
+        &format!("echo evil > {hooks}/pre-commit"),
+    );
+    let hook_after_control = Path::new(&format!("{hooks}/pre-commit")).exists();
+
     // Independent oracle: the allowlisted file exists, the denied one does not.
     let allowed_written = Path::new(&format!("{allowed}/f")).exists();
     let denied_written = Path::new(&format!("{denied}/f")).exists();
@@ -96,7 +131,10 @@ fn main() {
     println!("control (allow <denied>,  write <denied>)   -> exit {control}   [want 0]");
     println!("compose (allow <allowed>+example.com)       -> exit {compose}   [want 0]");
     println!("attack  (allow example.com, GET google)     -> exit {net_attack}   [want != 0]");
-    println!("oracle  <allowed>/f exists={allowed_written} (want true)  <denied>/f left by deny only via control");
+    println!("carve   compat  (write repo/src)            -> exit {carve_compat}   [want 0]");
+    println!("carve   attack  (write .git/hooks, carved)  -> exit {carve_attack}   [want != 0], hook_written={hook_after_attack} [want false]");
+    println!("carve   control (write .git/hooks, no deny) -> exit {carve_control}   [want 0], hook_written={hook_after_control} [want true]");
+    println!("oracle  <allowed>/f exists={allowed_written} (want true)");
 
     let _ = std::fs::remove_dir_all(&base);
 
@@ -106,7 +144,12 @@ fn main() {
         && compose == 0
         && net_attack != 0
         && allowed_written
-        && denied_written; // denied/f exists because the control arm (allowed) wrote it
+        && denied_written // denied/f exists because the control arm (allowed) wrote it
+        && carve_compat == 0
+        && carve_attack != 0
+        && !hook_after_attack // the broker refused the hook write
+        && carve_control == 0
+        && hook_after_control; // same write lands when the carve-out is absent
     println!("RESULT: {}", if pass { "PASS" } else { "FAIL" });
     std::process::exit(if pass { 0 } else { 1 });
 }

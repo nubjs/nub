@@ -32,12 +32,15 @@
 //! dropped `linux_monitor` module.
 #![allow(dead_code)]
 
+use crate::matcher::path::PathMatcher;
+use crate::policy::{Effect, FsAccess, FsRuleSet};
 use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // seccomp USER_NOTIF ABI — hand-declared because `libc` does not expose the
@@ -130,6 +133,8 @@ const BPF_JEQ: u16 = 0x10;
 const BPF_JGE: u16 = 0x30;
 const BPF_RET: u16 = 0x06;
 const BPF_K: u16 = 0x00;
+const BPF_ALU: u16 = 0x04;
+const BPF_AND: u16 = 0x50;
 
 #[cfg(target_arch = "x86_64")]
 const AUDIT_ARCH_NATIVE: u32 = 0xC000_003E; // AUDIT_ARCH_X86_64
@@ -140,6 +145,7 @@ const AUDIT_ARCH_NATIVE: u32 = 0xC000_00B7; // AUDIT_ARCH_AARCH64
 const OFF_NR: u32 = 0;
 const OFF_ARCH: u32 = 4;
 const OFF_ARG0: u32 = 16;
+const OFF_ARG2: u32 = 32; // args[2] = 16 + 2*8; the openat flags word
 
 // Supervisor-created DGRAM sockets are pinned into this descriptor window so the
 // filter can cheaply decide which `recv*` calls are DNS sockets worth observing.
@@ -153,43 +159,172 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> seccompiler::sock_filter {
     seccompiler::sock_filter { code, jt, jf, k }
 }
 
-/// Build the connect-notifier BPF program — a faithful transcription of `route.c`'s
-/// `install_connect_notifier` filter table. `connect`/`socket`/`send{to,msg,mmsg}` become
-/// `USER_NOTIF`; `io_uring_setup` becomes a scalar `EPERM`; `read`/`recv{from,msg}` are
-/// notified ONLY for descriptors in the DNS window; everything else runs.
-fn connect_notifier_program() -> Vec<seccompiler::sock_filter> {
-    let nr = |n: libc::c_long| n as u32;
-    vec![
-        /*  0 */ stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARCH),
-        /*  1 */ jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_NATIVE, 1, 0),
-        /*  2 */ stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
-        /*  3 */ stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR),
-        /*  4 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_io_uring_setup), 14, 0),
-        /*  5 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_sendto), 11, 0),
-        /*  6 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_sendmsg), 10, 0),
-        /*  7 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_sendmmsg), 9, 0),
-        /*  8 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_connect), 8, 0),
-        /*  9 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_socket), 7, 0),
-        /* 10 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_read), 3, 0),
-        /* 11 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_recvfrom), 2, 0),
-        /* 12 */ jump(BPF_JMP | BPF_JEQ | BPF_K, nr(libc::SYS_recvmsg), 1, 0),
-        /* 13 */ stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        /* 14 */ stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARG0),
-        /* 15 */ jump(BPF_JMP | BPF_JGE | BPF_K, DNS_FD_LO, 0, 2),
-        /* 16 */ jump(BPF_JMP | BPF_JGE | BPF_K, DNS_FD_HI, 1, 0),
-        /* 17 */ stmt(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
-        /* 18 */ stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        /* 19 */ stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
-    ]
+/// One symbolic classic-BPF instruction. Jump targets are LABELS resolved to forward skip
+/// counts by [`assemble`], so adding or removing a dispatch entry can never desync a
+/// hand-counted offset — the failure mode that makes a raw filter table so dangerous.
+enum Ins {
+    /// A non-jump instruction (`LD`, `RET`, `ALU`).
+    Stmt(u16, u32),
+    /// A conditional jump. `jt`/`jf` name labels; BOTH must resolve to a LATER instruction —
+    /// classic BPF jumps forward only, and [`assemble`] panics if one does not.
+    Jump(u16, u32, &'static str, &'static str),
+    /// A label marker; emits no instruction, names the NEXT real instruction's index.
+    Label(&'static str),
 }
 
-/// Install the connect notifier and return the listener descriptor (or `-errno`).
-/// Must run AFTER `PR_SET_NO_NEW_PRIVS`.
-unsafe fn install_connect_notifier() -> libc::c_int {
-    let program = connect_notifier_program();
+/// Resolve the symbolic program to `sock_filter`s, turning each jump's target labels into the
+/// `(target − current − 1)` forward skip counts classic BPF uses.
+fn assemble(prog: &[Ins]) -> Vec<seccompiler::sock_filter> {
+    use std::collections::HashMap;
+    let mut label_at: HashMap<&'static str, usize> = HashMap::new();
+    let mut idx = 0usize;
+    for ins in prog {
+        match ins {
+            Ins::Label(name) => {
+                label_at.insert(name, idx);
+            }
+            _ => idx += 1,
+        }
+    }
+    let resolve = |name: &'static str, cur: usize| -> u8 {
+        let target = *label_at
+            .get(name)
+            .unwrap_or_else(|| panic!("bpf label `{name}` is never defined"));
+        let skip = target
+            .checked_sub(cur + 1)
+            .unwrap_or_else(|| panic!("bpf label `{name}` is not a forward jump from {cur}"));
+        u8::try_from(skip).unwrap_or_else(|_| panic!("bpf jump to `{name}` exceeds 255"))
+    };
+    let mut out = Vec::with_capacity(idx);
+    let mut cur = 0usize;
+    for ins in prog {
+        match ins {
+            Ins::Label(_) => {}
+            Ins::Stmt(code, k) => {
+                out.push(stmt(*code, *k));
+                cur += 1;
+            }
+            Ins::Jump(code, k, t, f) => {
+                out.push(jump(*code, *k, resolve(t, cur), resolve(f, cur)));
+                cur += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Write-intent open flags: an `open{at,at2}` carrying any of these can mutate, so it is
+/// notified and brokered; a pure `O_RDONLY` open never leaves the kernel (the read-deny cost
+/// is deliberately out of scope for this axis).
+fn write_open_mask() -> u32 {
+    (libc::O_WRONLY | libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC) as u32
+}
+
+/// The write-intent syscalls the broker mediates. Notified only when `write_broker` is set
+/// (a policy carries deny/protect carve-outs), so the build jail's write-heavy workload —
+/// which has none — pays nothing. `openat` is notified conditionally on its flags word; the
+/// rest are unconditional. Legacy non-`*at` entry points (`open`/`rename`/…) are not present
+/// on aarch64 and are folded into these on x86_64 by glibc, so the `*at` set is the portable
+/// floor; a production sweep of the remaining x86_64 legacy numbers is tracked in 5.2.
+const WRITE_INTENT_NRS: &[libc::c_long] = &[
+    libc::SYS_openat,
+    libc::SYS_openat2,
+    libc::SYS_mkdirat,
+    libc::SYS_unlinkat,
+    libc::SYS_symlinkat,
+    libc::SYS_linkat,
+    libc::SYS_renameat,
+    libc::SYS_renameat2,
+    libc::SYS_truncate,
+];
+
+/// Build the notifier BPF program. `connect`/`socket`/`send{to,msg,mmsg}` become `USER_NOTIF`;
+/// `io_uring_setup` becomes a scalar `EPERM` (its SQEs never re-enter this filter, so it cannot
+/// be mediated per-op); `read`/`recv{from,msg}` are notified ONLY for descriptors in the DNS
+/// window. When `write_broker` is set, the write-intent syscalls above are also notified —
+/// `openat` gated on its flags carrying a write bit — so the deny-inside-allow broker can
+/// mediate them; otherwise those syscalls are never trapped and cost nothing.
+fn notifier_program(write_broker: bool) -> Vec<seccompiler::sock_filter> {
+    let nr = |n: libc::c_long| n as u32;
+    let ld = BPF_LD | BPF_W | BPF_ABS;
+    let jeq = BPF_JMP | BPF_JEQ | BPF_K;
+    let jge = BPF_JMP | BPF_JGE | BPF_K;
+    let mut p: Vec<Ins> = vec![
+        Ins::Stmt(ld, OFF_ARCH),
+        Ins::Jump(jeq, AUDIT_ARCH_NATIVE, "nr", "kill"),
+        Ins::Label("kill"),
+        Ins::Stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        Ins::Label("nr"),
+        Ins::Stmt(ld, OFF_NR),
+        Ins::Jump(jeq, nr(libc::SYS_io_uring_setup), "eperm", "n0"),
+        Ins::Label("n0"),
+        Ins::Jump(jeq, nr(libc::SYS_sendto), "notify", "n1"),
+        Ins::Label("n1"),
+        Ins::Jump(jeq, nr(libc::SYS_sendmsg), "notify", "n2"),
+        Ins::Label("n2"),
+        Ins::Jump(jeq, nr(libc::SYS_sendmmsg), "notify", "n3"),
+        Ins::Label("n3"),
+        Ins::Jump(jeq, nr(libc::SYS_connect), "notify", "n4"),
+        Ins::Label("n4"),
+        Ins::Jump(jeq, nr(libc::SYS_socket), "notify", "n5"),
+        Ins::Label("n5"),
+        Ins::Jump(jeq, nr(libc::SYS_read), "dnscheck", "n6"),
+        Ins::Label("n6"),
+        Ins::Jump(jeq, nr(libc::SYS_recvfrom), "dnscheck", "n7"),
+        Ins::Label("n7"),
+        Ins::Jump(jeq, nr(libc::SYS_recvmsg), "dnscheck", "n8"),
+        Ins::Label("n8"),
+    ];
+    if write_broker {
+        // `openat` routes to the flags check; the rest go straight to the notifier.
+        p.push(Ins::Jump(jeq, nr(libc::SYS_openat), "openat_flags", "w_openat"));
+        p.push(Ins::Label("w_openat"));
+        for (i, syscall) in WRITE_INTENT_NRS.iter().enumerate().skip(1) {
+            let after: &'static str = WRITE_INTENT_LABELS[i];
+            p.push(Ins::Jump(jeq, nr(*syscall), "notify", after));
+            p.push(Ins::Label(after));
+        }
+    }
+    // default: not a notified syscall → run it.
+    p.push(Ins::Stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+    // DNS-window check: fd < LO or fd >= HI → allow; LO <= fd < HI → notify.
+    p.push(Ins::Label("dnscheck"));
+    p.push(Ins::Stmt(ld, OFF_ARG0));
+    p.push(Ins::Jump(jge, DNS_FD_LO, "dnschi", "allow"));
+    p.push(Ins::Label("dnschi"));
+    p.push(Ins::Jump(jge, DNS_FD_HI, "allow", "notify"));
+    if write_broker {
+        // openat flags: masked write bits == 0 → read-only → allow; else notify.
+        p.push(Ins::Label("openat_flags"));
+        p.push(Ins::Stmt(ld, OFF_ARG2));
+        p.push(Ins::Stmt(BPF_ALU | BPF_AND | BPF_K, write_open_mask()));
+        p.push(Ins::Jump(jeq, 0, "allow", "notify"));
+    }
+    // shared return tail — placed LAST so every jump above reaches it forward.
+    p.push(Ins::Label("notify"));
+    p.push(Ins::Stmt(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF));
+    p.push(Ins::Label("allow"));
+    p.push(Ins::Stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+    p.push(Ins::Label("eperm"));
+    p.push(Ins::Stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32));
+    assemble(&p)
+}
+
+/// Per-index fall-through labels for [`WRITE_INTENT_NRS`], so the dispatch loop can name the
+/// instruction after each write-intent test without allocating a label string at runtime.
+const WRITE_INTENT_LABELS: &[&str] = &[
+    "w_openat", "w_openat2", "w_mkdirat", "w_unlinkat", "w_symlinkat", "w_linkat", "w_renameat",
+    "w_renameat2", "w_truncate",
+];
+
+/// Install a pre-built notifier filter and return the listener descriptor (or `-errno`). The
+/// filter is BUILT IN THE PARENT and passed in by reference: `fork` copies it into the child,
+/// so this — which runs post-fork, pre-`execve` — allocates nothing. Must run AFTER
+/// `PR_SET_NO_NEW_PRIVS`.
+unsafe fn install_notifier(filter: &[seccompiler::sock_filter]) -> libc::c_int {
     let prog = libc::sock_fprog {
-        len: program.len() as u16,
-        filter: program.as_ptr() as *mut libc::sock_filter,
+        len: filter.len() as u16,
+        filter: filter.as_ptr() as *mut libc::sock_filter,
     };
     let rc = unsafe {
         libc::syscall(
@@ -227,6 +362,11 @@ struct SkEntry {
 struct SupState {
     allow_all: bool,
     allow: Vec<String>,
+    /// The full fs policy the write broker enforces. `Some` ⇒ the broker is THE write-intent
+    /// authority (it performs opens outside Landlock, so it must apply the whole allow-only base
+    /// AND the deny carve-outs, not just the denies — see A6). `None` ⇒ the broker is not armed
+    /// and the filter traps no write-intent syscall.
+    write_matcher: Option<Arc<PathMatcher>>,
     dns_map: Vec<DnsEntry>,
     sk: Vec<SkEntry>,
     upstream_addr_be: u32, // network-order IPv4 of the real upstream resolver
@@ -277,6 +417,12 @@ impl SupState {
         false
     }
 
+    /// A cheap clone of the write matcher, taken under the lock so the (filesystem-touching)
+    /// decision itself runs OUTSIDE it.
+    fn write_matcher(&self) -> Option<Arc<PathMatcher>> {
+        self.write_matcher.clone()
+    }
+
     fn sk_put(&mut self, tgid: u32, fd: i32, dom: i32, typ: i32) {
         if let Some(e) = self.sk.iter_mut().find(|e| e.tgid == tgid && e.fd == fd) {
             if e.dup >= 0 {
@@ -304,6 +450,7 @@ fn state() -> &'static Mutex<SupState> {
         Mutex::new(SupState {
             allow_all: false,
             allow: Vec::new(),
+            write_matcher: None,
             dns_map: Vec::new(),
             sk: Vec::new(),
             upstream_addr_be: 0,
@@ -616,6 +763,430 @@ fn stub_loop(fd: RawFd, upstream_be: u32) {
 }
 
 // ---------------------------------------------------------------------------
+// write-intent broker (deny-inside-allow for writes) — ported from wdeny.c
+// ---------------------------------------------------------------------------
+
+/// The kernel `struct open_how` for `openat2`, defined locally so the port does not depend on
+/// the libc crate exporting it. Field order and width are the stable kernel ABI.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+
+fn is_write_intent(nr: libc::c_long) -> bool {
+    WRITE_INTENT_NRS.contains(&nr)
+}
+
+/// Whether the fs policy permits a WRITE at `canon` (an absolute canonical path): the last
+/// matching rule is an Allow granting ReadWrite. A Deny, a read-only Allow, or no match (the
+/// allow-only base's default Deny) all forbid the write. This is the WHOLE fs decision, because
+/// the broker performs the op outside Landlock and so must enforce the base, not just the denies.
+fn write_allowed(matcher: &PathMatcher, canon: &str) -> bool {
+    let d = matcher.decide(Path::new(canon));
+    d.effect == Effect::Allow && d.access == FsAccess::ReadWrite
+}
+
+/// Read a NUL-terminated string at `addr` from the target's `/proc/<tid>/mem`, without the NUL.
+/// `None` on a fault or no terminator within `max` bytes.
+fn read_child_str(tid: u32, addr: u64, max: usize) -> Option<String> {
+    let mut buf = vec![0u8; max];
+    let got = unsafe { read_child_mem(tid, addr, &mut buf) };
+    if got <= 0 {
+        return None;
+    }
+    let end = buf[..got as usize].iter().position(|&b| b == 0)?;
+    String::from_utf8(buf[..end].to_vec()).ok()
+}
+
+/// readlink(`/proc/self/fd/<fd>`) — where one of the SUPERVISOR's own fds really points.
+fn fd_path(fd: RawFd) -> Option<String> {
+    let link = CString::new(format!("/proc/self/fd/{fd}")).ok()?;
+    let mut buf = vec![0u8; 4096];
+    let n = unsafe {
+        libc::readlink(
+            link.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len() - 1,
+        )
+    };
+    if n < 0 {
+        return None;
+    }
+    String::from_utf8(buf[..n as usize].to_vec()).ok()
+}
+
+/// Resolve `(tid, dirfd, path)` to a VERIFIED `O_PATH` fd of the PARENT directory, the parent's
+/// canonical path, and the final component — or `Err(errno)`. The parent is `realpath`'d as a
+/// hint, then reopened with `RESOLVE_NO_SYMLINKS` and its real target read back, so a symlink
+/// swapped in after the hint either fails the open or is seen where it truly lands. The final
+/// component is deliberately NOT followed here; the caller re-checks an opened fd's real path.
+fn resolve_parent(tid: u32, dirfd: i32, path_in: &str) -> Result<(RawFd, String, String), i32> {
+    // "/proc/self/…" / "/proc/thread-self/…" name the CHILD's process, not the supervisor's.
+    let path: String = if let Some(rest) = path_in.strip_prefix("/proc/self/") {
+        format!("/proc/{tid}/{rest}")
+    } else if let Some(rest) = path_in.strip_prefix("/proc/thread-self/") {
+        format!("/proc/{tid}/{rest}")
+    } else {
+        path_in.to_string()
+    };
+    let start = if path.starts_with('/') {
+        "/".to_string()
+    } else if dirfd == libc::AT_FDCWD {
+        format!("/proc/{tid}/cwd")
+    } else {
+        format!("/proc/{tid}/fd/{dirfd}")
+    };
+    let (dirpart, base) = match path.rfind('/') {
+        None => (".".to_string(), path.clone()),
+        Some(0) => ("/".to_string(), path[1..].to_string()),
+        Some(i) => (path[..i].to_string(), path[i + 1..].to_string()),
+    };
+    if base.is_empty() || base == "." || base == ".." {
+        return Err(libc::EINVAL);
+    }
+    let dp = dirpart.strip_prefix('/').unwrap_or(&dirpart);
+    let joined = format!("{start}/{dp}");
+    let joined_c = CString::new(joined).map_err(|_| libc::EINVAL)?;
+    let mut real = vec![0u8; libc::PATH_MAX as usize];
+    let rp = unsafe { libc::realpath(joined_c.as_ptr(), real.as_mut_ptr() as *mut libc::c_char) };
+    if rp.is_null() {
+        return Err(errno());
+    }
+    let real_len = unsafe { libc::strlen(real.as_ptr() as *const libc::c_char) };
+    let real_str = String::from_utf8_lossy(&real[..real_len]).into_owned();
+    let real_c = CString::new(real_str).map_err(|_| libc::EIO)?;
+    let how = OpenHow {
+        flags: (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: RESOLVE_NO_SYMLINKS,
+    };
+    let pfd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            libc::AT_FDCWD,
+            real_c.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    } as RawFd;
+    if pfd < 0 {
+        return Err(errno());
+    }
+    match fd_path(pfd) {
+        Some(canon) => Ok((pfd, canon, base)),
+        None => {
+            unsafe { libc::close(pfd) };
+            Err(libc::EIO)
+        }
+    }
+}
+
+/// Join a verified parent's canonical path and a final component into the full canonical path.
+fn join_full(canon: &str, base: &str) -> String {
+    if canon == "/" {
+        format!("/{base}")
+    } else {
+        format!("{canon}/{base}")
+    }
+}
+
+/// Service one write-intent notification: read the path(s) once from the child, resolve the
+/// parent(s) to verified fds, apply the deny/protect policy to the CANONICAL path, and — when
+/// allowed — perform the operation itself relative to the verified parent, splicing any opened
+/// fd back with `ADDFD`. The child's memory is never consulted after the single read, so there
+/// is nothing to race. Replies to `nfd` itself (errno on denial/failure, value on success).
+fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
+    let nr = req.data.nr as libc::c_long;
+    let a = &req.data.args;
+    // Per-syscall argument layout: which args hold (dirfd, path) and the optional second pair.
+    let (dfd, pa, dfd2, pa2): (i32, u64, i32, u64) = match nr {
+        n if n == libc::SYS_openat => (a[0] as i32, a[1], libc::AT_FDCWD, 0),
+        n if n == libc::SYS_openat2 => (a[0] as i32, a[1], libc::AT_FDCWD, 0),
+        n if n == libc::SYS_mkdirat => (a[0] as i32, a[1], libc::AT_FDCWD, 0),
+        n if n == libc::SYS_unlinkat => (a[0] as i32, a[1], libc::AT_FDCWD, 0),
+        // symlinkat(target, newdirfd, linkpath): pa2 is the target TEXT (not a path to resolve).
+        n if n == libc::SYS_symlinkat => (a[1] as i32, a[2], libc::AT_FDCWD, a[0]),
+        n if n == libc::SYS_linkat => (a[0] as i32, a[1], a[2] as i32, a[3]),
+        n if n == libc::SYS_renameat => (a[0] as i32, a[1], a[2] as i32, a[3]),
+        n if n == libc::SYS_renameat2 => (a[0] as i32, a[1], a[2] as i32, a[3]),
+        n if n == libc::SYS_truncate => (libc::AT_FDCWD, a[0], libc::AT_FDCWD, 0),
+        _ => {
+            reply_continue(nfd, req.id);
+            return;
+        }
+    };
+
+    let Some(path) = read_child_str(req.pid, pa, libc::PATH_MAX as usize) else {
+        reply(nfd, req.id, -libc::EFAULT);
+        return;
+    };
+    let path2 = if pa2 != 0 {
+        match read_child_str(req.pid, pa2, libc::PATH_MAX as usize) {
+            Some(p) => Some(p),
+            None => {
+                reply(nfd, req.id, -libc::EFAULT);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    // The notification must still be live before we act on a path read from the child.
+    let mut valid_id = req.id;
+    if ioctl_notif(nfd, notif_id_valid(), &mut valid_id as *mut _ as *mut libc::c_void) < 0 {
+        return; // child gone: nothing to answer
+    }
+
+    // The broker is THE write-intent authority for a supervised launch (it performs opens
+    // outside Landlock), so it must apply the FULL fs write policy — the allow-only base AND the
+    // deny carve-outs — not just the denies (A6). No matcher ⇒ not armed; let the child run.
+    let Some(matcher) = state().lock().unwrap().write_matcher() else {
+        reply_continue(nfd, req.id);
+        return;
+    };
+
+    let resolves_second = nr == libc::SYS_linkat || nr == libc::SYS_renameat || nr == libc::SYS_renameat2;
+
+    let mut pfd: RawFd = -1;
+    let mut pfd2: RawFd = -1;
+    let mut addfd_src: RawFd = -1;
+    let mut cloexec = false;
+    let mut err: i32 = 0;
+    let mut val: i64 = 0;
+
+    // ---- policy: resolve, then deny before performing anything ----
+    'act: {
+        let (p, canon, base) = match resolve_parent(req.pid, dfd, &path) {
+            Ok(v) => v,
+            Err(e) => {
+                err = e;
+                break 'act;
+            }
+        };
+        pfd = p;
+        let full = join_full(&canon, &base);
+        if !write_allowed(&matcher, &full) {
+            eprintln!("SUP DENY write {full} -> EPERM");
+            err = libc::EPERM;
+            break 'act;
+        }
+
+        let mut base2 = String::new();
+        if resolves_second {
+            let path2_ref = path2.as_deref().unwrap_or("");
+            let (p2, canon2, b2) = match resolve_parent(req.pid, dfd2, path2_ref) {
+                Ok(v) => v,
+                Err(e) => {
+                    err = e;
+                    break 'act;
+                }
+            };
+            pfd2 = p2;
+            base2 = b2;
+            let full2 = join_full(&canon2, &base2);
+            if !write_allowed(&matcher, &full2) {
+                eprintln!("SUP DENY write {full2} -> EPERM");
+                err = libc::EPERM;
+                break 'act;
+            }
+            // linkat(AT_SYMLINK_FOLLOW) aliases the TARGET of a source symlink; the new hard link
+            // grants write to whatever the source really points at, so that real path must ITSELF
+            // be write-allowed (wdeny self-review 2026-09-04).
+            if nr == libc::SYS_linkat && (a[4] as i32 & libc::AT_SYMLINK_FOLLOW) != 0 {
+                let srcjoin = join_full(&canon, &base);
+                let src_c = CString::new(srcjoin).ok();
+                let mut srcreal = vec![0u8; libc::PATH_MAX as usize];
+                let ok = src_c.as_ref().map(|c| unsafe {
+                    !libc::realpath(c.as_ptr(), srcreal.as_mut_ptr() as *mut libc::c_char).is_null()
+                });
+                let refused = match ok {
+                    Some(true) => {
+                        let len = unsafe { libc::strlen(srcreal.as_ptr() as *const libc::c_char) };
+                        let real = String::from_utf8_lossy(&srcreal[..len]).into_owned();
+                        !write_allowed(&matcher, &real)
+                    }
+                    _ => true, // could not resolve the source → refuse
+                };
+                if refused {
+                    err = libc::EPERM;
+                    break 'act;
+                }
+            }
+        }
+
+        // ---- allowed: perform it ourselves on the verified parent fd(s) ----
+        match nr {
+            n if n == libc::SYS_openat => {
+                let flags = a[2] as i32;
+                let mode = a[3] as libc::mode_t;
+                let fd = unsafe {
+                    libc::openat(pfd, cstr(&base).as_ptr(), flags & !libc::O_CLOEXEC, mode as libc::c_uint)
+                };
+                if fd < 0 {
+                    err = errno();
+                    break 'act;
+                }
+                if fd_path(fd).map(|w| !write_allowed(&matcher, &w)).unwrap_or(false) {
+                    unsafe { libc::close(fd) };
+                    err = libc::EPERM;
+                    break 'act;
+                }
+                addfd_src = fd;
+                cloexec = flags & libc::O_CLOEXEC != 0;
+            }
+            n if n == libc::SYS_openat2 => {
+                let mut how = OpenHow::default();
+                let got = unsafe {
+                    read_child_mem(
+                        req.pid,
+                        a[2],
+                        std::slice::from_raw_parts_mut(
+                            &mut how as *mut OpenHow as *mut u8,
+                            std::mem::size_of::<OpenHow>(),
+                        ),
+                    )
+                };
+                if got != std::mem::size_of::<OpenHow>() as isize {
+                    err = libc::EFAULT;
+                    break 'act;
+                }
+                let fd = unsafe {
+                    libc::syscall(
+                        libc::SYS_openat2,
+                        pfd,
+                        cstr(&base).as_ptr(),
+                        &how as *const OpenHow,
+                        std::mem::size_of::<OpenHow>(),
+                    )
+                } as RawFd;
+                if fd < 0 {
+                    err = errno();
+                    break 'act;
+                }
+                if fd_path(fd).map(|w| !write_allowed(&matcher, &w)).unwrap_or(false) {
+                    unsafe { libc::close(fd) };
+                    err = libc::EPERM;
+                    break 'act;
+                }
+                addfd_src = fd;
+                cloexec = how.flags & libc::O_CLOEXEC as u64 != 0;
+            }
+            n if n == libc::SYS_mkdirat => {
+                if unsafe { libc::mkdirat(pfd, cstr(&base).as_ptr(), a[2] as libc::mode_t) } < 0 {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_unlinkat => {
+                if unsafe { libc::unlinkat(pfd, cstr(&base).as_ptr(), a[2] as i32) } < 0 {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_symlinkat => {
+                let target = cstr(path2.as_deref().unwrap_or(""));
+                if unsafe { libc::symlinkat(target.as_ptr(), pfd, cstr(&base).as_ptr()) } < 0 {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_linkat => {
+                if unsafe {
+                    libc::linkat(pfd, cstr(&base).as_ptr(), pfd2, cstr(&base2).as_ptr(), a[4] as i32)
+                } < 0
+                {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_renameat => {
+                if unsafe { libc::renameat(pfd, cstr(&base).as_ptr(), pfd2, cstr(&base2).as_ptr()) }
+                    < 0
+                {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_renameat2 => {
+                if unsafe {
+                    libc::syscall(
+                        libc::SYS_renameat2,
+                        pfd,
+                        cstr(&base).as_ptr(),
+                        pfd2,
+                        cstr(&base2).as_ptr(),
+                        a[4] as libc::c_uint,
+                    )
+                } < 0
+                {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_truncate => {
+                let fd = unsafe {
+                    libc::openat(pfd, cstr(&base).as_ptr(), libc::O_WRONLY | libc::O_NOFOLLOW, 0)
+                };
+                if fd < 0 {
+                    err = errno();
+                    break 'act;
+                }
+                if fd_path(fd)
+                    .map(|w| !write_allowed(&matcher, &w))
+                    .unwrap_or(false)
+                {
+                    unsafe { libc::close(fd) };
+                    err = libc::EPERM;
+                    break 'act;
+                }
+                if unsafe { libc::ftruncate(fd, a[1] as libc::off_t) } < 0 {
+                    err = errno();
+                }
+                unsafe { libc::close(fd) };
+            }
+            _ => {}
+        }
+    }
+
+    // ---- reply: splice an opened fd, or return the errno/value ----
+    if addfd_src >= 0 {
+        let mut af = SeccompNotifAddfd {
+            id: req.id,
+            srcfd: addfd_src as u32,
+            newfd_flags: if cloexec { libc::O_CLOEXEC as u32 } else { 0 },
+            ..Default::default()
+        };
+        let newfd = ioctl_notif(nfd, notif_addfd(), &mut af as *mut _ as *mut libc::c_void);
+        unsafe { libc::close(addfd_src) };
+        if newfd < 0 {
+            err = libc::EMFILE;
+        } else {
+            val = newfd as i64;
+        }
+    }
+    let mut r = SeccompNotifResp {
+        id: req.id,
+        val: if err != 0 { 0 } else { val },
+        error: if err != 0 { -err } else { 0 },
+        ..Default::default()
+    };
+    if ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void) < 0 {
+        eprintln!("[sup] SEND: {}", io::Error::last_os_error());
+    }
+    if pfd >= 0 {
+        unsafe { libc::close(pfd) };
+    }
+    if pfd2 >= 0 {
+        unsafe { libc::close(pfd2) };
+    }
+}
+
+/// A `CString` for a path component, empty on an interior NUL (which cannot occur in a real
+/// path component but keeps the perform step total).
+fn cstr(s: &str) -> CString {
+    CString::new(s).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // the supervisor loop
 // ---------------------------------------------------------------------------
 
@@ -633,6 +1204,14 @@ fn supervisor(nfd: RawFd) {
         }
         let nr = req.data.nr as libc::c_long;
         let cfd = req.data.args[0] as i32;
+
+        // Write-intent syscalls: the deny-inside-allow broker. Only reached when the filter was
+        // built with the write branch (a policy carried carve-outs), so this is inert for the
+        // build jail.
+        if is_write_intent(nr) {
+            handle_write_intent(nfd, &req);
+            continue;
+        }
 
         // DNS-socket recv*: observe the reply without consuming it, then CONTINUE.
         if nr == libc::SYS_recvfrom || nr == libc::SYS_read || nr == libc::SYS_recvmsg {
@@ -954,10 +1533,24 @@ fn supervisor(nfd: RawFd) {
 // public entry: run a command under the transparent egress supervisor
 // ---------------------------------------------------------------------------
 
-/// The egress allowlist for [`run_supervised`].
+/// The egress allowlist plus (for a supervised launch that confines the filesystem) the full fs
+/// policy the write broker enforces.
 pub struct EgressPolicy {
     pub allow_all: bool,
     pub allow: Vec<String>,
+    /// `Some` ⇒ arm the write broker as THE write-intent authority, enforcing this whole fs
+    /// policy (allow-only base + deny carve-outs). `None` ⇒ no filesystem confinement on this
+    /// launch, so the filter traps no write-intent syscall (the build jail's coarse path, and any
+    /// net-only policy).
+    pub write_policy: Option<FsRuleSet>,
+}
+
+impl EgressPolicy {
+    /// Whether this policy arms the write broker. Governs whether the BPF filter includes the
+    /// write-intent dispatch, so a launch that does not confine the filesystem pays nothing.
+    fn write_broker(&self) -> bool {
+        self.write_policy.is_some()
+    }
 }
 
 /// Fork `argv` under the connect-notifier, hand its listener fd to an in-process supervisor
@@ -968,10 +1561,14 @@ pub struct EgressPolicy {
 /// library launch path (where the confined child is spawned via `Command`/`pre_exec` rather
 /// than a bespoke fork) is deliberately left to the sandbox launch code.
 pub fn run_supervised(policy: EgressPolicy, argv: &[CString]) -> io::Result<i32> {
+    // Build the filter in the PARENT (allocation is fine here); `fork` copies it into the child,
+    // which installs it with no post-fork allocation.
+    let filter = notifier_program(policy.write_broker());
     {
         let mut st = state().lock().unwrap();
         st.allow_all = policy.allow_all;
         st.allow = policy.allow.clone();
+        st.write_matcher = policy.write_policy.as_ref().map(|s| Arc::new(PathMatcher::new(s)));
     }
     start_stub()?;
 
@@ -1000,7 +1597,7 @@ pub fn run_supervised(policy: EgressPolicy, argv: &[CString]) -> io::Result<i32>
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
                 libc::_exit(2);
             }
-            let nfd = install_connect_notifier();
+            let nfd = install_notifier(&filter);
             if nfd < 0 {
                 libc::_exit(3);
             }
@@ -1179,10 +1776,14 @@ pub(super) fn spawn_supervised(
     policy: EgressPolicy,
     launch: SupervisedLaunch,
 ) -> io::Result<SupervisedChild> {
+    // Built in the PARENT and copied into the child by `fork`; the child installs it without
+    // allocating. The write-intent dispatch is present only when the policy carries carve-outs.
+    let filter = notifier_program(policy.write_broker());
     {
         let mut st = state().lock().unwrap();
         st.allow_all = policy.allow_all;
         st.allow = policy.allow.clone();
+        st.write_matcher = policy.write_policy.as_ref().map(|s| Arc::new(PathMatcher::new(s)));
     }
     start_stub()?;
 
@@ -1250,7 +1851,7 @@ pub(super) fn spawn_supervised(
             // The USER_NOTIF listener, LAST so the ceiling above never traps to this supervisor.
             // `nfd` is handed to the parent then CLOSED before `execve`, so it never leaks into
             // the target (which could otherwise service its own notifications with CONTINUE).
-            let nfd = install_connect_notifier();
+            let nfd = install_notifier(&filter);
             if nfd < 0 {
                 libc::_exit(17);
             }

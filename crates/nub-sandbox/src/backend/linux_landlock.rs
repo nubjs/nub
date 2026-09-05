@@ -203,6 +203,13 @@ pub(crate) enum LandlockAccess {
 }
 
 impl LandlockAccess {
+    /// Whether this grant permits WRITING a file. Used by the supervised write broker, which
+    /// performs opens outside Landlock and so must allow exactly the paths Landlock would grant
+    /// write to — `ReadWrite`, a `Device` node, or the `FullDisk` tier — and no read-only grant.
+    pub(crate) fn grants_write(self) -> bool {
+        matches!(self, Self::ReadWrite | Self::Device | Self::FullDisk)
+    }
+
     /// The `landlock_access_fs_t` set this access grants at `abi`.
     ///
     /// Each arm ENUMERATES its rights rather than aliasing [`handled_access_fs`]. The two
@@ -480,6 +487,50 @@ fn reject_narrowing_grants(plan: &[MountGrant]) -> Result<(), String> {
 /// absent AUTHORED policy path; what reaches here additionally includes the system closure,
 /// which is deliberately distro-spanning (`/libx32`, `/etc/pki`, `/etc/crypto-policies`
 /// exist almost nowhere at once), so refusing on absence would abort every confined run.
+/// The fs policy the supervised WRITE BROKER enforces. The broker performs write-intent opens
+/// from the unrestricted supervisor, so it cannot lean on the child's Landlock ruleset and must
+/// decide writes itself against exactly what Landlock would grant: every write-granting
+/// [`derive_grants`] path (authored `rw`, device nodes, the private tmp) becomes an `Allow(rw)`
+/// rule and its `/**` subtree twin, then the policy's own Deny rules are appended LAST so a
+/// deny-inside-allow carve-out (`.git/hooks`, `.env*`, the policy file) wins by last-match. The
+/// base is `Deny`, so anything Landlock would not write-grant is refused.
+pub(crate) fn write_broker_ruleset(
+    policy: &SandboxPolicy,
+    tmp_dir: Option<&Path>,
+    entry_program: Option<&Path>,
+) -> Result<crate::policy::FsRuleSet, String> {
+    use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, FsRuleSet};
+    let mut entries: Vec<FsRule> = Vec::new();
+    for grant in derive_grants(policy, tmp_dir, entry_program)? {
+        if !grant.access.grants_write() {
+            continue;
+        }
+        let base = grant.path.to_string_lossy().into_owned();
+        for pattern in [base.clone(), format!("{}/**", base.trim_end_matches('/'))] {
+            entries.push(FsRule {
+                matcher: CanonGlob(pattern),
+                effect: Effect::Allow,
+                access: FsAccess::ReadWrite,
+                origin: FsOrigin::Authored,
+            });
+        }
+    }
+    // Deny carve-outs LAST — last-match-wins makes them authoritative over the allows above.
+    entries.extend(
+        policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|rule| rule.effect == Effect::Deny)
+            .cloned(),
+    );
+    Ok(FsRuleSet {
+        entries,
+        default_effect: Effect::Deny,
+    })
+}
+
 pub(crate) fn build(
     policy: &SandboxPolicy,
     tmp_dir: Option<&Path>,
