@@ -439,7 +439,7 @@ fn resolve_package_root(importer: &Path, specifier: &str) -> Option<PathBuf> {
     }
 }
 
-fn addon_module(name: &str) -> String {
+pub(super) fn addon_module(name: &str) -> String {
     format!(
         "const record = process[Symbol.for(\"nub.compile.bootstrap\")];\n\
          module.exports = record.createRequire(import.meta.url)({});\n",

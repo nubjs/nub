@@ -3114,7 +3114,10 @@ fn preserve_dependency_esm_classification(path: &str, source: &str) -> Option<St
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked || has_esm_syntax(&parsed.program) {
+    if parsed.panicked
+        || has_esm_syntax(&parsed.program)
+        || assigns_commonjs_exports_at_top_level(&parsed.program)
+    {
         return None;
     }
     let semantic = oxc_semantic::SemanticBuilder::new()
@@ -3126,6 +3129,50 @@ fn preserve_dependency_esm_classification(path: &str, source: &str) -> Option<St
         .iter()
         .any(|(name, _)| matches!(name.as_str(), "module" | "exports"));
     misread.then(|| format!("{source}\nexport {{}};\n"))
+}
+
+/// Whether the module assigns `module.exports` or `exports.<name>` as an
+/// unconditional top-level statement.
+///
+/// Such a module is CommonJS by construction, not an ES module that merely
+/// mentions the name: run as ESM the statement is a guaranteed `ReferenceError`
+/// the first time the module executes, so no working package ships one. What the
+/// marker above is really for is the GUARDED probe — `try { module.exports = … }
+/// catch {}`, and its `typeof module !== "undefined"` cousins — which Node does
+/// read as ESM and which stays marked.
+///
+/// The distinction is load-bearing for the compiler's OWN generated modules.
+/// `native::addon_module` is CommonJS Nub wrote itself, but the id it is served
+/// under is the `.node` file, whose owning manifest is the application's — so an
+/// app with `"type": "module"` made the shim look like an ESM dependency. Marking
+/// it turned Rolldown's CommonJS wrapper off, `module` was left unbound, and every
+/// artifact carrying a native addon died at startup with the `ReferenceError` Node
+/// reports as `ERR_AMBIGUOUS_MODULE_SYNTAX`.
+fn assigns_commonjs_exports_at_top_level(program: &Program<'_>) -> bool {
+    use oxc_ast::ast::{Expression, Statement};
+
+    fn root_object<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
+        match expr {
+            Expression::Identifier(ident) => Some(ident.name.as_str()),
+            Expression::StaticMemberExpression(member) => root_object(&member.object),
+            Expression::ComputedMemberExpression(member) => root_object(&member.object),
+            _ => None,
+        }
+    }
+
+    program.body.iter().any(|stmt| {
+        let Statement::ExpressionStatement(stmt) = stmt else {
+            return false;
+        };
+        let Expression::AssignmentExpression(assign) = &stmt.expression else {
+            return false;
+        };
+        assign
+            .left
+            .as_member_expression()
+            .and_then(|member| root_object(member.object()))
+            .is_some_and(|name| matches!(name, "module" | "exports"))
+    })
 }
 
 /// The mirror image, for a root Node runs as CommonJS. Rolldown classifies a
@@ -7901,6 +7948,41 @@ mod tests {
         assert!(
             preserve_dependency_esm_classification("\0nub:virtual", source).is_none(),
             "virtual modules are the compiler's own"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A module that assigns `module.exports` outright is CommonJS whatever its
+    /// package says, so the marker leaves it alone. The generated native-addon
+    /// shim is exactly that shape and is served under the `.node` id, whose
+    /// owning manifest is the APPLICATION's — so an app declaring
+    /// `"type": "module"` used to make the shim look like an ESM dependency,
+    /// and marking it left `module` unbound in every artifact carrying an addon.
+    #[test]
+    fn a_top_level_module_exports_assignment_keeps_its_commonjs_reading() {
+        let dir = fixture_dir("addon-shim-classification");
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).unwrap();
+        let addon = dir.join("watcher-a1b2c3d4.node");
+        let shim = crate::compile::native::addon_module("watcher-a1b2c3d4.node");
+        assert!(
+            preserve_dependency_esm_classification(&addon.to_string_lossy(), &shim).is_none(),
+            "the generated addon shim assigns module.exports and must stay CommonJS"
+        );
+        assert!(
+            preserve_dependency_esm_classification(
+                &dir.join("exports-member.mjs").to_string_lossy(),
+                "exports.answer = 42;\n"
+            )
+            .is_none(),
+            "assigning through `exports` is the same statement about the format"
+        );
+        assert!(
+            preserve_dependency_esm_classification(
+                &dir.join("probe.mjs").to_string_lossy(),
+                "try { module.exports = 1; } catch (e) { console.log(e.name); }\n"
+            )
+            .is_some(),
+            "a guarded probe is the shape the marker exists for and keeps it"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
