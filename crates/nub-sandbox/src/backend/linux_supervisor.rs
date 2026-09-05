@@ -1211,13 +1211,40 @@ static DNS_SLOT: AtomicU32 = AtomicU32::new(0);
 
 fn supervisor(nfd: RawFd) {
     loop {
-        let mut req: SeccompNotif = unsafe { std::mem::zeroed() };
-        if ioctl_notif(nfd, notif_recv(), &mut req as *mut _ as *mut libc::c_void) < 0 {
+        // Wait for a notification OR a listener hangup. `poll` separates two events a bare
+        // `NOTIF_RECV` conflates onto one ENOENT: "the target died" (exit — the filter is being
+        // torn down) and "THIS notification's task was reaped between wake and RECV" (a transient
+        // under load that MUST be re-blocked, not fatal). POLLHUP fires only for the first, giving
+        // the one clean exit; a transient ENOENT after POLLIN just loops. The old loop returned on
+        // any RECV error, which treats the transient as fatal — a documented race. NOTE: it did not
+        // reproduce here — a control on kernel 6.17 ran 64 parallel curls + `npm install` clean
+        // with the exit-on-error loop too (the earlier "0/8" was a test-harness `xargs -I _` bug,
+        // not the supervisor). This is hardening against the race the kernel docs and the route.c
+        // measurement (other kernels) describe, not a fix for a failure observed on this host.
+        let mut pfd = libc::pollfd {
+            fd: nfd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let pr = unsafe { libc::poll(&mut pfd, 1, -1) };
+        if pr < 0 {
             if errno() == libc::EINTR {
                 continue;
             }
-            eprintln!("[sup] RECV: {}", io::Error::last_os_error());
-            return;
+            return; // the listener itself is unusable
+        }
+        if pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return; // the target is gone and the filter is being torn down — the clean exit
+        }
+        if pfd.revents & libc::POLLIN == 0 {
+            continue;
+        }
+        let mut req: SeccompNotif = unsafe { std::mem::zeroed() };
+        if ioctl_notif(nfd, notif_recv(), &mut req as *mut _ as *mut libc::c_void) < 0 {
+            // EINTR: interrupted. ENOENT: the notifying task was reaped between `poll` and `RECV`
+            // — transient under load, never a reason to tear the supervisor down. Either way,
+            // re-block; a genuinely dead target surfaces as POLLHUP above, not here.
+            continue;
         }
         let nr = req.data.nr as libc::c_long;
         let cfd = req.data.args[0] as i32;

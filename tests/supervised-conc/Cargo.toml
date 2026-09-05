@@ -1,0 +1,15 @@
+# Concurrency + real-workload probe for the supervised launch (epic 1.5): does the seccomp
+# USER_NOTIF supervisor survive many simultaneous connections (npm install, parallel fetches)
+# rather than bailing on the transient ENOENT the kernel returns when a notification is reaped
+# between wake and RECV. Own workspace root; Linux-only.
+[workspace]
+
+[package]
+name = "supervised-conc-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nub-sandbox = { path = "../../crates/nub-sandbox" }
+serde_json = "1"
