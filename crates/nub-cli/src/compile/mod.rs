@@ -3546,13 +3546,41 @@ fn atomic_replace(staged: &Path, destination: &Path) -> std::io::Result<()> {
     let staged = windows_verbatim_path(staged)?;
     let destination = windows_verbatim_path(destination)?;
     let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. No destination
-    // is removed first, so an API failure leaves the previous artifact intact.
-    if unsafe { MoveFileExW(staged.as_ptr(), destination.as_ptr(), flags) } == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+
+    // Windows releases an executable's image section ASYNCHRONOUSLY, so the move
+    // can lose a race with a process that has already exited. The build's own
+    // self-probe RUNS the staged artifact immediately before this call, and
+    // `Command::output` returning means the child was reaped — not that the
+    // section is gone. Measured on the win32-arm64 CI leg: `a-env-strict` failed
+    // with `The process cannot access the file because it is being used by another
+    // process. (os error 32)`, intermittently, while every other fixture in the
+    // same run published fine.
+    //
+    // A bounded retry is the fix rather than a workaround: there is no handle to
+    // wait on, because the holder is the kernel finishing with a process that no
+    // longer exists. Anti-malware scanning a freshly written binary produces the
+    // same code, and the same answer. ~1.3s total, which is invisible next to a
+    // build and far short of hanging a broken publish.
+    //
+    // The retry is deliberately NOT extended to other errors. A denied or missing
+    // path fails on the first attempt, where the message still describes what went
+    // wrong.
+    const SHARING_VIOLATION: i32 = 32;
+    let mut delay = std::time::Duration::from_millis(10);
+    for attempt in 0..8 {
+        // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. No destination
+        // is removed first, so an API failure leaves the previous artifact intact.
+        if unsafe { MoveFileExW(staged.as_ptr(), destination.as_ptr(), flags) } != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(SHARING_VIOLATION) || attempt == 7 {
+            return Err(error);
+        }
+        std::thread::sleep(delay);
+        delay *= 2;
     }
+    unreachable!("the loop returns on its last attempt")
 }
 
 #[cfg(windows)]
