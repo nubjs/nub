@@ -191,8 +191,17 @@
   // the entry.
   let settled = false;
   let warned = false;
+  let deferred = false;
   const warn = () => {
     if (settled || warned) return;
+    // The first `beforeExit` is skipped for the reason the single-executable
+    // loader spells out: this listener precedes every one the application
+    // installs, and one of those may settle the entry.
+    if (!deferred) {
+      deferred = true;
+      setImmediate(() => {});
+      return;
+    }
     warned = true;
     process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
   };

@@ -191,8 +191,22 @@
   // arrive.
   let settled = false;
   let warned = false;
+  let deferred = false;
   const warn = () => {
     if (settled || warned) return;
+    // The FIRST `beforeExit` is too early to conclude anything. This listener is
+    // registered before the entry is even imported, so it runs ahead of every
+    // listener the application installs — and one of those may be exactly what
+    // settles the entry. Scheduling anything buys the loop another turn, which
+    // lets the rest of them run and their promise jobs drain; an entry still
+    // pending when the loop empties AGAIN has nothing left to settle it.
+    // Measured: `process.once("beforeExit", resolve)` around the awaited promise
+    // exits 0 in silence under nub, and warned here before the deferral.
+    if (!deferred) {
+      deferred = true;
+      setImmediate(() => {});
+      return;
+    }
     warned = true;
     process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
   };

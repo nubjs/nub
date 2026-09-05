@@ -62,6 +62,22 @@ const CASES = [
     stderrExcludes: "Detected unsettled top-level await",
   },
   {
+    name: "an entry settled by the application's own beforeExit listener",
+    // The counterpart to the two cases above, and the one that keeps the
+    // diagnostic honest: an entry whose await is resolved from `beforeExit` is
+    // not unsettled at all. The loader's own listener necessarily runs first, so
+    // it has to let the application's turn happen before concluding anything.
+    source: [
+      "let resolve;",
+      "const pending = new Promise((r) => { resolve = r; });",
+      'process.once("beforeExit", resolve);',
+      "await pending;",
+      'console.log("settled");',
+    ].join("\n"),
+    node: "26.7.0",
+    stderrExcludes: "Detected unsettled top-level await",
+  },
+  {
     name: "explicit process.exitCode",
     source: "process.exitCode = 7;",
     node: "26.7.0",
