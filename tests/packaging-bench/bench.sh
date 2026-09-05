@@ -447,6 +447,91 @@ for F in $FIXTURES; do
 done
 
 echo
+# ----------------------------------------- 7. capability-matched table (Node 22)
+# A SEPARATE question from packaging overhead, and it must never be merged into
+# that table. A bare SEA is fast partly because it does LESS: a nub artifact
+# supplies Temporal, URLPattern, Float16Array, reportError, a browser-shape Worker
+# and navigator.locks on a Node that lacks them. This asks what it costs a SEA to
+# reach the same behaviour, using the real published polyfills a user would
+# install — never nub's own preload/polyfill files, which nobody would ship and
+# whose presence here would make every number in this benchmark worthless.
+#
+# Node 22, not 26: on a 26 target nub's strip_native_polyfills drops those regions
+# from the preamble because Node has them natively, so there is barely a gap to
+# measure. On 22 the gap is real on both sides. The bare sea-*/seacc-* rows above
+# are untouched and stay a bare SEA, which is what SEA actually gives you.
+NODE22_PIN="${NODE22_PIN:-22.23.2}"
+echo
+echo "######## CAPABILITY-MATCHED — Node $NODE22_PIN — $OS-$ARCH"
+N22DIR="$W/node22"; N22=""
+case "$OS" in
+  linux)  N22TAR="node-v$NODE22_PIN-linux-$ARCH.tar.xz" ;;
+  darwin) N22TAR="node-v$NODE22_PIN-darwin-$ARCH.tar.xz" ;;
+esac
+mkdir -p "$N22DIR"
+if curl -fsSL "https://nodejs.org/dist/v$NODE22_PIN/$N22TAR" -o "$W/n22.tar.xz" 2>/dev/null \
+   && tar -xJf "$W/n22.tar.xz" -C "$N22DIR" --strip-components=1 2>/dev/null \
+   && [ -x "$N22DIR/bin/node" ]; then
+  N22="$N22DIR/bin/node"
+  echo "  node22:            $("$N22" -v)"
+else
+  echo "  node22:            UNAVAILABLE — skipping the capability table"
+fi
+
+if [ -n "$N22" ]; then
+  "$ESBUILD" app/cap.mjs      --bundle --minify --platform=node --format=cjs \
+    --target=node22 --outfile=bundles/cap.cjs      > esbuild-cap.log 2>&1
+  "$ESBUILD" app/cap-poly.mjs --bundle --minify --platform=node --format=cjs \
+    --target=node22 --outfile=bundles/cappoly.cjs  > esbuild-cappoly.log 2>&1
+  echo "  bundles:           cap $(wc -c < bundles/cap.cjs) bytes, cappoly $(wc -c < bundles/cappoly.cjs) bytes"
+
+  cat > sea-cap.json <<EOF
+{ "main": "$W/bundles/cappoly.cjs", "output": "$W/art/capsea", "disableExperimentalSEAWarning": true, "useCodeCache": true }
+EOF
+  CAP_OK=1
+  "$N22" --build-sea sea-cap.json > build-capsea.log 2>&1 && chmod +x art/capsea \
+    || { note_drop "capsea" "$(tail -3 build-capsea.log | tr '\n' ' ')"; CAP_OK=""; }
+  "$NUB_BIN" compile "$W/bundles/cap.cjs" --no-minify --target "$NODE22_PIN" \
+    --out art/capnub > build-capnub.log 2>&1 \
+    || { note_drop "capnub" "$(tail -3 build-capnub.log | tr '\n' ' ')"; CAP_OK=""; }
+
+  # Verify the match rather than assuming it. A capability-matched row whose
+  # capabilities do not actually match is worse than no row at all.
+  if [ -n "$CAP_OK" ]; then
+    D_SEA=$(CAP_DIGEST=1 $GUARD ./art/capsea 2>/dev/null)
+    D_NUB=$(CAP_DIGEST=1 ./art/capnub 2>/dev/null)
+    D_BARE=$(CAP_DIGEST=1 "$N22" bundles/cap.cjs 2>/dev/null)
+    echo "  bare node22:       $D_BARE"
+    echo "  polyfilled SEA:    $D_SEA"
+    echo "  nub artifact:      $D_NUB"
+    if [ "$D_SEA" = "$D_NUB" ]; then
+      echo "  capability match:  FULL"
+    else
+      echo "  capability match:  PARTIAL — the two differ; the row is labelled partial."
+      echo "                     Compare the two digests above global by global."
+    fi
+    O_SEA=$( (ulimit -u 800; $GUARD ./art/capsea) 2>/dev/null )
+    O_NUB=$( (ulimit -u 800; $GUARD ./art/capnub) 2>/dev/null )
+    O_BASE=$("$N22" bundles/cappoly.cjs 2>/dev/null)
+    if [ "$O_SEA" = "$O_BASE" ] && [ "$O_NUB" = "$O_BASE" ]; then
+      echo "  output check:      ok (all three identical)"
+      hyperfine -i --warmup "$WARMUP" --min-runs "$MIN_RUNS" --style none \
+        --export-json warm-cap.json \
+        -n "baseline-A (node22 + polyfills)" "$N22 $W/bundles/cappoly.cjs" \
+        -n "capsea (SEA + real polyfills)"   "$W/art/capsea" \
+        -n "baseline-B (node22 + polyfills)" "$N22 $W/bundles/cappoly.cjs" \
+        -n "capnub (nub, globals from preamble)" "$W/art/capnub" \
+        -n "baseline-Z (node22 + polyfills)" "$N22 $W/bundles/cappoly.cjs" \
+        > hyperfine-cap.log 2>&1
+      node "$HERE/summarize.mjs" warm-cap.json
+    else
+      echo "  output check:      MISMATCH — table suppressed"
+      echo "                     sea=[$O_SEA] nub=[$O_NUB] base=[$O_BASE]"
+    fi
+  fi
+fi
+
+echo
 echo "######## ARTIFACT SIZES"
 ls -l art/ | awk 'NR>1 {printf "  %-22s %10.1f MB\n", $9, $5/1000000}'
 

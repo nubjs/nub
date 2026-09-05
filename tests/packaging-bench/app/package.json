@@ -11,6 +11,9 @@
   "dependencies": {
     "chalk": "6.0.0",
     "commander": "15.0.0",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "@js-temporal/polyfill": "0.5.1",
+    "urlpattern-polyfill": "10.1.0",
+    "@petamoriken/float16": "3.9.2"
   }
 }
