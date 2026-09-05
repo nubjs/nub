@@ -130,7 +130,12 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
         .map(|(package, agg)| {
             let deep_path_only =
                 agg.from_deep_path && !agg.from_main && !agg.from_subpath && !agg.from_types;
-            let verdict = verdict_for(manifest, &package, agg.all_soft, deep_path_only);
+            // Referenced ONLY from the type surface, so TypeScript's `@types`
+            // fallback applies and a runtime resolution never happens. See
+            // `types_package_for`.
+            let types_only =
+                agg.from_types && !agg.from_main && !agg.from_subpath && !agg.from_deep_path;
+            let verdict = verdict_for(manifest, &package, agg.all_soft, deep_path_only, types_only);
             Finding {
                 package,
                 verdict,
@@ -150,6 +155,7 @@ fn verdict_for(
     package: &str,
     all_soft: bool,
     deep_path_only: bool,
+    types_only: bool,
 ) -> Verdict {
     if is_self(manifest, package) {
         return Verdict::SelfRef;
@@ -158,6 +164,35 @@ fn verdict_for(
         return Verdict::Builtin;
     }
     if manifest.deps.contains(package) || manifest.bundled.contains(package) {
+        return Verdict::Declared;
+    }
+    // A reference that exists ONLY on the type surface resolves through
+    // TypeScript's `@types` fallback, so a declared `@types/<pkg>` satisfies it and
+    // there is nothing for a consumer to install. Measured over the top 10,000:
+    // 15 of 40 sampled type-surface findings were this, and the targets are the
+    // DefinitelyTyped-only names — `geojson` (112 findings), `hast`, `estree`,
+    // `mdast`, `unist`, `json-schema` — where no runtime package is even intended.
+    // `@turf/destination` declares `@types/geojson` and writes
+    // `import('geojson').Position`; calling that a phantom asks the consumer to
+    // install a package the author correctly did not depend on.
+    //
+    // Restricted to `types_only` deliberately: a RUNTIME `require('geojson')` is
+    // NOT satisfied by `@types/geojson`, so any occurrence off the type surface
+    // keeps the reference a phantom.
+    // Every set a CONSUMER install makes resolvable, which is the question this
+    // whole module asks. A peer counts: the consumer supplies it, so the types
+    // are there. `devDependencies` deliberately does not — it is not installed
+    // downstream, so a `.d.ts` leaning on a dev-only types package really does
+    // break for the consumer. Measured over the sampled false positives: 13
+    // declare the types package in `dependencies`, 2 as a peer, and 2 dev-only
+    // (correctly still phantoms).
+    if types_only && {
+        let t = types_package_for(package);
+        manifest.deps.contains(&t)
+            || manifest.bundled.contains(&t)
+            || manifest.required_peers.contains(&t)
+            || manifest.optional_peers.contains(&t)
+    } {
         return Verdict::Declared;
     }
     if manifest.optional_peers.contains(package) {
@@ -177,6 +212,20 @@ fn verdict_for(
         Verdict::SoftPhantom
     } else {
         Verdict::HardPhantom
+    }
+}
+
+/// The DefinitelyTyped package that supplies types for `package`.
+///
+/// Unscoped is a plain prefix (`geojson` → `@types/geojson`); a SCOPED name is
+/// flattened with a double underscore and the `@` dropped (`@babel/core` →
+/// `@types/babel__core`), which is DefinitelyTyped's own convention and the one
+/// TypeScript's resolver implements. Getting the scoped form wrong would silently
+/// leave every scoped type-only reference misclassified.
+fn types_package_for(package: &str) -> String {
+    match package.strip_prefix('@').and_then(|r| r.split_once('/')) {
+        Some((scope, name)) => format!("@types/{scope}__{name}"),
+        None => format!("@types/{package}"),
     }
 }
 
@@ -218,6 +267,83 @@ mod tests {
         .unwrap();
         let f = classify(&m, &refs(&[("zod", "zod", false)]));
         assert_eq!(f[0].verdict, Verdict::DeclaredOptionalPeer);
+    }
+
+    #[test]
+    fn a_declared_types_package_satisfies_a_type_only_reference() {
+        // `@turf/destination` declares `@types/geojson` and writes
+        // `import('geojson').Position` in its `.d.ts`. TypeScript resolves that
+        // through the `@types` fallback, so nothing is undeclared and no consumer
+        // install can help. This was 15 of 40 sampled type-surface findings.
+        let type_ref = |raw: &str, package: &str| Reference {
+            package: package.to_string(),
+            raw: raw.to_string(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: true,
+            from_deep_path: false,
+        };
+
+        let m = Manifest::parse(
+            br#"{"name":"@turf/destination","dependencies":{"@types/geojson":"^7946.0.8"}}"#,
+        )
+        .unwrap();
+        let f = classify(&m, &[type_ref("geojson", "geojson")]);
+        assert_eq!(
+            f[0].verdict,
+            Verdict::Declared,
+            "a declared @types/geojson satisfies a type-only geojson reference"
+        );
+
+        // The SCOPED convention flattens with a double underscore. Getting this
+        // wrong misclassifies every scoped type-only reference silently.
+        let scoped =
+            Manifest::parse(br#"{"name":"p","dependencies":{"@types/babel__core":"^7"}}"#).unwrap();
+        let f = classify(&scoped, &[type_ref("@babel/core", "@babel/core")]);
+        assert_eq!(f[0].verdict, Verdict::Declared, "@babel/core → @types/babel__core");
+
+        // A PEER types package counts too — the consumer supplies it. Two of the
+        // fifteen sampled false positives declared it this way.
+        let peer =
+            Manifest::parse(br#"{"name":"p","peerDependencies":{"@types/geojson":"*"}}"#).unwrap();
+        let f = classify(&peer, &[type_ref("geojson", "geojson")]);
+        assert_eq!(f[0].verdict, Verdict::Declared, "a peer @types/geojson satisfies it");
+
+        // But a DEV-only types package does not: it is not installed downstream,
+        // so the consumer's type-check really does break.
+        let dev =
+            Manifest::parse(br#"{"name":"p","devDependencies":{"@types/geojson":"*"}}"#).unwrap();
+        let f = classify(&dev, &[type_ref("geojson", "geojson")]);
+        assert_eq!(
+            f[0].verdict,
+            Verdict::HardPhantom,
+            "a devDependency types package is not resolvable for a consumer"
+        );
+
+        // THE CONTROL. A runtime reference is NOT satisfied by a types package —
+        // `require('geojson')` needs the real thing — so any occurrence off the
+        // type surface keeps the reference a phantom.
+        let runtime = Reference {
+            package: "geojson".to_string(),
+            raw: "geojson".to_string(),
+            soft: false,
+            from_main: true,
+            from_subpath: false,
+            from_types: false,
+            from_deep_path: false,
+        };
+        let f = classify(&m, &[type_ref("geojson", "geojson"), runtime]);
+        assert_eq!(
+            f[0].verdict,
+            Verdict::HardPhantom,
+            "a runtime occurrence is not satisfied by @types/geojson"
+        );
+
+        // And with no types package declared it stays a phantom.
+        let bare = Manifest::parse(br#"{"name":"p"}"#).unwrap();
+        let f = classify(&bare, &[type_ref("geojson", "geojson")]);
+        assert_eq!(f[0].verdict, Verdict::HardPhantom);
     }
 
     #[test]
