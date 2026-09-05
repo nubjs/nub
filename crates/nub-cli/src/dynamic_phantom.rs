@@ -343,7 +343,7 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// after upgrade; harmless and expected (the whole point is to pick up the better
 /// verdict). Just bump the number when the scanner logic changes — the coupling
 /// is structural, nothing else to remember.
-pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 4;
+pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 5;
 
 /// Version of what the linker's GVS-populate pass WRITES TO DISK for a given eject
 /// set — bumped when the same plan produces a different on-disk shape.

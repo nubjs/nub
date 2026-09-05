@@ -441,6 +441,16 @@ fn config_roots(text: &str) -> Vec<String> {
             targets
                 .iter()
                 .filter_map(|t| t.as_str())
+                // ONLY a target containing `*` is a module root. TypeScript
+                // substitutes the captured segment into the `*` position, so
+                // `"*": ["src/*"]` maps `react` to `src/react` — a root. A target
+                // with no `*` is a CONSTANT: `"*": ["aliases"]` maps every
+                // specifier to `aliases` itself, so treating it as a root and
+                // probing `aliases/react` resolves a path TypeScript never
+                // consults. That direction is the dangerous one — it would
+                // silently drop a real `react` edge for any package that also
+                // ships `aliases/react.ts`.
+                .filter(|t| t.contains('*'))
                 .filter_map(|t| normalize_rel_join(&base, t.trim_end_matches(['*', '/']))),
         );
     }
@@ -1226,6 +1236,34 @@ mod tests {
             packages(&walk_index(&index_of(&root), &eps)),
             vec!["real-dep".to_string()]
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_constant_paths_target_is_not_a_module_root() {
+        // `"*": ["aliases"]` has no `*` in the TARGET, so TypeScript maps every
+        // bare specifier to `aliases` itself — it never looks at `aliases/react`.
+        // Treating the constant as a root would probe exactly that path and
+        // silently drop a real undeclared `react` for any package that also ships
+        // `aliases/react.ts`. A wildcard target is a root; a constant is not.
+        let root = scratch("self-ref-constant-paths");
+        fs::create_dir_all(root.join("aliases")).unwrap();
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"*":["aliases"]}}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("index.ts"), "import 'react';").unwrap();
+        fs::write(root.join("aliases/react.ts"), "").unwrap();
+
+        let eps = [main_entry("index.ts")];
+        let want = vec!["react".to_string()];
+        assert_eq!(
+            packages(&walk(&root, &eps)),
+            want,
+            "a constant paths target must not suppress a real react edge"
+        );
+        assert_eq!(packages(&walk_index(&index_of(&root), &eps)), want);
         let _ = fs::remove_dir_all(&root);
     }
 
