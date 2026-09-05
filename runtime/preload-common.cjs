@@ -1766,6 +1766,9 @@ module.exports = {
   preloadPolyfillPackages,
   installTemporalGlobal,
   installTemporalLazyGlobal,
+  // The compiled preamble's lazy Temporal getter (compile-lazy-temporal.cjs)
+  // installs the value on first access without reading the global back.
+  installTemporalValue,
   restoreCompileCacheEnv,
   installCompiledChildProcess,
   reenableUserCompileCache,
