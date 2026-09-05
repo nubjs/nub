@@ -376,6 +376,21 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         match inline::rewrite(app_files, &no_extract_inputs)? {
             inline::Rewritten::Inline(files) => (files, true, AppDelivery::Inline),
             inline::Rewritten::Extract(files, why) => {
+                // An embedding build reports why it is not a SEA, which is a
+                // different question from why it is not inline and has a better
+                // answer. `Decline::EmbeddedNode` — "it extracts its embedded Node
+                // anyway" — is the inline answer, and it is both uninformative and
+                // now premise-free: an embedding artifact is a SEA by default and
+                // extracts nothing. The version gate has no inline counterpart at
+                // all, so without this the artifact silently loses the SEA shape
+                // and the build says something true about a different question.
+                let why = if opts.smol {
+                    why.reason()
+                } else if let Some(sea_decline) = sea_decline {
+                    sea_decline.reason()
+                } else {
+                    "its Node predates single-executable flag support"
+                };
                 (files, false, AppDelivery::Extracted(why))
             }
         }
@@ -1129,7 +1144,7 @@ fn resolved_build_rows(
             ],
             AppDelivery::Extracted(why) => vec![
                 ("extracted on first run".to_string(), Ink::Plain),
-                (format!("  {}", why.reason()), Ink::Muted),
+                (format!("  {why}"), Ink::Muted),
             ],
         },
     ));
@@ -1547,8 +1562,12 @@ impl Drop for LiveLine {
 /// How a finished artifact hands its app to Node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppDelivery {
-    /// Written to the cache on first run, for the reason given.
-    Extracted(inline::Decline),
+    /// Written to the cache on first run, for the reason given. A borrowed
+    /// reason rather than a [`inline::Decline`] because the answer comes from
+    /// whichever no-extract shape was actually refused — the single-executable
+    /// one for an embedding build, the inline one for `--smol` — and from the
+    /// Node version gate, which is neither.
+    Extracted(&'static str),
     /// Served from the executable's own bytes as `data:` URLs, writing nothing.
     Inline,
     /// Served out of a Node single-executable blob.
@@ -4801,7 +4820,7 @@ mod tests {
             // Consistent with the rest of these facts rather than an arbitrary
             // pick: `--external` and a surviving computed import are exactly what
             // leaves the graph unsealed, and this build has both.
-            app_delivery: AppDelivery::Extracted(inline::Decline::UnsealedGraph),
+            app_delivery: AppDelivery::Extracted(inline::Decline::UnsealedGraph.reason()),
             report: Some(PathBuf::from("report.json")),
             elapsed: std::time::Duration::from_millis(8_880),
         }

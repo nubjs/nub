@@ -1,0 +1,84 @@
+# Branch-scoped probe for the single-executable `nub compile` shape on the five
+# runtime cells the dev Mac cannot reach: native darwin-x64, win32-x64,
+# win32-arm64, linux-arm64, and musl on both arches. No pull request — it runs on
+# pushes to the branch below.
+name: compile SEA probe
+
+on:
+  push:
+    branches: [sea-embed]
+    paths:
+      - 'tests/compile-sea-probe/**'
+      - '.github/workflows/compile-sea-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-x64 (native)
+            runner: macos-15-intel
+          - name: win32-x64
+            runner: windows-latest
+          - name: win32-arm64
+            runner: windows-11-arm
+          - name: linux-x64 and linux-x64-musl
+            runner: ubuntu-latest
+            musl: linux-x64-musl
+          - name: linux-arm64 and linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            musl: linux-arm64-musl
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes tags; commit verified upstream
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '24'
+
+      - name: Build nub
+        run: cargo build -p nub-cli --profile fast --features compile
+
+      # Its own workspace, so it needs its own invocation — and it defines no
+      # `fast` profile, so this one is `release`. Only the fallback step opens the
+      # template, but that step is the one proving the gate still works.
+      - name: Build the launcher template
+        shell: bash
+        working-directory: crates/nub-launcher
+        run: cargo build --locked --release
+
+      # `fast` inherits `dev`, so the binary lands in target/fast on every host.
+      - name: Resolve the built binaries
+        shell: bash
+        run: |
+          echo "NUB=$(ls target/fast/nub target/fast/nub.exe 2>/dev/null | head -1)" >> "$GITHUB_ENV"
+          echo "__NUB_LAUNCHER_TEMPLATE=$(ls crates/nub-launcher/target/release/nub-launcher crates/nub-launcher/target/release/nub-launcher.exe 2>/dev/null | head -1)" >> "$GITHUB_ENV"
+
+      - name: Native target
+        shell: bash
+        run: node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/native-probe"
+
+      # Below the execArgv backport floor nub cannot hand the artifact its Node
+      # flags through the blob, so the container decision has to fall back. This
+      # is the only assertion that the gate is a gate rather than a constant.
+      - name: A Node below the execArgv floor keeps the launcher
+        shell: bash
+        run: node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/old-probe" --target 22.19.0 --expect launcher
+
+      - name: musl target, run in Alpine
+        if: matrix.musl
+        shell: bash
+        run: |
+          node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/musl-probe" \
+            --platform ${{ matrix.musl }} \
+            --run-with "docker run --rm -v {dir}:{dir} -w {dir} alpine:3.20"
