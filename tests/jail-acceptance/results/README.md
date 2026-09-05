@@ -54,10 +54,11 @@ Passing `--population` pins the package set; omitting it rediscovers one from th
 
 ## Coverage
 
-The population grew from 87 packages to 180. The 87 were hand-curated, and measured against the
-npm top-downloaded set they carried only 59.9% of the weekly downloads that reach an install script.
-The remaining 93 have since been swept, so all three platforms now cover the full 180 - every rate
-below is over the whole population.
+The population is 179 packages, grown from a hand-curated 87. Measured against the npm top-downloaded set, those 87 carried only 59.9% of the weekly downloads that reach an install script. The rest have since been swept, so all three platforms cover the whole population and every rate below is over it.
+
+The three adjudicated sweep files carry 180 rows rather than 179. The extra row is `@whiskeysockets/baileys`, measured while it was in the population and dropped from it afterwards: its stable release carries no install script, and it was only ever discovered because the lookup judged it by a prerelease dist-tag. The row records a real measurement, so it stays; the package is not swept again.
+
+⛔ **The coverage figure is scoped to the band the population is drawn from, so it cannot detect what lies below it.** "Covers the script-carrying userbase" is measured against the npm top-downloaded set, and that set is the packages above 100,000 weekly downloads - the gate `scripts/npm-install-script-census.ts` applies with its default `--threshold`. The metric therefore compares the population against the set it was drawn from, and would read the same wherever the gate sat. Read it as completeness within the band, never as a claim about the ecosystem.
 
 ⛔ **One Linux row was not produced by a single sweep run: `duckdb`.** Its three arms each allow
 twenty minutes, and no prebuilt exists for its Node ABI, so every arm falls back to a source build

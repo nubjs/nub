@@ -18,7 +18,10 @@ const CANDIDATES = [
   // reach an install script — so 40% of the userbase the jail must not break was never swept, and
   // the heaviest omissions were not obscure: unrs-resolver at 54M/wk, @sentry/cli, workerd, msw, nx,
   // yarn, bun, aws-sdk. The list below is the union of that hand list with EVERY install-script
-  // carrying package in the npm top-downloaded set, which takes the coverage to 100%.
+  // carrying package in the npm top-downloaded set, which takes the coverage to 100% OF THAT SET.
+  // ⛔ Read that figure narrowly. The top-downloaded set IS the packages above 100,000 weekly
+  // downloads, so the metric is measured against the band this list is drawn from and would read
+  // 100% wherever the gate sat. It says the band is covered, never that the ecosystem is.
   //
   // Regenerate by scanning the npm top-downloaded packages for an install-time script rather than by
   // adding names you thought of. ⛔ A scan of that size is rate-limited hard: at concurrency 24 a run
