@@ -4,7 +4,7 @@ Re-tests [nodejs/node#44715](https://github.com/nodejs/node/issues/44715) on a m
 
 Node's macOS binary links CoreFoundation and Security unconditionally. Between them they account for about 404 of the ~657 dyld initializers a `node -e 0` runs before `main` — measured on macOS 26.6.2 arm64, a trivial C binary runs 2, the same binary with `-framework CoreFoundation` runs 404. Nothing on the startup path uses either framework: the imports are 14 Security symbols reached only from `--use-system-ca` (`src/crypto/crypto_context.cc`) and, through CoreFoundation, two from cctz's `local_time_zone()`.
 
-`patches/macos-cf.patch` marks both frameworks delay-init (`-Wl,-delay_framework,…` in `node.gypi` and `tools/v8_gypfiles/abseil.gyp`) and removes the four `CFSTR()` dictionary keys that would otherwise pin CoreFoundation to the launch path through a `__DATA_CONST,__cfstring` bind.
+`patches/macos-cf.patch` marks both frameworks delay-init and removes the four `CFSTR()` dictionary keys that would otherwise pin CoreFoundation to the launch path through a `__DATA_CONST,__cfstring` bind. The flags go on the linked target's `libraries` in `node.gypi` and nowhere else: gyp hands a static library target's `OTHER_LDFLAGS` straight to `libtool`, which special-cases `-framework X` as a warning but fails the archive on `-Wl,...`. A first attempt that also changed `tools/v8_gypfiles/abseil.gyp` broke `libv8_libbase.a` and `libv8_libplatform.a` for exactly that reason.
 
 The 2022 issue was closed on one observation: Instruments' Heap Allocations recorder produced no stacks for a binary built without the framework, on macOS 12.6. Two jobs settle whether that still holds:
 
