@@ -39,10 +39,9 @@ fn policy_allowing(hosts: &[&str]) -> SandboxPolicy {
 
 fn run(label: &str, policy: &SandboxPolicy, url: &str) -> i32 {
     eprintln!(">>> {label}: launching curl {url}");
-    // Plain HTTP over IPv4: the supervisor's transparent-splice path is proven for HTTP; the TLS
-    // handshake's send/recv pattern over a spliced socket is a separate, unverified path (a hang
-    // observed with https — recorded as a supervisor-hardening finding, epic 1.3/1.4). `-4` because
-    // the VM has no IPv6, so the supervisor's IPv6 dials stall happy-eyeballs.
+    // HTTPS over IPv4. The supervisor now preserves the child's O_NONBLOCK on the spliced socket
+    // (epic 1.3), so a TLS client's event loop no longer deadlocks on a blocking read. `-4`
+    // because the VM has no IPv6, so the supervisor's IPv6 dials stall happy-eyeballs.
     let spec = CommandSpec::new("/usr/bin/curl")
         .arg("-sS")
         .arg("-4")
@@ -69,9 +68,9 @@ fn main() {
 
     // example.com and www.google.com are on distinct networks (distinct IPs), so the
     // DNS-attribution allowlist cannot conflate them. Same hosts the linux-supervisor harness proved.
-    let compat = run("compat", &allow_example, "http://example.com/");
-    let attack = run("attack", &allow_example, "http://www.google.com/");
-    let control = run("control", &allow_google, "http://www.google.com/");
+    let compat = run("compat", &allow_example, "https://example.com/");
+    let attack = run("attack", &allow_example, "https://www.google.com/");
+    let control = run("control", &allow_google, "https://www.google.com/");
 
     println!("compat  (allow example.com, GET example.com)     -> exit {compat}  [want 0]");
     println!("attack  (allow example.com, GET www.google.com)  -> exit {attack}  [want != 0]");

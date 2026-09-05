@@ -885,6 +885,45 @@ fn supervisor(nfd: RawFd) {
             eprintln!("SUP DENY type={typ} fam={fam}");
         }
 
+        // Preserve the child's non-blocking disposition on the spliced socket. The child (curl,
+        // Node, git — any event-loop client) sets O_NONBLOCK on its own socket before connect, but
+        // ADDFD replaces that descriptor with our freshly-dialed BLOCKING socket, dropping the
+        // flag. The child then issues a read expecting non-blocking semantics; on a blocking
+        // socket it parks in the kernel and never returns to its own event loop to honor its
+        // timeout — a hang (MEASURED: `curl https://` completes the TLS handshake, then blocks
+        // forever in recvfrom on the spliced socket, past `--max-time`). `sfd` is our pidfd copy
+        // of the child's original socket, so its flags are the child's actual flags at connect.
+        if verdict_err == 0 && s >= 0 {
+            // Read the child's ACTUAL socket flags. `sfd` is -2 on the common `by_construction`
+            // path (the socket was supervisor-created), so grab a fresh dup of the child's fd —
+            // the child set O_NONBLOCK on that shared description before connect.
+            let mut flag_fd = sfd;
+            let mut flag_pidfd = -1;
+            if flag_fd < 0 {
+                flag_pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, tgid, 0) } as RawFd;
+                flag_fd = if flag_pidfd >= 0 {
+                    unsafe { libc::syscall(libc::SYS_pidfd_getfd, flag_pidfd, cfd, 0) as RawFd }
+                } else {
+                    -1
+                };
+            }
+            if flag_fd >= 0 {
+                let child_flags = unsafe { libc::fcntl(flag_fd, libc::F_GETFL) };
+                if child_flags >= 0 && child_flags & libc::O_NONBLOCK != 0 {
+                    let before = unsafe { libc::fcntl(s, libc::F_GETFL) };
+                    if before >= 0 {
+                        unsafe { libc::fcntl(s, libc::F_SETFL, before | libc::O_NONBLOCK) };
+                    }
+                }
+            }
+            if flag_fd >= 0 && flag_fd != sfd {
+                unsafe { libc::close(flag_fd) };
+            }
+            if flag_pidfd >= 0 {
+                unsafe { libc::close(flag_pidfd) };
+            }
+        }
+
         if verdict_err == 0 {
             let mut af = SeccompNotifAddfd {
                 id: req.id,
