@@ -163,6 +163,41 @@
     },
   });
 
+  // The backstop for the one thing the build-time scan cannot promise.
+  //
+  // Which payloads reach `child_process`/`cluster` is decided by reading the
+  // emitted chunks for what they RESOLVE, and that decision keeps such a payload
+  // on the launcher, which has a real Node to hand a fork. The scan is syntactic,
+  // so it is a heuristic and not a proof: it follows a require through a rename
+  // and through an alias binding, and it cannot follow one passed as an argument,
+  // stored on an object, or picked out of an array. Completing it would take
+  // interprocedural dataflow over the whole bundle.
+  //
+  // What matters is therefore not that the scan is complete but what happens when
+  // it is wrong, and without this the answer was the worst available. A fork here
+  // spawns `process.execPath`, which is the artifact; Node discards a
+  // single-executable's `argv[1]` (`FixupArgsForSEA`), so the child re-runs the
+  // whole application and forks again. Measured: a two-line fixture printed its
+  // first line until it was killed. One line of guard turns that into an error
+  // naming the cause, at the call, with a stack.
+  //
+  // Installed HERE rather than in the bootstrap because it is true of this
+  // container alone, and before the entry because Node's own
+  // `internal/cluster/primary` destructures `fork` into a module-local const the
+  // first time cluster is required — which is inside the application's graph, so
+  // a patch applied later would never reach it.
+  {
+    const childProcess = boot.getBuiltin("node:child_process");
+    childProcess.fork = (modulePath) => {
+      throw new Error(
+        `child_process.fork(${JSON.stringify(String(modulePath))}) cannot run in this ` +
+          "executable: the child would re-run the whole application instead of that module. " +
+          "The build is meant to detect a program that forks and produce a different kind of " +
+          "executable, so this is a bug worth reporting.",
+      );
+    };
+  }
+
   // `nub compile`'s build-time self-check, the counterpart to the launcher's
   // probe mode and deliberately the LAST thing before the app would start: every
   // line above has already run, so reaching here proves Node accepted the blob,

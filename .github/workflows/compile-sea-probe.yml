@@ -100,6 +100,18 @@ jobs:
           node tests/compile-sea-probe/semantics.mjs --nub "$NUB" \
             --out-dir "$RUNNER_TEMP/semantics" --modern-node-only 1
 
+      # Separate from the semantics harness on purpose: that one asserts the
+      # artifact matches the same file run through nub, and this case is a
+      # deliberate DIVERGENCE — the artifact refuses a fork that plain nub
+      # performs. Folding it in would mean giving that harness a mode that
+      # contradicts its premise.
+      - name: Fork guard
+        if: matrix.runner == 'ubuntu-latest'
+        shell: bash
+        run: |
+          node tests/compile-sea-probe/fork-guard.mjs --nub "$NUB" \
+            --out-dir "$RUNNER_TEMP/fork-guard"
+
       - name: musl target, run in Alpine
         if: matrix.musl
         shell: bash
