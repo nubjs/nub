@@ -637,13 +637,6 @@ pub(crate) fn apply(
     let sandboxing = confine_fs || policy.net.enforce;
     let tmp_lost = super::tmp_lost_axis(policy);
 
-    // Which of the two Windows backends owns this launch. Decided BEFORE the working-root
-    // work below because the clean-DACL precondition is an AppContainer-model requirement
-    // that the dedicated-account route does not share; the dispatch itself happens after.
-    let account_route = sandboxing
-        && super::windows_account::needs_account_backend(policy)
-        && super::windows_account::is_provisioned();
-
     // Derived HERE rather than beside its other consumers below because `verify_clean_root`
     // needs `publishable` — the subtrees nub publishes to `ALL APPLICATION PACKAGES` — to tell
     // its own ace from a foreign one. Pure over the policy apart from an `exists()` per rule,
@@ -671,16 +664,12 @@ pub(crate) fn apply(
                 cwd.display()
             )),
         })?;
-        // The dedicated-account route is exempt: its child is a separate local principal,
-        // never an AppContainer, so no `ALL APPLICATION PACKAGES` grant can widen it and no
-        // clean root is required (see `windows_account`). Previously this ran ahead of that
-        // dispatch, so `--sandbox-admin setup` could not rescue a host it had no reason to
-        // fail on.
-        if !account_route
-            && let Err(error) = launch::timed("verify_clean_root", || {
-                launch::verify_clean_root(&effective_cwd, &derived.publishable)
-            })
-        {
+        // The AppContainer model requires a working root no `ALL APPLICATION PACKAGES` grant
+        // already reaches — otherwise an inherited AAP grant would widen the child's allow-set
+        // past the policy.
+        if let Err(error) = launch::timed("verify_clean_root", || {
+            launch::verify_clean_root(&effective_cwd, &derived.publishable)
+        }) {
             return Err(Degradation {
                 lost: vec!["fs-root".to_string()],
                 reason: Some(format!(
@@ -770,24 +759,6 @@ pub(crate) fn apply(
             redact_stdout: false,
             redact_stderr: false,
         });
-    }
-
-    // ── agent-sandbox route (dedicated account + WFP) ────────────────────────────
-    // A policy the ALLOWLIST cannot carry — a generous-read base, a deny that must be carved
-    // inside a grant, or per-host egress — goes to the dedicated-account backend, which
-    // expresses all three but costs a one-time elevated setup. build-jail's shape (pure
-    // default-deny allowlist, coarse or absent net) never matches, so `nub install` stays
-    // admin-free. See `windows_account`'s module doc for why the split falls exactly here.
-    // PROVISIONING IS PART OF THE PREDICATE, not just a precondition checked later. Without
-    // it this branch subsumes the whole strict-Windows tier below — `Tier1`/`FailUnelevated`
-    // require exactly `net.enforce && any(Allow)`, which is byte-identical to
-    // `needs_account_backend`'s per-host arm and also forces `sandboxing` — so an
-    // unprovisioned machine would take the account route, fail closed, and leave that tier
-    // unreachable. Falling through instead keeps the AppContainer tier live and degrading
-    // honestly (over-confined reads, a reported deny it cannot carve), which is strictly
-    // better than refusing to run on a machine that never opted into the elevated setup.
-    if account_route {
-        return super::windows_account::apply(policy, spec, proxy_port, proxy_token, ca_bundle);
     }
 
     // ── net posture (strict-Windows tier decision) ──────────────────────────────
