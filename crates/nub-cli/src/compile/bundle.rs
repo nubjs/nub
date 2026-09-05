@@ -8304,6 +8304,58 @@ mod tests {
     }
 
     #[test]
+    fn an_async_module_cycle_is_guarded_against_re_entry() {
+        // Every member of this cycle has a real top-level await, which is what
+        // makes each initializer async and the cycle a deadlock without the
+        // guard: config -> migrate -> back to config, with the memo holding an
+        // in-flight promise by the time the second edge is taken. Plain Node
+        // runs this source; before the guard the compiled binary exited 13 with
+        // "Detected unsettled top-level await".
+        let dir = fixture_dir("async-cycle");
+        std::fs::write(
+            dir.join("config.mjs"),
+            "import { migrate } from './migrate.mjs';\n             export const settings = { name: 'cfg' };\n             await Promise.resolve();\n             export function load() { return settings.name + ':' + migrate() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("migrate.mjs"),
+            "import { settings } from './config.mjs';\n             await Promise.resolve();\n             export function migrate() { return 'm(' + settings.name + ')' }\n",
+        )
+        .unwrap();
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "import { load } from './config.mjs'; console.log(load());\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("a cyclic async graph must compile");
+        let all = res
+            .files
+            .iter()
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            all.contains("function __nubCycleInit(state, run)"),
+            "a chunk with async initializers must carry the cycle guard:\n{all}"
+        );
+        assert!(
+            all.contains("__nubCycleInit(__nub_cycle_init_config"),
+            "the async initializer for a cycle member must be guarded:\n{all}"
+        );
+        // The preamble initializer is synchronous and its callers do not await
+        // it, so routing it through a promise would let them run before it had.
+        assert!(
+            !all.contains("__nubCycleInit(__nub_cycle_init__nub_compile_preamble"),
+            "a synchronous initializer must not be routed through a promise:\n{all}"
+        );
+    }
+
+    #[test]
     fn module_wrappers_and_require_are_hoisted_declarations() {
         let dir = fixture_dir("hoisted-wrappers");
         let pkg = dir.join("node_modules/cjsdep");
