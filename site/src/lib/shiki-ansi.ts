@@ -32,7 +32,11 @@ import type { ShikiTransformer } from '@shikijs/types';
 // default's 1.06. The accents are the panel palette from `global.css`: ember,
 // acid, sky, orchid, plus `--nub-code-foreground` / `--nub-code-muted` for
 // white and bright black.
-const SITE_ANSI_PALETTE = {
+//
+// Exported because the animated player (`src/lib/ansi-screen.ts`) resolves the
+// same 16 colors itself: a recorded session and a static fence of the same
+// output have to be indistinguishable, and a second copy of a palette drifts.
+export const SITE_ANSI_PALETTE = {
   black: '#6b6459', //          3.39:1  dimmest, still legible
   red: '#ff5d3b', //            6.48:1  --color-ember
   green: '#4fe173', //         11.64:1  --color-acid

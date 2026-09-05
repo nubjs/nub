@@ -141,7 +141,9 @@ export function Bench({
         <BenchBars accent={accent} max={max} rows={rows} unit={unit} />
       </div>
       {(caption || source) && (
-        <p className="mt-2.5 text-center text-xs text-fd-muted-foreground">
+        /* Capped at 60% of the column and centered, matching `Figure`: a caption
+           set to the full measure reads as body copy rather than as an annotation. */
+        <p className="mx-auto mt-2.5 max-w-full sm:max-w-[60%] text-center text-xs text-fd-muted-foreground">
           {caption ? <span>{caption} </span> : null}
           {source ? (
             <a

@@ -28,7 +28,9 @@ export function Figure({
       ) : (
         img
       )}
-      <figcaption className="mt-3 text-center text-sm leading-relaxed text-fd-muted-foreground">
+      {/* Capped at 60% of the column and centered. A caption set to the full
+          measure reads as body copy and competes with the figure above it. */}
+      <figcaption className="mx-auto mt-3 max-w-full sm:max-w-[60%] text-center text-sm leading-relaxed text-fd-muted-foreground">
         {caption}
       </figcaption>
     </figure>

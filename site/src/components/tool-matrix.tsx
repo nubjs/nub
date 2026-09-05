@@ -122,6 +122,7 @@ export function ToolMatrix({
   tools,
   rows,
   us,
+  links,
   caption,
 }: {
   /** Column headers, left to right. */
@@ -129,6 +130,8 @@ export function ToolMatrix({
   rows: MatrixRow[];
   /** The column to tint as ours. Matched against `tools` by exact string. */
   us?: string;
+  /** Where a column header links, keyed by the entry in `tools`. */
+  links?: Record<string, string>;
   caption?: ReactNode;
 }) {
   assertNotes(rows, tools);
@@ -141,12 +144,31 @@ export function ToolMatrix({
   // `border-separate` with the row rule on the cells, not the <tr>: a collapsed
   // border is painted between the cells' backgrounds, so a tinted column showed
   // a hairline seam at every row.
+  //
+  // The minimum width is what makes a phone SCROLL the table: a fixed layout
+  // squeezed below the sum of its <col> widths collapses the first column to a
+  // word per line and overlaps the tool columns. 5.5rem per tool plus room for
+  // the label column, so six tools still leave ~11rem for the capability text.
   const usCell = (i: number) => (i === usIndex ? 'tm-us' : '');
   const rule = (last: boolean) => (last ? '' : 'border-b border-fd-border/60');
+  const minWidth = `${11 + tools.length * 5.5}rem`;
+  // `relative` on the scroll container is load-bearing: the glyphs' `sr-only`
+  // text is `position: absolute`, and an absolute box is clipped only by a
+  // POSITIONED overflow ancestor. Without it every sr-only span in the
+  // scrolled-out columns extends the page's own scroll width on a phone.
+  //
+  // The frame lives on that container, not on the table: the prose styles give
+  // every table its own bordered, rounded card, which here drew a second frame
+  // one pixel inside the first. The scroll container has to be the framed
+  // element anyway, so the frame stays put while a phone scrolls the columns
+  // under it — hence `border-0 rounded-none` on the table.
   return (
     <figure className="my-6">
-      <div className="overflow-x-auto rounded-lg border border-fd-border [&_table]:my-0">
-        <table className="tool-matrix w-full table-fixed border-separate border-spacing-0 text-left text-sm">
+      <div className="relative overflow-x-auto rounded-lg border border-fd-border [&_table]:my-0">
+        <table
+          className="tool-matrix w-full table-fixed rounded-none border-0 border-separate border-spacing-0 text-left text-sm"
+          style={{ minWidth }}
+        >
           <colgroup>
             <col />
             {tools.map((tool) => (
@@ -166,7 +188,7 @@ export function ToolMatrix({
                     i === usIndex ? 'text-fd-foreground' : 'text-fd-muted-foreground'
                   }`}
                 >
-                  {tool}
+                  {links?.[tool] ? <a href={links[tool]}>{tool}</a> : tool}
                 </th>
               ))}
             </tr>
@@ -202,7 +224,7 @@ export function ToolMatrix({
         </table>
       </div>
       {caption ? (
-        <figcaption className="mt-2 text-xs leading-relaxed text-fd-muted-foreground">
+        <figcaption className="mx-auto mt-2.5 max-w-full sm:max-w-[60%] text-center text-xs leading-relaxed text-fd-muted-foreground">
           {caption}
         </figcaption>
       ) : null}
