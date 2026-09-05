@@ -621,7 +621,12 @@ fn exec_argv(version: &NodeVersion, node_flags: &[String]) -> Vec<String> {
 /// diagnose without it: a blob present with an unflipped fuse produces a binary
 /// that runs as a plain `node` REPL, because `postject_has_resource()` returns
 /// false and Node never looks.
-pub fn verify_artifact(path: &Path, target: &TargetPlatform) -> Result<()> {
+pub fn verify_artifact(
+    path: &Path,
+    target: &TargetPlatform,
+    version_info: Option<&[u8]>,
+    hide_console: bool,
+) -> Result<()> {
     let image = fs::read(path).with_context(|| format!("reading back {}", path.display()))?;
 
     let fuse = find(&image, FUSE_PREFIX)
@@ -645,7 +650,14 @@ pub fn verify_artifact(path: &Path, target: &TargetPlatform) -> Result<()> {
             "the written artifact's single-executable blob does not start with Node's magic number"
         );
     }
-    Ok(())
+
+    // The Windows-only half, and the reason it is worth reading back rather than
+    // trusting the write: a Windows artifact is routinely cross-compiled, so it is
+    // never executed on the build host, and both of these fail SILENTLY on the
+    // target — an un-hidden console, or an Explorer Details tab showing nothing.
+    // Shared with the launcher path, which carries the full account of how the
+    // resource directory's ascending-id rule loses the icon along with them.
+    super::verify_windows_dressing(&image, version_info, hide_console)
 }
 
 #[cfg(test)]
@@ -925,8 +937,7 @@ mod tests {
             bytes: bytes.to_vec(),
             executable: false,
         };
-        let bootstrap =
-            "const requireArg = __filename === \"[eval]\" ? undefined : `--require=${__filename}`;\n";
+        let bootstrap = "const requireArg = __filename === \"[eval]\" ? undefined : `--require=${__filename}`;\n";
         let files = vec![
             file(
                 nub_core::compile::COMPILE_BOOTSTRAP_NAME,

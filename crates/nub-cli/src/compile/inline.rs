@@ -184,9 +184,7 @@ impl Decline {
             Self::EmbeddedNode => "it extracts its embedded Node anyway",
             Self::ClusterReentry => "it uses node:cluster, which re-runs the executable",
             Self::SourceMap => "it was built with source maps",
-            Self::ChildProcessReentry => {
-                "it forks child processes, which re-run the executable"
-            }
+            Self::ChildProcessReentry => "it forks child processes, which re-run the executable",
         }
     }
 }

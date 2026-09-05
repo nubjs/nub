@@ -641,7 +641,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     sync_file(staged.path())?;
     live.phase("verifying", "");
     if use_sea {
-        sea::verify_artifact(staged.path(), &target)?;
+        sea::verify_artifact(
+            staged.path(),
+            &target,
+            version_info.as_deref(),
+            opts.hide_console,
+        )?;
     } else {
         verify_artifact(
             staged.path(),
@@ -3163,32 +3168,17 @@ fn node_runs(node: &Path) -> bool {
 
 // ---- artifact verification ----------------------------------------------------
 
-/// Check the artifact before handing it to the user. Two layers, the second
-/// available only natively:
+/// The two things about a Windows artifact that only a read-back can establish,
+/// shared by both containers.
 ///
-/// 1. **Static scan (always).** Locate the payload in the produced file the way
-///    the target's loader will, and decode it. Catches a malformed injection on
-///    every target, including the cross ones that cannot be run here.
-/// 2. **Probe-mode self-check (target == host only).** Executes the artifact so it
-///    reads its own section and touches a heap allocation — the exact path an
-///    under-padded Mach-O injection corrupts into a SIGILL trap, which no static
-///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
-///    the scan but was never executed is a weaker guarantee, and the user should
-///    know which one they got.
-fn verify_artifact(
-    bin: &Path,
-    target: &TargetPlatform,
+/// A Windows binary is routinely cross-compiled and so is never executed on the
+/// build host — and both of these fail SILENTLY on the target machine: an
+/// un-hidden console window, or an Explorer Details tab showing nothing at all.
+fn verify_windows_dressing(
+    bytes: &[u8],
     version_info: Option<&[u8]>,
     hide_console: bool,
 ) -> Result<()> {
-    let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
-    let payload = inject::find_payload(target.format(), &bytes)
-        .with_context(|| format!("scanning {} for its payload", bin.display()))?
-        .context("the produced executable carries no payload — the injection did not take")?;
-    let view = nub_core::compile::decode(payload)
-        .context("the produced executable's payload does not decode")?;
-    verify_payload_shape(&view)?;
-
     // The version resource is re-read here for the same reason the payload is,
     // and it needs it more. A cross-compiled Windows binary cannot be executed
     // on this host, so this parse is the only evidence the resource is REACHABLE
@@ -3201,7 +3191,7 @@ fn verify_artifact(
     // subsystem back is the only thing standing between a silently un-hidden
     // binary and the user discovering it on the target machine.
     if hide_console {
-        let subsystem = inject::pe_subsystem(&bytes).context(
+        let subsystem = inject::pe_subsystem(bytes).context(
             "the produced executable's PE optional header is unreadable, so \
              --hide-console cannot be confirmed",
         )?;
@@ -3215,8 +3205,8 @@ fn verify_artifact(
     }
 
     if let Some(encoded) = version_info {
-        let found = inject::find_version_resource(&bytes)
-            .with_context(|| format!("scanning {} for its version resource", bin.display()))?
+        let found = inject::find_version_resource(bytes)
+            .context("scanning the produced executable for its version resource")?
             .context(
                 "the produced executable carries no version resource, so its metadata \
                  would not appear in Explorer — the injection did not take",
@@ -3243,6 +3233,36 @@ fn verify_artifact(
             );
         }
     }
+    Ok(())
+}
+
+/// Check the artifact before handing it to the user. Two layers, the second
+/// available only natively:
+///
+/// 1. **Static scan (always).** Locate the payload in the produced file the way
+///    the target's loader will, and decode it. Catches a malformed injection on
+///    every target, including the cross ones that cannot be run here.
+/// 2. **Probe-mode self-check (target == host only).** Executes the artifact so it
+///    reads its own section and touches a heap allocation — the exact path an
+///    under-padded Mach-O injection corrupts into a SIGILL trap, which no static
+///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
+///    the scan but was never executed is a weaker guarantee, and the user should
+///    know which one they got.
+fn verify_artifact(
+    bin: &Path,
+    target: &TargetPlatform,
+    version_info: Option<&[u8]>,
+    hide_console: bool,
+) -> Result<()> {
+    let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
+    let payload = inject::find_payload(target.format(), &bytes)
+        .with_context(|| format!("scanning {} for its payload", bin.display()))?
+        .context("the produced executable carries no payload — the injection did not take")?;
+    let view = nub_core::compile::decode(payload)
+        .context("the produced executable's payload does not decode")?;
+    verify_payload_shape(&view)?;
+
+    verify_windows_dressing(&bytes, version_info, hide_console)?;
 
     if !target.is_host() {
         note(&format!(
@@ -5765,7 +5785,7 @@ mod tests {
                 support_files: Vec::new(),
                 root_support_files: Vec::new(),
                 bootstrap_optional: false,
-            app_names_child_process: false,
+                app_names_child_process: false,
                 dynamic_import_sites: 0,
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),
