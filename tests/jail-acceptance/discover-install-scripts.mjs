@@ -19,6 +19,19 @@ const CANDIDATES = [
   // the heaviest omissions were not obscure: unrs-resolver at 54M/wk, @sentry/cli, workerd, msw, nx,
   // yarn, bun, aws-sdk. The list below is the union of that hand list with EVERY install-script
   // carrying package in the npm top-downloaded set, which takes the coverage to 100% OF THAT SET.
+  //
+  // ⛔⛔ THAT CLAIM DOES NOT HOLD TODAY, MEASURED 2026-09-05, AND ONE HALF OF WHY IS STRUCTURAL. A
+  // version-aware scan of ranks 1-25,500 finds 244 install-script carriers; the population covers
+  // 107. Of the 137 it misses, 81 carry a script on `latest` and are simply absent from the array
+  // below -- fixable by regenerating it. The other 56 are NOT fixable that way: they run their
+  // install script only on a version that is not `latest`, and everything here judges a candidate by
+  // `latest`, so no candidate list can surface them. `sharp` is the case in point, with no install
+  // script on `latest` and one on 0.34.5, which holds 30.7M weekly downloads.
+  //
+  // scripts/npm-install-script-census.ts already solves this by ranking a package's versions by
+  // actual download count and asking whether any of the top N runs a script. The population is
+  // generated HERE rather than from the census, so that version-awareness never reaches it. The
+  // missing packages are listed in results/uncovered-above-gate.tsv.
   // ⛔ Read that figure narrowly. The top-downloaded set IS the packages above 100,000 weekly
   // downloads, so the metric is measured against the band this list is drawn from and would read
   // 100% wherever the gate sat. It says the band is covered, never that the ecosystem is.
