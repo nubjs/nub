@@ -60,6 +60,10 @@ pub mod macos_denials;
 
 #[cfg(target_os = "linux")]
 mod linux;
+// The Linux half of the aube-scripts embedder seam (epic 4.1): install nub's build-jail
+// confinement onto a caller-owned command, so the lifecycle jail runs on the shared engine.
+#[cfg(target_os = "linux")]
+pub use linux::{BuildJailConfinement, confine_build_jail_command};
 
 // DROPPED with the bubblewrap teardown (epic 1.1): `linux_setup` (the privileged helper-account /
 // AppArmor host-setup tier), `linux_monitor` (the retained PID-1 monitor), `linux_net_bridge` (the

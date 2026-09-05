@@ -168,6 +168,12 @@ pub mod host_probe {
     pub use crate::backend::landlock_abi;
 }
 
+/// The Linux half of the aube-scripts embedder seam (epic 4.1): confine an embedder-owned
+/// command (e.g. a `tokio::process::Command`) with nub's build-jail Landlock + seccomp ceiling,
+/// so the shipping build jail runs on this shared engine rather than a second implementation.
+#[cfg(target_os = "linux")]
+pub use backend::{BuildJailConfinement, confine_build_jail_command};
+
 // `windows_admin` re-exported the dropped `windows_account` backend (privileged dedicated-account
 // + WFP tier). Removed with the curated zero-privilege import (epic row 0.3): the AppContainer
 // backend (`backend::windows`) needs no machine administration, and the account tier is not part

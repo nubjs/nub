@@ -809,12 +809,11 @@ pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, Landl
 /// # Safety
 /// `ruleset_fd` must outlive the spawn. The caller retains the [`LandlockRuleset`] on the
 /// returned `Prepared` for exactly that reason.
-unsafe fn install_confinement_pre_exec(
-    command: &mut Command,
+unsafe fn install_confinement_pre_exec<C: std::os::unix::process::CommandExt>(
+    command: &mut C,
     ruleset_fd: RawFd,
     seccomp: Option<std::sync::Arc<Vec<seccompiler::sock_filter>>>,
 ) {
-    use std::os::unix::process::CommandExt;
     let hook = move || -> std::io::Result<()> {
         // `setsid`, NOT `setpgid` — it detaches the CONTROLLING TERMINAL as well as
         // starting a new process group. Bubblewrap got this from `--new-session`, whose
@@ -865,10 +864,30 @@ pub(crate) fn prepare_launch(
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
 ) -> Result<(Command, LandlockRuleset), String> {
+    let ruleset = install_landlock_confinement(&mut command, policy, seccomp, tmp_dir, entry_program)?;
+    Ok((command, ruleset))
+}
+
+/// The engine seam (build-jail path): build the Landlock ruleset for `policy` and install the
+/// confinement `pre_exec` hook onto a caller-OWNED command — any [`CommandExt`], so an embedder's
+/// `tokio::process::Command` works without nub-sandbox taking a tokio dependency. The returned
+/// [`LandlockRuleset`] holds the ruleset descriptor open; the caller MUST keep it alive until the
+/// command is spawned (the hook consumes the fd after fork). This is what lets aube-scripts' own
+/// async lifecycle command be confined by the shared engine rather than a second Landlock
+/// implementation. `prepare_launch` is the in-crate caller that owns its `std::process::Command`.
+///
+/// [`CommandExt`]: std::os::unix::process::CommandExt
+pub(crate) fn install_landlock_confinement<C: std::os::unix::process::CommandExt>(
+    command: &mut C,
+    policy: &SandboxPolicy,
+    seccomp: Option<Vec<seccompiler::sock_filter>>,
+    tmp_dir: Option<&Path>,
+    entry_program: Option<&Path>,
+) -> Result<LandlockRuleset, String> {
     let ruleset = build(policy, tmp_dir, entry_program)?;
     let fd = ruleset.as_raw_fd();
-    unsafe { install_confinement_pre_exec(&mut command, fd, seccomp.map(std::sync::Arc::new)) };
-    Ok((command, ruleset))
+    unsafe { install_confinement_pre_exec(command, fd, seccomp.map(std::sync::Arc::new)) };
+    Ok(ruleset)
 }
 
 #[cfg(test)]
