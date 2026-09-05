@@ -405,15 +405,30 @@ fn a_single_executable_refuses_a_fork_the_container_scan_could_not_see() {
 if (GEN > 2) { console.log("gen", GEN, "STOPPING"); process.exit(9); }
 globalThis.__holder = { r: require };
 const cp = globalThis.__holder.r("node:child_process");
+const cluster = globalThis.__holder.r("node:cluster");
 try {
   cp.fork(__filename, [], { env: { ...process.env, GEN: String(GEN + 1) } });
   console.log("FORKED");
 } catch (error) {
   console.log("REFUSED:", error.message);
 }
+try {
+  cluster.fork({ GEN: String(GEN + 1) });
+  console.log("CLUSTER-FORKED");
+} catch (error) {
+  console.log("CLUSTER-REFUSED:", error.message);
+}
 "#,
     )
     .expect("write entry");
+    // A PASSIVE preload: it loads the module and does nothing else. That is enough,
+    // because loading is what hands `internal/cluster/primary` its own `fork`.
+    let preload = work.join("preload.cjs");
+    std::fs::write(
+        &preload,
+        "require(\"node:cluster\");\nconsole.log(\"PRELOADED-CLUSTER\");\n",
+    )
+    .expect("write the preload");
 
     let compiled = Command::new(nub_binary())
         .args(["compile", "--target", &runtime.node_target, "--out"])
@@ -463,20 +478,67 @@ try {
         return;
     }
 
-    let ran = run_compiled_artifact_with_timeout(&artifact, &work);
-    let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
-    assert!(
-        stdout.contains("REFUSED:"),
-        "the artifact did not refuse the fork; it printed {stdout:?}"
-    );
-    assert!(
-        !stdout.contains("FORKED"),
-        "the fork succeeded, so the child re-ran the application: {stdout:?}"
-    );
-    assert!(
-        !stdout.contains("gen 1"),
-        "a second generation started, which is the re-entry this guards: {stdout:?}"
-    );
+    // Twice, because the two refusals are reached by different mechanisms and only
+    // the second needs a preload to bring it about.
+    //
+    // Plain: the application loads cluster itself, AFTER the loader has replaced
+    // `child_process.fork`, so `internal/cluster/primary` captures the replacement
+    // and both calls end in it.
+    //
+    // Preloaded: a `NODE_OPTIONS` preload loads cluster BEFORE the blob's main, so
+    // that same const holds the ORIGINAL and nothing can reach it. Only the
+    // loader's separate patch of `cluster.fork` refuses the second call, which is
+    // the branch this half exists to exercise — without it the case passes on the
+    // first half alone.
+    for preloaded in [false, true] {
+        let mut command = Command::new(&artifact);
+        command.current_dir(&work);
+        if preloaded {
+            command.env("NODE_OPTIONS", format!("--require={}", preload.display()));
+        }
+        let ran =
+            run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(20));
+        let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+        let case = if preloaded {
+            "preloaded cluster"
+        } else {
+            "plain"
+        };
+
+        // Restored from the script this replaced: without it a run can refuse the
+        // fork, die on something else, and still satisfy every assertion below.
+        assert!(
+            ran.status.success(),
+            "{case}: the artifact exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+            ran.status.code()
+        );
+        if preloaded {
+            // The premise of this half. A preload that silently failed to run would
+            // leave the branch untested while the case still passed.
+            assert!(
+                stdout.contains("PRELOADED-CLUSTER"),
+                "{case}: the preload did not run, so cluster was not loaded before the \
+                 main and this half tested nothing\nstdout: {stdout}\nstderr: {stderr}"
+            );
+        }
+        assert!(
+            stdout.contains("REFUSED:"),
+            "{case}: the artifact did not refuse child_process.fork; it printed {stdout:?}"
+        );
+        assert!(
+            stdout.contains("CLUSTER-REFUSED:"),
+            "{case}: the artifact did not refuse cluster.fork; it printed {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("FORKED\n") && !stdout.contains("CLUSTER-FORKED"),
+            "{case}: a fork succeeded, so the child re-ran the application: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("gen 1"),
+            "{case}: a second generation started, which is the re-entry this guards: {stdout:?}"
+        );
+    }
 }
 
 #[cfg(feature = "compile")]

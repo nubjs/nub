@@ -196,15 +196,18 @@
   // one route a preload takes without meaning to, and the branch below takes it.
   {
     const childProcess = boot.getBuiltin("node:child_process");
-    const refuse = (what) => (modulePath) => {
+    // Reaching either of these means the build's scan missed this payload, which
+    // is the part the reader can act on and the part they cannot infer.
+    const REPORT =
+      " The build is meant to detect a program that forks and produce a different kind of " +
+      "executable, so this is a bug worth reporting.";
+    childProcess.fork = (modulePath) => {
       throw new Error(
-        `${what}(${JSON.stringify(String(modulePath))}) cannot run in this executable: the ` +
-          "child would re-run the whole application instead of that module. The build is " +
-          "meant to detect a program that forks and produce a different kind of executable, " +
-          "so this is a bug worth reporting.",
+        `child_process.fork(${JSON.stringify(String(modulePath))}) cannot run in this ` +
+          "executable: the child would re-run the whole application instead of that module." +
+          REPORT,
       );
     };
-    childProcess.fork = refuse("child_process.fork");
 
     // The one case where replacing `child_process.fork` is already too late. A
     // preload that loaded `node:cluster` gave `internal/cluster/primary` its
@@ -213,8 +216,19 @@
     // take. Conditional because reading the module would otherwise LOAD it,
     // which costs every artifact a builtin it does not use and would capture
     // the original itself.
+    //
+    // Its own message rather than the one above: `cluster.fork` takes an
+    // environment, not a module path, so rendering the argument prints
+    // `[object Object]` and "instead of that module" names nothing the caller
+    // wrote.
     if (process.moduleLoadList.some((entry) => entry.endsWith("internal/cluster/primary"))) {
-      boot.getBuiltin("node:cluster").fork = refuse("cluster.fork");
+      boot.getBuiltin("node:cluster").fork = () => {
+        throw new Error(
+          "cluster.fork() cannot run in this executable: the worker would re-run the whole " +
+            "application rather than starting a worker." +
+            REPORT,
+        );
+      };
     }
   }
 
