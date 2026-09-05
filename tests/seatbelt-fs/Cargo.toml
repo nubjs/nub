@@ -1,0 +1,14 @@
+# Phase-3 probe (epic 3.1): the compiler + matcher drive the macOS Seatbelt primitive
+# (`macos::apply` -> `/usr/bin/sandbox-exec`) end-to-end. The macOS analog of supervised-fs.
+# Own workspace, macOS-only (runs natively on the dev Mac — the one host that can).
+[workspace]
+
+[package]
+name = "seatbelt-fs-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nub-sandbox = { path = "../../crates/nub-sandbox" }
+serde_json = "1"

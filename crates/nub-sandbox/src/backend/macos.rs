@@ -160,8 +160,8 @@ const NETWORK_SERVICES: &str = "\
 ";
 
 /// The stock, unprivileged entry point to Seatbelt. Every confined launch goes through exactly
-/// this path, which is what makes its presence the only readiness question macOS has — see
-/// [`super::macos_setup::enforceable`], which re-exports this constant rather than restating it.
+/// this path, which is what makes its presence the only readiness question macOS has. (The
+/// `macos_setup` no-op readiness shim was dropped with the privileged tier, epic 0.3.)
 pub const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
 
 /// Apply a resolved policy to a command on macOS. When the policy confines neither

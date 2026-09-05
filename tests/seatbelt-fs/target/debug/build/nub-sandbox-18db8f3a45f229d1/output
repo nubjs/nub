@@ -1,0 +1,6 @@
+cargo:rerun-if-changed=data/build-jail-catalog.json
+cargo:rerun-if-changed=data/build-jail-catalog-v2.json
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-changed=src/catalog.rs
+cargo:rerun-if-changed=src/catalog_v2.rs
+cargo:rerun-if-changed=src/compiler/version_scope.rs
