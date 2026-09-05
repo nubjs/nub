@@ -1042,8 +1042,9 @@ pub(super) struct SupervisedChild {
     pid: libc::pid_t,
     /// The `pidfd` opened to grab the listener; retained for a race-free kill in `Drop`.
     pidfd: RawFd,
-    /// The supervisor loop thread. It returns on its own once the target dies (the RECV ioctl
-    /// fails when the listener has no live target), so `wait` joins it after reaping.
+    /// The supervisor loop thread, held only so it is DETACHED (not joined) on wait/drop — see
+    /// [`SupervisedChild::wait`]. `NOTIF_RECV` does not reliably wake on target death, so joining
+    /// would hang; the process reaps the detached thread at exit.
     supervisor: Option<std::thread::JoinHandle<()>>,
     /// Set once `waitpid` has reaped `pid`, so `Drop` neither re-kills nor double-reaps.
     reaped: bool,
@@ -1083,9 +1084,11 @@ impl SupervisedChild {
         if self.group_leader {
             unsafe { libc::kill(-self.pid, libc::SIGKILL) };
         }
-        if let Some(handle) = self.supervisor.take() {
-            let _ = handle.join();
-        }
+        // DETACH, never join: `SECCOMP_IOCTL_NOTIF_RECV` does not reliably return when the target
+        // dies, so joining here blocks forever. Dropping the handle detaches the thread, which the
+        // process reaps at exit. Clean per-launch shutdown (closing the listener to unblock RECV)
+        // is a supervisor-lifecycle hardening item (epic 1.4).
+        drop(self.supervisor.take());
         Ok(std::process::ExitStatus::from_raw(status))
     }
 }
@@ -1103,9 +1106,8 @@ impl Drop for SupervisedChild {
         if self.pidfd >= 0 {
             unsafe { libc::close(self.pidfd) };
         }
-        if let Some(handle) = self.supervisor.take() {
-            let _ = handle.join();
-        }
+        // Detached, never joined — see [`SupervisedChild::wait`].
+        drop(self.supervisor.take());
     }
 }
 

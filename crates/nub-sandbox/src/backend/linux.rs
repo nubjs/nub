@@ -16,7 +16,7 @@ use seccompiler::{
     SeccompRule, TargetArch, sock_filter,
 };
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -238,11 +238,34 @@ pub fn apply(
         return apply_landlock(policy, spec, landlock, tmp_dir);
     }
     if preflight.confine_without_landlock {
-        // epic 1.1: the bubblewrap backend that enforced every non-Landlock policy was
-        // removed with the curated zero-privilege import. This is the ONE seam it filled, and
-        // driving the seccomp user-notify supervisor (`linux_supervisor`) into it — together
-        // with the Landlock pre_exec launch wiring — is epic 1.1(d).
-        todo!("epic 1.1(d): drive linux_supervisor in the Landlock pre_exec launch path")
+        // The supervised (seccomp USER_NOTIF) launch — epic 1.1d. This is the seam the removed
+        // bubblewrap backend filled: a policy that needs confinement but is not a build-jail
+        // Landlock policy. The NET axis is wired here (transparent per-host egress through the
+        // in-process supervisor); FS and private-tmp under the supervisor are a later increment,
+        // so FAIL CLOSED when the policy asks for them rather than launch a child that would
+        // enforce neither. (Env is enforced by construction — `base_command`/`envp` — always.)
+        if fs_confines(&policy.fs) || policy.fs.tmp != TmpMode::Shared {
+            return Err(Degradation {
+                lost: vec!["fs".to_string()],
+                reason: Some(
+                    "supervised filesystem confinement is not yet wired (epic 1.1d); refusing to \
+                     launch without the filesystem boundary this policy requires"
+                        .to_string(),
+                ),
+            });
+        }
+        let plan = build_supervised_plan(policy, &spec)?;
+        return Ok(Prepared {
+            command: base_command(&spec, policy),
+            degradation: Degradation::full(),
+            proxy: None,
+            _inherited_files: Vec::new(),
+            signal_process_group: false,
+            _private_tmp: None,
+            redact_stdout: false,
+            redact_stderr: false,
+            supervised: Some(plan),
+        });
     }
     // Nothing to confine: the policy enforces no axis, so hand back the plain child. Only the
     // Landlock path populates `_inherited_files`/`signal_process_group`; the removed bubblewrap
@@ -256,6 +279,68 @@ pub fn apply(
         _private_tmp: None,
         redact_stdout: false,
         redact_stderr: false,
+        supervised: None,
+    })
+}
+
+/// Build the [`super::SupervisedPlan`] a `confine_without_landlock` policy forks with. The net
+/// axis becomes an [`EgressPolicy`](super::linux_supervisor::EgressPolicy); the environment is
+/// the same `constructed` map `base_command` uses; argv0 is resolved to an absolute path for the
+/// bespoke `execve`. No Landlock ruleset and no seccomp ceiling yet (net-only increment).
+fn build_supervised_plan(
+    policy: &SandboxPolicy,
+    spec: &CommandSpec,
+) -> Result<super::SupervisedPlan, Degradation> {
+    let to_cstring = |bytes: &[u8], label: &str| -> Result<CString, Degradation> {
+        CString::new(bytes).map_err(|_| Degradation {
+            lost: vec!["process-input".to_string()],
+            reason: Some(format!("sandbox {label} contains a NUL byte")),
+        })
+    };
+    // Resolve argv0 to an absolute path the same way the Landlock path does, so the bespoke
+    // `execve` (which performs no PATH search) can find it; fall back to the name verbatim so
+    // `execve` fails closed in the child when it cannot be resolved.
+    let child_cwd = spec
+        .cwd
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let program_abs = resolve_program(&spec.program, &child_cwd, target_path(policy).as_deref())
+        .unwrap_or_else(|| PathBuf::from(&spec.program));
+    let mut argv = vec![to_cstring(program_abs.as_os_str().as_bytes(), "entry program")?];
+    for arg in spec.args.tokens() {
+        argv.push(to_cstring(arg.as_bytes(), "argument")?);
+    }
+    let mut envp = Vec::with_capacity(policy.env.constructed.len());
+    for (key, value) in &policy.env.constructed {
+        envp.push(to_cstring(format!("{key}={value}").as_bytes(), "environment entry")?);
+    }
+    let cwd = match &spec.cwd {
+        Some(dir) => Some(to_cstring(dir.as_os_str().as_bytes(), "working directory")?),
+        None => None,
+    };
+    let net = &policy.net;
+    // No `enforce` ⇒ net is unconfined (allow everything). `default_effect == Allow` ⇒ the policy
+    // admits every host. Otherwise only the explicit Allow-Host rules pass; the supervisor dials
+    // and splices those and refuses the rest at connect.
+    let allow_all = !net.enforce || net.default_effect == Effect::Allow;
+    let allow = net
+        .rules
+        .iter()
+        .filter(|rule| rule.effect == Effect::Allow)
+        .filter_map(|rule| match &rule.target {
+            crate::policy::NetTarget::Host(host) => Some(host.clone()),
+            _ => None,
+        })
+        .collect();
+    Ok(super::SupervisedPlan {
+        egress: super::linux_supervisor::EgressPolicy { allow_all, allow },
+        argv,
+        envp,
+        cwd,
+        ruleset: None,
+        seccomp_ceiling: None,
+        setsid: true,
     })
 }
 
@@ -722,6 +807,7 @@ fn apply_landlock(
         _private_tmp: None,
         redact_stdout: false,
         redact_stderr: false,
+        supervised: None,
     })
 }
 

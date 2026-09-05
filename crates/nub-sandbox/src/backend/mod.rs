@@ -31,7 +31,7 @@ use crate::proxy::{EgressProxy, StaticDecider};
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -439,6 +439,62 @@ pub struct Prepared {
     /// byte-for-byte today's behavior.
     pub(crate) redact_stdout: bool,
     pub(crate) redact_stderr: bool,
+    /// Linux supervised-launch plan (seccomp `USER_NOTIF` per-host egress). When `Some`,
+    /// [`status`](Self::status) forks the confined child via
+    /// [`linux_supervisor::spawn_supervised`] instead of spawning `command` — the listener-fd
+    /// barrier cannot ride `Command::spawn` (see [`linux_supervisor::SupervisedChild`]).
+    /// Mirrors the Windows `launch` field. The asynchronous [`spawn`](Self::spawn) path does
+    /// not yet host it and refuses rather than launch unsupervised.
+    #[cfg(target_os = "linux")]
+    pub(crate) supervised: Option<SupervisedPlan>,
+}
+
+/// The owned inputs a supervised Linux launch forks with, built by [`apply`] and held until
+/// [`Prepared::status`] runs it. Owns its data because [`linux_supervisor::spawn_supervised`]
+/// borrows the argv/envp/cwd across the fork; the ruleset (when present) is held open so its
+/// descriptor survives to the child's `restrict_self`.
+#[cfg(target_os = "linux")]
+pub(crate) struct SupervisedPlan {
+    pub(crate) egress: linux_supervisor::EgressPolicy,
+    pub(crate) argv: Vec<CString>,
+    pub(crate) envp: Vec<CString>,
+    pub(crate) cwd: Option<CString>,
+    /// Landlock ruleset held open until the fork consumes its fd; `None` = no fs boundary.
+    pub(crate) ruleset: Option<linux_landlock::LandlockRuleset>,
+    pub(crate) seccomp_ceiling: Option<Vec<seccompiler::sock_filter>>,
+    pub(crate) setsid: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl SupervisedPlan {
+    /// Fork the confined child, run it under its supervisor, and return its exit status.
+    fn run(self) -> std::io::Result<std::process::ExitStatus> {
+        let SupervisedPlan {
+            egress,
+            argv,
+            envp,
+            cwd,
+            ruleset,
+            seccomp_ceiling,
+            setsid,
+        } = self;
+        let launch = linux_supervisor::SupervisedLaunch {
+            argv: &argv,
+            envp: &envp,
+            cwd: cwd.as_deref(),
+            ruleset_fd: ruleset
+                .as_ref()
+                .map_or(-1, linux_landlock::LandlockRuleset::as_raw_fd),
+            seccomp_ceiling: seccomp_ceiling.as_deref(),
+            setsid,
+        };
+        let mut child = linux_supervisor::spawn_supervised(egress, launch)?;
+        // Keep the ruleset alive across the fork+exec, exactly as the `Command` path keeps
+        // `_inherited_files`: the child's `restrict_self` consumes the fd after fork.
+        let status = child.wait();
+        drop(ruleset);
+        status
+    }
 }
 
 /// A running prepared child together with every resource that must outlive it.
@@ -707,6 +763,17 @@ impl Prepared {
                 "asynchronous confined Windows launches are not available",
             ));
         }
+        // The supervised launch forks directly (the listener-fd barrier cannot ride
+        // `Command::spawn`), so it has no `std::process::Child` to hand back — it is reachable
+        // only through the synchronous `status()`. Refuse rather than spawn `command`
+        // unsupervised, which would drop the net boundary the policy required.
+        #[cfg(target_os = "linux")]
+        if self.supervised.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "asynchronous supervised Linux launches are not yet available; use status()",
+            ));
+        }
         // Pipe the requested fds so the host can drain them through its redactor. stdin is
         // left untouched (interactive input still reaches the child). Both flags off (the
         // default) = inherit, so the non-redacting path is byte-for-byte unchanged.
@@ -782,6 +849,12 @@ impl Prepared {
         #[cfg(target_os = "windows")]
         if let Some(launch) = self.launch.take() {
             return launch.run();
+        }
+        // The Linux supervised launch owns its own fork+wait (the connect-notifier supervisor
+        // runs in this process for the child's whole life), the same way the Windows launch does.
+        #[cfg(target_os = "linux")]
+        if let Some(plan) = self.supervised.take() {
+            return plan.run();
         }
         let mut child = self.spawn()?;
         child.wait()

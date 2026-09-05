@@ -1,0 +1,24 @@
+# Standalone enforcement harness for the zero-privilege SUPERVISED launch path
+# (crates/nub-sandbox/src/backend/{linux.rs build_supervised_plan, mod.rs SupervisedPlan,
+# linux_supervisor.rs spawn_supervised}). NOT a workspace member — the nub workspace lists
+# its members explicitly, so this crate is invisible to a root `cargo build` and is compiled
+# only when run from this directory. Unlike tests/linux-supervisor (which `#[path]`-includes a
+# single module), this depends on nub-sandbox as a library and drives its REAL public path
+# compile() -> apply() -> Prepared::status(), so it proves the whole wiring end-to-end.
+# Linux-only, needs network + a real fork; run manually on a Linux enforcement host.
+# Own workspace root so cargo does not try to treat it as a member of the outer nub workspace.
+[workspace]
+
+[package]
+name = "supervised-launch-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nub-sandbox = { path = "../../crates/nub-sandbox" }
+serde_json = "1"
+
+[[bin]]
+name = "probe"
+path = "src/main.rs"
