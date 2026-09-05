@@ -24,6 +24,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/bench/install/provenance.sh
+source "$SCRIPT_DIR/provenance.sh"   # bench_env_json / bench_inject_env
 DEFAULT_NUB="$REPO_ROOT/target/release/nub"
 NUB="${NUB:-$DEFAULT_NUB}"
 FIXTURE_DIR="$REPO_ROOT/tests/bench/install/fixtures"
@@ -322,6 +325,12 @@ run_warm() {
 
   hyperfine "${HYPERFINE_ARGS[@]}" --export-json "$outfile_nub"
 
+  # Stamp provenance (tool versions/platform/arch/timestamp/load) into the result.
+  local warm_env_args=(nub="$NUB_SEMVER" pnpm="$PNPM_VERSION")
+  [[ $has_npm_lock -eq 1 ]] && warm_env_args+=(npm="$NPM_VERSION")
+  [[ $HAS_BUN -eq 1 && -f "$FIXTURE_DIR/$fixture/bun.lock" ]] && warm_env_args+=(bun="$BUN_VERSION")
+  bench_inject_env "$outfile_nub" "$(bench_env_json "${warm_env_args[@]}")"
+
   echo ""
   echo "  [results saved → $outfile_nub]"
   echo ""
@@ -414,16 +423,14 @@ run_cold() {
     local t0; t0=$(ms_now)
     XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" \
       NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC" NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC" \
-      "$NUB" install \
+      "$NUB" --cwd "$wd" install \
       --frozen-lockfile \
-      --cwd "$wd" \
       -s \
       2>/dev/null \
       || XDG_DATA_HOME="$data" XDG_CACHE_HOME="$cache" \
            NPM_CONFIG_USERCONFIG="$EMPTY_NPMRC" NPM_CONFIG_GLOBALCONFIG="$EMPTY_NPMRC" \
-           "$NUB" install \
+           "$NUB" --cwd "$wd" install \
            --frozen-lockfile \
-           --cwd "$wd" \
            2>&1 | tail -2
     local t1; t1=$(ms_now)
     local ms=$(( t1 - t0 ))
@@ -465,13 +472,16 @@ run_cold() {
 
   local outfile="$RESULTS_DIR/cold-${fixture}-${TIMESTAMP}.json"
   local bun_json='null'
+  local cold_env_args=(nub="$NUB_SEMVER" pnpm="$PNPM_VERSION")
   if [[ $has_bun_lock -eq 1 ]]; then
     read -r bun_mean bun_sd <<< "$(compute_stats_ms "${bun_times[@]}")"
     bun_json="$(printf '{"times_ms":[%s],"mean_ms":%d,"stddev_ms":%d}' \
       "$(IFS=,; echo "${bun_times[*]}")" "$bun_mean" "$bun_sd")"
+    cold_env_args+=(bun="$BUN_VERSION")
   fi
-  printf '{"scenario":"cold","fixture":"%s","runs":%d,"pnpm":{"times_ms":[%s],"mean_ms":%d,"stddev_ms":%d},"nub":{"times_ms":[%s],"mean_ms":%d,"stddev_ms":%d},"bun":%s}\n' \
-    "$fixture" "$RUNS" \
+  local cold_env_json; cold_env_json="$(bench_env_json "${cold_env_args[@]}")"
+  printf '{"scenario":"cold","fixture":"%s","runs":%d,"env":%s,"pnpm":{"times_ms":[%s],"mean_ms":%d,"stddev_ms":%d},"nub":{"times_ms":[%s],"mean_ms":%d,"stddev_ms":%d},"bun":%s}\n' \
+    "$fixture" "$RUNS" "$cold_env_json" \
     "$(IFS=,; echo "${pnpm_times[*]}")" "$pnpm_mean" "$pnpm_sd" \
     "$(IFS=,; echo "${nub_times[*]}")"  "$nub_mean"  "$nub_sd" \
     "$bun_json" \
