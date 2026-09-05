@@ -301,14 +301,22 @@ mod tests {
         let scoped =
             Manifest::parse(br#"{"name":"p","dependencies":{"@types/babel__core":"^7"}}"#).unwrap();
         let f = classify(&scoped, &[type_ref("@babel/core", "@babel/core")]);
-        assert_eq!(f[0].verdict, Verdict::Declared, "@babel/core → @types/babel__core");
+        assert_eq!(
+            f[0].verdict,
+            Verdict::Declared,
+            "@babel/core → @types/babel__core"
+        );
 
         // A PEER types package counts too — the consumer supplies it. Two of the
         // fifteen sampled false positives declared it this way.
         let peer =
             Manifest::parse(br#"{"name":"p","peerDependencies":{"@types/geojson":"*"}}"#).unwrap();
         let f = classify(&peer, &[type_ref("geojson", "geojson")]);
-        assert_eq!(f[0].verdict, Verdict::Declared, "a peer @types/geojson satisfies it");
+        assert_eq!(
+            f[0].verdict,
+            Verdict::Declared,
+            "a peer @types/geojson satisfies it"
+        );
 
         // But a DEV-only types package does not: it is not installed downstream,
         // so the consumer's type-check really does break.
