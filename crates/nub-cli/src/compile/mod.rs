@@ -323,9 +323,10 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         sealed_module_graph,
         worker_roots: bundled.worker_roots.len(),
         worker_wrappers: worker_wrappers.len(),
-        // The mode, not whether one was asked for: two of the three are reachable
-        // from a container that writes nothing, and one of those two only from the
-        // single-executable one.
+        // The mode, not whether one was asked for. The single-executable container
+        // carries an inline or a detached map; the no-extract launcher carries
+        // neither, because it rewrites its chunks after the map is made. Only
+        // `linked` is out of reach for both.
         sourcemap: opts.bundle.sourcemap,
         embeds_node: !opts.smol,
         computes_module_specifier: bundled.app_computes_module_specifier,
