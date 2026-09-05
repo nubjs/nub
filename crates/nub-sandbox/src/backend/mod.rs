@@ -50,8 +50,13 @@ mod macos;
 // zero-privilege import (epic row 0.3). Seatbelt needs no host provisioning; the readiness
 // probe that lived there is inlined at its one caller (`preflight`), which reads the stock
 // Seatbelt entry point through this re-export.
+//
+// `SANDBOX_EXEC_PATH` and `build_jail_seatbelt_profile` are the macOS half of the aube-scripts
+// embedder seam (epic 4.1): a caller wraps its own lifecycle command as
+// `sandbox-exec -p <profile> -- <cmd>` to run it on the shared engine, the analog of the Linux
+// `confine_build_jail_command` `pre_exec` seam.
 #[cfg(target_os = "macos")]
-pub(crate) use macos::SANDBOX_EXEC_PATH;
+pub use macos::{SANDBOX_EXEC_PATH, build_jail_seatbelt_profile};
 
 // NOT macOS-gated, unlike its siblings: only the `log show` call inside is, and compiling the
 // module everywhere keeps its record parser under test on every platform's CI leg rather than the
@@ -206,7 +211,6 @@ impl CommandArgs {
             Self::Verbatim(line) => Box::new(std::iter::once(line.as_os_str())),
         }
     }
-
 
     /// Apply to a plain `std::process::Command` (the paths that spawn without a custom
     /// `CreateProcessW`).

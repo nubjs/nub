@@ -281,12 +281,13 @@ num_cpus = "1"
 # brand rewrite can reach them (pm_engine/install_family.rs::with_fd_captured).
 libc.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # The shared zero-privilege sandbox engine. nub injects it as the enforcement
 # backend for dependency lifecycle scripts (pm_engine/sandbox_closure.rs), so the
-# build jail and the agent sandbox run one implementation. Linux-scoped while the
-# macOS/Windows lifecycle seams are still being wired; nub-sandbox is PM-pure
-# (it takes only paths + already-parsed data — no nub-cli/nub-core/aube types).
+# build jail and the agent sandbox run one implementation. Linux (Landlock) +
+# macOS (Seatbelt) are wired; the Windows AppContainer lifecycle seam is still
+# pending. nub-sandbox is PM-pure (it takes only paths + already-parsed data —
+# no nub-cli/nub-core/aube types).
 nub-sandbox = { path = "../nub-sandbox" }
 
 [target.'cfg(windows)'.dependencies]

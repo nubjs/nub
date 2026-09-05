@@ -17,12 +17,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// Mirror of `nub-cli` `pm_engine::sandbox_closure::{confine, build_jail_policy}`.
-fn confine(
-    command: &mut tokio::process::Command,
+/// Mirror of `nub-cli` `pm_engine::sandbox_closure::build_jail_policy`.
+fn build_jail_policy(
     jail: &aube_scripts::ScriptJail,
     home: &Path,
-) -> std::io::Result<Box<dyn Send>> {
+) -> Result<nub_sandbox::SandboxPolicy, nub_sandbox::CompileError> {
     use serde_json::json;
     let mut fs = serde_json::Map::new();
     fs.insert("/".to_string(), json!("r"));
@@ -44,7 +43,17 @@ fn confine(
         nub_sandbox::ScopeCapabilities::approved(),
         std::env::vars().collect(),
     );
-    let policy = nub_sandbox::compile(&surface, &ctx)
+    nub_sandbox::compile(&surface, &ctx)
+}
+
+/// Mirror of `nub-cli` `pm_engine::sandbox_closure::confine` (Linux: `pre_exec`).
+#[cfg(target_os = "linux")]
+fn confine(
+    command: &mut tokio::process::Command,
+    jail: &aube_scripts::ScriptJail,
+    home: &Path,
+) -> std::io::Result<Box<dyn Send>> {
+    let policy = build_jail_policy(jail, home)
         .map_err(|e| std::io::Error::other(format!("compile: {e}")))?;
     // `as_std_mut`: tokio's Command re-exposes `pre_exec` as an inherent method and does not impl
     // the std `CommandExt` trait `confine_build_jail_command` is generic over; its inner std command
@@ -58,6 +67,47 @@ fn confine(
             ))
         })?;
     Ok(Box::new(guard))
+}
+
+/// Mirror of `nub-cli` `pm_engine::sandbox_closure::confine` (macOS: `sandbox-exec` wrap).
+#[cfg(target_os = "macos")]
+fn confine(
+    command: &mut tokio::process::Command,
+    jail: &aube_scripts::ScriptJail,
+    home: &Path,
+) -> std::io::Result<Box<dyn Send>> {
+    let policy = build_jail_policy(jail, home)
+        .map_err(|e| std::io::Error::other(format!("compile: {e}")))?;
+    let Some(profile) = nub_sandbox::build_jail_seatbelt_profile(&policy, None) else {
+        return Ok(Box::new(()));
+    };
+    let std_cmd = command.as_std();
+    let program = std_cmd.get_program().to_os_string();
+    let args: Vec<std::ffi::OsString> = std_cmd.get_args().map(|a| a.to_os_string()).collect();
+    let envs: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = std_cmd
+        .get_envs()
+        .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+        .collect();
+    let mut wrapped = tokio::process::Command::new(nub_sandbox::SANDBOX_EXEC_PATH);
+    wrapped
+        .arg("-p")
+        .arg(&profile)
+        .arg("--")
+        .arg(&program)
+        .args(&args);
+    for (k, v) in envs {
+        match v {
+            Some(v) => {
+                wrapped.env(k, v);
+            }
+            None => {
+                wrapped.env_remove(k);
+            }
+        }
+    }
+    wrapped.kill_on_drop(true);
+    *command = wrapped;
+    Ok(Box::new(()))
 }
 
 async fn run_postinstall(
@@ -92,7 +142,11 @@ async fn run_postinstall(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
-    let base = PathBuf::from(format!("/tmp/nub-seam-{}", std::process::id()));
+    // Anchor under $HOME, not /tmp: the macOS Seatbelt base grants the darwin temp dir wholesale
+    // (epic 3.1 A6 trap), so a /tmp fixture would let the "escape" write succeed and mask the
+    // attack. On Linux it makes no difference — Landlock grants only the policy's own dirs.
+    let home = std::env::var("HOME").expect("HOME set");
+    let base = PathBuf::from(home).join(format!("nub-seam-{}", std::process::id()));
     let package_dir = base.join("node_modules").join("leftpad");
     let escape = base.join("escape"); // OUTSIDE {package_dir, jail home, /dev}
     std::fs::create_dir_all(&package_dir).expect("mkdir package");

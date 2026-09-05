@@ -174,6 +174,12 @@ pub mod host_probe {
 #[cfg(target_os = "linux")]
 pub use backend::{BuildJailConfinement, confine_build_jail_command};
 
+/// The macOS half of the aube-scripts embedder seam (epic 4.1): [`build_jail_seatbelt_profile`]
+/// returns the SBPL profile a caller wraps its own lifecycle command with
+/// (`sandbox-exec -p <profile> -- <cmd>`, [`SANDBOX_EXEC_PATH`]), running it on the shared engine.
+#[cfg(target_os = "macos")]
+pub use backend::{SANDBOX_EXEC_PATH, build_jail_seatbelt_profile};
+
 // `windows_admin` re-exported the dropped `windows_account` backend (privileged dedicated-account
 // + WFP tier). Removed with the curated zero-privilege import (epic row 0.3): the AppContainer
 // backend (`backend::windows`) needs no machine administration, and the account tier is not part

@@ -473,6 +473,25 @@ fn fs_confines(policy: &SandboxPolicy) -> bool {
     policy.fs.rules.default_effect != Effect::Allow || !policy.fs.rules.entries.is_empty()
 }
 
+/// The macOS half of the aube-scripts embedder seam: the SBPL profile enforcing `policy`, for a
+/// caller that wraps its OWN command as `sandbox-exec -p <profile> -- <cmd>` (the analog of the
+/// Linux [`confine_build_jail_command`](crate::confine_build_jail_command) `pre_exec` seam). Returns
+/// `None` when the policy confines nothing and needs no kernel wrap. `tmp_dir` is the per-run
+/// scratch dir when the policy uses a private tmp mode (the caller also points `TMPDIR` at it).
+///
+/// A minimal spec is synthesized: the stdio-path grants it would derive are covered by the build
+/// jail's read-generous base, and no audit label or redaction applies.
+pub fn build_jail_seatbelt_profile(
+    policy: &SandboxPolicy,
+    tmp_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    if !needs_wrap(policy) {
+        return None;
+    }
+    let spec = CommandSpec::new("/bin/sh");
+    Some(build_profile(policy, &spec, None, None, tmp_dir))
+}
+
 /// Build the full SBPL profile text for `policy`.
 ///
 /// NOT a pure function of its arguments: it reads the calling process's own fd table to
