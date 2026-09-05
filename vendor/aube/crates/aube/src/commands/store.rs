@@ -1246,11 +1246,14 @@ fn apply_legacy_gvs_prune(plan: &LegacyGvsPrunePlan) {
 /// filter.
 fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
+    let mut boundaries = Vec::new();
     let modules_dir_name = super::resolve_modules_dir_name_for_cwd(project);
     let mut stack = vec![project.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let configured = dir.join(&modules_dir_name);
         if configured.is_dir() && !found.contains(&configured) {
+            boundaries
+                .push(std::fs::canonicalize(&configured).unwrap_or_else(|_| configured.clone()));
             found.push(configured.clone());
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1282,7 +1285,11 @@ fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
                 continue;
             }
             let path = entry.path();
-            if found.iter().any(|recorded| path.starts_with(recorded)) {
+            let physical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if boundaries
+                .iter()
+                .any(|recorded| physical.starts_with(recorded))
+            {
                 continue;
             }
             stack.push(path);
@@ -1611,12 +1618,20 @@ mod legacy_gvs_prune_tests {
             ".dependencies",
             "nested/deps",
             "../external-deps",
+            "foo/../bar",
+            "nested/./deps",
+            "alias/../deps",
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let (root, current) = layout(tmp.path());
             let live = entry(&root, "live@1.0.0-aaaa");
             let orphan = entry(&root, "orphan@1.0.0-bbbb");
             let project = tmp.path().join("proj");
+            if modules == "alias/../deps" {
+                let target = project.join("physical/inner");
+                std::fs::create_dir_all(&target).unwrap();
+                std::os::unix::fs::symlink(target, project.join("alias")).unwrap();
+            }
             let local = project.join(modules).join(".store");
             std::fs::create_dir_all(&local).unwrap();
             std::fs::write(project.join("package.json"), r#"{"name":"prune-fixture"}"#).unwrap();
