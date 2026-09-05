@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Second-pass measurement of two already-built node binaries, so it costs a few
-# minutes instead of a ~90-minute rebuild. Answers three things the first pass
-# did not: whether the Allocations recorder behaves the same against a real node
-# with CoreFoundation delayed, what the first --use-system-ca call now costs
-# (the load moves there rather than disappearing), and the interleaved A/B.
+# minutes instead of a ~90-minute rebuild. It answers the one thing the first
+# pass does not: what the first --use-system-ca or fs.watch call now costs, the
+# load having moved there rather than disappeared.
+#
+# A node-level `leaks` and xctrace comparison was here and is deliberately gone.
+# It ran past the job's 60-minute cap before reaching these measurements --
+# `leaks --list` on 80,000 stack-logged allocations is enormous -- and it was
+# redundant: tests/node-cf-instruments answers the recorder question on control
+# binaries with a working positive control, and node-instruments.sh already
+# records both node binaries in the build job.
 # usage: probe.sh <baseline-binary> <variant-binary> <outdir>
 set -uo pipefail
 base=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -32,23 +38,8 @@ for pair in "baseline:$base" "macos-cf:$var"; do
   echo "  initializers, --use-system-ca: $(DYLD_PRINT_INITIALIZERS=1 "$bin" --use-system-ca -e 'require("tls").rootCertificates' 2>&1 | grep -c 'running initializer')"
   echo "  system roots via --use-system-ca:"
   "$bin" --use-system-ca -e 'console.log("   ", require("tls").rootCertificates.length)' 2>&1 | sed 's/^/  | /'
-  echo "  malloc stack logging (leaks):"
-  MallocStackLogging=1 leaks --atExit --list -- "$bin" allocy.js > "leaks-$label.txt" 2>&1
-  echo "    $(grep -m1 'leaks for' "leaks-$label.txt")"
-  echo "    Call stack blocks: $(grep -c 'Call stack' "leaks-$label.txt")"
-  rm -rf "trace-$label.trace"
-  xcrun xctrace record --template 'Allocations' --output "trace-$label.trace" --no-prompt \
-    --time-limit 120s --target-stdout "target-$label.txt" \
-    --launch -- "$bin" allocy.js > "xctrace-$label.log" 2>&1
-  echo "  xctrace record exit=$? bundle=$(du -sk "trace-$label.trace" 2>/dev/null | cut -f1) KB"
-  sed 's/^/  | /' "xctrace-$label.log"
 done
 
-echo "########## interleaved A/B"
-for cmd in "--version" "-e 0" "hello.js"; do
-  hyperfine -N --warmup 20 --runs 300 --export-json "ab-$(echo "$cmd" | tr -dc 'a-z0-9').json" \
-    "$base $cmd" "$var $cmd"
-done
 echo "########## the cost delay-init moves rather than removes"
 # --use-system-ca reads the keychain on its own thread, so the delayed load has
 # main-thread bootstrap to overlap with. fs.watch does not: libuv dlopens
@@ -59,6 +50,13 @@ const fs = require('fs');
 const w = fs.watch(process.cwd(), () => {});
 w.close();
 EOF
+echo "--- and the plain launches again, interleaved, for a second reading"
+hyperfine -N --warmup 20 --runs 300 --export-json ab-version.json \
+  "$base --version" "$var --version"
+hyperfine -N --warmup 20 --runs 300 --export-json ab-e0.json \
+  "$base -e 0" "$var -e 0"
+
+echo "--- the first-use paths"
 hyperfine -N --warmup 10 --runs 200 --export-json ab-systemca.json \
   "$base --use-system-ca -e 0" "$var --use-system-ca -e 0"
 hyperfine -N --warmup 10 --runs 200 --export-json ab-fswatch.json \
