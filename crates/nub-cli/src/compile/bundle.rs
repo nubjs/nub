@@ -54,10 +54,9 @@ use rolldown::plugin::{
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
-    CodeSplittingMode, EmittedChunk, InnerOptions, IsExternal, ManualCodeSplittingOptions,
-    MatchGroup, MatchGroupName, ModuleType, Output, OutputFormat, Platform, RawCompressOptions,
-    RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed, ResolveOptions, ResolvedExternal,
-    SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    EmittedChunk, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
+    RawCompressOptions, RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed,
+    ResolveOptions, ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
@@ -319,14 +318,17 @@ fn bundle_inner(
         // default installs `createRequire(import.meta.url)` for every unbound
         // `require` reference, which changes `require.main` from a ReferenceError
         // into an ordinary runtime value. Compiled artifacts preserve Node's ESM
-        // semantics here. CommonJS inputs are forced into their own chunk below,
-        // where [`CompilePreamble::intro`] supplies the loader their remaining
-        // external/dynamic require calls need without exposing it to ESM chunks.
+        // semantics here. A CommonJS module gets its loader from
+        // [`CompilePreamble::intro`], bound as `require` inside its own wrapper by
+        // [`hoist_module_wrappers`], so the chunk it shares with ESM declares none.
+        // Code splitting stays at Rolldown's default: one entry with no worker
+        // and no dynamic import is ONE chunk, and every extra file costs a start.
         polyfill_require: Some(false),
-        code_splitting: Some(compile_code_splitting(entry_abs)),
-        // The manual CommonJS boundary deliberately creates CJS↔ESM cross-chunk
-        // edges. Rolldown's default fast ordering does not promise cycle/order
-        // fidelity for that shape; its supported correctness mode does.
+        // Worker roots and dynamic imports still make cross-chunk edges, and a
+        // CommonJS package can be reached from both sides of one. Rolldown's
+        // default fast ordering does not promise cycle/order fidelity for that
+        // shape; its supported correctness mode does. It also fixes the wrapper
+        // shape [`hoist_module_wrappers`] matches.
         strict_execution_order: Some(true),
         // Compiled chunks always execute as ESM, regardless of the source
         // package's `type` field. Keeping that fact in their extension lets Node
@@ -1528,157 +1530,20 @@ impl<'a> oxc_ast_visit::Visit<'a> for PathGlobalScan {
 /// collide with the compiler's roots.
 const COMPILE_ROOT_ID: &str = "\0nub:compile-root";
 const COMPILE_PREAMBLE_ID: &str = "\0nub:compile-preamble";
-const COMPILE_COMMONJS_CHUNK: &str = "_nub_commonjs";
-const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "var __nubRequireCache; function __nubRequire() { return (__nubRequireCache ??= process[Symbol.for(\"nub.compile.bootstrap\")].createRequire(import.meta.url)); } function require(id) { return __nubRequire()(id); }";
+/// The name every chunk-level CommonJS loader is declared under. Deliberately
+/// NOT `require`: a chunk holds authored ESM beside the CommonJS modules it
+/// wraps, and Node gives ESM no `require` binding. [`hoist_module_wrappers`]
+/// binds this as `require` inside each CommonJS wrapper, and nowhere else.
+const COMPILE_COMMONJS_LOADER: &str = "__nubCjsRequire";
+const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "var __nubRequireCache; function __nubRequire() { return (__nubRequireCache ??= process[Symbol.for(\"nub.compile.bootstrap\")].createRequire(import.meta.url)); } function __nubCjsRequire(id) { return __nubRequire()(id); }";
 
-/// Keep CommonJS inputs in a lexical scope application ESM can never share.
-///
-/// `polyfill_require: false` is bundle-global, while the desired semantics are
-/// not: authored ESM must keep `require` unbound, but bundled CommonJS needs a
-/// real Node loader for builtins, externals, and unanalyzable calls Rolldown
-/// intentionally leaves in the output. Rolldown exposes its final per-module
-/// classification to manual chunk naming, after parsing and package-boundary
-/// resolution have settled ambiguities which a source transform cannot settle.
-/// Grouping exactly those inputs creates a reliable lexical boundary; dependency
-/// recursion is deliberately off so an authored ESM dependency can never be
-/// pulled in. The one explicit ESM member is Nub's own path-globals bridge: it
-/// must evaluate `import.meta.url` in the chunk whose `__filename` it supplies.
-/// Placement does not make CommonJS eager: Rolldown retains each input's
-/// `__commonJS` wrapper and cross-chunk links invoke that cached wrapper at the
-/// original import/require site. `strict_execution_order` above enables its
-/// cycle/order-preserving linker path, while each wrapper's early module cache
-/// preserves partial exports through CommonJS cycles. The shared chunk evaluates
-/// only wrapper declarations.
-fn compile_code_splitting(entry_abs: &Path) -> CodeSplittingMode {
-    // Resolved ONCE here rather than per module: it is the same path on every
-    // call, and the predicate below runs across the whole graph.
-    let entry: Arc<Path> =
-        Arc::from(std::fs::canonicalize(entry_abs).unwrap_or_else(|_| entry_abs.to_path_buf()));
-    CodeSplittingMode::Advanced(ManualCodeSplittingOptions {
-        groups: Some(vec![MatchGroup {
-            name: MatchGroupName::Dynamic(Arc::new(move |id, ctx| {
-                let commonjs_scope = id == PATH_GLOBALS_ID
-                    || authored_entry_is_node_commonjs(id, &entry)
-                    || ctx
-                        .get_module_info(id)
-                        .is_some_and(|module| is_node_commonjs_module(&module))
-                    || is_commonjs_only_data_module(id, ctx);
-                Box::pin(
-                    async move { Ok(commonjs_scope.then(|| COMPILE_COMMONJS_CHUNK.to_string())) },
-                )
-            })),
-            include_dependencies_recursively: Some(false),
-            ..Default::default()
-        }]),
-        ..Default::default()
-    })
-}
-
-/// The authored entry, classified the way NODE would rather than the way
-/// Rolldown's scanner does.
-///
-/// Rolldown decides CommonJS from `module`/`exports` markers, so a `.js` entry
-/// that only CALLS `require` — with no marker anywhere — is scanned as ESM. Node
-/// disagrees: absent a `"type"` field the nearest package.json makes it
-/// CommonJS, and it runs. Without this the entry misses the CommonJS chunk, its
-/// `require` never gets the chunk's lexical binding, and the artifact dies with
-/// `require is not defined in ES module scope` — after a build that exited 0. It
-/// only surfaces when the entry requires a BUILTIN or an ejected package, since a
-/// require of a bundlable package is inlined and leaves nothing behind.
-///
-/// Scoped to the one authored entry ON PURPOSE. Widening
-/// [`is_node_commonjs_module`] itself to ignore Rolldown's verdict also fixes
-/// this and then breaks six unrelated tests: virtual roots, worker roots and
-/// loader-emitted modules all reach that predicate, Node's extension rule claims
-/// them too, and a worker root pulled into this chunk stops being emitted as its
-/// own. The entry is the only module whose format Node has already decided and
-/// whose `require` the user wrote.
-fn authored_entry_is_node_commonjs(id: &str, entry: &Path) -> bool {
-    let id = clean_url(id);
-    let path = Path::new(id);
-    // Extension first, deliberately. This predicate is called for EVERY module in
-    // the graph and at most one of them can match, so the cheap test has to come
-    // before anything that touches the filesystem — otherwise a large application
-    // pays two `canonicalize` syscalls per module to answer "no" a few thousand
-    // times. `.js` is also the only extension that can qualify (see below), so
-    // nothing is lost by checking it up front.
-    if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
-        return false;
-    }
-    // Compared through `canonicalize` because a raw `Path` equality misses the
-    // same file reached by a different prefix — /tmp vs /private/tmp on macOS is
-    // the everyday case, and the cost of a miss is the silent runtime failure
-    // this whole predicate exists to prevent. `entry` arrives already canonical
-    // (resolved once when the closure was built), so only the id is resolved
-    // here. Falls back to the lexical compare when the id names no real file.
-    let same = match std::fs::canonicalize(path) {
-        Ok(resolved) => resolved == entry,
-        Err(_) => path == entry,
-    };
-    if !same {
-        return false;
-    }
-    // ONLY `.js`. That is the whole gap: `.cjs`/`.cts` already reach the chunk
-    // because Rolldown classifies them from the extension, and `.mjs`/`.mts` are
-    // ESM to both. TypeScript is deliberately excluded even though Node applies
-    // the same package-type rule to it — nub transpiles `.ts` through the ESM
-    // path, and claiming it here pulls worker roots and loader-emitted modules
-    // into the CommonJS chunk, which stops their chunks being emitted at all
-    // (measured: 4 tests red, all of them worker/loader/new-URL cases).
-    node_package_defaults_to_commonjs(id)
-}
-
-/// Keep a JSON module in the CommonJS chunk when only CommonJS reaches it.
-///
-/// Without this the group splits a package across two chunks and the halves
-/// import each other. A `require("./data.json")` inside a dynamically imported
-/// CommonJS package is the shape that shows it: the package's own module is
-/// CommonJS so the group claims it, while the JSON stays in the dynamic import's
-/// chunk. That chunk then imports the wrapper it needs from `_nub_commonjs`, and
-/// `_nub_commonjs` imports the JSON wrapper back out of it.
-///
-/// The cycle is not survivable, because a dynamic import of a CommonJS module
-/// emits an EAGER `export default require_pkg()` at the top of its chunk. ESM
-/// evaluates one side of a cycle to completion while the other is still partway
-/// through its own body, so that call runs before `var require_pkg` has been
-/// assigned and throws `require_pkg is not a function`. Co-locating the JSON
-/// removes the edge that closes the cycle.
-///
-/// Only JSON qualifies, and deliberately so. Extending this to modules in
-/// general would move authored ESM — which a CommonJS module can `require()` on
-/// Node 22+ — into a chunk carrying a lexical `require`, exactly the binding
-/// `compile_code_splitting`'s group exists to keep away from ESM. A JSON module
-/// is data with no user code, so it cannot observe that binding.
-fn is_commonjs_only_data_module(id: &str, ctx: &rolldown_common::ChunkingContext) -> bool {
-    if Path::new(clean_url(id))
-        .extension()
-        .and_then(|ext| ext.to_str())
-        != Some("json")
-    {
-        return false;
-    }
-    let Some(module) = ctx.get_module_info(id) else {
-        return false;
-    };
-    // An entry, or a module something imports dynamically, is a chunk root in its
-    // own right; moving it would change what the graph loads and when.
-    if module.is_entry || !module.dynamic_importers.is_empty() || module.importers.is_empty() {
-        return false;
-    }
-    module.importers.iter().all(|importer| {
-        ctx.get_module_info(importer.as_str())
-            .is_some_and(|importer| is_node_commonjs_module(&importer))
-    })
-}
-
-/// Apply the chunk boundary only when Node and Rolldown agree on CommonJS.
+/// Give a chunk the CommonJS loader only when Node and Rolldown agree on CommonJS.
 ///
 /// Rolldown's scanner lets CommonJS `module`/`exports` markers outweigh even an
 /// `.mjs` suffix; Node does not. Trusting `input_format` alone would therefore
-/// move authored ESM into the loader-bearing chunk and silently make code run
-/// where plain Node throws. The scanner result is still the first gate because
-/// only a module Rolldown will wrap can safely consume the chunk's lexical
-/// `require`.
+/// hand authored ESM a `require` and silently make code run where plain Node
+/// throws. The scanner result is still the first gate because only a module
+/// Rolldown will wrap gets the loader bound as its `require`.
 fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
     if !module.input_format.is_commonjs() {
         return false;
@@ -1693,11 +1558,12 @@ fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
     }
 }
 
-/// A synchronous loader intro for CommonJS chunks. Its lexical `require` is
-/// isolated by the manual chunk boundary, and the payload-root bootstrap has
-/// already installed the private builtin registry before any chunk evaluates.
+/// The loader intro for a chunk that carries a CommonJS module. The bootstrap
+/// record has already installed the private builtin registry before any chunk
+/// evaluates, and the loader serves the `require` calls Rolldown intentionally
+/// leaves in a wrapped module: builtins, externals, and calls it cannot analyze.
 ///
-/// `require` is a FUNCTION DECLARATION, not a `const`, for the same reason
+/// The loader is a FUNCTION DECLARATION, not a `const`, for the same reason
 /// [`hoist_module_wrappers`] rewrites Rolldown's wrappers: a chunk in an import
 /// cycle can be re-entered before its own body has run, and a `const` is in its
 /// temporal dead zone then — `Cannot access 'require' before initialization`
@@ -1711,16 +1577,18 @@ fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
 /// first statement, and reaching a property means calling into the loader
 /// earlier than the loader's own chunk starts.
 fn compile_commonjs_require_intro() -> String {
+    let loader = COMPILE_COMMONJS_LOADER;
     format!(
         "{COMPILE_COMMONJS_REQUIRE_MARKER}\n\
-         require.resolve = (id, options) => __nubRequire().resolve(id, options);\n\
-         Object.defineProperty(require, \"cache\", {{ get: () => __nubRequire().cache }});\n\
-         Object.defineProperty(require, \"main\", {{ get: () => __nubRequire().main }});\n\
-         Object.defineProperty(require, \"extensions\", {{ get: () => __nubRequire().extensions }});\n"
+         {loader}.resolve = (id, options) => __nubRequire().resolve(id, options);\n\
+         Object.defineProperty({loader}, \"cache\", {{ get: () => __nubRequire().cache }});\n\
+         Object.defineProperty({loader}, \"main\", {{ get: () => __nubRequire().main }});\n\
+         Object.defineProperty({loader}, \"extensions\", {{ get: () => __nubRequire().extensions }});\n"
     )
 }
 
-/// Rolldown's lazy module wrappers, as function declarations instead of `var`s.
+/// Rolldown's lazy module wrappers, as function declarations instead of `var`s —
+/// and, for CommonJS, with the chunk's loader bound as their `require`.
 ///
 /// Rolldown emits one wrapper per non-inlined module:
 ///
@@ -1741,15 +1609,32 @@ fn compile_commonjs_require_intro() -> String {
 /// cycle runs, so rewriting each wrapper to
 ///
 /// ```js
-/// var __nub_lazy_require_pkg;
-/// function require_pkg() { return (__nub_lazy_require_pkg ??= __commonJSMin(((exports, module) => { … }))).apply(this, arguments) }
+/// var __nub_lazy_init_mod;
+/// function init_mod() { return (__nub_lazy_init_mod ??= __esmMin((() => { … }))).apply(this, arguments) }
 /// ```
 ///
 /// makes the call safe from the first moment the binding is reachable. The
-/// wrapper is still built on first call and `__commonJSMin` still memoizes it, so
+/// wrapper is still built on first call and `__esmMin` still memoizes it, so
 /// evaluation ORDER is unchanged — only the window in which the name is callable
-/// widens. Chunk membership is untouched, and so is the CommonJS/ESM `require`
-/// isolation that `compile_code_splitting` exists to protect.
+/// widens.
+///
+/// A CommonJS wrapper additionally opens with `const require = __nubCjsRequire;`:
+///
+/// ```js
+/// var __nub_lazy_require_pkg;
+/// function require_pkg() { const require = __nubCjsRequire; return (__nub_lazy_require_pkg ??= __commonJSMin(((exports, module) => { … }))).apply(this, arguments) }
+/// ```
+///
+/// The callback is created inside that activation, so every `require` the
+/// module body left behind resolves to the loader, while the chunk's own scope
+/// declares no `require` at all. That is what lets CommonJS and authored ESM
+/// share one chunk — a hello-world artifact ships as ONE file instead of an
+/// entry, a CommonJS chunk and a runtime chunk — with an ESM module's `typeof
+/// require` still `undefined`, exactly as on plain Node, because nothing in
+/// scope answers to the name. Only the two CommonJS helpers get the binding; an
+/// `__esm` wrapper holds ESM and must not. (Earlier builds kept every CommonJS
+/// module in a manual `_nub_commonjs` chunk whose intro declared `require` at
+/// chunk level; the boundary was the isolation, and it cost two files per start.)
 ///
 /// This runs in `render_chunk`, which Rolldown drives BEFORE `minify_chunks`, so
 /// the helper names are still the readable ones matched below rather than mangled
@@ -1760,12 +1645,18 @@ fn compile_commonjs_require_intro() -> String {
 /// same-named module-scope variable the wrapped body closes over — and bundled
 /// output is full of one-letter names, so `(...a)` silently rebound `a` for a
 /// whole module. That failed as `a is not a function` deep inside a command
-/// handler, long after the build reported success.
+/// handler, long after the build reported success. The `require` binding is the
+/// one deliberate exception: it shadows exactly the name the module body means.
 const ROLLDOWN_MODULE_WRAPPERS: [&str; 4] = ["__commonJS", "__commonJSMin", "__esm", "__esmMin"];
+const ROLLDOWN_COMMONJS_WRAPPERS: [&str; 2] = ["__commonJS", "__commonJSMin"];
 
 /// Rewrite every top-level Rolldown module wrapper in one chunk. Returns `None`
 /// when the chunk has none, so an untouched chunk keeps its original bytes.
-fn hoist_module_wrappers(code: &str) -> Option<String> {
+///
+/// A rewrite that cannot be applied is an ERROR, not a fallback to Rolldown's
+/// bytes: a CommonJS wrapper shipped un-rewritten has no `require` in scope and
+/// fails at run time on the user's machine, after a build that exited 0.
+fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::{Expression, Statement};
     use oxc_parser::Parser;
@@ -1776,7 +1667,7 @@ fn hoist_module_wrappers(code: &str) -> Option<String> {
     if parsed.panicked {
         // An unparseable chunk is already fatal further down the pipeline
         // (`reject_invalid_chunks`); reporting it there keeps one error path.
-        return None;
+        return Ok(None);
     }
 
     let mut magic = MagicString::new(code.to_owned());
@@ -1804,36 +1695,36 @@ fn hoist_module_wrappers(code: &str) -> Option<String> {
 
         let name = name.name.as_str();
         let lazy = format!("__nub_lazy_{name}");
-        // `var <lazy>; function <name>(...a) { return (<lazy> ??= ` replaces
-        // everything up to the wrapper call, dropping the `/* @__PURE__ */` with
-        // it — tree-shaking has already run by render_chunk, so the annotation
-        // has no reader left.
-        // A failed range abandons the WHOLE chunk rather than emitting a
-        // half-rewritten one: `magic` is discarded with the `None`, so the chunk
-        // ships exactly as Rolldown rendered it. The spans come from this same
-        // parse, so this is a guard, not an expected path.
-        if magic
+        let bind_require = if ROLLDOWN_COMMONJS_WRAPPERS.contains(&callee.name.as_str()) {
+            format!("const require = {COMPILE_COMMONJS_LOADER}; ")
+        } else {
+            String::new()
+        };
+        // `var <lazy>; function <name>() { [const require = …;] return (<lazy> ??= `
+        // replaces everything up to the wrapper call, dropping the
+        // `/* @__PURE__ */` with it — tree-shaking has already run by
+        // render_chunk, so the annotation has no reader left. The spans come from
+        // this same parse, so a failed range is a bug, and it surfaces as one.
+        magic
             .update(
                 decl.span.start,
                 call.span.start,
-                format!("var {lazy}; function {name}() {{ return ({lazy} ??= "),
+                format!("var {lazy}; function {name}() {{ {bind_require}return ({lazy} ??= "),
             )
-            .is_err()
-            || magic
-                .update(
+            .and_then(|magic| {
+                magic.update(
                     call.span.end,
                     decl.span.end,
                     ").apply(this, arguments) }".to_string(),
                 )
-                .is_err()
-        {
-            return None;
-        }
+            })
+            .map_err(|err| {
+                anyhow!("rewriting the module wrapper `{name}` in a compiled chunk: {err}")
+            })?;
         rewrote = true;
     }
-    rewrote.then(|| magic.to_string())
+    Ok(rewrote.then(|| magic.to_string()))
 }
-
 /// Supplies the program and worker root wrappers plus the prelude source itself.
 ///
 /// A wrapper, rather than a textual import prepended to every authored root, is
@@ -2340,7 +2231,7 @@ impl Plugin for CompilePreamble {
     ) -> impl Future<Output = HookRenderChunkReturn> + Send {
         let hoisted = hoist_module_wrappers(&args.code);
         async move {
-            Ok(hoisted.map(|code| HookRenderChunkOutput {
+            Ok(hoisted?.map(|code| HookRenderChunkOutput {
                 code,
                 map: HookTransformOutputMap::Omitted,
             }))
@@ -2456,13 +2347,16 @@ impl Plugin for CompilePreamble {
                 let source = std::fs::read_to_string(&path).with_context(|| {
                     format!("reading compile root source at {}", path.display())
                 })?;
-                if let Some(code) =
-                    preserve_entry_esm_classification(&path.to_string_lossy(), &source)
+                let path = path.to_string_lossy();
+                if let Some(code) = preserve_entry_esm_classification(&path, &source)
+                    .or_else(|| preserve_entry_commonjs_classification(&path, &source))
                 {
                     // Rolldown chooses the module format before transform hooks.
-                    // Returning the marker here makes an authored `.mjs` root
-                    // unambiguously ESM without changing its physical id, which
-                    // is still needed by tsconfig, asset, and worker handling.
+                    // Returning the marker here makes a root's format unambiguous
+                    // — ESM for an authored `.mjs`, CommonJS for a type-less `.js`
+                    // that only calls `require` — without changing its physical
+                    // id, which is still needed by tsconfig, asset, and worker
+                    // handling.
                     return Ok(Some(HookLoadOutput {
                         code: code.into(),
                         // Let Rolldown infer the real source type from this
@@ -2483,22 +2377,33 @@ impl Plugin for CompilePreamble {
         self.note_app_builtin_usage(args.id, args.code);
         let root = self.is_root_source(args.id);
         let rewritten = if root {
-            let cjs = rewrite_entry_main_checks(clean_url(args.id), args.code);
-            let source = cjs.as_deref().unwrap_or(args.code);
-            rewrite_import_meta_main(clean_url(args.id), source, "true")
+            let path = clean_url(args.id);
+            // The load hook marks a root it read itself. One another plugin loaded
+            // arrives unmarked and gets the same nudge here — BEFORE the main-check
+            // rewrite, which can erase the root's only `module` reference.
+            let nudged = preserve_entry_commonjs_classification(path, args.code);
+            let code = nudged.as_deref().unwrap_or(args.code);
+            let cjs = rewrite_entry_main_checks(path, code);
+            let source = cjs.as_deref().unwrap_or(code);
+            rewrite_import_meta_main(path, source, "true")
                 .map(|magic| import_meta_transform_output(args.id, magic))
                 .or_else(|| cjs.map(|code| (code, HookTransformOutputMap::Null)))
+                .or_else(|| nudged.map(|code| (code, HookTransformOutputMap::Null)))
                 .or_else(|| {
-                    preserve_entry_esm_classification(clean_url(args.id), args.code)
+                    preserve_entry_esm_classification(path, args.code)
                         .map(|code| (code, HookTransformOutputMap::Null))
                 })
         } else {
+            let path = clean_url(args.id);
+            let esm = preserve_dependency_esm_classification(path, args.code);
+            let code = esm.as_deref().unwrap_or(args.code);
             // Rolldown can flatten a static dependency into the executable's
             // entry chunk, where a raw `import.meta.main` would accidentally
             // observe the chunk's main-ness. Preserve Node/Deno's per-module
             // rule before chunking: only the executable root may see `true`.
-            rewrite_non_root_import_meta_main(clean_url(args.id), args.code)
+            rewrite_non_root_import_meta_main(path, code)
                 .map(|magic| import_meta_transform_output(args.id, magic))
+                .or_else(|| esm.map(|code| (code, HookTransformOutputMap::Null)))
         };
         async move {
             Ok(rewritten.map(|(code, map)| HookTransformOutput {
@@ -2847,6 +2752,85 @@ fn preserve_entry_esm_classification(path: &str, source: &str) -> Option<String>
         return None;
     }
     Some(format!("{source}\nexport {{}};\n"))
+}
+
+/// A dependency Node runs as ESM but Rolldown would wrap as CommonJS: an `.mjs`,
+/// `.mts`, or type-module `.js`/`.ts` with no import or export that references
+/// `module` or `exports`. Rolldown's scan takes that reference as CommonJS
+/// evidence outweighing the extension and package, wraps the module, and hands
+/// it a real `module` — and, now that every CommonJS wrapper binds the chunk's
+/// loader as its `require`, a real `require` too. Plain Node gives it neither:
+/// the first such reference is a `ReferenceError`. The empty export makes
+/// Rolldown read the module the way Node does, so it is emitted as ESM with
+/// both names left unbound.
+///
+/// Narrower than the root marker on purpose. A dependency with no ESM syntax and
+/// no `module`/`exports` reference is already ESM to Rolldown by its extension or
+/// package, so marking it would only change its exports; only the shape Rolldown
+/// misreads gets the marker, and a module inside the prelude is never one.
+fn preserve_dependency_esm_classification(path: &str, source: &str) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // Every dependency passes through here, so the parse comes last: the
+    // extension and package answer for a CommonJS file without one.
+    let extension = Path::new(path).extension().and_then(|ext| ext.to_str());
+    if path.starts_with('\0')
+        || matches!(extension, Some("cjs" | "cts"))
+        || !(source.contains("module") || source.contains("exports"))
+        || (!matches!(extension, Some("mjs" | "mts")) && node_package_defaults_to_commonjs(path))
+    {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || has_esm_syntax(&parsed.program) {
+        return None;
+    }
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .build(&parsed.program)
+        .semantic;
+    let misread = semantic
+        .scoping()
+        .root_unresolved_references()
+        .iter()
+        .any(|(name, _)| matches!(name.as_str(), "module" | "exports"));
+    misread.then(|| format!("{source}\nexport {{}};\n"))
+}
+
+/// The mirror image, for a root Node runs as CommonJS. Rolldown classifies a
+/// format-`Unknown` module — a `.js`/`.ts` under a package with no `"type"` — as
+/// CommonJS only when it references `module` or `exports`, so a root that merely
+/// CALLS `require` is scanned as ESM: Rolldown leaves it unwrapped, its `require`
+/// binds to nothing, and the artifact dies with `require is not defined` after a
+/// build that exited 0. A `module` reference is the smallest marker that scan
+/// accepts; inside the wrapper Rolldown then emits, `module` is the real module
+/// object and the statement is a no-op. `.cjs`/`.cts` need nothing: Rolldown
+/// reads those extensions the way Node does.
+///
+/// Root-only, like its twin: a dependency keeps its own package's rules.
+fn preserve_entry_commonjs_classification(path: &str, source: &str) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    const MARKER: &str = "void module;";
+    if matches!(
+        Path::new(path).extension().and_then(|ext| ext.to_str()),
+        Some("cjs" | "cts")
+    ) || source.contains(MARKER)
+    {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || !node_classifies_as_commonjs(path, &parsed.program) {
+        return None;
+    }
+    Some(format!("{source}\n{MARKER}\n"))
 }
 
 fn is_unbound_global(
@@ -6640,6 +6624,30 @@ mod tests {
         dir
     }
 
+    /// How a chunk's own scope treats the name `require`, as oxc resolves it:
+    /// whether the top level declares it, and how many references bind to
+    /// nothing — one per mention plain Node would also leave unbound in ESM.
+    fn require_scope(code: &str) -> (bool, usize) {
+        use oxc_allocator::Allocator;
+        use oxc_parser::Parser;
+        use oxc_span::SourceType;
+
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+        assert!(!parsed.panicked, "an emitted chunk must parse:\n{code}");
+        let semantic = oxc_semantic::SemanticBuilder::new()
+            .build(&parsed.program)
+            .semantic;
+        let scoping = semantic.scoping();
+        let declared = scoping.get_root_binding("require".into()).is_some();
+        let unbound = scoping
+            .root_unresolved_references()
+            .iter()
+            .find(|(name, _)| name.as_str() == "require")
+            .map_or(0, |(_, refs)| refs.len());
+        (declared, unbound)
+    }
+
     fn bundle_module_graph(tag: &str, entry: &str, files: &[(&str, &str)]) -> Result<BundleResult> {
         let mut o = opts();
         o.minify = false;
@@ -7396,11 +7404,18 @@ mod tests {
             !intro.contains("node:module") && !intro.contains("__nubCompileCommonjs"),
             "the CommonJS loader must be a fixed bootstrap-backed binding: {intro}"
         );
-        // `require` has to survive a cycle re-entering this chunk before its body
-        // runs, which a `const` cannot — see `compile_commonjs_require_intro`.
+        // The loader has to survive a cycle re-entering this chunk before its
+        // body runs, which a `const` cannot — see `compile_commonjs_require_intro`.
+        // And it is never `require` itself: that name is bound per wrapper.
+        let declaration = format!("function {COMPILE_COMMONJS_LOADER}(id)");
         assert!(
-            intro.contains("function require(id)") && !intro.contains("const require"),
+            intro.contains(&declaration) && !intro.contains("const __nub"),
             "the loader must be a hoisted function declaration: {intro}"
+        );
+        let (declares_require, _) = require_scope(&intro);
+        assert!(
+            !declares_require,
+            "the intro must not declare `require` in chunk scope: {intro}"
         );
         for property in ["resolve", "cache", "main", "extensions"] {
             assert!(
@@ -7511,6 +7526,90 @@ mod tests {
         );
     }
 
+    /// A dependency Node reads as ESM keeps that reading even when it mentions
+    /// `module` or `exports`; one that mentions neither, or already has ESM
+    /// syntax, is left alone.
+    #[test]
+    fn esm_dependencies_that_mention_module_or_exports_get_the_marker() {
+        let dir = fixture_dir("esm-dependency-marker");
+        let mjs = dir.join("dep.mjs");
+        let source = "try { module.exports = 1; } catch (e) { console.log(e.name); }\n";
+        let marked = preserve_dependency_esm_classification(&mjs.to_string_lossy(), source)
+            .expect("an .mjs that mentions module must stay ESM");
+        assert!(marked.starts_with(source) && marked.ends_with("export {};\n"));
+        assert!(
+            preserve_dependency_esm_classification(&mjs.to_string_lossy(), "console.log(1);\n")
+                .is_none(),
+            "no module/exports reference, nothing for Rolldown to misread"
+        );
+        assert!(
+            preserve_dependency_esm_classification(&mjs.to_string_lossy(), &marked).is_none(),
+            "the marker is applied once"
+        );
+        assert!(
+            preserve_dependency_esm_classification(
+                &mjs.to_string_lossy(),
+                "const module = {}; module.exports = 1;\n"
+            )
+            .is_none(),
+            "a local binding named module is not the CommonJS global"
+        );
+        let cjs = dir.join("dep.cjs");
+        assert!(
+            preserve_dependency_esm_classification(&cjs.to_string_lossy(), source).is_none(),
+            ".cjs is CommonJS to both"
+        );
+        let js = dir.join("dep.js");
+        assert!(
+            preserve_dependency_esm_classification(&js.to_string_lossy(), source).is_none(),
+            "a type-less package makes .js CommonJS under Node"
+        );
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).unwrap();
+        assert!(
+            preserve_dependency_esm_classification(&js.to_string_lossy(), source).is_some(),
+            "a type-module package makes the same .js ESM"
+        );
+        assert!(
+            preserve_dependency_esm_classification("\0nub:virtual", source).is_none(),
+            "virtual modules are the compiler's own"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The CommonJS twin: a `.js` root under a type-less package that only calls
+    /// `require` gets the `module` marker Rolldown's scan needs; a root Rolldown
+    /// already reads as CommonJS, or Node reads as ESM, gets nothing.
+    #[test]
+    fn commonjs_roots_without_module_markers_get_a_module_reference() {
+        let dir = fixture_dir("commonjs-root-marker");
+        let entry = dir.join("entry.js");
+        let source = "const path = require('node:path'); console.log(path.sep);\n";
+        std::fs::write(&entry, source).unwrap();
+        let path = entry.to_string_lossy();
+        let marked = preserve_entry_commonjs_classification(&path, source)
+            .expect("a type-less .js root that only calls require needs the marker");
+        assert!(marked.starts_with(source));
+        assert!(marked.ends_with("void module;\n"));
+        assert!(
+            preserve_entry_commonjs_classification(&path, &marked).is_none(),
+            "the marker is applied once"
+        );
+        assert!(
+            preserve_entry_commonjs_classification(&path, "import x from 'x';\n").is_none(),
+            "ESM syntax is ESM under Node's rules too"
+        );
+        assert!(
+            preserve_entry_commonjs_classification("/tmp/entry.cjs", source).is_none(),
+            "Rolldown reads .cjs as CommonJS by itself"
+        );
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).unwrap();
+        assert!(
+            preserve_entry_commonjs_classification(&path, source).is_none(),
+            "a type-module package makes the same .js ESM"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn esm_root_guard_stays_an_esm_reference_in_the_emitted_chunk() {
         let dir = fixture_dir("esm-main-guard-output");
@@ -7530,9 +7629,17 @@ mod tests {
             .map(|file| String::from_utf8_lossy(&file.bytes))
             .expect("the named entry chunk must be emitted");
         assert!(entry_code.contains("ESM_REFERENCE:"));
+        // The chunk carries the prelude's CommonJS and so its loader, but the
+        // loader is never `require` in chunk scope: the root's own mention stays
+        // the unbound reference plain Node would throw on.
+        let (declares_require, unbound) = require_scope(&entry_code);
         assert!(
-            !entry_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            !declares_require,
             "the CommonJS loader must never become a lexical binding in authored ESM:\n{entry_code}"
+        );
+        assert_eq!(
+            unbound, 1,
+            "the ESM root's `require.main` must be the one unbound require in the chunk:\n{entry_code}"
         );
         let code = res
             .files
@@ -7563,7 +7670,7 @@ mod tests {
         assert_eq!(
             commonjs_chunks.len(),
             1,
-            "the bundled runtime's CommonJS modules need one isolated loader scope"
+            "one loader, in the chunk that carries the prelude's CommonJS modules"
         );
         let runtime_commonjs = String::from_utf8_lossy(&commonjs_chunks[0].bytes);
         assert!(
@@ -7577,8 +7684,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A CommonJS root shares the entry chunk with the ESM prelude. Its builtin
+    /// `require` is served by the chunk's loader, bound as `require` inside the
+    /// root's own wrapper — never as a binding the chunk's scope declares.
     #[test]
-    fn commonjs_builtin_require_is_isolated_from_the_esm_entry_chunk() {
+    fn commonjs_builtin_require_binds_inside_its_wrapper_not_the_chunk() {
         let dir = fixture_dir("commonjs-require-output");
         let entry = dir.join("entry.cjs");
         std::fs::write(
@@ -7595,32 +7705,48 @@ mod tests {
             .find(|file| String::from_utf8_lossy(&file.bytes).contains("CJS_BUILTIN_REQUIRE:"))
             .expect("the authored CommonJS module must be emitted");
         let commonjs_code = String::from_utf8_lossy(&commonjs.bytes);
+        assert_eq!(
+            commonjs.name, res.entry,
+            "one root with no worker and no dynamic import is the entry chunk itself"
+        );
         assert!(
             commonjs_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
-            "a raw Node builtin require needs createRequire in its CommonJS chunk:\n{commonjs_code}"
+            "a raw Node builtin require needs createRequire in its chunk:\n{commonjs_code}"
         );
         assert!(
             commonjs_code.contains("require(\"node:path\")"),
-            "the fixture must retain the raw builtin call that needs the lexical loader:\n{commonjs_code}"
+            "the fixture must retain the raw builtin call that needs the loader:\n{commonjs_code}"
         );
         assert!(
-            commonjs.name.starts_with(COMPILE_COMMONJS_CHUNK),
-            "Rolldown must keep CommonJS behind the named manual boundary: {}",
-            commonjs.name
+            commonjs_code.contains(&format!("const require = {COMPILE_COMMONJS_LOADER};")),
+            "the loader must be bound as `require` inside the wrapper:\n{commonjs_code}"
         );
-        assert_ne!(
-            commonjs.name, res.entry,
-            "the CommonJS module must not share the ESM facade's lexical scope"
+        let (declares_require, unbound) = require_scope(&commonjs_code);
+        assert!(
+            !declares_require && unbound == 0,
+            "the chunk's own scope must neither declare nor leave unbound a `require`:\n{commonjs_code}"
         );
-        let entry_code = res
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The single-file guarantee: an entry that reaches no worker and no dynamic
+    /// import is emitted as ONE chunk, and every file a start opens is paid for.
+    #[test]
+    fn an_entry_without_workers_or_dynamic_imports_is_one_chunk() {
+        let dir = fixture_dir("single-chunk");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "console.log('hello');\n").unwrap();
+        let res = bundle(&entry, &opts()).expect("a hello world must compile");
+        let chunks: Vec<&str> = res
             .files
             .iter()
-            .find(|file| file.name == res.entry)
-            .map(|file| String::from_utf8_lossy(&file.bytes))
-            .expect("the named entry chunk must be emitted");
-        assert!(
-            !entry_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
-            "the ESM facade must keep require unbound:\n{entry_code}"
+            .filter(|file| !file.name.ends_with(".map"))
+            .map(|file| file.name.as_str())
+            .collect();
+        assert_eq!(
+            chunks,
+            vec![res.entry.as_str()],
+            "the entry must be the only chunk"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7704,22 +7830,34 @@ mod tests {
             "no wrapper may survive as a `var`, which is unassigned during a cycle:\n{all}"
         );
         assert!(
-            all.contains("function require(id)"),
-            "the CommonJS chunk's own loader must hoist too:\n{all}"
+            all.contains(&format!("function {COMPILE_COMMONJS_LOADER}(id)")),
+            "the chunk's own loader must hoist too:\n{all}"
         );
         assert!(
-            !all.contains("const require = "),
-            "a `const require` is in its temporal dead zone when a cycle re-enters:\n{all}"
+            !all.contains(&format!("const {COMPILE_COMMONJS_LOADER}")),
+            "a `const` loader is in its temporal dead zone when a cycle re-enters:\n{all}"
+        );
+        // The binding a CommonJS body sees lives INSIDE its wrapper's forwarder,
+        // evaluated on call — never in the chunk's scope.
+        let bound = |wrapper: &str| {
+            all.contains(&format!(
+                "function {wrapper}() {{ const require = {COMPILE_COMMONJS_LOADER};"
+            ))
+        };
+        assert!(
+            bound("require_index") || bound("require_cjsdep"),
+            "the CommonJS wrapper must bind the loader as its own require:\n{all}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A dynamically imported CommonJS package emits an eager
-    /// `export default require_pkg()` at the top of its own chunk. If the JSON it
-    /// requires stays behind in that chunk while the package itself moves to
-    /// `_nub_commonjs`, the two chunks import each other and that eager call runs
-    /// against an unassigned wrapper — `require_pkg is not a function` at startup.
-    /// Both halves must land in the same chunk.
+    /// `export default require_pkg()` at the top of its own chunk. When the JSON
+    /// it requires sat in that chunk while the package itself was moved to a
+    /// manual CommonJS chunk, the two chunks imported each other and that eager
+    /// call ran against an unassigned wrapper — `require_pkg is not a function`
+    /// at startup. Rolldown's own placement keeps both halves in the dynamic
+    /// chunk; this pins that no boundary of ours separates them again.
     #[test]
     fn a_dynamically_imported_commonjs_package_keeps_its_json_in_one_chunk() {
         let dir = fixture_dir("commonjs-dynamic-json-chunk");
@@ -7758,10 +7896,13 @@ mod tests {
             .expect("the JSON must be emitted somewhere");
         let holder_code = String::from_utf8_lossy(&holder.bytes);
         assert!(
-            !holder_code.contains(&format!("from \"./{COMPILE_COMMONJS_CHUNK}")),
-            "the chunk holding the package's JSON must not import back out of the CommonJS \
-             chunk — that edge is what closes the cycle:\n{}",
-            holder.name
+            holder_code.contains("module.exports = {"),
+            "the package must sit in the chunk that holds its JSON — a split is the \
+             edge that closes the cycle:\n{holder_code}"
+        );
+        assert_ne!(
+            holder.name, res.entry,
+            "a dynamically imported package is not part of the entry chunk"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7806,9 +7947,12 @@ mod tests {
             commonjs_code.contains("local"),
             "the fixture's shadowed require path must survive bundling:\n{commonjs_code}"
         );
+        // The required ESM leaf shares the chunk; what it must not share is a
+        // `require` binding, and the chunk's scope declares none.
+        let (declares_require, _) = require_scope(&commonjs_code);
         assert!(
-            !commonjs_code.contains("CJS_TO_ESM_LEAF"),
-            "non-recursive grouping must keep a required ESM leaf outside the loader scope:\n{commonjs_code}"
+            !declares_require,
+            "a required ESM leaf must not see a `require` in chunk scope:\n{commonjs_code}"
         );
         assert!(
             res.files
@@ -7839,9 +7983,11 @@ mod tests {
             .find(|file| String::from_utf8_lossy(&file.bytes).contains("MJS_REFERENCE:"))
             .expect("the authored ESM dependency must be emitted");
         let dependency_code = String::from_utf8_lossy(&dependency.bytes);
+        let (declares_require, unbound) = require_scope(&dependency_code);
         assert!(
-            !dependency_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
-            "an .mjs dependency must retain Node's unbound-require semantics:\n{dependency_code}"
+            !declares_require && unbound == 1,
+            "an .mjs dependency must retain Node's unbound-require semantics — its one \
+             `require` binds to nothing in the chunk:\n{dependency_code}"
         );
         assert!(
             dependency_code.contains("require(\"node:path\")"),
@@ -8406,9 +8552,12 @@ console.log('CJS_ENTRY_MARK', path.sep);
         )
         .unwrap();
         let res = bundle(&entry, &o).expect("a CommonJS entry must compile");
+        let cjs_chunk = chunk_with(&res, "CJS_ENTRY_MARK");
         assert!(
-            chunk_with(&res, "CJS_ENTRY_MARK").contains(COMPILE_COMMONJS_REQUIRE_MARKER),
-            "the chunk holding the entry must also bind its require"
+            cjs_chunk.contains(COMPILE_COMMONJS_REQUIRE_MARKER)
+                && cjs_chunk.contains(&format!("const require = {COMPILE_COMMONJS_LOADER};")),
+            "a type-less .js entry that only calls require must be wrapped as CommonJS and \
+             get the loader as its require:\n{cjs_chunk}"
         );
 
         let esm = dir.join("esm.mjs");
@@ -8420,8 +8569,9 @@ console.log('ESM_ENTRY_MARK', path.sep);
         )
         .unwrap();
         let res = bundle(&esm, &o).expect("an ESM entry must compile");
+        let (declares_require, _) = require_scope(&chunk_with(&res, "ESM_ENTRY_MARK"));
         assert!(
-            !chunk_with(&res, "ESM_ENTRY_MARK").contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            !declares_require,
             "authored ESM must not be handed a require binding Node would not give it"
         );
     }

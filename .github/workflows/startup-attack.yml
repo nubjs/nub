@@ -29,6 +29,18 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq hyperfine
           else brew install hyperfine; fi
+      # The "before" for single-file emission: the branch as it stood with the
+      # standalone preamble landed and every CommonJS module still in its own
+      # chunk. Built FIRST into the shared target dir so only the nub crates
+      # rebuild for the tip; the binary is copied out before the tip overwrites it.
+      - name: Build the pre-single-file nub
+        run: |
+          git fetch --depth=1 origin "$BEFORE_SHA"
+          git worktree add /tmp/before "$BEFORE_SHA"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --manifest-path /tmp/before/Cargo.toml -p nub-cli --profile fast --features compile
+          cp "$GITHUB_WORKSPACE/target/fast/nub" /tmp/nub-before
+        env:
+          BEFORE_SHA: 483478915beb08b01ab835d6fb4fe781715fa4f9
       - name: Build nub with the compile feature
         run: cargo build -p nub-cli --profile fast --features compile
       # nub-launcher is its OWN cargo workspace, so the line above never builds it.
@@ -42,6 +54,7 @@ jobs:
       - name: Measure
         env:
           NUB_BIN: ${{ github.workspace }}/target/fast/nub
+          NUB_BIN_BEFORE: /tmp/nub-before
           __NUB_LAUNCHER_TEMPLATE: ${{ github.workspace }}/crates/nub-launcher/target/release/nub-launcher
           LAUNCHER_BEFORE: ${{ runner.os == 'macOS' && format('{0}/crates/nub-launcher/target-before/release/nub-launcher', github.workspace) || '' }}
           REPO: ${{ github.workspace }}
