@@ -23,8 +23,14 @@
 > host-local gate that genuinely reads these files — established by putting a deliberately
 > mis-formatted function into `windows_account/launch.rs` and watching `--check` go from 0 to 1,
 > rather than by assuming it. As of 2026-09-04 this crate's suite had never been run on Windows
-> at all, and the first run failed four tests in `esm_binding_seam_semantics.rs` — a fixture that
-> wants a directory symlink and falls back to a junction without Developer Mode or elevation.
+> at all, and the first run failed four tests in `esm_binding_seam_semantics.rs` — all four in
+> ~0.3s with none passing, on `both arms must exit zero` (`esm_binding_seam_semantics.rs:499`).
+> They are PRE-EXISTING, measured rather than assumed: the same filter was built with and without
+> that day's window-object change and returned `101` from both, with a marker count proving the
+> two arms genuinely compiled different sources. **The cause is UNKNOWN.** The obvious guess was
+> the fixture's directory symlink degrading to a junction without Developer Mode, and the logs do
+> not support it — no junction, privilege or access-denied signal appears in any of them. Every
+> other Windows test binary passed.
 > This is a standing verification gap, not a fact about any one change: when you touch a Windows
 > backend here, run the suite on a Windows host and treat the local gates as silent.
 
