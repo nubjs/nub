@@ -7,7 +7,13 @@
 #      entry chunk (`NUB_BIN_BEFORE` names a nub built before that change); and
 #   3. on macOS only, the launcher no longer linking Security.framework and
 #      CoreFoundation (`LAUNCHER_BEFORE` names a template linked without
-#      `-dead_strip_dylibs`).
+#      `-dead_strip_dylibs`);
+#   4. the chunk shaped so Node's compile cache holds the runtime's startup
+#      functions (`NUB_BIN_LAZY_CACHE` names a nub built just before that
+#      change); and
+#   5. for an older target that still needs the bundled polyfills, the polyfills
+#      installed as lazy globals (`NUB_BIN_EAGER_POLYFILLS` names a nub built
+#      just before that change; `NUB_BIN_BEFORE` stands in when it is unset).
 #
 # The preload is isolated on ONE extracted tree rather than on two artifacts: any
 # source marker that keeps the preload also keeps an eager builtin load, so two
@@ -23,6 +29,8 @@
 set -euo pipefail
 NUB_BIN="${NUB_BIN:?}"
 NUB_BIN_BEFORE="${NUB_BIN_BEFORE:-}"     # a nub built before single-file emission
+NUB_BIN_EAGER_POLYFILLS="${NUB_BIN_EAGER_POLYFILLS:-}" # a nub built before the lazy polyfill globals
+NUB_BIN_LAZY_CACHE="${NUB_BIN_LAZY_CACHE:-}"           # a nub built before the compile-cache chunk shape
 REPO="${REPO:-$PWD}"
 LAUNCHER_BEFORE="${LAUNCHER_BEFORE:-}"   # macOS: a launcher built without -dead_strip_dylibs
 NODE_OLD_PIN="${NODE_OLD_PIN:-22.23.2}"  # a target that still needs the bundled polyfills; empty skips that arm
@@ -176,26 +184,77 @@ if [ -n "$NUB_BIN_BEFORE" ]; then
   timing after s.txt; timing before sb.txt
 fi
 
-if [ -n "$NUB_BIN_BEFORE" ] && [ -n "$NODE_OLD_PIN" ]; then
+if [ -n "$NUB_BIN_LAZY_CACHE" ]; then
+  echo "--- eager startup compilation: the same sources compiled by a nub whose chunk left the compile cache incomplete ---"
+  compile "$NUB_BIN_LAZY_CACHE" hello.ts ./art-lazy
+  compile "$NUB_BIN_LAZY_CACHE" probe.mjs ./probe-lazy
+  ./art-lazy >/dev/null; ./art-lazy >/dev/null; ./probe-lazy >/dev/null; ./probe-lazy >/dev/null
+  # The finished chunk binds every forwarder as a var; the lazy one declares them.
+  # Every tree extracted so far is excluded by name, so the grep only tells the
+  # new pair apart from a tree the single-file arm left behind.
+  lazy_dir() { # lazy_dir <entry chunk name> -> the newest tree whose chunk is not finished
+    for d in "$D"/cache/nub/compile-app/*/; do
+      d="${d%/}"
+      [ -f "$d/$1" ] || continue
+      case "$d" in "$APP"|"$PAPP"|"${APPB:-}"|"${PAPPB:-}") continue;; esac
+      grep -q "=(function require_polyfills(" "$d/$1" || { echo "$d"; return; }
+    done
+  }
+  LAPP=$(lazy_dir hello.mjs); LPAPP=$(lazy_dir probe.mjs)
+  [ -n "$LAPP" ] && [ -n "$LPAPP" ] ||
+    { echo "lazy-cache trees not found"; find "$D/cache" -maxdepth 3 | sort; exit 1; }
+  echo "after : $(ls "$APP" | tr '\n' ' ')"
+  echo "before: $(ls "$LAPP" | tr '\n' ' ')"
+  echo "compile cache, after : $(ls -l "$D"/cache/nub/compile-v8/"$(basename "$APP")"/*/* | awk '{print $5}' | tr '\n' ' ') bytes"
+  echo "compile cache, before: $(ls -l "$D"/cache/nub/compile-v8/"$(basename "$LAPP")"/*/* | awk '{print $5}' | tr '\n' ' ') bytes"
+  LB="$LAPP/__nub_compile_bootstrap.cjs"; LCC="$D/cache/nub/compile-v8/$(basename "$LAPP")"
+  LPB="$LPAPP/__nub_compile_bootstrap.cjs"; LPCC="$D/cache/nub/compile-v8/$(basename "$LPAPP")"
+  LAZY="env NODE_COMPILE_CACHE=$LCC __NUB_COMPILED_BOOTSTRAP=$LB $N $FLAGS $LAPP/hello.mjs"
+  hyperfine -N -i --warmup 30 --min-runs "$RUNS" --style none --export-json e.json \
+    -n 'baseline-A'  "$N nil.mjs" \
+    -n 'after'       "$STANDALONE" \
+    -n 'before'      "$LAZY" \
+    -n 'baseline-B'  "$N nil.mjs" \
+    -n 'art-after'   "./art" \
+    -n 'art-before'  "./art-lazy" \
+    -n 'baseline-C'  "$N nil.mjs" || true
+  report e.json
+  PER=5 ROUNDS="$ROUNDS" bash "$REPO/tests/preamble-eval/cpu-ab.sh" \
+    "after=$STANDALONE" \
+    "before=$LAZY" \
+    "art-after=./art" \
+    "art-before=./art-lazy" \
+    "control=$STANDALONE"
+  : > sl.txt
+  for _ in $(seq 1 150); do
+    env NODE_COMPILE_CACHE=$PCC __NUB_COMPILED_BOOTSTRAP=$PB "$N" $FLAGS "$PAPP/probe.mjs" >> s.txt
+    env NODE_COMPILE_CACHE=$LPCC __NUB_COMPILED_BOOTSTRAP=$LPB "$N" $FLAGS "$LPAPP/probe.mjs" >> sl.txt
+  done
+  timing after s.txt; timing before sl.txt
+fi
+
+# The polyfill arm's "before" is a nub that still installed them eagerly; with
+# only the pre-single-file nub available, its several chunks are priced in too.
+OLD_BEFORE="${NUB_BIN_EAGER_POLYFILLS:-$NUB_BIN_BEFORE}"
+if [ -n "$OLD_BEFORE" ] && [ -n "$NODE_OLD_PIN" ]; then
   echo "--- an older target ($NODE_OLD_PIN): the polyfills it still needs, lazy vs eager ---"
-  # The pre-change nub also emits several chunks, so this arm prices both changes
-  # together; the single-file arm above isolates that one on a target where the
-  # polyfill regions are stripped either way.
   mkdir -p old && cp probe.mjs hello.ts old/ && printf '{"name":"o","type":"module"}\n' > old/package.json
   compile_old() { # compile_old <nub> <source> <out>
     "$1" compile "old/$2" --target "$NODE_OLD_PIN" --out "$3" > "compile-$(basename "$3").log" 2>&1 ||
       { echo "COMPILE FAILED: $3"; tail -30 "compile-$(basename "$3").log"; exit 1; }
   }
   compile_old "$NUB_BIN" probe.mjs ./old-probe-after
-  compile_old "$NUB_BIN_BEFORE" probe.mjs ./old-probe-before
+  compile_old "$OLD_BEFORE" probe.mjs ./old-probe-before
   compile_old "$NUB_BIN" hello.ts ./old-art-after
-  compile_old "$NUB_BIN_BEFORE" hello.ts ./old-art-before
+  compile_old "$OLD_BEFORE" hello.ts ./old-art-before
   for a in ./old-probe-after ./old-probe-before ./old-art-after ./old-art-before; do $a >/dev/null; $a >/dev/null; done
   # The launcher dedups an untrimmed embedded Node against an official one of
   # the same version in nub's store, so on a box that has provisioned this
   # version nothing is extracted; the arms must run the Node the artifact does.
-  NOLD="$HOME/.cache/nub/node/$NODE_OLD_PIN/bin/node"
-  for n in "$D"/cache/nub/compile-node/"$NODE_OLD_PIN"-*/node; do [ -x "$n" ] && NOLD=$n; done
+  NOLD=
+  for n in "$D"/cache/nub/compile-node/"$NODE_OLD_PIN"-*/node "$D/cache/nub/node/$NODE_OLD_PIN/bin/node" "$HOME/.cache/nub/node/$NODE_OLD_PIN/bin/node"; do
+    [ -x "$n" ] && { NOLD=$n; break; }
+  done
   [ -x "$NOLD" ] || { echo "no Node $NODE_OLD_PIN found in the extraction cache or nub's store"; ls "$D/cache/nub/compile-node"; exit 1; }
   [ "$("$NOLD" -e 'process.stdout.write("OK")')" = OK ] || { echo "extracted old node is not plain node"; exit 1; }
   "$NOLD" -v
@@ -203,7 +262,7 @@ if [ -n "$NUB_BIN_BEFORE" ] && [ -n "$NODE_OLD_PIN" ]; then
   echo "flags: $OFLAGS"
   # The after-tree is the one whose entry chunk carries the lazy installer.
   OPA=$(dirname "$(grep -l "defineLazy" "$D"/cache/nub/compile-app/*/probe.mjs | head -1)")
-  OPB=$(for d in "$D"/cache/nub/compile-app/*/; do d="${d%/}"; [ -f "$d/probe.mjs" ] && [ "$d" != "$OPA" ] && [ "$d" != "$PAPP" ] && [ "$d" != "${PAPPB:-}" ] && echo "$d"; done | head -1)
+  OPB=$(for d in "$D"/cache/nub/compile-app/*/; do d="${d%/}"; [ -f "$d/probe.mjs" ] && [ "$d" != "$OPA" ] && [ "$d" != "$PAPP" ] && [ "$d" != "${PAPPB:-}" ] && [ "$d" != "${LPAPP:-}" ] && echo "$d"; done | head -1)
   [ -n "$OPA" ] && [ -n "$OPB" ] || { echo "old-target probe trees not found"; find "$D/cache" -maxdepth 3 | sort; exit 1; }
   echo "after : $(ls "$OPA" | tr '\n' ' ')"
   echo "before: $(ls "$OPB" | tr '\n' ' ')"

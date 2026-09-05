@@ -53,15 +53,26 @@ jobs:
       # standalone preamble landed and every CommonJS module still in its own
       # chunk. Built FIRST into the shared target dir so only the nub crates
       # rebuild for the tip; the binary is copied out before the tip overwrites it.
-      - name: Build the pre-single-file nub
+      # Three "befores", one per change, each the branch as it stood just before
+      # that change landed: pre-single-file (several chunks per artifact), eager
+      # polyfills (single file, polyfills installed at start), and lazy cache
+      # (lazy polyfills, chunk not yet shaped for a complete compile cache).
+      - name: Build the before-change nubs
         run: |
-          git fetch --depth=1 origin "$BEFORE_SHA"
-          git worktree add /tmp/before "$BEFORE_SHA"
-          ln -s "$GITHUB_WORKSPACE/runtime/node_modules" /tmp/before/runtime/node_modules
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --manifest-path /tmp/before/Cargo.toml -p nub-cli --profile fast --features compile
-          cp "$GITHUB_WORKSPACE/target/fast/nub" /tmp/nub-before
+          build_at() { # build_at <sha> <out>
+            git fetch --depth=1 origin "$1"
+            git worktree add "/tmp/src-$2" "$1"
+            ln -s "$GITHUB_WORKSPACE/runtime/node_modules" "/tmp/src-$2/runtime/node_modules"
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --manifest-path "/tmp/src-$2/Cargo.toml" -p nub-cli --profile fast --features compile
+            cp "$GITHUB_WORKSPACE/target/fast/nub" "/tmp/$2"
+          }
+          build_at "$BEFORE_SHA" nub-before
+          build_at "$EAGER_POLYFILLS_SHA" nub-eager-polyfills
+          build_at "$LAZY_CACHE_SHA" nub-lazy-cache
         env:
           BEFORE_SHA: 483478915beb08b01ab835d6fb4fe781715fa4f9
+          EAGER_POLYFILLS_SHA: 81972ec1595ec89fbddf6b0057b37aee1fd31fed
+          LAZY_CACHE_SHA: 251eccd87c7d86f96cb977a0afe4737de600aa87
       - name: Build nub with the compile feature
         run: cargo build -p nub-cli --profile fast --features compile
       # nub-launcher is its OWN cargo workspace, so the line above never builds it.
@@ -76,6 +87,8 @@ jobs:
         env:
           NUB_BIN: ${{ github.workspace }}/target/fast/nub
           NUB_BIN_BEFORE: /tmp/nub-before
+          NUB_BIN_EAGER_POLYFILLS: /tmp/nub-eager-polyfills
+          NUB_BIN_LAZY_CACHE: /tmp/nub-lazy-cache
           __NUB_LAUNCHER_TEMPLATE: ${{ github.workspace }}/crates/nub-launcher/target/release/nub-launcher
           LAUNCHER_BEFORE: ${{ runner.os == 'macOS' && format('{0}/crates/nub-launcher/target-before/release/nub-launcher', github.workspace) || '' }}
           REPO: ${{ github.workspace }}
