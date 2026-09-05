@@ -1765,14 +1765,11 @@ fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
     Ok(rewrote.then(|| magic.to_string()))
 }
 
-/// The oldest Node whose `NODE_COMPILE_CACHE` persists a V8 code cache for an
-/// ES module entry (22.1.0). Below it, or with the target unknown (`--smol`),
-/// eager compilation would only make every start slower.
-const COMPILE_CACHE_FROM: (u64, u64, u64) = (22, 1, 0);
-
-/// The oldest Node where shaping the chunk for eager compilation actually FILLS
-/// that cache. Later than [`COMPILE_CACHE_FROM`] on purpose: a cache existing and
-/// the shape helping are different facts, and on 22.x the second is false.
+/// The oldest Node where shaping the chunk for eager compilation FILLS the V8
+/// code cache. Two facts sit behind it and only this one is the gate: Node
+/// persists no cache at all for an ES module entry below 22.1.0, and on the 22.x
+/// and 23.x line it persists one the shape makes SMALLER. With the target unknown
+/// (`--smol`) the shape is off for the same reason.
 ///
 /// Measured on one hello chunk, the largest cache entry after two runs, comparing
 /// the shaped tree against the same tree unshaped:
@@ -8237,7 +8234,7 @@ mod tests {
 
     /// The shape is off below 24 and on from it. Two different facts decide that
     /// and only the second is the gate: Node persists no code cache at all below
-    /// [`COMPILE_CACHE_FROM`] (22.1), and on 22.x it persists one that the shape
+    /// 22.1, and on 22.x it persists one that the shape
     /// makes SMALLER — 46 KB shaped against 50 KB unshaped, on both 22.15 and
     /// 22.23. So the whole 22 and 23 band is out, including 22.1 itself. The
     /// bundler reads the option, not the target: with it off, a cache-capable
@@ -8248,7 +8245,8 @@ mod tests {
             None,
             Some((20, 19, 0)),
             Some((22, 0, 99)),
-            Some(COMPILE_CACHE_FROM),
+            // 22.1.0: where the cache first exists, and still not where it helps.
+            Some((22, 1, 0)),
             Some((22, 23, 2)),
             Some((23, 99, 99)),
         ] {
