@@ -17,6 +17,16 @@
 // packages known to carry install scripts are all detected, and it counts unresolved lookups
 // separately rather than folding them into "no script".
 //
+// ⛔⛔ THE COUNT THIS PRODUCES IS A FLOOR, NOT A TOTAL, AND THE REASON IS STRUCTURAL. It reads each
+// package's `latest` manifest only, so a package whose current release dropped its install script is
+// counted as a non-carrier even while an older, still heavily used version runs one. `sharp` is the
+// worked example the census header uses and it still holds: latest carries no install script at all,
+// while 0.34.5 runs `install`. scripts/npm-install-script-census.ts avoids this by classifying up to
+// `--top-versions` releases per package. Doing the same here would multiply the request count by
+// that factor, which is why this stays latest-only -- but it means the honest reading of any number
+// below is "at least this many", and a package's ABSENCE from the output is not evidence it never
+// runs an install script.
+//
 // ⛔ EVERY fetch carries a hard timeout. Without one a single hung socket parks a worker forever and
 // the whole scan stalls silently -- measured: a 44k run froze at 5,000 checked for 40+ minutes while
 // the registry answered an unrelated probe in 0.3s.
