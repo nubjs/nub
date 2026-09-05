@@ -2,12 +2,23 @@ name: node-cf-followup
 
 # Re-measures two already-built node binaries pulled from a node-cf-probe run's
 # cf-bins artifact, so a second reading costs minutes rather than a rebuild.
+# workflow_dispatch alone is not enough on a probe branch: GitHub only registers a
+# dispatchable workflow once its file is on the default branch, so `gh workflow run`
+# answers 404 here. Push to the branch instead, with the run id in RUN_ID.
 on:
+  push:
+    branches: [probe/node-startup]
+    paths:
+      - 'tests/node-cf-followup/**'
+      - '.github/workflows/node-cf-followup.yml'
   workflow_dispatch:
     inputs:
       run_id:
         description: 'node-cf-probe run id carrying the cf-bins artifact'
-        required: true
+        required: false
+
+env:
+  RUN_ID: 33934292822
 
 jobs:
   measure:
@@ -19,7 +30,7 @@ jobs:
       - name: Fetch the built binaries
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "${{ inputs.run_id }}" -n cf-bins -D bins -R "$GITHUB_REPOSITORY"
+        run: gh run download "${{ inputs.run_id || env.RUN_ID }}" -n cf-bins -D bins -R "$GITHUB_REPOSITORY"
       - name: Measure
         run: tests/node-cf-followup/probe.sh bins/node-baseline bins/node-macos-cf "$RUNNER_TEMP/fu" | tee followup.txt
       - uses: actions/upload-artifact@v4
