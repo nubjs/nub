@@ -457,7 +457,11 @@ fn main_source(
         )
         .replace(
             "__NUB_SEA_NEUTRALIZE_LOCALSTORAGE__",
-            if neutralize_localstorage { "true" } else { "false" },
+            if neutralize_localstorage {
+                "true"
+            } else {
+                "false"
+            },
         );
 
     let mut out = bootstrap.into_bytes();
@@ -520,12 +524,15 @@ pub fn build_blob(inputs: &Inputs<'_>) -> Result<Vec<u8>> {
         inputs.app_files,
         inputs.entry,
         inputs.app_sha,
-        nub_core::node::flags::should_inject_experimental_webstorage(inputs.node_version, &[], None)
-            && nub_core::node::flags::should_neutralize_experimental_webstorage_localstorage(
-                inputs.node_version,
-                &[],
-                None,
-            ),
+        nub_core::node::flags::should_inject_experimental_webstorage(
+            inputs.node_version,
+            &[],
+            None,
+        ) && nub_core::node::flags::should_neutralize_experimental_webstorage_localstorage(
+            inputs.node_version,
+            &[],
+            None,
+        ),
     )?;
     let mut assets = payload.assets;
     assets.push((LICENSE_ASSET.to_string(), inputs.node_license.to_vec()));
@@ -551,8 +558,8 @@ pub fn build_blob(inputs: &Inputs<'_>) -> Result<Vec<u8>> {
         code_cache: None,
         assets,
         exec_argv: exec_argv(inputs.node_version, inputs.node_flags),
-        }
-        .serialize(inputs.node_version)
+    }
+    .serialize(inputs.node_version)
 }
 
 /// The flags Node splices into argv out of the blob — nub's injected set, then the
@@ -577,10 +584,11 @@ pub fn build_blob(inputs: &Inputs<'_>) -> Result<Vec<u8>> {
 fn exec_argv(version: &NodeVersion, node_flags: &[String]) -> Vec<String> {
     use nub_core::node::flags;
 
-    let mut argv: Vec<String> = flags::compute_inject_flags(version.clone(), &[], None, false, None)
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+    let mut argv: Vec<String> =
+        flags::compute_inject_flags(version.clone(), &[], None, false, None)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
     // Computed outside `compute_inject_flags` for the same reason the launcher
     // computes it separately: it honours an explicit user polarity, which that
     // helper's static set would bypass.
@@ -675,8 +683,8 @@ mod tests {
             0x19, 0x00, 0x00, 0x00, // warning-off | assets | exec argv
             0x02, // execArgvExtension: cli
             0x00, // mainFormat: commonjs
-            0x08, 0, 0, 0, 0, 0, 0, 0, b'm', b'a', b'i', b'n', b'.', b'c', b'j', b's',
-            0x2f, 0, 0, 0, 0, 0, 0, 0, // main, 47 bytes
+            0x08, 0, 0, 0, 0, 0, 0, 0, b'm', b'a', b'i', b'n', b'.', b'c', b'j', b's', 0x2f, 0, 0,
+            0, 0, 0, 0, 0, // main, 47 bytes
         ];
         assert_eq!(
             &bytes[..expected.len()],
@@ -719,7 +727,10 @@ mod tests {
             exec_argv: Vec::new(),
         };
         assert_eq!(blob.serialize(&v(25, 6, 1)).unwrap()[8..9], [1]);
-        assert_eq!(blob.serialize(&v(25, 6, 1)).unwrap()[9..17], 1u64.to_le_bytes());
+        assert_eq!(
+            blob.serialize(&v(25, 6, 1)).unwrap()[9..17],
+            1u64.to_le_bytes()
+        );
         assert_eq!(blob.serialize(&v(25, 7, 0)).unwrap()[9..10], [0]);
         assert_eq!(
             blob.serialize(&v(25, 7, 0)).unwrap().len(),
@@ -741,7 +752,9 @@ mod tests {
             assets: Vec::new(),
             exec_argv: Vec::new(),
         };
-        let flags = |b: &Blob| u32::from_le_bytes(b.serialize(&v(26, 7, 0)).unwrap()[4..8].try_into().unwrap());
+        let flags = |b: &Blob| {
+            u32::from_le_bytes(b.serialize(&v(26, 7, 0)).unwrap()[4..8].try_into().unwrap())
+        };
         assert_eq!(flags(&bare), 0);
 
         let with_assets = Blob {
@@ -840,9 +853,21 @@ mod tests {
     #[test]
     fn builds_the_note_postject_reads() {
         let note = elf_note(b"BLOB");
-        assert_eq!(u32::from_le_bytes(note[0..4].try_into().unwrap()), 14, "namesz counts the NUL");
-        assert_eq!(u32::from_le_bytes(note[4..8].try_into().unwrap()), 4, "descsz is the blob alone");
-        assert_eq!(u32::from_le_bytes(note[8..12].try_into().unwrap()), 0, "type matches Node's builder");
+        assert_eq!(
+            u32::from_le_bytes(note[0..4].try_into().unwrap()),
+            14,
+            "namesz counts the NUL"
+        );
+        assert_eq!(
+            u32::from_le_bytes(note[4..8].try_into().unwrap()),
+            4,
+            "descsz is the blob alone"
+        );
+        assert_eq!(
+            u32::from_le_bytes(note[8..12].try_into().unwrap()),
+            0,
+            "type matches Node's builder"
+        );
         assert_eq!(&note[12..25], RESOURCE_NAME.as_bytes());
         assert_eq!(note[25], 0);
         // namesz 14 rounds to 16, so the descriptor starts at 12 + 16.
@@ -900,18 +925,24 @@ mod tests {
             bytes: bytes.to_vec(),
             executable: false,
         };
-        let bootstrap = format!(
-            "const requireArg = __filename === \"[eval]\" ? undefined : `--require=${{__filename}}`;\n"
-        );
+        let bootstrap =
+            "const requireArg = __filename === \"[eval]\" ? undefined : `--require=${__filename}`;\n";
         let files = vec![
-            file(nub_core::compile::COMPILE_BOOTSTRAP_NAME, bootstrap.as_bytes()),
+            file(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME,
+                bootstrap.as_bytes(),
+            ),
             file("app.mjs", b"export default 1;"),
             file("package.json", b"{\"type\":\"module\"}"),
         ];
 
         let split = payload(&files, "app.mjs", "0123456789abcdef0123", false).unwrap();
         assert_eq!(
-            split.assets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            split
+                .assets
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
             ["app.mjs"],
             "the bootstrap is the main and package.json is dropped"
         );

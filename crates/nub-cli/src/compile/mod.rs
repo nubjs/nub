@@ -510,34 +510,34 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             .collect()
     } else {
         app_files
-        .into_iter()
-        .map(|file| {
-            // The length the LAUNCHER will find on disk, so it is read before
-            // anything below can compress or move these bytes.
-            let plain_size = file.bytes.len() as u64;
-            let bytes = if inline_app {
-                // The bootstrap alone is stored VERBATIM. The launcher reads it out
-                // of the payload to build the `-e` argument, and it carries no
-                // decompressor for this codec by design — nub-launcher is a
-                // deliberately minimal binary. Storing ~13 KB raw is what buys that.
-                if file.name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
-                    file.bytes
+            .into_iter()
+            .map(|file| {
+                // The length the LAUNCHER will find on disk, so it is read before
+                // anything below can compress or move these bytes.
+                let plain_size = file.bytes.len() as u64;
+                let bytes = if inline_app {
+                    // The bootstrap alone is stored VERBATIM. The launcher reads it out
+                    // of the payload to build the `-e` argument, and it carries no
+                    // decompressor for this codec by design — nub-launcher is a
+                    // deliberately minimal binary. Storing ~13 KB raw is what buys that.
+                    if file.name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
+                        file.bytes
+                    } else {
+                        brotli_encode(&file.bytes)
+                            .with_context(|| format!("brotli-compressing {}", file.name))?
+                    }
                 } else {
-                    brotli_encode(&file.bytes)
-                        .with_context(|| format!("brotli-compressing {}", file.name))?
-                }
-            } else {
-                zstd::encode_all(&file.bytes[..], 19)
-                    .with_context(|| format!("zstd-compressing {}", file.name))?
-            };
-            Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
-                name: file.name,
-                plain_size: Some(plain_size),
-                bytes,
-                executable: file.executable,
+                    zstd::encode_all(&file.bytes[..], 19)
+                        .with_context(|| format!("zstd-compressing {}", file.name))?
+                };
+                Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
+                    name: file.name,
+                    plain_size: Some(plain_size),
+                    bytes,
+                    executable: file.executable,
+                })
             })
-        })
-        .collect::<Result<_>>()?
+            .collect::<Result<_>>()?
     };
 
     // 4. Manifest + payload.

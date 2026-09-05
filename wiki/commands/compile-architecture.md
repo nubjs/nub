@@ -10,7 +10,7 @@ A compiled artifact carries neither Nub's transpiler nor its resolver. What norm
 
 Normal Nub execution augments the user's Node through preloads, module hooks, and injected flags. Rolldown instead transpiles TypeScript and JSX, substitutes target values such as `process.platform` and `process.arch`, and resolves the static module graph during the build.
 
-The runtime is still more than a bare script spawn. The launcher starts official, unpatched Node with version-appropriate flags and the extracted bundled entry, and hands it a fixed internal CommonJS bootstrap that captures fixed-root builtin access before user hooks run; the bundle's preamble restores the runtime globals the compiled program needs. The bootstrap is a `--require` preload only when the payload needs it to run before the ESM graph — when the sealed graph reaches `child_process`/`cluster` (the fork identity fix-up) or `Worker`/`worker_threads`. Otherwise, on Node 22.3 and later, the launcher passes the bootstrap's path in the environment and the preamble publishes the same record itself, which saves the preload's cost on every start.
+The runtime is still more than a bare script spawn. Official, unpatched Node runs with version-appropriate flags and the bundled entry, and is handed a fixed internal CommonJS bootstrap that captures fixed-root builtin access before user hooks run; the bundle's preamble restores the runtime globals the compiled program needs. A launcher artifact starts that Node and passes the extracted entry; a single-executable artifact is that Node, and reaches its entry through the blob. The bootstrap is a `--require` preload only when the payload needs it to run before the ESM graph — when the sealed graph reaches `child_process`/`cluster` (the fork identity fix-up) or `Worker`/`worker_threads`. Otherwise, on Node 22.3 and later, the bootstrap's path travels in the environment and the preamble publishes the same record itself, which saves the preload's cost on every start. A single-executable artifact never preloads it, because the bootstrap is already the first thing its blob main runs.
 
 "Unpatched" describes the default and the source, not an invariant of the byte stream: the build already strips the binary and re-signs it on macOS, and `--icu` additionally rewrites its ICU data package in place. Node's own code is never altered.
 
@@ -24,16 +24,30 @@ The default shape embeds a Node; `--smol` does not, and finds one at startup ins
 
 | Shape | Size | Contains | Node comes from |
 | --- | --- | --- | --- |
-| default (embed) | ~29 MB | launcher + manifest + bundled JS + assets + a stripped, zstd-19 Node | inside the binary |
+| default (embed) | ~108 MB | a stripped Node carrying the bundled JS and assets in a single-executable blob | it is the binary |
 | `--smol` | ~1.0 MB | launcher + manifest + bundled JS + assets | discovered locally, else provisioned |
 
-Both figures are a hello-world artifact on Node 26 for darwin-arm64. Neither floor is the bundled program: a `--smol` artifact is 851 KB of launcher template before it carries a byte of application code, and an embed artifact is that plus the compressed runtime.
+Both figures are a hello-world artifact on Node 26 for darwin-arm64. Neither floor is the bundled program: a `--smol` artifact is 851 KB of launcher template before it carries a byte of application code, and an embed artifact is a whole Node before it carries one.
+
+### The container the default shape uses
+
+An embedding artifact is a [Node single-executable application](https://nodejs.org/api/single-executable-applications.html): official Node carrying a serialized preparation blob, with a one-byte fuse flipped so Node's own embedder loader runs the blob's main.
+
+Nothing is extracted and no second process is created. The artifact's `process.execPath` is Node's execPath, because the two are one file.
+
+Nub writes that blob and that container itself rather than calling `node --experimental-sea-config`, which would require a host Node of the target's exact version for every cross-build. The format is Node's, and two of its fields move between releases: the header's `mainFormat` byte arrives in 25.7, and blob `execArgv` landed as three separate backports whose bands leave the whole 23.x line without it.
+
+`execArgv` is what decides the container. Nub's runtime flags reach a compiled artifact through that field, and an artifact that could not carry them would diverge from `nub <file>` on the first program that uses one — so a target Node below the backport bands keeps the launcher, as does any payload that needs real filesystem paths (`--external` packages, a retained computed `import()`, `--include`d files, native addons, a traced worker chunk, a linked source map). `--smol` is never a single-executable application: one *is* a Node, and the sub-1 MB shape embeds none.
+
+Two consequences follow the shape. An artifact's Node flags are fixed at build time, where the launcher recomputed them per run — `NODE_OPTIONS` still reaches the process, since the blob's `execArgvExtension` is Node's own `env` default, but a `--no-…` in it no longer subtracts a flag Nub injects, because argv beats the environment. And `--icu` no longer changes the size on disk: the trim rewrites ICU's package in place without shortening it, and the compression pass that used to turn that into a smaller artifact is gone. It still pays on the wire, where the zero-filled remainder compresses away.
 
 ### Trimming ICU out of the embedded Node
 
 `--icu=en,de,fr` rewrites the embedded Node's ICU data package in place to hold only the named languages. The default keeps every locale, because a dropped one falls back silently rather than failing.
 
-An official Node is built `--with-intl=full-icu`, so one linked-in package covering ~700 locales accounts for 31.6 MiB of the ~102 MiB stripped binary and 31.7% of the compressed blob. The rewrite zero-fills what it vacates, and that padding survives zstd at under a kilobyte. Measured on Node 26 for darwin-arm64, English alone takes a hello-world artifact from 29.5 MB to 24.4 MB.
+An official Node is built `--with-intl=full-icu`, so one linked-in package covering ~700 locales accounts for 31.6 MiB of the ~102 MiB stripped binary. The rewrite zero-fills what it vacates, and that padding survives zstd at under a kilobyte.
+
+Where the saving lands depends on the shape, because the rewrite frees bytes without shortening the file. A `--smol` artifact embeds no Node and is unaffected. An embedding artifact is the Node, so its size on disk does not move at all — measured on Node 26 for darwin-arm64, a hello-world artifact is 107.8 MB either way — while compressing it for distribution falls from 28.8 MB to 24.2 MB at zstd-19, and from 39.2 MB to 33.0 MB at gzip -9.
 
 Three properties make the rewrite safe to do after linking. ICU reaches the package through a bare pointer and navigates it by its own table of contents, so nothing records the length a smaller package would contradict. The package announces itself with a magic and a `CmnD` format tag that occur exactly once per binary in all three container formats, so locating it needs no symbol table — which matters because `strip` removes the ELF symbol that would otherwise name it. And only locale-shaped resources are dropped, so the charset converters, break iterators, normalization tables and supplemental resources all remain: no API changes behavior, and a dropped language falls back through ICU's normal chain to `root`.
 
@@ -53,31 +67,43 @@ When no installed Node qualifies, the launcher provisions the newest matching re
 
 ## Anatomy of a compiled binary
 
-A compiled binary is a target-specific `nub-launcher` with one injected section, holding a JSON manifest and its payload. How that section is attached is format-specific, and only one of the three formats ends up signed.
+Both shapes are one host binary with one injected region; which binary and which region differ.
 
-Payload V3 carries the app files, the length each one extracts to, and — for the default shape — the exact aggregate Node-root `LICENSE` as a compressed notice. The decoder remains compatible with V2 payloads, which record no extracted length, and with V1 payloads, which carry neither that nor the notice.
+A single-executable artifact is the target's official Node carrying a Node preparation blob. Every other artifact is a target-specific `nub-launcher` carrying a JSON manifest and its payload.
 
-Injection is format-specific:
+Payload V3 carries the app files, the length each one extracts to, and — for a launcher that embeds a Node — the exact aggregate Node-root `LICENSE` as a compressed notice. The decoder remains compatible with V2 payloads, which record no extracted length, and with V1 payloads, which carry neither that nor the notice. A single-executable artifact carries the same notice as a blob asset instead, reached through the same private `__NUB_COMPILED_LAUNCHER_MODE=licenses` channel.
 
-- **Mach-O** uses a new section and is ad-hoc-signed by the pure-Rust injector. The signature supplies neither a Developer ID identity nor notarization. It is also not a fixed cost: the CodeDirectory holds one SHA-256 per 4 KiB page, so it scales with the image at roughly 0.78% of it — 8 KB on a `--smol` artifact and 228 KB on a 29 MB embed one. The template's own signature is discarded, since the whole image is signed again after injection.
-- **ELF** uses `.note.sui` plus `.sui.phdrs` and remains unsigned.
+Injection is format-specific. The blob's segment, section, note and resource names are not Nub's to choose: Node's runtime has them compiled in, and reads itself with them.
+
+- **Mach-O** uses a new section and is ad-hoc-signed by the pure-Rust injector. The signature supplies neither a Developer ID identity nor notarization. It is also not a fixed cost: the CodeDirectory holds one SHA-256 per 4 KiB page, so it scales with the image at roughly 0.78% of it — 8 KB on a `--smol` artifact and 835 KB on a 108 MB embed one. A launcher template's own signature is discarded, since the whole image is signed again after injection; a Node template's is kept, because dropping it first makes the re-sign fail strict validation.
+- **ELF** uses `.note.sui` plus `.sui.phdrs` for a payload, a `NODE_SEA_BLOB` note for a blob, and remains unsigned.
 - **PE** uses a resource and remains unsigned. Authenticode signing is the distributor's responsibility.
+
+Writing the blob into the existing header slack is also what gives darwin-x64 an artifact at all. `node --build-sea` and `postject` inject through LIEF, which grows `__TEXT` by a page and shifts every later segment including the three `__thread_*` sections; dyld computes its thread-local span across those in load-command order, so the shifted binary fails a sanity check and dies at exec before any code runs. Stock Intel Node has 208 bytes of header slack and a one-section `LC_SEGMENT_64` needs 152, so Nub's writer fits into what is already there and moves only `__LINKEDIT`.
 
 The `compile/inject.rs::verify_template` function validates the template's format and architecture: Mach-O cputype, ELF `e_machine`, or PE COFF Machine. A checksum alone only proves that the downloaded bytes match their publisher; it does not prove that the asset matches the requested target.
 
 ## Build pipeline
 
-Five stages, in order. The ordering is load-bearing at two points: the target is resolved before bundling because it decides which polyfills are stripped, and the launcher is acquired before injection because a foreign target has no host fallback.
+Five stages, in order. The ordering is load-bearing at two points: the target is resolved before bundling, and a launcher, when one is needed, is acquired before injection.
+
+The target decides which polyfills are stripped. A foreign target has no host launcher to fall back to.
 
 1. **Resolve the target.** The `--target` flag selects the Node version; otherwise the compiler uses the project's pin chain and refuses when it finds no pin. The `--platform` flag selects the target triple.
 2. **Bundle.** Rolldown runs in-process as a Rust library. The plugins and their ordering are defined in `compile/bundle.rs`.
 3. **Collect assets.** Include globs, loader-claimed files, literal `new URL(..., import.meta.url)` references, worker roots, and native addons feed one `Assets` collector. The payload stores identical physical bytes once while retaining each logical name.
-4. **Acquire the launcher.** Normal lookup checks beside the running `nub`, then the local cache, then the immutable release for this exact Nub version. Downloaded launchers and their `.sha256` sidecars are verified before the launcher is cached. A foreign target has no host-template fallback; an offline build needs the exact target launcher already cached, and an unpublished version cannot fetch a release asset that does not exist.
-5. **Inject and stage.** The compiler injects the payload into a staged copy, verifies what the host can verify, then replaces the requested output. A foreign artifact cannot be executed on the build host, so cross-target verification is structural rather than an execution probe.
+4. **Acquire the launcher, when the artifact needs one.** Normal lookup checks beside the running `nub`, then the local cache, then the immutable release for this exact Nub version. Downloaded launchers and their `.sha256` sidecars are verified before the launcher is cached. A foreign target has no host-template fallback; an offline build needs the exact target launcher already cached, and an unpublished version cannot fetch a release asset that does not exist. A build that could produce a single-executable artifact skips the lookup entirely and repeats it only if the payload turns out to need real paths, because the alternative is fetching a template nothing opens — and failing an otherwise valid build on a platform for which this release published no launcher.
+5. **Inject and stage.** The compiler injects the payload or the blob into a staged copy, verifies what the host can verify, then replaces the requested output. A foreign artifact cannot be executed on the build host, so cross-target verification is structural rather than an execution probe: for a single-executable artifact that means reading the written file back, confirming the fuse byte is set and that a blob carrying Node's magic sits where that platform's Node will look for it.
 
 ## Runtime path
 
-What the launcher does between exec and handing control to Node. The cache is chosen before anything is extracted, because whether the artifact needs an executable mount depends on whether that cache will have to supply Node.
+A single-executable artifact has almost no path to describe: Node starts and reads its own blob.
+
+Node compiles the blob's main as an ordinary CommonJS wrapper — `exports`, `require`, `module`, `__filename` and `__dirname` arrive as parameters rather than globals, so the eval-global cleanup and the IIFE the inline shape needs have no counterpart here. That main is the compile bootstrap followed by a loader, which registers `module.registerHooks` to serve each chunk from the blob at a `file:` URL under a fixed virtual root, turns on Node's on-disk compile cache, and imports the entry.
+
+The chunks travel verbatim: at a real URL each one keeps its own `import.meta.url` and its own relative specifiers, so there is no specifier substitution pass and no re-encoding. That is also the difference that decides start time. The inline (`no-extract`) shape has to make each chunk a `data:` URL because it has nothing on disk and no hook API on its floor, and inside a blob that same choice costs 8.3 ms on a 60 KB chunk — a base64 encode, a URL parse and a base64 decode, none of which any cache covers. Serving `sea.getRawAsset` through hooks avoids the copy as well: the source is handed to Node as the ArrayBuffer the blob is already mapped at.
+
+The remaining steps describe a launcher artifact. The cache is chosen before anything is extracted, because whether the artifact needs an executable mount depends on whether that cache will have to supply Node.
 
 1. The launcher decodes its payload. No argument spelling is reserved at any argument count; the embedded Node notice is reached only through the private `__NUB_COMPILED_LAUNCHER_MODE=licenses` channel with no application arguments (release CI's gate), which prints it before cache resolution or Node startup.
 2. A `--smol` launcher first proves whether a usable external Node exists. This determines whether the selected cache will hold app data only or must supply Node.
@@ -90,18 +116,20 @@ Cache selection validates the properties it relies on before using extracted fil
 
 ## Process identity
 
-The outer artifact remains the application's executable identity even though the process that ends up running is Node — on Unix the launcher's own process after `exec`, on Windows a child:
+The outer artifact remains the application's executable identity even though the process that ends up running is Node.
 
-| Value | Compiled artifact |
-| --- | --- |
-| `process.execPath` | outer compiled executable |
-| `process.argv[0]` | outer compiled executable |
-| `process.argv[1]` | extracted bundled entry |
-| `process.argv0` | underlying Node argv0 |
-| initial `process.title` | underlying Node process title |
-| `process.execArgv` | actual underlying Node CLI flags |
+For a launcher artifact that process is the launcher's own after `exec` on Unix, a child on Windows. For a single-executable artifact there is no distinction to draw.
 
-The compile preamble rewrites `process.execPath` and `process.argv[0]`; `process.argv0` and the initial process title retain Node's native values. Directly spawning `process.execPath` re-enters the launcher and runs the compiled application again.
+| Value | Launcher artifact | Single-executable artifact |
+| --- | --- | --- |
+| `process.execPath` | outer compiled executable | the artifact, natively |
+| `process.argv[0]` | outer compiled executable | the artifact, natively |
+| `process.argv[1]` | extracted bundled entry | the artifact, as Node sets it |
+| `process.argv0` | underlying Node argv0 | the artifact as invoked |
+| initial `process.title` | underlying Node process title | the artifact as invoked |
+| `process.execArgv` | actual underlying Node CLI flags | the blob's `execArgv` |
+
+In a launcher artifact the compile preamble rewrites `process.execPath` and `process.argv[0]`, while `process.argv0` and the initial process title retain Node's native values. A single-executable artifact needs no rewrite: Node's native values already name the artifact, because it is the Node. Directly spawning `process.execPath` runs the compiled application again either way.
 
 The `process.execArgv` array truthfully exposes the flags passed to the underlying Node, including the version-dependent flags and, when it is preloaded, the private bootstrap. It is runtime plumbing rather than a stable API. Combining the outer `process.execPath` with those underlying Node flags is not a plain-Node re-execution recipe; a caller that needs plain Node must discover and pass a Node executable.
 
@@ -115,9 +143,13 @@ For native `node:worker_threads.Worker`, an explicit `execArgv` retains Node's r
 
 ## Why extraction uses real files
 
-The launcher extracts the app and runtime to real paths so native addons can load through the platform dynamic loader. Extracted addons use mode `644`; `dlopen` needs read access, not the executable bit.
+A native addon loads through the platform dynamic loader, which reads a path, so any payload carrying one extracts — and keeps the launcher rather than becoming a single-executable application.
 
-The default shape stores Node under `compile-node/<version>-<hash>`, keyed by content. Matching compiled binaries can share that extraction, and a compiled artifact can adopt a matching Node from Nub's ordinary store. The app files use their own payload-keyed extraction with a completion marker.
+Extracted addons use mode `644`; `dlopen` needs read access, not the executable bit.
+
+A launcher that embeds a Node stores it under `compile-node/<version>-<hash>`, keyed by content. Matching compiled binaries can share that extraction, and such an artifact can adopt a matching Node from Nub's ordinary store. The app files use their own payload-keyed extraction with a completion marker.
+
+A single-executable artifact extracts nothing, and still writes Node's compile cache — exactly as `node app.js` does.
 
 ## Build-time and runtime resolution
 
