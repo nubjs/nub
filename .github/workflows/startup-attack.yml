@@ -6,6 +6,7 @@ on:
       - 'tests/startup-attack/**'
       - '.github/workflows/startup-attack.yml'
       - 'runtime/compile-*.mjs'
+      - 'runtime/compile-*.cjs'
       - 'crates/nub-launcher/**'
   workflow_dispatch:
 
@@ -25,6 +26,25 @@ jobs:
         with:
           node-version: '26'
       - uses: Swatinem/rust-cache@v2
+      # The polyfill packages the compile prelude bundles for a target that lacks
+      # them natively live in runtime/node_modules, which a checkout does not
+      # carry; staged exactly as ci.yml's embedded-compile job stages them. A Node
+      # 26 target strips every region and needs none of this; the older-target
+      # arm of the measurement does.
+      - uses: ./setup
+        with:
+          cache: 'true'
+      - name: Stage the runtime's polyfill packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub install --frozen-lockfile --node-linker hoisted
+          rm -rf runtime/node_modules
+          mkdir -p runtime/node_modules/@js-temporal runtime/node_modules/@oxc-project runtime/node_modules/@petamoriken
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
       - name: Install hyperfine
         run: |
           if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -qq && sudo apt-get install -y -qq hyperfine
@@ -37,6 +57,7 @@ jobs:
         run: |
           git fetch --depth=1 origin "$BEFORE_SHA"
           git worktree add /tmp/before "$BEFORE_SHA"
+          ln -s "$GITHUB_WORKSPACE/runtime/node_modules" /tmp/before/runtime/node_modules
           CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --manifest-path /tmp/before/Cargo.toml -p nub-cli --profile fast --features compile
           cp "$GITHUB_WORKSPACE/target/fast/nub" /tmp/nub-before
         env:

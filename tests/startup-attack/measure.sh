@@ -25,6 +25,7 @@ NUB_BIN="${NUB_BIN:?}"
 NUB_BIN_BEFORE="${NUB_BIN_BEFORE:-}"     # a nub built before single-file emission
 REPO="${REPO:-$PWD}"
 LAUNCHER_BEFORE="${LAUNCHER_BEFORE:-}"   # macOS: a launcher built without -dead_strip_dylibs
+NODE_OLD_PIN="${NODE_OLD_PIN:-22.23.2}"  # a target that still needs the bundled polyfills; empty skips that arm
 NODE_PIN="${NODE_PIN:-$(node -v | tr -d v)}"
 RUNS="${RUNS:-400}"
 ROUNDS="${ROUNDS:-40}"
@@ -71,11 +72,18 @@ N=$(echo "$D"/cache/nub/compile-node/*/node)
 for path in "$N" "$B" "$PB" "$CC" "$PCC"; do
   [ -e "$path" ] || { echo "MISSING after two warm runs: $path"; find "$D/cache" -maxdepth 3 | sort; exit 1; }
 done
-FLAGS="--disable-warning=ExperimentalWarning --experimental-vm-modules --experimental-eventsource --experimental-addon-modules --experimental-import-text --experimental-ffi --experimental-vfs --experimental-stream-iter"
+# The flags the launcher itself passes for this target, read off its timing
+# print rather than copied here: they are version-dependent.
+flags_of() { # flags_of <artifact> -> the Node flags before the entry path
+  __NUB_LAUNCHER_TIMING=1 "$1" 2>&1 >/dev/null | sed -n 's/^ *argv: //p' | sed 's# /[^ ]*$##'
+}
+FLAGS=$(flags_of ./art)
+[ -n "$FLAGS" ] || { echo "could not read the launcher's flags"; __NUB_LAUNCHER_TIMING=1 ./art; exit 1; }
 [ "$(node -e 'process.stdout.write("OK")')" = OK ] || { echo "PATH node is not plain node"; exit 1; }
 [ "$("$N" -e 'process.stdout.write("OK")')" = OK ] || { echo "extracted node is not plain node"; exit 1; }
 echo "extracted tree: $(ls "$APP" | tr '\n' ' ')"
-__NUB_LAUNCHER_TIMING=1 ./art 2>&1 | grep -E "argv:|env:" | sed "s#$D##g" | cut -c1-160
+echo "flags: $FLAGS"
+__NUB_LAUNCHER_TIMING=1 ./art 2>&1 | grep -E "env:" | sed "s#$D##g" | cut -c1-160
 
 # Every Node arm carries the artifact's own flags and compile cache; only the
 # bootstrap delivery differs. No wrapper script: `env` is one exec, like the launcher.
@@ -166,6 +174,51 @@ if [ -n "$NUB_BIN_BEFORE" ]; then
     env NODE_COMPILE_CACHE=$PCCB __NUB_COMPILED_BOOTSTRAP=$PBB "$N" $FLAGS "$PAPPB/probe.mjs" >> sb.txt
   done
   timing after s.txt; timing before sb.txt
+fi
+
+if [ -n "$NUB_BIN_BEFORE" ] && [ -n "$NODE_OLD_PIN" ]; then
+  echo "--- an older target ($NODE_OLD_PIN): the polyfills it still needs, lazy vs eager ---"
+  # The pre-change nub also emits several chunks, so this arm prices both changes
+  # together; the single-file arm above isolates that one on a target where the
+  # polyfill regions are stripped either way.
+  mkdir -p old && cp probe.mjs hello.ts old/ && printf '{"name":"o","type":"module"}\n' > old/package.json
+  compile_old() { # compile_old <nub> <source> <out>
+    "$1" compile "old/$2" --target "$NODE_OLD_PIN" --out "$3" > "compile-$(basename "$3").log" 2>&1 ||
+      { echo "COMPILE FAILED: $3"; tail -30 "compile-$(basename "$3").log"; exit 1; }
+  }
+  compile_old "$NUB_BIN" probe.mjs ./old-probe-after
+  compile_old "$NUB_BIN_BEFORE" probe.mjs ./old-probe-before
+  compile_old "$NUB_BIN" hello.ts ./old-art-after
+  compile_old "$NUB_BIN_BEFORE" hello.ts ./old-art-before
+  for a in ./old-probe-after ./old-probe-before ./old-art-after ./old-art-before; do $a >/dev/null; $a >/dev/null; done
+  NOLD=$(ls "$D"/cache/nub/compile-node/"$NODE_OLD_PIN"-*/node | head -1)
+  [ "$("$NOLD" -e 'process.stdout.write("OK")')" = OK ] || { echo "extracted old node is not plain node"; exit 1; }
+  "$NOLD" -v
+  OFLAGS=$(flags_of ./old-probe-after)
+  echo "flags: $OFLAGS"
+  # The after-tree is the one whose entry chunk carries the lazy installer.
+  OPA=$(dirname "$(grep -l "defineLazy" "$D"/cache/nub/compile-app/*/probe.mjs | head -1)")
+  OPB=$(for d in "$D"/cache/nub/compile-app/*/; do d="${d%/}"; [ -f "$d/probe.mjs" ] && [ "$d" != "$OPA" ] && [ "$d" != "$PAPP" ] && [ "$d" != "${PAPPB:-}" ] && echo "$d"; done | head -1)
+  [ -n "$OPA" ] && [ -n "$OPB" ] || { echo "old-target probe trees not found"; find "$D/cache" -maxdepth 3 | sort; exit 1; }
+  echo "after : $(ls "$OPA" | tr '\n' ' ')"
+  echo "before: $(ls "$OPB" | tr '\n' ' ')"
+  : > oa.txt; : > ob.txt; : > on.txt
+  for _ in $(seq 1 150); do
+    env NODE_COMPILE_CACHE="$D/cache/nub/compile-v8/$(basename "$OPA")" __NUB_COMPILED_BOOTSTRAP="$OPA/__nub_compile_bootstrap.cjs" "$NOLD" $OFLAGS "$OPA/probe.mjs" >> oa.txt
+    env NODE_COMPILE_CACHE="$D/cache/nub/compile-v8/$(basename "$OPB")" __NUB_COMPILED_BOOTSTRAP="$OPB/__nub_compile_bootstrap.cjs" "$NOLD" $OFLAGS "$OPB/probe.mjs" >> ob.txt
+    "$NOLD" probe.mjs >> on.txt
+  done
+  timing after oa.txt; timing before ob.txt; timing plain-node on.txt
+  hyperfine -N -i --warmup 30 --min-runs "$RUNS" --style none --export-json o.json \
+    -n 'baseline-A'  "$NOLD nil.mjs" \
+    -n 'art-after'   "./old-art-after" \
+    -n 'art-before'  "./old-art-before" \
+    -n 'baseline-B'  "$NOLD nil.mjs" || true
+  report o.json
+  PER=5 ROUNDS="$ROUNDS" bash "$REPO/tests/preamble-eval/cpu-ab.sh" \
+    "art-after=./old-art-after" \
+    "art-before=./old-art-before" \
+    "control=./old-art-after"
 fi
 
 if [ -n "$LAUNCHER_BEFORE" ] && [ "$(uname -s)" = Darwin ]; then

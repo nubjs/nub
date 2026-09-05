@@ -14,7 +14,7 @@ The runtime is still more than a bare script spawn. The launcher starts official
 
 "Unpatched" describes the default and the source, not an invariant of the byte stream: the build already strips the binary and re-signs it on macOS, and `--icu` additionally rewrites its ICU data package in place. Node's own code is never altered.
 
-The preamble is injected into the main root and each supported static worker root. It installs feature-detected polyfills, including the supported Web Storage surface for `sessionStorage`. That storage is process-local and does not add browser-origin sharing or unsupported Web Storage APIs.
+The preamble is injected into the main root and each supported static worker root. It installs feature-detected polyfills, including the supported Web Storage surface for `sessionStorage`. A polyfill the target Node ships natively is stripped from the bundle before it is built; one the target lacks — Temporal, URLPattern, Float16Array — is bundled but installed as a lazy global, so its package evaluates on the first read of the global rather than at every start. That storage is process-local and does not add browser-origin sharing or unsupported Web Storage APIs.
 
 Static workers must use a file-backed `new Worker(new URL("./worker.js", import.meta.url))` shape through the global `Worker` or a named ESM import from `node:worker_threads`. Statically recognized data URLs, blob URLs, `{ eval: true }`, and CommonJS `require("node:worker_threads")` worker bindings are refused because the compiler cannot turn them into preamble-bearing roots.
 
