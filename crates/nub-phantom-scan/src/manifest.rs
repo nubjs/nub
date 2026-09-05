@@ -349,7 +349,7 @@ fn extension(path: &str) -> Option<&str> {
 /// is the load-bearing one: a bundled dep's own imports are the BUNDLED
 /// package's, and attributing them to the outer package is a false positive by
 /// construction.
-const NON_SURFACE_DIRS: [&str; 22] = [
+const NON_SURFACE_DIRS: [&str; 24] = [
     "node_modules",
     "test",
     "tests",
@@ -372,6 +372,8 @@ const NON_SURFACE_DIRS: [&str; 22] = [
     "script",
     "scripts",
     "coverage",
+    "doc",
+    "docs",
 ];
 
 /// File names that are a dev script by overwhelming convention, at any depth. A
@@ -416,6 +418,10 @@ pub(crate) fn is_deep_path_candidate(rel: &str) -> bool {
         let stem = lower.rsplit_once('.').map_or(lower.as_str(), |(s, _)| s);
         if stem.ends_with(".test")
             || stem.ends_with(".spec")
+            // `@aws-crypto/sha256-js` compiles `knownHashes.fixture.ts` into its
+            // published `build/`, where it imports an `@aws-sdk` package the
+            // manifest declares nowhere — a shipped test fixture, not a surface.
+            || stem.ends_with(".fixture")
             || stem.ends_with("-test")
             || stem.ends_with("_test")
             || stem.ends_with(".config")
@@ -463,7 +469,11 @@ mod tests {
         // `has_exports` is what decides whether legacy deep-path roots are sound:
         // an `exports` map is Node's encapsulation boundary, so an unexported file
         // genuinely cannot be imported and must never seed the walk.
-        assert!(!Manifest::parse(br#"{"name":"p","main":"lib/index.js"}"#).unwrap().has_exports);
+        assert!(
+            !Manifest::parse(br#"{"name":"p","main":"lib/index.js"}"#)
+                .unwrap()
+                .has_exports
+        );
         assert!(
             Manifest::parse(br#"{"name":"p","exports":{".":"./index.js"}}"#)
                 .unwrap()
@@ -504,6 +514,8 @@ mod tests {
             ".github/workflow.js",
             "lib/thing.test.js",
             "lib/thing.spec.js",
+            "build/knownHashes.fixture.js",
+            "docs/example.js",
             "lib/thing-test.js",
             "rollup.config.js",
             "karma.conf.js",

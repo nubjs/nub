@@ -60,8 +60,10 @@ pub struct Finding {
     /// the nub#450 peer-type class (its `@types/<peer>` must be project-local).
     pub(crate) from_types: bool,
     /// Reachable from a speculative legacy deep-path root — a published file no
-    /// declared surface references, in a package with no `exports` map.
-    pub from_deep_path: bool,
+    /// declared surface references, in a package with no `exports` map. Read
+    /// across the crate boundary through [`Finding::is_deep_path_only`], as the
+    /// other provenance bits are through [`Finding::is_subpath_adapter`].
+    pub(crate) from_deep_path: bool,
     /// Example raw specifiers (deduped) showing how it was referenced.
     pub specifiers: Vec<String>,
 }

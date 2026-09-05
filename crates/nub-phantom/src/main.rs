@@ -408,11 +408,7 @@ fn print_report_human(r: &PackageReport) {
             } else {
                 ""
             };
-            println!(
-                "  {tag} {}  [{}]{via}",
-                f.package,
-                f.specifiers.join(", ")
-            );
+            println!("  {tag} {}  [{}]{via}", f.package, f.specifiers.join(", "));
         }
     }
 }
@@ -448,7 +444,11 @@ fn print_scan_human(a: &ScanReport) {
     );
 
     println!("\n-- legacy deep-path offenders (reachable only by deep import) --");
-    for o in a.offenders.iter().filter(|o| !o.deep_path_phantoms.is_empty()) {
+    for o in a
+        .offenders
+        .iter()
+        .filter(|o| !o.deep_path_phantoms.is_empty())
+    {
         let names: Vec<&str> = o
             .deep_path_phantoms
             .iter()

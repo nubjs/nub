@@ -404,9 +404,9 @@ fn shadows_require(kind: &AstKind<'_>) -> bool {
 /// are not checked: no bundler emits one, and a narrower rule cannot suppress a
 /// real edge.
 fn params_bind_require(params: &FormalParameters<'_>) -> bool {
-    params.items.iter().any(|p| {
-        matches!(&p.pattern, BindingPattern::BindingIdentifier(id) if id.name == "require")
-    })
+    params.items.iter().any(
+        |p| matches!(&p.pattern, BindingPattern::BindingIdentifier(id) if id.name == "require"),
+    )
 }
 
 /// Whether the call is rooted at the bare name `require` (`require(...)` or

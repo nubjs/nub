@@ -157,13 +157,15 @@ mod tests {
             root
         };
 
-        let legacy = build(
-            r#"{"name":"demo","main":"lib/index.js","devDependencies":{"ava":"1"}}"#,
-        );
+        let legacy =
+            build(r#"{"name":"demo","main":"lib/index.js","devDependencies":{"ava":"1"}}"#);
         let r = analyze_extracted(&legacy, "0.0.0").unwrap();
         let f = r.findings.iter().find(|f| f.package == "react").unwrap();
         assert_eq!(f.verdict, Verdict::HardPhantom);
-        assert!(f.is_deep_path_only(), "flagged as the deep-path class: {f:?}");
+        assert!(
+            f.is_deep_path_only(),
+            "flagged as the deep-path class: {f:?}"
+        );
         assert_eq!(r.deep_path_phantoms().count(), 1);
         assert!(
             !r.findings.iter().any(|f| f.package == "ava"),

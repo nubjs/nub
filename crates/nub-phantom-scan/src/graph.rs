@@ -855,8 +855,16 @@ mod tests {
         // import devDependencies no consumer ever resolves.
         fs::write(root.join("test/index.test.js"), "require('ava');").unwrap();
         fs::write(root.join("examples/app.js"), "require('express');").unwrap();
-        fs::write(root.join("rollup.config.js"), "require('rollup-plugin-babel');").unwrap();
-        fs::write(root.join(".eslintrc.js"), "require('eslint-plugin-flowtype');").unwrap();
+        fs::write(
+            root.join("rollup.config.js"),
+            "require('rollup-plugin-babel');",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".eslintrc.js"),
+            "require('eslint-plugin-flowtype');",
+        )
+        .unwrap();
 
         let eps = [main_entry("lib/index.js")];
         let pkgs = |w: &super::Walk| -> Vec<String> {
@@ -881,7 +889,11 @@ mod tests {
         );
 
         // Provenance separates the speculative reference from the authoritative one.
-        let react = deep.references.iter().find(|r| r.package == "react").unwrap();
+        let react = deep
+            .references
+            .iter()
+            .find(|r| r.package == "react")
+            .unwrap();
         assert!(
             react.from_deep_path && !react.from_main,
             "react is deep-path-only: {react:?}"
