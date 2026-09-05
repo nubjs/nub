@@ -29,6 +29,24 @@ jobs:
       # and `nub compile` then fails its self-probe on a template it cannot find.
       - name: Build the launcher template
         run: cd crates/nub-launcher && cargo build --release
+      # `nub compile` resolves its compile-prelude's polyfill imports out of
+      # runtime/node_modules, which is gitignored and which nothing here stages.
+      # Nothing noticed until the Node 22 capability row, because a Node 26 target
+      # has these natively and strip_native_polyfills removes those regions from the
+      # preamble entirely — so every 26-targeted row in this benchmark built fine
+      # while a 22-targeted one failed with "Cannot find module
+      # 'urlpattern-polyfill/urlpattern'". Same set release.yml vendors.
+      - name: Stage the vendored runtime node_modules
+        shell: bash
+        run: | # zizmor: ignore[adhoc-packages] vendoring the runtime polyfills, matching release.yml
+          mkdir -p runtime/node_modules
+          cd runtime
+          npm init -y > /dev/null 2>&1
+          npm install --no-save --no-audit --no-fund \
+            @oxc-project/runtime urlpattern-polyfill \
+            @js-temporal/polyfill @petamoriken/float16 jsbi 2>&1 | tail -4
+          rm -f package.json package-lock.json node_modules/.package-lock.json
+          ls node_modules @js-temporal 2>/dev/null | head
       - name: Bench
         env:
           NUB_BIN: ${{ github.workspace }}/target/fast/nub
