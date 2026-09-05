@@ -4,6 +4,11 @@
 # invisible to `cargo build` at the root and is compiled only when run directly from this
 # directory. It pulls the module under test in via `#[path]` so there is a single source of
 # truth and the harness cannot drift from the real code. Linux-only; see README.md.
+
+# Own workspace root, so cargo does not try to treat it as a member of the outer nub workspace
+# (whose `members` list is explicit and does not include it).
+[workspace]
+
 [package]
 name = "linux-supervisor-probe"
 version = "0.0.0"
