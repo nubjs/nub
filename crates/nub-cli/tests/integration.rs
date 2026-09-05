@@ -354,6 +354,99 @@ fn a_smol_payload_records_whether_it_needs_the_register_hooks_shim() {
     );
 }
 
+/// The single-executable container refuses `child_process.fork`, because a fork
+/// there would re-run the whole application rather than the named module.
+///
+/// The container is chosen by reading the emitted chunks for what they RESOLVE,
+/// and a payload that reaches `child_process` keeps the launcher, which has a real
+/// Node to hand a fork. That scan is syntactic and so a heuristic: the fixture
+/// below stores the require on an object and calls it through a property, which it
+/// cannot follow, and the artifact really is a single-executable as a result.
+///
+/// So this pins what happens when the scan is WRONG. Without the guard the child
+/// re-runs the application and forks again — unbounded. The fixture stops itself at
+/// generation three, and the shared runner kills the process tree at ten seconds,
+/// so a regression fails here rather than running away.
+#[cfg(feature = "compile")]
+#[test]
+fn a_single_executable_refuses_a_fork_the_container_scan_could_not_see() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.js");
+    let artifact = work.join(format!("fork-guard{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    // CommonJS, because `require` is what the scan follows and this has to reach it
+    // by a route the scan cannot. No `"type": "module"` for the same reason.
+    std::fs::write(
+        work.join("package.json"),
+        "{ \"name\": \"fork-guard\", \"version\": \"1.0.0\", \"private\": true }\n",
+    )
+    .expect("write the fixture manifest");
+    std::fs::write(
+        &entry,
+        r#"const GEN = Number(process.env.GEN || "0");
+if (GEN > 2) { console.log("gen", GEN, "STOPPING"); process.exit(9); }
+globalThis.__holder = { r: require };
+const cp = globalThis.__holder.r("node:child_process");
+try {
+  cp.fork(__filename, [], { env: { ...process.env, GEN: String(GEN + 1) } });
+  console.log("FORKED");
+} catch (error) {
+  console.log("REFUSED:", error.message);
+}
+"#,
+    )
+    .expect("write entry");
+
+    let compiled = Command::new(nub_binary())
+        .args(["compile", "--target", &runtime.node_target, "--out"])
+        .arg(&artifact)
+        .arg(&entry)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    assert!(
+        compiled.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    // BOTH streams: which one carries the summary is the renderer's business, and
+    // reading stdout alone reported the premise broken while the build really was
+    // producing a single-executable artifact.
+    let summary = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    if !summary.contains("a single-executable application") {
+        // Not a failure. The scan learning to follow this shape, or a target Node
+        // below the bands that container needs, both land here — and in either case
+        // the artifact is a launcher, where a fork is correct and this guard is not
+        // the thing under test.
+        eprintln!("skipped: this fixture no longer selects the single-executable container");
+        return;
+    }
+
+    let ran = run_compiled_artifact_with_timeout(&artifact, &work);
+    let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+    assert!(
+        stdout.contains("REFUSED:"),
+        "the artifact did not refuse the fork; it printed {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("FORKED"),
+        "the fork succeeded, so the child re-ran the application: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("gen 1"),
+        "a second generation started, which is the re-entry this guards: {stdout:?}"
+    );
+}
+
 #[cfg(feature = "compile")]
 #[test]
 fn compile_resolves_commonjs_requires_of_esm() {
