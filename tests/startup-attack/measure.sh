@@ -64,18 +64,19 @@ unset NODE_COMPILE_CACHE
 ./art >/dev/null; ./art >/dev/null; ./probe >/dev/null; ./probe >/dev/null
 
 # The extracted tree behind an artifact: its app dir, bootstrap, and compile
-# cache (the launcher keys the cache by the same short app key as the extraction).
-# Globs, not `find | while | head`: under `pipefail` that pipeline's status is the
-# loop's LAST `[ -f ]` test, false whenever the matching directory is not the
-# final one, and `set -e` then exits on the assignment without a word.
-app_dir() { # app_dir <entry chunk name> -> the one compile-app dir holding it
-  local hits=("$D"/cache/nub/compile-app/*/"$1")
-  [ "${#hits[@]}" -eq 1 ] && [ -f "${hits[0]}" ] ||
-    { echo "expected exactly one extracted $1, found: ${hits[*]}" >&2; find "$D/cache" -maxdepth 3 | sort >&2; exit 1; }
-  dirname "${hits[0]}"
+# cache. The launcher names the tree itself — its timing print carries the
+# NODE_COMPILE_CACHE it sets, keyed by the same short app key as the extraction —
+# so every arm reads its key off the artifact it belongs to, and no tree has to
+# be told apart from a sibling by its contents or its position in a listing.
+tree_of() { # tree_of <artifact> -> its compile-app dir
+  local key
+  key=$(__NUB_LAUNCHER_TIMING=1 "$1" 2>&1 >/dev/null | sed -n 's/.*NODE_COMPILE_CACHE=[^ ]*\/compile-v8\/\([0-9a-f]*\).*/\1/p' | head -1)
+  [ -n "$key" ] && [ -d "$D/cache/nub/compile-app/$key" ] ||
+    { echo "could not read the app key of $1 off the launcher's timing print" >&2; __NUB_LAUNCHER_TIMING=1 "$1" >&2; exit 1; }
+  echo "$D/cache/nub/compile-app/$key"
 }
-APP=$(app_dir hello.mjs); B="$APP/__nub_compile_bootstrap.cjs"; CC="$D/cache/nub/compile-v8/$(basename "$APP")"
-PAPP=$(app_dir probe.mjs); PB="$PAPP/__nub_compile_bootstrap.cjs"; PCC="$D/cache/nub/compile-v8/$(basename "$PAPP")"
+APP=$(tree_of ./art); B="$APP/__nub_compile_bootstrap.cjs"; CC="$D/cache/nub/compile-v8/$(basename "$APP")"
+PAPP=$(tree_of ./probe); PB="$PAPP/__nub_compile_bootstrap.cjs"; PCC="$D/cache/nub/compile-v8/$(basename "$PAPP")"
 N=$(echo "$D"/cache/nub/compile-node/*/node)
 for path in "$N" "$B" "$PB" "$CC" "$PCC"; do
   [ -e "$path" ] || { echo "MISSING after two warm runs: $path"; find "$D/cache" -maxdepth 3 | sort; exit 1; }
@@ -146,18 +147,8 @@ if [ -n "$NUB_BIN_BEFORE" ]; then
   compile "$NUB_BIN_BEFORE" hello.ts ./art-before
   compile "$NUB_BIN_BEFORE" probe.mjs ./probe-before
   ./art-before >/dev/null; ./art-before >/dev/null; ./probe-before >/dev/null; ./probe-before >/dev/null
-  # A different bundle is a different app key, so the before-trees sit beside
-  # the after-trees; tell them apart by which one the after-artifact extracted.
-  before_dir() { # before_dir <entry chunk name>
-    local d
-    for d in "$D"/cache/nub/compile-app/*/; do
-      d="${d%/}"
-      [ -f "$d/$1" ] && [ "$d" != "$APP" ] && [ "$d" != "$PAPP" ] && { echo "$d"; return 0; }
-    done
-    echo "no before-tree holding $1" >&2; exit 1
-  }
-  APPB=$(before_dir hello.mjs); BB="$APPB/__nub_compile_bootstrap.cjs"; CCB="$D/cache/nub/compile-v8/$(basename "$APPB")"
-  PAPPB=$(before_dir probe.mjs); PBB="$PAPPB/__nub_compile_bootstrap.cjs"; PCCB="$D/cache/nub/compile-v8/$(basename "$PAPPB")"
+  APPB=$(tree_of ./art-before); BB="$APPB/__nub_compile_bootstrap.cjs"; CCB="$D/cache/nub/compile-v8/$(basename "$APPB")"
+  PAPPB=$(tree_of ./probe-before); PBB="$PAPPB/__nub_compile_bootstrap.cjs"; PCCB="$D/cache/nub/compile-v8/$(basename "$PAPPB")"
   echo "after : $(ls "$APP" | tr '\n' ' ')"
   echo "before: $(ls "$APPB" | tr '\n' ' ')"
   STANDALONE_BEFORE="env NODE_COMPILE_CACHE=$CCB __NUB_COMPILED_BOOTSTRAP=$BB $N $FLAGS $APPB/hello.mjs"
@@ -189,20 +180,7 @@ if [ -n "$NUB_BIN_LAZY_CACHE" ]; then
   compile "$NUB_BIN_LAZY_CACHE" hello.ts ./art-lazy
   compile "$NUB_BIN_LAZY_CACHE" probe.mjs ./probe-lazy
   ./art-lazy >/dev/null; ./art-lazy >/dev/null; ./probe-lazy >/dev/null; ./probe-lazy >/dev/null
-  # The finished chunk binds every forwarder as a var; the lazy one declares them.
-  # Every tree extracted so far is excluded by name, so the grep only tells the
-  # new pair apart from a tree the single-file arm left behind.
-  lazy_dir() { # lazy_dir <entry chunk name> -> the newest tree whose chunk is not finished
-    for d in "$D"/cache/nub/compile-app/*/; do
-      d="${d%/}"
-      [ -f "$d/$1" ] || continue
-      case "$d" in "$APP"|"$PAPP"|"${APPB:-}"|"${PAPPB:-}") continue;; esac
-      grep -q "=(function require_polyfills(" "$d/$1" || { echo "$d"; return; }
-    done
-  }
-  LAPP=$(lazy_dir hello.mjs); LPAPP=$(lazy_dir probe.mjs)
-  [ -n "$LAPP" ] && [ -n "$LPAPP" ] ||
-    { echo "lazy-cache trees not found"; find "$D/cache" -maxdepth 3 | sort; exit 1; }
+  LAPP=$(tree_of ./art-lazy); LPAPP=$(tree_of ./probe-lazy)
   echo "after : $(ls "$APP" | tr '\n' ' ')"
   echo "before: $(ls "$LAPP" | tr '\n' ' ')"
   echo "compile cache, after : $(ls -l "$D"/cache/nub/compile-v8/"$(basename "$APP")"/*/* | awk '{print $5}' | tr '\n' ' ') bytes"
@@ -260,10 +238,7 @@ if [ -n "$OLD_BEFORE" ] && [ -n "$NODE_OLD_PIN" ]; then
   "$NOLD" -v
   OFLAGS=$(flags_of ./old-probe-after)
   echo "flags: $OFLAGS"
-  # The after-tree is the one whose entry chunk carries the lazy installer.
-  OPA=$(dirname "$(grep -l "defineLazy" "$D"/cache/nub/compile-app/*/probe.mjs | head -1)")
-  OPB=$(for d in "$D"/cache/nub/compile-app/*/; do d="${d%/}"; [ -f "$d/probe.mjs" ] && [ "$d" != "$OPA" ] && [ "$d" != "$PAPP" ] && [ "$d" != "${PAPPB:-}" ] && [ "$d" != "${LPAPP:-}" ] && echo "$d"; done | head -1)
-  [ -n "$OPA" ] && [ -n "$OPB" ] || { echo "old-target probe trees not found"; find "$D/cache" -maxdepth 3 | sort; exit 1; }
+  OPA=$(tree_of ./old-probe-after); OPB=$(tree_of ./old-probe-before)
   echo "after : $(ls "$OPA" | tr '\n' ' ')"
   echo "before: $(ls "$OPB" | tr '\n' ' ')"
   : > oa.txt; : > ob.txt; : > on.txt
