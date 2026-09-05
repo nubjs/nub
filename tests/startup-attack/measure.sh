@@ -191,7 +191,12 @@ if [ -n "$NUB_BIN_BEFORE" ] && [ -n "$NODE_OLD_PIN" ]; then
   compile_old "$NUB_BIN" hello.ts ./old-art-after
   compile_old "$NUB_BIN_BEFORE" hello.ts ./old-art-before
   for a in ./old-probe-after ./old-probe-before ./old-art-after ./old-art-before; do $a >/dev/null; $a >/dev/null; done
-  NOLD=$(ls "$D"/cache/nub/compile-node/"$NODE_OLD_PIN"-*/node | head -1)
+  # The launcher dedups an untrimmed embedded Node against an official one of
+  # the same version in nub's store, so on a box that has provisioned this
+  # version nothing is extracted; the arms must run the Node the artifact does.
+  NOLD="$HOME/.cache/nub/node/$NODE_OLD_PIN/bin/node"
+  for n in "$D"/cache/nub/compile-node/"$NODE_OLD_PIN"-*/node; do [ -x "$n" ] && NOLD=$n; done
+  [ -x "$NOLD" ] || { echo "no Node $NODE_OLD_PIN found in the extraction cache or nub's store"; ls "$D/cache/nub/compile-node"; exit 1; }
   [ "$("$NOLD" -e 'process.stdout.write("OK")')" = OK ] || { echo "extracted old node is not plain node"; exit 1; }
   "$NOLD" -v
   OFLAGS=$(flags_of ./old-probe-after)
