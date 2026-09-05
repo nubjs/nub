@@ -7,9 +7,18 @@ name: compile SEA probe
 on:
   push:
     branches: [sea-embed]
+    # Everything the probe is a check ON, not just the probe itself. Narrowed to
+    # the harness alone, it stayed silent through the change that fixed the
+    # Windows defect it had just caught — a filter that skips the fix is worse
+    # than no filter, so the writer, the loaders and the vendored injector are
+    # all in it.
     paths:
       - 'tests/compile-sea-probe/**'
       - '.github/workflows/compile-sea-probe.yml'
+      - 'crates/nub-cli/src/compile/**'
+      - 'crates/nub-launcher/**'
+      - 'runtime/compile-*.cjs'
+      - 'vendor/libsui/**'
   workflow_dispatch:
 
 permissions:
