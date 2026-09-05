@@ -585,6 +585,22 @@ pub struct Macho {
 
 pub(crate) const SEGNAME: [u8; 16] = *b"__SUI\0\0\0\0\0\0\0\0\0\0\0";
 
+/// Pad a segment or section name into Mach-O's fixed 16-byte field.
+///
+/// Not NUL-terminated when the name is exactly 16 bytes, which matches the
+/// format: `getsectdata` and Node's own `__NODE_SEA_BLOB` lookup both compare
+/// against a fixed-width field rather than a C string.
+fn name16(name: &str) -> Result<[u8; 16], Error> {
+    if name.len() > 16 {
+        return Err(Error::InvalidObject(
+            "Mach-O segment and section names must be at most 16 bytes",
+        ));
+    }
+    let mut out = [0u8; 16];
+    out[..name.len()].copy_from_slice(name.as_bytes());
+    Ok(out)
+}
+
 /// Ad-hoc sign `data` by staging it at `tmp_path` and handing that file to
 /// Apple's `codesign`, returning the signed bytes. This is the x86_64 leg of
 /// [`Macho::build_and_sign`]; arm64 is signed in-process instead.
@@ -608,6 +624,14 @@ fn codesign_adhoc(data: &[u8], tmp_path: &std::path::Path) -> Result<Vec<u8>, Er
     match std::process::Command::new("codesign")
         .arg("-s")
         .arg("-")
+        // Replace whatever signature the input already carried. Without it
+        // `codesign` REFUSES a signed input ("is already signed") and this
+        // function's warn-and-continue policy leaves the STALE signature in place
+        // — a binary that runs but reports `invalid signature (code or signature
+        // have been modified)`, measured on a darwin-x64 Node with its release
+        // signature kept. Harmless on an unsigned input, which is what the
+        // launcher template is, so one spelling serves both callers.
+        .arg("--force")
         .arg("-i")
         .arg(apple_codesign::ADHOC_IDENTIFIER)
         .arg(tmp_path)
@@ -637,12 +661,35 @@ fn codesign_adhoc(data: &[u8], tmp_path: &std::path::Path) -> Result<Vec<u8>, Er
 
 impl Macho {
     pub fn from(obj: Vec<u8>) -> Result<Self, Error> {
+        Self::parse(obj, true)
+    }
+
+    /// Parse without dropping an existing `LC_CODE_SIGNATURE`.
+    ///
+    /// [`from`](Self::from) hands an x86_64 image to `codesign --remove-signature`
+    /// before touching it. That is harmless for an UNSIGNED input — which is what
+    /// nub's own launcher template is — and it destroys a signed one: measured on
+    /// the official darwin-x64 `node`, stripping its release signature first makes
+    /// the later `codesign` fail with `main executable failed strict validation`
+    /// and leaves the written section somewhere the runtime's own lookup cannot
+    /// find it.
+    ///
+    /// Nothing has to come off. The writer shifts the signature's `dataoff` along
+    /// with the rest of `__LINKEDIT`, and `codesign --force` replaces the blob
+    /// afterwards — which is exactly what the arm64 path has always done. The
+    /// pre-strip also only runs on a macOS host, so a Linux or Windows host has
+    /// always taken this path for a darwin-x64 target.
+    pub fn from_keeping_signature(obj: Vec<u8>) -> Result<Self, Error> {
+        Self::parse(obj, false)
+    }
+
+    fn parse(obj: Vec<u8>, strip_existing_signature: bool) -> Result<Self, Error> {
         let header = Header64::read_from_prefix(&obj)
             .ok_or(Error::InvalidObject("Failed to read header"))?;
 
         // Atomically strip code signature first for intel binaries.
         #[cfg(target_vendor = "apple")]
-        let obj = if header.cputype != CPU_TYPE_ARM_64 {
+        let obj = if strip_existing_signature && header.cputype != CPU_TYPE_ARM_64 {
             use std::io::Write;
 
             let tmp_dir = std::env::temp_dir();
@@ -687,6 +734,9 @@ impl Macho {
         } else {
             obj
         };
+        // The pre-strip is the only reader of this, and it is macOS-only.
+        #[cfg(not(target_vendor = "apple"))]
+        let _ = strip_existing_signature;
 
         let mut commands: Vec<(u32, u32, usize)> = Vec::with_capacity(header.ncmds as usize);
 
@@ -740,12 +790,25 @@ impl Macho {
     /// names in a fixed-size 16-byte field, so `name` must be at most
     /// **16 bytes** long. Names longer than 16 bytes return
     /// [`Error::InvalidObject`] instead of panicking.
-    pub fn write_section(mut self, name: &str, sectdata: Vec<u8>) -> Result<Self, Error> {
-        if name.len() > 16 {
-            return Err(Error::InvalidObject(
-                "Mach-O section name must be at most 16 bytes",
-            ));
-        }
+    pub fn write_section(self, name: &str, sectdata: Vec<u8>) -> Result<Self, Error> {
+        self.write_section_in_segment("__SUI", name, sectdata)
+    }
+
+    /// Write a section into an explicitly named segment.
+    ///
+    /// [`write_section`](Self::write_section) hardcodes `__SUI`, which is the
+    /// segment nub's own launcher looks itself up in. A Node single-executable
+    /// blob has to land somewhere else — Node's runtime reads segment `NODE_SEA`,
+    /// section `__NODE_SEA_BLOB`, and those names are compiled into the binary
+    /// doing the reading, so they are not negotiable.
+    pub fn write_section_in_segment(
+        mut self,
+        segname: &str,
+        name: &str,
+        sectdata: Vec<u8>,
+    ) -> Result<Self, Error> {
+        let segname = name16(segname)?;
+        let sectname = name16(name)?;
 
         // One mechanism for both Darwin architectures. The x86_64 path used to
         // append the payload behind a sentinel instead, which cannot be code
@@ -759,7 +822,7 @@ impl Macho {
         self.seg = SegmentCommand64 {
             cmd: LC_SEGMENT_64,
             cmdsize: size_of::<SegmentCommand64>() as u32 + size_of::<Section64>() as u32,
-            segname: SEGNAME,
+            segname,
             vmaddr: self.linkedit_cmd.vmaddr,
             vmsize: align_vmsize(sectdata.len() as u64, page_size),
             filesize: align_vmsize(sectdata.len() as u64, page_size),
@@ -770,15 +833,12 @@ impl Macho {
             flags: 0,
         };
 
-        let mut sectname = [0; 16];
-        sectname[..name.len()].copy_from_slice(name.as_bytes());
-
         self.sec = Section64 {
             addr: self.seg.vmaddr,
             size: sectdata.len() as u64,
             offset: self.linkedit_cmd.fileoff as u32,
             align: if sectdata.len() < 16 { 0 } else { 4 },
-            segname: SEGNAME,
+            segname,
             sectname,
             ..self.sec
         };
@@ -1269,6 +1329,26 @@ impl<'a> Elf<'a> {
         sectdata: &[u8],
         writer: &mut W,
     ) -> Result<(), Error> {
+        self.append_note(&build_elf_note_payload(name, sectdata), ".note.sui", writer)
+    }
+
+    /// Append an already-built ELF note verbatim, under a section name of the
+    /// caller's choosing.
+    ///
+    /// [`append`](Self::append) wraps the payload in this crate's own `SUI\0`
+    /// note, whose descriptor carries a length-prefixed section name. A Node
+    /// single-executable blob cannot use that shape: the reader is postject's
+    /// `postject_find_resource`, which matches the note's own `n_name` and takes
+    /// the descriptor as the blob with nothing in front of it. So the note is
+    /// built by the caller and this method only places it — the PT_LOAD, the
+    /// relocated program header table, the PT_NOTE entry and the strip-proofing
+    /// sections are identical either way.
+    pub fn append_note<W: Write>(
+        &self,
+        note: &[u8],
+        note_section_name: &str,
+        writer: &mut W,
+    ) -> Result<(), Error> {
         const PAGE: usize = 0x1000;
         // Program/segment header type and flag constants (ELF64).
         const PT_LOAD: u32 = 1;
@@ -1376,7 +1456,6 @@ impl<'a> Elf<'a> {
         }
         let first_load_bias = first_load_bias.unwrap_or(0);
 
-        let note = build_elf_note_payload(name, sectdata);
 
         // Layout of the appended region, all within one new PT_LOAD:
         //   [page-aligned] new program header table | note
@@ -1511,7 +1590,8 @@ impl<'a> Elf<'a> {
             // Relocate and grow .shstrtab so it carries the new section names.
             let mut new_shstr = data[shstr_off..shstr_off + shstr_size].to_vec();
             let note_name_index = new_shstr.len() as u32;
-            new_shstr.extend_from_slice(b".note.sui\0");
+            new_shstr.extend_from_slice(note_section_name.as_bytes());
+            new_shstr.push(0);
             let phdr_name_index = new_shstr.len() as u32;
             new_shstr.extend_from_slice(b".sui.phdrs\0");
 

@@ -1,0 +1,148 @@
+// The second half of a compiled artifact's single-executable main.
+//
+// `nub compile` concatenates compile-bootstrap.cjs and this file, substitutes the
+// `__NUB_SEA_*__` placeholders, and stores the result as the SEA blob's `main`.
+// Node runs it as CommonJS through its embedder loader, before any ESM in the
+// process, with the bootstrap's frozen builtin accessors already published.
+//
+// It looks like the inline (`no-extract`) loader and is a different design in the
+// one place that decides the artifact's start time. The inline shape has no
+// choice: with nothing on disk and no hook API on its floor, each chunk has to
+// become a `data:` URL. Inside a SEA there IS a choice, and taking the same one
+// costs 8.3 ms on an 60 KB chunk — a base64 encode of the source, a `data:` URL
+// parse, and a base64 decode back, none of which any cache covers. So the chunks
+// are served through `module.registerHooks` at ordinary `file:` URLs instead, and
+// three things follow, measured on Linux against plain `node` running the same
+// source (baseline spread 1.49 ms):
+//
+//   * `data:` URL loader                            +12.14 ms
+//   * hook-served `file:` URLs, `getRawAsset`        +3.81 ms
+//   * ... plus `enableCompileCache`                  +0.53 ms
+//
+// The last row is parity: a plain SEA carrying no nub code at all measures
+// -0.70 ms on the same instrument. `getRawAsset` is worth 1.0 ms of that on its
+// own — module hooks accept an ArrayBuffer as `source`, so the blob is decoded
+// where it is mapped and never copied into a JavaScript string.
+//
+// A real URL also buys capability the inline shape cannot have: cross-chunk
+// relative specifiers resolve against it, so there is no specifier-substitution
+// pass; a source map can attach to it; and a Worker can be pointed at one.
+//
+// The one thing a SEA takes away is the main's own `import()`, which is the
+// EMBEDDER's and resolves builtins only — see the synthetic module at the bottom.
+
+(() => {
+  const boot = process[Symbol.for("nub.compile.bootstrap")];
+  const sea = boot.getBuiltin("node:sea");
+  const Module = boot.getBuiltin("node:module");
+
+  const ENTRY = "__NUB_SEA_ENTRY__";
+  // Every payload file the module loader may be asked for, by payload name.
+  const FILES = __NUB_SEA_FILES__;
+  // Whether this Node's `localStorage` getter throws without a storage file, and
+  // so has to be neutralized by the preamble. The launcher sets the same signal in
+  // the child's environment; here the artifact sets it on itself, because a SEA
+  // has no parent process to be handed anything by.
+  const NEUTRALIZE_LOCALSTORAGE = __NUB_SEA_NEUTRALIZE_LOCALSTORAGE__;
+  // This artifact's subdirectory under nub's cache root, or "" to leave the
+  // compile cache off. The same mechanism the extracted shape drives through
+  // `NODE_COMPILE_CACHE`, and worth 3.3 ms: without it every chunk is compiled
+  // from source on every start.
+  const COMPILE_CACHE_KEY = "__NUB_SEA_COMPILE_CACHE__";
+  // The virtual root every chunk reports as its own location — identical to the
+  // inline shape's, and for the same reason. See `compile::inline::VIRTUAL_ROOT`
+  // for why it carries a drive letter.
+  const ROOT = "file:///N:/$nub/";
+
+  // Release CI's embedded-notice gate, on the same private environment channel the
+  // launcher uses. It rides an environment variable rather than a reserved
+  // argument spelling so a compiled app keeps its whole argv surface — no flag a
+  // publisher might already use is intercepted, at any argument count. A SEA's
+  // argv with no application arguments is [execPath, execPath].
+  if (process.env.__NUB_COMPILED_LAUNCHER_MODE === "licenses" && process.argv.length === 2) {
+    process.stdout.write(Buffer.from(sea.getRawAsset("__nub_node_license")));
+    return;
+  }
+
+  // A SEA's argv is already [execPath, ...userArgs]: Node repeats argv[0] at
+  // position 1 in place of the missing entry path (`FixupArgsForSEA`), which puts
+  // the artifact exactly where a program expects its own path. The inline shape
+  // has to splice it in; here there is nothing to do, and `process.execArgv`
+  // holds the real flags because Node parsed them out of the blob.
+
+  if (NEUTRALIZE_LOCALSTORAGE) process.env.__NUB_NEUTRALIZE_LOCALSTORAGE = "1";
+  // Set or REMOVED, never inherited: a sealed artifact launched from an armed nub
+  // process must not take its parent's runtime-V8 signal. Every SEA payload is
+  // sealed — an unsealed one stays on the launcher — so the removal is
+  // unconditional here, where the launcher has to compute the set first.
+  delete process.env.__NUB_RUNTIME_V8_FLAGS;
+  delete process.env.__NUB_ARGV_ONLY_FLAGS;
+
+  if (COMPILE_CACHE_KEY) {
+    try {
+      // nub's cache root, as `node::discovery::cache_dir` resolves it: the XDG
+      // variable when set, else `~/.cache/nub` — which is also what the Windows
+      // branch uses for an ordinary user profile. Deliberately NOT a full mirror
+      // of that function: its remaining branch is the Windows SYSTEM-account
+      // fallback, and reproducing it here would put a second copy of a rule that
+      // only exists to pick a WRITABLE directory. Passing `undefined` when the
+      // root cannot be determined hands Node its own default under `os.tmpdir()`,
+      // and an unwritable directory throws into the catch below — so every way
+      // this can be wrong costs milliseconds and nothing else. Forward slashes
+      // are accepted on Windows, so one join serves both.
+      const root = process.env.XDG_CACHE_HOME
+        ? `${process.env.XDG_CACHE_HOME}/nub`
+        : process.env.HOME || process.env.USERPROFILE
+          ? `${process.env.HOME || process.env.USERPROFILE}/.cache/nub`
+          : undefined;
+      Module.enableCompileCache(root === undefined ? undefined : `${root}/${COMPILE_CACHE_KEY}`);
+    } catch {
+      // An unwritable cache directory is not a reason to refuse to start: every
+      // chunk still compiles from source, exactly as a first run does.
+    }
+  }
+
+  const files = new Set(FILES);
+  const nameOf = (specifier) => {
+    if (specifier.startsWith("./")) return specifier.slice(2);
+    if (specifier.startsWith(ROOT)) return specifier.slice(ROOT.length);
+    return null;
+  };
+  // `.cjs` is the extension every generated CommonJS support file carries, and
+  // the payload names are nub's own, so the extension is a reliable format tag
+  // here in a way it would not be for arbitrary user files.
+  const formatOf = (name) => (name.endsWith(".cjs") ? "commonjs" : "module");
+
+  Module.registerHooks({
+    resolve(specifier, context, next) {
+      const name = nameOf(specifier);
+      if (name !== null && files.has(name)) {
+        return { url: ROOT + name, format: formatOf(name), shortCircuit: true };
+      }
+      return next(specifier, context);
+    },
+    load(url, context, next) {
+      const name = nameOf(url);
+      if (name !== null && files.has(name)) {
+        // The ArrayBuffer straight out of the mapped blob. Node decodes it in
+        // C++; handing it a string instead costs a copy of the whole chunk.
+        return { source: sea.getRawAsset(name), format: formatOf(name), shortCircuit: true };
+      }
+      return next(url, context);
+    },
+  });
+
+  // The one line a SEA needs that no other shape does. `import()` from here is the
+  // embedder's and throws ERR_UNKNOWN_BUILTIN_MODULE for anything that is not a
+  // builtin — the hooks above are irrelevant to it, because the rejection happens
+  // before resolution. A module compiled through the REAL CommonJS loader gets the
+  // ordinary dynamic-import callback, which goes through them.
+  //
+  // Not awaited, and deliberately not wrapped: an import failure must surface as
+  // the ordinary unhandled rejection Node prints for a failed ESM entry, with the
+  // `ROOT`-rooted frames the hooks establish.
+  const shim = new Module(ROOT + "__nub_sea_entry", null);
+  shim.filename = ROOT + "__nub_sea_entry";
+  shim.paths = [];
+  shim._compile(`import(${JSON.stringify(ROOT + ENTRY)});`, shim.filename);
+})();
