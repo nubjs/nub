@@ -91,6 +91,14 @@ last() { awk -v n="$1" -v k="$2" 'NR==1{t0=$1} $2==n && $3==k {t=$1-t0} END{prin
 check() {
   if eval "$2" 2>/dev/null; then echo "  ok   $1"; else echo "  FAIL $1"; fails=$((fails + 1)); fi
 }
+await_setup() {
+  remaining=20
+  until eval "$2"; do
+    remaining=$((remaining - 1))
+    [ "$remaining" -gt 0 ] || { echo "  FAIL setup: $1"; exit 1; }
+    sleep 1
+  done
+}
 timeline() { awk 'NR==1{t0=$1} {printf "t+%ds %s %s; ", $1-t0, $2, $3}' "$T/log/events"; echo; }
 want=" $* "
 run() { [ "$want" = "  " ] || case $want in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
@@ -134,20 +142,31 @@ printf '%s A cargo-start\n' "\$(date +%s)" >> "$T/log/events"
 "$W" "$T/bin/rustc" A 5 2>>"$T/log/wrapper.err"
 printf '%s A cargo-end\n' "\$(date +%s)" >> "$T/log/events"
 IDLE
-  # C's cargo is launched FIRST (lowest pid) but compiles only from t+2; A
-  # compiles 1s at t+0 and idles 8s; B queues at t+1, D at t+5. B reclaims the
-  # slot at ~t+6 and holds it to ~t+12 (two 5s compiles in a pair), so A
-  # re-queues (t+9) while B still holds: at B's release the line is A (first
-  # queued t+0), C (t+2), D (t+5), and A must go first — unless a re-queue
-  # loses its place, in which case the tie falls to C's lower pid. C's compiles
+  cat > "$T/late.sh" <<LATE
+while [ ! -e "$T/release-c" ]; do sleep 1; done
+exec /bin/sh "$T/build.sh" C 3 1 6
+LATE
+  # C's cargo is launched FIRST (lowest pid) but queues only after B's ticket
+  # is in an earlier clock second. Sleeps alone can give B and C the same
+  # ticket time on a busy runner, letting C's lower pid win the tie. A
+  # compiles for 1s and idles for 8s. B reclaims the slot and holds it for two
+  # parallel 5s compiles, so A re-queues while B still holds. At B's release,
+  # A must precede C and D using its original ticket. C's lower pid prevents
+  # pid order alone from passing this check. C's compiles
   # are 6s under a 4s window: a holder whose compile OUTLASTS the window is
   # exactly the build a stale start-stamp would expose. Mutation-checked:
   # dropping the end-stamp lets A steal from C (the +15 bound); ignoring live
   # markers, or skipping _hold's pid check, lets D steal (the D-after-C
   # check). A 3s compile caught none of these.
-  NUB_BUILD_IDLE=4 build C 3 1 6 2 &
-  NUB_BUILD_IDLE=4 "$T/bin/cargo" "$T/idle.sh" & sleep 1
-  NUB_BUILD_IDLE=4 build B 2 2 5 & sleep 4
+  NUB_BUILD_IDLE=4 "$T/bin/cargo" "$T/late.sh" &
+  NUB_BUILD_IDLE=4 "$T/bin/cargo" "$T/idle.sh" &
+  await_setup "A began compiling" '[ -n "$(at A start)" ]'
+  NUB_BUILD_IDLE=4 "$T/bin/cargo" "$T/build.sh" B 2 2 5 & b=$!
+  await_setup "B received its first ticket" '[ -s "$T/sem/first/$b" ]'
+  b_ticket=$(head -n 1 "$T/sem/first/$b")
+  await_setup "B and C have distinct ticket times" '[ "$(date +%s)" -gt "$b_ticket" ]'
+  touch "$T/release-c"
+  sleep 4
   NUB_BUILD_IDLE=4 build D 1 1 1 & wait; timeline
   # Relational: B may start once A's first compile is 4s idle, plus polling
   # (observed +5..6). Without idle reclaim B waits for A's cargo to exit, ~30s.
