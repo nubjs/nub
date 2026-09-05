@@ -31,6 +31,14 @@ const FROM_SUBPATH: u8 = 0b010;
 /// this and NOT the runtime bits, so `@types/<peer>` reachability (nub#450) is
 /// separable from a runtime require of the same peer.
 const FROM_TYPES: u8 = 0b100;
+/// Provenance bit: reached ONLY as a speculative legacy deep-path root — a
+/// published JS file no `main`/`bin`/`exports` surface references, in a package
+/// with no `exports` map, which Node's legacy resolution nonetheless lets a
+/// consumer import as `<pkg>/<path/to/file>`. Seeded in a second phase AFTER the
+/// authoritative walk reaches its fixpoint, so this bit alone never lands on a
+/// file the published surface already reaches; a reference carrying it and no
+/// runtime bit is deep-path-only, which the classifier treats as lower-confidence.
+const FROM_DEEP_PATH: u8 = 0b1000;
 
 /// A bare-specifier reference collected from a reachable file.
 #[derive(Debug, Clone)]
@@ -52,6 +60,9 @@ pub struct Reference {
     /// this surface is the nub#450 peer-type class: its `@types/<peer>` must be
     /// project-local for the type-checker's realpath walk to reach it.
     pub(crate) from_types: bool,
+    /// Reachable from a speculative legacy deep-path root (see [`FROM_DEEP_PATH`]).
+    /// Set only when [`WalkOptions::deep_path_roots`] is on.
+    pub(crate) from_deep_path: bool,
 }
 
 /// Result of the reachable-module walk.
@@ -87,6 +98,24 @@ trait FileSource {
     fn read(&self, key: &Self::Key) -> Option<String>;
     /// The package-relative path for `key` — the parser's `SourceType` hint.
     fn rel_path(&self, key: &Self::Key) -> String;
+    /// Every published file that may seed the walk as a speculative legacy
+    /// deep-path root, filtered by [`crate::manifest::is_deep_path_candidate`].
+    /// Sorted, so the two backings enumerate in the same order.
+    fn deep_path_roots(&self) -> Vec<Self::Key>;
+}
+
+/// Knobs on the reachable-graph walk. The default is the AUTHORITATIVE walk —
+/// only what `main`/`bin`/`exports`/`types` reach — and is what the shipped
+/// disk-eject scan runs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WalkOptions {
+    /// Additionally seed every published JS file as a speculative entry point.
+    /// Sound ONLY for a package with NO `exports` map, where Node's legacy
+    /// resolution really does let a consumer import any published path; a package
+    /// WITH `exports` cannot be deep-imported at all, so seeding its unexported
+    /// internals would manufacture phantoms for code no consumer can load.
+    /// Callers gate this on [`crate::manifest::Manifest::has_exports`].
+    pub deep_path_roots: bool,
 }
 
 /// Walk from `entry_points`, following relative edges and collecting bare
@@ -98,7 +127,14 @@ trait FileSource {
 /// once (cached) and propagates provenance bits to fixpoint — a file re-reached
 /// with new bits is re-queued for propagation only, never re-parsed; (2) build
 /// references from the cache using each file's FINAL mask.
-fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry]) -> Walk {
+///
+/// With [`WalkOptions::deep_path_roots`] a THIRD step sits between them: once the
+/// authoritative walk has reached its fixpoint, every still-unreached published
+/// JS file is seeded as a speculative deep-path root and drained the same way.
+/// Running it second — rather than seeding everything at once — is what keeps
+/// `FROM_DEEP_PATH` off files the published surface already reaches, so
+/// "deep-path-only" stays an exact predicate rather than an approximation.
+fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry], opts: WalkOptions) -> Walk {
     let mut result = Walk::default();
     let mut parsed: BTreeMap<S::Key, Vec<Occurrence>> = BTreeMap::new();
     let mut flags: BTreeMap<S::Key, u8> = BTreeMap::new();
@@ -117,7 +153,46 @@ fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry]) -> Walk {
             }
         }
     }
+    drain(source, &mut result, &mut parsed, &mut flags, &mut queue);
 
+    if opts.deep_path_roots {
+        for key in source.deep_path_roots() {
+            if !flags.contains_key(&key) && add_flags(&mut flags, &key, FROM_DEEP_PATH) {
+                queue.push_back(key);
+            }
+        }
+        drain(source, &mut result, &mut parsed, &mut flags, &mut queue);
+    }
+
+    result.files_analyzed = parsed.len();
+    for (file, occs) in &parsed {
+        let fflags = *flags.get(file).unwrap_or(&0);
+        for occ in occs {
+            if let SpecKind::Bare(package) = specifier::classify(&occ.spec) {
+                result.references.push(Reference {
+                    package,
+                    raw: occ.spec.clone(),
+                    soft: occ.soft,
+                    from_main: fflags & FROM_MAIN != 0,
+                    from_subpath: fflags & FROM_SUBPATH != 0,
+                    from_types: fflags & FROM_TYPES != 0,
+                    from_deep_path: fflags & FROM_DEEP_PATH != 0,
+                });
+            }
+        }
+    }
+    result
+}
+
+/// BFS the queue to its fixpoint: parse each file once, follow its relative edges,
+/// and propagate provenance bits onward.
+fn drain<S: FileSource>(
+    source: &S,
+    result: &mut Walk,
+    parsed: &mut BTreeMap<S::Key, Vec<Occurrence>>,
+    flags: &mut BTreeMap<S::Key, u8>,
+    queue: &mut VecDeque<S::Key>,
+) {
     while let Some(file) = queue.pop_front() {
         let fflags = *flags.get(&file).unwrap_or(&0);
         // Parse once; a re-queue for provenance propagation reuses the cache.
@@ -145,34 +220,23 @@ fn walk_generic<S: FileSource>(source: &S, entry_points: &[Entry]) -> Walk {
         // `ImportsHash` (self) and `NonPackage` (URL/virtual/internal) are not
         // dependency edges; only `Bare` references are collected in phase 2.
         for t in targets {
-            if add_flags(&mut flags, &t, fflags) {
+            if add_flags(flags, &t, fflags) {
                 queue.push_back(t);
             }
         }
     }
-
-    result.files_analyzed = parsed.len();
-    for (file, occs) in &parsed {
-        let fflags = *flags.get(file).unwrap_or(&0);
-        for occ in occs {
-            if let SpecKind::Bare(package) = specifier::classify(&occ.spec) {
-                result.references.push(Reference {
-                    package,
-                    raw: occ.spec.clone(),
-                    soft: occ.soft,
-                    from_main: fflags & FROM_MAIN != 0,
-                    from_subpath: fflags & FROM_SUBPATH != 0,
-                    from_types: fflags & FROM_TYPES != 0,
-                });
-            }
-        }
-    }
-    result
 }
 
-/// Walk an already-extracted package tree rooted at `root`.
+/// Walk an already-extracted package tree rooted at `root` — the authoritative
+/// surface only.
 pub fn walk(root: &Path, entry_points: &[Entry]) -> Walk {
-    walk_generic(&FsSource { root }, entry_points)
+    walk_with(root, entry_points, WalkOptions::default())
+}
+
+/// [`walk`] with explicit [`WalkOptions`] — the entry the eval tool uses to turn
+/// on speculative deep-path roots for an `exports`-less package.
+pub fn walk_with(root: &Path, entry_points: &[Entry], opts: WalkOptions) -> Walk {
+    walk_generic(&FsSource { root }, entry_points, opts)
 }
 
 /// Walk a CAS-backed package: `files` are `(package-relative-path, absolute
@@ -183,8 +247,17 @@ pub fn walk(root: &Path, entry_points: &[Entry]) -> Walk {
 /// [`normalize_rel_join`] for the one accepted divergence on malformed
 /// (escape-and-re-enter-by-root-name) specifiers that never appear in practice.
 pub(crate) fn walk_index(files: &[(String, PathBuf)], entry_points: &[Entry]) -> Walk {
+    walk_index_with(files, entry_points, WalkOptions::default())
+}
+
+/// [`walk_index`] with explicit [`WalkOptions`].
+pub(crate) fn walk_index_with(
+    files: &[(String, PathBuf)],
+    entry_points: &[Entry],
+    opts: WalkOptions,
+) -> Walk {
     let map: BTreeMap<String, PathBuf> = files.iter().cloned().collect();
-    walk_generic(&IndexSource { files: map }, entry_points)
+    walk_generic(&IndexSource { files: map }, entry_points, opts)
 }
 
 /// OR `bit` into `key`'s provenance mask. Returns true if the mask GREW (new
@@ -279,6 +352,39 @@ impl FileSource for FsSource<'_> {
             .unwrap_or(key)
             .to_string_lossy()
             .into_owned()
+    }
+
+    fn deep_path_roots(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        collect_files(self.root, self.root, &mut out, 0);
+        out.sort();
+        out
+    }
+}
+
+/// Recursively list candidate deep-path roots under `dir`. Depth-bounded for the
+/// same reason the resolver is: a tarball is untrusted input.
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+    if depth > MAX_RESOLVE_DEPTH {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        let Ok(ft) = e.file_type() else { continue };
+        // Symlinks are not followed: a tarball's symlink can point outside the
+        // package root, and the walk's stay-under-root invariant is the only thing
+        // keeping another package's code out of this package's findings.
+        if ft.is_dir() {
+            collect_files(root, &path, out, depth + 1);
+        } else if ft.is_file() {
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+            if crate::manifest::is_deep_path_candidate(&rel.replace('\\', "/")) {
+                out.push(path);
+            }
+        }
     }
 }
 
@@ -420,6 +526,16 @@ impl FileSource for IndexSource {
     fn rel_path(&self, key: &String) -> String {
         key.clone()
     }
+
+    fn deep_path_roots(&self) -> Vec<String> {
+        // `files` is a BTreeMap, so the key iteration is already sorted — the same
+        // order `FsSource` produces after its explicit sort.
+        self.files
+            .keys()
+            .filter(|rel| crate::manifest::is_deep_path_candidate(rel))
+            .cloned()
+            .collect()
+    }
 }
 
 impl IndexSource {
@@ -523,7 +639,7 @@ fn normalize_rel_join(from_dir: &str, spec: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{walk, walk_index};
+    use super::{WalkOptions, walk, walk_index, walk_index_with, walk_with};
     use crate::manifest::{Entry, EntryKind};
     use std::fs;
     use std::path::PathBuf;
@@ -716,6 +832,105 @@ mod tests {
         assert!(a.iter().any(|p| p == "sub-dep"));
         assert!(a.iter().any(|p| p == "pkg-dep"));
         assert!(a.iter().any(|p| p == "root-dep"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deep_path_roots_reach_an_unreferenced_published_file_only_when_enabled() {
+        // The redux-persist@6.0.0 shape: no `exports` map, `main: lib/index.js`,
+        // and a published `lib/integration/react.js` that `main` never references
+        // but consumers import as `<pkg>/lib/integration/react`. Its unguarded
+        // `require("react")` is invisible to the authoritative walk.
+        let root = scratch("deep-path");
+        fs::create_dir_all(root.join("lib/integration")).unwrap();
+        fs::create_dir_all(root.join("test")).unwrap();
+        fs::create_dir_all(root.join("examples")).unwrap();
+        fs::write(root.join("lib/index.js"), "require('declared-dep');").unwrap();
+        fs::write(
+            root.join("lib/integration/react.js"),
+            "var r = require('react');",
+        )
+        .unwrap();
+        // Non-surface directories and tooling configs ship in real tarballs and
+        // import devDependencies no consumer ever resolves.
+        fs::write(root.join("test/index.test.js"), "require('ava');").unwrap();
+        fs::write(root.join("examples/app.js"), "require('express');").unwrap();
+        fs::write(root.join("rollup.config.js"), "require('rollup-plugin-babel');").unwrap();
+        fs::write(root.join(".eslintrc.js"), "require('eslint-plugin-flowtype');").unwrap();
+
+        let eps = [main_entry("lib/index.js")];
+        let pkgs = |w: &super::Walk| -> Vec<String> {
+            let mut v: Vec<String> = w.references.iter().map(|r| r.package.clone()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+
+        // Default (authoritative) walk: the deep-path file is unreachable.
+        assert_eq!(pkgs(&walk(&root, &eps)), vec!["declared-dep".to_string()]);
+
+        let opts = WalkOptions {
+            deep_path_roots: true,
+        };
+        let deep = walk_with(&root, &eps, opts);
+        assert_eq!(
+            pkgs(&deep),
+            vec!["declared-dep".to_string(), "react".to_string()],
+            "only the legitimate deep-path file is seeded; test/, examples/, \
+             rollup.config.js and .eslintrc.js are not"
+        );
+
+        // Provenance separates the speculative reference from the authoritative one.
+        let react = deep.references.iter().find(|r| r.package == "react").unwrap();
+        assert!(
+            react.from_deep_path && !react.from_main,
+            "react is deep-path-only: {react:?}"
+        );
+        let dep = deep
+            .references
+            .iter()
+            .find(|r| r.package == "declared-dep")
+            .unwrap();
+        assert!(
+            dep.from_main && !dep.from_deep_path,
+            "a file the published surface reaches keeps its authoritative provenance \
+             and gains no deep-path bit: {dep:?}"
+        );
+
+        // Both backings must agree, as they do for the authoritative walk.
+        let idx = walk_index_with(&index_of(&root), &eps, opts);
+        assert_eq!(pkgs(&idx), pkgs(&deep));
+        assert_eq!(idx.files_analyzed, deep.files_analyzed);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deep_path_root_shares_provenance_with_a_file_the_main_graph_also_reaches() {
+        // A deep-path root that pulls in a module `main` already reaches must not
+        // downgrade that module: the shared file ends up with BOTH bits, so its
+        // references stay main-reachable and are classified exactly as before.
+        let root = scratch("deep-path-diamond");
+        fs::write(root.join("index.js"), "require('./shared');").unwrap();
+        fs::write(root.join("shared.js"), "require('shared-ghost');").unwrap();
+        fs::write(root.join("orphan.js"), "require('./shared');").unwrap();
+
+        let w = walk_with(
+            &root,
+            &[main_entry("index.js")],
+            WalkOptions {
+                deep_path_roots: true,
+            },
+        );
+        let shared = w
+            .references
+            .iter()
+            .find(|r| r.package == "shared-ghost")
+            .unwrap();
+        assert!(
+            shared.from_main,
+            "a main-reachable module keeps from_main even when a deep-path root \
+             also reaches it: {shared:?}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

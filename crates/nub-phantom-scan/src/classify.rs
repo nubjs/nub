@@ -34,6 +34,15 @@ pub enum Verdict {
     Builtin,
     /// A self reference (the package's own name / subpath).
     SelfRef,
+    /// Undeclared as a runtime dep, but present in `devDependencies` AND reachable
+    /// only as a speculative legacy deep-path root. That combination describes a
+    /// build/test helper that shipped in the tarball: nothing on the published
+    /// surface reaches it, and the author's own manifest says the import is
+    /// dev-time. Reported as its own category rather than a phantom — the
+    /// deep-path class is speculative, so it does not get to override the author's
+    /// declaration. A devDep import reached from `main`/`bin`/`exports` is
+    /// unaffected and stays a phantom.
+    DevOnlyDeepPath,
 }
 
 /// One classified package reference.
@@ -50,6 +59,9 @@ pub struct Finding {
     /// Reachable from the `.d.ts` TYPE surface — a DECLARED PEER with this set is
     /// the nub#450 peer-type class (its `@types/<peer>` must be project-local).
     pub(crate) from_types: bool,
+    /// Reachable from a speculative legacy deep-path root — a published file no
+    /// declared surface references, in a package with no `exports` map.
+    pub from_deep_path: bool,
     /// Example raw specifiers (deduped) showing how it was referenced.
     pub specifiers: Vec<String>,
 }
@@ -61,6 +73,20 @@ impl Finding {
     /// backend it never declares (`@hookform/resolvers/zod` → `zod`).
     pub fn is_subpath_adapter(&self) -> bool {
         self.verdict == Verdict::HardPhantom && self.from_subpath && !self.from_main
+    }
+
+    /// The legacy deep-path class: a HARD phantom reached ONLY through a published
+    /// file that no declared surface references (`redux-persist/lib/integration/
+    /// react` → `react`). Node's legacy resolution makes it genuinely importable,
+    /// but nothing in the manifest says a consumer does — so it is real-but-
+    /// lower-confidence, and a downstream consumer should be able to weigh it
+    /// separately from a `main`-reachable phantom.
+    pub fn is_deep_path_only(&self) -> bool {
+        self.verdict == Verdict::HardPhantom
+            && self.from_deep_path
+            && !self.from_main
+            && !self.from_subpath
+            && !self.from_types
     }
 }
 
@@ -74,6 +100,7 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
         from_main: bool,
         from_subpath: bool,
         from_types: bool,
+        from_deep_path: bool,
         specs: Vec<String>,
     }
     let mut by_pkg: BTreeMap<String, Agg> = BTreeMap::new();
@@ -83,12 +110,14 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
             from_main: false,
             from_subpath: false,
             from_types: false,
+            from_deep_path: false,
             specs: Vec::new(),
         });
         e.all_soft &= r.soft;
         e.from_main |= r.from_main;
         e.from_subpath |= r.from_subpath;
         e.from_types |= r.from_types;
+        e.from_deep_path |= r.from_deep_path;
         if !e.specs.contains(&r.raw) {
             e.specs.push(r.raw.clone());
         }
@@ -97,7 +126,9 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
     by_pkg
         .into_iter()
         .map(|(package, agg)| {
-            let verdict = verdict_for(manifest, &package, agg.all_soft);
+            let deep_path_only =
+                agg.from_deep_path && !agg.from_main && !agg.from_subpath && !agg.from_types;
+            let verdict = verdict_for(manifest, &package, agg.all_soft, deep_path_only);
             Finding {
                 package,
                 verdict,
@@ -105,13 +136,19 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
                 from_main: agg.from_main,
                 from_subpath: agg.from_subpath,
                 from_types: agg.from_types,
+                from_deep_path: agg.from_deep_path,
                 specifiers: agg.specs,
             }
         })
         .collect()
 }
 
-fn verdict_for(manifest: &Manifest, package: &str, all_soft: bool) -> Verdict {
+fn verdict_for(
+    manifest: &Manifest,
+    package: &str,
+    all_soft: bool,
+    deep_path_only: bool,
+) -> Verdict {
     if is_self(manifest, package) {
         return Verdict::SelfRef;
     }
@@ -127,7 +164,13 @@ fn verdict_for(manifest: &Manifest, package: &str, all_soft: bool) -> Verdict {
     if manifest.required_peers.contains(package) {
         return Verdict::DeclaredPeer;
     }
-    // Undeclared.
+    // Undeclared. A speculative deep-path root importing one of the package's own
+    // devDependencies is the shipped-build-helper shape, not a consumer surface —
+    // the author declared the import dev-time and nothing published reaches the
+    // file, so a speculative root does not get to promote it to a phantom.
+    if deep_path_only && manifest.dev_deps.contains(package) {
+        return Verdict::DevOnlyDeepPath;
+    }
     if all_soft {
         Verdict::SoftPhantom
     } else {
@@ -157,6 +200,7 @@ mod tests {
                 from_main: true,
                 from_subpath: false,
                 from_types: false,
+                from_deep_path: false,
             })
             .collect()
     }
@@ -204,6 +248,42 @@ mod tests {
     }
 
     #[test]
+    fn deep_path_only_devdep_is_not_a_phantom_but_a_reached_one_is() {
+        // A speculative deep-path root importing one of the package's OWN
+        // devDependencies is a shipped build/test helper — the author declared the
+        // import dev-time and no published surface reaches the file, so the
+        // speculative root does not get to promote it to a phantom. The same
+        // devDep reached from `main` is unaffected and stays hard.
+        let m = Manifest::parse(br#"{"name":"pkg","devDependencies":{"ava":"1"}}"#).unwrap();
+        let deep = |pkg: &str| Reference {
+            package: pkg.to_string(),
+            raw: pkg.to_string(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: false,
+            from_deep_path: true,
+        };
+        let f = classify(&m, &[deep("ava"), deep("react")]);
+        let v = |name: &str| f.iter().find(|x| x.package == name).unwrap();
+        assert_eq!(v("ava").verdict, Verdict::DevOnlyDeepPath);
+        assert_eq!(
+            v("react").verdict,
+            Verdict::HardPhantom,
+            "an undeclared package reached only by deep path is still a phantom"
+        );
+        assert!(v("react").is_deep_path_only());
+        assert!(!v("ava").is_deep_path_only());
+
+        // Same devDep, reached from `main` as well → the guard does not apply.
+        let mut also_main = deep("ava");
+        also_main.from_main = true;
+        let f = classify(&m, &[deep("ava"), also_main]);
+        assert_eq!(f[0].verdict, Verdict::HardPhantom);
+        assert!(!f[0].is_deep_path_only());
+    }
+
+    #[test]
     fn subpath_only_hard_phantom_is_the_adapter_class() {
         let m = Manifest::parse(br#"{"name":"@hookform/resolvers"}"#).unwrap();
         // A hard phantom reached only from a subpath export is the adapter class;
@@ -215,6 +295,7 @@ mod tests {
             from_main: false,
             from_subpath: true,
             from_types: false,
+            from_deep_path: false,
         };
         let main_reached = Reference {
             package: "junk".into(),
@@ -223,6 +304,7 @@ mod tests {
             from_main: true,
             from_subpath: false,
             from_types: false,
+            from_deep_path: false,
         };
         let f = classify(&m, &[subpath_only, main_reached]);
         let zod = f.iter().find(|x| x.package == "zod").unwrap();

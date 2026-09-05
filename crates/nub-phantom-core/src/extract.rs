@@ -21,9 +21,10 @@
 //! hardness), never toward a false phantom — safe for the never-false-flag bar.
 
 use oxc_allocator::Allocator;
+use oxc_ast::AstKind;
 use oxc_ast::ast::{
-    Argument, ConditionalExpression, Expression, IfStatement, ImportDeclarationSpecifier,
-    LogicalExpression, Statement, TryStatement,
+    Argument, BindingPattern, ConditionalExpression, Expression, FormalParameters, IfStatement,
+    ImportDeclarationSpecifier, LogicalExpression, Statement, TryStatement,
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
@@ -98,6 +99,7 @@ fn parse_and_visit(source: &str, source_type: SourceType, capture_types: bool) -
         guard_depth: 0,
         out: Vec::new(),
         capture_types,
+        require_shadow_depth: 0,
     };
     v.visit_program(&ret.program);
     v.out
@@ -112,6 +114,17 @@ struct SpecVisitor {
     /// Retain type-only import/re-export specifiers. Set only for SFC script
     /// blocks, where a type-position phantom still breaks GVS resolution (nub#450).
     capture_types: bool,
+    /// Lexical nesting inside a function that takes a PARAMETER named `require`.
+    /// Nonzero means a `require(...)` here resolves against that parameter, not
+    /// Node — the browserify/UMD/webpack bundle shape
+    /// (`function(require,module,exports){…}` fed by an inlined module registry),
+    /// where the specifiers name the transitive graph the bundler already
+    /// inlined. Measured: over the top-1000 packages this one shape produced 11
+    /// of 14 speculative deep-path findings (object.assign's `dist/browser.js`
+    /// naming `es-errors`, `gopd`, `math-intrinsics`, …), none of which a
+    /// consumer must install. Parameters only, never a `const require =
+    /// createRequire(...)` binding — that one IS a real Node edge.
+    require_shadow_depth: u32,
 }
 
 impl SpecVisitor {
@@ -125,6 +138,18 @@ impl SpecVisitor {
 }
 
 impl<'a> Visit<'a> for SpecVisitor {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        if shadows_require(&kind) {
+            self.require_shadow_depth += 1;
+        }
+    }
+
+    fn leave_node(&mut self, kind: AstKind<'a>) {
+        if shadows_require(&kind) {
+            self.require_shadow_depth -= 1;
+        }
+    }
+
     fn visit_try_statement(&mut self, it: &TryStatement<'a>) {
         // Everything lexically within a try — the try block, the catch handler,
         // and the finalizer — is a guarded region: the canonical optional-load
@@ -209,7 +234,9 @@ impl<'a> Visit<'a> for SpecVisitor {
             }
             // `require("x")` / `require.resolve("x")` / `createRequire(...)("x")`.
             Expression::CallExpression(call) => {
-                if let Some((spec, kind)) = require_call(call) {
+                if let Some((spec, kind)) = require_call(call)
+                    && !(self.require_shadow_depth > 0 && callee_is_bare_require(&call.callee))
+                {
                     self.record(spec, kind);
                 }
             }
@@ -363,6 +390,38 @@ fn require_call<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> Option<(&'a s
     }
 }
 
+/// Whether `kind` is a function whose PARAMETER list binds the name `require`,
+/// which shadows Node's for the whole body.
+fn shadows_require(kind: &AstKind<'_>) -> bool {
+    match kind {
+        AstKind::Function(f) => params_bind_require(&f.params),
+        AstKind::ArrowFunctionExpression(f) => params_bind_require(&f.params),
+        _ => false,
+    }
+}
+
+/// A plain identifier parameter named `require`. Destructured and rest patterns
+/// are not checked: no bundler emits one, and a narrower rule cannot suppress a
+/// real edge.
+fn params_bind_require(params: &FormalParameters<'_>) -> bool {
+    params.items.iter().any(|p| {
+        matches!(&p.pattern, BindingPattern::BindingIdentifier(id) if id.name == "require")
+    })
+}
+
+/// Whether the call is rooted at the bare name `require` (`require(...)` or
+/// `require.resolve(...)`) — the forms a `require` parameter shadows. A
+/// `createRequire(...)(...)` callee is NOT rooted at that name and is unaffected.
+fn callee_is_bare_require(callee: &Expression<'_>) -> bool {
+    match callee {
+        Expression::Identifier(id) => id.name == "require",
+        Expression::StaticMemberExpression(m) => {
+            matches!(&m.object, Expression::Identifier(id) if id.name == "require")
+        }
+        _ => false,
+    }
+}
+
 /// True if `callee` names `createRequire` — bare (`createRequire(...)`) or a
 /// member (`module.createRequire(...)`). The receiver is not checked: only Node's
 /// `createRequire` uses this name, and the outer call's argument must still be a
@@ -397,6 +456,54 @@ mod tests {
             .into_iter()
             .map(|o| (o.spec, o.soft, o.kind))
             .collect()
+    }
+
+    #[test]
+    fn a_require_parameter_shadows_node_so_bundle_internals_are_not_edges() {
+        // The browserify/UMD bundle shape: each inlined module is a factory taking
+        // its own `require`, fed by the bundle's module registry. Those specifiers
+        // name the graph the bundler ALREADY inlined, so attributing them to the
+        // publishing package is a false phantom (measured on object.assign's
+        // `dist/browser.js`, which names 11 packages it does not need).
+        let got = specs(
+            r#"
+            (function(){})()({1:[function(require,module,exports){
+              var e = require('es-errors');
+              require.resolve('gopd');
+            },{}]},{},[1]);
+            const real = require('really-needed');
+            "#,
+        );
+        let names: Vec<_> = got.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["really-needed"],
+            "only the module-scope require is a Node edge: {names:?}"
+        );
+
+        // The shadow is lexical and ends with the function.
+        let after = specs("function f(require) { require('inner'); }\nrequire('outer');");
+        assert_eq!(
+            after.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(),
+            vec!["outer"]
+        );
+
+        // An arrow parameter shadows identically.
+        let arrow = specs("const f = (require) => require('inner');");
+        assert!(arrow.is_empty(), "arrow parameter shadows too: {arrow:?}");
+
+        // A `const require = createRequire(...)` binding is NOT a parameter and
+        // stays a real edge — the common ESM interop shape.
+        let cr = specs(
+            "import { createRequire } from 'node:module';\n\
+             const require = createRequire(import.meta.url);\n\
+             const x = require('lodash');",
+        );
+        let names: Vec<_> = cr.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(
+            names.contains(&"lodash"),
+            "createRequire-bound require is a real edge: {names:?}"
+        );
     }
 
     #[test]

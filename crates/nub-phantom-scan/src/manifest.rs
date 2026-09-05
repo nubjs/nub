@@ -26,6 +26,19 @@ pub struct Manifest {
     pub(crate) optional_peers: BTreeSet<String>,
     /// `bundledDependencies` / `bundleDependencies` — shipped inside the tarball.
     pub(crate) bundled: BTreeSet<String>,
+    /// `devDependencies`. NOT part of the declared surface — a consumer install
+    /// does not make them resolvable, so importing one from published code is a
+    /// phantom. Kept only to discriminate the SPECULATIVE deep-path class: a file
+    /// reachable by nothing but a deep path, importing a package the author did
+    /// declare as a devDep, is a shipped build/test helper rather than a public
+    /// surface (see [`crate::classify`]).
+    pub(crate) dev_deps: BTreeSet<String>,
+    /// Whether the manifest declares an `exports` map. An `exports` map is Node's
+    /// encapsulation boundary: it is the AUTHORITATIVE public surface, and a file
+    /// it does not name genuinely cannot be imported. Without one, Node's legacy
+    /// resolution lets a consumer `require('<pkg>/<any/published/file.js>')`, so
+    /// every published JS file is a potential entry point.
+    pub has_exports: bool,
     /// Published entry files (relative paths from the package root) — the roots
     /// of the reachable-module walk, each tagged by whether it is the main entry
     /// or a non-`.` `exports` subpath (the adapter surface).
@@ -86,7 +99,11 @@ impl Manifest {
             }
         }
 
+        collect_keys(&v, "devDependencies", &mut m.dev_deps);
         collect_bundled(&v, &mut m.bundled);
+        // `"exports": null` counts: it exports nothing, which is still an
+        // encapsulation boundary, not a legacy deep-path-open package.
+        m.has_exports = v.get("exports").is_some();
         m.entry_points = collect_entry_points(&v);
         Some(m)
     }
@@ -326,6 +343,99 @@ fn extension(path: &str) -> Option<&str> {
     file.rsplit_once('.').map(|(_, e)| e)
 }
 
+/// Directory names that ship in tarballs but are never a consumer's import
+/// target. Deep-path seeding is speculative — "Node COULD resolve this" — so it
+/// is bounded to the directories where a deep import is plausible. `node_modules`
+/// is the load-bearing one: a bundled dep's own imports are the BUNDLED
+/// package's, and attributing them to the outer package is a false positive by
+/// construction.
+const NON_SURFACE_DIRS: [&str; 22] = [
+    "node_modules",
+    "test",
+    "tests",
+    "__tests__",
+    "__test__",
+    "spec",
+    "__specs__",
+    "__mocks__",
+    "mocks",
+    "fixture",
+    "fixtures",
+    "__fixtures__",
+    "example",
+    "examples",
+    "demo",
+    "demos",
+    "benchmark",
+    "benchmarks",
+    "bench",
+    "script",
+    "scripts",
+    "coverage",
+];
+
+/// File names that are a dev script by overwhelming convention, at any depth. A
+/// narrower list than [`NON_SURFACE_DIRS`] on purpose: `mocks.js` or `fixtures.js`
+/// can plausibly be a real module, `bench.js` cannot.
+const DEV_SCRIPT_STEMS: [&str; 8] = [
+    "bench",
+    "benchmark",
+    "benchmarks",
+    "test",
+    "tests",
+    "spec",
+    "example",
+    "examples",
+];
+
+/// Whether a published file may SPECULATIVELY seed the walk as a legacy deep-path
+/// entry (`require('<pkg>/lib/integration/react')`), for a package with no
+/// `exports` map. Admits JS-like files only, outside the non-surface directories
+/// above, excluding dotfiles/dot-dirs (`.eslintrc.js`, `.github/`), `*.test.*` /
+/// `*.spec.*` siblings, and build-tool configs (`rollup.config.js`, `gulpfile.js`)
+/// — all of which ship routinely and import devDependencies no consumer ever
+/// resolves. `.d.ts` is excluded by `is_js_like`; the type surface has its own
+/// seeding.
+pub(crate) fn is_deep_path_candidate(rel: &str) -> bool {
+    if !is_js_like(rel) {
+        return false;
+    }
+    let mut segments = rel.split('/').peekable();
+    while let Some(seg) = segments.next() {
+        let lower = seg.to_ascii_lowercase();
+        if lower.starts_with('.') {
+            return false;
+        }
+        if segments.peek().is_some() {
+            if NON_SURFACE_DIRS.contains(&lower.as_str()) {
+                return false;
+            }
+            continue;
+        }
+        // Last segment: the file name.
+        let stem = lower.rsplit_once('.').map_or(lower.as_str(), |(s, _)| s);
+        if stem.ends_with(".test")
+            || stem.ends_with(".spec")
+            || stem.ends_with("-test")
+            || stem.ends_with("_test")
+            || stem.ends_with(".config")
+            || stem.ends_with(".conf")
+            || matches!(stem, "gulpfile" | "gruntfile" | "makefile")
+            // A file whose whole name is a dev-script convention, wherever it
+            // sits. asynckit ships a root `bench.js` requiring `async` and
+            // `benchmark` (neither declared, not even as devDeps) purely because
+            // it has no `files` whitelist — importable in principle, imported by
+            // nobody. Excluding one here can only lose a SPECULATIVE root: a file
+            // the published surface actually references is reached in the
+            // authoritative phase, before deep-path seeding runs.
+            || DEV_SCRIPT_STEMS.contains(&stem)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::Manifest;
@@ -346,6 +456,65 @@ mod tests {
         assert!(m.required_peers.contains("react"));
         assert!(m.optional_peers.contains("zod")); // optional peer moved out of required
         assert!(!m.required_peers.contains("zod"));
+    }
+
+    #[test]
+    fn has_exports_gates_deep_path_seeding_and_candidates_exclude_non_surface_files() {
+        // `has_exports` is what decides whether legacy deep-path roots are sound:
+        // an `exports` map is Node's encapsulation boundary, so an unexported file
+        // genuinely cannot be imported and must never seed the walk.
+        assert!(!Manifest::parse(br#"{"name":"p","main":"lib/index.js"}"#).unwrap().has_exports);
+        assert!(
+            Manifest::parse(br#"{"name":"p","exports":{".":"./index.js"}}"#)
+                .unwrap()
+                .has_exports
+        );
+        assert!(
+            Manifest::parse(br#"{"name":"p","exports":null}"#)
+                .unwrap()
+                .has_exports,
+            "`exports: null` exports nothing — still an encapsulation boundary"
+        );
+
+        let cand = super::is_deep_path_candidate;
+        // The redux-persist@6.0.0 miss: a published file no entry references.
+        assert!(cand("lib/integration/react.js"));
+        assert!(cand("es/index.mjs") && cand("src/persistReducer.js"));
+        // A dev-script FILE name, wherever it sits — asynckit's root `bench.js`.
+        assert!(!cand("bench.js") && !cand("test.js") && !cand("example.js"));
+        // Non-surface directories that ship in real tarballs.
+        for p in [
+            "test/index.js",
+            "tests/a.js",
+            "__tests__/a.js",
+            "__mocks__/fs.js",
+            "example/app.js",
+            "examples/app.js",
+            "benchmark/run.js",
+            "bench/run.js",
+            "scripts/build.js",
+            "coverage/lcov.js",
+            "node_modules/dep/index.js",
+        ] {
+            assert!(!cand(p), "{p} must not seed the walk");
+        }
+        // Dotfiles/dot-dirs, test siblings, and build-tool configs.
+        for p in [
+            ".eslintrc.js",
+            ".github/workflow.js",
+            "lib/thing.test.js",
+            "lib/thing.spec.js",
+            "lib/thing-test.js",
+            "rollup.config.js",
+            "karma.conf.js",
+            "gulpfile.js",
+        ] {
+            assert!(!cand(p), "{p} must not seed the walk");
+        }
+        // A `.d.ts` has its own Types surface; non-JS carries no imports.
+        assert!(!cand("index.d.ts") && !cand("data.json") && !cand("README.md"));
+        // `config.js` is an ordinary module — only `<tool>.config.js` is excluded.
+        assert!(cand("lib/config.js"));
     }
 
     #[test]
