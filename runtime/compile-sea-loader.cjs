@@ -35,6 +35,7 @@
   const boot = process[Symbol.for("nub.compile.bootstrap")];
   const sea = boot.getBuiltin("node:sea");
   const Module = boot.getBuiltin("node:module");
+  const fs = boot.getBuiltin("node:fs");
 
   const ENTRY = "__NUB_SEA_ENTRY__";
   // Every payload file the module loader may be asked for, by payload name.
@@ -177,49 +178,43 @@
   // against `nub app.mjs` on the same file: an entry ending in an unsettled
   // top-level await exited 0 rather than 13, and a throwing entry under
   // `--unhandled-rejections=warn` exited 0 rather than 1.
-  // The diagnostic and the exit code are raised at DIFFERENT points, and that is
-  // the whole subtlety. `process.emitWarning` queues its write behind a tick, so
-  // one emitted from an `exit` listener is composed and then dropped — the loop is
-  // already finished. `beforeExit` is the last moment a turn can still run. The
-  // exit code has the opposite requirement and stays on `exit`, which is the only
-  // point at which nothing further can settle the entry.
+  // Both the exit code and the diagnostic are raised from `exit`, because that is
+  // the ONLY point at which an entry can be called unsettled. `beforeExit` runs
+  // again every time a listener schedules work, so no number of rounds is a proof
+  // — and this loader's listener would necessarily run before the application's,
+  // which is where an entry awaiting something resolved from `beforeExit` gets
+  // settled. Measured, both shapes: an entry resolved on the first such round and
+  // one resolved on the second each exit 0 in silence.
   //
-  // Node itself writes this line synchronously from C++ (`ModuleWrap`, gated on
-  // `--no-warnings`). Going through `emitWarning` instead is deliberate: it is
-  // what keeps `--no-warnings`, `--trace-warnings` and the `warning` event
-  // working, and for a compiled artifact `NODE_OPTIONS` is the only way those
-  // arrive.
+  // The line is therefore written to fd 2 rather than emitted. `process.emitWarning`
+  // queues its write behind a tick, so one emitted from an `exit` listener is
+  // composed and dropped; a synchronous write is also exactly what Node does for
+  // this same diagnostic in `ModuleWrap::…`.
+  //
+  // Node gates its copy on `--warnings`, and the gate is readable without parsing
+  // a flag: Node attaches its own `warning` listener during pre-execution exactly
+  // when `--warnings` is on AND `NODE_NO_WARNINGS` is unset
+  // (`pre_execution.js::setupWarningHandler`), and this runs before any
+  // application code can add one. Measured against `nub <file>`: `--no-warnings`
+  // suppresses the diagnostic and `NODE_NO_WARNINGS=1` does not, which is why the
+  // environment variable is the second term rather than another way to say no.
+  // Setting both spellings at once is the one combination this reads as enabled
+  // where Node would not.
+  const warningsEnabled =
+    process.listenerCount("warning") > 0 || process.env.NODE_NO_WARNINGS === "1";
+
   let settled = false;
-  let warned = false;
-  let deferred = false;
-  const warn = () => {
-    if (settled || warned) return;
-    // The FIRST `beforeExit` is too early to conclude anything. This listener is
-    // registered before the entry is even imported, so it runs ahead of every
-    // listener the application installs — and one of those may be exactly what
-    // settles the entry. Scheduling anything buys the loop another turn, which
-    // lets the rest of them run and their promise jobs drain; an entry still
-    // pending when the loop empties AGAIN has nothing left to settle it.
-    // Measured: `process.once("beforeExit", resolve)` around the awaited promise
-    // exits 0 in silence under nub, and warned here before the deferral.
-    if (!deferred) {
-      deferred = true;
-      setImmediate(() => {});
-      return;
-    }
-    warned = true;
-    process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
-  };
   const unsettled = () => {
     if (settled || process.exitCode !== undefined) return;
     process.exitCode = 13;
+    if (warningsEnabled) {
+      fs.writeSync(2, `Warning: Detected unsettled top-level await at ${ROOT}${ENTRY}\n`);
+    }
   };
   const done = () => {
     settled = true;
-    process.off("beforeExit", warn);
     process.off("exit", unsettled);
   };
-  process.on("beforeExit", warn);
   process.on("exit", unsettled);
   shim.exports.then(
     () => {

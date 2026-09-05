@@ -184,37 +184,26 @@
   // in an unsettled top-level await exits 0 rather than 13, and a throwing entry
   // under `--unhandled-rejections=warn` exits 0 rather than 1. Both measured
   // against the same file run through `nub`.
-  // The diagnostic goes on `beforeExit` and the exit code on `exit`, for the
-  // reason the single-executable loader spells out: `process.emitWarning` queues
-  // its write behind a tick, so one emitted from `exit` is composed and dropped,
-  // while the exit code must be set at the only point nothing further can settle
-  // the entry.
+  // Both raised from `exit`, and the line written rather than emitted, for the
+  // reasons the single-executable loader spells out: `beforeExit` can run any
+  // number of times so it proves nothing, `process.emitWarning` cannot write from
+  // `exit`, and Node's own gate is readable off the `warning` listener it attaches
+  // during pre-execution.
+  const warningsEnabled =
+    process.listenerCount("warning") > 0 || process.env.NODE_NO_WARNINGS === "1";
+
   let settled = false;
-  let warned = false;
-  let deferred = false;
-  const warn = () => {
-    if (settled || warned) return;
-    // The first `beforeExit` is skipped for the reason the single-executable
-    // loader spells out: this listener precedes every one the application
-    // installs, and one of those may settle the entry.
-    if (!deferred) {
-      deferred = true;
-      setImmediate(() => {});
-      return;
-    }
-    warned = true;
-    process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
-  };
   const unsettled = () => {
     if (settled || process.exitCode !== undefined) return;
     process.exitCode = 13;
+    if (warningsEnabled) {
+      fs.writeSync(2, `Warning: Detected unsettled top-level await at ${ROOT}${ENTRY}\n`);
+    }
   };
   const done = () => {
     settled = true;
-    process.off("beforeExit", warn);
     process.off("exit", unsettled);
   };
-  process.on("beforeExit", warn);
   process.on("exit", unsettled);
   import(entryUrl).then(
     () => {

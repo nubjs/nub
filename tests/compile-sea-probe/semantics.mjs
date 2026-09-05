@@ -78,6 +78,26 @@ const CASES = [
     stderrExcludes: "Detected unsettled top-level await",
   },
   {
+    name: "an entry settled on a later beforeExit cycle",
+    // `beforeExit` runs again every time a listener schedules work, so a loader
+    // that counts rounds is wrong at the next one. This case exists to fail any
+    // bounded guard: the settling happens on cycle two.
+    source: [
+      "let resolve;",
+      "const pending = new Promise((r) => { resolve = r; });",
+      "let cycles = 0;",
+      'process.on("beforeExit", () => {',
+      "  cycles += 1;",
+      "  if (cycles === 1) setImmediate(() => {});",
+      "  else resolve();",
+      "});",
+      "await pending;",
+      'console.log("settled-second");',
+    ].join("\n"),
+    node: "26.7.0",
+    stderrExcludes: "Detected unsettled top-level await",
+  },
+  {
     name: "explicit process.exitCode",
     source: "process.exitCode = 7;",
     node: "26.7.0",
