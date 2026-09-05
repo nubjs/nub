@@ -110,8 +110,8 @@ type AppFiles = Vec<AppFile<Vec<u8>>>;
 
 pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Started before anything that can touch the network or the disk, so the
-    // `elapsed` row measures the wait the user actually sat through rather than
-    // the part of it this function happens to bracket.
+    // closing success line reports the wait the user actually sat through rather
+    // than the part of it this function happens to bracket.
     let started = std::time::Instant::now();
     let target = resolve_platform(opts.platform.as_deref())?;
 
@@ -164,6 +164,18 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         &target,
     )?;
     reject_non_windows_hide_console(opts.hide_console, &target)?;
+
+    // Printed here — after the cheap rejections, before the first step that can
+    // take a visible amount of time. Everything above fails in the first second,
+    // so an intro above them would announce a build that never started.
+    eprintln!(
+        "{}",
+        intro_line(
+            &opts.entry,
+            &out_path,
+            crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        )
+    );
 
     // Resolved AND verified before any real work: a cross-compile whose launcher
     // template is missing, or is not that platform's executable, must fail in the
@@ -519,8 +531,17 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // bytes being split. `node.size` is the DECOMPRESSED length — the
         // launcher's warm-start check — so using it here would report a Node
         // component four times the space it takes in the file.
-        node_bytes: node.blob.len() as u64,
+        node_bytes: (node.blob.len() + node.license.len()) as u64,
         app_bytes: app_files.iter().map(|f| f.bytes.len() as u64).sum(),
+        // Injection re-signs the whole image, so the template's own ad-hoc
+        // signature never reaches the artifact and must come off its size.
+        launcher_bytes: (template.len() as u64)
+            .saturating_sub(inject::code_signature_size(target.format(), &template)),
+        // Measured off the published file rather than predicted: the signature's
+        // size is a function of the final image, which nothing before the write
+        // knows. A failure to read it back is not worth failing a verified build
+        // over — the component simply reports zero and goes unnamed.
+        signature_bytes: inject::code_signature_size_of(target.format(), &out_path).unwrap_or(0),
         shipped,
         deferred: bundled.dynamic_import_sites,
         app_extracts: inline_decline,
@@ -583,6 +604,109 @@ fn report_resolved_build(
         for line in render_row(label, &spans, width, cols, color) {
             eprintln!("{line}");
         }
+    }
+    eprintln!();
+    eprintln!("{}", success_line(out_path, facts.elapsed, color));
+}
+
+/// The line that opens a compile, and the one thing here that survives in the
+/// scrollback from before the build.
+///
+/// The live line cannot do this job: it is `ProgressJobDoneBehavior::Hide`, so
+/// the only pre-block line a compile printed erased itself, and a build that had
+/// scrolled past left no record of what was even being compiled. It is also off
+/// entirely when stderr is not a terminal, which is exactly the run — a CI log —
+/// where the record matters most. So this is a plain `eprintln!` rather than a
+/// kept final frame: it prints identically in both modes, and the spinner keeps
+/// being purely transient.
+///
+/// `entry → out` and nothing else. The platform and the size are on the block
+/// eight lines below, and a cross-compile carries its target in the default
+/// output name anyway; an intro repeating the block is a second, worse copy of
+/// it. What the block cannot say is what the reader is waiting FOR, because it
+/// prints when the waiting is over.
+fn intro_line(entry: &str, out_path: &Path, color: bool) -> String {
+    format!(
+        "{} {} compiling {entry} {} {}",
+        banner(color),
+        paint("·", Ink::Muted, color),
+        paint("→", Ink::Muted, color),
+        paint(&out_path.display().to_string(), Ink::Accent, color),
+    )
+}
+
+/// The line that closes a successful compile.
+///
+/// A build that worked used to end on its own last fact — `elapsed  3.5s`, or
+/// whichever optional row happened to sort last — so nothing in the output said
+/// the thing had actually succeeded. This says it, in the vocabulary the rest of
+/// the CLI already spends on exactly that: a green bold check mark, then the
+/// noun, then a dim duration. It is the same line `nub install` signs off with
+/// (`✓ installed 2 packages in 1.2s`), which is what makes it legible without
+/// being read.
+///
+/// It carries the elapsed time, and the `elapsed` block row was removed when it
+/// did. One fact stated twice, three lines apart, is worse than either placement
+/// on its own — and the duration belongs with the success cue, where it answers
+/// "that worked, and it took this long" as one sentence.
+///
+/// No banner, unlike the install summary. That summary is frequently the ONLY
+/// persistent line an install prints, so it has to identify who is speaking; a
+/// compile always prints [`intro_line`] first, and stamping the version twice
+/// into a seven-line output is noise.
+fn success_line(out_path: &Path, elapsed: std::time::Duration, color: bool) -> String {
+    format!(
+        "{} compiled {} in {}",
+        paint_success(color),
+        paint(&out_path.display().to_string(), Ink::Accent, color),
+        paint(&format_elapsed(elapsed), Ink::Muted, color),
+    )
+}
+
+/// The product banner: magenta-bold `nub`, then the dim version.
+///
+/// One definition, because it is drawn on two surfaces — the live line's header
+/// and [`intro_line`] — and the two drifting apart would be invisible until
+/// someone put them side by side. Byte-compatible with the banner the engine
+/// prints, which is what makes an install and a compile look like one CLI.
+fn banner(color: bool) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    if !color {
+        return format!("nub {version}");
+    }
+    format!("\x1b[35m\x1b[1mnub\x1b[22m\x1b[39m \x1b[2m{version}\x1b[22m")
+}
+
+/// The green check mark, in the one place a build says it worked.
+///
+/// Not an [`Ink`], deliberately: `Ink` is the block's three-tier vocabulary and
+/// adding a fourth for a glyph one line uses would put a color in it that the
+/// block itself never draws.
+fn paint_success(color: bool) -> String {
+    if color {
+        "\x1b[32m\x1b[1m✓\x1b[22m\x1b[39m".to_string()
+    } else {
+        "✓".to_string()
+    }
+}
+
+/// An elapsed build, in the three bands the engine's install summary uses
+/// (`aube::progress::ci::format_duration`): sub-second `240ms`, sub-minute
+/// `4.0s`, otherwise `3m12s`.
+///
+/// Reimplemented rather than called because that function is private to the
+/// engine. The bands matter here more than they do for an install: a `--target`
+/// that has to download and recompress a ~100 MB Node routinely runs past a
+/// minute, and the flat `{:.1}s` this replaces rendered that as `92.4s`.
+fn format_elapsed(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", d.as_secs_f64())
+    } else {
+        let total = d.as_secs();
+        format!("{}m{:02}s", total / 60, total % 60)
     }
 }
 
@@ -664,7 +788,7 @@ fn render_row(
     // `run` is the text accumulated since the ink last changed or the line last
     // broke; it is flushed through `paint` once. Painting each word as it lands
     // renders identically and is what shipped first — but it wraps every word in
-    // its own escape pair, so `(node 28.3 MB · app 24 KB · launcher 1.2 MB)`
+    // its own escape pair, so `(node 28.2 MB · app 57 KB · launcher 851 KB)`
     // leaves the terminal as eleven separate dim spans and roughly ten times the
     // bytes, which is what anyone piping the output to a file or a doc gets.
     let mut run = String::new();
@@ -877,10 +1001,8 @@ fn resolved_build_rows(
         ));
     }
 
-    rows.push((
-        "elapsed",
-        vec![(format!("{:.1}s", facts.elapsed.as_secs_f64()), Ink::Plain)],
-    ));
+    // No `elapsed` row: the closing success line carries the duration, and
+    // stating it in both places three lines apart reads as two measurements.
     rows
 }
 
@@ -1219,13 +1341,13 @@ impl LiveLine {
         if !crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr())) {
             return Self(None);
         }
-        let header = format!(
-            "\x1b[35m\x1b[1mnub\x1b[22m\x1b[39m \x1b[2m{}\x1b[22m",
-            env!("CARGO_PKG_VERSION")
-        );
+        // clx redraws every 200 ms by default, which reads as a stutter rather
+        // than a spinner. 80 ms is ora's cadence. The setting is process-global,
+        // and `nub compile` owns the only progress job in this process.
+        clx::progress::set_interval(std::time::Duration::from_millis(80));
         let job = clx::progress::ProgressJobBuilder::new()
             .body("{{header}}  {{ spinner() }} {{phase}}{{detail}}")
-            .prop("header", &header)
+            .prop("header", &banner(true))
             .prop("phase", &Self::phase_field("bundling"))
             .prop("detail", &String::new())
             // The line is transient by construction: at teardown the job flips to
@@ -1282,11 +1404,19 @@ impl Drop for LiveLine {
 struct BuildFacts {
     /// The finished file, from `metadata` on what was published.
     size: u64,
-    /// The COMPRESSED Node blob's contribution. Zero under `--smol`, which
-    /// embeds no runtime at all.
+    /// The embedded runtime's contribution: the COMPRESSED Node blob plus the
+    /// compressed `LICENSE` shipped beside it, which exists only because that
+    /// runtime does. Zero under `--smol`, which embeds no runtime at all.
     node_bytes: u64,
     /// The compressed app files' contribution.
     app_bytes: u64,
+    /// The launcher template's contribution, which is its file size MINUS its own
+    /// ad-hoc signature: injection re-signs the whole image, so the template's
+    /// signature is discarded rather than carried.
+    launcher_bytes: u64,
+    /// The finished artifact's ad-hoc code signature, measured off the file that
+    /// was written. Zero on ELF and PE, which nub never signs.
+    signature_bytes: u64,
     /// Everything that did not get sealed into the bundle, with the reason each
     /// one earned. Ordered as the build discovered them.
     shipped: Vec<(String, &'static str)>,
@@ -1305,24 +1435,28 @@ impl BuildFacts {
     ///
     /// This is the number someone shrinking a binary actually wants; the total on
     /// its own cannot tell them whether their code or the runtime is the problem.
-    /// The remainder is the launcher plus the container's own headers, which is
-    /// what is left once the two payload regions are accounted for — computed as
-    /// a difference rather than measured, so it can never disagree with the total.
+    /// Every part named here is MEASURED, so they deliberately do NOT sum to the
+    /// total. What is left over is the payload container's header, the manifest,
+    /// the per-file framing, and the alignment of the payload region to a 64 KiB
+    /// boundary — a few tens of kilobytes nobody can act on. Naming it took the
+    /// row past 100 columns on a real build, which wraps on an 80-column terminal,
+    /// so it is left out and the parts that answer the question stay on one line.
     ///
-    /// Empty when the parts do not add up to something worth splitting: a `--smol`
-    /// build with no assets is almost entirely launcher, and naming three
-    /// components of one small number is noise.
+    /// `launcher` used to BE the remainder — `size - node - app` — so it swallowed
+    /// the ad-hoc code signature as well. That is not a rounding error: the
+    /// CodeDirectory carries one SHA-256 per 4 KiB page, so on a 29 MB embed build
+    /// a fixed 851 KB launcher was reported as 1.2 MB, and the row said the
+    /// launcher alone outweighed a whole `--smol` binary.
     fn size_split(&self) -> String {
-        let launcher = self
-            .size
-            .saturating_sub(self.node_bytes)
-            .saturating_sub(self.app_bytes);
         let mut parts = Vec::new();
         if self.node_bytes > 0 {
             parts.push(format!("node {}", mb(self.node_bytes)));
         }
         parts.push(format!("app {}", mb(self.app_bytes)));
-        parts.push(format!("launcher {}", mb(launcher)));
+        parts.push(format!("launcher {}", mb(self.launcher_bytes)));
+        if self.signature_bytes > 0 {
+            parts.push(format!("signature {}", mb(self.signature_bytes)));
+        }
         format!("  ({})", parts.join(" · "))
     }
 }
@@ -4465,9 +4599,15 @@ mod tests {
     /// A build with everything present, so the optional rows all appear at once.
     fn full_facts() -> BuildFacts {
         BuildFacts {
-            size: 29_473_842,
-            node_bytes: 25_100_000,
-            app_bytes: 2_500_000,
+            // Every size here is measured off a real darwin-arm64 embed build, so
+            // the components add up the way a reader's own build will: 851 KB of
+            // launcher template, a 228 KB signature that scales with the file, and
+            // 66 KB of container header, manifest and 64 KiB payload alignment.
+            size: 29_390_370,
+            node_bytes: 28_189_460,
+            app_bytes: 56_571,
+            launcher_bytes: 850_864,
+            signature_bytes: 227_954,
             shipped: vec![
                 ("@napi-rs/nice".to_string(), "native addon"),
                 ("sharp".to_string(), "--external"),
@@ -4505,7 +4645,9 @@ mod tests {
                 &host,
             )),
             vec![
-                "output=acme  29.5 MB  (node 25.1 MB · app 2.5 MB · launcher 1.9 MB)".to_string(),
+                "output=acme  29.4 MB  (node 28.2 MB · app 57 KB · launcher 851 KB · \
+                 signature 228 KB)"
+                    .to_string(),
                 "runtime=Node 26.8.1, embedded  (package.json#engines.node)".to_string(),
                 // No aside: building for the host is the default, and a note on
                 // the default is paid for by every build and earned by none.
@@ -4514,8 +4656,42 @@ mod tests {
                 "deferred=3 dynamic import sites  resolved where the binary runs".to_string(),
                 "app=extracted on first run  it resolves modules at run time".to_string(),
                 "report=report.json  esbuild schema".to_string(),
-                "elapsed=8.9s".to_string(),
             ]
+        );
+    }
+
+    /// Every part of the split is measured, and the container's own bytes are not
+    /// named at all — so the parts stay under the total rather than reaching it.
+    ///
+    /// The regression this pins: `launcher` used to BE the remainder, so it
+    /// swallowed the ad-hoc code signature — which grows at one SHA-256 per 4 KiB
+    /// page — and reported a fixed 851 KB template as 1.2 MB on a 29 MB build.
+    #[test]
+    fn the_split_names_the_signature_apart_from_the_launcher() {
+        let signed = full_facts();
+        assert_eq!(
+            signed.size_split(),
+            "  (node 28.2 MB · app 57 KB · launcher 851 KB · signature 228 KB)",
+        );
+        let components =
+            signed.node_bytes + signed.app_bytes + signed.launcher_bytes + signed.signature_bytes;
+        assert!(
+            components < signed.size,
+            "the measured parts must stay under the total, since the container's \
+             header, manifest and alignment padding go unnamed: {components} vs {}",
+            signed.size
+        );
+
+        // ELF and PE are never signed, so there is no component to name and the
+        // bytes it would have covered do not exist rather than moving elsewhere.
+        let unsigned = BuildFacts {
+            size: signed.size - signed.signature_bytes,
+            signature_bytes: 0,
+            ..signed
+        };
+        assert_eq!(
+            unsigned.size_split(),
+            "  (node 28.2 MB · app 57 KB · launcher 851 KB)",
         );
     }
 
@@ -4552,10 +4728,12 @@ mod tests {
     fn a_build_with_nothing_deferred_or_external_prints_no_row_for_it() {
         let host = TargetPlatform::host().unwrap();
         let bare = BuildFacts {
-            size: 4_400_000,
+            size: 3_433_512,
             // `--smol` embeds no runtime, so the split names only what is there.
             node_bytes: 0,
             app_bytes: 2_500_000,
+            launcher_bytes: 850_864,
+            signature_bytes: 26_744,
             shipped: Vec::new(),
             deferred: 0,
             app_extracts: None,
@@ -4573,11 +4751,10 @@ mod tests {
                 &host,
             )),
             vec![
-                "output=acme  4.4 MB  (app 2.5 MB · launcher 1.9 MB)".to_string(),
+                "output=acme  3.4 MB  (app 2.5 MB · launcher 851 KB · signature 27 KB)".to_string(),
                 "runtime=Node >=22 <23, not embedded  (--target)".to_string(),
                 format!("platform={}", host.triple()),
                 "app=run from the executable  nothing is written to disk".to_string(),
-                "elapsed=2.4s".to_string(),
             ]
         );
     }
@@ -4627,7 +4804,6 @@ mod tests {
                 ("deferred", vec![Ink::Plain, Ink::Muted]),
                 ("app", vec![Ink::Plain, Ink::Muted]),
                 ("report", vec![Ink::Plain, Ink::Muted]),
-                ("elapsed", vec![Ink::Plain]),
             ],
             "exactly one Accent in the whole block, on the path the reader runs next"
         );
@@ -4638,6 +4814,67 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The two lines that bracket the block, in both the modes they print in.
+    ///
+    /// The colorless spelling is the load-bearing half. Both lines print on a
+    /// redirected build — where the live line is off entirely — so a CI log is
+    /// the one place they are the ONLY record that a compile started and that it
+    /// worked, and an escape sequence leaking into that log is exactly what a
+    /// TTY-only assertion would miss.
+    #[test]
+    fn the_intro_and_success_lines_bracket_the_block_in_both_modes() {
+        let out = Path::new("dist/cli");
+        let took = std::time::Duration::from_millis(3_540);
+
+        assert_eq!(
+            intro_line("cli.ts", out, false),
+            format!(
+                "nub {} · compiling cli.ts → dist/cli",
+                env!("CARGO_PKG_VERSION")
+            ),
+            "the intro names what the reader is waiting for, which is the one \
+             thing the closing block cannot say"
+        );
+        assert_eq!(
+            success_line(out, took, false),
+            "✓ compiled dist/cli in 3.5s",
+            "a build that worked has to say so in words, not by ending"
+        );
+
+        // The artifact path is the block's Accent and stays it on both lines, so
+        // the path a reader runs next is one color from the first line to the
+        // last. The green check mark is the only ink here the block never draws.
+        let intro = intro_line("cli.ts", out, true);
+        let success = success_line(out, took, true);
+        assert!(
+            intro.contains(&paint("dist/cli", Ink::Accent, true))
+                && success.contains(&paint("dist/cli", Ink::Accent, true)),
+            "intro={intro:?} success={success:?}"
+        );
+        assert!(
+            success.starts_with("\x1b[32m\x1b[1m✓"),
+            "the success cue is the engine's green bold check mark: {success:?}"
+        );
+        assert_eq!(
+            strip_sgr(&success),
+            success_line(out, took, false),
+            "color must add nothing but color"
+        );
+    }
+
+    /// The bands exist because an embed build that downloads a ~100 MB Node
+    /// routinely runs past a minute, and the flat `{:.1}s` this replaced rendered
+    /// that as `92.4s`.
+    #[test]
+    fn an_elapsed_build_is_reported_in_the_band_it_lands_in() {
+        let ms = |n| format_elapsed(std::time::Duration::from_millis(n));
+        assert_eq!(ms(240), "240ms");
+        assert_eq!(ms(999), "999ms");
+        assert_eq!(ms(1_000), "1.0s");
+        assert_eq!(ms(59_940), "59.9s");
+        assert_eq!(ms(92_400), "1m32s");
     }
 
     /// A row too wide for the terminal wraps to the value column, not to zero.
@@ -4934,7 +5171,7 @@ mod tests {
     fn every_value_starts_in_one_column_and_the_slack_is_on_the_left() {
         let spans = vec![("x".to_string(), Ink::Plain)];
         let width = 8;
-        let rendered: Vec<String> = ["output", "runtime", "platform", "elapsed"]
+        let rendered: Vec<String> = ["output", "runtime", "platform", "shipped"]
             .iter()
             .map(|label| render_row(label, &spans, width, 80, false).join(""))
             .collect();

@@ -106,8 +106,8 @@ replaceOrDie(
 // manifest without these leaves that lock unsatisfiable, and both are built with
 // `--locked`, which refuses to reconcile rather than doing it. Not hypothetical:
 // release.yml's canary path stamps a version on the build runners and then builds
-// the launcher `--locked` in the SAME job, so every push to main would fail the
-// build on all eight targets. The root lock is not in this list because nothing
+// the launcher `--locked` in the SAME job, so every canary build would fail on
+// all eight targets. The root lock is not in this list because nothing
 // consumes it under `--locked`; it self-heals on the next cargo invocation.
 //
 // Rewritten here rather than through `cargo update` because BOTH entry points
