@@ -49,9 +49,11 @@ jobs:
       - name: Build nub
         run: cargo build -p nub-cli --profile fast --features compile
 
-      # Its own workspace, so it needs its own invocation — and it defines no
-      # `fast` profile, so this one is `release`. Only the fallback step opens the
-      # template, but that step is the one proving the gate still works.
+      # Nothing here should open a launcher template — every row asserts the
+      # single-executable shape. It is built anyway so that a payload which
+      # unexpectedly declines fails on the assertion below rather than on a
+      # missing template, which reads like a different bug. Its own workspace, and
+      # it defines no `fast` profile, so this one is `release`.
       - name: Build the launcher template
         shell: bash
         working-directory: crates/nub-launcher
@@ -76,9 +78,10 @@ jobs:
             --platform ${{ matrix.musl }} \
             --run-with "docker run --rm -v {dir}:{dir} -w {dir} alpine:3.20"
 
-      # Below the execArgv backport floor nub cannot hand the artifact its Node
-      # flags through the blob, so the container decision has to fall back. This
-      # is the only assertion that the gate is a gate rather than a constant.
-      - name: A Node below the execArgv floor keeps the launcher
-        shell: bash
-        run: node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/old-probe" --target 22.19.0 --expect launcher
+      # The version gate that decides the container is deliberately not probed
+      # here. Compiling for a Node below the execArgv floor pulls in the Temporal,
+      # URLPattern and Float16Array polyfills, which live in `runtime/node_modules`
+      # and are not in a fresh checkout, so the step measured the staging rather
+      # than the gate. `compile::sea`'s
+      # `gates_exec_argv_on_the_backport_bands_rather_than_one_floor` covers the
+      # predicate across eleven versions, including the hole across 23.x.

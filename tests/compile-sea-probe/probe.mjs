@@ -19,7 +19,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replace(/^--/, ""), process.argv[i + 1]);
 const nub = resolve(args.get("nub"));
-let out = resolve(args.get("out"));
+// Windows will not execute a file whose name has no recognized extension, and it
+// fails as a spawn error rather than a non-zero exit — so the artifact is asked
+// for under the name the target can actually run.
+const wantsExe = (args.get("platform") ?? process.platform).startsWith("win32");
+let out = resolve(args.get("out")) + (wantsExe ? ".exe" : "");
 const expect = args.get("expect") ?? "sea";
 const targetNode = args.get("target") ?? "26.7.0";
 
@@ -78,7 +82,10 @@ if (args.get("run-with")) {
 }
 const ran = spawnSync(cmd, argv, { encoding: "utf8", env: runEnv });
 process.stderr.write(ran.stderr ?? "");
-if (ran.status !== 0) fail(`the artifact exited ${ran.status}: ${(ran.stdout ?? "").trim()}`);
+if (ran.error) fail(`could not run ${cmd}: ${ran.error.message}`);
+if (ran.status !== 0) {
+  fail(`the artifact exited ${ran.status}${ran.signal ? ` on ${ran.signal}` : ""}: ${(ran.stdout ?? "").trim()}`);
+}
 const got = (ran.stdout ?? "").trim().split("\n").pop();
 say(`artifact: ${got}`);
 if (got !== control) fail(`artifact printed '${got}', control printed '${control}'`);
