@@ -1274,11 +1274,18 @@ fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
                 continue;
             }
             // Descend only into REAL directories: following a symlink here
-            // could walk out of the project or around a cycle.
+            // could walk out of the project or around a cycle. A recorded
+            // modules directory is a boundary too — a nested configured name
+            // (`nested/deps`) is recorded from its parent, and the walk must
+            // not re-enter it from inside `nested/`.
             if !entry.file_type().is_ok_and(|t| t.is_dir()) || name.starts_with('.') {
                 continue;
             }
-            stack.push(entry.path());
+            let path = entry.path();
+            if found.iter().any(|recorded| path.starts_with(recorded)) {
+                continue;
+            }
+            stack.push(path);
         }
     }
     found
@@ -1616,10 +1623,20 @@ mod legacy_gvs_prune_tests {
             std::fs::write(project.join(".npmrc"), format!("modules-dir={modules}\n")).unwrap();
             let link = local.join("live@1.0.0");
             std::os::unix::fs::symlink(&live, &link).unwrap();
+            // A package's own nested `node_modules` inside the modules
+            // directory: the walk records the modules directory and stops
+            // there, rather than re-entering it from `nested/` and taking
+            // this one as a second root.
+            std::fs::create_dir_all(project.join(modules).join("pkg/node_modules")).unwrap();
             record(&root, &project);
             expire(&root, "live@1.0.0-aaaa");
             expire(&root, "orphan@1.0.0-bbbb");
 
+            assert_eq!(
+                find_node_modules_dirs(&project),
+                vec![project.join(modules)],
+                "modules={modules}"
+            );
             let plan = plan_legacy_gvs_prune(&current);
             assert_eq!(
                 planned(&plan),
