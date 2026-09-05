@@ -1167,11 +1167,10 @@ fn apply_inner(
     // presence as `proxy_port` (both derive from `proxy`), threaded into each backend so
     // the child authenticates to the loopback proxy.
     let proxy_token = proxy.as_ref().map(EgressProxy::token);
-    // The Linux Landlock backend takes neither: it confines egress with a coarse seccomp family
-    // ceiling and has no proxy to authenticate to. Both are threaded into the mac/win/generic
-    // backends below, which are cfg'd out here. (epic 1.1d wires the supervisor into this seam.)
-    #[cfg(target_os = "linux")]
-    let _ = (proxy_port, proxy_token);
+    // The Linux Landlock build-jail backend takes neither (coarse seccomp family ceiling, no
+    // proxy to authenticate to); the SUPERVISED backend takes both, redirecting an allowed connect
+    // through the loopback proxy for per-host SNI precision (epic 5.1). `linux::apply` routes each
+    // arm and ignores the pair on the Landlock arm.
     // The child CA bundle, when TLS termination engaged — its ephemeral path, threaded into the
     // mac/win/generic backends. On Linux the only wired backend is the Landlock build jail, which
     // starts no proxy and terminates no TLS, so there is never a CA bundle to hand it or announce.
@@ -1192,12 +1191,17 @@ fn apply_inner(
 
     #[cfg(target_os = "macos")]
     let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
-    // The Linux backend takes neither the proxy nor a net bridge: the Landlock build jail confines
-    // egress with a coarse seccomp family ceiling and has no netns to route through, and the
-    // retained-monitor net bridge was dropped with `linux_monitor` (epic 1.1). The non-Landlock
-    // seam that would drive `linux_supervisor` is epic 1.1(d).
+    // The Landlock build-jail arm ignores the proxy pair (coarse seccomp family ceiling, no netns);
+    // the supervised arm redirects an allowed connect through the loopback proxy (epic 5.1).
     #[cfg(target_os = "linux")]
-    let mut prepared = linux::apply(policy, spec, tmp_dir, linux_preflight)?;
+    let mut prepared = linux::apply(
+        policy,
+        spec,
+        tmp_dir,
+        linux_preflight,
+        proxy_port,
+        proxy_token,
+    )?;
     #[cfg(target_os = "windows")]
     let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

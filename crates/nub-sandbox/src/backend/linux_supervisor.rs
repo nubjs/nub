@@ -42,6 +42,25 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Whether the supervisor's per-connection decision trace is enabled. The supervisor runs in the
+/// nub PARENT, so its `eprintln!`s land on nub's own stderr (the user's terminal during `nub
+/// install`) and name every destination the child reaches — useful when debugging egress, noise in
+/// production. Gated behind `NUB_SANDBOX_SUP_DEBUG`; read once. (epic 5.1 L5)
+fn sup_debug() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("NUB_SANDBOX_SUP_DEBUG").is_some())
+}
+
+/// `eprintln!` gated on [`sup_debug`]. Every supervisor decision line goes through this so the
+/// default (unset) run emits nothing.
+macro_rules! suplog {
+    ($($arg:tt)*) => {
+        if sup_debug() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // seccomp USER_NOTIF ABI — hand-declared because `libc` does not expose the
 // notification ioctls or their structs across the versions we target. Layouts
@@ -408,6 +427,12 @@ struct SupState {
     sk: Vec<SkEntry>,
     upstream_addr_be: u32, // network-order IPv4 of the real upstream resolver
     stub_port: u16,
+    /// `Some` ⇒ redirect an allowed TCP connect through the loopback egress proxy at this port
+    /// (epic 5.1); `None` ⇒ dial the destination directly (the coarse path). Paired with
+    /// [`Self::proxy_token`], copied from the [`EgressPolicy`] before the fork.
+    proxy_port: Option<u16>,
+    /// The bearer the supervisor presents to the loopback proxy. Present iff `proxy_port` is.
+    proxy_token: Option<String>,
 }
 
 impl SupState {
@@ -422,7 +447,7 @@ impl SupState {
                 name: name.to_string(),
             });
         }
-        eprintln!("SUP DNS {name} -> {}", fmt_ip(fam, addr));
+        suplog!("SUP DNS {name} -> {}", fmt_ip(fam, addr));
     }
 
     fn lookup(&self, fam: i32, addr: &[u8]) -> Option<String> {
@@ -506,6 +531,8 @@ fn state() -> &'static Mutex<SupState> {
             sk: Vec::new(),
             upstream_addr_be: 0,
             stub_port: 0,
+            proxy_port: None,
+            proxy_token: None,
         })
     })
 }
@@ -591,7 +618,7 @@ fn reply(nfd: RawFd, id: u64, err: i32) {
         ..Default::default()
     };
     if ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void) < 0 {
-        eprintln!("[sup] SEND: {}", io::Error::last_os_error());
+        suplog!("[sup] SEND: {}", io::Error::last_os_error());
     }
 }
 
@@ -707,6 +734,114 @@ fn make_sockaddr_in(addr_be: u32, port: u16) -> libc::sockaddr_in {
     a
 }
 
+/// Set (or clear, with `secs == 0`) the receive timeout on a blocking socket, so the supervisor's
+/// handshake with the loopback proxy cannot wedge the thread if the proxy never answers.
+fn set_recv_timeout(fd: RawFd, secs: i64) {
+    let tv = libc::timeval {
+        tv_sec: secs,
+        tv_usec: 0,
+    };
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            size_of::<libc::timeval>() as libc::socklen_t,
+        );
+    }
+}
+
+/// Dial the loopback egress proxy at `proxy_port` and complete the cooperative HTTP `CONNECT`
+/// handshake on the confined child's behalf, returning a BLOCKING connected socket on success or
+/// `-1` on any failure (the caller denies — never a direct-dial fallback, which would bypass the
+/// proxy's SNI gate). `authority`/`dport` name the child's intended destination (the observed DNS
+/// name when known, else the IP literal); the proxy re-resolves and applies its host + SNI gates.
+/// `token` is presented as `Proxy-Authorization: Basic base64("<token>:")` — the same credential
+/// `set_proxy_env` hands a cooperating client. Runs in the supervisor thread (unconfined), all raw
+/// libc + blocking I/O; a 10s recv timeout guards the handshake read and is cleared before the
+/// socket is handed back, so the tunnel the child inherits has no timeout. (epic 5.1)
+fn proxy_connect_tcp(proxy_port: u16, token: &str, authority: &str, dport: u16) -> RawFd {
+    use base64::Engine;
+    let s = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+    if s < 0 {
+        return -1;
+    }
+    let sa = make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), proxy_port);
+    if unsafe {
+        libc::connect(
+            s,
+            &sa as *const _ as *const libc::sockaddr,
+            size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    } != 0
+    {
+        unsafe { libc::close(s) };
+        return -1;
+    }
+    set_recv_timeout(s, 10);
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{token}:"));
+    let req = format!(
+        "CONNECT {authority}:{dport} HTTP/1.1\r\nHost: {authority}:{dport}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"
+    );
+    let bytes = req.as_bytes();
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let n = unsafe {
+            libc::write(
+                s,
+                bytes.as_ptr().add(off) as *const libc::c_void,
+                bytes.len() - off,
+            )
+        };
+        if n <= 0 {
+            unsafe { libc::close(s) };
+            return -1;
+        }
+        off += n as usize;
+    }
+    // Read the proxy's response header block (`...\r\n\r\n`), bounded. A `200` status opens the
+    // tunnel; the child's subsequent ClientHello is then what the proxy reads for its SNI gate.
+    // Anything else (403/407/timeout/short read) is a deny.
+    let mut buf = [0u8; 1024];
+    let mut len = 0usize;
+    let ok = loop {
+        if len >= buf.len() {
+            break false;
+        }
+        let n = unsafe {
+            libc::read(
+                s,
+                buf.as_mut_ptr().add(len) as *mut libc::c_void,
+                buf.len() - len,
+            )
+        };
+        if n <= 0 {
+            break false;
+        }
+        len += n as usize;
+        if buf[..len].windows(4).any(|w| w == b"\r\n\r\n") {
+            // Status line `HTTP/1.x <code> ...`; the code is the second space-separated token.
+            let line_end = buf[..len]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .unwrap_or(len);
+            break std::str::from_utf8(&buf[..line_end])
+                .ok()
+                .and_then(|l| l.split(' ').nth(1))
+                .map(|code| code == "200")
+                .unwrap_or(false);
+        }
+    };
+    if ok {
+        set_recv_timeout(s, 0); // clear before handing the tunnel to the child
+        s
+    } else {
+        unsafe { libc::close(s) };
+        -1
+    }
+}
+
 /// Bind a loopback UDP socket, run the forward-and-record loop on it, and return the
 /// bound port. `upstream_be` is the real resolver in network byte order.
 fn start_stub() -> io::Result<()> {
@@ -747,7 +882,7 @@ fn start_stub() -> io::Result<()> {
         st.upstream_addr_be = upstream_be;
         st.stub_port = port;
     }
-    eprintln!(
+    suplog!(
         "SUP stub resolver 127.0.0.1:{port} -> upstream {}",
         fmt_ip(libc::AF_INET, &upstream_be.to_ne_bytes())
     );
@@ -1037,7 +1172,7 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
         pfd = p;
         let full = join_full(&canon, &base);
         if !write_allowed(&matcher, &full) {
-            eprintln!("SUP DENY write {full} -> EPERM");
+            suplog!("SUP DENY write {full} -> EPERM");
             err = libc::EPERM;
             break 'act;
         }
@@ -1056,7 +1191,7 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
             base2 = b2;
             let full2 = join_full(&canon2, &base2);
             if !write_allowed(&matcher, &full2) {
-                eprintln!("SUP DENY write {full2} -> EPERM");
+                suplog!("SUP DENY write {full2} -> EPERM");
                 err = libc::EPERM;
                 break 'act;
             }
@@ -1258,7 +1393,7 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
         ..Default::default()
     };
     if ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void) < 0 {
-        eprintln!("[sup] SEND: {}", io::Error::last_os_error());
+        suplog!("[sup] SEND: {}", io::Error::last_os_error());
     }
     if pfd >= 0 {
         unsafe { libc::close(pfd) };
@@ -1387,7 +1522,7 @@ fn supervisor(nfd: RawFd) {
             if addr_ptr == 0 {
                 reply_continue(nfd, req.id); // connected: policed at connect()
             } else {
-                eprintln!("SUP DENY UDP-send (addressed) -> EPERM");
+                suplog!("SUP DENY UDP-send (addressed) -> EPERM");
                 reply(nfd, req.id, -libc::EPERM);
             }
             continue;
@@ -1509,7 +1644,7 @@ fn supervisor(nfd: RawFd) {
             as *mut libc::c_void)
             >= 0;
         if !id_live || got < size_of::<libc::sockaddr_in>() as isize || sfd == -1 {
-            eprintln!("SUP DENY (unreadable: got={got} sfd={sfd}) -> EPERM");
+            suplog!("SUP DENY (unreadable: got={got} sfd={sfd}) -> EPERM");
             if sfd >= 0 {
                 unsafe { libc::close(sfd) };
             }
@@ -1521,7 +1656,7 @@ fn supervisor(nfd: RawFd) {
         }
 
         if dom != libc::AF_INET && dom != libc::AF_INET6 {
-            eprintln!("SUP CONTINUE dom={dom}");
+            suplog!("SUP CONTINUE dom={dom}");
             if sfd >= 0 {
                 unsafe { libc::close(sfd) };
             }
@@ -1564,7 +1699,7 @@ fn supervisor(nfd: RawFd) {
                 } == 0
                 {
                     verdict_err = 0;
-                    eprintln!(
+                    suplog!(
                         "SUP DNS-UDP asked {ip}:{port} -> dialed upstream {}:53 (observed via peek)",
                         fmt_ip(libc::AF_INET, &upstream_be.to_ne_bytes())
                     );
@@ -1575,10 +1710,10 @@ fn supervisor(nfd: RawFd) {
                         e.dup = dupfd;
                     }
                 } else {
-                    eprintln!("SUP DENY UDP {ip}:{port} (dial upstream failed)");
+                    suplog!("SUP DENY UDP {ip}:{port} (dial upstream failed)");
                 }
             } else {
-                eprintln!("SUP DENY UDP {ip}:{port}");
+                suplog!("SUP DENY UDP {ip}:{port}");
             }
         } else if typ == libc::SOCK_STREAM {
             let loopback = fam == libc::AF_INET && addr[0] == 127;
@@ -1586,41 +1721,74 @@ fn supervisor(nfd: RawFd) {
                 let st = state().lock().unwrap();
                 st.lookup(fam, &addr[..n])
             };
-            let allow = {
+            // The proxy config, copied from `EgressPolicy` before the fork (epic 5.1). `Some` ⇒ a
+            // loopback SNI-inspecting proxy is running and is authoritative for a NON-loopback
+            // connect; `None` ⇒ the coarse observed-name allowlist decides (epic 1.5). Loopback is
+            // always dialed directly — the proxy is itself loopback, so routing loopback through it
+            // would loop, and the child reaching its own loopback services is not egress.
+            let proxy = {
                 let st = state().lock().unwrap();
-                st.allowed(name.as_deref())
+                st.proxy_port
+                    .map(|p| (p, st.proxy_token.clone().unwrap_or_default()))
             };
-            if loopback || allow {
-                s = unsafe { libc::socket(fam, libc::SOCK_STREAM, 0) };
-                if unsafe {
-                    libc::connect(
-                        s,
-                        &ss as *const _ as *const libc::sockaddr,
-                        alen as libc::socklen_t,
-                    )
-                } == 0
-                {
+            if let (false, Some((pport, ptoken))) = (loopback, proxy) {
+                // Transparent redirect: dial the loopback proxy and speak the cooperative HTTP
+                // CONNECT on the child's behalf. The authority is the observed name when known
+                // (exact for the common one-host-per-IP case), else the IP literal (the proxy's
+                // host gate fail-closes a hardcoded-IP / DoH connect that has no allowlisted IP
+                // rule). The proxy then reads the child's ClientHello SNI as the authoritative
+                // per-host gate — closing the shared-IP leak 1.5 left (a DENIED host riding an
+                // ALLOWED host's IP is dropped at the SNI gate). On ANY dial/handshake failure we
+                // deny; never fall back to a direct dial, which would bypass the SNI gate. (5.1 L3/L4)
+                let authority = name.clone().unwrap_or_else(|| ip.clone());
+                s = proxy_connect_tcp(pport, &ptoken, &authority, port);
+                if s >= 0 {
                     verdict_err = 0;
-                    eprintln!(
-                        "SUP ALLOW {ip}:{port} name={}",
-                        name.as_deref()
-                            .unwrap_or(if loopback { "(loopback)" } else { "(none)" })
-                    );
+                    suplog!("SUP PROXY {ip}:{port} authority={authority} -> 127.0.0.1:{pport}");
                 } else {
-                    verdict_err = -errno();
-                    eprintln!(
-                        "SUP dial {ip}:{port} failed: {}",
-                        io::Error::last_os_error()
-                    );
+                    verdict_err = -libc::EPERM;
+                    suplog!("SUP DENY (proxy) {ip}:{port} authority={authority} -> EPERM");
                 }
             } else {
-                eprintln!(
-                    "SUP DENY {ip}:{port} name={} -> EPERM",
-                    name.as_deref().unwrap_or("(none: no observed DNS)")
-                );
+                let allow = {
+                    let st = state().lock().unwrap();
+                    st.allowed(name.as_deref())
+                };
+                if loopback || allow {
+                    s = unsafe { libc::socket(fam, libc::SOCK_STREAM, 0) };
+                    if unsafe {
+                        libc::connect(
+                            s,
+                            &ss as *const _ as *const libc::sockaddr,
+                            alen as libc::socklen_t,
+                        )
+                    } == 0
+                    {
+                        verdict_err = 0;
+                        suplog!(
+                            "SUP ALLOW {ip}:{port} name={}",
+                            name.as_deref().unwrap_or(if loopback {
+                                "(loopback)"
+                            } else {
+                                "(none)"
+                            })
+                        );
+                    } else {
+                        verdict_err = -errno();
+                        suplog!(
+                            "SUP dial {ip}:{port} failed: {}",
+                            io::Error::last_os_error()
+                        );
+                    }
+                } else {
+                    suplog!(
+                        "SUP DENY {ip}:{port} name={} -> EPERM",
+                        name.as_deref().unwrap_or("(none: no observed DNS)")
+                    );
+                }
             }
         } else {
-            eprintln!("SUP DENY type={typ} fam={fam}");
+            suplog!("SUP DENY type={typ} fam={fam}");
         }
 
         // Preserve the child's non-blocking disposition on the spliced socket. The child (curl,
@@ -1671,7 +1839,7 @@ fn supervisor(nfd: RawFd) {
                 ..Default::default()
             };
             if ioctl_notif(nfd, notif_addfd(), &mut af as *mut _ as *mut libc::c_void) < 0 {
-                eprintln!("[sup] ADDFD: {}", io::Error::last_os_error());
+                suplog!("[sup] ADDFD: {}", io::Error::last_os_error());
                 verdict_err = -libc::EPERM;
             }
         }
@@ -1702,6 +1870,17 @@ pub struct EgressPolicy {
     /// launch, so the filter traps no write-intent syscall (the build jail's coarse path, and any
     /// net-only policy).
     pub write_policy: Option<FsRuleSet>,
+    /// `Some` ⇒ a loopback SNI-inspecting egress proxy is running; the connect-notifier redirects
+    /// an allowed TCP connect THROUGH it (speaking the cooperative `CONNECT` handshake on the
+    /// child's behalf) instead of dialing the destination directly, so per-host precision comes
+    /// from the proxy's SNI gate rather than the coarse observed-IP allowlist. `None` ⇒ no proxy,
+    /// so the notifier dials the destination directly (the coarse path, epic 1.5). Paired with
+    /// [`Self::proxy_token`]. (epic 5.1)
+    pub proxy_port: Option<u16>,
+    /// The per-session bearer the supervisor presents to the loopback proxy (HTTP
+    /// `Proxy-Authorization: Basic base64("<token>:")`). Always present when [`Self::proxy_port`]
+    /// is. (epic 5.1)
+    pub proxy_token: Option<String>,
 }
 
 impl EgressPolicy {
@@ -1731,6 +1910,8 @@ pub fn run_supervised(policy: EgressPolicy, argv: &[CString]) -> io::Result<i32>
             .write_policy
             .as_ref()
             .map(|s| Arc::new(PathMatcher::new(s)));
+        st.proxy_port = policy.proxy_port;
+        st.proxy_token = policy.proxy_token.clone();
     }
     start_stub()?;
 
@@ -1956,6 +2137,8 @@ pub(super) fn spawn_supervised(
             .write_policy
             .as_ref()
             .map(|s| Arc::new(PathMatcher::new(s)));
+        st.proxy_port = policy.proxy_port;
+        st.proxy_token = policy.proxy_token.clone();
     }
     start_stub()?;
 

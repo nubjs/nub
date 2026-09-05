@@ -1,0 +1,18 @@
+# Standalone verification harness for the zero-privilege supervised launch's PER-HOST egress axis
+# (epic 5.1): a fine-grained net allowlist derives ProxyMode::Auto, so `apply` starts the loopback
+# SNI-inspecting proxy, and the supervisor redirects every non-loopback connect THROUGH it by
+# speaking the cooperative HTTP CONNECT on the child's behalf. The child (curl) is NON-cooperative
+# (no HTTP_PROXY in its env, `--noproxy '*'` besides) — it dials directly and the supervisor
+# intercepts at the seccomp layer, so this is exactly A1's "non-cooperative egress blocked, never
+# leaked". Own workspace root; Linux-only.
+[workspace]
+
+[package]
+name = "proxy-per-host-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nub-sandbox = { path = "../../crates/nub-sandbox" }
+serde_json = "1"

@@ -233,6 +233,11 @@ pub fn apply(
     spec: CommandSpec,
     tmp_dir: Option<&Path>,
     preflight: LinuxPreflight,
+    // The loopback egress proxy's port + bearer, when one is running (a per-host net policy). The
+    // Landlock build-jail arm ignores them — it has no supervisor to redirect and confines egress
+    // with the coarse seccomp family ceiling — so they flow only into the supervised plan. (5.1)
+    proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
 ) -> Result<Prepared, Degradation> {
     if let Some(landlock) = preflight.landlock {
         return apply_landlock(policy, spec, landlock, tmp_dir);
@@ -246,7 +251,7 @@ pub fn apply(
         // created (threaded in as `tmp_dir`), granted rw by the ruleset + broker with `TMPDIR`
         // pointed at it; Deny tmp grants nothing, so the shared `/tmp` is simply never in the
         // allow-set. (Env is enforced by construction — `base_command`/`envp` — always.)
-        let plan = build_supervised_plan(policy, &spec, tmp_dir)?;
+        let plan = build_supervised_plan(policy, &spec, tmp_dir, proxy_port, proxy_token)?;
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
@@ -285,6 +290,8 @@ fn build_supervised_plan(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
     tmp_dir: Option<&Path>,
+    proxy_port: Option<u16>,
+    proxy_token: Option<&str>,
 ) -> Result<super::SupervisedPlan, Degradation> {
     let to_cstring = |bytes: &[u8], label: &str| -> Result<CString, Degradation> {
         CString::new(bytes).map_err(|_| Degradation {
@@ -388,6 +395,8 @@ fn build_supervised_plan(
             allow_all,
             allow,
             write_policy,
+            proxy_port,
+            proxy_token: proxy_token.map(str::to_string),
         },
         argv,
         envp,
