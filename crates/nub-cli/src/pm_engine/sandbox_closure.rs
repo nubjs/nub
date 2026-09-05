@@ -154,7 +154,7 @@ fn build_jail_policy(
         project: jail.package_dir.clone(),
     };
     let ctx = nub_sandbox::CompileCtx::new(
-        homes.clone(),
+        homes,
         jail.package_dir.clone(),
         nub_sandbox::ScopeCapabilities::approved(),
         std::env::vars().collect(),
@@ -164,7 +164,22 @@ fn build_jail_policy(
     // reproduces aube's read-anywhere posture minus `$HOME`-anchored secrets, so lifecycle tooling
     // (node + its runtime/preload, module tree, system libs) reads what it needs while writes stay
     // confined. On Linux, Landlock drops the secret denies but the allows already exclude the secret
-    // subtrees; Seatbelt keeps them (stricter). `.env*` basename reads are a per-backend residual.
-    nub_sandbox::relax_reads_to_disk_minus_secrets(&mut policy, &homes);
+    // subtrees; Seatbelt keeps them. `.env*` basename reads are a per-backend residual.
+    //
+    // ⛔ Anchor the secret exclusion to the REAL user home, NOT the throwaway jail home (`home`). The
+    // jail home is an empty per-package dir, so `disk_minus_secrets_read_allows` anchored to it would
+    // exclude nothing real and still grant read to the user's actual `~/.ssh` — measured leaking under
+    // the 5.2c adversarial sweep. `cache` follows the real home for the same reason; `tmp` and
+    // `project` stay the jail's (they carry no user secrets and the write grants already cover them).
+    let real_home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.to_path_buf());
+    let secret_homes = nub_sandbox::Homes {
+        cache: real_home.join(".cache"),
+        home: real_home,
+        tmp: home.join("tmp"),
+        project: jail.package_dir.clone(),
+    };
+    nub_sandbox::relax_reads_to_disk_minus_secrets(&mut policy, &secret_homes);
     Ok(policy)
 }
