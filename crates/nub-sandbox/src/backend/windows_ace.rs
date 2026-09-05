@@ -392,7 +392,10 @@ fn win32_obj_err(op: &str, rc: u32) -> io::Error {
 
 fn win32_last_err(op: &str, path: &Path) -> io::Error {
     let rc = io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
-    io::Error::other(format!("{op} on {} failed (Win32 error {rc})", path.display()))
+    io::Error::other(format!(
+        "{op} on {} failed (Win32 error {rc})",
+        path.display()
+    ))
 }
 
 /// Every window-object grant this process holds, keyed by SID, with the number of live guards

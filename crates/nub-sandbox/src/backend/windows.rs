@@ -2045,21 +2045,18 @@ pub(super) mod launch {
             // FAILS FORWARD deliberately: a station whose DACL cannot be rewritten still
             // launches, rather than losing a run that worked before this existed; and it strips
             // exactly its own ace on drop (`windows_ace`, resurrected from the dropped tier).
-            let window =
-                match unsafe { crate::backend::windows_ace::sid_to_string(ac_sid) } {
-                    Ok(sid_str) => Some(
-                        crate::backend::windows_ace::WindowAceGuard::grant(&sid_str),
-                    ),
-                    Err(error) => {
-                        tracing::debug!(
-                            %error,
-                            "sandbox: could not stringify the container SID for the window-station \
-                             ace — a USER32-importing child on a non-interactive station may fail \
-                             loader init"
-                        );
-                        None
-                    }
-                };
+            let window = match unsafe { crate::backend::windows_ace::sid_to_string(ac_sid) } {
+                Ok(sid_str) => Some(crate::backend::windows_ace::WindowAceGuard::grant(&sid_str)),
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "sandbox: could not stringify the container SID for the window-station \
+                         ace — a USER32-importing child on a non-interactive station may fail \
+                         loader init"
+                    );
+                    None
+                }
+            };
             // Under NUB_JAIL_DUMP_POLICY, report whether the ace actually landed on THIS station:
             // `station_ace=false` printed next to a child `code=3221225794` (0xC0000142) names the
             // fault outright, where the bare exit code says only "the child could not start".
