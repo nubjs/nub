@@ -1695,6 +1695,34 @@ fn compile_commonjs_require_intro() -> String {
 const ROLLDOWN_MODULE_WRAPPERS: [&str; 4] = ["__commonJS", "__commonJSMin", "__esm", "__esmMin"];
 const ROLLDOWN_COMMONJS_WRAPPERS: [&str; 2] = ["__commonJS", "__commonJSMin"];
 
+/// The re-entrancy guard nub wraps every ASYNC module initializer in, and the
+/// reason it exists: Rolldown lowers each import edge into its own `await`, which
+/// is correct for a DAG and wrong inside a cycle.
+///
+/// Real ESM never has a module wait on another module in its own strongly
+/// connected component. `InnerModuleEvaluation` only registers a pending async
+/// dependency when the required module has already left the stack; a requirement
+/// that is still EVALUATING is in the same SCC, so the spec records a
+/// `[[DFSAncestorIndex]]` and moves on. The whole SCC's top-level awaits are then
+/// joined at its cycle root.
+///
+/// Rolldown's lowering has no such rule, so `a -> b -> c -> a` compiles to three
+/// initializers that each await the next. By the time the third calls back into
+/// the first, the memo holds the first's IN-FLIGHT PROMISE, and awaiting it is a
+/// deadlock: the program exits 13 with "Detected unsettled top-level await" and
+/// nothing else. Plain Node runs the same source.
+///
+/// This restores the spec's rule dynamically. An initializer that is re-entered
+/// while its own promise is still pending is, by construction, being reached
+/// through a cycle, so the guard returns `undefined` rather than the promise the
+/// caller would deadlock on. The first caller still holds the real promise, so
+/// the SCC completes before anything downstream of it runs.
+///
+/// It is applied ONLY to async wrappers. A synchronous initializer must finish
+/// synchronously — its callers do not await it — so routing one through a promise
+/// would let them run before it had.
+const COMPILE_CYCLE_INIT_HELPER: &str = "function __nubCycleInit(state, run) { if (state.s === 2) return state.p; if (state.s === 1) return; state.s = 1; return state.p = run().then((v) => { state.s = 2; return v }, (e) => { state.s = 2; throw e }); }\n";
+
 /// Rewrite every top-level Rolldown module wrapper in one chunk. Returns `None`
 /// when the chunk has none, so an untouched chunk keeps its original bytes.
 ///
@@ -1717,6 +1745,7 @@ fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
 
     let mut magic = MagicString::new(code.to_owned());
     let mut rewrote = false;
+    let mut needs_cycle_helper = false;
     for statement in &parsed.program.body {
         let Statement::VariableDeclaration(decl) = statement else {
             continue;
@@ -1745,28 +1774,50 @@ fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
         } else {
             String::new()
         };
+        // Only an ASYNC wrapper can deadlock a cycle, and only an async one may
+        // be routed through a promise — see [`COMPILE_CYCLE_INIT_HELPER`].
+        let is_async = call
+            .arguments
+            .first()
+            .and_then(|argument| argument.as_expression())
+            // oxc keeps parentheses in the tree, and Rolldown emits the wrapper
+            // argument parenthesized, so the arrow is one level down.
+            .map(|expression| expression.get_inner_expression())
+            .is_some_and(|expression| match expression {
+                Expression::ArrowFunctionExpression(arrow) => arrow.r#async,
+                Expression::FunctionExpression(function) => function.r#async,
+                _ => false,
+            });
         // `var <lazy>; function <name>() { [const require = …;] return (<lazy> ??= `
         // replaces everything up to the wrapper call, dropping the
         // `/* @__PURE__ */` with it — tree-shaking has already run by
         // render_chunk, so the annotation has no reader left. The spans come from
         // this same parse, so a failed range is a bug, and it surfaces as one.
-        magic
-            .update(
-                decl.span.start,
-                call.span.start,
-                format!("var {lazy}; function {name}() {{ {bind_require}return ({lazy} ??= "),
+        let (open, close) = if is_async {
+            let state = format!("__nub_cycle_{name}");
+            (
+                format!(
+                    "var {lazy}; var {state} = {{ s: 0, p: void 0 }};                      function {name}() {{ {bind_require}return __nubCycleInit({state}, () => ({lazy} ??= "
+                ),
+                ").apply(this, arguments)) }".to_string(),
             )
-            .and_then(|magic| {
-                magic.update(
-                    call.span.end,
-                    decl.span.end,
-                    ").apply(this, arguments) }".to_string(),
-                )
-            })
+        } else {
+            (
+                format!("var {lazy}; function {name}() {{ {bind_require}return ({lazy} ??= "),
+                ").apply(this, arguments) }".to_string(),
+            )
+        };
+        needs_cycle_helper |= is_async;
+        magic
+            .update(decl.span.start, call.span.start, open)
+            .and_then(|magic| magic.update(call.span.end, decl.span.end, close))
             .map_err(|err| {
                 anyhow!("rewriting the module wrapper `{name}` in a compiled chunk: {err}")
             })?;
         rewrote = true;
+    }
+    if needs_cycle_helper {
+        magic.prepend(COMPILE_CYCLE_INIT_HELPER.to_string());
     }
     Ok(rewrote.then(|| magic.to_string()))
 }
