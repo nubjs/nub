@@ -478,20 +478,47 @@ else
   echo "  node22:            UNAVAILABLE — skipping the capability table"
 fi
 
-if [ -n "$N22" ]; then
-  "$ESBUILD" app/cap.mjs      --bundle --minify --platform=node --format=cjs \
-    --target=node22 --outfile=bundles/cap.cjs      > esbuild-cap.log 2>&1
-  "$ESBUILD" app/cap-poly.mjs --bundle --minify --platform=node --format=cjs \
-    --target=node22 --outfile=bundles/cappoly.cjs  > esbuild-cappoly.log 2>&1
-  echo "  bundles:           cap $(wc -c < bundles/cap.cjs) bytes, cappoly $(wc -c < bundles/cappoly.cjs) bytes"
+if [ -n "$N22" ] && [ "$OS" != linux ]; then
+  echo "  skipped:           Node 22 predates --build-sea, and the two-step"
+  echo "                     postject flow needs a re-signing step this harness"
+  echo "                     only does on linux. The capability table is linux-only."
+  N22=""
+fi
 
+if [ -n "$N22" ]; then
+  # Both bundles are written INTO app/, beside its node_modules. nub's compile
+  # prelude resolves its own polyfill dependencies relative to the input, and a
+  # bundle sitting in bundles/ made that resolution fail outright.
+  "$ESBUILD" app/cap.mjs      --bundle --minify --platform=node --format=cjs \
+    --target=node22 --outfile=app/cap.cjs      > esbuild-cap.log 2>&1
+  "$ESBUILD" app/cap-poly.mjs --bundle --minify --platform=node --format=cjs \
+    --target=node22 --outfile=app/cappoly.cjs  > esbuild-cappoly.log 2>&1
+  if [ ! -s app/cap.cjs ] || [ ! -s app/cappoly.cjs ]; then
+    echo "  bundling FAILED:   $(tail -3 esbuild-cappoly.log | tr '\n' ' ')"
+    N22=""
+  else
+    echo "  bundles:           cap $(wc -c < app/cap.cjs) bytes, cappoly $(wc -c < app/cappoly.cjs) bytes"
+  fi
+fi
+
+if [ -n "$N22" ]; then
+  # Node 22 predates `--build-sea` (Node 25.5+), so this is the original two-step
+  # sea-config + postject flow. Using --build-sea here cost a run: it fails with
+  # "bad option", which reads like a broken harness rather than a version gate.
   cat > sea-cap.json <<EOF
-{ "main": "$W/bundles/cappoly.cjs", "output": "$W/art/capsea", "disableExperimentalSEAWarning": true, "useCodeCache": true }
+{ "main": "$W/app/cappoly.cjs", "output": "$W/blob-cap.blob", "disableExperimentalSEAWarning": true, "useCodeCache": true }
 EOF
   CAP_OK=1
-  "$N22" --build-sea sea-cap.json > build-capsea.log 2>&1 && chmod +x art/capsea \
-    || { note_drop "capsea" "$(tail -3 build-capsea.log | tr '\n' ' ')"; CAP_OK=""; }
-  "$NUB_BIN" compile "$W/bundles/cap.cjs" --no-minify --target "$NODE22_PIN" \
+  if "$N22" --experimental-sea-config sea-cap.json > build-capsea.log 2>&1 \
+     && cp "$N22" art/capsea && chmod +w art/capsea \
+     && ./node_modules/.bin/postject art/capsea NODE_SEA_BLOB "$W/blob-cap.blob" \
+          --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 \
+          >> build-capsea.log 2>&1; then
+    chmod +x art/capsea
+  else
+    note_drop "capsea" "$(tail -3 build-capsea.log | tr '\n' ' ')"; CAP_OK=""
+  fi
+  "$NUB_BIN" compile "$W/app/cap.cjs" --no-minify --target "$NODE22_PIN" \
     --out art/capnub > build-capnub.log 2>&1 \
     || { note_drop "capnub" "$(tail -3 build-capnub.log | tr '\n' ' ')"; CAP_OK=""; }
 
@@ -500,7 +527,7 @@ EOF
   if [ -n "$CAP_OK" ]; then
     D_SEA=$(CAP_DIGEST=1 $GUARD ./art/capsea 2>/dev/null)
     D_NUB=$(CAP_DIGEST=1 ./art/capnub 2>/dev/null)
-    D_BARE=$(CAP_DIGEST=1 "$N22" bundles/cap.cjs 2>/dev/null)
+    D_BARE=$(CAP_DIGEST=1 "$N22" app/cap.cjs 2>/dev/null)
     echo "  bare node22:       $D_BARE"
     echo "  polyfilled SEA:    $D_SEA"
     echo "  nub artifact:      $D_NUB"
@@ -512,16 +539,16 @@ EOF
     fi
     O_SEA=$( (ulimit -u 800; $GUARD ./art/capsea) 2>/dev/null )
     O_NUB=$( (ulimit -u 800; $GUARD ./art/capnub) 2>/dev/null )
-    O_BASE=$("$N22" bundles/cappoly.cjs 2>/dev/null)
+    O_BASE=$("$N22" app/cappoly.cjs 2>/dev/null)
     if [ "$O_SEA" = "$O_BASE" ] && [ "$O_NUB" = "$O_BASE" ]; then
       echo "  output check:      ok (all three identical)"
       hyperfine -i --warmup "$WARMUP" --min-runs "$MIN_RUNS" --style none \
         --export-json warm-cap.json \
-        -n "baseline-A (node22 + polyfills)" "$N22 $W/bundles/cappoly.cjs" \
+        -n "baseline-A (node22 + polyfills)" "$N22 $W/app/cappoly.cjs" \
         -n "capsea (SEA + real polyfills)"   "$W/art/capsea" \
-        -n "baseline-B (node22 + polyfills)" "$N22 $W/bundles/cappoly.cjs" \
+        -n "baseline-B (node22 + polyfills)" "$N22 $W/app/cappoly.cjs" \
         -n "capnub (nub, globals from preamble)" "$W/art/capnub" \
-        -n "baseline-Z (node22 + polyfills)" "$N22 $W/bundles/cappoly.cjs" \
+        -n "baseline-Z (node22 + polyfills)" "$N22 $W/app/cappoly.cjs" \
         > hyperfine-cap.log 2>&1
       node "$HERE/summarize.mjs" warm-cap.json
     else
