@@ -864,7 +864,8 @@ pub(crate) fn prepare_launch(
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
 ) -> Result<(Command, LandlockRuleset), String> {
-    let ruleset = install_landlock_confinement(&mut command, policy, seccomp, tmp_dir, entry_program)?;
+    let ruleset =
+        install_landlock_confinement(&mut command, policy, seccomp, tmp_dir, entry_program)?;
     Ok((command, ruleset))
 }
 

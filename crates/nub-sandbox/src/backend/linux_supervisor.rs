@@ -153,7 +153,12 @@ const DNS_FD_LO: u32 = 960;
 const DNS_FD_HI: u32 = 1024;
 
 fn stmt(code: u16, k: u32) -> seccompiler::sock_filter {
-    seccompiler::sock_filter { code, jt: 0, jf: 0, k }
+    seccompiler::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
 }
 fn jump(code: u16, k: u32, jt: u8, jf: u8) -> seccompiler::sock_filter {
     seccompiler::sock_filter { code, jt, jf, k }
@@ -294,7 +299,12 @@ fn notifier_program(write_broker: bool) -> Vec<seccompiler::sock_filter> {
     ];
     if write_broker {
         // `openat` routes to the flags check; the rest go straight to the notifier.
-        p.push(Ins::Jump(jeq, nr(libc::SYS_openat), "openat_flags", "w_openat"));
+        p.push(Ins::Jump(
+            jeq,
+            nr(libc::SYS_openat),
+            "openat_flags",
+            "w_openat",
+        ));
         p.push(Ins::Label("w_openat"));
         for (i, syscall) in WRITE_INTENT_NRS.iter().enumerate().skip(1) {
             let after: &'static str = WRITE_INTENT_LABELS[i];
@@ -323,15 +333,25 @@ fn notifier_program(write_broker: bool) -> Vec<seccompiler::sock_filter> {
     p.push(Ins::Label("allow"));
     p.push(Ins::Stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     p.push(Ins::Label("eperm"));
-    p.push(Ins::Stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | libc::EPERM as u32));
+    p.push(Ins::Stmt(
+        BPF_RET | BPF_K,
+        SECCOMP_RET_ERRNO | libc::EPERM as u32,
+    ));
     assemble(&p)
 }
 
 /// Per-index fall-through labels for [`WRITE_INTENT_NRS`], so the dispatch loop can name the
 /// instruction after each write-intent test without allocating a label string at runtime.
 const WRITE_INTENT_LABELS: &[&str] = &[
-    "w_openat", "w_openat2", "w_mkdirat", "w_unlinkat", "w_symlinkat", "w_linkat", "w_renameat",
-    "w_renameat2", "w_truncate",
+    "w_openat",
+    "w_openat2",
+    "w_mkdirat",
+    "w_unlinkat",
+    "w_symlinkat",
+    "w_linkat",
+    "w_renameat",
+    "w_renameat2",
+    "w_truncate",
 ];
 
 /// Install a pre-built notifier filter and return the listener descriptor (or `-errno`). The
@@ -445,11 +465,25 @@ impl SupState {
             if e.dup >= 0 {
                 unsafe { libc::close(e.dup) };
             }
-            *e = SkEntry { tgid, fd, dom, typ, dns: false, dup: -1 };
+            *e = SkEntry {
+                tgid,
+                fd,
+                dom,
+                typ,
+                dns: false,
+                dup: -1,
+            };
             return;
         }
         if self.sk.len() < 1024 {
-            self.sk.push(SkEntry { tgid, fd, dom, typ, dns: false, dup: -1 });
+            self.sk.push(SkEntry {
+                tgid,
+                fd,
+                dom,
+                typ,
+                dns: false,
+                dup: -1,
+            });
         }
     }
 
@@ -506,7 +540,9 @@ fn parse_ipv4(s: &str) -> Option<u32> {
     if octets.len() != 4 || s.split('.').count() != 4 {
         return None;
     }
-    Some(u32::from_ne_bytes([octets[0], octets[1], octets[2], octets[3]]))
+    Some(u32::from_ne_bytes([
+        octets[0], octets[1], octets[2], octets[3],
+    ]))
 }
 
 /// Thread-group leader for a thread id (fds are shared across a thread group, so
@@ -549,7 +585,11 @@ fn ioctl_notif(nfd: RawFd, req: libc::c_ulong, arg: *mut libc::c_void) -> libc::
 }
 
 fn reply(nfd: RawFd, id: u64, err: i32) {
-    let mut r = SeccompNotifResp { id, error: err, ..Default::default() };
+    let mut r = SeccompNotifResp {
+        id,
+        error: err,
+        ..Default::default()
+    };
     if ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void) < 0 {
         eprintln!("[sup] SEND: {}", io::Error::last_os_error());
     }
@@ -739,7 +779,10 @@ fn stub_loop(fd: RawFd, upstream_be: u32) {
         if u < 0 {
             continue;
         }
-        let tv = libc::timeval { tv_sec: 3, tv_usec: 0 };
+        let tv = libc::timeval {
+            tv_sec: 3,
+            tv_usec: 0,
+        };
         unsafe {
             libc::setsockopt(
                 u,
@@ -955,7 +998,12 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
 
     // The notification must still be live before we act on a path read from the child.
     let mut valid_id = req.id;
-    if ioctl_notif(nfd, notif_id_valid(), &mut valid_id as *mut _ as *mut libc::c_void) < 0 {
+    if ioctl_notif(
+        nfd,
+        notif_id_valid(),
+        &mut valid_id as *mut _ as *mut libc::c_void,
+    ) < 0
+    {
         return; // child gone: nothing to answer
     }
 
@@ -967,7 +1015,8 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
         return;
     };
 
-    let resolves_second = nr == libc::SYS_linkat || nr == libc::SYS_renameat || nr == libc::SYS_renameat2;
+    let resolves_second =
+        nr == libc::SYS_linkat || nr == libc::SYS_renameat || nr == libc::SYS_renameat2;
 
     let mut pfd: RawFd = -1;
     let mut pfd2: RawFd = -1;
@@ -1042,13 +1091,21 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
                 let flags = a[2] as i32;
                 let mode = a[3] as libc::mode_t;
                 let fd = unsafe {
-                    libc::openat(pfd, cstr(&base).as_ptr(), flags & !libc::O_CLOEXEC, mode as libc::c_uint)
+                    libc::openat(
+                        pfd,
+                        cstr(&base).as_ptr(),
+                        flags & !libc::O_CLOEXEC,
+                        mode as libc::c_uint,
+                    )
                 };
                 if fd < 0 {
                     err = errno();
                     break 'act;
                 }
-                if fd_path(fd).map(|w| !write_allowed(&matcher, &w)).unwrap_or(false) {
+                if fd_path(fd)
+                    .map(|w| !write_allowed(&matcher, &w))
+                    .unwrap_or(false)
+                {
                     unsafe { libc::close(fd) };
                     err = libc::EPERM;
                     break 'act;
@@ -1085,7 +1142,10 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
                     err = errno();
                     break 'act;
                 }
-                if fd_path(fd).map(|w| !write_allowed(&matcher, &w)).unwrap_or(false) {
+                if fd_path(fd)
+                    .map(|w| !write_allowed(&matcher, &w))
+                    .unwrap_or(false)
+                {
                     unsafe { libc::close(fd) };
                     err = libc::EPERM;
                     break 'act;
@@ -1111,7 +1171,13 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
             }
             n if n == libc::SYS_linkat => {
                 if unsafe {
-                    libc::linkat(pfd, cstr(&base).as_ptr(), pfd2, cstr(&base2).as_ptr(), a[4] as i32)
+                    libc::linkat(
+                        pfd,
+                        cstr(&base).as_ptr(),
+                        pfd2,
+                        cstr(&base2).as_ptr(),
+                        a[4] as i32,
+                    )
                 } < 0
                 {
                     err = errno();
@@ -1141,7 +1207,12 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
             }
             n if n == libc::SYS_truncate => {
                 let fd = unsafe {
-                    libc::openat(pfd, cstr(&base).as_ptr(), libc::O_WRONLY | libc::O_NOFOLLOW, 0)
+                    libc::openat(
+                        pfd,
+                        cstr(&base).as_ptr(),
+                        libc::O_WRONLY | libc::O_NOFOLLOW,
+                        0,
+                    )
                 };
                 if fd < 0 {
                     err = errno();
@@ -1270,7 +1341,10 @@ fn supervisor(nfd: RawFd) {
             };
             if dup >= 0 {
                 let mut r = [0u8; 4096];
-                let tv = libc::timeval { tv_sec: 3, tv_usec: 0 };
+                let tv = libc::timeval {
+                    tv_sec: 3,
+                    tv_usec: 0,
+                };
                 unsafe {
                     libc::setsockopt(
                         dup,
@@ -1281,7 +1355,12 @@ fn supervisor(nfd: RawFd) {
                     )
                 };
                 let rn = unsafe {
-                    libc::recv(dup, r.as_mut_ptr() as *mut libc::c_void, r.len(), libc::MSG_PEEK)
+                    libc::recv(
+                        dup,
+                        r.as_mut_ptr() as *mut libc::c_void,
+                        r.len(),
+                        libc::MSG_PEEK,
+                    )
                 };
                 if rn > 0 {
                     parse_response(&r[..rn as usize]);
@@ -1331,7 +1410,11 @@ fn supervisor(nfd: RawFd) {
             let mut af = SeccompNotifAddfd {
                 id: req.id,
                 srcfd: s as u32,
-                newfd_flags: if typ & libc::SOCK_CLOEXEC != 0 { libc::O_CLOEXEC as u32 } else { 0 },
+                newfd_flags: if typ & libc::SOCK_CLOEXEC != 0 {
+                    libc::O_CLOEXEC as u32
+                } else {
+                    0
+                },
                 ..Default::default()
             };
             let is_dgram = (typ & 0xff) == libc::SOCK_DGRAM;
@@ -1353,7 +1436,11 @@ fn supervisor(nfd: RawFd) {
                 let mut st = state().lock().unwrap();
                 st.sk_put(tgid_of(req.pid), newfd, dom, typ & 0xff);
             }
-            let mut r = SeccompNotifResp { id: req.id, val: newfd as i64, ..Default::default() };
+            let mut r = SeccompNotifResp {
+                id: req.id,
+                val: newfd as i64,
+                ..Default::default()
+            };
             ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void);
             continue;
         }
@@ -1387,9 +1474,21 @@ fn supervisor(nfd: RawFd) {
         if sfd >= 0 {
             let mut ol = size_of::<i32>() as libc::socklen_t;
             unsafe {
-                libc::getsockopt(sfd, libc::SOL_SOCKET, libc::SO_TYPE, &mut typ as *mut _ as *mut libc::c_void, &mut ol);
+                libc::getsockopt(
+                    sfd,
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    &mut typ as *mut _ as *mut libc::c_void,
+                    &mut ol,
+                );
                 ol = size_of::<i32>() as libc::socklen_t;
-                libc::getsockopt(sfd, libc::SOL_SOCKET, libc::SO_DOMAIN, &mut dom as *mut _ as *mut libc::c_void, &mut ol);
+                libc::getsockopt(
+                    sfd,
+                    libc::SOL_SOCKET,
+                    libc::SO_DOMAIN,
+                    &mut dom as *mut _ as *mut libc::c_void,
+                    &mut ol,
+                );
             }
         }
 
@@ -1398,12 +1497,17 @@ fn supervisor(nfd: RawFd) {
         let want = req.data.args[2] as usize;
         let alen = want.min(size_of::<libc::sockaddr_storage>());
         let ss_bytes = unsafe {
-            std::slice::from_raw_parts_mut(&mut ss as *mut _ as *mut u8, size_of::<libc::sockaddr_storage>())
+            std::slice::from_raw_parts_mut(
+                &mut ss as *mut _ as *mut u8,
+                size_of::<libc::sockaddr_storage>(),
+            )
         };
         let got = unsafe { read_child_mem(req.pid, req.data.args[1], &mut ss_bytes[..alen]) };
 
         // notification must still be live, and the read must have yielded a sockaddr_in
-        let id_live = ioctl_notif(nfd, notif_id_valid(), &mut { req.id } as *mut u64 as *mut libc::c_void) >= 0;
+        let id_live = ioctl_notif(nfd, notif_id_valid(), &mut { req.id } as *mut u64
+            as *mut libc::c_void)
+            >= 0;
         if !id_live || got < size_of::<libc::sockaddr_in>() as isize || sfd == -1 {
             eprintln!("SUP DENY (unreadable: got={got} sfd={sfd}) -> EPERM");
             if sfd >= 0 {
@@ -1452,7 +1556,11 @@ fn supervisor(nfd: RawFd) {
                 s = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
                 let up = make_sockaddr_in(upstream_be, 53);
                 if unsafe {
-                    libc::connect(s, &up as *const _ as *const libc::sockaddr, size_of::<libc::sockaddr_in>() as libc::socklen_t)
+                    libc::connect(
+                        s,
+                        &up as *const _ as *const libc::sockaddr,
+                        size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
                 } == 0
                 {
                     verdict_err = 0;
@@ -1485,17 +1593,25 @@ fn supervisor(nfd: RawFd) {
             if loopback || allow {
                 s = unsafe { libc::socket(fam, libc::SOCK_STREAM, 0) };
                 if unsafe {
-                    libc::connect(s, &ss as *const _ as *const libc::sockaddr, alen as libc::socklen_t)
+                    libc::connect(
+                        s,
+                        &ss as *const _ as *const libc::sockaddr,
+                        alen as libc::socklen_t,
+                    )
                 } == 0
                 {
                     verdict_err = 0;
                     eprintln!(
                         "SUP ALLOW {ip}:{port} name={}",
-                        name.as_deref().unwrap_or(if loopback { "(loopback)" } else { "(none)" })
+                        name.as_deref()
+                            .unwrap_or(if loopback { "(loopback)" } else { "(none)" })
                     );
                 } else {
                     verdict_err = -errno();
-                    eprintln!("SUP dial {ip}:{port} failed: {}", io::Error::last_os_error());
+                    eprintln!(
+                        "SUP dial {ip}:{port} failed: {}",
+                        io::Error::last_os_error()
+                    );
                 }
             } else {
                 eprintln!(
@@ -1611,14 +1727,18 @@ pub fn run_supervised(policy: EgressPolicy, argv: &[CString]) -> io::Result<i32>
         let mut st = state().lock().unwrap();
         st.allow_all = policy.allow_all;
         st.allow = policy.allow.clone();
-        st.write_matcher = policy.write_policy.as_ref().map(|s| Arc::new(PathMatcher::new(s)));
+        st.write_matcher = policy
+            .write_policy
+            .as_ref()
+            .map(|s| Arc::new(PathMatcher::new(s)));
     }
     start_stub()?;
 
     // child->parent (fd number) and parent->child (go) plain pipes
     let mut c2p = [0i32; 2];
     let mut p2c = [0i32; 2];
-    if unsafe { libc::pipe(c2p.as_mut_ptr()) } != 0 || unsafe { libc::pipe(p2c.as_mut_ptr()) } != 0 {
+    if unsafe { libc::pipe(c2p.as_mut_ptr()) } != 0 || unsafe { libc::pipe(p2c.as_mut_ptr()) } != 0
+    {
         return Err(io::Error::last_os_error());
     }
 
@@ -1667,9 +1787,7 @@ pub fn run_supervised(policy: EgressPolicy, argv: &[CString]) -> io::Result<i32>
         libc::close(p2c[0]);
     }
     let mut child_nfd_bytes = [0u8; 4];
-    let got = unsafe {
-        libc::read(c2p[0], child_nfd_bytes.as_mut_ptr() as *mut libc::c_void, 4)
-    };
+    let got = unsafe { libc::read(c2p[0], child_nfd_bytes.as_mut_ptr() as *mut libc::c_void, 4) };
     if got != 4 {
         let mut st = 0;
         unsafe { libc::waitpid(pid, &mut st, 0) };
@@ -1779,7 +1897,11 @@ impl SupervisedChild {
 impl Drop for SupervisedChild {
     fn drop(&mut self) {
         if !self.reaped {
-            let target = if self.group_leader { -self.pid } else { self.pid };
+            let target = if self.group_leader {
+                -self.pid
+            } else {
+                self.pid
+            };
             unsafe {
                 libc::kill(target, libc::SIGKILL);
                 let mut status = 0;
@@ -1830,7 +1952,10 @@ pub(super) fn spawn_supervised(
         let mut st = state().lock().unwrap();
         st.allow_all = policy.allow_all;
         st.allow = policy.allow.clone();
-        st.write_matcher = policy.write_policy.as_ref().map(|s| Arc::new(PathMatcher::new(s)));
+        st.write_matcher = policy
+            .write_policy
+            .as_ref()
+            .map(|s| Arc::new(PathMatcher::new(s)));
     }
     start_stub()?;
 
@@ -1933,8 +2058,7 @@ pub(super) fn spawn_supervised(
         unsafe { libc::waitpid(pid, &mut status, 0) };
     };
     let mut child_nfd_bytes = [0u8; 4];
-    let got =
-        unsafe { libc::read(c2p[0], child_nfd_bytes.as_mut_ptr() as *mut libc::c_void, 4) };
+    let got = unsafe { libc::read(c2p[0], child_nfd_bytes.as_mut_ptr() as *mut libc::c_void, 4) };
     unsafe { libc::close(c2p[0]) };
     if got != 4 {
         unsafe { libc::close(p2c[1]) };

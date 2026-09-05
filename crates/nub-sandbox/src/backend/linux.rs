@@ -302,7 +302,10 @@ fn build_supervised_plan(
         .unwrap_or_else(|| PathBuf::from("/"));
     let program_abs = resolve_program(&spec.program, &child_cwd, target_path(policy).as_deref())
         .unwrap_or_else(|| PathBuf::from(&spec.program));
-    let mut argv = vec![to_cstring(program_abs.as_os_str().as_bytes(), "entry program")?];
+    let mut argv = vec![to_cstring(
+        program_abs.as_os_str().as_bytes(),
+        "entry program",
+    )?];
     for arg in spec.args.tokens() {
         argv.push(to_cstring(arg.as_bytes(), "argument")?);
     }
@@ -315,12 +318,18 @@ fn build_supervised_plan(
         if is_tmp_key(key) {
             continue;
         }
-        envp.push(to_cstring(format!("{key}={value}").as_bytes(), "environment entry")?);
+        envp.push(to_cstring(
+            format!("{key}={value}").as_bytes(),
+            "environment entry",
+        )?);
     }
     if let Some(tmp) = tmp_dir {
         let tmp = tmp.to_string_lossy();
         for key in ["TMPDIR", "TMP", "TEMP"] {
-            envp.push(to_cstring(format!("{key}={tmp}").as_bytes(), "temp-dir env")?);
+            envp.push(to_cstring(
+                format!("{key}={tmp}").as_bytes(),
+                "temp-dir env",
+            )?);
         }
     }
     let cwd = match &spec.cwd {
@@ -348,12 +357,12 @@ fn build_supervised_plan(
     // subtree (`.git/hooks`, `.git/config`, the policy file) is carried by the write broker below.
     let ruleset = if fs_confines(&policy.fs) {
         Some(
-            super::linux_landlock::build(policy, tmp_dir, Some(&program_abs)).map_err(|reason| {
-                Degradation {
+            super::linux_landlock::build(policy, tmp_dir, Some(&program_abs)).map_err(
+                |reason| Degradation {
                     lost: vec!["fs".to_string()],
                     reason: Some(reason),
-                }
-            })?,
+                },
+            )?,
         )
     } else {
         None
@@ -393,7 +402,6 @@ pub(super) fn protects_ambient_credentials(policy: &SandboxPolicy) -> bool {
     policy.env.resolved && policy.env.enforce && !policy.env.withheld.is_empty()
 }
 
-
 fn validate_process_inputs(spec: &CommandSpec) -> Result<(), String> {
     let reject_nul = |label: &str, value: &OsStr| {
         if value.as_bytes().contains(&0) {
@@ -411,7 +419,6 @@ fn validate_process_inputs(spec: &CommandSpec) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 fn executable(path: &Path) -> bool {
     path.metadata()
@@ -779,7 +786,6 @@ fn prepend_x86_64_unsupported_abi_guard(mut program: BpfProgram) -> Result<BpfPr
     Ok(guarded)
 }
 
-
 fn apply_landlock(
     policy: &SandboxPolicy,
     spec: CommandSpec,
@@ -968,7 +974,6 @@ fn resolve_program(program: &OsStr, child_cwd: &Path, path: Option<&OsStr>) -> O
             .flatten()
     })
 }
-
 
 #[cfg(test)]
 mod tests {
