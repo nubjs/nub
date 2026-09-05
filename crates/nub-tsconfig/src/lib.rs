@@ -970,7 +970,7 @@ fn parent_dir(p: &str) -> String {
 /// same `jsonc-parser` the data parsers use.
 fn read_jsonc(path: &str) -> Result<Value, String> {
     let text = std::fs::read_to_string(path)
-        .map_err(|_| format!("Cannot resolve tsconfig at path: {path}"))?;
+        .map_err(|e| format!("Cannot resolve tsconfig at path: {path}: {e}"))?;
     // The CLI's `nub.jsonc` validation already tolerates the Windows/PowerShell
     // UTF-8 BOM, but a configured tsconfig — and the package metadata in its
     // `extends` chain — is re-opened here, so the same one marker has to be
@@ -1550,5 +1550,37 @@ mod tests {
         ]);
         assert_eq!(read(&dir), vec!["ok"]);
         assert!(diags(&dir).is_empty());
+    }
+
+    /// The read failure used to surface as a bare "Cannot resolve tsconfig at path:
+    /// <path>", so an OS-level refusal — a macOS TCC-protected folder, a root-owned
+    /// file — read like a broken config, and the CLI's "Fix the config" verdict sent
+    /// the reader to repair a file that was fine. The diagnostic now names the OS
+    /// error, so the two failures are distinguishable at a glance.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_tsconfig_names_the_os_error_not_just_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = project(&[(
+            "tsconfig.json",
+            r#"{ "compilerOptions": { "strict": true } }"#,
+        )]);
+        let path = dir.path().join("tsconfig.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // root reads through the mode bits, so there is nothing to observe there.
+        if std::fs::read_to_string(&path).is_ok() {
+            return;
+        }
+        let diags = diags(&dir);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let joined = diags.join("\n");
+        assert!(
+            joined.contains("Cannot resolve tsconfig at path"),
+            "expected the read diagnostic; got {diags:?}"
+        );
+        assert!(
+            joined.contains("Permission denied"),
+            "the OS error should be named; got {diags:?}"
+        );
     }
 }
