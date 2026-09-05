@@ -202,6 +202,12 @@ catalog-legacy/
 # Regenerated on demand from live APIs, so it is derived data, never tracked.
 /tmp/
 
+# Written by tests/compile-sea-probe/probe.mjs on every run, because the compile
+# needs a package.json beside the fixture to resolve it as a module. Its sibling
+# .node-version is already covered by the blanket dotfile rule above, so only this
+# one showed up as an untracked file after a local probe run.
+/tests/compile-sea-probe/package.json
+
 *.cpuprofile
 /p.js
 /rev.rs
