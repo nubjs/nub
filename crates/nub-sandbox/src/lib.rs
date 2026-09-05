@@ -151,6 +151,12 @@ pub use backend::{
     CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget,
     RuntimeCapability, StatusReport, apply, apply_with_runtime, earliest_bootstrap,
 };
+// The Windows zero-privilege per-host egress FUNNEL seam: an embedder registers HOW to launch nub
+// as the co-package egress-proxy helper (`set_...`, OS-agnostic so nub-cli registers with no
+// `cfg`), and nub-cli dispatches its hidden re-entry to `serve_...` (Windows-only).
+pub use backend::set_windows_egress_helper_command;
+#[cfg(target_os = "windows")]
+pub use backend::{serve_windows_egress_helper, windows_token_report};
 // The retained-monitor exercisers and `PreparedSignalCallback` were re-exported from the
 // dropped `linux_monitor` backend (privileged PID-1 monitor tier). Removed with the curated
 // zero-privilege import (epic row 0.3); the Landlock + seccomp user-notify supervisor that

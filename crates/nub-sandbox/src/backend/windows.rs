@@ -49,7 +49,7 @@
 //! `Prepared::status()` calls [`WindowsLaunch::run`], which owns setup → spawn → wait
 //! → RAII teardown.
 
-use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, FsRule, NetPolicy};
+use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, FsRule, Inspection, NetPolicy};
 // Referenced only by the Windows-gated `apply`; the host build (module-under-test)
 // never names it.
 #[cfg(target_os = "windows")]
@@ -103,6 +103,14 @@ pub(crate) struct AppContainerLaunch {
     /// egress, since `allow_internet` stays `false`), torn down when the child exits.
     /// Requires elevation; `apply` sets it only when [`plan_net`] chose [`WinNetPlan::Tier1`].
     register_loopback_exemption: bool,
+    /// Zero-privilege per-host egress FUNNEL: `Some(policy)` ⇒ before spawning the (capability-
+    /// free) child, launch a CO-PACKAGE helper process — SAME AppContainer SID, holding
+    /// `internetClient` — running nub's egress proxy over this net policy, then point the child
+    /// at it via `HTTP_PROXY`. Same-package loopback needs NO admin loopback exemption (unlike
+    /// Tier 1), so this is the unprivileged production path. `apply` sets it only when
+    /// [`plan_net`] chose [`WinNetPlan::Funnel`]; the proxy's port/token are known only at launch,
+    /// so [`AppContainerLaunch::run`] injects the proxy env then rather than `apply` baking it in.
+    egress_funnel: Option<NetPolicy>,
 }
 
 /// Which Windows mechanism owns this launch. The zero-privilege engine keeps only the
@@ -556,9 +564,15 @@ enum WinNetPlan {
     Unconfined,
     /// Coarse egress-deny — withhold `internetClient`, no proxy (deny-all; unprivileged).
     CoarseDeny,
+    /// Zero-privilege per-host FUNNEL — a co-package AppContainer helper (same SID +
+    /// `internetClient`) runs nub's egress proxy, and the capability-free child reaches it by
+    /// same-package loopback (NO admin loopback exemption). Connection tier only (no MITM). The
+    /// interim production per-host path; selected when an embedder has registered a helper launch
+    /// command ([`set_windows_egress_helper_command`](crate::backend::set_windows_egress_helper_command)).
+    Funnel,
     /// Strict-Windows Tier 1 — register the per-run AC-SID loopback exemption so the child
     /// reaches nub's proxy (its SOLE egress, `internetClient` withheld). Per-host + MITM
-    /// enforce. Requires elevation.
+    /// enforce. Requires elevation. The fallback when no helper command is registered.
     Tier1,
     /// Fail-CLOSED: the policy needs per-host/MITM but nub is not elevated, so the loopback
     /// exemption can't be registered. The maintainer requirement — surface a clear error,
@@ -580,23 +594,53 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Decide the net posture. Per-host is signalled by any Allow rule (matches
+/// Decide the net posture. Per-host is signalled by any Allow rule / a broker (matches
 /// `backend::start_proxy_if_needed`, which is what actually starts the proxy). A pure
-/// deny-all is coarse (no proxy, no elevation). `elevated` is consulted only on the
-/// per-host branch, so the caller may pass `false` elsewhere without changing the verdict.
-fn plan_net(net: &NetPolicy, elevated: bool) -> WinNetPlan {
+/// deny-all is coarse (no proxy, no elevation).
+///
+/// The per-host branch prefers the zero-privilege [`Funnel`](WinNetPlan::Funnel) whenever a
+/// helper launch command is registered AND the policy is Connection-tier (no broker, no TLS
+/// inspection) — the funnel's co-package proxy is Connection-only. A broker / TLS-inspect
+/// policy, or a host with no helper registered, falls back to the elevated
+/// [`Tier1`](WinNetPlan::Tier1) (in-process terminating proxy + admin loopback exemption), or
+/// [`FailUnelevated`](WinNetPlan::FailUnelevated) when neither is available. `elevated` is
+/// consulted only on that fallback, so the caller may pass `false` when a helper is available.
+fn plan_net(net: &NetPolicy, elevated: bool, helper_available: bool) -> WinNetPlan {
     if !net.enforce {
         return WinNetPlan::Unconfined;
     }
-    let needs_proxy = net.rules.iter().any(|r| r.effect == Effect::Allow);
+    let needs_proxy =
+        net.rules.iter().any(|r| r.effect == Effect::Allow) || !net.brokers.is_empty();
     if !needs_proxy {
         return WinNetPlan::CoarseDeny;
+    }
+    // The co-package funnel serves the CONNECTION tier only — its helper runs
+    // `EgressProxy::start(.., None)` with no MITM. A broker / TLS-inspect policy needs the
+    // in-process terminating proxy, so it stays on the elevated Tier-1 path.
+    let connection_only = net.brokers.is_empty() && net.inspection == Inspection::Connection;
+    if helper_available && connection_only {
+        return WinNetPlan::Funnel;
     }
     if elevated {
         WinNetPlan::Tier1
     } else {
         WinNetPlan::FailUnelevated
     }
+}
+
+/// Whether `apply` will route this policy through the zero-privilege co-package egress funnel —
+/// the exact predicate [`plan_net`] uses to return [`WinNetPlan::Funnel`]. `backend::apply_inner`
+/// consults this to SKIP starting an in-process egress proxy on Windows: the funnel's proxy runs
+/// in the helper process instead, and an in-process one would bind a port the child cannot reach
+/// (a wasted bind whose failure would needlessly fail the launch closed).
+#[cfg(target_os = "windows")]
+pub(super) fn uses_egress_funnel(policy: &SandboxPolicy) -> bool {
+    let net = &policy.net;
+    net.enforce
+        && (net.rules.iter().any(|r| r.effect == Effect::Allow) || !net.brokers.is_empty())
+        && net.brokers.is_empty()
+        && net.inspection == Inspection::Connection
+        && crate::backend::windows_egress_helper_command().is_some()
 }
 
 // TRAVERSE MODEL (why a LEAF grant alone suffices — no ancestor traverse grants): a
@@ -762,14 +806,18 @@ pub(crate) fn apply(
     }
 
     // ── net posture (strict-Windows tier decision) ──────────────────────────────
-    // Per-host + MITM ride nub's loopback proxy, which an AppContainer child can reach
-    // ONLY through an admin-registered loopback exemption. `is_elevated` is queried lazily
-    // (only when a per-host rule is present) so the coarse/unconfined paths pay nothing.
+    // A per-host allow rides nub's egress proxy. The zero-privilege path runs that proxy in a
+    // CO-PACKAGE helper the child reaches by same-package loopback (the Funnel), selected when an
+    // embedder registered a helper launch command. Only WITHOUT one does the per-host tier need
+    // the elevated in-process proxy + admin loopback exemption (Tier 1) — so `is_elevated` is
+    // queried lazily, and only on that fallback (a helper being available makes it irrelevant).
+    let per_host_allow =
+        policy.net.enforce && policy.net.rules.iter().any(|r| r.effect == Effect::Allow);
+    let helper_available = crate::backend::windows_egress_helper_command().is_some();
     let net_plan = plan_net(
         &policy.net,
-        policy.net.enforce
-            && policy.net.rules.iter().any(|r| r.effect == Effect::Allow)
-            && launch::is_elevated(),
+        per_host_allow && !helper_available && launch::is_elevated(),
+        helper_available,
     );
     // INFORMATIVE FAIL (maintainer requirement): a per-host / MITM config on an unelevated
     // Windows host cannot register the exemption, so FAIL CLOSED with a clear message —
@@ -793,6 +841,12 @@ pub(crate) fn apply(
         });
     }
     let tier1 = net_plan == WinNetPlan::Tier1;
+    // The zero-privilege co-package funnel: the child's SOLE egress is the helper's proxy, reached
+    // by same-package loopback. `run()` launches that helper and injects its proxy env, because the
+    // port/token exist only at launch. No in-process `proxy_port` is required here (the caller
+    // starts none — `uses_egress_funnel` suppresses it), which is exactly why this must not fall
+    // under the Tier-1 `proxy_port.is_none()` guard below.
+    let funnel = net_plan == WinNetPlan::Funnel;
     // Tier 1 is meaningless without the running proxy the child routes through; if the
     // proxy failed to start (CA/TLS build or bind failure) fail closed rather than launch a
     // child that can reach nothing under a per-host promise.
@@ -939,14 +993,24 @@ pub(crate) fn apply(
         read_node_grants,
         write_grants,
         publishable_grants,
-        env: build_child_env(&policy.env, tier1, proxy_port, proxy_token, ca_bundle),
-        // Grant internetClient only when net is unconfined; an enforced net (coarse deny
-        // OR Tier 1) withholds it. For Tier 1 this is LOAD-BEARING: the loopback exemption
-        // opens loopback but withholding internetClient keeps external egress blocked, so
-        // nub's proxy is the child's SOLE egress (matches mac/linux `remote ip localhost`).
-        // The unconfined case is reported as less than full host networking above.
+        env: build_child_env(
+            &policy.env,
+            tier1,
+            funnel,
+            proxy_port,
+            proxy_token,
+            ca_bundle,
+        ),
+        // Grant internetClient only when net is unconfined; an enforced net (coarse deny,
+        // Tier 1, OR the funnel) withholds it. For Tier 1 AND the funnel this is LOAD-BEARING:
+        // the child's ONLY egress must be nub's proxy, so it holds no direct-egress capability
+        // (matches mac/linux `remote ip localhost`). Under the funnel the reach is same-package
+        // loopback to the helper; under Tier 1 it is the admin loopback exemption. The unconfined
+        // case is reported as less than full host networking above.
         allow_internet: !policy.net.enforce,
         register_loopback_exemption: tier1,
+        // `run()` launches the co-package helper over this policy and injects its proxy env.
+        egress_funnel: funnel.then(|| policy.net.clone()),
     };
 
     // The `command` field is unused on the launch path (status() runs `launch`); it
@@ -964,22 +1028,26 @@ pub(crate) fn apply(
 
 /// The child's env block, or `None` to inherit the ambient env untouched.
 ///
-/// - env enforced ⇒ start from the constructed scrub map; else (Tier 1 only) snapshot the
+/// - env enforced ⇒ start from the constructed scrub map; else (Tier 1 / funnel only) snapshot the
 ///   ambient env so the proxy/CA overrides ride an otherwise-inherited environment — the
 ///   Windows launch block is all-or-nothing, unlike a mac/linux `Command`'s inherit+override,
 ///   so "inherit + override" must be materialized here (a non-Unicode var is lossily kept).
 /// - Tier 1 folds in the cooperative proxy hint (clients route through the loopback proxy)
 ///   and the MITM CA-trust vars (the child trusts the proxy's minted leaves). A non-Tier-1
 ///   enforced env stays the plain scrub — no proxy is running to route to.
+/// - The funnel forces a materialized block too (so `run()` has a map to inject the helper's
+///   proxy hint into once its port/token are known), but folds in NOTHING here: the proxy env is
+///   injected at launch, and the funnel is Connection-tier so there is no CA bundle.
 #[cfg(target_os = "windows")]
 fn build_child_env(
     env: &crate::policy::EnvPolicy,
     tier1: bool,
+    funnel: bool,
     proxy_port: Option<u16>,
     proxy_token: Option<&str>,
     ca_bundle: Option<&std::path::Path>,
 ) -> Option<BTreeMap<String, String>> {
-    if !env.enforce && !tier1 {
+    if !env.enforce && !tier1 && !funnel {
         return None;
     }
     let mut m = if env.enforce {
@@ -1074,6 +1142,122 @@ pub(super) fn resolve_program(
         }
     }
     None
+}
+
+/// A one-line report of the CURRENT process's token security principal:
+/// `il=<Low|Medium|…> is_appcontainer=<bool> ac_sid=<S-1-15-2-…|none>`.
+///
+/// A diagnostic for confined-launch principals — used to prove, from inside a running process, that
+/// it is the Low-integrity AppContainer the sandbox intended, and (for the egress funnel) that the
+/// co-package helper and the confined child carry the SAME AppContainer SID. Read-only queries on
+/// the process's own token; never fails hard (returns `il=err`/`none` fields instead).
+#[cfg(target_os = "windows")]
+pub fn windows_token_report() -> String {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+        TOKEN_APPCONTAINER_INFORMATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenAppContainerSid,
+        TokenIntegrityLevel, TokenIsAppContainer,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return "il=err is_appcontainer=err ac_sid=err".to_string();
+        }
+        // Integrity level from the mandatory-label SID's last sub-authority (RID).
+        let il = {
+            let mut len = 0u32;
+            GetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                std::ptr::null_mut(),
+                0,
+                &mut len,
+            );
+            let mut buf = vec![0u8; len as usize];
+            let mut out = "err".to_string();
+            if len > 0
+                && GetTokenInformation(
+                    token,
+                    TokenIntegrityLevel,
+                    buf.as_mut_ptr().cast(),
+                    len,
+                    &mut len,
+                ) != 0
+            {
+                let tml = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+                let sid = tml.Label.Sid;
+                let count = *GetSidSubAuthorityCount(sid);
+                let rid = *GetSidSubAuthority(sid, u32::from(count - 1));
+                out = match rid {
+                    0x0000 => "Untrusted".into(),
+                    0x1000 => "Low".into(),
+                    0x2000 => "Medium".into(),
+                    0x3000 => "High".into(),
+                    0x4000 => "System".into(),
+                    other => format!("rid=0x{other:04x}"),
+                };
+            }
+            out
+        };
+        let mut is_ac_raw = 0u32;
+        let mut len = 0u32;
+        GetTokenInformation(
+            token,
+            TokenIsAppContainer,
+            std::ptr::from_mut(&mut is_ac_raw).cast(),
+            4,
+            &mut len,
+        );
+        let ac_sid = {
+            let mut len = 0u32;
+            GetTokenInformation(
+                token,
+                TokenAppContainerSid,
+                std::ptr::null_mut(),
+                0,
+                &mut len,
+            );
+            if len == 0 {
+                "none".to_string()
+            } else {
+                let mut buf = vec![0u8; len as usize];
+                if GetTokenInformation(
+                    token,
+                    TokenAppContainerSid,
+                    buf.as_mut_ptr().cast(),
+                    len,
+                    &mut len,
+                ) != 0
+                {
+                    let info = &*(buf.as_ptr() as *const TOKEN_APPCONTAINER_INFORMATION);
+                    if info.TokenAppContainer.is_null() {
+                        "none".to_string()
+                    } else {
+                        let mut s: *mut u16 = std::ptr::null_mut();
+                        if ConvertSidToStringSidW(info.TokenAppContainer, &mut s) != 0 {
+                            let mut n = 0usize;
+                            while *s.add(n) != 0 {
+                                n += 1;
+                            }
+                            let out = String::from_utf16_lossy(std::slice::from_raw_parts(s, n));
+                            LocalFree(s.cast());
+                            out
+                        } else {
+                            "err".to_string()
+                        }
+                    }
+                } else {
+                    "none".to_string()
+                }
+            }
+        };
+        CloseHandle(token);
+        format!("il={il} is_appcontainer={} ac_sid={ac_sid}", is_ac_raw != 0)
+    }
 }
 
 /// Place (`grant`) or remove the ancestor repair's non-inherited traverse ace on `dir` for
@@ -1230,6 +1414,16 @@ pub(super) mod launch {
     const TRAVERSE_MASK: u32 = 0x0010_00a1;
     // The well-known internetClient capability SID.
     const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
+    // internetClientServer + privateNetworkClientServer. Granted to the co-package egress-funnel
+    // HELPER alongside internetClient so its loopback bind/accept is never the variable under test
+    // — the exact cap set the proven funnel harness gave the helper. The confined CHILD still holds
+    // ZERO capabilities; these widen the trusted helper, not the sandboxed principal.
+    const INTERNET_CLIENT_SERVER_SID: &str = "S-1-15-3-2";
+    const PRIVATE_NETWORK_CLIENT_SERVER_SID: &str = "S-1-15-3-3";
+    // An app-package-readable working directory for a LowBox process — a LowBox cannot resolve
+    // nub's own user-profile cwd. `System32` carries ALL APPLICATION PACKAGES read (measured), so
+    // the egress-funnel helper (which needs no policy grants of its own) starts there.
+    const APP_PACKAGE_READABLE_CWD: &str = "C:\\Windows\\System32";
     // ALL APPLICATION PACKAGES. Any right for this SID invalidates the default-deny
     // AppContainer assumption for that path.
     const ALL_APPLICATION_PACKAGES_SID: &str = "S-1-15-2-1";
@@ -2013,7 +2207,7 @@ pub(super) mod launch {
         /// Own the full spawn lifecycle: create a per-run AppContainer profile, grant
         /// the inheritable allow-ACEs, launch the child under the LowBox token inside a
         /// kill-on-close Job, wait, then tear everything down (RAII).
-        pub(crate) fn run(self) -> io::Result<ExitStatus> {
+        pub(crate) fn run(mut self) -> io::Result<ExitStatus> {
             // 1. Per-run AppContainer profile → AC SID. `_profile` deletes it on drop
             //    (declared FIRST ⇒ dropped LAST, after the ACEs are revoked).
             let name = unique_profile_name();
@@ -2467,6 +2661,50 @@ pub(super) mod launch {
                     std::mem::size_of::<HANDLE>() * inherit_handles.len(),
                 )?;
             }
+
+            // 5c. THE ZERO-PRIVILEGE EGRESS FUNNEL. Launch a CO-PACKAGE helper process — SAME
+            //     AppContainer SID (`ac_sid`), holding `internetClient` — that runs nub's egress
+            //     proxy over `self.egress_funnel`'s policy, then point THIS (capability-free) child
+            //     at it via `HTTP_PROXY`. The child reaches the helper by SAME-PACKAGE loopback,
+            //     which needs NO admin loopback exemption (the `IsAppContainerLoopback` kernel
+            //     permit) — the whole reason this path is unprivileged where Tier 1 is not.
+            //
+            //     Ordered here, AFTER the window-station ACE (1b): the helper shares `ac_sid`, so
+            //     that ACE is what lets a USER32-importing nub.exe survive loader init on a non-
+            //     interactive station. The proxy port/token exist only now, so the child's proxy
+            //     env is injected here rather than in `apply`'s `build_child_env`. `_egress_helper`
+            //     holds the helper in a KILL_ON_JOB_CLOSE job dropped when `run` returns (after the
+            //     child is waited + reaped below), so the helper lives exactly the child's lifetime
+            //     and dies with nub even on a crash.
+            let _egress_helper = if let Some(policy) = self.egress_funnel.take() {
+                let (port, token, guard) = timed("egress_funnel_helper", || {
+                    launch_egress_helper(ac_sid, &policy)
+                })?;
+                if let Some(env) = self.env.as_mut() {
+                    let url = format!("http://{token}@127.0.0.1:{port}");
+                    for key in [
+                        "HTTP_PROXY",
+                        "HTTPS_PROXY",
+                        "http_proxy",
+                        "https_proxy",
+                        "ALL_PROXY",
+                        "npm_config_proxy",
+                        "npm_config_https_proxy",
+                    ] {
+                        env.insert(key.to_string(), url.clone());
+                    }
+                    // A bypass var surviving here would route the child AROUND the proxy — the OS
+                    // still blocks that (no `internetClient`), but it turns a clean proxy-403 into
+                    // an opaque connect failure. Drop them, exactly as `backend::set_proxy_env`.
+                    for key in ["NO_PROXY", "no_proxy", "npm_config_noproxy"] {
+                        env.remove(key);
+                    }
+                    env.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
+                }
+                Some(guard)
+            } else {
+                None
+            };
 
             // 6. Build the command line + env block + cwd (kept alive across the call).
             let mut cmdline = build_command_line(&self.program, &self.args);
@@ -3225,6 +3463,234 @@ pub(super) mod launch {
         Ok(job)
     }
 
+    /// Owns the running co-package egress-funnel helper. Dropping it closes the helper's
+    /// KILL_ON_JOB_CLOSE job handle, which reaps the helper — so the helper lives exactly as long
+    /// as the `AppContainerLaunch::run` frame that holds it (i.e. the confined child's lifetime),
+    /// and dies with nub even on a crash. The explicit `TerminateProcess` is belt-and-suspenders
+    /// for an immediate teardown; the job close is the guarantee.
+    struct HelperGuard {
+        job: HANDLE,
+        process: HANDLE,
+    }
+    impl Drop for HelperGuard {
+        fn drop(&mut self) {
+            unsafe {
+                windows_sys::Win32::System::Threading::TerminateProcess(self.process, 0);
+                CloseHandle(self.job);
+                CloseHandle(self.process);
+            }
+        }
+    }
+
+    /// Launch the CO-PACKAGE egress-proxy helper for the zero-privilege per-host funnel, and read
+    /// back the loopback port + bearer token it binds.
+    ///
+    /// The helper is nub itself, re-invoked through the embedder-registered command
+    /// ([`windows_egress_helper_command`](crate::backend::windows_egress_helper_command)) plus a
+    /// base64(JSON) [`NetPolicy`] argument, launched as an AppContainer LowBox with `ac_sid` (the
+    /// SAME package SID as the confined child) and `internetClient` (+ the client/server loopback
+    /// caps, matching the proven harness so the bind/accept is never the variable). It prints
+    /// `PROXY_READY port=<p> token=<t>` on the inherited stdout pipe read here.
+    ///
+    /// Grants NO file ACEs: the medium-IL parent opens the image section, and nub's own
+    /// dependencies load from `System32` (ALL APPLICATION PACKAGES readable) — the proven funnel
+    /// harness ran the same-shape helper this way with no per-file grant. The window-station ACE
+    /// the child already holds (step 1b) covers the helper too, since it shares `ac_sid`.
+    fn launch_egress_helper(
+        ac_sid: PSID,
+        policy: &crate::policy::NetPolicy,
+    ) -> io::Result<(u16, String, HelperGuard)> {
+        use base64::Engine as _;
+        use std::os::windows::io::AsRawHandle as _;
+
+        // 1. Command line: the registered [image, hidden-flag] + the per-run serialized policy.
+        let base = crate::backend::windows_egress_helper_command()
+            .ok_or_else(|| io::Error::other("no Windows egress-helper command is registered"))?;
+        let (program, flag_args) = base
+            .split_first()
+            .ok_or_else(|| io::Error::other("the Windows egress-helper command is empty"))?;
+        let json = serde_json::to_vec(policy).map_err(io::Error::other)?;
+        let blob = base64::engine::general_purpose::STANDARD.encode(&json);
+        let mut argv: Vec<std::ffi::OsString> = flag_args.to_vec();
+        argv.push(std::ffi::OsString::from(blob));
+        let mut cmdline = build_command_line(program, &crate::backend::CommandArgs::Argv(argv));
+
+        // 2. A pipe carrying the helper's stdout back to nub (PROXY_READY). Only the WRITE end is
+        //    marked inheritable and scoped into the child via the handle list; the read end stays
+        //    private to nub.
+        let (reader, writer) = std::io::pipe()?;
+        let w: HANDLE = writer.as_raw_handle().cast();
+        if unsafe { SetHandleInformation(w, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // 3. SECURITY_CAPABILITIES: the child's package SID + internetClient (+ loopback
+        //    client/server caps, per the proven harness). The HELPER is trusted nub code, not the
+        //    sandboxed principal — the confined child holds ZERO capabilities.
+        let cap_owned: Vec<CapSid> = [
+            INTERNET_CLIENT_SID,
+            INTERNET_CLIENT_SERVER_SID,
+            PRIVATE_NETWORK_CLIENT_SERVER_SID,
+        ]
+        .iter()
+        .map(|s| CapSid::new(s))
+        .collect::<io::Result<_>>()?;
+        let mut caps: Vec<SID_AND_ATTRIBUTES> = cap_owned
+            .iter()
+            .map(|c| SID_AND_ATTRIBUTES {
+                Sid: c.0,
+                Attributes: SE_GROUP_ENABLED,
+            })
+            .collect();
+        let mut sec_caps = SECURITY_CAPABILITIES {
+            AppContainerSid: ac_sid,
+            Capabilities: caps.as_mut_ptr(),
+            CapabilityCount: caps.len() as u32,
+            Reserved: 0,
+        };
+
+        // 4. Proc-thread attribute list: SECURITY_CAPABILITIES + a HANDLE_LIST scoping inheritance
+        //    to exactly the stdout write end.
+        let inherit = [w];
+        let mut attr = ProcThreadAttrList::new(2)?;
+        attr.update(
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+            std::ptr::from_mut(&mut sec_caps).cast(),
+            std::mem::size_of::<SECURITY_CAPABILITIES>(),
+        )?;
+        attr.update(
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            inherit.as_ptr().cast_mut().cast(),
+            std::mem::size_of::<HANDLE>() * inherit.len(),
+        )?;
+
+        // 5. STARTUPINFOEX: stdout+stderr → the pipe write end; stdin none. cwd = System32
+        //    (app-package-readable). Inherit the parent env (NULL lpEnvironment) — the helper is
+        //    nub itself and only needs enough env to start the proxy.
+        let cwd_wide = to_wide(APP_PACKAGE_READABLE_CWD);
+        let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.lpAttributeList = attr.as_ptr();
+        si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdInput = std::ptr::null_mut();
+        si.StartupInfo.hStdOutput = w;
+        si.StartupInfo.hStdError = w;
+
+        let flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW;
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: cmdline/cwd_wide/attr/sec_caps/caps all outlive this call; lpCommandLine is a
+        // writable UTF-16 buffer; bInheritHandles TRUE so the scoped handle list takes effect.
+        let ok = unsafe {
+            CreateProcessW(
+                std::ptr::null(),
+                cmdline.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                flags,
+                std::ptr::null(),
+                cwd_wide.as_ptr(),
+                std::ptr::from_mut(&mut si).cast(),
+                &mut pi,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _ = &cap_owned; // backs `sec_caps` — held alive until here
+
+        // 6. Contain the helper in its own KILL_ON_JOB_CLOSE job (assigned while suspended) so it
+        //    cannot outlive nub, then resume it.
+        let job = match create_confinement_job() {
+            Ok(job) => job,
+            Err(e) => {
+                unsafe {
+                    windows_sys::Win32::System::Threading::TerminateProcess(pi.hProcess, 1);
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                }
+                return Err(e);
+            }
+        };
+        if unsafe { AssignProcessToJobObject(job, pi.hProcess) } == 0 {
+            let e = io::Error::last_os_error();
+            unsafe {
+                windows_sys::Win32::System::Threading::TerminateProcess(pi.hProcess, 1);
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                CloseHandle(job);
+            }
+            return Err(e);
+        }
+        unsafe {
+            ResumeThread(pi.hThread);
+            CloseHandle(pi.hThread);
+        }
+        let guard = HelperGuard {
+            job,
+            process: pi.hProcess,
+        };
+
+        // 7. nub drops its own copy of the write end (else the reader never sees EOF), then reads
+        //    PROXY_READY off the pipe on a worker thread, bounded by a deadline. The worker RETURNS
+        //    as soon as it has the line (closing nub's read end), so it does not linger; on the
+        //    helper's death the read end sees EOF and the worker exits too.
+        drop(writer);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            let mut buf = std::io::BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match buf.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = tx.send(None);
+                        return;
+                    }
+                    Ok(_) => {
+                        if let Some(rest) = line.trim().strip_prefix("PROXY_READY") {
+                            let mut port = 0u16;
+                            let mut token = String::new();
+                            for field in rest.split_whitespace() {
+                                if let Some(v) = field.strip_prefix("port=") {
+                                    port = v.parse().unwrap_or(0);
+                                } else if let Some(v) = field.strip_prefix("token=") {
+                                    token = v.to_string();
+                                }
+                            }
+                            let _ = tx.send(Some((port, token)));
+                            return;
+                        }
+                        if line.contains("PROXY_START_FAIL") {
+                            let _ = tx.send(None);
+                            return;
+                        }
+                        // Diagnostic principal dump (gated in the helper) — surface it so a
+                        // verification run can compare the helper's SID against the child's.
+                        if line.contains("TOKEN[") {
+                            eprint!("{line}");
+                        }
+                    }
+                    Err(_) => {
+                        let _ = tx.send(None);
+                        return;
+                    }
+                }
+            }
+        });
+
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Some((port, token))) if port != 0 && !token.is_empty() => Ok((port, token, guard)),
+            _ => {
+                // guard drops here → helper reaped.
+                Err(io::Error::other(
+                    "the co-package egress-funnel helper did not report a ready proxy",
+                ))
+            }
+        }
+    }
+
     /// Remove every ACE for `sid` on `path` (teardown). REVOKE_ACCESS ignores the
     /// access mask + inheritance and matches purely on the trustee, so a unique per-run
     /// SID's ACEs go cleanly wherever we placed them.
@@ -3962,30 +4428,54 @@ mod tests {
             effect: Effect::Allow,
         };
 
-        // Unconfined net — grant internetClient, no proxy (elevation-irrelevant).
+        // Unconfined net — grant internetClient, no proxy (elevation- and helper-irrelevant).
         let unconfined = NetPolicy::default();
-        assert_eq!(plan_net(&unconfined, false), WinNetPlan::Unconfined);
-        assert_eq!(plan_net(&unconfined, true), WinNetPlan::Unconfined);
+        assert_eq!(plan_net(&unconfined, false, false), WinNetPlan::Unconfined);
+        assert_eq!(plan_net(&unconfined, true, true), WinNetPlan::Unconfined);
 
-        // Pure deny-all — coarse egress-deny, unprivileged (elevation-irrelevant).
+        // Pure deny-all — coarse egress-deny, unprivileged (elevation- and helper-irrelevant).
         let deny_all = NetPolicy {
             enforce: true,
             default_effect: Effect::Deny,
             ..Default::default()
         };
-        assert_eq!(plan_net(&deny_all, false), WinNetPlan::CoarseDeny);
-        assert_eq!(plan_net(&deny_all, true), WinNetPlan::CoarseDeny);
+        assert_eq!(plan_net(&deny_all, false, false), WinNetPlan::CoarseDeny);
+        assert_eq!(plan_net(&deny_all, true, true), WinNetPlan::CoarseDeny);
 
-        // Per-host (any Allow rule) needs the elevated loopback exemption: Tier 1 when
-        // elevated, fail-CLOSED (never silent coarse-degrade) when not.
+        // Per-host (any Allow rule), NO helper registered: the elevated loopback exemption is the
+        // only per-host path — Tier 1 when elevated, fail-CLOSED (never silent coarse-degrade) when
+        // not.
         let per_host = NetPolicy {
             enforce: true,
             rules: vec![allow("example.com")],
             default_effect: Effect::Deny,
             ..Default::default()
         };
-        assert_eq!(plan_net(&per_host, true), WinNetPlan::Tier1);
-        assert_eq!(plan_net(&per_host, false), WinNetPlan::FailUnelevated);
+        assert_eq!(plan_net(&per_host, true, false), WinNetPlan::Tier1);
+        assert_eq!(
+            plan_net(&per_host, false, false),
+            WinNetPlan::FailUnelevated
+        );
+
+        // Per-host WITH a helper registered: the zero-privilege co-package Funnel wins, regardless
+        // of elevation — it needs neither admin nor the in-process proxy.
+        assert_eq!(plan_net(&per_host, false, true), WinNetPlan::Funnel);
+        assert_eq!(plan_net(&per_host, true, true), WinNetPlan::Funnel);
+
+        // A TLS-inspect per-host policy is NOT funnel-eligible (the funnel's helper is Connection
+        // tier, no MITM): it falls back to the elevated Tier-1 path even with a helper registered.
+        let per_host_mitm = NetPolicy {
+            enforce: true,
+            rules: vec![allow("example.com")],
+            default_effect: Effect::Deny,
+            inspection: crate::policy::Inspection::TlsInspect,
+            ..Default::default()
+        };
+        assert_eq!(plan_net(&per_host_mitm, true, true), WinNetPlan::Tier1);
+        assert_eq!(
+            plan_net(&per_host_mitm, false, true),
+            WinNetPlan::FailUnelevated
+        );
     }
 
     // `apply` is `#[cfg(windows)]`, so this test compiles + runs only on the Windows VM/CI.
@@ -4037,9 +4527,13 @@ mod tests {
         });
 
         // The dedicated-account + WFP tier owned the provisioned loopback window; it was dropped
-        // (epic row 0.3), so there is no window and the proxy takes an ephemeral port. Phase 5.1's
-        // same-package-SID loopback funnel is what will honor a per-host policy on Windows; until
-        // then per-host fail-closes below, unconditionally and without any elevation path.
+        // (epic row 0.3), so there is no window and the proxy takes an ephemeral port. The
+        // same-package-SID loopback FUNNEL now honors a per-host policy on Windows WITHOUT
+        // elevation — but only when an embedder has registered a helper launch command, which this
+        // test deliberately does NOT (the helper-command OnceLock is process-global and set-once,
+        // so registering here would corrupt sibling tests). So this exercises the no-helper
+        // fallback: Tier 1 when elevated, fail-closed otherwise. The funnel path is covered
+        // hermetically by `plan_net_decides_windows_net_posture` and end-to-end on the Windows VM.
         let port = 59080;
         let res = apply(
             &per_host,

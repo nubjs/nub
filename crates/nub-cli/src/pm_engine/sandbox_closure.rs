@@ -25,9 +25,24 @@ pub(crate) fn register() {
     aube_scripts::set_script_sandbox(std::sync::Arc::new(confine));
 }
 
-/// No-op where the lifecycle seam is not wired (currently Windows), so aube's embedded jail — or
-/// its no-op non-Linux/macOS arm — remains the enforcement path.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows: the aube-scripts lifecycle seam is not wired here yet (aube's no-op non-Linux/macOS
+/// arm stays the build-jail path), but the `nub-sandbox` AppContainer backend still needs to know
+/// HOW to launch nub as the co-package egress-proxy HELPER for a zero-privilege per-host net policy
+/// (the agent sandbox reaches this independently of the build jail). Register that launch command —
+/// `[current_exe(), "<hidden-flag>"]`; the backend appends the per-run serialized policy, and the
+/// hidden re-entry is dispatched in `cli::run` to `nub_sandbox::serve_windows_egress_helper`.
+#[cfg(target_os = "windows")]
+pub(crate) fn register() {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("nub"));
+    nub_sandbox::set_windows_egress_helper_command(vec![
+        exe.into_os_string(),
+        std::ffi::OsString::from(crate::cli::EGRESS_FUNNEL_HELPER_FLAG),
+    ]);
+}
+
+/// No-op where neither seam is wired (non-Linux/macOS/Windows), so aube's embedded jail — or its
+/// no-op arm — remains the enforcement path.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(crate) fn register() {}
 
 /// Linux: install nub's Landlock + seccomp confinement as a `pre_exec` on the caller's command.

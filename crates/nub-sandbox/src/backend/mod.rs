@@ -30,8 +30,90 @@ use crate::proxy::mitm::{BrokerSession, MitmEngine, RuntimeCredentialBroker};
 use crate::proxy::{EgressProxy, StaticDecider};
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
+use std::ffi::OsString;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::OnceLock;
+
+/// How an embedder launches nub as the Windows CO-PACKAGE EGRESS-PROXY HELPER — the argv the
+/// AppContainer backend uses as the image + command line for a per-host net launch's helper
+/// process (typically `[current_exe(), "<hidden-flag>"]`). The backend appends the per-run
+/// serialized net policy as a final argument at launch. `None` (unset) ⇒ the backend cannot spawn
+/// the helper, so a per-host policy stays on the elevated Tier-1 / fail-closed path — behavior is
+/// UNCHANGED when no embedder registers one.
+///
+/// OS-agnostic by design: the setter compiles everywhere so an embedder registers once at startup
+/// without a `cfg`; only the Windows backend reads it (via [`windows_egress_helper_command`]).
+static WINDOWS_EGRESS_HELPER_COMMAND: OnceLock<Vec<OsString>> = OnceLock::new();
+
+/// Register the co-package egress-helper launch command (see [`WINDOWS_EGRESS_HELPER_COMMAND`]).
+/// Set-once; the first call wins. Call at process startup, before any confined per-host launch.
+pub fn set_windows_egress_helper_command(argv: Vec<OsString>) {
+    let _ = WINDOWS_EGRESS_HELPER_COMMAND.set(argv);
+}
+
+/// The registered co-package egress-helper launch command, if an embedder installed one. Read only
+/// by the Windows backend (`windows::uses_egress_funnel` / `apply` / `launch_egress_helper`), so a
+/// non-Windows build derives the seam but never consults it — kept compiled everywhere so a change
+/// to it is type-checked on the dev host, matching this file's `set_ca_env`/`set_proxy_env` idiom.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn windows_egress_helper_command() -> Option<&'static [OsString]> {
+    WINDOWS_EGRESS_HELPER_COMMAND.get().map(Vec::as_slice)
+}
+
+/// The Windows co-package egress-proxy HELPER PROCESS entry. nub re-invokes itself with the
+/// registered hidden flag and a base64(JSON) [`NetPolicy`](crate::policy::NetPolicy) argument; this
+/// reads that policy, starts the real [`EgressProxy`] (Connection tier, no MITM), prints
+/// `PROXY_READY port=<p> token=<t>` on its inherited stdout for the parent to read, and then serves
+/// until the parent tears it down (its KILL_ON_JOB_CLOSE job). Never returns.
+///
+/// The parent (the AppContainer backend's `launch_egress_helper`) is what confines this: it runs
+/// as a co-package AppContainer LowBox holding only `internetClient` + the loopback caps, sharing
+/// the confined child's package SID so the child reaches it by same-package loopback.
+#[cfg(target_os = "windows")]
+pub fn serve_windows_egress_helper() -> ! {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    // args: [exe, hidden-flag, base64(JSON policy)] — nub-cli's dispatch has matched the flag.
+    let blob = std::env::args().nth(2).unwrap_or_default();
+    let json = match base64::engine::general_purpose::STANDARD.decode(blob.as_bytes()) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("PROXY_START_FAIL policy-decode: {error}");
+            std::process::exit(2);
+        }
+    };
+    let policy: crate::policy::NetPolicy = match serde_json::from_slice(&json) {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("PROXY_START_FAIL policy-parse: {error}");
+            std::process::exit(2);
+        }
+    };
+    // Diagnostic (gated, off in production): report the helper's own security principal so a
+    // verification run can confirm it is a Low-integrity AppContainer sharing the child's SID. The
+    // parent's reader forwards any `TOKEN[` line it sees on this stdout to nub's stderr.
+    if std::env::var_os("NUB_EGRESS_DUMP_TOKENS").is_some() {
+        println!("TOKEN[helper] {}", windows_token_report());
+        let _ = std::io::stdout().flush();
+    }
+    match EgressProxy::start(Arc::new(StaticDecider::new(policy)), None) {
+        Ok(proxy) => {
+            // The parent reads this line off the inherited stdout to learn where to point the child.
+            println!("PROXY_READY port={} token={}", proxy.port(), proxy.token());
+            let _ = std::io::stdout().flush();
+            // Hold the proxy alive and serve the child's whole lifetime; the parent reaps us.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        Err(error) => {
+            println!("PROXY_START_FAIL start: {error}");
+            let _ = std::io::stdout().flush();
+            std::process::exit(2);
+        }
+    }
+}
 
 /// What `nub setup-sandbox --check` found: the report a human reads, plus the single fact a script
 /// needs. `ready` answers exactly one question — can the sandbox enforce for THIS caller, right
@@ -112,6 +194,8 @@ pub fn earliest_bootstrap() -> std::io::Result<RuntimeCapability> {
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::windows_publish_appcontainer_read;
+#[cfg(target_os = "windows")]
+pub use windows::windows_token_report;
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
 pub use windows::{windows_leaf_grant_redundant, windows_object_traverse_ace};
@@ -1160,8 +1244,21 @@ fn apply_inner(
     } else {
         start_proxy_if_needed(policy, runtime_brokers)?
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
     let proxy = start_proxy_if_needed(policy, runtime_brokers)?;
+    // Windows: a Connection-tier per-host policy runs its egress proxy inside a CO-PACKAGE
+    // AppContainer HELPER process (the zero-privilege funnel), not in nub — so nub starts NO
+    // in-process proxy for it. An in-process one would bind a loopback port the confined child
+    // cannot reach (different package), and its bind failure is a HARD apply error, which would
+    // needlessly fail the funnel launch closed. `windows::uses_egress_funnel` is the exact
+    // predicate `windows::apply` uses to select the funnel, so the two never disagree. Every other
+    // Windows net posture still starts the in-process proxy exactly as before.
+    #[cfg(target_os = "windows")]
+    let proxy = if windows::uses_egress_funnel(policy) {
+        None
+    } else {
+        start_proxy_if_needed(policy, runtime_brokers)?
+    };
     let proxy_port = proxy.as_ref().map(EgressProxy::port);
     // The per-session egress-proxy token, delivered to the child via the proxy URL. Same
     // presence as `proxy_port` (both derive from `proxy`), threaded into each backend so

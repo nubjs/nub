@@ -291,6 +291,13 @@ libc.workspace = true
 nub-sandbox = { path = "../nub-sandbox" }
 
 [target.'cfg(windows)'.dependencies]
+# The shared zero-privilege sandbox engine, on Windows too: the AppContainer per-host
+# egress FUNNEL needs nub-cli to register the co-package helper launch command
+# (pm_engine/sandbox_closure.rs) and to dispatch its hidden re-entry to
+# `serve_windows_egress_helper` (cli.rs). The aube-scripts lifecycle seam stays unwired here
+# (that is why this was linux/macos-only before), but the agent sandbox reaches the backend
+# independently. Same PM-pure crate as the linux/macos block above.
+nub-sandbox = { path = "../nub-sandbox" }
 # CRT fd-level capture (_dup/_dup2/_pipe/_read) so `with_fd_captured` works on
 # Windows too — load-bearing for `config get registry`'s default-registry
 # substitution, which detects the engine's `undefined` print from the capture
