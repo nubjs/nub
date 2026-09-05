@@ -155,24 +155,33 @@ pub enum Decline {
     /// those are is per container and per mode, and the answer is measured rather
     /// than argued — the same throwing `app.ts`, compiled six ways on Node 26.8:
     ///
-    /// | `--sourcemap=` | `Mode::Sea` | `Mode::Inline` |
-    /// | --- | --- | --- |
-    /// | `inline` | `app.ts:2:13` | `app.mjs:3:10743` |
-    /// | `linked` | needs a file | needs a file |
-    /// | `external` | `app.mjs:2:10743` | `app.mjs:2:10743` |
+    /// | `--sourcemap=` | extracted (the control) | `Mode::Sea` | `Mode::Inline` |
+    /// | --- | --- | --- | --- |
+    /// | `inline` | `app.ts:2:13` | `app.ts:2:13` | `app.mjs:3:10743` |
+    /// | `linked` | `app.ts:2:13` | needs a file | needs a file |
+    /// | `external` | `app.mjs:2:10743` | `app.mjs:2:10743` | `app.mjs:3:10743` |
     ///
     /// `linked` ships a `.map` beside the chunks and names it in a
     /// `sourceMappingURL`, which neither container can resolve; it is caught by
     /// [`Decline::NonChunkFile`] too, and kept here only because this reason reads
-    /// better. `external` emits its map beside the EXECUTABLE and puts no reference
-    /// in the bundle, so its frames are unmapped in every shape including today's
-    /// extracted one — declining it bought a first-run write and nothing else.
+    /// better.
     ///
-    /// `inline` is the one that splits, and it is why this was worth measuring: the
-    /// single-executable container serves each module through a `registerHooks`
-    /// `load` hook, and V8 honours the `sourceMappingURL` it finds there; the
-    /// no-extract launcher hands its chunks over as `-e` plus `data:` URLs, and it
-    /// does not.
+    /// `Mode::Inline` declines EVERY map, and the reason is not that it cannot find
+    /// one — it is that no map made by the bundler still describes what that
+    /// container runs. [`rewrite_chunk`] edits each chunk AFTER bundling: it
+    /// prepends one generated line and rewrites cross-chunk specifiers in place,
+    /// which moves every line by one and moves columns on the lines it touches. The
+    /// map is made before that. The shift is visible in the table above — the same
+    /// frame is line 2 under a container that runs the bundler's bytes and line 3
+    /// under the one that rewrites them. An unresolvable map is a missing map, which
+    /// a reader notices; a map that resolves to the WRONG line is worse, because
+    /// nothing reports it. Composing `rewrite_chunk`'s edit into each map would
+    /// admit both `inline` and `external` here, and is what that would take.
+    ///
+    /// `Mode::Sea` rewrites nothing — it serves the emitted chunk verbatim through
+    /// a `registerHooks` `load` hook, where V8 honours the `sourceMappingURL` it
+    /// finds (`sea.rs`: "`EVAL_GLOBAL_CLEANUP` has no counterpart here"). So its
+    /// maps still describe its code, and only `linked` is out of reach.
     SourceMap,
     /// The payload names `child_process`, so the bootstrap installs its `fork()`
     /// identity fix-up — which sets the fork's executable to the Node the artifact
@@ -319,11 +328,12 @@ pub fn classify(
     if inputs.worker_roots != 0 || inputs.worker_wrappers != 0 {
         return Ok(Err(Decline::StaticWorker));
     }
-    // `Linked` in either container, and `Inline` in the one that cannot apply it.
-    // The other four cells are reachable; the table behind that is on
+    // `Linked` needs a file no container can reach. Everything else is a question
+    // of whether the map still describes the code: `Mode::Inline` rewrites its
+    // chunks after the map is made, so none of them does. See
     // [`Decline::SourceMap`].
     if matches!(inputs.sourcemap, bundle::SourcemapMode::Linked)
-        || (mode == Mode::Inline && matches!(inputs.sourcemap, bundle::SourcemapMode::Inline))
+        || (mode == Mode::Inline && !matches!(inputs.sourcemap, bundle::SourcemapMode::None))
     {
         return Ok(Err(Decline::SourceMap));
     }
@@ -823,9 +833,14 @@ mod tests {
     /// The two `Inline` cells are the whole point. The same mode is reachable from
     /// the single-executable container and not from the no-extract launcher, so a
     /// test that checked one of them would read as coverage whichever way the code
-    /// went. `External` is here because declining it was the cost with no benefit:
-    /// its map is never named by the bundle, so its frames are unmapped in every
-    /// shape, extracted ones included.
+    /// went.
+    ///
+    /// `External` pins the correction that a review caught: it looked admissible
+    /// everywhere, because its map is never named by the bundle and its frames come
+    /// back unmapped in every shape. But `Mode::Inline` publishes a DETACHED map
+    /// made before [`rewrite_chunk`] shifts the code it describes, so admitting it
+    /// there hands an error tracker a map that resolves to the wrong line and says
+    /// nothing about it.
     #[test]
     fn each_container_declines_only_the_source_maps_it_cannot_honour() {
         use bundle::SourcemapMode::{External, Inline as InlineMap, Linked, None as NoMap};
@@ -862,8 +877,9 @@ mod tests {
             (
                 External,
                 None,
-                None,
-                "an external map is never named by the bundle, so nothing resolves it at run time",
+                Some(Decline::SourceMap),
+                "an external map is published unchanged, so the container that rewrites its \
+                 chunks would describe them with a map made before the rewrite",
             ),
         ] {
             assert_eq!(
