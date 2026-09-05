@@ -28,9 +28,13 @@ if (record !== undefined) {
     typeof record.getBuiltin === "function" &&
     record.needsChildProcess === false &&
     record["needsW" + "orker"] === false &&
-    requirePath !== null &&
-    existsSync(requirePath);
-  if (!wellFormed) recordState = `bad:${JSON.stringify(record.requireArg)}`;
+    // `--smol` plus a small payload is the INLINE shape: the bootstrap arrives as
+    // Node's `-e`, so `__filename` is `[eval]`, `requireArg` is undefined by design,
+    // and there is no file to look for. Every consumer already reads a missing value
+    // as "do not prepend a preload", which is the truth there. The extracted shape
+    // still has to name a file that exists.
+    (record.requireArg === undefined || (requirePath !== null && existsSync(requirePath)));
+  if (!wellFormed) recordState = `bad:${JSON.stringify(record.requireArg ?? null)}`;
 }
 // The lazy accessor must still deliver a constructor on computed access.
 const lazy = typeof globalThis["Wor" + "ker"];
