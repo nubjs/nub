@@ -22,7 +22,7 @@ Taking a GitHub issue from "reported" to "shipped and the reporter told." The hy
 
 ## Guardrails
 
-- **Tone is factual, neutral, professional** — never braggy, competitive, or over-promising. See [`PROSE.md`](../../../PROSE.md).
+- **Tone is factual, neutral, professional** — never braggy, competitive, or over-promising. Invoke the `prose-writing` skill.
 - **A fix lands via the PR-from-a-worktree flow**, not directly on the shared `main` tree. Trivial doc/typo fixes are the documented exception.
 - **Verify end-to-end before pushing** — run the pre-push local-verification loop. A green suite with a stubbed fix is worse than an unchecked one.
 - **Don't autonomously land a change to a default / security posture / product behavior / API-config-env surface.** Those are recommend-only until the maintainer signs off. A mechanical, clearly-a-bug fix may land; a behavior decision routes back as a question.
@@ -64,7 +64,7 @@ gh issue comment <n> --repo nubjs/nub --body "Investigating."
 
 No "thanks for the report," no timeline, no preview of your hypothesis — a longer ack leaks half-formed theories and reads as noise. Internal/self-filed issues don't need this.
 
-**Every substantive comment is terse + factual per PROSE.md.** State what you found and what you did, in the fewest words that carry the facts. Never write "previous comments were wrong" or similar meta-commentary — prior comments are often a bot's. The `gh-comment-guard` PreToolUse hook blocks an over-long `gh issue/pr comment` / `gh pr create` body; trim it, or set `NUB_ALLOW_LONG_COMMENT=1` only for a genuinely-needed longer body.
+**Every substantive comment is terse + factual per the `prose-writing` skill.** State what you found and what you did, in the fewest words that carry the facts. Never write "previous comments were wrong" or similar meta-commentary — prior comments are often a bot's. The `gh-comment-guard` PreToolUse hook blocks an over-long `gh issue/pr comment` / `gh pr create` body; trim it, or set `NUB_ALLOW_LONG_COMMENT=1` only for a genuinely-needed longer body.
 
 If triage shows it's not a bug, say so factually with the reason and close it per Step 6.
 

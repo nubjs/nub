@@ -19,6 +19,8 @@ prune.bats|aube prune --help|nub's clap help omits aube's "Remove extraneous pac
 prune.bats|aube prune removes orphaned .aube entries|fixture seeds an orphan under node_modules/.aube; nub's virtual store is node_modules/.store
 prune.bats|aube prune honors virtualStoreDir|asserts the prune summary's ".aube" label; nub rebrands it to "the virtual store"
 prune.bats|aube prune removes orphan scoped .aube entries and cleans empty scope dir|fixture seeds an orphan under node_modules/.aube; nub's virtual store is node_modules/.store
+ci.bats|aube ci --disable-global-virtual-store materializes packages per-project|nub's install surface does not advertise the engine's global-virtual-store toggle flags (the mode is configured, not flagged); also asserts the node_modules/.aube path
+remove.bats|aube remove: invalid packageExtensions leave package.json unchanged|asserts the ERR_AUBE_INVALID_PACKAGE_EXTENSION spelling; nub rebrands the code to ERR_NUB_
 
 # ── fresh projects default to pnpm-lock.yaml (defaultLockfileFormat=pnpm) ───
 install.bats|aube install in CI generates a lockfile when none is present|fresh projects write pnpm-lock.yaml, not aube-lock.yaml
@@ -46,9 +48,15 @@ add.bats|aube add -w: errors outside a workspace|engine emits pnpm-workspace.yam
 update.bats|aube update -r --latest updates a shared catalog entry|catalog fixture declares its workspace in aube-workspace.yaml, which workspace_markers() does not consult, so -r has no workspace root to filter against
 update.bats|aube update -r --latest --no-save leaves the catalog range unchanged|catalog fixture declares its workspace in aube-workspace.yaml, which workspace_markers() does not consult, so -r has no workspace root to filter against
 update.bats|aube update -r --latest updates a named catalog and preserves its prefix|catalog fixture declares its workspace in aube-workspace.yaml, which workspace_markers() does not consult, so -r has no workspace root to filter against
+update.bats|aube update -r --latest preserves unrelated shared catalog entries|catalog fixture declares its workspace in aube-workspace.yaml, which workspace_markers() does not consult, so -r has no workspace root to filter against
+update.bats|aube update -r skips deferred install when no importer updates|catalog fixture declares its workspace in aube-workspace.yaml, which workspace_markers() does not consult, so -r has no workspace root to filter against
+remove.bats|aube remove: removed override falls back to resolution|fixture pins the override under `pnpm.overrides`, a branded field a nub-identity project ignores, so there is no override for the removal to drop
+lockfile_settings.bats|defaultLockfileFormat=pnpm creates and recreates pnpm-lock.yaml|drives the recreate through `aube clean`, which nub refuses (no node_modules deletion on the user's behalf)
+remove.bats|aube remove: stale retained dependency falls back to resolution|asserts the engine's "Resolved N packages" line; nub's install summary replaces it (install/mod.rs logs it at debug). The fallback itself holds: the test's refuted "Pruned lockfile" line stays absent
+remove.bats|aube remove --save-dev resolves an incompatible overlapping dependency|asserts the engine's "Resolved N packages" line; nub's install summary replaces it (install/mod.rs logs it at debug)
 
 # ── pnpm-parity divergences (decision C: nub extends aube's behavior to match pnpm) ──
-add.bats|aube add --save-peer writes only peerDependencies and does not install|nub dual-writes --save-peer to devDependencies+peerDependencies for pnpm parity (decision C); aube asserts peerDependencies-only
+add.bats|aube add --save-peer writes only peerDependencies and auto-installs the peer|nub dual-writes --save-peer to devDependencies+peerDependencies for pnpm parity (decision C); aube asserts peerDependencies-only
 
 # ── virgin projects get a `packageManager: nub@<v>` identity stamp (PR #255) ──
 # On a truly-fresh project (no lockfile / packageManager / devEngines), nub's
@@ -65,6 +73,10 @@ remove.bats|aube remove: preserves package.json top-level key order|a virgin rem
 # like aube-workspace.yaml above. Frozen installs see "no lockfile", ci can't
 # install from it, update can't refresh it.
 install.bats|aube install --frozen-lockfile works|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock
+remove.bats|aube remove --save-dev retains an overlapping optional dependency|greps aube-lock.yaml; nub's canonical lockfile name is nub.lock
+update.bats|aube update --latest --no-save: does not resolve past the kept range|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock
+update.bats|aube update warns when minimumReleaseAge hides a newer version|the warning fires; the closing assertion greps aube-lock.yaml, and nub's canonical lockfile name is nub.lock
+lockfile_settings.bats|an existing lockfile wins over defaultLockfileFormat|asserts aube-lock.yaml survives; nub's canonical lockfile name is nub.lock
 install.bats|aube install --no-frozen-lockfile re-resolves when lockfile is missing|asserts aube-lock.yaml is rewritten; nub's canonical lockfile name is nub.lock (1.25.1 renamed this test, dropping its old .aube-state assertion)
 install.bats|aube install surfaces lockfile parse errors instead of silently re-resolving|garbage written into aube-lock.yaml is never read (file invisible under nub's lock name)
 install.bats|aube install --frozen-lockfile errors when lockfile is stale|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock

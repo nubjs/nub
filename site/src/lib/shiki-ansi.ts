@@ -24,34 +24,54 @@ import type { ShikiTransformer } from '@shikijs/types';
       near-black code panel: `black` lands at 1.06:1 on #0b0a08 (invisible), and
       `red` and `brightBlack` both miss AA. The replacements below map each
       default onto the site's own dark-panel accents, so an ANSI block reads as
-      part of the site rather than as a screenshot of someone else's editor. */
+      part of the site rather than as a screenshot of someone else's editor. The
+      three rules that build that table are stated above it. */
 
-// Every value below is measured against the code panel's #0b0a08 ground. All
-// clear WCAG AA (4.5:1) except `black`, which is deliberately the dimmest entry
-// at 3.39:1 — ANSI black's job is to recede, and 3.39 already beats the VS Code
-// default's 1.06. The accents are the panel palette from `global.css`: ember,
-// acid, sky, orchid, plus `--nub-code-foreground` / `--nub-code-muted` for
-// white and bright black.
-//
+/* THREE RULES BUILD THIS TABLE, and every value is either a site token or a
+   stated derivation of one — nothing is picked by eye.
+
+   1. NORMALS ARE SITE TOKENS. Each of the six chromatic slots takes the
+      dark-panel accent from `global.css` that occupies it, and `white` /
+      `brightBlack` take the panel's own foreground and muted. `cyan` is the one
+      slot the site has never needed a color for, so it is CONSTRUCTED as a
+      sibling of `--color-acid`: acid is hsl(135, 71%, 60%), and this is the same
+      saturation and lightness at hue 175. Mixing an existing token toward the
+      background instead was tried and rejected — at 38-48% saturation it read as
+      a dull sage next to accents that all sit at 71-100%.
+   2. BRIGHTS ARE THE NORMAL LIFTED 35% TOWARD WHITE, so the bright row keeps
+      its hue and gains only weight.
+   3. EXCEPT WHERE THE SITE ALREADY OWNS A LIGHTER SIBLING, which beats a
+      derived lift. `brightMagenta` is `--color-orchid` and `brightCyan` is the
+      #99ffe4 mint — both counted on the rendered homepage (orchid once, mint
+      fourteen times), so both are colors a reader has already met. Lifted pink
+      (#ffa1cf) sat too close to pink to read as a separate color at all, and
+      this is also why `magenta` is pink rather than orchid: orchid as the NORMAL
+      magenta collided with `--color-sky` on the line above it in a real
+      transcript, which is the exact confusion ANSI color exists to prevent.
+
+   Contrast is measured against the panel's #0b0a08. Every entry clears WCAG AA
+   (4.5:1) except `black`, which is deliberately the dimmest thing on the panel
+   at 3.25:1 — ANSI black's job is to recede, and it still beats the VS Code
+   default's 1.06:1, where it was invisible. */
 // Exported because the animated player (`src/lib/ansi-screen.ts`) resolves the
 // same 16 colors itself: a recorded session and a static fence of the same
 // output have to be indistinguishable, and a second copy of a palette drifts.
 export const SITE_ANSI_PALETTE = {
-  black: '#6b6459', //          3.39:1  dimmest, still legible
+  black: '#65625b', //          3.25:1  foreground mixed 60% toward the panel
   red: '#ff5d3b', //            6.48:1  --color-ember
   green: '#4fe173', //         11.64:1  --color-acid
   yellow: '#fbbf24', //        11.85:1  --status-warn
   blue: '#7bb0ff', //           8.95:1  --color-sky
-  magenta: '#c9a3ff', //        9.58:1  --color-orchid
-  cyan: '#55d6d0', //          11.23:1
+  magenta: '#ff6fb5', //        7.72:1  --color-pink
+  cyan: '#51e1d5', //          12.33:1  acid's saturation and lightness at hue 175
   white: '#ece6d8', //         15.90:1  --nub-code-foreground
   brightBlack: '#9f988c', //    6.92:1  --nub-code-muted, matching dimmed console output
-  brightRed: '#ff8f75', //      8.89:1
-  brightGreen: '#8cf0a4', //   14.24:1
-  brightYellow: '#ffd75f', //  14.27:1
-  brightBlue: '#a8caff', //    11.83:1
-  brightMagenta: '#e0c4ff', // 12.73:1
-  brightCyan: '#8ceaf2', //    14.29:1
+  brightRed: '#ff9680', //      9.35:1
+  brightGreen: '#8deca4', //   13.82:1
+  brightYellow: '#fcd571', //  14.04:1
+  brightBlue: '#a9ccff', //    12.03:1
+  brightMagenta: '#c9a3ff', //  9.58:1  --color-orchid, per rule 3
+  brightCyan: '#99ffe4', //    16.75:1  the site's mint, per rule 3
   brightWhite: '#ffffff', //   19.79:1
 } as const;
 

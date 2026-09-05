@@ -1,8 +1,8 @@
-// Regression guard for the Next.js 16 + Turbopack build break: nub injects
-// `--js-defer-import-eval` on argv because Node refuses it in NODE_OPTIONS, and real
-// tooling forwards `process.execArgv` into a Worker. Node then rejected nub's own flag
-// with ERR_WORKER_INVALID_EXEC_ARGV and killed the build. nub's preload hides the flag
-// from execArgv; V8 has already parsed it, so the feature must still work.
+// Regression guard from the Next.js 16 + Turbopack build break: real tooling forwards
+// `process.execArgv` into a Worker, and Node once rejected a nub-injected V8 flag there
+// with ERR_WORKER_INVALID_EXEC_ARGV. nub now turns `--js-defer-import-eval` on from
+// inside the process instead of putting it on argv, so nothing nub adds may be left in
+// execArgv, and the worker's own preload must still enable deferral.
 import { Worker } from "node:worker_threads";
 
 // Every flag left visible must be one Node would accept back in NODE_OPTIONS.

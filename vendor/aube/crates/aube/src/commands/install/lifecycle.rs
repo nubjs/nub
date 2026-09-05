@@ -15,23 +15,30 @@ pub(super) async fn run_root_lifecycle(
     manifest: &aube_manifest::PackageJson,
     hook: aube_scripts::LifecycleHook,
 ) -> miette::Result<()> {
+    run_root_lifecycle_script(project_dir, modules_dir_name, manifest, hook.script_name()).await
+}
+
+/// Run a named root-package lifecycle script.
+///
+/// Most install hooks use [`aube_scripts::LifecycleHook`], but pnpm's
+/// root-only `pnpm:devPreinstall` hook is intentionally outside the npm
+/// lifecycle enum. Keeping the spawn and error path here makes the special
+/// hook behave exactly like the ordinary root lifecycle.
+pub(super) async fn run_root_lifecycle_script(
+    project_dir: &std::path::Path,
+    modules_dir_name: &str,
+    manifest: &aube_manifest::PackageJson,
+    script_name: &str,
+) -> miette::Result<()> {
     // Only announce when the hook is actually defined, so projects without
     // lifecycle scripts don't get noise in their install output.
-    if !manifest.scripts.contains_key(hook.script_name()) {
+    if !manifest.scripts.contains_key(script_name) {
         return Ok(());
     }
-    tracing::debug!("Running {} script...", hook.script_name());
-    aube_scripts::run_root_hook(project_dir, modules_dir_name, manifest, hook)
+    tracing::debug!("Running {script_name} script...");
+    aube_scripts::run_root_script_by_name(project_dir, modules_dir_name, manifest, script_name)
         .await
-        .map_err(|e| {
-            // Old message was just the bare error string. User got
-            // a cryptic "exit status 1" with no hook name, no script
-            // path, nothing. Tag with which hook fired so the log
-            // line is self-documenting. This is the common case
-            // (failed preinstall on `aube install`) so the regression
-            // really hurt triage.
-            miette!("root {} script failed: {e}", hook.script_name())
-        })?;
+        .map_err(|e| miette!("root {script_name} script failed: {e}"))?;
     Ok(())
 }
 
@@ -50,8 +57,8 @@ pub(super) async fn run_root_lifecycle(
 ///   the same denylist; `true`/absent is the default, only `false` denies)
 /// - the `--dangerously-allow-all-builds` escape hatch
 ///
-/// Workspace-level entries in the `allowBuilds` map take precedence
-/// over the manifest map for the same pattern, matching pnpm. The
+/// Workspace and manifest entries in the `allowBuilds` map merge for the same
+/// pattern, with an explicit denial from either source taking precedence. The
 /// flat lists are pure append — deny always wins at `decide()` time.
 pub(crate) fn build_policy_from_sources(
     manifest: &aube_manifest::PackageJson,
@@ -77,6 +84,13 @@ pub(crate) fn build_policy_from_manifest_sources<'a>(
     Vec<aube_scripts::BuildPolicyError>,
 ) {
     let mut merged = std::collections::BTreeMap::new();
+    // The policy holds only what the project declared. Default trust is the
+    // `defaultTrust` floor's job (`default_trust.rs`): it is consulted on
+    // `Unspecified`, gates every listed package on provenance, advisory
+    // vetting and the cooling window, and names what it let through. A
+    // built-in allowlist seeded here (the bundled pnpm trusted list,
+    // `assets/trusted-dependencies.json`) would answer `Allow` ahead of the
+    // floor, skipping those gates and the disclosure.
     let mut only_built = Vec::new();
     let mut never_built = Vec::new();
     for manifest in manifests {
@@ -96,7 +110,10 @@ pub(crate) fn build_policy_from_manifest_sources<'a>(
         never_built.extend(manifest.dependencies_meta_built_false());
     }
     for (k, v) in workspace.allow_builds_raw() {
-        merged.insert(k, v);
+        merged
+            .entry(k)
+            .and_modify(|existing| merge_allow_build(existing, v.clone()))
+            .or_insert(v);
     }
     only_built.extend(workspace.only_built_dependencies.iter().cloned());
     never_built.extend(workspace.never_built_dependencies.iter().cloned());
@@ -281,7 +298,7 @@ pub(super) fn resolve_link_strategy(
         // handle. `open_store` performs lockfile + IO work; a second
         // call to fetch `virtual_store_dir` would repeat that on the
         // hot path of every `auto`-mode install.
-        let store = super::super::open_store(cwd).ok();
+        let store = super::super::open_store_with_ctx(cwd, ctx).ok();
         let store_dir = store.as_ref().map(|s| s.root().to_path_buf());
         // Probe against the GVS dir when GVS is on. The GVS dir won't
         // exist yet on a cold install, so create it before the probe
@@ -377,10 +394,14 @@ pub(super) fn resolve_link_strategy(
 }
 
 /// What [`run_dep_lifecycle_scripts`] did.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct DepLifecycleOutcome {
     /// Lifecycle scripts actually executed.
     pub ran: usize,
+    /// Whether any package's on-disk contents changed — a script ran, or a
+    /// side-effects-cache entry was restored over the tree. Drives the
+    /// post-build bin relink, which a restore needs as much as a real build.
+    pub package_contents_changed: bool,
     /// Spec keys of packages the policy ALLOWED to build whose build
     /// could not be attempted, because the materialized directory or
     /// its `package.json` was not on disk when the phase ran. Both are
@@ -410,6 +431,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // paths that must never floor (rebuild).
     floor: &super::default_trust::DefaultTrustFloor,
     virtual_store_dir_max_length: usize,
+    canonicalize_package_dir: bool,
     child_concurrency: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
     side_effects_cache: SideEffectsCacheConfig<'_>,
@@ -525,6 +547,29 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             unbuilt.push(pkg.source_approval_key().unwrap_or_else(|| pkg.spec_key()));
             continue;
         }
+        // With the global virtual store on Windows, changing directory through
+        // an NTFS junction preserves the logical `.aube/<dep_path>` path.
+        // Native build tools such as
+        // node-gyp can then resolve a dependency to its graph-hashed GVS path
+        // but interpret that path relative to the unhashed local `.aube/`
+        // namespace, leaving an apparently missing `node_api.gyp`. POSIX
+        // `getcwd` resolves the outer symlink and masks the same mismatch.
+        // Enter the physical shared-store directory explicitly so the script
+        // cwd and every nested dependency use the same namespace.
+        let package_dir = if canonicalize_package_dir {
+            lifecycle_package_dir(&package_dir, true)
+                .await
+                .into_diagnostic()
+                .wrap_err_with(|| {
+                    format!(
+                        "failed to resolve isolated package directory for {} at {}",
+                        pkg.name,
+                        package_dir.display()
+                    )
+                })?
+        } else {
+            package_dir
+        };
         // Read the dep's `package.json` directly from its materialized
         // location. Previously we looked it up via `package_indices`,
         // but the fetch phase now skips `load_index` for packages
@@ -593,7 +638,10 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     }
 
     if jobs.is_empty() {
-        return Ok(DepLifecycleOutcome { ran: 0, unbuilt });
+        return Ok(DepLifecycleOutcome {
+            unbuilt,
+            ..Default::default()
+        });
     }
 
     // A package reachable ONLY through `optionalDependencies` is one the
@@ -696,7 +744,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // `(optional, spec, outcome)` rather than a bare result: the drain loop has
     // to know whether the package that failed was optional-only, and an error
     // surfacing from `join_next` carries no identity of its own.
-    let mut set: tokio::task::JoinSet<(bool, String, miette::Result<usize>)> =
+    let mut set: tokio::task::JoinSet<(bool, String, miette::Result<DepLifecycleOutcome>)> =
         tokio::task::JoinSet::new();
     for job in jobs {
         let sem = semaphore.clone();
@@ -723,8 +771,14 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     )
                 })?;
                 match restore_result? {
-                    SideEffectsCacheRestore::Restored | SideEffectsCacheRestore::AlreadyApplied => {
-                        return Ok(0);
+                    SideEffectsCacheRestore::Restored => {
+                        return Ok(DepLifecycleOutcome {
+                            package_contents_changed: true,
+                            ..Default::default()
+                        });
+                    }
+                    SideEffectsCacheRestore::AlreadyApplied => {
+                        return Ok(DepLifecycleOutcome::default());
                     }
                     SideEffectsCacheRestore::Miss => {}
                 }
@@ -855,7 +909,11 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     );
                 }
             }
-            Ok(ran_here)
+            Ok(DepLifecycleOutcome {
+                ran: ran_here,
+                package_contents_changed: ran_here > 0,
+                ..Default::default()
+            })
         });
         let task = crate::runtime::scope_current(task);
         let task = aube_scripts::scope_current(task);
@@ -863,12 +921,16 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     }
 
     let mut ran = 0usize;
+    let mut package_contents_changed = false;
     while let Some(res) = set.join_next().await {
         // A `JoinError` here is a task-level panic — an aube bug, not a package
         // whose build failed — so it stays fatal even for an optional package.
-        let (optional, spec, outcome) = res.into_diagnostic()?;
-        match outcome {
-            Ok(count) => ran += count,
+        let (optional, spec, job_outcome) = res.into_diagnostic()?;
+        match job_outcome {
+            Ok(job_outcome) => {
+                ran += job_outcome.ran;
+                package_contents_changed |= job_outcome.package_contents_changed;
+            }
             // An optional-only package's build failure is not the install's
             // error: npm (`_handleOptionalFailure` during reify) and pnpm
             // (`buildDependency`'s catch) both continue. Warned per package
@@ -900,7 +962,11 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             Err(error) => return Err(error),
         }
     }
-    Ok(DepLifecycleOutcome { ran, unbuilt })
+    Ok(DepLifecycleOutcome {
+        ran,
+        package_contents_changed,
+        unbuilt,
+    })
 }
 
 /// Persist a freshly imported package index under the store key(s) a
@@ -949,6 +1015,20 @@ fn persist_pkg_index(
             code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
             "Failed to cache index for {display_name}@{version}: {e}"
         );
+    }
+}
+
+async fn lifecycle_package_dir(
+    package_dir: &std::path::Path,
+    canonicalize: bool,
+) -> std::io::Result<std::path::PathBuf> {
+    if canonicalize {
+        let package_dir = package_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::dirs::canonicalize(&package_dir))
+            .await
+            .map_err(std::io::Error::other)?
+    } else {
+        Ok(package_dir.to_path_buf())
     }
 }
 
@@ -1498,6 +1578,120 @@ pub(super) fn unreviewed_dep_builds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn global_virtual_store_lifecycle_uses_physical_package_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let physical = temp
+            .path()
+            .join("shared-store")
+            .join("pkg@1.0.0")
+            .join("node_modules")
+            .join("pkg");
+        std::fs::create_dir_all(&physical).unwrap();
+        let logical = temp
+            .path()
+            .join("project")
+            .join("node_modules")
+            .join(".aube")
+            .join("pkg@1.0.0");
+        std::fs::create_dir_all(logical.parent().unwrap()).unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            physical.parent().and_then(std::path::Path::parent).unwrap(),
+            &logical,
+        )
+        .unwrap();
+        #[cfg(windows)]
+        {
+            let target = physical.parent().and_then(std::path::Path::parent).unwrap();
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&logical)
+                .arg(target)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+
+        let logical_package = logical.join("node_modules/pkg");
+        assert_eq!(
+            lifecycle_package_dir(&logical_package, true).await.unwrap(),
+            crate::dirs::canonicalize(&physical).unwrap()
+        );
+        assert_eq!(
+            lifecycle_package_dir(&logical_package, false)
+                .await
+                .unwrap(),
+            logical_package
+        );
+    }
+
+    /// A project that declares nothing gets a policy that decides nothing:
+    /// a listed-by-default package is `Unspecified` so the `defaultTrust`
+    /// floor, with its gates and disclosure, is what admits it.
+    #[test]
+    fn undeclared_policy_leaves_default_trust_to_the_floor() {
+        let manifest = aube_manifest::PackageJson::default();
+        let workspace = aube_manifest::WorkspaceConfig::default();
+        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            policy.decide("esbuild", "0.28.1"),
+            aube_scripts::AllowDecision::Unspecified
+        );
+        assert_eq!(
+            policy.decide("sharp", "0.35.2"),
+            aube_scripts::AllowDecision::Unspecified
+        );
+    }
+
+    #[test]
+    fn explicit_deny_overrides_default_trust() {
+        let manifest = manifest_with_allow_build("esbuild", false);
+        let workspace = aube_manifest::WorkspaceConfig::default();
+        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            policy.decide("esbuild", "0.28.1"),
+            aube_scripts::AllowDecision::Deny
+        );
+    }
+
+    #[test]
+    fn project_deny_overrides_workspace_allow() {
+        let manifest = manifest_with_allow_build("esbuild", false);
+        let mut workspace = aube_manifest::WorkspaceConfig::default();
+        workspace
+            .allow_builds
+            .insert("esbuild".to_string(), yaml_serde::Value::Bool(true));
+        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            policy.decide("esbuild", "0.28.1"),
+            aube_scripts::AllowDecision::Deny
+        );
+    }
+
+    #[test]
+    fn workspace_deny_overrides_default_trust() {
+        let manifest = aube_manifest::PackageJson::default();
+        let mut workspace = aube_manifest::WorkspaceConfig::default();
+        workspace
+            .allow_builds
+            .insert("esbuild".to_string(), yaml_serde::Value::Bool(false));
+        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            policy.decide("esbuild", "0.28.1"),
+            aube_scripts::AllowDecision::Deny
+        );
+    }
 
     #[test]
     fn member_allow_build_conflict_denies() {

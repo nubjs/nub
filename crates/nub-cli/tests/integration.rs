@@ -354,6 +354,193 @@ fn a_smol_payload_records_whether_it_needs_the_register_hooks_shim() {
     );
 }
 
+/// Whether a target Node can carry the single-executable container at all.
+///
+/// The blob's `execArgv` field is what the container needs and it reached release
+/// as three backports, so the band is not one floor: 24.7 and later, or the 22.20
+/// line, with 23.x excluded because it went end of life before any of them landed.
+/// Kept here rather than reached for through the compiler so a test asserting what
+/// the compiler chose cannot agree with it by construction.
+#[cfg(feature = "compile")]
+fn sea_container_is_available(target: &str) -> bool {
+    let Some((major, minor, patch)) = parse_node_version(target) else {
+        return false;
+    };
+    let version = (major, minor, patch);
+    version >= (24, 7, 0) || (version >= (22, 20, 0) && major < 23)
+}
+
+/// The single-executable container refuses `child_process.fork`, because a fork
+/// there would re-run the whole application rather than the named module.
+///
+/// The container is chosen by reading the emitted chunks for what they RESOLVE,
+/// and a payload that reaches `child_process` keeps the launcher, which has a real
+/// Node to hand a fork. That scan is syntactic and so a heuristic: the fixture
+/// below stores the require on an object and calls it through a property, which it
+/// cannot follow, and the artifact really is a single-executable as a result.
+///
+/// So this pins what happens when the scan is WRONG. Without the guard the child
+/// re-runs the application and forks again — unbounded. The fixture stops itself at
+/// generation three, and the shared runner kills the process tree at ten seconds,
+/// so a regression fails here rather than running away.
+#[cfg(feature = "compile")]
+#[test]
+fn a_single_executable_refuses_a_fork_the_container_scan_could_not_see() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.js");
+    let artifact = work.join(format!("fork-guard{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    // CommonJS, because `require` is what the scan follows and this has to reach it
+    // by a route the scan cannot. No `"type": "module"` for the same reason.
+    std::fs::write(
+        work.join("package.json"),
+        "{ \"name\": \"fork-guard\", \"version\": \"1.0.0\", \"private\": true }\n",
+    )
+    .expect("write the fixture manifest");
+    std::fs::write(
+        &entry,
+        r#"const GEN = Number(process.env.GEN || "0");
+if (GEN > 2) { console.log("gen", GEN, "STOPPING"); process.exit(9); }
+globalThis.__holder = { r: require };
+const cp = globalThis.__holder.r("node:child_process");
+const cluster = globalThis.__holder.r("node:cluster");
+try {
+  cp.fork(__filename, [], { env: { ...process.env, GEN: String(GEN + 1) } });
+  console.log("FORKED");
+} catch (error) {
+  console.log("REFUSED:", error.message);
+}
+try {
+  cluster.fork({ GEN: String(GEN + 1) });
+  console.log("CLUSTER-FORKED");
+} catch (error) {
+  console.log("CLUSTER-REFUSED:", error.message);
+}
+"#,
+    )
+    .expect("write entry");
+    // A PASSIVE preload: it loads the module and does nothing else. That is enough,
+    // because loading is what hands `internal/cluster/primary` its own `fork`.
+    let preload = work.join("preload.cjs");
+    std::fs::write(
+        &preload,
+        "require(\"node:cluster\");\nconsole.log(\"PRELOADED-CLUSTER\");\n",
+    )
+    .expect("write the preload");
+
+    let compiled = Command::new(nub_binary())
+        .args(["compile", "--target", &runtime.node_target, "--out"])
+        .arg(&artifact)
+        .arg(&entry)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    assert!(
+        compiled.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    // BOTH streams: which one carries the summary is the renderer's business, and
+    // reading stdout alone reported the premise broken while the build really was
+    // producing a single-executable artifact.
+    let summary = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    if !summary.contains("a single-executable application") {
+        // Two very different reasons land here, and only one of them is this
+        // test's business.
+        //
+        // A target Node below the bands the container needs gets no
+        // single-executable at all, whatever the payload looks like. That is the
+        // host, not the code, so it returns rather than failing — otherwise the
+        // test is red for everyone on an older Node.
+        //
+        // Anything else means the payload DECLINED, which is the premise breaking,
+        // and a silent pass there is the trap this test exists to avoid: the scan
+        // learning to follow the holder shape is a fix, but the guard is still
+        // needed for the flows it has not learned, and a test that quietly stops
+        // exercising it reads as coverage while covering nothing. So it fails, and
+        // whoever taught the scan this shape has to find one it still misses.
+        assert!(
+            !sea_container_is_available(&runtime.node_target),
+            "the payload declined the single-executable container, so this test stopped \
+             exercising the fork guard. The scan has learned this fixture's shape — replace it \
+             with one the scan still misses rather than deleting the case, because the guard \
+             still covers every flow the scan has not learned. Compile summary:\n{summary}"
+        );
+        return;
+    }
+
+    // Twice, because the two refusals are reached by different mechanisms and only
+    // the second needs a preload to bring it about.
+    //
+    // Plain: the application loads cluster itself, AFTER the loader has replaced
+    // `child_process.fork`, so `internal/cluster/primary` captures the replacement
+    // and both calls end in it.
+    //
+    // Preloaded: a `NODE_OPTIONS` preload loads cluster BEFORE the blob's main, so
+    // that same const holds the ORIGINAL and nothing can reach it. Only the
+    // loader's separate patch of `cluster.fork` refuses the second call, which is
+    // the branch this half exists to exercise — without it the case passes on the
+    // first half alone.
+    for preloaded in [false, true] {
+        let mut command = Command::new(&artifact);
+        command.current_dir(&work);
+        if preloaded {
+            command.env("NODE_OPTIONS", format!("--require={}", preload.display()));
+        }
+        let ran =
+            run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(20));
+        let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+        let case = if preloaded {
+            "preloaded cluster"
+        } else {
+            "plain"
+        };
+
+        // Restored from the script this replaced: without it a run can refuse the
+        // fork, die on something else, and still satisfy every assertion below.
+        assert!(
+            ran.status.success(),
+            "{case}: the artifact exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+            ran.status.code()
+        );
+        if preloaded {
+            // The premise of this half. A preload that silently failed to run would
+            // leave the branch untested while the case still passed.
+            assert!(
+                stdout.contains("PRELOADED-CLUSTER"),
+                "{case}: the preload did not run, so cluster was not loaded before the \
+                 main and this half tested nothing\nstdout: {stdout}\nstderr: {stderr}"
+            );
+        }
+        assert!(
+            stdout.contains("REFUSED:"),
+            "{case}: the artifact did not refuse child_process.fork; it printed {stdout:?}"
+        );
+        assert!(
+            stdout.contains("CLUSTER-REFUSED:"),
+            "{case}: the artifact did not refuse cluster.fork; it printed {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("FORKED\n") && !stdout.contains("CLUSTER-FORKED"),
+            "{case}: a fork succeeded, so the child re-ran the application: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("gen 1"),
+            "{case}: a second generation started, which is the re-entry this guards: {stdout:?}"
+        );
+    }
+}
+
 #[cfg(feature = "compile")]
 #[test]
 fn compile_resolves_commonjs_requires_of_esm() {
@@ -10123,5 +10310,51 @@ fn yaml_alias_reuse_within_the_budget_still_loads() {
             "lastRegion": "us-east-1",
         }),
         "every alias must expand to its anchored value; stderr: {stderr}"
+    );
+}
+
+/// A failed compile reports itself, and does not also reach `Termination`.
+///
+/// The unit tests around `error_lines` and `diagnostic_lines` all stay green if
+/// the `.or_else` in `cli.rs` is deleted, returns zero, or lets the error escape
+/// — they test the renderer, and nothing tests that anything calls it. This
+/// spawns the real binary so the wiring is what is under test.
+///
+/// `--platform` is the cheapest failure that reaches it: it is refused while
+/// resolving arguments, so no launcher template, no Node download and no bundler
+/// run are needed, and the test costs a process spawn.
+///
+/// The absence assertion is the load-bearing half. Returning the error instead
+/// of reporting it would still exit 1 and still print the message — just under
+/// `Termination`'s own `Error:` framing — so an exit-code check alone cannot
+/// tell the two apart.
+#[cfg(feature = "compile")]
+#[test]
+fn a_failed_compile_prints_the_error_tier_rather_than_escaping_to_termination() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("app.ts"), "console.log(1);\n").unwrap();
+
+    let output = Command::new(nub_binary())
+        .args(["compile", "app.ts", "--platform", "sunos-sparc"])
+        .current_dir(&dir)
+        .env("NO_COLOR", "1")
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a refused --platform exits 1; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("error  unknown --platform"),
+        "expected the error tier's label and two-space gap, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Error:"),
+        "the error must not ALSO escape to Termination; got: {stderr:?}"
     );
 }

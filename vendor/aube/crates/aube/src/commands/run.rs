@@ -1,11 +1,10 @@
 use super::ensure_installed_in;
 use aube_manifest::PackageJson;
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use std::io::IsTerminal;
 use std::path::Path;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct RunArgs {
     /// Script or local binary name.
     ///
@@ -14,31 +13,41 @@ pub struct RunArgs {
     /// `node_modules/.bin/<name>`.
     pub script: Option<String>,
     /// Arguments to pass to the script
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[usage(arg, double_dash = "automatic")]
     pub args: Vec<String>,
     /// Print the nearest `package.json`'s scripts for shell completion.
     ///
     /// Consumed by the `complete "script"` node in the usage spec, not
     /// meant to be typed by hand.
-    #[arg(long, hide = true)]
+    #[usage(long, hide)]
     pub complete: bool,
     /// Don't error if the script is missing from package.json
-    #[arg(long)]
+    #[usage(long)]
     pub if_present: bool,
     /// Forward `--inspect` to a Node-backed script or local binary.
-    #[arg(long, value_name = "[[HOST:]PORT]", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    #[usage(
+        long,
+        value_name = "[[HOST:]PORT]",
+        require_equals = true,
+        default_missing = ""
+    )]
     pub inspect: Option<String>,
     /// Forward `--inspect-brk` to a Node-backed script or local binary.
-    #[arg(long, value_name = "[[HOST:]PORT]", num_args = 0..=1, require_equals = true, default_missing_value = "")]
+    #[usage(
+        long,
+        value_name = "[[HOST:]PORT]",
+        require_equals = true,
+        default_missing = ""
+    )]
     pub inspect_brk: Option<String>,
     /// Continue recursive execution after a script fails.
     ///
     /// Parsed for pnpm compatibility; aube's sequential fanout still
     /// stops on first failure.
-    #[arg(long)]
+    #[usage(long)]
     pub no_bail: bool,
     /// Skip auto-install check
-    #[arg(long)]
+    #[usage(long)]
     pub no_install: bool,
     /// Disable topological sorting (default is on).
     ///
@@ -46,7 +55,7 @@ pub struct RunArgs {
     /// order so a `build` script in a shared library finishes before a
     /// dependent app's `build` starts. Pass this to fall back to the
     /// raw workspace-listing order.
-    #[arg(long, overrides_with = "sort")]
+    #[usage(long, overrides = "--sort")]
     pub no_sort: bool,
     /// Run the script in every matched workspace package concurrently.
     ///
@@ -56,12 +65,12 @@ pub struct RunArgs {
     /// allowed to finish so their output isn't truncated. Child
     /// stdio is piped and lines are emitted with a `<package>: `
     /// prefix; pass `--reporter-hide-prefix` to drop the labels.
-    #[arg(long)]
+    #[usage(long)]
     pub parallel: bool,
     /// Write a recursive run summary file.
     ///
     /// Parsed for pnpm compatibility.
-    #[arg(long)]
+    #[usage(long)]
     pub report_summary: bool,
     /// Hide the `<package>: ` label on parallel-run output lines.
     ///
@@ -69,46 +78,47 @@ pub struct RunArgs {
     /// clean even when many packages run at once), but the source
     /// package isn't named on each line. Sequential runs ignore this
     /// flag.
-    #[arg(long)]
+    #[usage(long)]
     pub reporter_hide_prefix: bool,
     /// Resume recursive execution starting at this package name.
     ///
     /// After the topo sort and `--reverse` are applied, packages
     /// before the named one in the resulting order are skipped. Errors
     /// if the name isn't in the matched workspace set.
-    #[arg(long, value_name = "PACKAGE")]
+    #[usage(long, value_name = "PACKAGE")]
     pub resume_from: Option<String>,
     /// Reverse the recursive execution order (after topo sort).
     ///
     /// Useful for teardown-style scripts where dependents must shut
     /// down before their deps.
-    #[arg(long)]
+    #[usage(long)]
     pub reverse: bool,
     /// Sort recursive packages topologically (this is the default).
     ///
     /// Pass to override an earlier `--no-sort` on the same invocation.
-    #[arg(long, overrides_with = "no_sort")]
+    #[usage(long, overrides = "--no-sort")]
     pub sort: bool,
     /// Suppress aube's wrapper output while still showing script
     /// stdout/stderr.
     ///
-    /// Short alias for the global `--silent` flag; long form is
-    /// intentionally omitted to avoid shadowing the global `--silent`
-    /// in clap's dispatch.
-    #[arg(short = 's')]
+    /// Short alias for the global `--silent` flag.
+    //
+    // The long form is intentionally omitted so this flag does not
+    // shadow the global `--silent` during argument dispatch.
+    #[usage(short = 's')]
     pub silent: bool,
     /// Cap the number of recursive packages running at once.
     ///
     /// Setting this implicitly enables parallel mode at width `N`.
     /// `0` means "use the available CPU count". Without this flag,
     /// `--parallel` stays unbounded.
-    #[arg(long, value_name = "N")]
+    #[usage(long, value_name = "N")]
     pub workspace_concurrency: Option<usize>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub lockfile: crate::cli_args::LockfileArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub virtual_store: crate::cli_args::VirtualStoreArgs,
 }
 
@@ -117,25 +127,53 @@ pub struct RunArgs {
 ///
 /// These forward to a fixed script name so the script name itself
 /// is implicit — only the trailing args and `--no-install` are configurable.
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ScriptArgs {
     /// Arguments to pass to the script
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[usage(arg, double_dash = "automatic")]
     pub args: Vec<String>,
     /// Skip auto-install check
-    #[arg(long)]
+    #[usage(long)]
     pub no_install: bool,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub lockfile: crate::cli_args::LockfileArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub virtual_store: crate::cli_args::VirtualStoreArgs,
 }
+
+macro_rules! script_alias_args {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            #[derive(Debug, usage_rs::Args)]
+            pub struct $name {
+                #[usage(flatten)]
+                inner: ScriptArgs,
+            }
+
+            impl $name {
+                pub fn into_inner(self) -> ScriptArgs {
+                    self.inner
+                }
+            }
+        )+
+    };
+}
+
+script_alias_args!(InstallTestArgs, RestartArgs, StartArgs, StopArgs, TestArgs);
 
 pub async fn run(
     run_args: RunArgs,
     filter: aube_workspace::selector::EffectiveFilter,
+) -> miette::Result<Option<i32>> {
+    run_with_process_replacement(run_args, filter, false).await
+}
+
+pub(crate) async fn run_with_process_replacement(
+    run_args: RunArgs,
+    filter: aube_workspace::selector::EffectiveFilter,
+    replace_process: bool,
 ) -> miette::Result<Option<i32>> {
     run_args.network.install_overrides();
     run_args.lockfile.install_overrides();
@@ -172,12 +210,6 @@ pub async fn run(
         },
     };
     let node_args = node_args_from_run_flags(inspect, inspect_brk);
-    // Resolve the project's Node runtime before anything spawns —
-    // covers the warm path where no install runs (the install path
-    // re-enters ensure() with the lockfile pin, but the OnceCell makes
-    // that a no-op if we already resolved here; both read the same
-    // version sources so they agree).
-    crate::runtime::ensure_for_cwd(&crate::dirs::cwd()?).await?;
     let recursive = RecursiveOpts {
         // pnpm parity: topo sort is on by default. `--sort` and
         // `--no-sort` use clap `overrides_with`, so only one can land
@@ -192,8 +224,17 @@ pub async fn run(
         no_bail,
     };
     run_script_with(
-        &script, &args, &node_args, no_install, if_present, parallel, silent, &filter, recursive,
+        &script,
+        &args,
+        &node_args,
+        no_install,
+        if_present,
+        parallel,
+        silent,
+        &filter,
+        recursive,
         None,
+        replace_process,
     )
     .await
 }
@@ -401,6 +442,16 @@ fn single_line(cmd: &str) -> String {
 /// `package.json` prints nothing rather than erroring, because the caller
 /// is a TAB press and completion noise is worse than no completions.
 pub(crate) fn print_script_completions(dir: Option<&Path>) {
+    let candidates = script_completion_candidates(dir);
+    let mut out = String::new();
+    for (name, cmd) in candidates {
+        out.push_str(&completion_line(&name, &cmd));
+        out.push('\n');
+    }
+    let _ = std::io::Write::write_all(&mut std::io::stdout(), out.as_bytes());
+}
+
+pub(crate) fn script_completion_candidates(dir: Option<&Path>) -> Vec<(String, String)> {
     // Establish where to search *without* chdir'ing. `cli_main` is a
     // library entry point, so an embedding host is driving this in-process
     // and would keep any cwd change we made.
@@ -418,30 +469,18 @@ pub(crate) fn print_script_completions(dir: Option<&Path>) {
     // missing. (`read_dir` would test the read bit instead and reject
     // execute-only directories a real run handles fine.)
     let Some(start) = super::completion_start_dir(dir) else {
-        return;
+        return Vec::new();
     };
     let Some(root) = crate::dirs::find_project_root(&start) else {
-        return;
+        return Vec::new();
     };
     let Ok(scripts) = read_scripts_in_order(&root) else {
-        return;
+        return Vec::new();
     };
-    let mut out = String::new();
-    for (name, cmd) in &scripts {
-        // JSON keys can hold a newline, and the protocol is one candidate
-        // per line — such a name would split into several bogus
-        // candidates, none of which names a real script. Nothing sane can
-        // be offered for it, so skip it.
-        if name.contains(['\n', '\r']) {
-            continue;
-        }
-        out.push_str(&completion_line(name, cmd));
-        out.push('\n');
-    }
-    // `write_all` rather than `print!`: the latter panics if stdout is
-    // gone, and a completion helper whose reader closed the pipe should
-    // just stop, not abort with a panic message.
-    let _ = std::io::Write::write_all(&mut std::io::stdout(), out.as_bytes());
+    scripts
+        .into_iter()
+        .filter(|(name, _)| !name.contains(['\n', '\r']))
+        .collect()
 }
 
 /// Format one `name:command` completion line. `usage` splits each line on
@@ -506,6 +545,7 @@ pub(crate) async fn run_script(
         filter,
         RecursiveOpts::default(),
         None,
+        false,
     )
     .await
 }
@@ -522,7 +562,6 @@ pub(crate) async fn run_script_in(
     if_present: bool,
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
-    crate::runtime::ensure_for_cwd(&base_dir).await?;
     let silent = super::global_output_flags().silent;
     run_script_with(
         script,
@@ -535,6 +574,7 @@ pub(crate) async fn run_script_in(
         filter,
         RecursiveOpts::default(),
         Some(base_dir),
+        false,
     )
     .await
 }
@@ -551,6 +591,7 @@ pub(crate) async fn run_script_with(
     filter: &aube_workspace::selector::EffectiveFilter,
     recursive: RecursiveOpts,
     base_dir: Option<std::path::PathBuf>,
+    replace_process: bool,
 ) -> miette::Result<Option<i32>> {
     let initial_cwd = match base_dir {
         Some(dir) => dir,
@@ -580,26 +621,19 @@ pub(crate) async fn run_script_with(
             ));
         }
     };
-    let enable_pre_post_scripts = configure_script_settings_for_project(&cwd)?;
-
     if !filter.is_empty() {
         return run_script_filtered(
-            &cwd,
-            script,
-            args,
-            node_args,
-            no_install,
-            if_present,
-            parallel,
-            silent,
-            filter,
-            enable_pre_post_scripts,
+            &cwd, script, args, node_args, no_install, if_present, parallel, silent, filter,
             recursive,
         )
         .await;
     }
 
     let manifest = load_manifest(&cwd)?;
+    // Reuse these exact live bytes for runtime selection and dispatch. This
+    // avoids a second manifest read without introducing cross-command state.
+    crate::runtime::ensure_for_cwd_with_manifest(&cwd, &manifest).await?;
+    let enable_pre_post_scripts = configure_script_settings_for_project(&cwd)?;
     if !manifest.scripts.contains_key(script) {
         ensure_installed_in(no_install, Some(&cwd)).await?;
         let bin_path = super::project_modules_dir(&cwd).join(".bin").join(script);
@@ -634,7 +668,11 @@ pub(crate) async fn run_script_with(
         script,
         args,
         node_args,
-        enable_pre_post_scripts,
+        ScriptChainOptions {
+            enable_pre_post_scripts,
+            silent,
+            replace_process,
+        },
     )
     .await
 }
@@ -663,7 +701,6 @@ async fn run_script_filtered(
     parallel: bool,
     silent: bool,
     filter: &aube_workspace::selector::EffectiveFilter,
-    enable_pre_post_scripts: bool,
     recursive: RecursiveOpts,
 ) -> miette::Result<Option<i32>> {
     // `cwd` is the nearest ancestor with a `package.json`, which in a
@@ -671,7 +708,9 @@ async fn run_script_filtered(
     // shared helper walks up to the real workspace root before
     // enumerating packages, so yarn / npm / bun monorepos work from a
     // subpackage.
-    let (_root, matched) = super::select_workspace_packages(cwd, filter, "run")?;
+    let (root, matched) = super::select_workspace_packages(cwd, filter, "run")?;
+    crate::runtime::ensure_for_cwd(&root).await?;
+    let enable_pre_post_scripts = configure_script_settings_for_project(&root)?;
 
     let matched = order_matched_packages(matched, &recursive)?;
 
@@ -679,7 +718,7 @@ async fn run_script_filtered(
     // isolated linker already materializes every workspace package's
     // deps in a single pass, so per-package reinstalls would just
     // re-check the same lockfile N times.
-    ensure_installed_in(no_install, Some(cwd)).await?;
+    ensure_installed_in(no_install, Some(&root)).await?;
 
     if let Some(concurrency) = effective_concurrency(parallel, recursive.workspace_concurrency) {
         return run_filtered_parallel(
@@ -743,7 +782,11 @@ async fn run_script_filtered(
             script,
             args,
             node_args,
-            enable_pre_post_scripts,
+            ScriptChainOptions {
+                enable_pre_post_scripts,
+                silent,
+                replace_process: false,
+            },
         )
         .await?
         {
@@ -990,6 +1033,7 @@ async fn run_filtered_parallel(
                     &args,
                     &node_args,
                     enable_pre_post_scripts,
+                    silent,
                     &output_mode,
                 )
                 .await
@@ -1062,11 +1106,14 @@ pub(crate) async fn exec_optional(
     manifest: &PackageJson,
     script: &str,
     args: &[String],
+    silent: bool,
 ) -> miette::Result<Option<Option<i32>>> {
     if !manifest.scripts.contains_key(script) {
         return Ok(None);
     }
-    Ok(Some(exec_script(cwd, manifest, script, args).await?))
+    Ok(Some(
+        exec_script(cwd, manifest, script, args, silent).await?,
+    ))
 }
 
 /// Run a single script. Returns `Ok(Some(code))` on a non-zero child exit
@@ -1077,8 +1124,9 @@ pub(crate) async fn exec_script(
     manifest: &PackageJson,
     script: &str,
     args: &[String],
+    silent: bool,
 ) -> miette::Result<Option<i32>> {
-    exec_script_with_node_args(cwd, manifest, script, args, &[]).await
+    exec_script_with_node_args(cwd, manifest, script, args, &[], silent).await
 }
 
 /// Build a fully-configured `tokio::process::Command` for running a
@@ -1088,6 +1136,13 @@ pub(crate) async fn exec_script(
 /// returns the raw status so the parallel path can collect all outcomes).
 /// Keeping one place to configure these means future security fixes land
 /// once, not twice.
+///
+/// Returns the command alongside the `$ <cmd>` line to echo for it. The
+/// echoed line is built here rather than at the call sites because this
+/// is where `cmd` has already been through node-arg injection — echoing
+/// the raw manifest body would hide the `--inspect` a user just asked
+/// for. See [`display_arg`] for why the echoed args are quoted more
+/// loosely than the executed ones.
 async fn build_script_command(
     cwd: &Path,
     manifest: &PackageJson,
@@ -1095,45 +1150,33 @@ async fn build_script_command(
     cmd: &str,
     args: &[String],
     node_args: &[String],
-) -> miette::Result<tokio::process::Command> {
+) -> miette::Result<(tokio::process::Command, String)> {
     // Raw script body as written in package.json, exported as
     // `npm_lifecycle_script` (pnpm parity). Captured before node-arg
     // injection and arg quoting so it mirrors the manifest, not the
     // spliced shell command line.
     let lifecycle_script = cmd.to_string();
-    let cmd = inject_node_args(cmd, node_args);
-    let shell_cmd = if args.is_empty() {
-        cmd
-    } else {
-        // Quote each forwarded arg. Args land inside `sh -c "..."` or
-        // cmd `/c "..."` which reparses. Unquoted $, backticks, ;, |,
-        // () all get interpreted. `aube run echo '$(rm -rf ~)'` would
-        // run the subshell. Same npm/pnpm bug class from years ago.
-        // shell_quote_arg wraps per-platform. See aube-scripts.
-        let mut buf =
-            String::with_capacity(cmd.len() + args.iter().map(|a| a.len() + 3).sum::<usize>());
-        buf.push_str(&cmd);
-        for a in args {
-            buf.push(' ');
-            buf.push_str(&aube_scripts::shell_quote_arg(a));
-        }
-        buf
-    };
 
     let bin_dir = super::project_modules_dir(cwd).join(".bin");
     let node_gyp_bin_dir = super::install::node_gyp_bootstrap::lazy_shim_bin_dir(&bin_dir)?;
-    let runtime_bin_dirs = crate::runtime::path_entries();
+    let activated_shim_dir = crate::tool_shims::activated_shim_dir();
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut entries =
-        Vec::with_capacity(2 + usize::from(node_gyp_bin_dir.is_some()) + runtime_bin_dirs.len());
-    entries.push(bin_dir);
+    let mut project_bins = Vec::with_capacity(1 + usize::from(node_gyp_bin_dir.is_some()));
+    project_bins.push(bin_dir);
     if let Some(dir) = node_gyp_bin_dir {
+        project_bins.push(dir);
+    }
+    let mut entries = crate::runtime::path_entries_with_project_bins(project_bins);
+    entries
+        .reserve(usize::from(activated_shim_dir.is_some()) + std::env::split_paths(&path).count());
+    // Startup removes the activated shim directory from aube's own PATH
+    // so internal runtime probes cannot rediscover aube recursively. Package
+    // scripts are user commands, though, and must retain the shell activation
+    // contract so `pnpm` / `npm` / `yarn` continue to route through aube.
+    // A nested shim invocation sanitizes its own process PATH before probing.
+    if let Some(dir) = activated_shim_dir {
         entries.push(dir);
     }
-    // The switched Node runtime beats the inherited PATH but loses to
-    // project-local bins — scripts running `node` get the pinned
-    // version.
-    entries.extend(runtime_bin_dirs);
     entries.extend(std::env::split_paths(&path));
     let new_path = std::env::join_paths(entries).unwrap_or(path);
     let script_dir = if cwd.is_absolute() {
@@ -1144,15 +1187,79 @@ async fn build_script_command(
     let node_gyp_project_dir =
         crate::dirs::find_workspace_root(&script_dir).unwrap_or_else(|| script_dir.clone());
 
-    // npm-compat env vars. `spawn_shell` already stamped the
-    // invocation-level vars (`npm_execpath`, `npm_node_execpath` /
-    // `NODE`, `npm_command`, `npm_config_user_agent`) from the
+    // npm-compat env vars. Whichever spawn helper runs below already
+    // stamped the invocation-level vars (`npm_execpath`,
+    // `npm_node_execpath` / `NODE`, `npm_command`,
+    // `npm_config_user_agent`) from the
     // process-global ScriptSettings configured for this run. Here we
     // add the per-script + manifest vars so build scripts that branch
     // on `$npm_lifecycle_event`, stamp `$npm_package_version`, or read
     // `$npm_package_engines_node` behave the same under `aube run` as
     // under `aube install` postinstall.
-    let mut command = aube_scripts::spawn_shell(&shell_cmd);
+    //
+    // A body that is one plain command gets exec'd directly — `sh` would
+    // only add a resident parent process. `direct_argv` resolves the
+    // program against `new_path` (not the process PATH, which is what
+    // `execvp` would search) and declines for anything a shell might
+    // actually be interpreting, in which case we splice and quote exactly
+    // as before. `--inspect` keeps the shell too: `inject_node_args`
+    // rewrites the command line textually, and one implementation of that
+    // is enough.
+    let direct = if node_args.is_empty() {
+        aube_scripts::direct::direct_argv(cmd, &new_path)
+    } else {
+        None
+    };
+    let (mut command, echo_line) = match &direct {
+        // Forwarded args become real argv entries instead of quoted text.
+        // Behavior-identical: `shell_quote_arg` single-quotes, which
+        // already suppresses every expansion — this just stops round
+        // tripping them through a parser that would otherwise need it.
+        Some((program, arg0, words)) => {
+            let argv = words
+                .iter()
+                .map(|w| std::ffi::OsString::from(*w))
+                .chain(args.iter().map(std::ffi::OsString::from));
+            // The echoed line has to read the same whichever path ran, so
+            // build it exactly as the shell arm does below. `node_args` is
+            // empty here (a direct plan requires it), so there is nothing
+            // to splice — only the forwarded args to append.
+            let mut echo = String::with_capacity(cmd.len() + 16);
+            echo.push_str(cmd);
+            for a in args {
+                echo.push(' ');
+                echo.push_str(&display_arg(a));
+            }
+            (aube_scripts::spawn_program(program, arg0, argv), echo)
+        }
+        None => {
+            let echo_cmd = inject_node_args(cmd, node_args, |a| display_arg(a).into_owned());
+            let cmd = inject_node_args(cmd, node_args, aube_scripts::shell_quote_arg);
+            let (shell_cmd, echo_line) = if args.is_empty() {
+                (cmd, echo_cmd)
+            } else {
+                // Quote each forwarded arg. Args land inside `sh -c "..."` or
+                // cmd `/c "..."` which reparses. Unquoted $, backticks, ;, |,
+                // () all get interpreted. `aube run echo '$(rm -rf ~)'` would
+                // run the subshell. Same npm/pnpm bug class from years ago.
+                // shell_quote_arg wraps per-platform. See aube-scripts.
+                let mut buf = String::with_capacity(
+                    cmd.len() + args.iter().map(|a| a.len() + 3).sum::<usize>(),
+                );
+                buf.push_str(&cmd);
+                let mut echo = String::with_capacity(buf.capacity());
+                echo.push_str(&echo_cmd);
+                for a in args {
+                    buf.push(' ');
+                    buf.push_str(&aube_scripts::shell_quote_arg(a));
+                    echo.push(' ');
+                    echo.push_str(&display_arg(a));
+                }
+                (buf, echo)
+            };
+            (aube_scripts::spawn_shell(&shell_cmd), echo_line)
+        }
+    };
     command
         .env("PATH", &new_path)
         .current_dir(cwd)
@@ -1185,10 +1292,47 @@ async fn build_script_command(
         let init_cwd = crate::dirs::cwd().ok().unwrap_or_else(|| cwd.to_path_buf());
         command.env("INIT_CWD", init_cwd);
     }
-    Ok(command)
+    if direct.is_some() {
+        // `sh` rewrites PWD to its own cwd on startup; a directly-exec'd
+        // child just inherits ours. Measured against dash, PWD was the
+        // only difference in the whole child environment, so stamp it and
+        // the two paths stay indistinguishable. Without this, a tool that
+        // reads `process.env.PWD` instead of `process.cwd()` would see
+        // aube's invocation dir under `aube -C dir run x`.
+        command.env("PWD", &script_dir);
+    }
+    Ok((command, echo_line))
 }
 
-fn inject_node_args(cmd: &str, node_args: &[String]) -> String {
+/// Quote `arg` for the echoed `$ <cmd>` line only — never for execution.
+///
+/// The executed command line quotes every arg unconditionally via
+/// `shell_quote_arg`, which is correct but turns `aube run test foo` into
+/// a displayed `... 'foo'`. npm, pnpm, and bun all echo shell-safe args
+/// bare, so do the same: pass through anything drawn from a conservative
+/// safe set, and fall back to the *exact* execution quoting for anything
+/// else. Routing the interesting cases through `shell_quote_arg` rather
+/// than a second quoting implementation means the echoed line can never
+/// disagree with what actually ran.
+fn display_arg(arg: &str) -> std::borrow::Cow<'_, str> {
+    let safe = !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | '=' | ':' | '@' | ',' | '+')
+        });
+    if safe {
+        std::borrow::Cow::Borrowed(arg)
+    } else {
+        std::borrow::Cow::Owned(aube_scripts::shell_quote_arg(arg))
+    }
+}
+
+/// Splice `node_args` in after a leading bare `node`, quoting each with
+/// `quote`. Callers pass `shell_quote_arg` to build the line that is
+/// actually executed and [`display_arg`] to build the echoed one, so a
+/// CLI `--inspect` echoes exactly like the same flag written into the
+/// manifest body instead of picking up quotes the manifest form never has.
+fn inject_node_args(cmd: &str, node_args: &[String], quote: impl Fn(&str) -> String) -> String {
     if node_args.is_empty() {
         return cmd.to_string();
     }
@@ -1205,7 +1349,7 @@ fn inject_node_args(cmd: &str, node_args: &[String]) -> String {
     out.push_str(&cmd[..leading_len + 4]);
     for arg in node_args {
         out.push(' ');
-        out.push_str(&aube_scripts::shell_quote_arg(arg));
+        out.push_str(&quote(arg));
     }
     out.push_str(rest);
     out
@@ -1215,30 +1359,91 @@ fn inject_node_args(cmd: &str, node_args: &[String]) -> String {
 /// any stage short-circuits and returns `Ok(Some(code))` (the pre/main/post
 /// ordering matches npm/pnpm: a failing pre-script stops the chain before
 /// the main script runs). `Ok(None)` means every stage that ran succeeded.
-pub(crate) async fn exec_script_chain(
+#[derive(Clone, Copy)]
+struct ScriptChainOptions {
+    enable_pre_post_scripts: bool,
+    silent: bool,
+    replace_process: bool,
+}
+
+async fn exec_script_chain(
     cwd: &Path,
     manifest: &PackageJson,
     script: &str,
     args: &[String],
     node_args: &[String],
-    enable_pre_post_scripts: bool,
+    options: ScriptChainOptions,
 ) -> miette::Result<Option<i32>> {
-    if enable_pre_post_scripts {
+    if options.enable_pre_post_scripts {
         let pre = format!("pre{script}");
-        if let Some(Some(code)) = exec_optional(cwd, manifest, &pre, &[]).await? {
+        if let Some(Some(code)) = exec_optional(cwd, manifest, &pre, &[], options.silent).await? {
             return Ok(Some(code));
         }
     }
-    if let Some(code) = exec_script_with_node_args(cwd, manifest, script, args, node_args).await? {
+    let post = format!("post{script}");
+    if options.replace_process
+        && (!options.enable_pre_post_scripts || !manifest.scripts.contains_key(&post))
+    {
+        return exec_script_replacing_process(
+            cwd,
+            manifest,
+            script,
+            args,
+            node_args,
+            options.silent,
+        )
+        .await;
+    }
+    if let Some(code) =
+        exec_script_with_node_args(cwd, manifest, script, args, node_args, options.silent).await?
+    {
         return Ok(Some(code));
     }
-    if enable_pre_post_scripts {
-        let post = format!("post{script}");
-        if let Some(Some(code)) = exec_optional(cwd, manifest, &post, &[]).await? {
-            return Ok(Some(code));
-        }
+    if options.enable_pre_post_scripts
+        && let Some(Some(code)) = exec_optional(cwd, manifest, &post, &[], options.silent).await?
+    {
+        return Ok(Some(code));
     }
     Ok(None)
+}
+
+#[cfg(unix)]
+async fn exec_script_replacing_process(
+    cwd: &Path,
+    manifest: &PackageJson,
+    script: &str,
+    args: &[String],
+    node_args: &[String],
+    silent: bool,
+) -> miette::Result<Option<i32>> {
+    use std::os::unix::process::CommandExt;
+
+    let cmd = manifest
+        .scripts
+        .get(script)
+        .ok_or_else(|| miette!("script not found: {script}"))?;
+    let (mut command, echo_line) =
+        build_script_command(cwd, manifest, script, cmd, args, node_args).await?;
+    if !silent {
+        super::run_output::echo_script_command(&echo_line, None);
+    }
+    let error = command.as_std_mut().exec();
+    Err(miette::Report::new(aube_scripts::Error::Spawn(
+        script.to_string(),
+        error.to_string(),
+    )))
+}
+
+#[cfg(not(unix))]
+async fn exec_script_replacing_process(
+    cwd: &Path,
+    manifest: &PackageJson,
+    script: &str,
+    args: &[String],
+    node_args: &[String],
+    silent: bool,
+) -> miette::Result<Option<i32>> {
+    exec_script_with_node_args(cwd, manifest, script, args, node_args, silent).await
 }
 
 /// Run a script. On a non-zero child exit, returns `Ok(Some(code))` so the
@@ -1252,13 +1457,18 @@ async fn exec_script_with_node_args(
     script: &str,
     args: &[String],
     node_args: &[String],
+    silent: bool,
 ) -> miette::Result<Option<i32>> {
     let cmd = manifest
         .scripts
         .get(script)
         .ok_or_else(|| miette!("script not found: {script}"))?;
 
-    let mut command = build_script_command(cwd, manifest, script, cmd, args, node_args).await?;
+    let (mut command, echo_line) =
+        build_script_command(cwd, manifest, script, cmd, args, node_args).await?;
+    if !silent {
+        super::run_output::echo_script_command(&echo_line, None);
+    }
 
     let status = command
         .status()
@@ -1281,11 +1491,13 @@ pub(crate) async fn exec_script_status(
     manifest: &PackageJson,
     script: &str,
     args: &[String],
+    silent: bool,
     output_mode: &super::run_output::OutputMode,
 ) -> miette::Result<std::process::ExitStatus> {
-    exec_script_status_with_node_args(cwd, manifest, script, args, &[], output_mode).await
+    exec_script_status_with_node_args(cwd, manifest, script, args, &[], silent, output_mode).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn exec_script_status_chain(
     cwd: &Path,
     manifest: &PackageJson,
@@ -1293,58 +1505,116 @@ pub(crate) async fn exec_script_status_chain(
     args: &[String],
     node_args: &[String],
     enable_pre_post_scripts: bool,
+    silent: bool,
     output_mode: &super::run_output::OutputMode,
 ) -> miette::Result<std::process::ExitStatus> {
     if enable_pre_post_scripts {
         let pre = format!("pre{script}");
         if manifest.scripts.contains_key(&pre) {
-            let status = exec_script_status(cwd, manifest, &pre, &[], output_mode).await?;
+            let status = exec_script_status(cwd, manifest, &pre, &[], silent, output_mode).await?;
             if !status.success() {
                 return Ok(status);
             }
         }
     }
-    let status =
-        exec_script_status_with_node_args(cwd, manifest, script, args, node_args, output_mode)
-            .await?;
+    let status = exec_script_status_with_node_args(
+        cwd,
+        manifest,
+        script,
+        args,
+        node_args,
+        silent,
+        output_mode,
+    )
+    .await?;
     if !status.success() {
         return Ok(status);
     }
     if enable_pre_post_scripts {
         let post = format!("post{script}");
         if manifest.scripts.contains_key(&post) {
-            return exec_script_status(cwd, manifest, &post, &[], output_mode).await;
+            return exec_script_status(cwd, manifest, &post, &[], silent, output_mode).await;
         }
     }
     Ok(status)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exec_script_status_with_node_args(
     cwd: &Path,
     manifest: &PackageJson,
     script: &str,
     args: &[String],
     node_args: &[String],
+    silent: bool,
     output_mode: &super::run_output::OutputMode,
 ) -> miette::Result<std::process::ExitStatus> {
     let cmd = manifest
         .scripts
         .get(script)
         .ok_or_else(|| miette!("script not found: {script}"))?;
-    let command = build_script_command(cwd, manifest, script, cmd, args, node_args).await?;
+    let (command, echo_line) =
+        build_script_command(cwd, manifest, script, cmd, args, node_args).await?;
+    if !silent {
+        super::run_output::echo_script_command(&echo_line, Some(output_mode));
+    }
     super::run_output::run_command(command, output_mode).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        RecursiveOpts, command_column_width, completion_line, effective_concurrency,
+        RecursiveOpts, command_column_width, completion_line, display_arg, effective_concurrency,
         inject_node_args, name_column_width, node_args_from_run_flags, order_matched_packages,
     };
     use aube_manifest::PackageJson;
     use aube_workspace::selector::SelectedPackage;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    /// Shell-safe args echo bare, matching what npm, pnpm, and bun print.
+    /// Quoting these would make `aube run test --watch` echo as
+    /// `... '--watch'`, which is noise no other package manager emits.
+    #[test]
+    fn display_arg_leaves_shell_safe_args_bare() {
+        for arg in [
+            "build",
+            "--watch",
+            "-v",
+            "src/index.ts",
+            "--reporter=json",
+            "@scope/pkg",
+            "a,b",
+            "1.2.3",
+            "NODE_ENV=production",
+        ] {
+            assert_eq!(display_arg(arg), arg, "{arg} should echo unquoted");
+        }
+    }
+
+    /// Anything outside the safe set falls back to `shell_quote_arg` — the
+    /// same function that builds the executed command line. Asserting
+    /// equality against it (rather than a hardcoded string) is what keeps
+    /// the echoed line from ever drifting from what actually ran.
+    #[test]
+    fn display_arg_falls_back_to_exec_quoting() {
+        for arg in [
+            "",
+            "a b",
+            "$(rm -rf ~)",
+            "it's",
+            "a;b",
+            "*",
+            "a\nb",
+            "\u{e9}",
+        ] {
+            assert_eq!(
+                display_arg(arg),
+                aube_scripts::shell_quote_arg(arg),
+                "{arg:?} should reuse the execution quoting"
+            );
+        }
+    }
 
     fn pkg(name: &str, deps: &[&str]) -> SelectedPackage {
         let manifest = PackageJson {
@@ -1486,17 +1756,31 @@ mod tests {
     #[test]
     fn inject_node_args_only_touches_direct_node_commands() {
         let args = vec!["--inspect".to_string()];
+        let quote = aube_scripts::shell_quote_arg;
         assert_eq!(
-            inject_node_args("node test.js", &args),
+            inject_node_args("node test.js", &args, quote),
             format!(
                 "node {} test.js",
                 aube_scripts::shell_quote_arg("--inspect")
             )
         );
-        assert_eq!(inject_node_args("tsx test.ts", &args), "tsx test.ts");
+        assert_eq!(inject_node_args("tsx test.ts", &args, quote), "tsx test.ts");
         assert_eq!(
-            inject_node_args("node-gyp rebuild", &args),
+            inject_node_args("node-gyp rebuild", &args, quote),
             "node-gyp rebuild"
+        );
+    }
+
+    /// A CLI `--inspect` has to echo exactly like the same flag written
+    /// into the manifest body. Quoting only the injected one would put
+    /// the noise `display_arg` removes right back on the path this
+    /// feature newly exposes.
+    #[test]
+    fn injected_node_args_echo_unquoted_like_the_manifest_form() {
+        let args = vec!["--inspect=127.0.0.1:9229".to_string()];
+        assert_eq!(
+            inject_node_args("node app.js", &args, |a| display_arg(a).into_owned()),
+            "node --inspect=127.0.0.1:9229 app.js"
         );
     }
 

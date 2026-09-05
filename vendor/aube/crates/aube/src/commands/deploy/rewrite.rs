@@ -311,7 +311,8 @@ pub(super) fn rewrite_local_refs(
         }
     }
 
-    let rewritten = serde_json::to_string_pretty(&doc)
+    let indent = aube_manifest::detect_json_indent(&raw);
+    let rewritten = aube_manifest::serialize_json_with_indent(&doc, indent)
         .into_diagnostic()
         .wrap_err("failed to serialize rewritten package.json")?;
     aube_util::fs_atomic::atomic_write(manifest_path, rewritten.as_bytes())

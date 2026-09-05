@@ -1,6 +1,7 @@
 use super::dep_path::{
-    PATCH_HASH_MARKER, dep_path_tail, parse_dep_path, peerless_alias_target, rewrite_peer_suffix,
-    rewrite_snapshot_alias_deps, strip_patch_hash_suffix, version_to_dep_path,
+    PATCH_HASH_MARKER, dep_path_tail, parse_dep_path, peerless_alias_target,
+    registry_name_from_qualified_version, rewrite_peer_suffix, rewrite_snapshot_alias_deps,
+    strip_patch_hash_suffix, version_to_dep_path,
 };
 use super::raw::{
     RawBinSpec, RawDepSpec, RawPnpmLockfile, RawRuntimeVariant, local_source_from_resolution,
@@ -30,6 +31,59 @@ fn rebase_importer_local(local: LocalSource, importer_path: &str) -> LocalSource
         LocalSource::Portal(path) => LocalSource::Portal(rebase(path, importer_path)),
         LocalSource::Exec(path) => LocalSource::Exec(rebase(path, importer_path)),
         LocalSource::Git(_) | LocalSource::RemoteTarball(_) => local,
+    }
+}
+
+/// Lowest `lockfileVersion` this reader understands. pnpm v9 replaced
+/// the top-level `dependencies:` map and `/name@version` package keys
+/// with `importers:` + `snapshots:`; every pass below assumes that
+/// shape, so older files must be rejected rather than parsed into an
+/// empty graph.
+pub(super) const MIN_LOCKFILE_VERSION: u64 = 9;
+
+/// Major component of a `lockfileVersion`. pnpm has written the value
+/// both as a quoted string (`'9.0'`, `'6.0'`) and as a bare YAML float
+/// (`5.4`), so both encodings are accepted.
+///
+/// Every dot-separated component must be digits: reading only the
+/// leading component would accept `9.invalid` as version 9 and let a
+/// lockfile of unknown shape through the guard. Returns `None` for
+/// anything that isn't a well-formed version number, which the caller
+/// treats as unsupported.
+pub(super) fn lockfile_version_major(value: &yaml_serde::Value) -> Option<u64> {
+    if let Some(s) = value.as_str() {
+        let s = s.trim();
+        let mut components = s.split('.');
+        let major = components.next()?;
+        if !components.all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit())) {
+            return None;
+        }
+        return major.parse().ok();
+    }
+    if let Some(u) = value.as_u64() {
+        return Some(u);
+    }
+    // A bare YAML float is numeric by construction, so truncating to
+    // the major is safe here — `9.5` is a v9-family lockfile.
+    let f = value.as_f64()?;
+    (f.is_finite() && f >= 0.0).then_some(f.trunc() as u64)
+}
+
+/// Render a `lockfileVersion` back for the error message, preserving
+/// whichever encoding the lockfile used.
+fn render_lockfile_version(value: &yaml_serde::Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    if let Some(u) = value.as_u64() {
+        return u.to_string();
+    }
+    if let Some(i) = value.as_i64() {
+        return i.to_string();
+    }
+    match value.as_f64() {
+        Some(f) => f.to_string(),
+        None => "(unreadable)".to_string(),
     }
 }
 
@@ -95,6 +149,54 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     let mut raw = parse_raw_lockfile(&content)
         .map_err(|e| Error::parse_yaml_err(path, content.clone(), &e))?;
     strip_patch_hash_markers(&mut raw);
+
+    // Version guard before any structural pass: a pre-v9 lockfile is
+    // valid YAML that yields zero importers, which would otherwise
+    // link nothing and exit 0.
+    match lockfile_version_major(&raw.lockfile_version) {
+        Some(major) if major >= MIN_LOCKFILE_VERSION => {}
+        _ => {
+            return Err(Error::UnsupportedPnpmLockfileVersion {
+                path: path.to_path_buf(),
+                version: render_lockfile_version(&raw.lockfile_version),
+            });
+        }
+    }
+
+    // Layout guard for a lockfile whose declared version does not match
+    // its body: `lockfileVersion: '9.0'` over a pre-v9 body passes the
+    // version check, and its root deps are then dropped on the floor —
+    // the graph comes back empty and the declared dependencies go
+    // unlinked.
+    //
+    // Two independent signatures, because either can appear alone: a
+    // root-level dependency block (the only shape a `link:`/`file:`-only
+    // project has, since it has no `packages:` at all), and a
+    // slash-prefixed package key (`/is-odd@3.0.1` in v6,
+    // `/is-odd/3.0.1` in v5). A package name cannot begin with `/`, and
+    // no v9+ document puts dependencies at the root, so neither shape is
+    // one pnpm or aube writes at v9.
+    let legacy_marker = [
+        ("dependencies", raw.dependencies.is_some()),
+        ("devDependencies", raw.dev_dependencies.is_some()),
+        ("optionalDependencies", raw.optional_dependencies.is_some()),
+        ("specifiers", raw.specifiers.is_some()),
+    ]
+    .into_iter()
+    .find_map(|(block, present)| present.then(|| format!("root-level `{block}:` block")))
+    .or_else(|| {
+        raw.packages
+            .keys()
+            .find(|key| key.starts_with('/'))
+            .map(|key| format!("package key `{key}`"))
+    });
+    if let Some(marker) = legacy_marker {
+        return Err(Error::PnpmLockfileLegacyLayout {
+            path: path.to_path_buf(),
+            version: render_lockfile_version(&raw.lockfile_version),
+            marker,
+        });
+    }
 
     // Parse importers (direct deps of each workspace package).
     // We track synthesized LockedPackages for local (`file:` / `link:`)
@@ -568,6 +670,13 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         }
         let (name, version) = parse_dep_path(&dep_path)
             .ok_or_else(|| Error::parse(path, format!("invalid dep path: {dep_path}")))?;
+        if let Some(registry_name) = registry_name_from_qualified_version(&version) {
+            return Err(Error::UnsupportedNamedRegistry {
+                path: path.to_path_buf(),
+                dep_path,
+                registry_name: registry_name.to_string(),
+            });
+        }
         // Runtime pin entries (`node@runtime:24.4.1`) are not packages
         // — they're absorbed into `graph.runtimes` below. Skipping them
         // here keeps them out of the package table so the fetch/link

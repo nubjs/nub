@@ -29,6 +29,98 @@ JSON
 	assert_file_exists preinstall.marker
 }
 
+@test "aube install runs pnpm:devPreinstall before root preinstall" {
+	cat >package.json <<'JSON'
+{
+  "name": "dev-preinstall-test",
+  "version": "1.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"order.log\", \"dev\\n\")'",
+    "preinstall": "node -e 'require(\"fs\").appendFileSync(\"order.log\", \"pre\\n\")'"
+  },
+  "dependencies": {
+    "is-odd": "^3.0.1"
+  }
+}
+JSON
+	run aube install
+	assert_success
+	run cat order.log
+	assert_output "dev
+pre"
+}
+
+@test "aube install runs pnpm:devPreinstall only at the workspace root" {
+	cat >package.json <<'JSON'
+{
+  "name": "dev-preinstall-workspace",
+  "version": "1.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"root.marker\", \"ran\")'"
+  }
+}
+JSON
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+YAML
+	mkdir -p packages/app
+	cat >packages/app/package.json <<'JSON'
+{
+  "name": "dev-preinstall-member",
+  "version": "1.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"member.marker\", \"ran\")'"
+  }
+}
+JSON
+	run bash -c "cd packages/app && aube install"
+	assert_success
+	assert_file_exists root.marker
+	assert_file_not_exists packages/app/member.marker
+}
+
+@test "aube install skips pnpm:devPreinstall on warm repeats" {
+	cat >package.json <<'JSON'
+{
+  "name": "dev-preinstall-warm",
+  "version": "1.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").appendFileSync(\"runs.log\", \"run\\n\")'"
+  },
+  "dependencies": {
+    "is-odd": "^3.0.1"
+  }
+}
+JSON
+	echo "trustPolicy=off" >>.npmrc
+	run aube install
+	assert_success
+	run aube install
+	assert_success
+	run grep -c '^run$' runs.log
+	assert_output "1"
+}
+
+@test "aube add runs pnpm:devPreinstall without ordinary root hooks" {
+	cat >package.json <<'JSON'
+{
+  "name": "dev-preinstall-add",
+  "version": "1.0.0",
+  "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"dev.marker\", process.env.npm_command)'",
+    "postinstall": "node -e 'require(\"fs\").writeFileSync(\"postinstall.marker\", \"ran\")'"
+  }
+}
+JSON
+	echo "trustPolicy=off" >>.npmrc
+	run aube add is-odd
+	assert_success
+	run cat dev.marker
+	assert_output "add"
+	assert_file_not_exists postinstall.marker
+}
+
 @test "aube install runs root postinstall hook after deps are linked" {
 	cat >package.json <<'JSON'
 {
@@ -357,6 +449,7 @@ JSON
   "name": "lifecycle-test",
   "version": "1.0.0",
   "scripts": {
+    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"should-not-exist\", \"x\")'",
     "preinstall": "node -e 'require(\"fs\").writeFileSync(\"should-not-exist\", \"x\")'",
     "postinstall": "node -e 'require(\"fs\").writeFileSync(\"should-not-exist\", \"x\")'"
   },

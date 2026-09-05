@@ -1697,6 +1697,18 @@ mod tests {
     }
 
     #[test]
+    fn popular_package_is_not_flagged_by_a_lower_ranked_similar_name() {
+        assert_eq!(
+            find_similar_package_name("esbuild", "esbuild\nmsbuild\n"),
+            None
+        );
+        assert_eq!(
+            find_similar_package_name("@types/node", "@types/node\n@types/code\n"),
+            None
+        );
+    }
+
+    #[test]
     fn similar_name_prefers_distance_then_popularity_rank() {
         assert_eq!(
             find_similar_package_name("foobarz", "foobars\nfoobaz\n"),

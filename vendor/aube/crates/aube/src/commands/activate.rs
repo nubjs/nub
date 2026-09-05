@@ -1,16 +1,16 @@
-use clap::{Args, ValueEnum};
 use miette::miette;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ActivateArgs {
     /// Shell to emit activation code for
     pub shell: ActivateShell,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, usage_rs::ValueEnum, strum::Display, strum::EnumString)]
+#[strum(serialize_all = "kebab-case")]
 pub enum ActivateShell {
     Bash,
     Fish,

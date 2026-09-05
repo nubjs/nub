@@ -20,7 +20,7 @@ Task playbooks ("skills") live as plain-markdown `SKILL.md` files under `.claude
 
 Per-agent config is tracked for **every** agent, not just Claude: `.claude/settings.json` + `.claude/hooks/` (Claude Code), `.codex/config.toml` + `.codex/hooks.json` (Codex), and `.mcp.json` (the shared `chrome-devtools` MCP server). The two agents read different config files, so the `gh-comment-guard` hook script exists once per agent — `.githooks/pre-push` requires the copies stay byte-identical, and rejects a hook command that hardcodes an absolute home path. Codex sets no project-dir environment variable of its own — verified by dumping a live hook's environment: it received 79 vars, none of them `CODEX_*`, and no `CLAUDE_PROJECT_DIR` even though 11 unrelated `CLAUDE_*` vars had leaked in from the launching shell. It does run hooks with the working directory set to the project root and passes `cwd` in the stdin payload. So a Codex hook path uses `$(git rev-parse --show-toplevel)`, which additionally survives being invoked from a subdirectory.
 
-When present, [`AGENTS.local.md`](../AGENTS.local.md) (gitignored, not in a clean checkout) adds maintainer-local orientation — orchestration workflow, dispatch policy, pull-request handling policy, and pointers into local-only directories. It is an optional overlay; this file is self-sufficient without it. **Read it whenever it exists: it carries binding maintainer policy that this file does not repeat**, including how to handle a contributor's PR (we push the changes ourselves rather than asking the author to amend) and the branch-protection merge override.
+When present, `AGENTS.local.md` (gitignored, not in a clean checkout) adds maintainer-local orientation — orchestration workflow, dispatch policy, pull-request handling policy, and pointers into local-only directories. It is an optional overlay; this file is self-sufficient without it. **Read it whenever it exists: it carries binding maintainer policy that this file does not repeat**, including how to handle a contributor's PR (we push the changes ourselves rather than asking the author to amend) and the branch-protection merge override.
 
 ## Non-negotiables
 
@@ -101,7 +101,7 @@ Roadmap, unshipped features, and competitive material stay in the gitignored `in
 
 ## Git & GitHub maintainer hygiene
 
-This is a public project with real reporters watching, so maintainer responsiveness is mandatory hygiene, not courtesy. The end-to-end issue playbook is the `address-issue` skill; comment tone is [`PROSE.md`](../PROSE.md) — factual, neutral, never braggy.
+This is a public project with real reporters watching, so maintainer responsiveness is mandatory hygiene. The issue playbook is the `address-issue` skill; comment tone is the `prose-writing` skill — factual, neutral, never braggy.
 
 - **Acknowledge an EXTERNAL issue with exactly the comment `Investigating.`** — no summary, plan, timeline, or restatement of the bug. Internal/self-filed issues need no acknowledgement.
 - **Substantive issue/PR comments are terse and factual.** State what you found and what you did, in the fewest words that carry the facts. Never write meta-commentary like "previous comments were wrong" — prior comments are often a bot's. The `gh-comment-guard` PreToolUse hook (`.claude/hooks/gh-comment-guard.mjs`, wired in `.claude/settings.json`) blocks an over-long `gh issue/pr comment` or `gh pr create` body; trim it, or set `NUB_ALLOW_LONG_COMMENT=1` when a longer body is genuinely needed (e.g. a detailed release note).
@@ -366,7 +366,7 @@ Feature-specific harnesses live under `tests/<feature>/` — e.g. `tests/pnp/` b
 
 **Plain language, colleague tone.** Use the minimum words that convey every point: direct, calm, collaborative, one technical colleague to another.
 
-Simplest accurate term; explain any necessary jargon at first use. State conclusions and tradeoffs; cut preamble, repetition, hedging, and ceremony. Concision never means omission — keep every fact needed for the decision. Full cross-surface tone bar: [`PROSE.md`](../PROSE.md).
+Simplest accurate term; explain any necessary jargon at first use. State conclusions and tradeoffs; cut preamble, repetition, hedging, and ceremony. Concision never means omission — keep every fact needed for the decision. Full cross-surface tone bar: the `prose-writing` skill.
 
 **The last message before you come to rest must stand alone.** It is the whole interface the reader gets: they see it in a queue, later, without your working context and without scrolling the transcript. So it accounts for everything you did since their last message — what changed and where, what you verified and how, what you decided and why, and what is still open. Never point at "the above", at a tool call, or at a file they have not read.
 
@@ -386,11 +386,13 @@ Visual structure never replaces the host application's control syntax. In Fray, 
 
 ## User-facing copy: prose & tone
 
-**[`PROSE.md`](../PROSE.md) is the cross-project copywriting guide — read it before writing any GitHub comment, docs page, blog/marketing copy, or release note.**
+**The `prose-writing` skill is the cross-project copywriting guide — invoke it before writing any GitHub comment, docs page, blog/marketing copy, or release note.**
 
-The `prose-writing` skill auto-triggers on copy work and points back to PROSE.md as canonical. It owns register, sentence/heading mechanics, scannability, inline-code-pileup avoidance, description fields, real-output-only mockups, GitHub tone, markdown mechanics, and release-notes shape. The sections below carry only the nub-specific layers.
+The skill lives with the maintainer's global skills rather than in this repo; the repo's `PROSE.md` copy was retired 2026-09-04 so the guide has one home. An agent without the skill applies the summary in this section.
 
-**Any general copy-style feedback gets applied everywhere it applies, not just where it was raised** — and gets recorded in `PROSE.md`, not here. Dispatch a sweep of all docs (plus homepage/blog where relevant), then add the rule to the shared guide.
+The skill auto-triggers on copy work and its bundled guide is canonical. It owns register, sentence/heading mechanics, scannability, inline-code-pileup avoidance, description fields, real-output-only mockups, GitHub tone, markdown mechanics, and release-notes shape. The sections below carry only the nub-specific layers.
+
+**Any general copy-style feedback gets applied everywhere it applies, not just where it was raised** — and gets recorded in the `prose-writing` skill's guide, not here. Dispatch a sweep of all docs (plus homepage/blog where relevant), then add the rule to the shared guide.
 
 **User-facing AGENT instructions must be coding-agent-agnostic.** Any copy an arbitrary coding agent reads and *executes* — `start.md`, the `nub agent skill` output, docs that tell an agent to do something — must accommodate every coding agent (Claude Code, Cursor, Codex/Copilot, Cline, …). Each stores standing instructions differently (`.claude/skills/<name>/SKILL.md`, `.cursor/rules/`, `AGENTS.md`, `.github/copilot-instructions.md`). Never hardcode a Claude-specific path as THE target; instruct the running agent to follow its own conventions and the repo's existing layout. A Claude path may appear only as one example among several. Keep `nub agent skill` / `https://nubjs.com/skill.md` as the agent-neutral source. (This does not govern this repo's own `.claude/skills/*`.)
 
@@ -406,7 +408,7 @@ Conventions specific to the docs site, on top of the shared guide above.
 
 ## Blog & marketing copy (`site/content/blog/`, homepage)
 
-General structure rules live in [`PROSE.md`](../PROSE.md). The homepage is the canonical register — reuse an existing passage or code block rather than rewriting it. The nub-specific layers:
+General structure rules live in the `prose-writing` skill. The homepage is the canonical register — reuse an existing passage or code block rather than rewriting it. The nub-specific layers:
 
 - **Benchmarks use the homepage `<Bench>` component** (a registered global MDX component). The file-execution bench belongs to the file runner, not `nub run`.
 - **Bailout commands are sub-section asides.** Surfaces that exist for completeness (`nub node`, `nub pm`) get a short `###` under the section whose implicit behavior they back up, never their own `##`.

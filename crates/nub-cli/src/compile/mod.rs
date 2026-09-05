@@ -35,16 +35,20 @@ mod assets;
 pub mod bundle;
 mod closure;
 mod external;
+mod icu;
 mod inject;
+mod inline;
 mod launcher;
 mod loaders;
 mod metafile;
 mod native;
 mod native_layout;
+mod sea;
 mod unbundlable;
 mod version_info;
 
 pub use bundle::{BundleOptions, SourcemapMode};
+pub use icu::parse_locales as parse_icu_locales;
 
 /// Shown while a first run unpacks the embedded Node (or provisions one under
 /// `--smol`). Deliberately generic: the launcher has no app name of its own, and
@@ -75,6 +79,11 @@ pub struct CompileOptions {
     /// `--node-options`: NODE_OPTIONS-style strings the compiled binary starts its
     /// Node with, applied before whatever the end user sets at run time.
     pub node_options: Vec<String>,
+    /// `--icu=<locales>`: the languages to keep in the embedded Node's ICU data.
+    /// `None` — no flag, or a bare `--icu`, or `--icu=full` — keeps all ~700, which
+    /// is the only setting that formats identically to the user's own `node`.
+    /// Ignored under `--smol`, which embeds no Node to trim.
+    pub icu: Option<Vec<String>>,
     /// `--icon`: a Windows `.ico` to show on the executable. Windows-only because
     /// it is the only target whose format carries the icon in the file itself —
     /// macOS reads one from the surrounding `.app` bundle and Linux from a
@@ -84,6 +93,11 @@ pub struct CompileOptions {
     /// the nearest `package.json` supplies. Windows-only for the same reason as
     /// [`CompileOptions::icon`] — no other container format carries them.
     pub metadata: Vec<String>,
+    /// `--hide-console`: give the Windows executable the GUI subsystem, and tell
+    /// its launcher to spawn Node with no console. Windows-only for the same
+    /// reason as [`CompileOptions::icon`] — the subsystem is a PE header field,
+    /// and neither Mach-O nor ELF has anything corresponding to it.
+    pub hide_console: bool,
     /// `--metafile`: where to write the build report. `None` collects nothing.
     pub metafile: Option<PathBuf>,
     /// The bundler-flag surface, shared verbatim with `nub build`.
@@ -97,8 +111,8 @@ type AppFiles = Vec<AppFile<Vec<u8>>>;
 
 pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Started before anything that can touch the network or the disk, so the
-    // `elapsed` row measures the wait the user actually sat through rather than
-    // the part of it this function happens to bracket.
+    // closing success line reports the wait the user actually sat through rather
+    // than the part of it this function happens to bracket.
     let started = std::time::Instant::now();
     let target = resolve_platform(opts.platform.as_deref())?;
 
@@ -108,6 +122,17 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let entry_path = Path::new(&opts.entry);
     if !entry_path.is_file() {
         bail!("entry file not found: {}", opts.entry);
+    }
+
+    // Refused rather than ignored, matching `--icon` and `--metadata`: `--smol`
+    // embeds no Node, so there is no ICU data to trim and the artifact would run on
+    // whatever the host supplies. Accepting the flag would report a saving the
+    // build never made.
+    if opts.smol && opts.icu.is_some() {
+        bail!(
+            "--icu trims the ICU data out of the EMBEDDED Node, and --smol embeds none.\n\
+             \x20\x20A --smol artifact uses whichever Node it finds or provisions at startup."
+        );
     }
 
     // Read here for the same reason the entry is stat'd here: a mistyped path is
@@ -139,13 +164,19 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         &out_path,
         &target,
     )?;
+    reject_non_windows_hide_console(opts.hide_console, &target)?;
 
-    // Resolved AND verified before any real work: a cross-compile whose launcher
-    // template is missing, or is not that platform's executable, must fail in the
-    // first second — not after downloading and recompressing a ~100 MB Node for
-    // the target. For a foreign target this may fetch the template from this
-    // release, a few hundred KB, still the cheapest step to fail on.
-    let template = launcher::locate(&target)?;
+    // Printed here — after the cheap rejections, before the first step that can
+    // take a visible amount of time. Everything above fails in the first second,
+    // so an intro above them would announce a build that never started.
+    eprintln!(
+        "{}",
+        intro_line(
+            &opts.entry,
+            &out_path,
+            crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        )
+    );
 
     // 1. Resolve `--include`/`--exclude` BEFORE bundling: a typo'd include is a
     //    sub-second failure, and paying for a full bundle first would hide that
@@ -153,6 +184,26 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let entry_dir = entry_abs.parent().unwrap_or(Path::new("."));
     let cwd = std::env::current_dir().context("resolving the current directory")?;
     let layout = assets::plan(entry_dir, &cwd, &opts.include, &opts.exclude)?;
+    // A bundled CommonJS module's `__dirname` has to land where the extraction dir
+    // actually puts that module's directory, which only the layout knows.
+    //
+    // Both paths are `canonicalize`d, which on Windows yields the VERBATIM
+    // `\\?\C:\...` spelling while rolldown's module ids carry the ordinary one.
+    // `Path::strip_prefix` compares prefixes by variant and `VerbatimDisk != Disk`,
+    // so leaving them verbatim makes every offset silently `None` on a Windows
+    // build host. `canonicalize_for_bundler` exists for the same mismatch.
+    let mut mirror = bundle::ModuleMirror {
+        anchor: bundle::strip_verbatim_prefix(layout.anchor.clone(), cfg!(windows)),
+        entry_dir: bundle::strip_verbatim_prefix(entry_dir.to_path_buf(), cfg!(windows)),
+        materialized: Default::default(),
+    };
+    // Bundle output lands under the entry prefix, and each asset creates its own
+    // parents; nothing else in the payload makes a directory.
+    mirror.materialize(&layout.entry_prefix);
+    for asset in &layout.assets {
+        mirror.materialize(asset.rel.rsplit_once('/').map_or("", |(dir, _)| dir));
+    }
+    opts.bundle.module_mirror = mirror;
 
     // The exact target Node must be known BEFORE bundling: it decides which
     // polyfills the preamble carries, and a static import cannot be tree-shaken
@@ -178,6 +229,26 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         gate_version.0.minor,
         gate_version.0.patch,
     ));
+    opts.bundle.eager_startup =
+        bundle::eager_startup_compilation_supported(opts.bundle.target_node);
+
+    // Resolved AND verified before any real work: a cross-compile whose launcher
+    // template is missing, or is not that platform's executable, must fail in the
+    // first second — not after downloading and recompressing a ~100 MB Node for
+    // the target. For a foreign target this may fetch the template from this
+    // release, a few hundred KB, still the cheapest step to fail on.
+    //
+    // A single-executable application opens no template at all — it IS a Node —
+    // so this asks the same question the container decision below asks, minus the
+    // payload-shape half that is not known yet. Being conservative here only costs
+    // a lookup nothing reads; being eager would fail a perfectly good SEA build on
+    // a platform whose launcher this release never published, and would fetch a
+    // template over the network to do it.
+    let template = if opts.smol || !sea::supports_blob_exec_argv(&gate_version) {
+        Some(launcher::locate(&target)?)
+    } else {
+        None
+    };
 
     // 2. Bundle (Rolldown, in-process). The target's platform/arch are baked in
     //    as defines UNDER the user's, so a cross-compiled `process.platform`
@@ -232,6 +303,99 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         entry_name = shim.entry;
         app_files.extend(shim.files);
     }
+    // Computed here rather than beside the manifest because the no-extract decision
+    // below needs it: only the VERBATIM payload sets can carry a file Node parses
+    // that the bundler did not — emitted asset copies, native-island contents, and
+    // `--include`s. Their PRESENCE is the predicate, not their extensions, since the
+    // CommonJS loader parses an exact-path `require()` of any unknown or absent
+    // extension with its `.js` handler, so no name-based allowlist can prove a
+    // shipped file is not runtime JavaScript.
+    let carries_verbatim_files =
+        bundled.assets.len() + bundled.native_files.len() + layout.assets.len() > 0;
+    let sealed_module_graph = !shim_plan.needed() && !carries_verbatim_files;
+
+    // Can this payload run WITHOUT being written to disk? `sealed_module_graph` is
+    // necessary and not sufficient: a statically traced worker chunk and a
+    // `--sourcemap=linked` map are both files the bundler itself parsed, so the
+    // graph is sealed with either present, and neither can be reached from a
+    // `data:` URL. See `compile::inline`.
+    let no_extract_inputs = inline::Inputs {
+        sealed_module_graph,
+        worker_roots: bundled.worker_roots.len(),
+        worker_wrappers: worker_wrappers.len(),
+        sourcemap: opts.bundle.sourcemap != bundle::SourcemapMode::None,
+        embeds_node: !opts.smol,
+        computes_module_specifier: bundled.app_computes_module_specifier,
+        entry: &entry_name,
+    };
+    // WHICH CONTAINER: a Node single-executable application, or nub's launcher
+    // with a payload appended to it?
+    //
+    // The SEA is the default for an embedding build, and it is the same payload in
+    // a different container — the bundle, the bootstrap, the flags and the virtual
+    // root are all shared, and only the delivery differs. It wins because it drops
+    // the two terms the launcher shape cannot: the launcher process itself, and
+    // unpacking ~110 MB of Node to the cache on first run. Measured on Linux
+    // against plain `node` running the same source, 300-run minimums with a 1.49 ms
+    // baseline spread: the launcher artifact +7.20 ms, the single-executable one
+    // +0.53 — at parity with plain Node, and 1.2 ms from a SEA carrying no nub code
+    // at all.
+    //
+    // It is declined in exactly two situations. A Node too old to read `execArgv`
+    // out of the blob cannot be handed nub's flags at all
+    // (`sea::supports_blob_exec_argv`), and `--smol` embeds no Node — a SEA IS a
+    // Node, so a shape whose whole point is not carrying one cannot be one. Beyond
+    // those, a payload that needs real filesystem paths (`--external`, a surviving
+    // computed `import()`, `--include`d files, a native addon, a traced worker
+    // chunk, a linked source map) still extracts, and the eligibility pass that
+    // decides is the one the inline shape already uses.
+    let sea_capable = !opts.smol && sea::supports_blob_exec_argv(&gate_version);
+    let sea_decline = if sea_capable {
+        inline::classify(&app_files, &no_extract_inputs, inline::Mode::Sea)?.err()
+    } else {
+        None
+    };
+    let use_sea = sea_capable && sea_decline.is_none();
+
+    // The lookup above was skipped for anything that COULD be a SEA, and a decline
+    // is how that guess turns out wrong: the payload needs real paths after all, so
+    // the launcher is back and its template has to be fetched now. Still ahead of
+    // the Node download, which is the step worth failing before.
+    let template = match template {
+        _ if use_sea => Vec::new(),
+        Some(template) => template,
+        None => launcher::locate(&target)?,
+    };
+
+    // A SEA takes the chunks VERBATIM, so it skips this rewrite entirely: its
+    // loader serves them from `module.registerHooks` at real `file:` URLs, where
+    // `import.meta.url` and every relative specifier already mean what they mean in
+    // the extracted tree. See `compile::sea::payload`.
+    let (app_files, inline_app, app_delivery) = if use_sea {
+        (app_files, false, AppDelivery::Sea)
+    } else {
+        match inline::rewrite(app_files, &no_extract_inputs)? {
+            inline::Rewritten::Inline(files) => (files, true, AppDelivery::Inline),
+            inline::Rewritten::Extract(files, why) => {
+                // An embedding build reports why it is not a SEA, which is a
+                // different question from why it is not inline and has a better
+                // answer. `Decline::EmbeddedNode` — "it extracts its embedded Node
+                // anyway" — is the inline answer, and it is both uninformative and
+                // now premise-free: an embedding artifact is a SEA by default and
+                // extracts nothing. The version gate has no inline counterpart at
+                // all, so without this the artifact silently loses the SEA shape
+                // and the build says something true about a different question.
+                let why = if opts.smol {
+                    why.reason()
+                } else if let Some(sea_decline) = sea_decline {
+                    sea_decline.reason()
+                } else {
+                    "its Node predates single-executable flag support"
+                };
+                (files, false, AppDelivery::Extracted(why))
+            }
+        }
+    };
     let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
         live.phase("embedding", &format!("{} files", layout.assets.len()));
@@ -300,7 +464,18 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let exact =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
         external::check_node_support(&exact, &source, &shim_plan)?;
-        let node = build_node_blob(&exact, &target, &cache_root, &source)?;
+        let node = build_node_blob(
+            &exact,
+            &target,
+            &cache_root,
+            &source,
+            opts.icu.as_deref(),
+            if use_sea {
+                NodeDelivery::Verbatim
+            } else {
+                NodeDelivery::Compressed
+            },
+        )?;
         let summary = RuntimeSummary {
             fact: format!("Node {exact}, embedded"),
             provenance: source.to_string(),
@@ -315,26 +490,56 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // Node blob already uses, and it lets the launcher decode only the files it
     // actually extracts. Level 19 matches the Node blob; the app region is small
     // enough that the time is not noticeable next to the ~107 MB one.
-    // Computed before `app_files` is consumed below. Only the VERBATIM payload
-    // sets can carry a file Node parses that the bundler did not: emitted asset
-    // copies, native-island contents, and `--include`s. Their PRESENCE is the
-    // predicate, not their extensions — the CJS loader parses an exact-path
-    // `require()` of any unknown or absent extension with its `.js` handler, so
-    // no name-based allowlist can prove a shipped file is not runtime JS.
-    let carries_verbatim_files =
-        bundled.assets.len() + bundled.native_files.len() + layout.assets.len() > 0;
-    let app_files: Vec<_> = app_files
-        .into_iter()
-        .map(|file| {
-            let bytes = zstd::encode_all(&file.bytes[..], 19)
-                .with_context(|| format!("zstd-compressing {}", file.name))?;
-            Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
+    // An inline payload takes BROTLI instead, because the code that decompresses it
+    // is the artifact's own JavaScript: `zlib.zstdDecompressSync` is missing on Node
+    // 23.5 and 23.6 while brotli is on every supported version. Nothing in Rust ever
+    // decompresses these bytes, which is why the manifest's `app_compressed` — the
+    // launcher's per-file zstd flag — stays false for them.
+    let app_files: Vec<_> = if use_sea {
+        // Raw. A SEA's assets are mapped from the executable and handed to Node as
+        // the `ArrayBuffer` `getRawAsset` returns; compressing them would force a
+        // JavaScript decode into a string on every start, which is the copy the
+        // loader exists to avoid. They sit beside a ~110 MB Node either way.
+        app_files
+            .into_iter()
+            .map(|file| nub_core::compile::AppFile {
+                plain_size: Some(file.bytes.len() as u64),
                 name: file.name,
-                bytes,
+                bytes: file.bytes,
                 executable: file.executable,
             })
-        })
-        .collect::<Result<_>>()?;
+            .collect()
+    } else {
+        app_files
+            .into_iter()
+            .map(|file| {
+                // The length the LAUNCHER will find on disk, so it is read before
+                // anything below can compress or move these bytes.
+                let plain_size = file.bytes.len() as u64;
+                let bytes = if inline_app {
+                    // The bootstrap alone is stored VERBATIM. The launcher reads it out
+                    // of the payload to build the `-e` argument, and it carries no
+                    // decompressor for this codec by design — nub-launcher is a
+                    // deliberately minimal binary. Storing ~13 KB raw is what buys that.
+                    if file.name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
+                        file.bytes
+                    } else {
+                        brotli_encode(&file.bytes)
+                            .with_context(|| format!("brotli-compressing {}", file.name))?
+                    }
+                } else {
+                    zstd::encode_all(&file.bytes[..], 19)
+                        .with_context(|| format!("zstd-compressing {}", file.name))?
+                };
+                Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
+                    name: file.name,
+                    plain_size: Some(plain_size),
+                    bytes,
+                    executable: file.executable,
+                })
+            })
+            .collect::<Result<_>>()?
+    };
 
     // 4. Manifest + payload.
     let manifest = Manifest {
@@ -357,7 +562,8 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         node_sha256: node.sha256,
         node_blake3: node.blake3,
         node_size: node.size,
-        app_compressed: true,
+        node_icu: node.icu,
+        app_compressed: !inline_app,
         app_sha256: app_sha,
         minify: opts.bundle.minify,
         install_message: Some(install_message(&opts)),
@@ -371,9 +577,26 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // construction: the bundler parsed them. Computed require of a path
         // OUTSIDE the artifact stays out of the predicate on the
         // plain-Node-baseline argument in the Manifest field's doc comment.
-        sealed_module_graph: !shim_plan.needed() && !carries_verbatim_files,
+        sealed_module_graph,
+        // The launcher's half of `--hide-console`. The PE subsystem flip below
+        // only stops Windows giving the LAUNCHER a console; this is what stops it
+        // giving one to the Node it spawns.
+        hide_console: opts.hide_console,
+        inline_app,
+        // An inline payload runs the bootstrap as `-e` and has no preload to save.
+        standalone_preamble: !inline_app
+            && bundled.bootstrap_optional
+            && supports_standalone_preamble(opts.bundle.target_node),
     };
-    let payload = encode_with_license(&manifest, &app_files, &node.blob, &node.license);
+    // A SEA carries no nub payload at all: the manifest above describes the
+    // launcher's container, and the launcher is not in this artifact. Everything
+    // the manifest would have told the launcher is either already true in a SEA
+    // (the entry, the exact Node) or is baked into the blob (the flags).
+    let payload = if use_sea {
+        Vec::new()
+    } else {
+        encode_with_license(&manifest, &app_files, &node.blob, &node.license)
+    };
 
     // 5. Build and verify a staged artifact before replacing the requested
     // destination. A late signing/permission/static/native-probe failure must
@@ -381,19 +604,68 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     live.phase("linking", &target.triple());
     let staged_maps = stage_detached_maps(&bundled, &out_path)?;
     let staged = StagedArtifact::new(&out_path, "artifact")?;
-    inject::inject(
-        &target,
-        &template,
-        &payload,
-        icon.as_deref(),
-        version_info.as_deref(),
-        staged.path(),
-    )
-    .with_context(|| format!("writing {}", staged.path().display()))?;
+    let sea_blob_len = if use_sea {
+        let blob = sea::build_blob(&sea::Inputs {
+            app_files: &app_files,
+            entry: &manifest.entry,
+            app_sha: &manifest.app_sha256,
+            node_license: &node.license,
+            node_version: &node_version,
+            node_flags: &manifest.node_flags,
+        })?;
+        sea::inject(
+            &target,
+            &node.blob,
+            &blob,
+            icon.as_deref(),
+            version_info.as_deref(),
+            opts.hide_console,
+            staged.path(),
+        )
+        .with_context(|| format!("writing {}", staged.path().display()))?;
+        blob.len() as u64
+    } else {
+        inject::inject(
+            &target,
+            &template,
+            &payload,
+            icon.as_deref(),
+            version_info.as_deref(),
+            opts.hide_console,
+            staged.path(),
+        )
+        .with_context(|| format!("writing {}", staged.path().display()))?;
+        0
+    };
     set_executable(staged.path())?;
     sync_file(staged.path())?;
     live.phase("verifying", "");
-    verify_artifact(staged.path(), &target, version_info.as_deref())?;
+    if use_sea {
+        // The entry's own length, which the self-probe compares against what the
+        // artifact's `sea.getRawAsset` hands back. `build_blob` has already
+        // refused a payload whose entry is not among the emitted chunks, so the
+        // lookup cannot miss — and a zero would simply fail the probe, which is
+        // the safe way for an impossible case to land.
+        let entry_len = app_files
+            .iter()
+            .find(|file| file.name == manifest.entry)
+            .map_or(0, |file| file.bytes.len());
+        sea::verify_artifact(
+            staged.path(),
+            &manifest.entry,
+            entry_len,
+            &target,
+            version_info.as_deref(),
+            opts.hide_console,
+        )?;
+    } else {
+        verify_artifact(
+            staged.path(),
+            &target,
+            version_info.as_deref(),
+            opts.hide_console,
+        )?;
+    }
     staged.publish(&out_path)?;
 
     // Detached maps are optional debugging companions rather than part of the
@@ -414,10 +686,32 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // bytes being split. `node.size` is the DECOMPRESSED length — the
         // launcher's warm-start check — so using it here would report a Node
         // component four times the space it takes in the file.
-        node_bytes: node.blob.len() as u64,
-        app_bytes: app_files.iter().map(|f| f.bytes.len() as u64).sum(),
+        node_bytes: (node.blob.len() + node.license.len()) as u64,
+        // For a SEA the app's contribution is the whole blob — the assets plus the
+        // generated main that serves them, which is the payload's real cost.
+        app_bytes: if use_sea {
+            sea_blob_len
+        } else {
+            app_files.iter().map(|f| f.bytes.len() as u64).sum()
+        },
+        // Injection re-signs the whole image, so the template's own ad-hoc
+        // signature never reaches the artifact and must come off its size.
+        // Zero for a SEA, whose container is the Node binary itself rather than a
+        // launcher template — the `node` part above already accounts for it.
+        launcher_bytes: if use_sea {
+            0
+        } else {
+            (template.len() as u64)
+                .saturating_sub(inject::code_signature_size(target.format(), &template))
+        },
+        // Measured off the published file rather than predicted: the signature's
+        // size is a function of the final image, which nothing before the write
+        // knows. A failure to read it back is not worth failing a verified build
+        // over — the component simply reports zero and goes unnamed.
+        signature_bytes: inject::code_signature_size_of(target.format(), &out_path).unwrap_or(0),
         shipped,
         deferred: bundled.dynamic_import_sites,
+        app_delivery,
         report: opts.metafile.clone(),
         elapsed: started.elapsed(),
     };
@@ -471,20 +765,143 @@ fn report_resolved_build(
     // either strand a gap on a narrow block or collide on a wide one. That is what
     // `install_report.rs::render_block` does, for the same reason.
     let width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
-    let cols = console::Term::stderr()
-        .size_checked()
-        .map_or(FALLBACK_COLS, |(_, cols)| cols as usize);
+    let cols = stderr_cols();
     eprintln!();
     for (label, spans) in rows {
         for line in render_row(label, &spans, width, cols, color) {
             eprintln!("{line}");
         }
     }
+    eprintln!();
+    eprintln!("{}", success_line(out_path, facts.elapsed, color));
+}
+
+/// The line that opens a compile, and the one thing here that survives in the
+/// scrollback from before the build.
+///
+/// The live line cannot do this job: it is `ProgressJobDoneBehavior::Hide`, so
+/// the only pre-block line a compile printed erased itself, and a build that had
+/// scrolled past left no record of what was even being compiled. It is also off
+/// entirely when stderr is not a terminal, which is exactly the run — a CI log —
+/// where the record matters most. So this is a plain `eprintln!` rather than a
+/// kept final frame: it prints identically in both modes, and the spinner keeps
+/// being purely transient.
+///
+/// `entry → out` and nothing else. The platform and the size are on the block
+/// eight lines below, and a cross-compile carries its target in the default
+/// output name anyway; an intro repeating the block is a second, worse copy of
+/// it. What the block cannot say is what the reader is waiting FOR, because it
+/// prints when the waiting is over.
+fn intro_line(entry: &str, out_path: &Path, color: bool) -> String {
+    format!(
+        "{} {} compiling {entry} {} {}",
+        banner(color),
+        paint("·", Ink::Muted, color),
+        paint("→", Ink::Muted, color),
+        paint(&out_path.display().to_string(), Ink::Accent, color),
+    )
+}
+
+/// The line that closes a successful compile.
+///
+/// A build that worked used to end on its own last fact — `elapsed  3.5s`, or
+/// whichever optional row happened to sort last — so nothing in the output said
+/// the thing had actually succeeded. This says it, in the vocabulary the rest of
+/// the CLI already spends on exactly that: a green bold check mark, then the
+/// noun, then a dim duration. It is the same line `nub install` signs off with
+/// (`✓ installed 2 packages in 1.2s`), which is what makes it legible without
+/// being read.
+///
+/// It carries the elapsed time, and the `elapsed` block row was removed when it
+/// did. One fact stated twice, three lines apart, is worse than either placement
+/// on its own — and the duration belongs with the success cue, where it answers
+/// "that worked, and it took this long" as one sentence.
+///
+/// No banner, unlike the install summary. That summary is frequently the ONLY
+/// persistent line an install prints, so it has to identify who is speaking; a
+/// compile always prints [`intro_line`] first, and stamping the version twice
+/// into a seven-line output is noise.
+fn success_line(out_path: &Path, elapsed: std::time::Duration, color: bool) -> String {
+    format!(
+        "{} compiled {} in {}",
+        paint_success(color),
+        paint(&out_path.display().to_string(), Ink::Accent, color),
+        paint(&format_elapsed(elapsed), Ink::Muted, color),
+    )
+}
+
+/// The product banner: magenta-bold `nub`, then the dim version.
+///
+/// One definition, because it is drawn on two surfaces — the live line's header
+/// and [`intro_line`] — and the two drifting apart would be invisible until
+/// someone put them side by side. Byte-compatible with the banner the engine
+/// prints, which is what makes an install and a compile look like one CLI.
+fn banner(color: bool) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    if !color {
+        return format!("nub {version}");
+    }
+    format!("\x1b[35m\x1b[1mnub\x1b[22m\x1b[39m \x1b[2m{version}\x1b[22m")
+}
+
+/// The green check mark, in the one place a build says it worked.
+///
+/// Not an [`Ink`], deliberately: `Ink` is the block's three-tier vocabulary and
+/// adding a fourth for a glyph one line uses would put a color in it that the
+/// block itself never draws.
+fn paint_success(color: bool) -> String {
+    if color {
+        "\x1b[32m\x1b[1m✓\x1b[22m\x1b[39m".to_string()
+    } else {
+        "✓".to_string()
+    }
+}
+
+/// An elapsed build, in the three bands the engine's install summary uses
+/// (`aube::progress::ci::format_duration`): sub-second `240ms`, sub-minute
+/// `4.0s`, otherwise `3m12s`.
+///
+/// Reimplemented rather than called because that function is private to the
+/// engine. The bands matter here more than they do for an install: a `--target`
+/// that has to download and recompress a ~100 MB Node routinely runs past a
+/// minute, and the flat `{:.1}s` this replaces rendered that as `92.4s`.
+fn format_elapsed(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", d.as_secs_f64())
+    } else {
+        let total = d.as_secs();
+        format!("{}m{:02}s", total / 60, total % 60)
+    }
 }
 
 /// Assumed terminal width when stderr cannot be measured — a pipe, a log file, a
 /// CI runner. Matches `install_report.rs`.
 const FALLBACK_COLS: usize = 80;
+
+/// A string's width in TERMINAL CELLS, which is what a wrap decision needs.
+///
+/// `chars().count()` counts Unicode scalar values, and the two disagree on
+/// exactly the text a user controls: a path, a package name or a `--platform`
+/// value carrying CJK or emoji is two cells per scalar, so counting scalars
+/// wraps a full column late and the line the tier just indented soft-wraps at
+/// column zero anyway. `console` is already a dependency here — it is what
+/// measures the terminal — and it strips SGR while measuring, so this stays
+/// correct if it is ever handed painted text.
+fn cells(text: &str) -> usize {
+    console::measure_text_width(text)
+}
+
+/// The width everything this module prints wraps to. Read once per surface
+/// rather than threaded down, and named so the block and the diagnostics
+/// demonstrably wrap to the same number.
+fn stderr_cols() -> usize {
+    console::Term::stderr()
+        .size_checked()
+        .map_or(FALLBACK_COLS, |(_, cols)| cols as usize)
+}
 
 /// One row: the label right-aligned in its gutter, then each span in its own ink.
 ///
@@ -534,26 +951,50 @@ fn render_row(
     let mut col = value_col;
     let mut at_line_start = true;
 
+    // Wrapping happens word by word, but PAINTING happens per run of one ink.
+    // `run` is the text accumulated since the ink last changed or the line last
+    // broke; it is flushed through `paint` once. Painting each word as it lands
+    // renders identically and is what shipped first — but it wraps every word in
+    // its own escape pair, so `(node 28.2 MB · app 57 KB · launcher 851 KB)`
+    // leaves the terminal as eleven separate dim spans and roughly ten times the
+    // bytes, which is what anyone piping the output to a file or a doc gets.
+    let mut run = String::new();
+    let mut run_ink = Ink::Plain;
+    macro_rules! flush {
+        () => {
+            if !run.is_empty() {
+                line.push_str(&paint(&run, run_ink, color));
+                run.clear();
+            }
+        };
+    }
+
     for (text, ink) in spans {
+        if *ink != run_ink {
+            flush!();
+            run_ink = *ink;
+        }
         for (lead, word) in words(text) {
             // The separator belongs to whichever line the word lands on, so a
             // wrapped word sheds it and no continuation opens with stray spaces.
-            let needed = if at_line_start { 0 } else { lead } + word.chars().count();
+            let needed = if at_line_start { 0 } else { lead } + cells(word);
             if !at_line_start && col + needed > limit {
+                flush!();
                 lines.push(std::mem::take(&mut line));
                 line = " ".repeat(value_col);
                 col = value_col;
                 at_line_start = true;
             }
             if !at_line_start {
-                line.push_str(&" ".repeat(lead));
+                run.push_str(&" ".repeat(lead));
                 col += lead;
             }
-            line.push_str(&paint(word, *ink, color));
-            col += word.chars().count();
+            run.push_str(word);
+            col += cells(word);
             at_line_start = false;
         }
     }
+    flush!();
     lines.push(line);
     lines
 }
@@ -700,6 +1141,31 @@ fn resolved_build_rows(
             ],
         ));
     }
+    // Always shown, because whether the binary needs a writable directory is the
+    // question a self-contained artifact exists to answer — and the reason is what
+    // makes the answer actionable when it is the wrong one.
+    rows.push((
+        "app",
+        match facts.app_delivery {
+            AppDelivery::Inline => vec![
+                ("run from the executable".to_string(), Ink::Plain),
+                ("  nothing is written to disk".to_string(), Ink::Muted),
+            ],
+            // Deliberately not "nothing is written to disk": a single-executable
+            // artifact unpacks nothing, but it still writes Node's compile cache,
+            // exactly as `node app.js` does. Claiming otherwise would be the one
+            // sentence in this block a reader could act on and be wrong about.
+            AppDelivery::Sea => vec![
+                ("run from the executable".to_string(), Ink::Plain),
+                ("  a single-executable application".to_string(), Ink::Muted),
+            ],
+            AppDelivery::Extracted(why) => vec![
+                ("extracted on first run".to_string(), Ink::Plain),
+                (format!("  {why}"), Ink::Muted),
+            ],
+        },
+    ));
+
     if let Some(report) = &facts.report {
         rows.push((
             "report",
@@ -710,17 +1176,26 @@ fn resolved_build_rows(
         ));
     }
 
-    rows.push((
-        "elapsed",
-        vec![(format!("{:.1}s", facts.elapsed.as_secs_f64()), Ink::Plain)],
-    ));
+    // No `elapsed` row: the closing success line carries the duration, and
+    // stating it in both places three lines apart reads as two measurements.
     rows
 }
 
-/// Bytes as the megabytes a reader compares against a disk quota — decimal, the
-/// unit every other size in this output and on the docs page already uses.
+/// Bytes as the size a reader compares against a disk quota — decimal, the unit
+/// convention every other size in this output and on the docs page already uses.
+///
+/// Under a megabyte it says kilobytes instead, because a fixed `{:.1} MB` prints
+/// `0.0 MB` for anything below 50 KB — and the app region of a small binary is
+/// exactly that. A component of a real artifact reported as `0.0 MB` reads as
+/// "nothing is there", which is both wrong and the opposite of what the split
+/// exists to tell someone trying to shrink their binary. Measured on a two-line
+/// program: `app 0.0 MB`, beside a 24 KB region.
 fn mb(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1_000.0)
+    }
 }
 
 // ---- the live line -------------------------------------------------------------
@@ -763,6 +1238,31 @@ const PHASE_WIDTH: usize = 11;
 static LIVE: std::sync::Mutex<Option<std::sync::Arc<clx::progress::ProgressJob>>> =
     std::sync::Mutex::new(None);
 
+/// Move the live line to a new phase, from anywhere in the compile path.
+///
+/// A free function for the same reason [`note`] is one: the code that knows a
+/// step has started is often deep — the Node stripper, the re-signer — and
+/// threading a reporter down through every signature in between to let one of
+/// them change a word buys nothing.
+///
+/// This is where a step that used to print a standalone sentence goes.
+/// `Signing embedded Node.js` was one: it is not a fact about the artifact and
+/// not something a reader can act on, so it does not belong in the scrollback
+/// the closing block is handed — but it IS the slowest part of an embed build,
+/// so saying nothing while it runs is worse. A phase says it and then takes it
+/// back, which is what a phase is for.
+///
+/// With no live line this is a no-op, deliberately: the redirected build already
+/// gets the warnings and the closing block, which is everything a log needs.
+pub(crate) fn phase(verb: &str, detail: &str) {
+    if let Ok(guard) = LIVE.lock()
+        && let Some(job) = guard.as_ref()
+    {
+        job.prop("phase", &LiveLine::phase_field(verb));
+        job.prop("detail", &detail.to_string());
+    }
+}
+
 /// Print a line without tearing an animated status line.
 ///
 /// A bare `eprintln!` while a job is repainting interleaves with it and leaves
@@ -781,12 +1281,40 @@ pub(crate) fn note(line: &str) {
     }
 }
 
-/// The label column a warning's body hangs under: `warn` plus the same [`GAP`]
-/// the block uses, so a wrapped explanation lines up with the headline it
-/// explains instead of with the margin.
-const WARN_INDENT: usize = 4 + GAP;
+/// How loud a diagnostic is.
+///
+/// Separate from [`Ink`], which is the closing block's vocabulary and
+/// deliberately has three tiers and no more. A diagnostic answers a different
+/// question — how much of the reader's attention this deserves — so it gets its
+/// own two-value answer rather than a fourth `Ink` that only one surface uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tier {
+    /// Worth acting on; the build still produced an artifact.
+    Warn,
+    /// The build produced nothing.
+    Error,
+}
 
-/// A warning, drawn in the two tiers it has.
+impl Tier {
+    fn label(self) -> &'static str {
+        match self {
+            Tier::Warn => "warn",
+            Tier::Error => "error",
+        }
+    }
+
+    /// Yellow and red, which are the two colors nub already spends on exactly
+    /// these meanings: yellow on an install's `latest X` advisory, red on the
+    /// engine's `ERR_NUB_*` line. Neither is a new color.
+    fn sgr(self) -> &'static str {
+        match self {
+            Tier::Warn => "\x1b[33m",
+            Tier::Error => "\x1b[31m",
+        }
+    }
+}
+
+/// A warning, drawn in the two weights it has.
 ///
 /// Everything the compile path wants to say used to be one weight and one
 /// prefix — a `note:` in front of a paragraph — so a warning a reader had to act
@@ -804,34 +1332,183 @@ const WARN_INDENT: usize = 4 + GAP;
 /// build, not a problem with it.
 pub(crate) fn warn(headline: &str, body: &[&str]) {
     let color = crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
-    for line in warn_lines(headline, body, color) {
+    for line in diagnostic_lines(Tier::Warn, headline, body, stderr_cols(), color) {
         note(&line);
     }
 }
 
-/// The lines [`warn`] prints, split from the printing so a test can read them.
+/// Report a failed build, and hand back the exit code it should carry.
+///
+/// `main` returns a `Result`, so an error escaping [`run`] reaches Rust's
+/// `Termination` and prints an unstyled `Error: …` — the same framing a panic
+/// gets, and indistinguishable at a glance from a warning that let the build
+/// finish. An error is a diagnostic one step louder than a warning, so it is
+/// drawn as one rather than left to the runtime.
+///
+/// Scoped to `nub compile` deliberately. nub's error surface is already split —
+/// the PM engine prints a red `ERR_NUB_*` line while everything reaching
+/// `Termination` prints a plain `Error:` — and closing that gap is a change to
+/// every command's output rather than this one's to make.
+pub(crate) fn report_error(err: &anyhow::Error) -> i32 {
+    let color = crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
+    for line in error_lines(err, stderr_cols(), color) {
+        note(&line);
+    }
+    1
+}
+
+/// Decompose an error into the lines [`report_error`] prints.
+///
+/// Split out for the same reason [`render_row`] is: the decomposition is the
+/// part with judgment in it, and a test that rebuilt it would not be testing
+/// what ships.
+///
+/// The rule that matters: **everything after the first line is the author's, and
+/// is reproduced byte for byte.** A compile error is not a sentence, it is a
+/// formatted block — a `file:line`, the offending source nested one level under
+/// it, a blank line, then a paragraph hard-wrapped by whoever wrote it. Both
+/// obvious treatments destroy it, and both were tried: re-indenting to hang
+/// under the headline flattens the nesting, so the location and the source at it
+/// become two unrelated lines; re-wrapping breaks each authored line one word
+/// early, because the hanging indent pushes a 74-column line two columns past
+/// the terminal. The tier's job is to label the error, not to lay it out.
+fn error_lines(err: &anyhow::Error, cols: usize, color: bool) -> Vec<String> {
+    let rendered = err.to_string();
+    let mut source = rendered.lines();
+    let headline = source.next().unwrap_or_default();
+
+    // The headline is one sentence with no structure of its own, and the tier
+    // put a label in front of it, so this is the part the tier owns and wraps.
+    let mut lines = headline_lines(Tier::Error, headline, cols, color);
+    lines.extend(source.map(|line| {
+        // An empty line stays empty rather than becoming a pair of escapes.
+        if line.is_empty() {
+            String::new()
+        } else {
+            paint(line, Ink::Muted, color)
+        }
+    }));
+
+    // A cause is the tier's own composition — anyhow gives it as a bare string
+    // with no formatting around it — so it does hang under the headline.
+    //
+    // Per PHYSICAL line, though, not once per cause. A cause is frequently
+    // multiline itself: `inject::inject` builds `setting the executable icon:
+    // …\n  The container parsed, so one of the images inside it did not. …`,
+    // and `run` wraps that with `writing <staged path>`, so the icon message
+    // arrives here as a chained cause carrying its own newlines. Prefixing the
+    // whole string once indents its first line and leaves every later one back
+    // at the column it was authored in — the same defect the message body had,
+    // one level down. The line's own relative indent is kept on top of the
+    // hanging one, so the cause's internal structure survives.
+    let indent = Tier::Error.label().len() + GAP;
+    let pad = " ".repeat(indent);
+    lines.extend(err.chain().skip(1).flat_map(|cause| {
+        cause
+            .to_string()
+            .lines()
+            .map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{pad}{}", paint(line, Ink::Muted, color))
+                }
+            })
+            .collect::<Vec<_>>()
+    }));
+    lines
+}
+
+/// The label and its headline: the one part both tiers compose themselves, so
+/// the label is painted in exactly one place.
+fn headline_lines(tier: Tier, headline: &str, cols: usize, color: bool) -> Vec<String> {
+    let label = tier.label();
+    let painted = if color {
+        format!("{}\x1b[1m{label}\x1b[22m\x1b[39m", tier.sgr())
+    } else {
+        label.to_string()
+    };
+    let indent = label.len() + GAP;
+    wrapped(headline, indent, cols)
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            // The label sits on the first line only; the rest align under it.
+            let lead = if i == 0 {
+                format!("{painted}{}", " ".repeat(GAP))
+            } else {
+                " ".repeat(indent)
+            };
+            format!("{lead}{chunk}")
+        })
+        .collect()
+}
+
+/// The lines a diagnostic prints, split from the printing so a test can read
+/// them.
+///
+/// Shared by both tiers so they cannot drift into two different shapes — the
+/// point of a tier is that the reader learns one layout and reads severity off
+/// the label.
 ///
 /// Same reason [`render_row`] is split out: the body's hanging indent has to be
 /// computed from the label's VISIBLE width, and a test that rebuilt the
 /// arithmetic itself would stay green while production indented by the escape
 /// bytes instead.
-fn warn_lines(headline: &str, body: &[&str], color: bool) -> Vec<String> {
-    let label = if color {
-        // Yellow, which is what an install already spends on the `latest X`
-        // advisory — the CLI's existing "worth your attention, not an error".
-        "\x1b[33m\x1b[1mwarn\x1b[22m\x1b[39m".to_string()
-    } else {
-        "warn".to_string()
-    };
-    let mut lines = vec![format!("{label}{}{headline}", " ".repeat(GAP))];
-    lines.extend(body.iter().map(|line| {
-        format!(
-            "{}{}",
-            " ".repeat(WARN_INDENT),
-            paint(line, Ink::Muted, color)
-        )
-    }));
+fn diagnostic_lines(
+    tier: Tier,
+    headline: &str,
+    body: &[&str],
+    cols: usize,
+    color: bool,
+) -> Vec<String> {
+    // Everything hangs under the headline rather than under the margin, so an
+    // explanation reads as belonging to the thing it explains — and so does a
+    // headline long enough to wrap, which is not rare: `unknown --platform …`
+    // enumerates all eight supported triples and runs to 155 columns.
+    let indent = tier.label().len() + GAP;
+    let mut lines = headline_lines(tier, headline, cols, color);
+    // A `warn` body is written AT the call site FOR this indent — short
+    // fragments, no nesting — so unlike an error's, it is the tier's to lay out.
+    for line in body {
+        for chunk in wrapped(line, indent, cols) {
+            lines.push(format!(
+                "{}{}",
+                " ".repeat(indent),
+                paint(&chunk, Ink::Muted, color)
+            ));
+        }
+    }
     lines
+}
+
+/// Break `text` into chunks that each fit in `cols` once `indent` is added.
+///
+/// Painted AFTER this runs, never before — wrapping a string that already
+/// carries escapes counts those bytes as columns, which is the same trap
+/// [`render_row`]'s label gutter has.
+fn wrapped(text: &str, indent: usize, cols: usize) -> Vec<String> {
+    // A pathologically narrow terminal still has to make progress rather than
+    // emit one word per line forever.
+    let limit = cols.max(indent + 20);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut col = indent;
+    for (lead, word) in words(text) {
+        let needed = if line.is_empty() { 0 } else { lead } + cells(word);
+        if !line.is_empty() && col + needed > limit {
+            out.push(std::mem::take(&mut line));
+            col = indent;
+        }
+        if !line.is_empty() {
+            line.push_str(&" ".repeat(lead));
+            col += lead;
+        }
+        line.push_str(word);
+        col += cells(word);
+    }
+    out.push(line);
+    out
 }
 
 impl LiveLine {
@@ -839,13 +1516,13 @@ impl LiveLine {
         if !crate::cli::color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr())) {
             return Self(None);
         }
-        let header = format!(
-            "\x1b[35m\x1b[1mnub\x1b[22m\x1b[39m \x1b[2m{}\x1b[22m",
-            env!("CARGO_PKG_VERSION")
-        );
+        // clx redraws every 200 ms by default, which reads as a stutter rather
+        // than a spinner. 80 ms is ora's cadence. The setting is process-global,
+        // and `nub compile` owns the only progress job in this process.
+        clx::progress::set_interval(std::time::Duration::from_millis(80));
         let job = clx::progress::ProgressJobBuilder::new()
             .body("{{header}}  {{ spinner() }} {{phase}}{{detail}}")
-            .prop("header", &header)
+            .prop("header", &banner(true))
             .prop("phase", &Self::phase_field("bundling"))
             .prop("detail", &String::new())
             // The line is transient by construction: at teardown the job flips to
@@ -861,9 +1538,8 @@ impl LiveLine {
 
     /// Move to a phase, with an optional detail after it.
     fn phase(&self, verb: &str, detail: &str) {
-        if let Some(job) = &self.0 {
-            job.prop("phase", &Self::phase_field(verb));
-            job.prop("detail", &detail.to_string());
+        if self.0.is_some() {
+            phase(verb, detail);
         }
     }
 
@@ -900,19 +1576,44 @@ impl Drop for LiveLine {
 /// Every field is already in hand at the point the artifact is finished. Deriving
 /// one again at report time — re-reading the blob, re-stat'ing a payload — is how
 /// a report starts describing something other than the file that was written.
+/// How a finished artifact hands its app to Node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppDelivery {
+    /// Written to the cache on first run, for the reason given. A borrowed
+    /// reason rather than a [`inline::Decline`] because the answer comes from
+    /// whichever no-extract shape was actually refused — the single-executable
+    /// one for an embedding build, the inline one for `--smol` — and from the
+    /// Node version gate, which is neither.
+    Extracted(&'static str),
+    /// Served from the executable's own bytes as `data:` URLs, writing nothing.
+    Inline,
+    /// Served out of a Node single-executable blob.
+    Sea,
+}
+
 struct BuildFacts {
     /// The finished file, from `metadata` on what was published.
     size: u64,
-    /// The COMPRESSED Node blob's contribution. Zero under `--smol`, which
-    /// embeds no runtime at all.
+    /// The embedded runtime's contribution: the COMPRESSED Node blob plus the
+    /// compressed `LICENSE` shipped beside it, which exists only because that
+    /// runtime does. Zero under `--smol`, which embeds no runtime at all.
     node_bytes: u64,
     /// The compressed app files' contribution.
     app_bytes: u64,
+    /// The launcher template's contribution, which is its file size MINUS its own
+    /// ad-hoc signature: injection re-signs the whole image, so the template's
+    /// signature is discarded rather than carried.
+    launcher_bytes: u64,
+    /// The finished artifact's ad-hoc code signature, measured off the file that
+    /// was written. Zero on ELF and PE, which nub never signs.
+    signature_bytes: u64,
     /// Everything that did not get sealed into the bundle, with the reason each
     /// one earned. Ordered as the build discovered them.
     shipped: Vec<(String, &'static str)>,
     /// Surviving computed `import()` sites, from `--allow-dynamic-import`.
     deferred: usize,
+    /// How the app reaches Node at run time.
+    app_delivery: AppDelivery,
     /// Where `--metafile` wrote the build report, if it was asked for.
     report: Option<PathBuf>,
     elapsed: std::time::Duration,
@@ -923,24 +1624,32 @@ impl BuildFacts {
     ///
     /// This is the number someone shrinking a binary actually wants; the total on
     /// its own cannot tell them whether their code or the runtime is the problem.
-    /// The remainder is the launcher plus the container's own headers, which is
-    /// what is left once the two payload regions are accounted for — computed as
-    /// a difference rather than measured, so it can never disagree with the total.
+    /// Every part named here is MEASURED, so they deliberately do NOT sum to the
+    /// total. What is left over is the payload container's header, the manifest,
+    /// the per-file framing, and the alignment of the payload region to a 64 KiB
+    /// boundary — a few tens of kilobytes nobody can act on. Naming it took the
+    /// row past 100 columns on a real build, which wraps on an 80-column terminal,
+    /// so it is left out and the parts that answer the question stay on one line.
     ///
-    /// Empty when the parts do not add up to something worth splitting: a `--smol`
-    /// build with no assets is almost entirely launcher, and naming three
-    /// components of one small number is noise.
+    /// `launcher` used to BE the remainder — `size - node - app` — so it swallowed
+    /// the ad-hoc code signature as well. That is not a rounding error: the
+    /// CodeDirectory carries one SHA-256 per 4 KiB page, so on a 29 MB embed build
+    /// a fixed 851 KB launcher was reported as 1.2 MB, and the row said the
+    /// launcher alone outweighed a whole `--smol` binary.
     fn size_split(&self) -> String {
-        let launcher = self
-            .size
-            .saturating_sub(self.node_bytes)
-            .saturating_sub(self.app_bytes);
         let mut parts = Vec::new();
         if self.node_bytes > 0 {
             parts.push(format!("node {}", mb(self.node_bytes)));
         }
         parts.push(format!("app {}", mb(self.app_bytes)));
-        parts.push(format!("launcher {}", mb(launcher)));
+        // Zero for a single-executable artifact, which has no launcher at all —
+        // the container is the Node binary already named on the `node` part.
+        if self.launcher_bytes > 0 {
+            parts.push(format!("launcher {}", mb(self.launcher_bytes)));
+        }
+        if self.signature_bytes > 0 {
+            parts.push(format!("signature {}", mb(self.signature_bytes)));
+        }
         format!("  ({})", parts.join(" · "))
     }
 }
@@ -1058,6 +1767,38 @@ fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<
         );
     }
     Ok(Some(bytes))
+}
+
+/// Refuse `--hide-console` for a target whose format has no subsystem field.
+///
+/// Refused rather than ignored, matching `--icon` and `--metadata`: the whole
+/// point of the flag is that nothing is shown, so accepting it on a target that
+/// cannot honor it would be indistinguishable from it working right up until
+/// someone ran the binary.
+///
+/// The HOST is not checked, only the target. Everything the flag does is byte
+/// editing plus one payload field, so a hidden Windows binary cross-compiles
+/// from macOS or Linux exactly like an icon does.
+/// Whether every Node this artifact accepts has `process.getBuiltinModule`, which
+/// is how a standalone preamble reaches builtins without the bootstrap's early CJS
+/// `require` (`runtime/compile-record.mjs`). Landed at 22.3.0 with a 20.16 backport;
+/// the 20.x band is left out because a `--smol` floor there admits 21.x, which
+/// never had it, and the bootstrap preload is only ~1 ms.
+fn supports_standalone_preamble(target: Option<(u64, u64, u64)>) -> bool {
+    matches!(target, Some((major, minor, _)) if major > 22 || (major == 22 && minor >= 3))
+}
+
+fn reject_non_windows_hide_console(hide_console: bool, target: &TargetPlatform) -> Result<()> {
+    if hide_console && target.format() != ContainerFormat::Pe {
+        bail!(
+            "--hide-console applies to Windows executables, and this build targets {}.\n\
+             \x20\x20A console window is a Windows concept: macOS and Linux start a program \
+             from a terminal that already exists, and neither Mach-O nor ELF carries anything \
+             that would suppress one.",
+            target.triple()
+        );
+    }
+    Ok(())
 }
 
 /// Build the Windows version resource — the fields Explorer's Details tab shows
@@ -1590,6 +2331,7 @@ fn assemble_app(
         // that can carry an executable — `esbuild`'s Go binary, a vendored helper.
         .chain(bundled.native_files.iter().map(|f| AppFile {
             name: layout.bundle_path(&f.name),
+            plain_size: Some(f.bytes.len() as u64),
             bytes: f.bytes.clone(),
             executable: f.executable,
         }))
@@ -1631,6 +2373,42 @@ fn assemble_app(
             .with_context(|| format!("reading {}", asset.source.display()))?;
         files.push(AppFile::from_source_mode(asset.rel.clone(), bytes, mode));
         origins.push(Origin::Included);
+    }
+
+    // A ROOT MANIFEST, SO A WALK-UP STOPS INSIDE THE APP.
+    //
+    // The `getRoot` idiom — climb from `__dirname` until a directory holds
+    // `package.json` or `node_modules`, throw at the filesystem root — is how
+    // `bindings` and a long tail of packages find their own installed root. A pure
+    // bundle's extraction dir held neither, so the climb walked straight out of it:
+    // with the cache under `$HOME` it returned the user's home directory, silently
+    // and at exit 0, and with the cache elsewhere it threw. Verified on macOS and
+    // Linux against two independently built binaries, and `--include package.json`
+    // was already the accidental cure — which is the evidence that the absent
+    // manifest is the whole cause.
+    //
+    // NO `"type"` FIELD, deliberately. The chunks carry `.mjs`/`.cjs` and settle
+    // their own format, but a bare `.js` `--include`d at the root is loaded by
+    // Node's module-syntax detection, and detection only runs while no nearer
+    // manifest names a type. A synthesized `"type": "commonjs"` would break exactly
+    // that file in a `type: module` project; omitting the field changes nothing.
+    // (A user who `--include`s their real `package.json` gets theirs — this only
+    // fills a gap, and never overwrites.)
+    // Keyed the way the collision gate keys, not by bytes: on darwin and win32
+    // `Package.json` and `package.json` are the SAME file, so a byte compare would
+    // miss an included one, synthesize a second, and fail a build that used to
+    // succeed -- with a message telling the user to rename a file they did not
+    // duplicate.
+    let manifest_key = collision_key("package.json", target.os);
+    if !files
+        .iter()
+        .any(|f| collision_key(&f.name, target.os) == manifest_key)
+    {
+        files.push(AppFile::plain(
+            "package.json".to_string(),
+            b"{\"private\":true}\n".to_vec(),
+        ));
+        origins.push(Origin::Generated);
     }
 
     reject_colliding_names(&files, &origins, target)?;
@@ -1840,9 +2618,22 @@ struct StagedDetachedMap {
 /// the launcher checks on a warm start.
 ///
 /// `Default` is the `smol` shape: no embedded Node, so no blob, no digests, no size.
+/// How the target's Node travels inside the artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeDelivery {
+    /// zstd-19 into the launcher's payload, decompressed to the cache on first
+    /// run. The Node is a passenger; the artifact is nub's launcher.
+    Compressed,
+    /// Verbatim, because the artifact IS this binary — the single-executable
+    /// shape writes its blob into it rather than carrying it.
+    Verbatim,
+}
+
 #[derive(Default)]
 struct EmbeddedNode {
-    /// zstd-19 compressed Node binary.
+    /// The Node bytes as they go into the artifact: zstd-19 compressed under
+    /// [`NodeDelivery::Compressed`], the prepared image itself under
+    /// [`NodeDelivery::Verbatim`].
     blob: Vec<u8>,
     /// SHA-256 of the DECOMPRESSED bytes — the extraction cache key.
     sha256: String,
@@ -1850,8 +2641,11 @@ struct EmbeddedNode {
     blake3: String,
     /// Length of the same bytes — the launcher's warm-start check.
     size: u64,
-    /// zstd-19 compressed Node LICENSE.
+    /// The Node LICENSE, compressed or plain to match `blob`.
     license: Vec<u8>,
+    /// The locales `--icu` kept, comma-joined, or empty for an untrimmed Node.
+    /// Reaches the manifest, where it gates the launcher's official-Node dedup.
+    icu: String,
 }
 
 fn build_node_blob(
@@ -1859,6 +2653,8 @@ fn build_node_blob(
     target: &TargetPlatform,
     cache_root: &Path,
     resolved_from: &str,
+    icu: Option<&[String]>,
+    delivery: NodeDelivery,
 ) -> Result<EmbeddedNode> {
     let (os, arch, musl) = dist_platform(target);
     // Provisioning prints the `Using Node.js <v> (resolved from <source>)` line +
@@ -1880,7 +2676,7 @@ fn build_node_blob(
         );
     }
 
-    let bytes = prepare_node_bytes(&node_bin, target)?;
+    let bytes = prepare_node_bytes(&node_bin, target, icu)?;
     let sha = crate::cli::sha256_hex(&bytes);
     // Retained as manifest format headroom; `sha` stays the cache key. Both are
     // over the same decompressed bytes.
@@ -1889,6 +2685,19 @@ fn build_node_blob(
     // single compile even though the input never changes for a given Node and
     // target. Keyed by the hash of the bytes being compressed, so a stale entry
     // is not expressible: different bytes are a different key.
+    // A single-executable artifact IS this binary, so there is nothing to
+    // compress and nothing to decompress at start — which is also what removes
+    // the ~20 s zstd-19 pass on a cache miss below.
+    if delivery == NodeDelivery::Verbatim {
+        return Ok(EmbeddedNode {
+            size: bytes.len() as u64,
+            blob: bytes,
+            sha256: sha,
+            blake3: b3,
+            license,
+            icu: icu.map(|l| l.join(",")).unwrap_or_default(),
+        });
+    }
     let cached = cache_root
         .join("compile-node-blob")
         .join(format!("{sha}.zst"));
@@ -1922,6 +2731,7 @@ fn build_node_blob(
         blake3: b3,
         size: bytes.len() as u64,
         license,
+        icu: icu.map(|l| l.join(",")).unwrap_or_default(),
     })
 }
 
@@ -1966,12 +2776,27 @@ fn node_binary_in(version_dir: &Path, target: &TargetPlatform) -> PathBuf {
 ///   binary cannot be run, so the check degrades to "is it still a well-formed
 ///   image of the expected format". Execution alone is NOT sufficient — see
 ///   `retains_node_api_exports`.
-fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8>> {
+fn prepare_node_bytes(
+    node_bin: &Path,
+    target: &TargetPlatform,
+    icu: Option<&[String]>,
+) -> Result<Vec<u8>> {
     let original = fs::read(node_bin).with_context(|| format!("reading {}", node_bin.display()))?;
     let format = target.format();
 
+    // Every fallback below ships the ORIGINAL Node, which is correct but larger.
+    // That trade is fine for a strip nobody asked for and wrong for an explicit
+    // `--icu`: silently shipping ~700 locales when the caller asked for two is the
+    // build lying about what it produced. So a requested trim turns each fallback
+    // into an error instead.
     let needs_resign = format == ContainerFormat::MachO;
     if needs_resign && which_first(&["codesign"]).is_none() {
+        if icu.is_some() {
+            bail!(
+                "--icu needs codesign on PATH: trimming rewrites the Node binary, and macOS will \
+                 not launch one whose signature no longer matches"
+            );
+        }
         warn(
             "no codesign on PATH, so the embedded Node is not stripped",
             &["A stripped macOS Node could not be re-signed, and an unsigned one cannot launch."],
@@ -1987,7 +2812,11 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
     } else {
         &["llvm-strip"]
     };
-    let Some(strip) = which_first(candidates) else {
+    // Optional, because an ICU trim is worth staging for on its own: a cross-format
+    // target needs llvm-strip specifically, so a Mac compiling for Windows routinely
+    // has no usable stripper and must still be able to honour `--icu`.
+    let strip = which_first(candidates);
+    if strip.is_none() && icu.is_none() {
         warn(
             &format!(
                 "no {} on PATH, so the embedded Node is not stripped",
@@ -1996,11 +2825,33 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
             &["The artifact is larger than it needs to be; installing the tool shrinks it."],
         );
         return Ok(original);
+    }
+
+    // The trim lands on the STAGED copy, never on `original`, so every fallback path
+    // below still has pristine bytes to return.
+    let staged = match icu {
+        Some(locales) => {
+            let mut bytes = original.clone();
+            let report = icu::trim(&mut bytes, locales)?;
+            // Resource counts, not the bytes freed. The rewrite vacates ~19 MB of a
+            // ~107 MB binary, but most of that is zeros by the time zstd sees it, so
+            // reporting the raw figure would promise an artifact four times smaller
+            // than the one this build is about to produce. The `output` row below
+            // states the size that actually ships.
+            note(&format!(
+                "Trimmed ICU to {} ({} of {} locale resources kept)",
+                locales.join(", "),
+                report.kept,
+                report.total
+            ));
+            bytes
+        }
+        None => original.clone(),
     };
 
     let tmp = std::env::temp_dir().join(format!("nub-compile-node-{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
-    fs::write(&tmp, &original).with_context(|| format!("staging Node at {}", tmp.display()))?;
+    fs::write(&tmp, &staged).with_context(|| format!("staging Node at {}", tmp.display()))?;
     // fs::write lands 0644; the post-strip `--version` verification must be able to
     // EXEC the staged binary, so restore the executable bit before strip/verify.
     set_executable(&tmp)?;
@@ -2027,9 +2878,16 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         && fs::metadata(&entitlements).is_ok_and(|m| m.len() > 0);
     let _ent_guard = FileGuard(entitlements.clone());
 
-    let mut argv: Vec<&std::ffi::OsStr> = strip_flags(format).iter().map(AsRef::as_ref).collect();
-    argv.push(tmp.as_os_str());
-    let mut ok = run_ok(&strip, &argv);
+    let mut ok = match &strip {
+        Some(strip) => {
+            let mut argv: Vec<&std::ffi::OsStr> =
+                strip_flags(format).iter().map(AsRef::as_ref).collect();
+            argv.push(tmp.as_os_str());
+            run_ok(strip, &argv)
+        }
+        // Nothing to strip with, but a trim still has to be signed and verified.
+        None => true,
+    };
     if ok && needs_resign {
         // `-i node` is load-bearing, not cosmetic. Without it `codesign` derives the
         // CodeDirectory identifier from the file's BASENAME, and this file is staged
@@ -2068,7 +2926,7 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         // Announced BEFORE the call, not after it. Signing a ~107 MB binary takes
         // real time, and a progress line printed once it finished left that whole
         // stretch labelled by the previous phase.
-        note("Signing embedded Node.js");
+        phase("signing", "embedded Node");
         ok = run_ok("codesign", &sign);
     }
 
@@ -2091,10 +2949,19 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         Some("the stripped Node failed verification")
     } else if !retains_node_api_exports(&original, &stripped) {
         Some("stripping dropped the Node-API exports that native addons resolve against")
+    } else if icu.is_some() && target.is_host() && !node_formats_dates(&tmp) {
+        // `node_runs` is a `--version` check, and a broken ICU package passes it:
+        // a package whose per-tree indexes no longer resolve boots fine and then
+        // FATAL-aborts inside the first `Intl.DateTimeFormat`. So a trim earns a
+        // probe that actually reaches ICU.
+        Some("the trimmed Node could not format a date through Intl")
     } else {
         None
     };
     if let Some(why) = reject {
+        if icu.is_some() {
+            bail!("--icu could not produce a working Node: {why}");
+        }
         // The same class as the two missing-tool warnings above: the artifact is
         // correct but larger than it should be, and the reader can act on why.
         warn(
@@ -2104,10 +2971,29 @@ fn prepare_node_bytes(node_bin: &Path, target: &TargetPlatform) -> Result<Vec<u8
         return Ok(original);
     }
 
-    if !needs_resign {
+    if !needs_resign && strip.is_some() {
         note("Stripped the embedded Node");
     }
     Ok(stripped)
+}
+
+/// Can this Node reach its ICU data and format through it?
+///
+/// Constructs an `Intl.DateTimeFormat` and a segmenter and formats with both, which
+/// is what separates a package that merely PARSES from one ICU can navigate. Host
+/// targets only, for the same reason `node_runs` is: a foreign binary cannot run
+/// here. A non-zero exit or a crash is a failure; the OUTPUT is deliberately not
+/// asserted on, because a trimmed Node is expected to answer in a fallback locale.
+fn node_formats_dates(node: &Path) -> bool {
+    run_ok(
+        node.to_string_lossy().as_ref(),
+        &[
+            "-e".as_ref(),
+            "new Intl.DateTimeFormat('en',{dateStyle:'full'}).format(0);\
+             [...new Intl.Segmenter('en',{granularity:'word'}).segment('a b')];"
+                .as_ref(),
+        ],
+    )
 }
 
 /// Flags this format's stripper needs to leave a usable Node behind.
@@ -2293,27 +3179,17 @@ fn node_runs(node: &Path) -> bool {
 
 // ---- artifact verification ----------------------------------------------------
 
-/// Check the artifact before handing it to the user. Two layers, the second
-/// available only natively:
+/// The two things about a Windows artifact that only a read-back can establish,
+/// shared by both containers.
 ///
-/// 1. **Static scan (always).** Locate the payload in the produced file the way
-///    the target's loader will, and decode it. Catches a malformed injection on
-///    every target, including the cross ones that cannot be run here.
-/// 2. **Probe-mode self-check (target == host only).** Executes the artifact so it
-///    reads its own section and touches a heap allocation — the exact path an
-///    under-padded Mach-O injection corrupts into a SIGILL trap, which no static
-///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
-///    the scan but was never executed is a weaker guarantee, and the user should
-///    know which one they got.
-fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u8]>) -> Result<()> {
-    let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
-    let payload = inject::find_payload(target.format(), &bytes)
-        .with_context(|| format!("scanning {} for its payload", bin.display()))?
-        .context("the produced executable carries no payload — the injection did not take")?;
-    let view = nub_core::compile::decode(payload)
-        .context("the produced executable's payload does not decode")?;
-    verify_payload_shape(&view)?;
-
+/// A Windows binary is routinely cross-compiled and so is never executed on the
+/// build host — and both of these fail SILENTLY on the target machine: an
+/// un-hidden console window, or an Explorer Details tab showing nothing at all.
+fn verify_windows_dressing(
+    bytes: &[u8],
+    version_info: Option<&[u8]>,
+    hide_console: bool,
+) -> Result<()> {
     // The version resource is re-read here for the same reason the payload is,
     // and it needs it more. A cross-compiled Windows binary cannot be executed
     // on this host, so this parse is the only evidence the resource is REACHABLE
@@ -2321,9 +3197,27 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u
     // Explorer showing nothing and no error anywhere. The concrete way to lose it
     // is the resource directory's ascending-id rule (see `set_version_info` in
     // vendor/libsui), which takes the icon down with it.
+    // Same argument as the version resource below, and the same failure shape: a
+    // Windows artifact built on macOS is never executed here, so reading the
+    // subsystem back is the only thing standing between a silently un-hidden
+    // binary and the user discovering it on the target machine.
+    if hide_console {
+        let subsystem = inject::pe_subsystem(bytes).context(
+            "the produced executable's PE optional header is unreadable, so \
+             --hide-console cannot be confirmed",
+        )?;
+        if subsystem != inject::SUBSYSTEM_WINDOWS_GUI {
+            bail!(
+                "the produced executable's subsystem is {subsystem}, not \
+                 {} (GUI) — --hide-console did not take",
+                inject::SUBSYSTEM_WINDOWS_GUI
+            );
+        }
+    }
+
     if let Some(encoded) = version_info {
-        let found = inject::find_version_resource(&bytes)
-            .with_context(|| format!("scanning {} for its version resource", bin.display()))?
+        let found = inject::find_version_resource(bytes)
+            .context("scanning the produced executable for its version resource")?
             .context(
                 "the produced executable carries no version resource, so its metadata \
                  would not appear in Explorer — the injection did not take",
@@ -2350,6 +3244,36 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u
             );
         }
     }
+    Ok(())
+}
+
+/// Check the artifact before handing it to the user. Two layers, the second
+/// available only natively:
+///
+/// 1. **Static scan (always).** Locate the payload in the produced file the way
+///    the target's loader will, and decode it. Catches a malformed injection on
+///    every target, including the cross ones that cannot be run here.
+/// 2. **Probe-mode self-check (target == host only).** Executes the artifact so it
+///    reads its own section and touches a heap allocation — the exact path an
+///    under-padded Mach-O injection corrupts into a SIGILL trap, which no static
+///    check can see. Cross-compiling SKIPS this, loudly: an artifact that passes
+///    the scan but was never executed is a weaker guarantee, and the user should
+///    know which one they got.
+fn verify_artifact(
+    bin: &Path,
+    target: &TargetPlatform,
+    version_info: Option<&[u8]>,
+    hide_console: bool,
+) -> Result<()> {
+    let bytes = fs::read(bin).with_context(|| format!("reading {}", bin.display()))?;
+    let payload = inject::find_payload(target.format(), &bytes)
+        .with_context(|| format!("scanning {} for its payload", bin.display()))?
+        .context("the produced executable carries no payload — the injection did not take")?;
+    let view = nub_core::compile::decode(payload)
+        .context("the produced executable's payload does not decode")?;
+    verify_payload_shape(&view)?;
+
+    verify_windows_dressing(&bytes, version_info, hide_console)?;
 
     if !target.is_host() {
         note(&format!(
@@ -2361,6 +3285,26 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u
         return Ok(());
     }
 
+    let out = run_self_probe(bin)?;
+    let ok =
+        out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("nub-probe ok");
+    if !ok {
+        bail!(
+            "the produced executable failed its self-probe (exit {:?}) — the launcher template \
+             likely has insufficient Mach-O header padding for section injection (see \
+             crates/nub-launcher/build.rs)",
+            out.status.code()
+        );
+    }
+    Ok(())
+}
+
+/// Run an artifact in probe mode and hand back what it printed.
+///
+/// Shared by both containers: the launcher answers on its own probe path, the
+/// single-executable shape from inside its blob's main, and neither caller cares
+/// which of the two spawn hazards below it was saved from.
+fn run_self_probe(bin: &Path) -> Result<std::process::Output> {
     // `Command::new` PATH-searches a bare name, so the default `--out` (the entry
     // stem, no directory component) would probe a stray PATH binary or fail to
     // spawn. Anchor a relative path to the cwd the file was just written to.
@@ -2369,8 +3313,8 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u
     } else {
         Path::new(".").join(bin)
     };
-    let out = match probe_once(&bin) {
-        Ok(out) => out,
+    match probe_once(&bin) {
+        Ok(out) => Ok(out),
         // A deep enough `--out` yields a binary every FILE api can read and sign
         // but that Windows will not spawn. MEASURED with this crate's own
         // artifact on Windows Server 2022: `--out` at 285 characters compiles
@@ -2403,29 +3347,29 @@ fn verify_artifact(bin: &Path, target: &TargetPlatform, version_info: Option<&[u
                     "running the self-probe on a short copy of {}, which did not spawn in place: {error}",
                     bin.display()
                 )
-            })?
+            })
         }
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("running the self-probe on {}", bin.display()));
+            Err(error).with_context(|| format!("running the self-probe on {}", bin.display()))
         }
-    };
-    let ok =
-        out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("nub-probe ok");
-    if !ok {
-        bail!(
-            "the produced executable failed its self-probe (exit {:?}) — the launcher template \
-             likely has insufficient Mach-O header padding for section injection (see \
-             crates/nub-launcher/build.rs)",
-            out.status.code()
-        );
     }
-    Ok(())
 }
 
 fn probe_once(bin: &Path) -> std::io::Result<std::process::Output> {
     std::process::Command::new(bin)
         .env("__NUB_COMPILED_LAUNCHER_MODE", "probe")
+        // The same scrub, and the same reason, as [`node_runs`] — and it binds
+        // harder here, because a single-executable artifact IS a Node and reads
+        // this itself. A developer machine routinely carries a `NODE_OPTIONS`
+        // aimed at some other Node (nub's own dev shell exports one), and Node
+        // rejects the whole invocation over one flag it does not know, so the
+        // probe would fail a perfectly good artifact. A preload named there is
+        // worse than that: `--require`/`--import` runs BEFORE the blob's main, so
+        // anything it prints lands on stdout ahead of the probe's reply and the
+        // response no longer matches. Either way the check would be reading the
+        // build machine's environment rather than the bytes just written.
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_REPL_EXTERNAL_MODULE")
         .output()
 }
 
@@ -2773,6 +3717,18 @@ fn run_ok(program: impl AsRef<std::ffi::OsStr>, args: &[&std::ffi::OsStr]) -> bo
 ///
 /// This is the extraction cache key, so the mode belongs in it: two artifacts
 /// whose files differ only in executability must not share one extracted tree.
+/// Brotli at the maximum quality, for an inline payload's chunks.
+///
+/// Quality 11 with a 24-bit window, matching what the zstd-19 it replaces is
+/// reaching for: this runs once per build on a few tens of kilobytes, and the bytes
+/// it produces are shipped to every user of the artifact.
+fn brotli_encode(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut reader = brotli::CompressorReader::new(bytes, 4096, 11, 24);
+    std::io::copy(&mut reader, &mut out).context("brotli-compressing an inline payload chunk")?;
+    Ok(out)
+}
+
 fn sha256_of_app(files: &[AppFile<Vec<u8>>]) -> String {
     let mut h = Sha256::new();
     for file in files {
@@ -2869,7 +3825,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The parent guard above passes when `--out` names a directory whose parent
     /// `--icon` is checked before anything expensive runs, and by CONTENT rather
     /// than by extension — a PNG saved under a `.ico` name is the ordinary mistake
     /// and would embed into a resource Windows silently declines to draw.
@@ -2903,6 +3858,38 @@ mod tests {
             "must name the target, got: {err}"
         );
         assert!(load_icon(None, &mac).unwrap().is_none());
+    }
+
+    /// `--hide-console` is refused on a target that cannot honor it, for the same
+    /// reason `--icon` is: the flag's whole promise is that nothing appears, so
+    /// accepting it and doing nothing looks identical to it working until someone
+    /// runs the binary. The HOST is deliberately not part of the gate — the flip
+    /// is byte editing, so a hidden Windows binary cross-compiles from anywhere.
+    #[test]
+    fn hide_console_is_refused_for_a_target_with_no_subsystem_field() {
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let linux = TargetPlatform {
+            os: TargetOs::Linux,
+            arch: TargetArch::Arm64,
+            musl: false,
+        };
+
+        reject_non_windows_hide_console(true, &win).expect("a Windows target accepts the flag");
+        let err = reject_non_windows_hide_console(true, &linux)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("linux-arm64"),
+            "must name the target, got: {err}"
+        );
+        // The control: the gate must key on the FLAG, not on the target alone, or
+        // it would break every ordinary Linux build.
+        reject_non_windows_hide_console(false, &linux)
+            .expect("a Linux build without the flag is untouched");
     }
 
     /// The defaults are the feature: a Windows build with no version resource is
@@ -3007,6 +3994,7 @@ mod tests {
         );
     }
 
+    /// The parent guard above passes when `--out` names a directory whose parent
     /// exists, so the build used to run to completion and die on the rename with
     /// `Is a directory (os error 21)` over an internal staging path.
     #[test]
@@ -3456,6 +4444,8 @@ mod tests {
             out: None,
             icon: None,
             metadata: Vec::new(),
+            hide_console: false,
+            icu: None,
             smol: false,
             target: None,
             platform: None,
@@ -3466,6 +4456,7 @@ mod tests {
             define_file: Vec::new(),
             metafile: None,
             bundle: BundleOptions {
+                module_mirror: Default::default(),
                 minify: true,
                 keep_names: true,
                 sourcemap: SourcemapMode::Inline,
@@ -3479,7 +4470,7 @@ mod tests {
                 external: Vec::new(),
                 unbundled: Vec::new(),
                 bundled: Vec::new(),
-                allow_dynamic_import: false,
+                allow_dynamic_import: Vec::new(),
                 tsconfig: None,
                 loaders: Vec::new(),
                 native_target: None,
@@ -3487,6 +4478,7 @@ mod tests {
                 drop_debugger: false,
                 metafile: false,
                 target_node: None,
+                eager_startup: false,
             },
         }
     }
@@ -3505,12 +4497,16 @@ mod tests {
             node_sha256: "node".into(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "app".into(),
             minify: false,
             install_message: None,
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
+            inline_app: false,
+            standalone_preamble: false,
         };
         let app = vec![AppFile::plain("main.js", b"app".to_vec())];
         let missing = nub_core::compile::encode_with_license(&manifest, &app, b"node", &[]);
@@ -3526,6 +4522,7 @@ mod tests {
             node_sha256: String::new(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             ..manifest
         };
@@ -3858,14 +4855,24 @@ mod tests {
     /// A build with everything present, so the optional rows all appear at once.
     fn full_facts() -> BuildFacts {
         BuildFacts {
-            size: 29_473_842,
-            node_bytes: 25_100_000,
-            app_bytes: 2_500_000,
+            // Every size here is measured off a real darwin-arm64 embed build, so
+            // the components add up the way a reader's own build will: 851 KB of
+            // launcher template, a 228 KB signature that scales with the file, and
+            // 66 KB of container header, manifest and 64 KiB payload alignment.
+            size: 29_390_370,
+            node_bytes: 28_189_460,
+            app_bytes: 56_571,
+            launcher_bytes: 850_864,
+            signature_bytes: 227_954,
             shipped: vec![
                 ("@napi-rs/nice".to_string(), "native addon"),
                 ("sharp".to_string(), "--external"),
             ],
             deferred: 3,
+            // Consistent with the rest of these facts rather than an arbitrary
+            // pick: `--external` and a surviving computed import are exactly what
+            // leaves the graph unsealed, and this build has both.
+            app_delivery: AppDelivery::Extracted(inline::Decline::UnsealedGraph.reason()),
             report: Some(PathBuf::from("report.json")),
             elapsed: std::time::Duration::from_millis(8_880),
         }
@@ -3894,16 +4901,53 @@ mod tests {
                 &host,
             )),
             vec![
-                "output=acme  29.5 MB  (node 25.1 MB · app 2.5 MB · launcher 1.9 MB)".to_string(),
+                "output=acme  29.4 MB  (node 28.2 MB · app 57 KB · launcher 851 KB · \
+                 signature 228 KB)"
+                    .to_string(),
                 "runtime=Node 26.8.1, embedded  (package.json#engines.node)".to_string(),
                 // No aside: building for the host is the default, and a note on
                 // the default is paid for by every build and earned by none.
                 format!("platform={}", host.triple()),
                 "shipped=@napi-rs/nice (native addon), sharp (--external)".to_string(),
                 "deferred=3 dynamic import sites  resolved where the binary runs".to_string(),
+                "app=extracted on first run  it resolves modules at run time".to_string(),
                 "report=report.json  esbuild schema".to_string(),
-                "elapsed=8.9s".to_string(),
             ]
+        );
+    }
+
+    /// Every part of the split is measured, and the container's own bytes are not
+    /// named at all — so the parts stay under the total rather than reaching it.
+    ///
+    /// The regression this pins: `launcher` used to BE the remainder, so it
+    /// swallowed the ad-hoc code signature — which grows at one SHA-256 per 4 KiB
+    /// page — and reported a fixed 851 KB template as 1.2 MB on a 29 MB build.
+    #[test]
+    fn the_split_names_the_signature_apart_from_the_launcher() {
+        let signed = full_facts();
+        assert_eq!(
+            signed.size_split(),
+            "  (node 28.2 MB · app 57 KB · launcher 851 KB · signature 228 KB)",
+        );
+        let components =
+            signed.node_bytes + signed.app_bytes + signed.launcher_bytes + signed.signature_bytes;
+        assert!(
+            components < signed.size,
+            "the measured parts must stay under the total, since the container's \
+             header, manifest and alignment padding go unnamed: {components} vs {}",
+            signed.size
+        );
+
+        // ELF and PE are never signed, so there is no component to name and the
+        // bytes it would have covered do not exist rather than moving elsewhere.
+        let unsigned = BuildFacts {
+            size: signed.size - signed.signature_bytes,
+            signature_bytes: 0,
+            ..signed
+        };
+        assert_eq!(
+            unsigned.size_split(),
+            "  (node 28.2 MB · app 57 KB · launcher 851 KB)",
         );
     }
 
@@ -3940,12 +4984,15 @@ mod tests {
     fn a_build_with_nothing_deferred_or_external_prints_no_row_for_it() {
         let host = TargetPlatform::host().unwrap();
         let bare = BuildFacts {
-            size: 4_400_000,
+            size: 3_433_512,
             // `--smol` embeds no runtime, so the split names only what is there.
             node_bytes: 0,
             app_bytes: 2_500_000,
+            launcher_bytes: 850_864,
+            signature_bytes: 26_744,
             shipped: Vec::new(),
             deferred: 0,
+            app_delivery: AppDelivery::Inline,
             report: None,
             elapsed: std::time::Duration::from_millis(2_400),
         };
@@ -3960,10 +5007,10 @@ mod tests {
                 &host,
             )),
             vec![
-                "output=acme  4.4 MB  (app 2.5 MB · launcher 1.9 MB)".to_string(),
+                "output=acme  3.4 MB  (app 2.5 MB · launcher 851 KB · signature 27 KB)".to_string(),
                 "runtime=Node >=22 <23, not embedded  (--target)".to_string(),
                 format!("platform={}", host.triple()),
-                "elapsed=2.4s".to_string(),
+                "app=run from the executable  nothing is written to disk".to_string(),
             ]
         );
     }
@@ -4011,8 +5058,8 @@ mod tests {
                     vec![Ink::Plain, Ink::Muted, Ink::Plain, Ink::Plain, Ink::Muted,],
                 ),
                 ("deferred", vec![Ink::Plain, Ink::Muted]),
+                ("app", vec![Ink::Plain, Ink::Muted]),
                 ("report", vec![Ink::Plain, Ink::Muted]),
-                ("elapsed", vec![Ink::Plain]),
             ],
             "exactly one Accent in the whole block, on the path the reader runs next"
         );
@@ -4023,6 +5070,67 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The two lines that bracket the block, in both the modes they print in.
+    ///
+    /// The colorless spelling is the load-bearing half. Both lines print on a
+    /// redirected build — where the live line is off entirely — so a CI log is
+    /// the one place they are the ONLY record that a compile started and that it
+    /// worked, and an escape sequence leaking into that log is exactly what a
+    /// TTY-only assertion would miss.
+    #[test]
+    fn the_intro_and_success_lines_bracket_the_block_in_both_modes() {
+        let out = Path::new("dist/cli");
+        let took = std::time::Duration::from_millis(3_540);
+
+        assert_eq!(
+            intro_line("cli.ts", out, false),
+            format!(
+                "nub {} · compiling cli.ts → dist/cli",
+                env!("CARGO_PKG_VERSION")
+            ),
+            "the intro names what the reader is waiting for, which is the one \
+             thing the closing block cannot say"
+        );
+        assert_eq!(
+            success_line(out, took, false),
+            "✓ compiled dist/cli in 3.5s",
+            "a build that worked has to say so in words, not by ending"
+        );
+
+        // The artifact path is the block's Accent and stays it on both lines, so
+        // the path a reader runs next is one color from the first line to the
+        // last. The green check mark is the only ink here the block never draws.
+        let intro = intro_line("cli.ts", out, true);
+        let success = success_line(out, took, true);
+        assert!(
+            intro.contains(&paint("dist/cli", Ink::Accent, true))
+                && success.contains(&paint("dist/cli", Ink::Accent, true)),
+            "intro={intro:?} success={success:?}"
+        );
+        assert!(
+            success.starts_with("\x1b[32m\x1b[1m✓"),
+            "the success cue is the engine's green bold check mark: {success:?}"
+        );
+        assert_eq!(
+            strip_sgr(&success),
+            success_line(out, took, false),
+            "color must add nothing but color"
+        );
+    }
+
+    /// The bands exist because an embed build that downloads a ~100 MB Node
+    /// routinely runs past a minute, and the flat `{:.1}s` this replaced rendered
+    /// that as `92.4s`.
+    #[test]
+    fn an_elapsed_build_is_reported_in_the_band_it_lands_in() {
+        let ms = |n| format_elapsed(std::time::Duration::from_millis(n));
+        assert_eq!(ms(240), "240ms");
+        assert_eq!(ms(999), "999ms");
+        assert_eq!(ms(1_000), "1.0s");
+        assert_eq!(ms(59_940), "59.9s");
+        assert_eq!(ms(92_400), "1m32s");
     }
 
     /// A row too wide for the terminal wraps to the value column, not to zero.
@@ -4072,35 +5180,193 @@ mod tests {
         assert_eq!(words_out, words_in, "wrapping dropped or reordered a word");
     }
 
-    /// A warning's body hangs under its headline, not under the margin.
+    /// A diagnostic's body hangs under its headline, not under the margin.
     ///
-    /// The indent is the whole reason this tier reads as two: line up the body
-    /// with the left edge instead and the explanation stops looking like it
-    /// belongs to the headline above it. Asserted with color ON as well, because
-    /// that is the case where an implementation that padded the painted label
-    /// would silently indent by the escape bytes.
+    /// The indent is the whole reason a tier reads as two things: line the body
+    /// up with the left edge instead and the explanation stops looking like it
+    /// belongs to the headline above it. Both tiers are asserted, because they
+    /// have different label widths and a shared implementation is exactly where
+    /// one of them would silently pick up the other's indent.
+    ///
+    /// Color is asserted too — that is the case where an implementation padding
+    /// the PAINTED label would indent by the escape bytes instead of the letters.
     #[test]
-    fn a_warning_hangs_its_body_under_its_headline() {
+    fn a_diagnostic_hangs_its_body_under_its_headline() {
         let body = ["first explanation line", "second"];
         assert_eq!(
-            warn_lines("the embedded Node is not stripped", &body, false),
+            diagnostic_lines(
+                Tier::Warn,
+                "the embedded Node is not stripped",
+                &body,
+                80,
+                false
+            ),
             vec![
                 "warn  the embedded Node is not stripped".to_string(),
                 "      first explanation line".to_string(),
                 "      second".to_string(),
             ]
         );
-
-        let colored = warn_lines("headline", &body, true);
         assert_eq!(
-            colored.iter().map(|l| strip_sgr(l)).collect::<Vec<_>>(),
-            warn_lines("headline", &body, false),
-            "color must change nothing about which columns the lines occupy"
+            diagnostic_lines(
+                Tier::Error,
+                "entry file not found: app.ts",
+                &body,
+                80,
+                false
+            ),
+            vec![
+                "error  entry file not found: app.ts".to_string(),
+                "       first explanation line".to_string(),
+                "       second".to_string(),
+            ],
+            "the wider label carries a wider hanging indent"
         );
+
+        for (tier, sgr) in [(Tier::Warn, "\x1b[33m"), (Tier::Error, "\x1b[31m")] {
+            let colored = diagnostic_lines(tier, "headline", &body, 80, true);
+            assert_eq!(
+                colored.iter().map(|l| strip_sgr(l)).collect::<Vec<_>>(),
+                diagnostic_lines(tier, "headline", &body, 80, false),
+                "color must change nothing about which columns the lines occupy"
+            );
+            assert!(
+                colored[0].starts_with(&format!("{sgr}\x1b[1m{}", tier.label())),
+                "the label carries the whole of the diagnostic's weight: {:?}",
+                colored[0]
+            );
+        }
+    }
+
+    /// A headline too long for the terminal wraps under the label, not to the
+    /// margin.
+    ///
+    /// Uses the real one that forced this: `--platform` enumerates all eight
+    /// supported triples and runs to 155 columns, so on any ordinary terminal
+    /// the label's own line is the one that wraps. Left to the terminal, the
+    /// remainder restarts at column zero and the hanging indent the tier exists
+    /// for is honored only on lines short enough not to need it.
+    #[test]
+    fn a_diagnostic_too_wide_for_the_terminal_wraps_under_its_label() {
+        let headline = "unknown --platform \"sunos-sparc\". Supported: darwin-arm64, darwin-x64, \
+             linux-arm64, linux-arm64-musl, linux-x64, linux-x64-musl, win32-arm64, win32-x64";
+        let lines = diagnostic_lines(Tier::Error, headline, &[], 80, false);
+
         assert!(
-            colored[0].starts_with("\x1b[33m\x1b[1mwarn"),
-            "the label carries the whole of the warning's weight: {:?}",
-            colored[0]
+            lines.len() > 1,
+            "a 155-column headline must wrap: {lines:?}"
+        );
+        for line in &lines {
+            assert!(line.len() <= 80, "line runs past the terminal: {line:?}");
+        }
+        let indent = "error".len() + GAP;
+        for line in &lines[1..] {
+            assert_eq!(
+                line.len() - line.trim_start().len(),
+                indent,
+                "a continuation hangs under the headline, not at the margin: {line:?}"
+            );
+        }
+        let words_in: Vec<&str> = headline.split_whitespace().collect();
+        let words_out: Vec<&str> = lines.iter().flat_map(|l| l.split_whitespace()).collect();
+        assert_eq!(
+            words_out[1..],
+            words_in[..],
+            "wrapping dropped or reordered a word (the leading `error` label aside)"
+        );
+    }
+
+    /// An error's own formatting survives verbatim, and its causes hang.
+    ///
+    /// The verbatim half is the load-bearing one, and it is asserted with a
+    /// message shaped like the real ones: a `file:line`, the offending source
+    /// nested one level under it, a blank line, then a hard-wrapped paragraph.
+    /// Re-indenting it collapses the nesting so the location and the source at
+    /// it become two unrelated lines; re-wrapping breaks each authored line one
+    /// word early. Both shipped, briefly, and both are what this pins shut.
+    ///
+    /// The causes are different — anyhow hands those over as bare strings with
+    /// no formatting of their own, so the tier lays them out.
+    #[test]
+    fn an_error_keeps_its_own_formatting_and_hangs_its_causes() {
+        let formatted = anyhow::anyhow!(
+            "1 import could not be resolved at build time:\n  /src/plugins.ts:6:22\n    import(pluginName)\n\n  A compiled binary carries no node_modules, so an unresolved import fails at\n  runtime on the machine you ship to."
+        );
+        assert_eq!(
+            error_lines(&formatted, 80, false),
+            vec![
+                "error  1 import could not be resolved at build time:".to_string(),
+                "  /src/plugins.ts:6:22".to_string(),
+                "    import(pluginName)".to_string(),
+                String::new(),
+                "  A compiled binary carries no node_modules, so an unresolved import fails at"
+                    .to_string(),
+                "  runtime on the machine you ship to.".to_string(),
+            ],
+            "only the first line is the tier's; the rest is the author's, byte for byte"
+        );
+
+        let chained = anyhow::anyhow!("no such file or directory")
+            .context("reading app.ts")
+            .context("bundling app.ts");
+        assert_eq!(
+            error_lines(&chained, 80, false),
+            vec![
+                "error  bundling app.ts".to_string(),
+                "       reading app.ts".to_string(),
+                "       no such file or directory".to_string(),
+            ],
+            "every cause is stated; none is dropped and none repeats the headline"
+        );
+
+        // A cause is frequently multiline itself. This is the real one, shortened:
+        // `inject::inject` builds the icon message with its own second line, and
+        // `run` wraps it with `writing <staged path>`. Indenting the cause once
+        // leaves that second line back at the column it was authored in.
+        let multiline_cause = anyhow::anyhow!(
+            "setting the executable icon: PngNotRgba\n  The container parsed, so one of the images inside it did not."
+        )
+        .context("writing /tmp/app.staged");
+        assert_eq!(
+            error_lines(&multiline_cause, 200, false),
+            vec![
+                "error  writing /tmp/app.staged".to_string(),
+                "       setting the executable icon: PngNotRgba".to_string(),
+                "         The container parsed, so one of the images inside it did not."
+                    .to_string(),
+            ],
+            "every physical line of a cause hangs, keeping the relative indent it came with"
+        );
+    }
+
+    /// A wide character occupies two terminal cells, and the wrap has to know.
+    ///
+    /// `chars().count()` and the rendered width agree on ASCII, which is why
+    /// every other test here would pass with either. They disagree on exactly
+    /// the text a user controls — a path, a package name, a `--platform` value —
+    /// so counting scalars wraps a column late and the line lands past the edge,
+    /// where the terminal breaks it back to column zero and the hanging indent
+    /// the tier just applied is lost.
+    #[test]
+    fn a_wide_character_counts_as_the_two_cells_it_occupies() {
+        // Eight per word, so a scalar count says 8 where the terminal says 16.
+        let headline = "unknown --platform \"日本語テスト\". Supported: 日本語テスト, 日本語テスト, 日本語テスト";
+        let lines = diagnostic_lines(Tier::Error, headline, &[], 40, false);
+
+        assert!(lines.len() > 1, "must wrap at 40 cells: {lines:?}");
+        for line in &lines {
+            assert!(
+                cells(line) <= 40,
+                "line renders {} cells, over the 40 asked for: {line:?}",
+                cells(line)
+            );
+        }
+        let words_in: Vec<&str> = headline.split_whitespace().collect();
+        let words_out: Vec<&str> = lines.iter().flat_map(|l| l.split_whitespace()).collect();
+        assert_eq!(
+            words_out[1..],
+            words_in[..],
+            "wrapping dropped or reordered a word (the leading `error` label aside)"
         );
     }
 
@@ -4161,7 +5427,7 @@ mod tests {
     fn every_value_starts_in_one_column_and_the_slack_is_on_the_left() {
         let spans = vec![("x".to_string(), Ink::Plain)];
         let width = 8;
-        let rendered: Vec<String> = ["output", "runtime", "platform", "elapsed"]
+        let rendered: Vec<String> = ["output", "runtime", "platform", "shipped"]
             .iter()
             .map(|label| render_row(label, &spans, width, 80, false).join(""))
             .collect();
@@ -4254,6 +5520,8 @@ mod tests {
             native_files: Vec::new(),
             support_files: Vec::new(),
             root_support_files: Vec::new(),
+            bootstrap_optional: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -4261,6 +5529,7 @@ mod tests {
             metafile: None,
         };
         let layout = assets::Layout {
+            anchor: PathBuf::new(),
             entry_prefix: String::new(),
             assets: vec![assets::Asset {
                 source,
@@ -4303,11 +5572,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A user manifest is a verbatim asset, not compile-time metadata. Chunks
-    /// now name their ESM format directly with `.mjs`, so no entry-adjacent
-    /// manifest is needed to alter Node's package-type lookup.
+    /// A user manifest is a verbatim asset, not compile-time metadata: it is
+    /// embedded exactly as written and never rewritten or replaced. Chunks name
+    /// their ESM format directly with `.mjs`, so nothing here is trying to alter
+    /// Node's package-type lookup. Distinct from the ROOT manifest `assemble_app`
+    /// synthesizes when the payload has none, which exists to stop a `getRoot`
+    /// walk-up climbing out of the extraction dir and carries no `"type"` field
+    /// for exactly the reason above.
     #[test]
-    fn included_commonjs_manifest_is_verbatim_and_no_manifest_is_synthesized() {
+    fn an_included_manifest_is_embedded_verbatim_rather_than_replaced() {
         let dir = fresh_dir("included-manifest");
         let target = TargetPlatform::parse("linux-x64").unwrap();
         let manifest = b"{\n  \"type\": \"commonjs\",\n  \"private\": true\n}\n";
@@ -4324,6 +5597,8 @@ mod tests {
             native_files: Vec::new(),
             support_files: Vec::new(),
             root_support_files: Vec::new(),
+            bootstrap_optional: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -4331,6 +5606,7 @@ mod tests {
             metafile: None,
         };
         let layout = assets::Layout {
+            anchor: PathBuf::new(),
             entry_prefix: "dist/bun".into(),
             assets: vec![assets::Asset {
                 source,
@@ -4375,6 +5651,8 @@ mod tests {
                 name: COMPILE_BOOTSTRAP_NAME.into(),
                 bytes: b"require('module');".to_vec(),
             }],
+            bootstrap_optional: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -4384,6 +5662,7 @@ mod tests {
         let files = assemble_app(
             &bundled,
             &assets::Layout {
+                anchor: PathBuf::new(),
                 entry_prefix: "src/app".into(),
                 assets: Vec::new(),
             },
@@ -4400,6 +5679,11 @@ mod tests {
                     "src/app/worker-blob-url.cjs",
                     b"module.exports = {};".to_vec()
                 ),
+                // Synthesized because this payload includes no manifest of its own,
+                // and at the ROOT even though the entry sits under `src/app/` --
+                // which is the point: a walk-up from a chunk has to terminate at the
+                // app dir, not at the entry's directory.
+                AppFile::plain("package.json", b"{\"private\":true}\n".to_vec()),
             ]
         );
     }
@@ -4438,6 +5722,8 @@ mod tests {
                 name: "a\\..\\escaped.cjs".into(),
                 bytes: Vec::new(),
             }],
+            bootstrap_optional: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -4448,6 +5734,7 @@ mod tests {
         let err = assemble_app(
             &bundled,
             &assets::Layout {
+                anchor: PathBuf::new(),
                 entry_prefix: String::new(),
                 assets: Vec::new(),
             },
@@ -4478,6 +5765,8 @@ mod tests {
             native_files: Vec::new(),
             support_files: Vec::new(),
             root_support_files: Vec::new(),
+            bootstrap_optional: false,
+            app_computes_module_specifier: false,
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
@@ -4491,6 +5780,7 @@ mod tests {
         let files = assemble_app(
             &bundled,
             &assets::Layout {
+                anchor: PathBuf::new(),
                 entry_prefix: String::new(),
                 assets: Vec::new(),
             },
@@ -4525,6 +5815,8 @@ mod tests {
                 native_files: Vec::new(),
                 support_files: Vec::new(),
                 root_support_files: Vec::new(),
+                bootstrap_optional: false,
+                app_computes_module_specifier: false,
                 dynamic_import_sites: 0,
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),
@@ -4532,6 +5824,7 @@ mod tests {
                 metafile: None,
             },
             assets::Layout {
+                anchor: PathBuf::new(),
                 entry_prefix: String::new(),
                 assets: vec![assets::Asset {
                     source,

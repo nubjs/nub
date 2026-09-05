@@ -198,6 +198,40 @@ pub(super) fn parse_dep_path(dep_path: &str) -> Option<(String, String)> {
     Some((name, version))
 }
 
+/// Return the registry alias from pnpm 11.20's registry-qualified
+/// `<alias>:<semver>` version slot. Reserved protocol prefixes retain
+/// their existing meaning and are not treated as registry aliases.
+pub(super) fn registry_name_from_qualified_version(version: &str) -> Option<&str> {
+    const RESERVED: &[&str] = &[
+        "bitbucket",
+        "catalog",
+        "custom",
+        "file",
+        "git",
+        "github",
+        "gitlab",
+        "http",
+        "https",
+        "jsr",
+        "link",
+        "npm",
+        "runtime",
+        "ssh",
+        "workspace",
+    ];
+
+    let (registry_name, qualified_version) = version.split_once(':')?;
+    let mut chars = registry_name.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        || !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        || RESERVED.contains(&registry_name)
+        || node_semver::Version::parse(qualified_version).is_err()
+    {
+        return None;
+    }
+    Some(registry_name)
+}
+
 /// Detect npm-aliased entries inside a snapshot's `dependencies` /
 /// `optionalDependencies` map and rewrite them to aube's internal shape.
 ///

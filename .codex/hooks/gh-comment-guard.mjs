@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // PreToolUse hook: guard `gh` comment/create verbs against verbose bodies.
 //
-// WHY: dispatched sub-agents do NOT inherit AGENTS.md / PROSE.md, so a prompt
+// WHY: dispatched sub-agents do NOT inherit AGENTS.md / the prose-writing skill, so a prompt
 // telling them "comments must be terse" is unenforced and routinely ignored —
 // the #118/#120 fix-agents posted verbose, unreasonable essays AS the maintainer.
 // Prompts demonstrably fail; this guard is the DETERMINISTIC floor. It blocks an
 // over-long body on `gh issue comment` / `gh pr comment` / `gh issue create` /
 // `gh pr create` and points the caller at the rule: an initial issue ack is
-// EXACTLY "Investigating."; substantive comments are terse per PROSE.md. An
+// EXACTLY "Investigating."; substantive comments are terse per the prose-writing skill. An
 // explicit NUB_ALLOW_LONG_COMMENT=1 override prevents false-positive lockout for
 // a genuinely-needed longer body (e.g. a detailed release note).
 //
@@ -23,7 +23,7 @@
 const MAX_BODY_CHARS = 700;
 
 const REMINDER = [
-  "GitHub comment tone (PROSE.md): factual, neutral, terse. No preamble, no essays,",
+  "GitHub comment tone (prose-writing skill): factual, neutral, terse. No preamble, no essays,",
   "no editorializing. Initial ack of an external issue = EXACTLY \"Investigating.\".",
   "Never claim \"previous comments were wrong\" (they may be a bot's).",
 ].join(" ");

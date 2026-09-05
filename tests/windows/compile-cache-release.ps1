@@ -106,13 +106,13 @@ function Assert-NoRuntimeWriteThrough {
     # The property under test is that the RUNTIME CACHE refuses an unsafe candidate
     # -- ensure_safe_base returns None and extraction falls through. Assert that by
     # the absence of an extracted `runtime-*` tree, NOT by the absence of the `nub`
-    # directory: nub's node-discovery / node-env-flags / transpile / v8-compile-cache
+    # directory: nub's node-discovery / node-flags / transpile / v8-compile-cache
     # caches create that directory unconditionally through a plain create_dir_all,
     # with no DACL validation of their own, so it exists either way and testing for
     # it can never pass. Measured on windows-latest against a real release build --
     # under a rejected Everyone-Modify ancestor the `nub` dir held exactly
-    # transpile/, v8-compile-cache/, node-discovery.json and node-env-flags.json,
-    # runtime-* count 0, while the runtime itself landed in the fallback root.
+    # transpile/, v8-compile-cache/, node-discovery.json and the per-binary flag
+    # cache, runtime-* count 0, while the runtime itself landed in the fallback root.
     #
     # That those other caches write into an unsafe directory at all is a real but
     # SEPARATE gap, tracked as a follow-up; it is not what this gate covers.
@@ -200,7 +200,9 @@ setInterval(() => {}, 1000);
 
     $nubRoot = Join-Path $cache 'nub'
     $runtimeDirs = @(Get-ChildItem -LiteralPath $nubRoot -Directory -Filter 'runtime-*')
-    if ($runtimeDirs.Count -ne 1) { throw "expected exactly one extracted runtime, got $($runtimeDirs.Count)" }
+    # Nub names the reason it declined a cache base on stderr ("… is not usable for
+    # the runtime cache (<reason>)"); without it a relocation reads as a bare count.
+    if ($runtimeDirs.Count -ne 1) { throw "expected exactly one extracted runtime, got $($runtimeDirs.Count); cold-run stderr: $($cold.Stderr)" }
     $runtime = $runtimeDirs[0].FullName
     $workerBlob = Join-Path $runtime 'worker-blob-url.cjs'
     $addon = Join-Path $runtime 'addons\nub-native.node'

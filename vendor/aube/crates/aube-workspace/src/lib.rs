@@ -216,6 +216,156 @@ fn validate_workspace_pattern(
     Ok(())
 }
 
+/// Does `path` name a workspace member under `patterns`?
+///
+/// `path` is project-root-relative with `/` separators — the spelling an
+/// importer key already uses. Purely lexical: no filesystem access, so a
+/// caller holding only a lockfile and a manifest can ask the question.
+///
+/// This exists because a `package-lock.json` CANNOT answer it. npm keys
+/// both a workspace member (`packages/app`) and a local directory
+/// dependency (`vendor/local`) as a bare path carrying `name`/`version`,
+/// and either may hold a root `node_modules/<name>` link record — a root
+/// importer's own `file:./dep` is indistinguishable from a member by
+/// shape alone. The manifest's `workspaces` patterns are the only real
+/// source of truth, so the reader matches against them here rather than
+/// guessing from the lockfile.
+///
+/// Reproduces the discovery walk's semantics: braces expand first, a `!`
+/// prefix negates, and a match needs some positive pattern and no
+/// negative one. Getting that wrong in the EXCLUSIVE direction is the
+/// expensive one — a real member judged a non-member loses its importer
+/// entry and its install breaks — while an over-inclusive answer only
+/// reproduces the phantom-importer bug the caller is fixing.
+///
+/// Positives and negatives match with DIFFERENT options, and positives
+/// with two different sets again depending on the pattern, because the
+/// walk does. That asymmetry is the walk's, not an oversight here;
+/// copying it is what keeps the two answering alike, and every attempt
+/// to tidy it into one uniform rule has desynchronised them.
+/// [`pattern_matches_path`] carries the breakdown.
+pub fn matches_member_patterns(path: &str, patterns: &[String]) -> bool {
+    // Both discovery branches skip `node_modules` outright, so no path
+    // under one is ever a member however well it matches.
+    if path.split('/').any(|component| component == "node_modules") {
+        return false;
+    }
+    let mut matched = false;
+    for raw in patterns {
+        let (negated, pattern) = raw
+            .strip_prefix('!')
+            .map_or((false, raw.as_str()), |p| (true, p));
+        for expanded in expand_braces(pattern) {
+            if negated {
+                // Mirror the walk's negation matchers EXACTLY: the raw
+                // spelling, default match options, and the companion with a
+                // trailing `/**` stripped — the `glob` crate makes `**`
+                // consume at least one component, while the micromatch
+                // semantics pnpm uses let it match zero, so `!packages/**`
+                // has to exclude `packages` itself as well.
+                //
+                // Normalising the spelling here, as the positive half does,
+                // looks like the consistent choice and is a bug: it makes
+                // `!./packages/skipped` exclude a member the walk KEEPS,
+                // and over-exclusion is the direction that costs a real
+                // member its importer entry. Agreement with the walk is the
+                // whole contract, so a divergence that reads as an
+                // improvement is still a divergence.
+                let excluded = std::iter::once(expanded.as_str())
+                    .chain(expanded.strip_suffix("/**"))
+                    .any(|p| glob::Pattern::new(p).is_ok_and(|m| m.matches(path)));
+                if excluded {
+                    // A later exclusion wins outright, matching the walk.
+                    return false;
+                }
+            } else if pattern_matches_path(&expanded, path) {
+                matched = true;
+            }
+        }
+    }
+    matched
+}
+
+/// One expanded (brace-free, sign-free) POSITIVE pattern against one path.
+///
+/// **`expand_workspace_pattern` has TWO branches and they disagree, so
+/// this picks between them the same way it does — on whether the pattern
+/// contains `**`.** Treating positives as one uniform case is what made
+/// earlier versions of this wrong in both directions at once.
+///
+/// - No `**`: discovery joins the pattern onto a real directory and hands
+///   it to `glob::glob`, so a `*` cannot span a directory boundary, and
+///   the FILESYSTEM resolves the spelling — `./packages/*`, `packages/./*`
+///   and `packages/*/` all find `packages/app`. A lexical matcher gets no
+///   such help, so it normalises first.
+/// - With `**`: discovery walks `read_dir` and tests each path with
+///   `Pattern::matches_path`, whose default lets a `*` span freely, and it
+///   compiles the pattern VERBATIM. So `packages/*/leaf/**` really does
+///   reach `packages/a/b/leaf/x`, and normalising the spelling here would
+///   match paths discovery misses.
+///
+/// `case_sensitive` is spelled out rather than inherited from `Default`.
+/// `MatchOptions` DERIVES `Default`, which yields `case_sensitive: false`,
+/// while every discovery path uses `MatchOptions::new()`, which is `true`
+/// — the crate documents that mismatch on `new()` as a FIXME. Inheriting
+/// it made this matcher silently case-insensitive, so a differently-cased
+/// path stayed a phantom importer.
+///
+/// There is deliberately NO `/**`-stripped companion here, unlike the
+/// negation half. The walk builds one only for its negation matchers; its
+/// positive recursive branch has none, and `read_dir` never tests the walk
+/// root itself, so `packages/**` does not name `packages`. Adding one
+/// looked symmetric and over-matched.
+fn pattern_matches_path(pattern: &str, path: &str) -> bool {
+    let recursive = pattern.contains("**");
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: !recursive,
+        require_literal_leading_dot: false,
+    };
+    let normalized;
+    let effective = if recursive {
+        pattern
+    } else {
+        normalized = normalize_member_pattern(pattern);
+        normalized.as_str()
+    };
+    glob::Pattern::new(effective).is_ok_and(|m| m.matches_with(path, options))
+}
+
+/// Render a workspace pattern in the same frame as a lockfile importer
+/// key: no `.` components, no empty ones, no trailing slash, and an
+/// in-root `normal/..` pair collapsed.
+///
+/// This is what the filesystem does for the non-recursive discovery
+/// branch when it joins the pattern onto a real directory, which is why
+/// `./packages/*`, `packages/./*` and `packages/*/` all find
+/// `packages/app` there. A lexical matcher has to do it explicitly.
+///
+/// Splitting on `/` is safe for glob metacharacters: `.` and `..` are only
+/// ever acted on as a WHOLE component, never inside one.
+///
+/// A LEADING `..` has nothing to pop and must survive. The two cases are
+/// genuinely different frames rather than two spellings of one: npm
+/// accepts `packages/../apps/*`, discovers `apps/a` and keys it `apps/a`,
+/// so failing to collapse that dropped a real importer — while `../**`
+/// deliberately reaches OUTSIDE the project, and the walk renders what it
+/// finds there as `../sibling`. Collapsing the first and preserving the
+/// second is what keeps both answers right.
+fn normalize_member_pattern(pattern: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+    for component in pattern.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if matches!(components.last(), Some(&last) if last != "..") => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    components.join("/")
+}
+
 fn expand_braces(pattern: &str) -> Vec<String> {
     let mut depth = 0;
     let mut open = None;
@@ -434,6 +584,173 @@ mod tests {
             .into_iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// `matches_member_patterns` must answer exactly what the walk finds,
+    /// so every case asks BOTH on the same inputs. The expected column
+    /// pins the WALK — a positive control proving the fixture is live and
+    /// the case is not passing vacuously — and the matcher is then checked
+    /// against the walk's answer rather than against a second hand-written
+    /// list the two could drift away from together.
+    ///
+    /// The tree carries the shapes that decide an npm lockfile importer: a
+    /// real member, a local directory dependency NESTED beneath it (npm
+    /// keys the two identically, which is the whole reason this function
+    /// exists), a second member for a negation to exclude, and a manifest
+    /// on `packages` itself, which is what makes the `**`-companion
+    /// matcher observable at all.
+    #[test]
+    fn member_matching_agrees_with_workspace_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let universe = [
+            "packages",
+            "packages/app",
+            "packages/app/vendor/local",
+            "packages/app/node_modules/dep",
+            "packages/skipped",
+            "packages/a/b/leaf/x",
+        ];
+        for sub in universe {
+            write(
+                &dir.path().join(sub).join("package.json"),
+                &format!(
+                    r#"{{"name":"{}","version":"1.0.0"}}"#,
+                    sub.replace('/', "-")
+                ),
+            );
+        }
+
+        let cases: [(&[&str], &[&str]); 10] = [
+            // A single `*` must not span a directory boundary, or the
+            // nested local dep is retained as a phantom importer.
+            (&["packages/*"], &["packages/app", "packages/skipped"]),
+            // Three spellings npm accepts and preserves. The non-recursive
+            // discovery branch joins the pattern onto a real directory, so
+            // the filesystem resolves every one of them; a lexical matcher
+            // gets no such help and matched NOTHING before it normalised
+            // -- dropping real members, the expensive direction.
+            (&["./packages/*"], &["packages/app", "packages/skipped"]),
+            (&["packages/*/"], &["packages/app", "packages/skipped"]),
+            (&["packages/./*"], &["packages/app", "packages/skipped"]),
+            (&["packages/*", "!packages/skipped"], &["packages/app"]),
+            // The walk does NOT normalise a negation's spelling, so this
+            // one excludes nothing. Normalising it here would drop a real
+            // member -- the expensive direction.
+            (
+                &["packages/*", "!./packages/skipped"],
+                &["packages/app", "packages/skipped"],
+            ),
+            // `!packages/**` excludes `packages` itself, not just its
+            // descendants: the `glob` crate needs `**` to consume a
+            // component, so the walk compiles a companion matcher with the
+            // trailing `/**` stripped, and so must this.
+            (&["*", "!packages/**"], &[]),
+            // The RECURSIVE branch, which discovery selects on the pattern
+            // containing `**` and matches with `Pattern::matches_path` --
+            // whose default lets a `*` span separators. Forcing literal
+            // separators on EVERY positive dropped the nested member here.
+            (&["packages/*/leaf/**"], &["packages/a/b/leaf/x"]),
+            // That branch also compiles the pattern VERBATIM, so the `./`
+            // spelling finds nothing, even though the non-recursive branch
+            // above resolves it through the filesystem. Normalising both
+            // alike would match what discovery misses.
+            (&["./packages/**"], &[]),
+            // `packages` itself is NOT named by `packages/**`: discovery
+            // read_dirs FROM the pattern root, so it never tests the root,
+            // and `glob` needs `**` to consume a component. A positive
+            // `/**` companion mirroring the negation half over-matched it.
+            // `node_modules` is skipped outright by both branches.
+            (
+                &["packages/**"],
+                &[
+                    "packages/a/b/leaf/x",
+                    "packages/app",
+                    "packages/app/vendor/local",
+                    "packages/skipped",
+                ],
+            ),
+        ];
+
+        for (patterns, expected_walk) in cases {
+            let quoted = patterns
+                .iter()
+                .map(|p| format!(r#""{p}""#))
+                .collect::<Vec<_>>()
+                .join(",");
+            write(
+                &dir.path().join("package.json"),
+                &format!(r#"{{"name":"r","version":"1.0.0","workspaces":[{quoted}]}}"#),
+            );
+            let walked: BTreeSet<String> = find_workspace_packages(dir.path())
+                .unwrap()
+                .iter()
+                .filter_map(|p| pathdiff::diff_paths(p, dir.path()))
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .collect();
+            assert_eq!(
+                walked,
+                expected_walk.iter().map(|s| s.to_string()).collect(),
+                "the walk itself must see {expected_walk:?} for {patterns:?}"
+            );
+
+            let owned: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+            for candidate in universe {
+                assert_eq!(
+                    matches_member_patterns(candidate, &owned),
+                    walked.contains(candidate),
+                    "lexical matching disagreed with the walk for {patterns:?} \
+                     on {candidate}; the walk saw {walked:?}"
+                );
+            }
+        }
+    }
+
+    /// Case is asserted LEXICALLY rather than through the walk, on
+    /// purpose: macOS ships a case-insensitive volume by default while CI
+    /// runs on Linux, so a filesystem fixture would make the walk's answer
+    /// a property of the volume rather than of the pattern language, and
+    /// the comparison would mean different things on the two.
+    ///
+    /// What is pinned here is the pattern language: every discovery path
+    /// matches through `MatchOptions::new()`, which is case-SENSITIVE.
+    /// `MatchOptions` also derives `Default`, whose `case_sensitive` is
+    /// `false` — the crate documents the mismatch as a FIXME — so a
+    /// `..Default::default()` here silently made matching insensitive and
+    /// kept a differently-cased path as a phantom importer.
+    #[test]
+    fn member_matching_is_case_sensitive() {
+        let patterns = vec!["packages/*".to_string()];
+        assert!(
+            matches_member_patterns("packages/app", &patterns),
+            "the exact spelling must match"
+        );
+        let shouty = vec!["PACKAGES/*".to_string()];
+        assert!(
+            !matches_member_patterns("packages/app", &shouty),
+            "a differently-cased pattern must not match, as `MatchOptions::new()` would not"
+        );
+    }
+
+    /// An in-root `normal/..` pair collapses; a leading `..` does not.
+    ///
+    /// Asserted lexically rather than through the walk because the two
+    /// render in different frames, which is the whole point. npm accepts
+    /// `packages/../apps/*`, discovers `apps/a` and keys it `apps/a` in
+    /// the lockfile, so the matcher has to answer for `apps/a` — whereas
+    /// the walk hands its caller an absolute path that `pathdiff` renders
+    /// back as `packages/../apps/a`. Comparing those two spellings would
+    /// be testing the rendering, not the membership question the npm
+    /// reader actually asks.
+    #[test]
+    fn in_root_parent_components_collapse_but_leading_ones_do_not() {
+        assert!(
+            matches_member_patterns("apps/a", &["packages/../apps/*".to_string()]),
+            "npm keys this member `apps/a`; not collapsing the `..` dropped a real importer"
+        );
+        assert!(
+            !matches_member_patterns("apps/a", &["../apps/*".to_string()]),
+            "a leading `..` points outside the project and must not collapse into `apps/*`"
+        );
     }
 
     #[test]

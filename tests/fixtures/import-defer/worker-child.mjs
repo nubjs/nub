@@ -1,5 +1,6 @@
-// Deferral must still work inside the worker: V8 flags are process-global, so hiding
-// the flag from execArgv must not turn the feature off.
+// Deferral must still work inside the worker. It inherits nub's preload through
+// execArgv and the runtime-flag signal through its copy of the environment; its own
+// load hook then turns the flag on, and V8 flags are process-global.
 import defer * as dep from "./dep.ts";
 
 console.log("execargv:worker-before");

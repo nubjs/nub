@@ -15,7 +15,6 @@
 //! This is a read-only introspection command — no project lock, no
 //! lockfile, no node_modules.
 
-use clap::Args;
 use miette::{IntoDiagnostic, miette};
 use std::collections::BTreeMap;
 
@@ -34,7 +33,7 @@ Examples:
   $ aube find-hash --json sha512-abc123...
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct FindHashArgs {
     /// Hash to look up.
     ///
@@ -45,9 +44,9 @@ pub struct FindHashArgs {
     /// Emit machine-readable JSON instead of a plain text listing.
     ///
     /// Output is an array of `{ "name", "version", "path" }` objects.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 

@@ -71,7 +71,7 @@
 use core::mem::size_of;
 use pe_edit::{
     IconDirectory, IconDirectoryEntry, ResourceData, ResourceEntry, ResourceEntryName,
-    ResourceTable, CODE_PAGE_ID_EN_US, RT_GROUP_ICON, RT_ICON, RT_RCDATA, RT_VERSION,
+    ResourceTable, CODE_PAGE_ID_EN_US, RT_GROUP_ICON, RT_ICON, RT_MANIFEST, RT_RCDATA, RT_VERSION,
 };
 
 // libsui: the resource-directory language for the version resource. US English
@@ -149,6 +149,9 @@ pub struct PortableExecutable<'a> {
     // table is emitted in insertion order and RT_VERSION must sort after
     // RT_GROUP_ICON. See set_version_info.
     version_info: Option<Vec<u8>>,
+    // libsui: likewise deferred, and emitted after the version resource, because
+    // RT_MANIFEST (24) is the highest id of the five this builder can write.
+    manifest: Option<(Vec<u8>, u32)>,
 }
 
 impl<'a> PortableExecutable<'a> {
@@ -160,6 +163,7 @@ impl<'a> PortableExecutable<'a> {
             resource_dir: pe_edit::ResourceDirectory::default(),
             icons: Vec::new(),
             version_info: None,
+            manifest: None,
         })
     }
 
@@ -286,6 +290,30 @@ impl<'a> PortableExecutable<'a> {
         self
     }
 
+    /// Set the `RT_MANIFEST` resource — the application manifest Windows reads
+    /// before the process starts.
+    ///
+    /// libsui: this builder replaces the resource directory wholesale, so an
+    /// input whose manifest matters has to hand it back here. It matters more
+    /// than it looks: `IsWindows10OrGreater` and the rest of `VersionHelpers.h`
+    /// are subject to Windows' version-lie shim, which reports 6.2 to any image
+    /// that does not declare a `<supportedOS>` GUID in its manifest. Node's own
+    /// `wmain` calls exactly that helper and exits 216 when it fails, so a Node
+    /// binary rewritten without its manifest refuses to start at all.
+    ///
+    /// Deferred to [`Self::build`] for [`Self::set_version_info`]'s reason, and
+    /// emitted after it: `RT_MANIFEST` is 24, the highest of the ids this builder
+    /// writes.
+    ///
+    /// `language` is carried from the input rather than fixed, because a manifest
+    /// is the one resource here whose bytes come from somewhere else — the caller
+    /// read it off the image being rewritten, and a manifest under a language the
+    /// image never used is a resource the loader may not find.
+    pub fn set_manifest(mut self, resource: Vec<u8>, language: u32) -> Self {
+        self.manifest = Some((resource, language));
+        self
+    }
+
     /// Build and write the modified PE file
     pub fn build<W: std::io::Write>(mut self, writer: &mut W) -> Result<(), Error> {
         // TODO: the order of the table entries matters. this works for now.
@@ -338,8 +366,9 @@ impl<'a> PortableExecutable<'a> {
             );
         }
 
-        // libsui: last, so the root table's ID entries stay ascending — RT_ICON
-        // (3), RT_RCDATA (10), RT_GROUP_ICON (14), RT_VERSION (16).
+        // libsui: last two, so the root table's ID entries stay ascending —
+        // RT_ICON (3), RT_RCDATA (10), RT_GROUP_ICON (14), RT_VERSION (16),
+        // RT_MANIFEST (24).
         if let Some(resource) = self.version_info.take() {
             let root = self.resource_dir.root_mut();
             let mut data = ResourceData::default();
@@ -357,6 +386,28 @@ impl<'a> PortableExecutable<'a> {
             );
             root.insert(
                 ResourceEntryName::ID(RT_VERSION as u32),
+                ResourceEntry::Table(name_table),
+            );
+        }
+
+        if let Some((resource, language)) = self.manifest.take() {
+            let root = self.resource_dir.root_mut();
+            let mut data = ResourceData::default();
+            // A manifest is XML in whatever encoding its own declaration names,
+            // so it carries no code page of its own and the field stays 0 — the
+            // value every manifest-bearing image observed here writes.
+            data.set_data(resource);
+            let mut language_table = ResourceTable::default();
+            language_table.insert(ResourceEntryName::ID(language), ResourceEntry::Data(data));
+            // Name 1 is CREATEPROCESS_MANIFEST_RESOURCE_ID, the id the loader
+            // reads for an EXE. A manifest under any other name is ignored.
+            let mut name_table = ResourceTable::default();
+            name_table.insert(
+                ResourceEntryName::ID(1),
+                ResourceEntry::Table(language_table),
+            );
+            root.insert(
+                ResourceEntryName::ID(RT_MANIFEST as u32),
                 ResourceEntry::Table(name_table),
             );
         }
@@ -585,14 +636,111 @@ pub struct Macho {
 
 pub(crate) const SEGNAME: [u8; 16] = *b"__SUI\0\0\0\0\0\0\0\0\0\0\0";
 
+/// Pad a segment or section name into Mach-O's fixed 16-byte field.
+///
+/// Not NUL-terminated when the name is exactly 16 bytes, which matches the
+/// format: `getsectdata` and Node's own `__NODE_SEA_BLOB` lookup both compare
+/// against a fixed-width field rather than a C string.
+fn name16(name: &str) -> Result<[u8; 16], Error> {
+    if name.len() > 16 {
+        return Err(Error::InvalidObject(
+            "Mach-O segment and section names must be at most 16 bytes",
+        ));
+    }
+    let mut out = [0u8; 16];
+    out[..name.len()].copy_from_slice(name.as_bytes());
+    Ok(out)
+}
+
+/// Ad-hoc sign `data` by staging it at `tmp_path` and handing that file to
+/// Apple's `codesign`, returning the signed bytes. This is the x86_64 leg of
+/// [`Macho::build_and_sign`]; arm64 is signed in-process instead.
+///
+/// `-i` is load-bearing, not cosmetic. Without it `codesign` derives the
+/// CodeDirectory identifier from the staged file's BASENAME, and that name
+/// carries the compiling process's PID — so two compiles of an unchanged tree
+/// produced artifacts differing in exactly the ASCII digits of that PID, and a
+/// reproducible build was impossible. `ADHOC_IDENTIFIER` is what the arm64
+/// signer writes, so both macOS legs now agree on one stable value.
+///
+/// A missing or failing `codesign` leaves `data` unsigned rather than failing
+/// the build: an unsigned x86_64 image still executes.
+#[cfg(target_vendor = "apple")]
+fn codesign_adhoc(data: &[u8], tmp_path: &std::path::Path) -> Result<Vec<u8>, Error> {
+    if let Some(parent) = tmp_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(tmp_path, data)?;
+
+    match std::process::Command::new("codesign")
+        .arg("-s")
+        .arg("-")
+        // Replace whatever signature the input already carried. Without it
+        // `codesign` REFUSES a signed input ("is already signed") and this
+        // function's warn-and-continue policy leaves the STALE signature in place
+        // — a binary that runs but reports `invalid signature (code or signature
+        // have been modified)`, measured on a darwin-x64 Node with its release
+        // signature kept. Harmless on an unsigned input, which is what the
+        // launcher template is, so one spelling serves both callers.
+        .arg("--force")
+        .arg("-i")
+        .arg(apple_codesign::ADHOC_IDENTIFIER)
+        .arg(tmp_path)
+        .output()
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!(
+                    "Warning: Failed to adhoc codesign binary: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // codesign not found, skip it
+        }
+        Err(e) => {
+            std::fs::remove_file(tmp_path).ok();
+            return Err(e.into());
+        }
+    }
+
+    let signed = std::fs::read(tmp_path)?;
+    std::fs::remove_file(tmp_path).ok();
+    Ok(signed)
+}
+
 impl Macho {
     pub fn from(obj: Vec<u8>) -> Result<Self, Error> {
+        Self::parse(obj, true)
+    }
+
+    /// Parse without dropping an existing `LC_CODE_SIGNATURE`.
+    ///
+    /// [`from`](Self::from) hands an x86_64 image to `codesign --remove-signature`
+    /// before touching it. That is harmless for an UNSIGNED input — which is what
+    /// nub's own launcher template is — and it destroys a signed one: measured on
+    /// the official darwin-x64 `node`, stripping its release signature first makes
+    /// the later `codesign` fail with `main executable failed strict validation`
+    /// and leaves the written section somewhere the runtime's own lookup cannot
+    /// find it.
+    ///
+    /// Nothing has to come off. The writer shifts the signature's `dataoff` along
+    /// with the rest of `__LINKEDIT`, and `codesign --force` replaces the blob
+    /// afterwards — which is exactly what the arm64 path has always done. The
+    /// pre-strip also only runs on a macOS host, so a Linux or Windows host has
+    /// always taken this path for a darwin-x64 target.
+    pub fn from_keeping_signature(obj: Vec<u8>) -> Result<Self, Error> {
+        Self::parse(obj, false)
+    }
+
+    fn parse(obj: Vec<u8>, strip_existing_signature: bool) -> Result<Self, Error> {
         let header = Header64::read_from_prefix(&obj)
             .ok_or(Error::InvalidObject("Failed to read header"))?;
 
         // Atomically strip code signature first for intel binaries.
         #[cfg(target_vendor = "apple")]
-        let obj = if header.cputype != CPU_TYPE_ARM_64 {
+        let obj = if strip_existing_signature && header.cputype != CPU_TYPE_ARM_64 {
             use std::io::Write;
 
             let tmp_dir = std::env::temp_dir();
@@ -637,6 +785,9 @@ impl Macho {
         } else {
             obj
         };
+        // The pre-strip is the only reader of this, and it is macOS-only.
+        #[cfg(not(target_vendor = "apple"))]
+        let _ = strip_existing_signature;
 
         let mut commands: Vec<(u32, u32, usize)> = Vec::with_capacity(header.ncmds as usize);
 
@@ -690,12 +841,25 @@ impl Macho {
     /// names in a fixed-size 16-byte field, so `name` must be at most
     /// **16 bytes** long. Names longer than 16 bytes return
     /// [`Error::InvalidObject`] instead of panicking.
-    pub fn write_section(mut self, name: &str, sectdata: Vec<u8>) -> Result<Self, Error> {
-        if name.len() > 16 {
-            return Err(Error::InvalidObject(
-                "Mach-O section name must be at most 16 bytes",
-            ));
-        }
+    pub fn write_section(self, name: &str, sectdata: Vec<u8>) -> Result<Self, Error> {
+        self.write_section_in_segment("__SUI", name, sectdata)
+    }
+
+    /// Write a section into an explicitly named segment.
+    ///
+    /// [`write_section`](Self::write_section) hardcodes `__SUI`, which is the
+    /// segment nub's own launcher looks itself up in. A Node single-executable
+    /// blob has to land somewhere else — Node's runtime reads segment `NODE_SEA`,
+    /// section `__NODE_SEA_BLOB`, and those names are compiled into the binary
+    /// doing the reading, so they are not negotiable.
+    pub fn write_section_in_segment(
+        mut self,
+        segname: &str,
+        name: &str,
+        sectdata: Vec<u8>,
+    ) -> Result<Self, Error> {
+        let segname = name16(segname)?;
+        let sectname = name16(name)?;
 
         // One mechanism for both Darwin architectures. The x86_64 path used to
         // append the payload behind a sentinel instead, which cannot be code
@@ -709,7 +873,7 @@ impl Macho {
         self.seg = SegmentCommand64 {
             cmd: LC_SEGMENT_64,
             cmdsize: size_of::<SegmentCommand64>() as u32 + size_of::<Section64>() as u32,
-            segname: SEGNAME,
+            segname,
             vmaddr: self.linkedit_cmd.vmaddr,
             vmsize: align_vmsize(sectdata.len() as u64, page_size),
             filesize: align_vmsize(sectdata.len() as u64, page_size),
@@ -720,15 +884,12 @@ impl Macho {
             flags: 0,
         };
 
-        let mut sectname = [0; 16];
-        sectname[..name.len()].copy_from_slice(name.as_bytes());
-
         self.sec = Section64 {
             addr: self.seg.vmaddr,
             size: sectdata.len() as u64,
             offset: self.linkedit_cmd.fileoff as u32,
             align: if sectdata.len() < 16 { 0 } else { 4 },
-            segname: SEGNAME,
+            segname,
             sectname,
             ..self.sec
         };
@@ -937,44 +1098,11 @@ impl Macho {
             // For Intel binaries, build to a temporary file and run adhoc codesign
             #[cfg(target_vendor = "apple")]
             {
-                let tmp_dir = std::env::temp_dir();
-                std::fs::create_dir_all(&tmp_dir)?;
-                let tmp_path = tmp_dir.join(format!("sui_sign_{}", std::process::id()));
-
-                {
-                    let mut tmp_file = std::fs::File::create(&tmp_path)?;
-                    self.build(&mut tmp_file)?;
-                }
-
-                // Run adhoc codesign
-                match std::process::Command::new("codesign")
-                    .arg("-s")
-                    .arg("-")
-                    .arg(&tmp_path)
-                    .output()
-                {
-                    Ok(output) => {
-                        if !output.status.success() {
-                            eprintln!(
-                                "Warning: Failed to adhoc codesign binary: {}",
-                                String::from_utf8_lossy(&output.stderr)
-                            );
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // codesign not found, skip it
-                    }
-                    Err(e) => {
-                        std::fs::remove_file(&tmp_path).ok();
-                        return Err(e.into());
-                    }
-                }
-
-                // Read the (possibly signed) binary and write to output
-                let signed_data = std::fs::read(&tmp_path)?;
-                writer.write_all(&signed_data)?;
-                std::fs::remove_file(&tmp_path).ok();
-
+                let mut data = Vec::new();
+                self.build(&mut data)?;
+                let tmp_path =
+                    std::env::temp_dir().join(format!("sui_sign_{}", std::process::id()));
+                writer.write_all(&codesign_adhoc(&data, &tmp_path)?)?;
                 Ok(())
             }
 
@@ -1252,6 +1380,26 @@ impl<'a> Elf<'a> {
         sectdata: &[u8],
         writer: &mut W,
     ) -> Result<(), Error> {
+        self.append_note(&build_elf_note_payload(name, sectdata), ".note.sui", writer)
+    }
+
+    /// Append an already-built ELF note verbatim, under a section name of the
+    /// caller's choosing.
+    ///
+    /// [`append`](Self::append) wraps the payload in this crate's own `SUI\0`
+    /// note, whose descriptor carries a length-prefixed section name. A Node
+    /// single-executable blob cannot use that shape: the reader is postject's
+    /// `postject_find_resource`, which matches the note's own `n_name` and takes
+    /// the descriptor as the blob with nothing in front of it. So the note is
+    /// built by the caller and this method only places it — the PT_LOAD, the
+    /// relocated program header table, the PT_NOTE entry and the strip-proofing
+    /// sections are identical either way.
+    pub fn append_note<W: Write>(
+        &self,
+        note: &[u8],
+        note_section_name: &str,
+        writer: &mut W,
+    ) -> Result<(), Error> {
         const PAGE: usize = 0x1000;
         // Program/segment header type and flag constants (ELF64).
         const PT_LOAD: u32 = 1;
@@ -1359,7 +1507,6 @@ impl<'a> Elf<'a> {
         }
         let first_load_bias = first_load_bias.unwrap_or(0);
 
-        let note = build_elf_note_payload(name, sectdata);
 
         // Layout of the appended region, all within one new PT_LOAD:
         //   [page-aligned] new program header table | note
@@ -1494,7 +1641,8 @@ impl<'a> Elf<'a> {
             // Relocate and grow .shstrtab so it carries the new section names.
             let mut new_shstr = data[shstr_off..shstr_off + shstr_size].to_vec();
             let note_name_index = new_shstr.len() as u32;
-            new_shstr.extend_from_slice(b".note.sui\0");
+            new_shstr.extend_from_slice(note_section_name.as_bytes());
+            new_shstr.push(0);
             let phdr_name_index = new_shstr.len() as u32;
             new_shstr.extend_from_slice(b".sui.phdrs\0");
 
@@ -1762,6 +1910,46 @@ pub mod utils {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Two compiles of one tree stage the x86_64 image at `sui_sign_<pid>`, so the
+    // staged file's NAME is the only per-run input `codesign` sees. Signing
+    // identical bytes under two names must therefore yield identical bytes.
+    //
+    // The input is a signature-stripped copy of the test binary — an arm64 image
+    // on an arm64 host, which is fine: `codesign_adhoc` never parses what it
+    // signs, and the arch dispatch it serves lives in `build_and_sign`.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn adhoc_signature_is_independent_of_the_staged_file_name() {
+        let dir = std::env::temp_dir().join(format!("sui_sign_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let input = dir.join("input");
+        std::fs::copy(std::env::current_exe().unwrap(), &input).unwrap();
+        // `codesign` refuses to sign an already-signed image, and the production
+        // x86_64 path is handed one `Macho::from` has already stripped.
+        let stripped = std::process::Command::new("codesign")
+            .arg("--remove-signature")
+            .arg(&input)
+            .status()
+            .unwrap();
+        assert!(stripped.success(), "could not strip the test input");
+        let data = std::fs::read(&input).unwrap();
+
+        let a = codesign_adhoc(&data, &dir.join("sui_sign_11111")).unwrap();
+        let b = codesign_adhoc(&data, &dir.join("sui_sign_22222")).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Positive control: a failing or absent `codesign` returns the input
+        // untouched, and the equality below would then hold for the wrong reason.
+        // Compared with `assert!` rather than `assert_ne!`/`assert_eq!` so a
+        // failure does not dump two multi-megabyte images into the output.
+        assert!(a != data, "codesign did not sign the staged image");
+        assert!(
+            a == b,
+            "the ad-hoc signature depends on the staged file's name"
+        );
+    }
 
     // Build a minimal arm64 Mach-O containing __TEXT, __LINKEDIT, and the
     // dyld-1284.13 commands LC_FUNCTION_VARIANTS / LC_FUNCTION_VARIANT_FIXUPS,

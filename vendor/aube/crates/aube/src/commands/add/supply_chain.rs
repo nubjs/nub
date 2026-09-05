@@ -8,6 +8,7 @@ pub(super) async fn run_cli_name_gates(
     packages: &[String],
     allow_low_downloads: bool,
     prompt: crate::commands::add_supply_chain::LowDownloadPrompt,
+    setting_overrides: &[(String, String)],
 ) -> miette::Result<()> {
     let project_dir = supply_chain_project_dir(cwd);
     let manifest = crate::commands::load_manifest_or_default(&project_dir)?;
@@ -18,7 +19,8 @@ pub(super) async fn run_cli_name_gates(
         minimum_package_age_minutes,
         mut allowed_unpopular,
         lockfile_dir,
-    ) = crate::commands::with_settings_ctx(&project_dir, |ctx| {
+        cache_dir,
+    ) = crate::commands::with_settings_ctx_and_cli(&project_dir, setting_overrides, |ctx| {
         let policy = if aube_settings::resolved::paranoid(ctx) {
             aube_settings::resolved::AdvisoryCheck::Required
         } else {
@@ -30,6 +32,7 @@ pub(super) async fn run_cli_name_gates(
             aube_settings::resolved::minimum_package_age(ctx),
             aube_settings::resolved::allowed_unpopular_packages(ctx).unwrap_or_default(),
             crate::commands::install::resolve_active_lockfile_dir(&project_dir, &manifest, ctx)?,
+            crate::commands::resolved_cache_dir_with_ctx(&project_dir, ctx),
         ))
     })?;
     let locked_registry_names = locked_registry_names(&lockfile_dir, &manifest);
@@ -39,8 +42,8 @@ pub(super) async fn run_cli_name_gates(
             .map(|name| glob::Pattern::escape(name)),
     );
     let registry_client = crate::commands::make_client(&project_dir);
-    let packument_cache = crate::commands::packument_cache_dir_for_cwd(&project_dir);
-    let full_packument_cache = crate::commands::packument_full_cache_dir_for_cwd(&project_dir);
+    let packument_cache = cache_dir.join("packuments-v1");
+    let full_packument_cache = cache_dir.join("packuments-full-v1");
     crate::commands::add_supply_chain::run_gates(
         &registry_inputs.exact_advisory_pairs,
         &registry_inputs.download_names,

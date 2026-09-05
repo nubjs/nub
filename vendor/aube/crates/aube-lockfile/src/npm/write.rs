@@ -3,6 +3,8 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
+use super::raw::RawNpmLockfile;
+
 #[derive(Debug, Serialize)]
 struct WriteNpmLockfile<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,8 +325,9 @@ struct WriteNpmPeerDepMeta {
 ///  - Registry `resolved` tarball URLs are emitted when they were
 ///    present in the parsed graph. Graphs synthesized without
 ///    `tarball_url` fall back to npm's tolerated no-`resolved` form.
-///  - Non-git local source entries (`file:`, URL tarballs) aren't
-///    emitted yet. Git sources emit their pinned `resolved:` URL.
+///  - Path-backed local source entries (`file:`, `link:`) aren't
+///    emitted yet. Git and remote-tarball sources emit their pinned
+///    `resolved:` URL.
 ///    Workspace `link:` packages are emitted as importer entries plus
 ///    a root `node_modules/<name>` link record.
 pub fn write(
@@ -336,11 +339,12 @@ pub fn write(
     // lookups from parent deps resolve to one canonical entry even if
     // the graph has several contextualized variants.
     let mut canonical = crate::build_canonical_map(graph);
-    for pkg in graph
-        .packages
-        .values()
-        .filter(|pkg| super::source::is_git_local_source(pkg.local_source.as_ref()))
-    {
+    for pkg in graph.packages.values().filter(|pkg| {
+        matches!(
+            pkg.local_source,
+            Some(LocalSource::Git(_) | LocalSource::RemoteTarball(_))
+        )
+    }) {
         canonical
             .entry(super::canonical_key_from_dep_path(&pkg.dep_path))
             .or_insert(pkg);
@@ -369,7 +373,8 @@ pub fn write(
     // `["foo", "bar"]` for `node_modules/foo/node_modules/bar`. Shared
     // with bun (which renders the same segment list as `foo/bar`).
     let root_tree_roots = non_link_roots(graph, &roots);
-    let tree = super::build_hoist_tree(&canonical, &root_tree_roots);
+    let preferred_roots = preferred_root_placements(path, &canonical);
+    let tree = super::build_hoist_tree(&canonical, &root_tree_roots, Some(&preferred_roots));
     // For the npm writer, re-key the tree by install_path strings.
     let mut placed: BTreeMap<String, String> = tree
         .into_iter()
@@ -555,7 +560,7 @@ pub fn write(
         );
 
         let workspace_tree_roots = non_link_roots(graph, importer_roots);
-        let workspace_tree = super::build_hoist_tree(&canonical, &workspace_tree_roots);
+        let workspace_tree = super::build_hoist_tree(&canonical, &workspace_tree_roots, None);
         // Skip subtrees whose top-level segment is already hoisted to
         // `node_modules/<name>` at the same canonical version: Node's
         // upward `node_modules` walk from `<importer>/...` resolves to
@@ -764,6 +769,45 @@ pub fn write(
     body.push('\n');
     crate::atomic_write_lockfile(path, body.as_bytes())?;
     Ok(())
+}
+
+/// Read npm's existing top-level install choices before replacing the file.
+/// This is best-effort: new destinations and malformed files have no layout
+/// preference, while the caller's normal parse path remains responsible for
+/// surfacing errors from an existing project lockfile.
+fn preferred_root_placements(
+    path: &Path,
+    canonical: &BTreeMap<String, &LockedPackage>,
+) -> BTreeMap<String, String> {
+    let Ok(content) = crate::read_lockfile(path) else {
+        return BTreeMap::new();
+    };
+    let Ok(raw) = crate::parse_json::<RawNpmLockfile>(path, content) else {
+        return BTreeMap::new();
+    };
+    let mut preferred = BTreeMap::new();
+    for (install_path, entry) in raw.packages {
+        if entry.link {
+            continue;
+        }
+        let Some(rest) = install_path.strip_prefix("node_modules/") else {
+            continue;
+        };
+        if rest.contains("/node_modules/") {
+            continue;
+        }
+        let Some(name) = super::layout::package_name_from_install_path(&install_path) else {
+            continue;
+        };
+        let Some(version) = entry.version else {
+            continue;
+        };
+        let key = format!("{name}@{version}");
+        if canonical.contains_key(&key) {
+            preferred.insert(name, key);
+        }
+    }
+    preferred
 }
 
 fn workspace_package_for_importer<'a>(

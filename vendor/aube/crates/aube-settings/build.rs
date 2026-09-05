@@ -501,7 +501,7 @@ fn default_expr(name: &str, def: &SettingDef, kind: Kind, rust_ty: &str) -> Opti
     // this literal value".
     if matches!(
         name,
-        "preferFrozenLockfile" | "storeDir" | "cacheDir" | "nodeVersion"
+        "preferFrozenLockfile" | "storeDir" | "cacheDir" | "nodeVersion" | "catalogPrune"
     ) {
         return None;
     }

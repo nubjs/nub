@@ -11,6 +11,8 @@ use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 
 const REGISTRY: &str = "https://registry.npmjs.org";
+/// npm's abbreviated-packument media type — the one `npm install` itself sends.
+const ABBREVIATED_PACKUMENT: &str = "application/vnd.npm.install-v1+json";
 /// Skip a tarball larger than this — a phantom scan does not need to page in a
 /// half-gigabyte package, and it bounds a scan's disk/time.
 const MAX_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
@@ -31,12 +33,16 @@ pub struct Extracted {
 /// honors a `Retry-After` header, so a scan does not silently drop half its
 /// corpus. A 4xx other than 429 (e.g. an unpublished/renamed package's 404) is
 /// terminal and returned immediately.
-fn get_with_retry(client: &Client, url: &str) -> Result<reqwest::blocking::Response, String> {
+fn get_with_retry(
+    client: &Client,
+    url: &str,
+    accept: &str,
+) -> Result<reqwest::blocking::Response, String> {
     const MAX_ATTEMPTS: u32 = 9;
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match client.get(url).header("accept", "application/json").send() {
+        match client.get(url).header("accept", accept).send() {
             Ok(resp) => {
                 let status = resp.status();
                 let retryable = status.as_u16() == 429 || status.is_server_error();
@@ -89,24 +95,38 @@ pub fn client() -> Client {
 /// Fetch `name`'s latest version and extract its tarball. Errors are returned as
 /// strings (a scan logs and skips rather than aborting the batch).
 pub fn fetch(client: &Client, name: &str) -> Result<Extracted, String> {
-    let meta_url = format!("{REGISTRY}/{name}/latest");
-    let meta: serde_json::Value = get_with_retry(client, &meta_url)
+    // The ABBREVIATED packument, not `/{name}/latest`. Measured 2026-09-05: under
+    // a wide scan `registry.npmjs.org/<pkg>/latest` rate-limits to a hard 429 that
+    // no backoff clears — five consecutive probes returned 429 for `/latest` while
+    // the abbreviated document returned 200 for the same package on the same
+    // connection. The abbreviated form is the endpoint npm's own installer uses,
+    // so it is the best-cached path on the registry CDN and is not throttled the
+    // same way. It carries every field this fetcher needs (`dist-tags.latest` and
+    // that version's `dist.tarball`); the manifest itself is read out of the
+    // tarball, never from metadata, so the abbreviated document's dropped fields
+    // (`exports`, `scripts`, …) cost nothing here.
+    let meta_url = format!("{REGISTRY}/{name}");
+    let meta: serde_json::Value = get_with_retry(client, &meta_url, ABBREVIATED_PACKUMENT)
         .map_err(|e| format!("metadata: {e}"))?
         .json()
         .map_err(|e| format!("metadata parse: {e}"))?;
 
     let version = meta
-        .get("version")
+        .get("dist-tags")
+        .and_then(|t| t.get("latest"))
         .and_then(|v| v.as_str())
         .ok_or("no version in metadata")?
         .to_string();
     let tarball = meta
-        .get("dist")
+        .get("versions")
+        .and_then(|vs| vs.get(&version))
+        .and_then(|v| v.get("dist"))
         .and_then(|d| d.get("tarball"))
         .and_then(|t| t.as_str())
         .ok_or("no tarball url in metadata")?;
 
-    let resp = get_with_retry(client, tarball).map_err(|e| format!("tarball: {e}"))?;
+    let resp = get_with_retry(client, tarball, "application/octet-stream")
+        .map_err(|e| format!("tarball: {e}"))?;
     if let Some(len) = resp.content_length()
         && len > MAX_TARBALL_BYTES
     {

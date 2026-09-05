@@ -1717,43 +1717,15 @@ pub fn accepts_argv_flag(node_path: &Path, flag: &str) -> Option<bool> {
 
 /// Read the cached argv-flag verdict for (binary, flag), honoring the mtime key.
 fn read_argv_flag_cache(node_path: &Path, flag: &str) -> Option<bool> {
-    let cache = cache_dir()?.join("node-argv-flags.json");
-    let content = fs::read_to_string(&cache).ok()?;
-    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let entry = data.get(node_path.to_string_lossy().as_ref())?;
-    if entry.get("mtime")?.as_u64()? != node_mtime_secs(node_path)? {
-        return None;
-    }
-    entry.get("flags")?.get(flag)?.as_bool()
+    read_flag_entry(node_path)?.argv.get(flag).copied()
 }
 
 /// Record the argv-flag verdict for (binary, flag). Best-effort: a failed write
 /// only costs a re-probe.
 fn write_argv_flag_cache(node_path: &Path, flag: &str, accepted: bool) {
-    let Some(dir) = cache_dir() else { return };
-    let Some(dir) = safe_cache_dir(dir) else {
-        return;
-    };
-    let cache = dir.join("node-argv-flags.json");
-
-    let mut data: serde_json::Value = fs::read_to_string(&cache)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let key = node_path.to_string_lossy().to_string();
-    let mtime = node_mtime_secs(node_path).unwrap_or(0);
-    // A stale entry (different mtime) is replaced wholesale rather than merged —
-    // the old verdicts describe a different binary.
-    if data[&key].get("mtime").and_then(|m| m.as_u64()) != Some(mtime) {
-        data[&key] = serde_json::json!({ "mtime": mtime, "flags": {} });
-    }
-    data[&key]["flags"][flag] = serde_json::json!(accepted);
-
-    let _ = fs::write(
-        &cache,
-        serde_json::to_string_pretty(&data).unwrap_or_default(),
-    );
+    update_flag_entry(node_path, |entry| {
+        entry.argv.insert(flag.to_string(), accepted);
+    });
 }
 
 /// mtime (seconds since epoch) of a Node binary, for cache-key freshness. `None`
@@ -1769,50 +1741,132 @@ fn node_mtime_secs(node_path: &Path) -> Option<u64> {
 }
 
 /// Read the cached `allowedNodeEnvironmentFlags` set for a binary, honoring the
-/// (path, mtime) key so a rebuilt/replaced Node at the same path re-probes. Kept in
-/// a sibling file to `node-discovery.json` so it never risks the version cache.
+/// (path, mtime) key so a rebuilt/replaced Node at the same path re-probes.
 fn read_env_flags_cache(node_path: &Path) -> Option<std::collections::BTreeSet<String>> {
-    let cache = cache_dir()?.join("node-env-flags.json");
-    let content = fs::read_to_string(&cache).ok()?;
-    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let key = node_path.to_string_lossy();
-    let entry = data.get(key.as_ref())?;
-    let cached_mtime = entry.get("mtime")?.as_u64()?;
-
-    if cached_mtime != node_mtime_secs(node_path)? {
-        return None;
-    }
-
-    let arr = entry.get("flags")?.as_array()?;
-    Some(
-        arr.iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect(),
-    )
+    let env = read_flag_entry(node_path)?.env?;
+    Some(env.into_iter().collect())
 }
 
 fn write_env_flags_cache(node_path: &Path, flags: &std::collections::BTreeSet<String>) {
-    let Some(dir) = cache_dir() else { return };
-    let Some(dir) = safe_cache_dir(dir) else {
+    update_flag_entry(node_path, |entry| {
+        entry.env = Some(flags.iter().cloned().collect());
+    });
+}
+
+/// Both probe verdicts for ONE Node binary: its `allowedNodeEnvironmentFlags` set
+/// and its per-flag argv verdicts. They share the (path, mtime) key and are read on
+/// the same spawn, so they share a file and a launch reads one.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct NodeFlagEntry {
+    /// The binary this describes. Stored so a hashed-filename collision is a miss
+    /// (one re-probe) rather than another binary's verdicts.
+    path: String,
+    mtime: u64,
+    /// Absent until the env-flag probe has run; the argv probe writes the file first
+    /// whenever a `Mitigation::UnflagArgv` row applies to a Node nub did not install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<Vec<String>>,
+    #[serde(default)]
+    argv: std::collections::BTreeMap<String, bool>,
+}
+
+/// ONE FILE PER BINARY, not one shared map — the same shape, and for the same
+/// reason, as the launcher's `cache::ProbeStore`.
+///
+/// These verdicts used to live in two flat `{ "<path>": … }` maps
+/// (`node-env-flags.json`, `node-argv-flags.json`) that every read parsed WHOLE, via
+/// `serde_json::Value`, to pull a single key. The env-flag set is ~256 strings per
+/// binary, so the file grew ~9 KB for every Node the machine had ever seen and the
+/// parse grew with it — on a hot path taken by every compiled-artifact launch AND
+/// every non-compat `nub` spawn. Measured on linux-x64, warm, hello-world artifact:
+/// the pre-spawn flag window ran 0.08 ms at 1 entry, 0.45 at 10, 2.09 at 50 and
+/// 8.45 at 200 — 0.042 ms of pure parse per remembered Node, per launch, forever.
+/// For scale, the whole rest of the launcher's warm work is ~0.6 ms. Keyed per
+/// binary the read is one small file whatever else the machine has installed.
+///
+/// It also stops one bad entry from poisoning every other: a single malformed byte
+/// anywhere in a shared map made `from_str` fail for EVERY binary — a `node` spawn
+/// per launch, indefinitely — and the next write reset the map, discarding every
+/// other binary's verdicts.
+///
+/// The legacy files are left alone rather than deleted. They are inert (nothing
+/// reads them now) and leaving them keeps a downgrade working.
+const FLAG_ENTRY_DIR: &str = "node-flags";
+
+/// The entry filename for `node_path`: a hash, so an arbitrary filesystem path
+/// becomes a fixed-width name that cannot escape the directory. A collision costs
+/// one re-probe, never a wrong verdict — `read_flag_entry` compares the stored path.
+fn flag_entry_name(node_path: &Path) -> String {
+    blake3::hash(node_path.to_string_lossy().as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+fn read_flag_entry(node_path: &Path) -> Option<NodeFlagEntry> {
+    read_flag_entry_in(&cache_dir()?, node_path)
+}
+
+/// `read_flag_entry` against an explicit cache root, so a test can drive it without
+/// mutating process-global environment (`XDG_CACHE_HOME`) — the seam
+/// `nub_store_node_in` established.
+fn read_flag_entry_in(cache_root: &Path, node_path: &Path) -> Option<NodeFlagEntry> {
+    let path = cache_root
+        .join(FLAG_ENTRY_DIR)
+        .join(flag_entry_name(node_path));
+    let entry: NodeFlagEntry = serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+    // Any doubt means "probe it again", which is always correct and merely slower:
+    // a hash collision, or a binary rebuilt in place since the verdict was recorded.
+    if entry.path != node_path.to_string_lossy() || entry.mtime != node_mtime_secs(node_path)? {
+        return None;
+    }
+    Some(entry)
+}
+
+/// Read-modify-write one binary's entry. Best-effort throughout: a cache that
+/// cannot be written is a slower launch, never a failed one.
+fn update_flag_entry(node_path: &Path, mutate: impl FnOnce(&mut NodeFlagEntry)) {
+    let Some(cache_root) = cache_dir().and_then(safe_cache_dir) else {
         return;
     };
-    let cache = dir.join("node-env-flags.json");
+    update_flag_entry_in(&cache_root, node_path, mutate);
+}
 
-    let mut data: serde_json::Value = fs::read_to_string(&cache)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
+/// `update_flag_entry` against an explicit cache root — the write half of the
+/// `read_flag_entry_in` seam.
+fn update_flag_entry_in(
+    cache_root: &Path,
+    node_path: &Path,
+    mutate: impl FnOnce(&mut NodeFlagEntry),
+) {
+    let dir = cache_root.join(FLAG_ENTRY_DIR);
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Some(mtime) = node_mtime_secs(node_path) else {
+        return;
+    };
+    // A stale entry is replaced wholesale rather than merged — the old verdicts
+    // describe a different binary at the same path.
+    let mut entry = read_flag_entry_in(cache_root, node_path).unwrap_or_default();
+    entry.path = node_path.to_string_lossy().into_owned();
+    entry.mtime = mtime;
+    mutate(&mut entry);
 
-    let key = node_path.to_string_lossy().to_string();
-    data[key] = serde_json::json!({
-        "flags": flags.iter().collect::<Vec<_>>(),
-        "mtime": node_mtime_secs(node_path).unwrap_or(0),
-    });
-
-    let _ = fs::write(
-        &cache,
-        serde_json::to_string_pretty(&data).unwrap_or_default(),
-    );
+    let Ok(body) = serde_json::to_string(&entry) else {
+        return;
+    };
+    // Written through a temp file and renamed: the two probes write the same entry,
+    // so a concurrent reader must never see a half-written one. A torn read would
+    // only cost a re-probe, but rename is free here and removes the case.
+    let final_path = dir.join(flag_entry_name(node_path));
+    let staging = dir.join(format!(
+        "{}.{}.tmp",
+        flag_entry_name(node_path),
+        std::process::id()
+    ));
+    if fs::write(&staging, body).is_ok() && fs::rename(&staging, &final_path).is_err() {
+        let _ = fs::remove_file(&staging);
+    }
 }
 
 /// Scan the nvm install directory for a version matching the pin.
@@ -3012,5 +3066,102 @@ mod tests {
             }
             Err(e) => panic!("unexpected error: {e}"),
         }
+    }
+
+    /// The verdicts for one Node must be readable no matter what is on disk for
+    /// another. They used to share two flat `{ "<path>": … }` maps that every read
+    /// parsed WHOLE, which had two consequences this pins down: the parse was
+    /// O(every Node the machine had ever seen) on a path taken by every launch, and
+    /// one malformed entry made `from_str` fail for EVERY binary — a `node` spawn
+    /// per launch, indefinitely.
+    #[test]
+    fn a_damaged_entry_for_one_binary_does_not_hide_anothers_verdicts() {
+        let dir = unique_tmp("flagcache-isolation");
+        let cache = dir.join("cache");
+        let (mine, other) = (dir.join("node-a"), dir.join("node-b"));
+        std::fs::write(&mine, b"a").unwrap();
+        std::fs::write(&other, b"b").unwrap();
+
+        update_flag_entry_in(&cache, &mine, |e| {
+            e.env = Some(vec!["--experimental-vm-modules".to_string()]);
+        });
+        update_flag_entry_in(&cache, &other, |e| e.env = Some(vec![]));
+
+        // Corrupt the OTHER binary's entry, exactly as a truncated write would.
+        let damaged = cache.join(FLAG_ENTRY_DIR).join(flag_entry_name(&other));
+        std::fs::write(&damaged, b"{not json").unwrap();
+
+        assert_eq!(
+            read_flag_entry_in(&cache, &mine).and_then(|e| e.env),
+            Some(vec!["--experimental-vm-modules".to_string()]),
+            "a damaged entry for a different binary must not affect this one"
+        );
+        assert!(
+            read_flag_entry_in(&cache, &other).is_none(),
+            "the damaged entry itself must read as a miss, not as empty verdicts"
+        );
+    }
+
+    /// Both probes key on (path, mtime) and are read on the same spawn, so they
+    /// share one file — and a binary rebuilt in place invalidates both together.
+    #[test]
+    fn both_verdicts_share_one_entry_and_lapse_when_the_binary_changes() {
+        let dir = unique_tmp("flagcache-roundtrip");
+        let cache = dir.join("cache");
+        let node = dir.join("node");
+        std::fs::write(&node, b"v1").unwrap();
+
+        update_flag_entry_in(&cache, &node, |e| e.env = Some(vec!["--permission".into()]));
+        update_flag_entry_in(&cache, &node, |e| {
+            e.argv.insert("--js-defer-import-eval".into(), false);
+        });
+
+        let entry = read_flag_entry_in(&cache, &node).expect("both writes land in one entry");
+        assert_eq!(
+            entry.env.as_deref(),
+            Some(&["--permission".to_string()][..])
+        );
+        assert_eq!(entry.argv.get("--js-defer-import-eval"), Some(&false));
+        assert_eq!(
+            std::fs::read_dir(cache.join(FLAG_ENTRY_DIR))
+                .unwrap()
+                .count(),
+            1,
+            "one binary must occupy exactly one entry file"
+        );
+
+        // Move the mtime far enough that a whole-second key changes.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::write(&node, b"v2").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&node)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(
+            read_flag_entry_in(&cache, &node).is_none(),
+            "a binary replaced at the same path must re-probe, not reuse the old verdicts"
+        );
+    }
+
+    /// The entry filename is a hash of the path, so the path is stored INSIDE and
+    /// compared on read: a collision costs one re-probe, never another binary's
+    /// verdicts.
+    #[test]
+    fn an_entry_recorded_for_a_different_path_is_a_miss() {
+        let dir = unique_tmp("flagcache-collision");
+        let cache = dir.join("cache");
+        let node = dir.join("node");
+        std::fs::write(&node, b"x").unwrap();
+        update_flag_entry_in(&cache, &node, |e| e.env = Some(vec![]));
+
+        let entry_path = cache.join(FLAG_ENTRY_DIR).join(flag_entry_name(&node));
+        let mut entry: NodeFlagEntry =
+            serde_json::from_str(&std::fs::read_to_string(&entry_path).unwrap()).unwrap();
+        entry.path = "/somewhere/else/bin/node".into();
+        std::fs::write(&entry_path, serde_json::to_string(&entry).unwrap()).unwrap();
+
+        assert!(read_flag_entry_in(&cache, &node).is_none());
     }
 }

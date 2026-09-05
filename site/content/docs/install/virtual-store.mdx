@@ -40,7 +40,7 @@ As each tarball is imported into the store, Nub parses that version's published 
 
 At link time, a flagged package is **ejected**: hardlinked into the project as real files instead of symlinked into the store, so its resolution walk passes through the project again — and the undeclared target is linked where that walk finds it. Everything that transitively imports the flagged package is ejected with it; ejecting the offender alone would leave its store-resident importers loading the shared copy — two real paths, two module instances. The ejected closure measures 0.3–2.1% of real large trees, and the symlinked majority keeps the one-link-per-package relink.
 
-Detection and ejection are on for every install, with no configuration. Two toolchains whose resolvers cannot follow symlinks out of the project — Next.js, whose Turbopack canonicalizes paths and confines the module graph to a single project root, and bare React Native, whose Metro config crawls by real path — automatically get a **project-local** store instead: the same isolated layout, with every link staying inside `node_modules`. See [shared vs per-project store](/docs/install#shared-vs-per-project-store).
+Detection and ejection are on for every install, with no configuration. Three toolchains whose resolvers cannot follow symlinks out of the project — Next.js, whose Turbopack canonicalizes paths and confines the module graph to a single project root; bare React Native, whose Metro config crawls by real path; and Remix 3, whose asset server serves npm packages to the browser only from inside the project's `node_modules` — automatically get a **project-local** store instead: the same isolated layout, with every link staying inside `node_modules`. See [shared vs per-project store](/docs/install#shared-vs-per-project-store).
 
 ## Performance
 
@@ -133,33 +133,36 @@ nub store prune
 ```
 
 ```
-Pruned 0 files (0.0 MB) from the store
-Pruned 2 entries from the virtual store and 0 entries from the extracted-tree tier
+Pruned 4 packages (0.1 MB) from the global virtual store
+Pruned 1 stale project record from the global virtual store registry
+Pruned 4 files (0.0 MB) from the store
 ```
 
-Nub records every project that installs against the shared store. A prune keeps the entries those projects still reach — directly, or through another entry's own dependencies — and removes the rest.
+Nub records every project that installs against the shared store. A prune keeps the entries those projects still link to — directly, or through another entry's own dependencies — and removes the rest. A registered project whose directory is gone stops counting as a store user; the prune drops its record and says so, and whatever only that project reached goes with it. The next install in a project that needs an entry extracts it again.
 
-A registered project that nub cannot find might be deleted, or might be on a disk that is not mounted, and those look identical. It stops counting as a store user and the prune says so, but everything else still gets collected. Whatever only that project reached becomes unreferenced and takes the usual 30-day hold, so remounting the disk before then keeps it.
+`--dry-run` prints the same plan without removing anything, and `--dry-run --json` prints it as JSON.
 
-Removal takes two passes. The first prune to find an entry unreferenced holds it and says so; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
+The extracted-tree cache, the copy of each package that the linker clones into projects, is held rather than collected. The first prune to find an entry unreferenced reports it; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
 
 ```
-Holding 24 entries unreferenced for 30 days before removal.
+Holding 30029 entries of the extracted-tree cache unreferenced for 30 days before removal.
 Install in any project that still needs them and they are kept.
 ```
 
 That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks unreferenced. Without the hold, one install followed by one prune would delete the rest.
 
-With nothing registered at all, a prune skips the store entirely rather than treating an empty registry as an empty store:
+With nothing registered at all, a prune skips that cache rather than treating an empty registry as an empty store:
 
 ```
-No projects are registered against the virtual store; skipping it.
+No projects are registered against the store; skipping the extracted-tree cache.
 Run an install in each project you want kept, then prune again.
 ```
 
 <Callout>
 Any install registers a project, including one that reports no work to do. Running an install once in each project registers it.
 </Callout>
+
+Earlier versions of Nub kept the shared store in a different layout. A prune removes what that layout left behind once no project links into it, on the same 30-day hold.
 
 ## Project configuration
 

@@ -439,7 +439,7 @@ fn resolve_package_root(importer: &Path, specifier: &str) -> Option<PathBuf> {
     }
 }
 
-fn addon_module(name: &str) -> String {
+pub(super) fn addon_module(name: &str) -> String {
     format!(
         "const record = process[Symbol.for(\"nub.compile.bootstrap\")];\n\
          module.exports = record.createRequire(import.meta.url)({});\n",
@@ -1637,18 +1637,18 @@ enum Classification {
 /// the platform defines make resolution pick the TARGET's platform package
 /// whenever one is installed, so a mismatch means it genuinely is not there.
 fn check_target(bytes: &[u8], path: &Path, target: &TargetPlatform) -> Result<()> {
-    // Names WHERE supportedArchitectures works, because it does not work
-    // everywhere: the engine reads it from an incumbent pnpm or yarn's own
-    // config, so a project using neither has no equivalent setting and the
-    // advice was unactionable for exactly the reader most likely to hit this.
+    // Names only Nub's own `--os` / `--cpu` / `--libc` install flags, which work
+    // in every project. The persistent `supportedArchitectures` setting is not
+    // offered: the engine reads it only from an incumbent pnpm or yarn's config,
+    // so for a nub, npm or bun project it is advice that cannot be followed.
     let advice = "\x20\x20A native addon is machine code for one platform, and a compiled binary \
                   loads it\n\x20\x20from a real file at run time — there is no later step that \
                   could translate it. The\n\x20\x20install has to put the target's own platform \
                   package on disk before you compile.\n\
-                  \n\x20\x20If this project uses pnpm or yarn, set supportedArchitectures.os, \
-                  .cpu and .libc\n\x20\x20in its config and install again. Otherwise install on \
-                  the target platform itself —\n\x20\x20a container of that platform is the \
-                  usual way — or drop --platform to build for\n\x20\x20this machine.";
+                  \n\x20\x20Select it with nub install --os <os> --cpu <cpu> --libc <libc>, then \
+                  compile again.\n\x20\x20If no prebuilt exists for the target, install on the \
+                  target platform itself — a\n\x20\x20container is the usual way — or drop \
+                  --platform to build for this machine.";
     let found = match classify(bytes) {
         Some(Classification::Object(found)) => found,
         Some(Classification::UnsupportedMachine { os }) => bail!(

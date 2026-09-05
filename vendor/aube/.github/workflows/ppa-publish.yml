@@ -28,13 +28,13 @@ on:
 permissions: {}
 
 env:
+  MBX_DISABLE: "1"
   DEBIAN_FRONTEND: noninteractive
 
 jobs:
   publish-ppa:
-    # github-hosted runner: namespace runners block outbound FTP (port 21)
-    # to ppa.launchpad.net, which is what dput needs to upload the source
-    # package. Ubuntu-hosted runners allow it.
+    # dput needs outbound FTP (port 21) to upload the source package to
+    # ppa.launchpad.net, which Ubuntu-hosted runners allow.
     runs-on: ubuntu-latest
     environment: ppa-publishing
     timeout-minutes: 45

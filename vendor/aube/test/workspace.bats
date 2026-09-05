@@ -576,7 +576,7 @@ _setup_shared_direct_dep_workspace() {
 	# the isolated linker are POSIX shims (so `extendNodePath` can
 	# set NODE_PATH), which means `readlink -f` returns the shim's
 	# own canonical path. Check the recorded target inside the shim
-	# instead: the v1 marker comment carries the resolved relative
+	# instead: the v2 marker comment carries the resolved relative
 	# path for the prune / unlink pass to recover.
 	for app in app1 app2; do
 		bin="packages/$app/node_modules/.bin/my-tool"
@@ -585,9 +585,9 @@ _setup_shared_direct_dep_workspace() {
 		if [ -L "$bin" ]; then
 			target="$(readlink -f "$bin")"
 		else
-			# `aube-bin-shim v1 target=...` line embeds the
+			# `aube-bin-shim v2 target=...` line embeds the
 			# $basedir-relative path to the workspace file.
-			target="$(grep -m1 'aube-bin-shim v1 target=' "$bin")"
+			target="$(grep -m1 'aube-bin-shim v2 target=' "$bin")"
 		fi
 		[[ "$target" == *"tools/dev/bin/my-tool.mjs" ]]
 	done

@@ -353,7 +353,7 @@ managedPolicy = "max"
 examples = []
 
 [minimumReleaseAgeExclude]
-description = "Packages exempt from the minimumReleaseAge requirement."
+description = "Packages exempt from the `minimumReleaseAge` requirement."
 type = "list<string>"
 default = "undefined"
 docs = """
@@ -373,7 +373,7 @@ managedPolicy = "managedWins"
 examples = []
 
 [minimumReleaseAgeStrict]
-description = "Fail the install when no version satisfies the minimumReleaseAge cutoff."
+description = "Fail the install when no version satisfies the `minimumReleaseAge` cutoff."
 type = "bool"
 default = "false"
 docs = """
@@ -396,7 +396,7 @@ default = "\"\""
 docs = """
 Path (or bare npm package name) of a
 [Bun-compatible security scanner](https://bun.sh/docs/pm/security-scanner-api)
-module. Aube loads it through a `node` bridge that adapts Bun's
+module. aube loads it through a `node` bridge that adapts Bun's
 in-process plugin contract to a subprocess.
 
 ```yaml
@@ -678,8 +678,10 @@ description = "Fail install when a package's trust evidence weakens between rele
 type = '"no-downgrade" | "off"'
 default = "\"no-downgrade\""
 docs = """
-When `no-downgrade` (the default), aube rejects a version that carries weaker
-trust evidence than any earlier-published version of the same package.
+When `no-downgrade` (the default), aube rejects a newly resolved version that
+carries weaker trust evidence than any earlier-published version of the same
+package. Versions already present in the active lockfile are trusted without
+re-fetching their publishing evidence.
 Recognized evidence: npm staged-publish approval metadata (`approver`)
 outranks structured npm trusted-publisher metadata
 (`_npmUser.trustedPublisher.id`), which outranks structured SLSA provenance
@@ -748,8 +750,7 @@ type = "object"
 default = "{ default = \"https://registry.npmjs.org/\" }"
 docs = """
 Maps `default` and `@scope` keys to registry URLs. aube reads these from
-`.npmrc` via `aube_registry::config::NpmConfig` (see
-`crates/aube-registry/src/config.rs`). Bearer tokens and basic auth per
+`.npmrc`. Bearer tokens and basic auth per
 registry are parsed from `.npmrc` and URL-scoped `npm_config_//...` /
 `pnpm_config_//...` environment variables. `tokenHelper` is only accepted
 from trusted user-level config, not from URL-scoped environment variables.
@@ -821,7 +822,7 @@ layout = true
 examples = []
 
 [hoistingLimits]
-description = "Limit how far dependencies are hoisted in nodeLinker=hoisted installs."
+description = "Limit how far dependencies are hoisted in `nodeLinker=hoisted` installs."
 type = '"none" | "workspaces" | "dependencies"'
 default = "\"none\""
 docs = """
@@ -1017,21 +1018,17 @@ Relocates the per-project `.aube/<dep>/node_modules/` tree that the
 isolated linker writes into. Relative paths resolve against the project
 root (`~` expands to `$HOME`).
 
-The generated accessor's declared default is the literal
-`"node_modules/.aube"` — but callers should resolve through
-`aube_cli::commands::resolve_virtual_store_dir`, which additionally
-substitutes `<modulesDir>/.aube` when `modulesDir` itself has been
-overridden. That's the "real" effective default and matches pnpm's
-documented `<modulesDir>/.pnpm` behavior: a project that renames
-`node_modules/` alone still gets a coherent layout without having
-to set both.
+The declared default is the literal `"node_modules/.aube"`, but when
+`modulesDir` itself has been overridden and this setting is unset,
+the effective default becomes `<modulesDir>/.aube`. That matches
+pnpm's documented `<modulesDir>/.pnpm` behavior: a project that
+renames `node_modules/` alone still gets a coherent layout without
+having to set both.
 
 The linker, engines check, fetch-phase "already linked" fast path,
-orphan sweep, `apply_injected` (dependenciesMeta.injected), `aube
-patch` (extract source), `aube rebuild` (dep lifecycle scripts),
-`aube unlink` (classify internal symlinks), `aube prune` (orphan
-cleanup), and `aube licenses` (virtual-store manifest read) all
-consult the setting through that helper.
+orphan sweep, `dependenciesMeta.injected` handling, `aube patch`,
+`aube rebuild`, `aube unlink`, `aube prune`, and `aube licenses` all
+honor this setting.
 """
 sources.cli = []
 sources.env = ["npm_config_virtual_store_dir", "NPM_CONFIG_VIRTUAL_STORE_DIR", "AUBE_VIRTUAL_STORE_DIR"]
@@ -1046,8 +1043,8 @@ type = "int"
 default = "120 (Linux/macOS), 60 (Windows)"
 docs = """
 Caps the number of characters in a single `node_modules/.aube/<dep>`
-directory name. `dep_path_to_filename` already truncates-and-hashes
-dep_paths that would otherwise overflow the cap, so lowering this
+directory name. aube already truncates and hashes dependency paths
+that would otherwise overflow the cap, so lowering this
 value lets peer-heavy graphs (e.g. ESLint + TypeScript plugin
 matrices) stay under filesystem `NAME_MAX` limits on unusual setups
 (ecryptfs, some CI filesystems). The default is 120 on Linux/macOS and
@@ -1148,7 +1145,7 @@ type = "int"
 default = "1440"
 docs = """
 Accepted for pnpm parity. `aube dlx` currently installs into a fresh
-`tempfile::TempDir` per invocation and removes it on exit, so there is
+temporary directory per invocation and removes it on exit, so there is
 no persistent dlx cache to expire — the configured value is read and
 validated, but no eviction runs against it. If aube grows a persistent
 dlx cache later, this setting will gate its TTL without any further
@@ -1165,8 +1162,8 @@ type = "bool"
 default = "undefined"
 docs = """
 aube ships its own global virtual store under `~/.cache/aube/virtual-store/`.
-It's enabled by default outside CI and disabled under CI (see
-`aube-linker`, which checks the `CI` env var). Set
+It's enabled by default outside CI and disabled under CI (detected via
+the `CI` environment variable). Set
 `enableGlobalVirtualStore=false` in `.npmrc` or `pnpm-workspace.yaml`
 to force per-project materialization for a project.
 
@@ -1201,7 +1198,9 @@ docs = """
 Relocates the global virtual store — the shared tree of materialized
 package directories that `node_modules/.aube/<dep>` symlinks into when
 `enableGlobalVirtualStore` is on. Unset, it lives at
-`<cacheDir>/virtual-store/`.
+`<cacheDir>/virtual-store/`. aube stores registry-managed entries in a
+versioned child directory below this root so older releases cannot share
+entries that a current `aube store prune` may remove.
 
 Set this when the global virtual store belongs somewhere other than
 the rest of the cache — typically to put it on the same volume as
@@ -1232,7 +1231,7 @@ examples = [
 [disableGlobalVirtualStoreForPackages]
 description = "Package names whose presence in any importer forces per-project materialization."
 type = "list<string>"
-default = "[\"next\", \"nuxt\", \"parcel\"]"
+default = "[\"next\", \"expo\", \"react-native\", \"metro\"]"
 docs = """
 aube's global virtual store makes `node_modules/.aube/<pkg>` an
 absolute symlink into `~/.cache/aube/virtual-store/`. Tools whose
@@ -1246,12 +1245,25 @@ When `aube install` finds one of these names in any importer's
 forces per-project materialization for that install and prints a
 one-line warning naming the trigger.
 
-The default list — `next`, `nuxt`, `parcel` —
-covers the tools with concrete walk-up failures: Next.js's Turbopack
-canonicalizes through symlinks and walks up for app-router/monorepo detection,
-Nuxt plugins walk up for config discovery, and Parcel's resolver walks up for
-`.parcelrc`. Vite and VitePress are compatible with the global virtual store:
-aube writes `node_modules/.modules.yaml` with the store location, which Vite
+The default list — `next`, `expo`, `react-native`, `metro` — covers the tools
+with concrete filesystem-root failures. Next.js's Turbopack canonicalizes
+through symlinks and walks up for app-router/monorepo detection. Metro's file
+map requires symlink targets to stay within the project root or configured
+watch folders; Expo and React Native use Metro but normally declare their
+framework package rather than `metro` directly.
+
+Track upstream compatibility in
+[vercel/next.js#93556](https://github.com/vercel/next.js/issues/93556) for
+Next.js and
+[expo/expo#45460](https://github.com/expo/expo/pull/45460) for the Metro
+file-map change that follows global-store symlinks. The Metro-family entries
+remain in the default list until that behavior is available across the Expo,
+React Native, and direct Metro versions aube supports.
+
+Nuxt, Parcel, Vite, and VitePress are compatible with the global virtual store.
+For Nuxt and Parcel, aube's sibling dependency links keep resolution inside the
+installed graph. For Vite and VitePress, aube writes
+`node_modules/.modules.yaml` with the store location, which Vite
 8.1+ reads when constructing its filesystem allow-list. For older Vite
 versions, aube materializes only the Vite dependency path locally and backports
 the same allow-list lookup into that project-local copy; unrelated dependencies
@@ -1341,8 +1353,8 @@ type = "bool"
 default = "true"
 docs = """
 aube verifies each package's SRI `integrity` (sha512, or legacy
-sha1/sha256/sha384) against the tarball bytes at import time in
-`aube_store::verify_integrity`, before extraction.
+sha1/sha256/sha384) against the tarball bytes at import time, before
+extraction.
 Set to `false` via `.npmrc`, env, or `--no-verify-store-integrity` to
 skip the check — useful in trusted CI environments where the registry
 is already known-good and the tarball bytes have been vetted upstream.
@@ -1429,7 +1441,7 @@ type = "url"
 default = "null"
 docs = """
 Forwards every HTTPS registry fetch through the given proxy URL.
-Honored by the `aube-registry` reqwest client. Resolution mirrors
+Honored by aube's registry HTTP client. Resolution mirrors
 pnpm: `.npmrc https-proxy` ?? `.npmrc proxy` ?? `HTTPS_PROXY` /
 `https_proxy` env var.
 """
@@ -1470,7 +1482,7 @@ description = "Comma-separated list of domains that bypass the proxy."
 type = "string"
 default = "null"
 docs = """
-Passed through to `reqwest::NoProxy::from_string` verbatim, so
+Passed through to the HTTP client's no-proxy parser verbatim, so
 wildcard and port-qualified hosts behave the same as curl / node.
 Applies to both `httpsProxy` and `httpProxy`. Falls back to the
 standard `NO_PROXY` / `no_proxy` environment variables.
@@ -1492,7 +1504,7 @@ type = "string"
 default = "undefined"
 docs = """
 Used on multi-homed hosts where outbound traffic must leave a
-specific interface. Parsed as `IpAddr`; unparseable values are
+specific interface. Parsed as an IP address; unparseable values are
 dropped at load time with a warning.
 """
 sources.cli = []
@@ -1506,14 +1518,14 @@ typedAccessorUnused = true
 npmShared = true
 
 [maxsockets]
-description = "Maximum concurrent connections per origin."
+description = "Idle connection pool size per host."
 type = "int"
 default = "networkConcurrency x 3"
 docs = """
-Plumbed into reqwest's `pool_max_idle_per_host`. This is the
-closest analogue to pnpm's per-origin socket cap — reqwest doesn't
-expose a hard maximum, but capping the idle pool keeps the steady
-state bounded.
+Caps the HTTP client's idle connection pool per host. This is the
+closest analogue to pnpm's per-origin socket cap — aube's HTTP client
+doesn't expose a hard maximum, but capping the idle pool keeps the
+steady state bounded.
 """
 sources.cli = []
 sources.env = ["npm_config_maxsockets", "NPM_CONFIG_MAXSOCKETS", "AUBE_MAXSOCKETS"]
@@ -1531,8 +1543,7 @@ type = "bool"
 default = "true"
 docs = """
 Defaults to `true`. Setting `strict-ssl=false` disables TLS
-certificate verification entirely via
-`danger_accept_invalid_certs` — required to get through corporate
+certificate verification entirely — required to get through corporate
 MITM proxies that present a self-signed CA until aube grows a
 proper per-registry `cafile` setting.
 """
@@ -1549,7 +1560,7 @@ npmShared = true
 # ========================================= Lockfile =========================================
 
 [lockfile]
-description = "Read and generate aube-lock.yaml."
+description = "Read and generate `aube-lock.yaml`."
 type = "bool"
 default = "true"
 docs = """
@@ -1627,13 +1638,15 @@ sources.workspaceYaml = ["lockfileDir"]
 examples = ["aube install --lockfile-dir .."]
 
 [preferFrozenLockfile]
-description = "Perform a headless install if the lockfile already satisfies package.json."
+description = "Perform a headless install if the lockfile already satisfies `package.json`."
 type = "bool"
 default = "true"
 docs = """
-aube's default outside CI. Maps to `FrozenMode::Prefer` in
-`crates/aube/src/commands/install.rs`. Inside CI the default flips
-to `FrozenMode::Frozen` (see `default_for_env`).
+aube's default outside CI: when the lockfile already satisfies
+`package.json`, install skips resolution and links straight from the
+lockfile. Inside CI (the `CI` environment variable is set) the default
+flips to `--frozen-lockfile`, which fails instead of updating an
+out-of-date lockfile.
 """
 sources.cli = ["prefer-frozen-lockfile"]
 sources.env = ["npm_config_prefer_frozen_lockfile", "NPM_CONFIG_PREFER_FROZEN_LOCKFILE", "AUBE_PREFER_FROZEN_LOCKFILE"]
@@ -1681,7 +1694,7 @@ local symlink dep doesn't churn the lockfile. The setting round-trips
 through the lockfile's `settings:` header — once enabled, subsequent
 installs preserve it even without re-reading `.npmrc`.
 
-Aube already omits `link:` packages from the `packages:` / `snapshots:`
+aube already omits `link:` packages from the `packages:` / `snapshots:`
 sections unconditionally (pnpm parity). This flag controls the
 importer-level visibility. `file:` directory deps and git deps are
 unaffected; only `link:` entries are filtered.
@@ -1693,7 +1706,7 @@ sources.workspaceYaml = ["excludeLinksFromLockfile"]
 examples = []
 
 [gitBranchLockfile]
-description = "Generate branch-specific lockfile names (aube-lock.<branch>.yaml)."
+description = "Generate branch-specific lockfile names (`aube-lock.<branch>.yaml`)."
 type = "bool"
 default = "false"
 docs = """
@@ -1756,7 +1769,7 @@ sources.workspaceYaml = ["mergeGitBranchLockfilesBranchPattern"]
 examples = []
 
 [sharedWorkspaceLockfile]
-description = "Write one lockfile per workspace package instead of a single shared root lockfile."
+description = "Record every workspace package in a single shared root lockfile instead of one lockfile per package."
 type = "bool"
 default = "true"
 docs = """
@@ -1820,8 +1833,8 @@ description = "Hosts for which aube performs shallow git clones."
 type = "list<string>"
 default = "[\"github.com\", \"gist.github.com\", \"gitlab.com\", \"bitbucket.com\", \"bitbucket.org\"]"
 docs = """
-Consulted by `aube-store::git_shallow_clone` when cloning a git
-dependency. When the URL's hostname matches an entry in this list
+Consulted when cloning a git dependency. When the URL's hostname
+matches an entry in this list
 (exact match, same as pnpm — `github.com` does not match
 `api.github.com`), aube fetches only the commit it needs with
 `git fetch --depth 1 origin <sha>`, falling back to a full fetch if
@@ -1841,16 +1854,19 @@ sources.npmrc = ["git-shallow-hosts", "gitShallowHosts"]
 examples = []
 
 [networkConcurrency]
-description = "Maximum concurrent HTTP(S) requests."
+description = "Starting concurrency for registry requests; aube adapts from it at runtime."
 type = "int"
-default = "auto (workers x3 clamped to 16-64)"
+default = "auto (workers x3 clamped to 16-128)"
 docs = """
-Caps the tokio semaphores that gate concurrent tarball downloads
-inside `crates/aube/src/commands/install.rs`. When unset, aube
-matches pnpm's dynamic default: worker count x3, clamped to 16-64.
-Set this value explicitly to override the automatic scaling. The
-resolver's packument fetcher still uses its own internal cap for now;
-plumbing that cap through is tracked as a follow-up.
+Sets the starting concurrency for tarball downloads and packument
+(metadata) fetches. It is a starting point, not a hard ceiling: aube
+adapts from this seed while installing, backing off when the registry
+throttles (429 / 503) and growing again as requests succeed, within a
+floor of 4 and a ceiling of at least 256.
+
+When unset, aube derives the seed from the worker count the way pnpm
+derives its dynamic default: worker count x3, clamped to 16-128. Set
+this value explicitly to override the automatic scaling.
 """
 sources.cli = ["network-concurrency"]
 sources.env = ["npm_config_network_concurrency", "NPM_CONFIG_NETWORK_CONCURRENCY", "AUBE_NETWORK_CONCURRENCY"]
@@ -1964,7 +1980,7 @@ docs = """
 Observability threshold for registry *metadata* requests (packument,
 dist-tags). When a successful response takes longer than
 `fetchWarnTimeoutMs` milliseconds of wall-clock time — including any
-retry backoff — aube emits a `tracing::warn!` line naming the resource
+retry backoff — aube emits a warning naming the resource
 and the elapsed time. The request itself is never aborted by this
 setting; the hard cut-off is still `fetchTimeout`.
 
@@ -2021,8 +2037,8 @@ docs = """
 Refuses any tarball response whose `Content-Length` exceeds this many
 bytes before any decompression runs. Without a wire-level cap a
 hostile mirror could stream a multi-GiB compressed payload into
-memory before the gzip reader ever sees a byte; the separate
-decompressed ceiling in `aube-store` would only fire after that.
+memory before the gzip reader ever sees a byte; aube's separate
+decompressed-size ceiling would only fire after that.
 
 Default: 1 GiB. Raise if a legitimate tarball exceeds it, or set to
 `0` to disable the cap entirely (only reasonable against a registry
@@ -2041,9 +2057,11 @@ type = "bool"
 default = "true"
 docs = """
 When true (the default), missing peer dependencies are auto-installed
-during resolution and hoisted into the importer. Set to `false` to
-match pnpm's opt-out behavior: peers are left alone and unmet peers
-are silent (set `strict-peer-dependencies=true` for diagnostics).
+during resolution. An importer's own required peers are added to that
+importer's dependencies; peers required by installed packages remain in
+those packages' peer contexts. Set to `false` to match pnpm's opt-out
+behavior: peers are left alone and unmet peers are silent (set
+`strict-peer-dependencies=true` for diagnostics).
 """
 sources.cli = ["auto-install-peers"]
 sources.env = ["npm_config_auto_install_peers", "NPM_CONFIG_AUTO_INSTALL_PEERS", "AUBE_AUTO_INSTALL_PEERS"]
@@ -2093,7 +2111,7 @@ type = "bool"
 default = "false"
 docs = """
 When true, any unmet peer dependency (missing, or resolved to a version
-outside the declared range) fails the install with a miette diagnostic
+outside the declared range) fails the install with a diagnostic
 listing every mismatch. This is also the only way aube surfaces peer
 mismatches — by default aube is silent, matching bun/npm/yarn. Set
 this to `false` (the default) to disable.
@@ -2235,7 +2253,7 @@ typedAccessorUnused = true
 description = "Install on all workspace packages by default."
 type = "bool"
 default = "true"
-docs = "When true, workspace installs resolve and link all importers by default. Set to false to opt out of implicit workspace-wide install behavior; explicit `--filter` / `--recursive` still wins."
+docs = "When `true`, workspace installs resolve and link all importers by default. Set to `false` to opt out of implicit workspace-wide install behavior; explicit `--filter` / `--recursive` still wins."
 sources.cli = []
 sources.env = ["npm_config_recursive_install", "NPM_CONFIG_RECURSIVE_INSTALL", "AUBE_RECURSIVE_INSTALL"]
 sources.npmrc = ["recursiveInstall"]
@@ -2264,7 +2282,7 @@ sources.npmrc = ["npmPath"]
 examples = []
 
 [packageManagerStrict]
-description = "Enforce the `packageManager` field in package.json (`off` | `warn` | `error`)."
+description = "Enforce the `packageManager` field in `package.json` (`off` | `warn` | `error`)."
 type = '"off" | "warn" | "error" | true | false'
 default = "\"warn\""
 docs = """
@@ -2283,7 +2301,7 @@ sources.npmrc = ["package-manager-strict", "packageManagerStrict"]
 examples = []
 
 [packageManagerStrictVersion]
-description = "Enforce the exact `packageManager` version from package.json."
+description = "Enforce the exact `packageManager` version from `package.json`."
 type = "bool"
 default = "false"
 docs = "When enabled, `packageManager: \"aube@<version>\"` must match the running aube version exactly. `pnpm@...` cannot be exact-version satisfied by aube and fails with a clear diagnostic."
@@ -2317,7 +2335,7 @@ examples = []
 # ========================================= Build =========================================
 
 [ignoreScripts]
-description = "Skip all lifecycle scripts in package.json."
+description = "Skip all lifecycle scripts in `package.json`."
 type = "bool"
 default = "false"
 docs = """
@@ -2473,7 +2491,7 @@ examples = ['jailBuildPermissions: { sharp: { env: ["SHARP_DIST_BASE_URL"], writ
 typedAccessorUnused = true
 
 [unsafePerm]
-description = "Drop to a non-root user when running scripts as root."
+description = "Value of npm's `unsafe-perm` exported to scripts; aube does not switch users itself."
 type = "bool"
 default = "false (as root), true (otherwise)"
 docs = """
@@ -2487,7 +2505,7 @@ sources.npmrc = ["unsafePerm"]
 examples = []
 
 [nodeOptions]
-description = "Options passed to Node.js via NODE_OPTIONS."
+description = "Options passed to Node.js via `NODE_OPTIONS`."
 type = "string"
 default = "null"
 docs = """
@@ -2509,7 +2527,7 @@ docs = """
 Controls `run`, lifecycle shortcuts, `exec`, and implicit script commands.
 `install` preserves aube's auto-install behavior, `warn` reports stale
 dependencies without installing, `error` fails, `false` skips the check, and
-`prompt` currently behaves like `install` in non-interactive aube.
+`prompt` currently behaves like `install` (aube does not prompt interactively here).
 """
 sources.cli = []
 sources.env = ["npm_config_verify_deps_before_run", "NPM_CONFIG_VERIFY_DEPS_BEFORE_RUN", "AUBE_VERIFY_DEPS_BEFORE_RUN"]
@@ -2582,8 +2600,9 @@ Opt-in floor under the `allowBuilds` allowlist. When enabled, a
 dependency whose build scripts would otherwise be skipped as
 unreviewed may still run them if every gate holds: the package's
 registry name is on the vendored default-trust list (Bun's curated
-`default-trusted-dependencies.txt`, provenance recorded in the data
-file), the package resolved from a registry (git / file / link /
+`default-trusted-dependencies.txt` plus the names pnpm's
+trusted-dependencies list adds to it, provenance for both in the
+data file), the package resolved from a registry (git / file / link /
 tarball sources never qualify), an OSV `MAL-*` advisory gate covered
 this install, and the resolved version has aged past the
 `minimumReleaseAge` window (per its recorded publish time; an unknown
@@ -2607,7 +2626,7 @@ description = "Node.js version aube reports when evaluating `engines` checks."
 type = "string"
 default = "output of `node -v` with the leading `v` stripped"
 docs = """
-Paired with `engineStrict`. Set this in .npmrc to pin the Node version
+Paired with `engineStrict`. Set this in `.npmrc` to pin the Node version
 engines checks validate against, rather than probing `node --version`
 at install time.
 
@@ -2698,7 +2717,7 @@ examples = []
 description = "Version prefix used when installing a package."
 type = '"^" | "~" | ""'
 default = "\"^\""
-docs = "Resolved from `.npmrc`. `--save-exact` overrides to empty prefix."
+docs = "Resolved from `.npmrc`. `--save-exact` overrides it to an empty prefix."
 sources.cli = []
 sources.env = ["npm_config_save_prefix", "NPM_CONFIG_SAVE_PREFIX", "AUBE_SAVE_PREFIX"]
 sources.npmrc = ["save-prefix", "savePrefix"]
@@ -2738,7 +2757,7 @@ linked.
 
 Off by default to match pnpm 8+ — opt in via `pnpm-workspace.yaml`
 when you want every `aube add` to prefer the local copy of a sibling.
-Aube's resolver already prefers workspace siblings on bare semver
+aube's resolver already prefers workspace siblings on bare semver
 ranges at install time, including transitives, so pnpm's `"deep"`
 mode is accepted as an alias for the add-time manifest behavior.
 """
@@ -2797,7 +2816,16 @@ npmShared = true
 description = "Directory where globally installed packages live."
 type = "path"
 default = "platform-specific"
-docs = "Overrides the directory where globally installed packages live. Falls back to `AUBE_HOME` / `PNPM_HOME` / platform default."
+docs = """
+Overrides the directory holding the physical per-package install dirs
+for `aube add -g`. Falls back to `AUBE_HOME` (when set, installs go in
+a `global-aube/` subdir of it), otherwise `<dataDir>/global-aube` —
+`$XDG_DATA_HOME/aube/global-aube`, `~/.local/share/aube/global-aube`,
+or `%LOCALAPPDATA%\\aube\\global-aube` on Windows.
+
+`PNPM_HOME` is not consulted: aube keeps its global layout under its
+own data root rather than installing into pnpm's directories.
+"""
 sources.cli = []
 sources.env = ["npm_config_global_dir", "NPM_CONFIG_GLOBAL_DIR", "AUBE_GLOBAL_DIR"]
 sources.npmrc = ["globalDir"]
@@ -2807,7 +2835,15 @@ examples = []
 description = "Directory where global binaries are symlinked."
 type = "path"
 default = "platform-specific"
-docs = "Overrides the directory where global binaries are symlinked. Independent of `globalDir`; falls back to `AUBE_HOME` / `PNPM_HOME` / platform default."
+docs = """
+Overrides the directory global binaries are symlinked into — the one
+you put on `$PATH`. Independent of `globalDir`; falls back to
+`AUBE_HOME`, otherwise `<dataDir>/bin` (`$XDG_DATA_HOME/aube/bin`,
+`~/.local/share/aube/bin`, or `%LOCALAPPDATA%\\aube\\bin` on Windows).
+
+`PNPM_HOME` is not consulted: aube keeps its global layout under its
+own data root rather than installing into pnpm's directories.
+"""
 sources.cli = []
 sources.env = ["npm_config_global_bin_dir", "NPM_CONFIG_GLOBAL_BIN_DIR", "AUBE_GLOBAL_BIN_DIR"]
 sources.npmrc = ["globalBinDir"]
@@ -2829,9 +2865,9 @@ project `.npmrc`. Path interpretation matches pnpm's other path
 settings: `~` expands to the user's home directory and a relative
 path resolves against the project root.
 
-Implementation: parsed values are appended to the merged entry list
-returned by `aube_registry::config::load_npmrc_entries`, so the
-auth-token lookup picks them up automatically — no separate loader.
+Entries from this file are merged into the same lookup as the other
+`.npmrc` files, so auth tokens declared here are picked up
+automatically wherever aube resolves registry credentials.
 """
 sources.cli = []
 sources.env = ["npm_config_npmrc_auth_file", "NPM_CONFIG_NPMRC_AUTH_FILE", "AUBE_NPMRC_AUTH_FILE"]
@@ -2860,8 +2896,8 @@ description = "Directory for the global virtual store and cached package metadat
 type = "path"
 default = "platform cache dir (`$XDG_CACHE_HOME/{cache_namespace}`)"
 docs = """
-Overrides the cache directory. Unset, aube derives it per platform
-(`aube_store::dirs::cache_dir`): `$XDG_CACHE_HOME/aube` when
+Overrides the cache directory. Unset, aube derives it per platform:
+`$XDG_CACHE_HOME/aube` when
 `XDG_CACHE_HOME` is set, `%LOCALAPPDATA%\\aube` on Windows, else
 `~/.cache/aube`. Those are all *base* directories that aube appends
 its own name to; this setting takes a complete path instead, so
@@ -2869,7 +2905,8 @@ its own name to; this setting takes a complete path instead, so
 
 The global virtual store (`<cacheDir>/virtual-store/`) and cached
 packument metadata (`<cacheDir>/packuments-v1/`,
-`<cacheDir>/packuments-full-v1/`) live under this directory. The
+`<cacheDir>/packuments-full-v1/`, and the `trustPolicy` trust histories
+in `<cacheDir>/trust-history-v1/`) live under this directory. The
 content-addressable store is *not* here — it is `storeDir`, which
 defaults under `$XDG_DATA_HOME` instead. A few smaller caches (the OSV
 advisory mirror, the bootstrapped `node-gyp`, git clones, and the
@@ -2878,7 +2915,7 @@ dir regardless of this setting.
 
 Set this alongside `storeDir` when the store lives on a non-default
 volume. Entries in the global virtual store are hardlinked out of the
-CAS, so on installs with the global virtual store enabled, a `cacheDir`
+content-addressable store, so on installs with the global virtual store enabled, a `cacheDir`
 and `storeDir` split across filesystems degrades every install to a
 per-file copy and aube warns about it. Pointing both at the same volume
 (`AUBE_CACHE_DIR=/mnt/dev/cache/aube` plus
@@ -2909,7 +2946,7 @@ type = "bool"
 default = "true"
 docs = """
 After a successful `install`, `add`, or `update`, aube fetches
-`https://aube.jdx.dev/VERSION` and prints a one-line notice if the
+`https://aube.sh/VERSION` and prints a one-line notice if the
 advertised version is newer than the running binary. The result is
 cached under `<cacheDir>/update-check.json` so only the first run in
 any 24h window touches the network. Failures (DNS, timeout, non-200,
@@ -2966,22 +3003,18 @@ sources.npmrc = ["preferSymlinkedExecutables"]
 examples = []
 
 [ignoreCompatibilityDb]
-description = "Disable pnpm's automatic dependency patching database."
+description = "Disable bundled package compatibility repairs."
 type = "bool"
 default = "false"
 docs = """
-Accepted for pnpm config parity. pnpm ships a built-in compatibility
-database of auto-patches for known-broken packages; aube has no such
-database, so this setting has nothing to toggle. Parsed without
-warning so shared `.npmrc` files that set it remain portable.
+Disables aube's bundled Yarn and pnpm compatibility repairs for
+known-broken package manifests. Project-defined `packageExtensions`
+still apply.
 """
 sources.cli = []
 sources.env = ["npm_config_ignore_compatibility_db", "NPM_CONFIG_IGNORE_COMPATIBILITY_DB", "AUBE_IGNORE_COMPATIBILITY_DB"]
 sources.npmrc = ["ignoreCompatibilityDb"]
 examples = []
-# Parity no-op: aube has no compatibility database to disable. Remove
-# this flag if aube ever ships a patch database.
-typedAccessorUnused = true
 
 [resolutionMode]
 description = "Dependency version resolution strategy."
@@ -2991,8 +3024,9 @@ docs = """
 Controls how aube chooses versions during resolution. `highest` picks
 the newest satisfying version. `time-based` filters candidates through
 the lockfile / packument publish-time cutoff before picking. `lowest-direct`
-is accepted for pnpm parity and currently maps to the same time-aware
-resolver mode.
+picks the oldest satisfying version for direct dependencies without a
+publish-time cutoff, while transitive dependencies use the newest satisfying
+version.
 """
 sources.cli = ["resolution-mode"]
 sources.env = ["npm_config_resolution_mode", "NPM_CONFIG_RESOLUTION_MODE", "AUBE_RESOLUTION_MODE"]
@@ -3188,7 +3222,7 @@ sources.npmrc = ["shellEmulator"]
 examples = []
 
 [catalogMode]
-description = "How catalog references in package.json are handled by `add`."
+description = "How catalog references in `package.json` are handled by `aube add`."
 type = '"manual" | "strict" | "prefer"'
 default = "\"manual\""
 docs = """
@@ -3217,9 +3251,9 @@ description = "Explicitly mark the environment as CI."
 type = "bool"
 default = "auto-detected"
 docs = """
-aube detects CI via `env::var("CI").is_ok()` in two places:
-`aube-linker` (disables the global virtual store) and
-`install::FrozenMode::default_for_env` (flips the default to `Frozen`).
+aube treats the environment as CI when the `CI` environment variable
+is set. CI mode disables the global virtual store and flips the default
+install mode to `--frozen-lockfile`.
 """
 sources.cli = []
 sources.env = ["npm_config_ci", "NPM_CONFIG_CI", "AUBE_CI", "CI"]
@@ -3231,7 +3265,7 @@ examples = ["CI=1 aube install"]
 # `ResolveCtx` for a one-liner isn't worth the plumbing.
 typedAccessorUnused = true
 
-[cleanupUnusedCatalogs]
+[catalogPrune]
 description = "Remove unused catalog entries during install."
 type = "bool"
 default = "false"
@@ -3241,10 +3275,25 @@ When enabled, `aube install` rewrites `aube-workspace.yaml` (or
 entries no importer references. A catalog that ends up empty is
 removed entirely. The rewrite is comment- and format-preserving:
 yaml comments around surviving entries (and on the rest of the file)
-stay intact. yamlpatch's `Remove` op only deletes the line carrying
+stay intact. Pruning only deletes the line carrying
 the entry's `key: value`, so a `# annotation` line above a pruned
 entry is left in place rather than guessed-at; clean those up by
 hand if you don't want orphaned annotations.
+"""
+sources.cli = []
+sources.env = ["npm_config_catalog_prune", "NPM_CONFIG_CATALOG_PRUNE", "AUBE_CATALOG_PRUNE"]
+sources.npmrc = ["catalogPrune"]
+sources.workspaceYaml = ["catalogPrune"]
+examples = []
+
+[cleanupUnusedCatalogs]
+description = "Deprecated alias for `catalogPrune`."
+type = "bool"
+default = "false"
+docs = """
+Deprecated in pnpm 11.22. Use `catalogPrune` instead. The legacy name remains
+accepted for compatibility, but `catalogPrune` takes precedence when both are
+configured.
 """
 sources.cli = []
 sources.env = ["npm_config_cleanup_unused_catalogs", "NPM_CONFIG_CLEANUP_UNUSED_CATALOGS", "AUBE_CLEANUP_UNUSED_CATALOGS"]
@@ -3263,7 +3312,7 @@ type = "int"
 default = "platform-specific"
 docs = """
 Caps the dedicated linker worker pool used for filesystem-heavy
-materialization in `aube-linker`: creating package directories,
+materialization: creating package directories,
 reflinking / hardlinking files, and writing dependency symlinks.
 Defaults are platform-aware because APFS reflink metadata work and
 Linux hardlink work saturate at different points (currently 4 on
@@ -3296,8 +3345,7 @@ Canonical name is `aubeNoLock` so it can be set from
 `aubeNoLock` / `aube-no-lock`). The `AUBE_NO_LOCK` env-var alias
 is kept as a convenient shell-export form.
 
-Values are parsed as strict booleans via the shared
-`aube_settings::values::parse_bool` rule: `1` / `true` are truthy,
+Values are parsed as strict booleans: `1` / `true` are truthy,
 `0` / `false` are explicitly off, and anything else (including
 unset, empty string, or arbitrary text) leaves the default
 (`false`, i.e. locking stays on).
@@ -3329,8 +3377,7 @@ Canonical name is `aubeNoAutoInstall` so it can be set from
 `AUBE_NO_AUTO_INSTALL` env-var alias is kept as a convenient
 shell-export form.
 
-Values are parsed as strict booleans via the shared
-`aube_settings::values::parse_bool` rule: `1` / `true` are truthy,
+Values are parsed as strict booleans: `1` / `true` are truthy,
 `0` / `false` are explicitly off, and anything else (including
 unset, empty string, or arbitrary text) leaves the default
 (`false`, i.e. auto-install stays on).

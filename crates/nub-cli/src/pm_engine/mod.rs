@@ -6,7 +6,7 @@
 //!
 //! - [`install_family`] — dependency-graph mutation and linking (`install`,
 //!   `ci`, `add`, `remove`, `update`, `link`, `patch*`, …). All are wired to
-//!   the embedded engine; `install`/`ci` dispatch via live clap verbs.
+//!   the embedded engine; `install`/`ci` dispatch via live parser verbs.
 //! - [`info_family`] — read-only project/graph/registry queries (`list`,
 //!   `why`, `outdated`, `audit`, `view`, …).
 //! - [`publish_family`] — registry writes, packaging, and auth (`publish`,
@@ -39,7 +39,7 @@
 //!   [`run_node_gyp_bootstrap`], because the engine's lazy node-gyp shims
 //!   re-invoke `current_exe()` (= nub) with it mid-lifecycle-script.
 //!
-//! `install`/`i`/`ci` are *not* in the registry: they are live clap verbs
+//! `install`/`i`/`ci` are *not* in the registry: they are live parser verbs
 //! in `cli.rs` (SUBCOMMANDS) dispatching straight to
 //! [`install_family::run_install`] / [`install_family::run_ci`]. `init` is
 //! not in the registry either — the spelling is reserved for nub's own
@@ -66,6 +66,7 @@ pub mod phantom_closure;
 pub mod platform_flags;
 pub mod present;
 pub mod publish_family;
+mod remix_compat;
 mod resource_limits;
 pub mod store_config_family;
 pub mod unsupported_config;
@@ -109,7 +110,7 @@ pub enum Family {
 }
 
 /// One registered engine verb: its canonical spelling, accepted aliases
-/// (mirroring aube's clap aliases), owning family, and — documentation for
+/// (mirroring aube's own aliases), owning family, and — documentation for
 /// the Surface phase — the aube args type the wired implementation parses.
 pub struct VerbSpec {
     pub canonical: &'static str,
@@ -254,7 +255,7 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         aube_args: "commands::create::CreateArgs",
     },
     // `init` is deliberately NOT registered: the spelling belongs to nub's
-    // own project scaffold (src/init.rs, a clap subcommand), not the engine's
+    // own project scaffold (src/init.rs, a native subcommand), not the engine's
     // npm-style manifest write — the fourth deliberate pnpm-compat exception
     // (AGENTS.md); design record in internal/commands/init.md.
     // Workspace fanout meta-verb. Registered so it errors with the honest
@@ -535,7 +536,7 @@ pub fn dispatch_verb(
 /// node-gyp and prints its executable path on stdout. The lazy shims the
 /// engine drops into a project's `.bin` re-invoke `current_exe()` with
 /// this verb mid-lifecycle-script — and under nub, `current_exe()` IS
-/// nub — so cli.rs intercepts the spelling before clap and lands here.
+/// nub — so cli.rs intercepts the spelling before the parser and lands here.
 /// The printed path is data for the shim (it lands under nub's own cache
 /// root, which the identity profile's `cache_namespace` carries), so stdout
 /// is passed through; failures route through the brand rewrite like every
@@ -551,17 +552,17 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     // __node-gyp-bootstrap <dir>`, where `current_exe()` is nub) before any other
     // preflight, so the namespace registration has to happen here.
     engine_brand_preflight();
-    // The bootstrap entry (`pub`-widened in vendor/aube @ b1a90d5: `pub mod
-    // node_gyp_bootstrap` + `pub async fn {ensure_cached, print_bootstrapped_binary}`)
-    // resolves/bootstraps the cached node-gyp and prints its executable path on
-    // stdout for the shim to exec. Drive it on a fresh runtime; route any failure
-    // through the brand rewrite like every other engine report.
+    // The embed facade's bootstrap entry resolves/bootstraps the cached
+    // node-gyp and returns its executable, which is printed on stdout for the
+    // shim to exec. Drive it on a fresh runtime; route any failure through the
+    // brand rewrite like every other engine report.
     let rt = build_runtime()?;
     let project = std::path::Path::new(project_dir);
-    match rt
-        .block_on(aube::commands::install::node_gyp_bootstrap::print_bootstrapped_binary(project))
-    {
-        Ok(()) => Ok(0),
+    match rt.block_on(aube::embed::bootstrap_node_gyp(project)) {
+        Ok(binary) => {
+            println!("{}", binary.display());
+            Ok(0)
+        }
         Err(report) => Ok(present::emit_report(&report)),
     }
 }
@@ -1037,7 +1038,7 @@ pub(crate) fn project_supplied_settings(cwd: &Path) -> (Vec<String>, bool) {
         VirtualStoreLocality::Default,
     );
     // The config verbs dispatch through `lookup_verb` and RETURN before the
-    // clap match that initializes the snapshot for ordinary routes, so on this
+    // parser match that initializes the snapshot for ordinary routes, so on this
     // path `effective_config` is unset unless it is asked for here. Without
     // this the whole check reported "nothing is shadowed" for every project —
     // inert, and silently so, because failing to recognize a shadow just lets
@@ -1363,6 +1364,17 @@ fn apply_config_scope(
     });
 
     if noise == ConfigScopeNoise::Warn {
+        // Renamed-field hard-error. The build allowlist moved from a top-level
+        // `allowBuilds` map to `allowScripts`, the field npm 12 gates its own
+        // install scripts on. Proceeding would silently drop every approval AND
+        // every explicit `false` denial the old map records — a security-
+        // relevant miss in the permissive direction for the denials — so refuse
+        // instead. Role-independent: the top-level map is nub's own key, read on
+        // every surface, and no other PM reads it either.
+        if manifest.has_legacy_root_allow_builds() {
+            return Err(legacy_allow_builds_error());
+        }
+        warn_dropped_root_install_fields(&manifest);
         // Catalog hard-error: a role that doesn't honor `catalog:` specifiers
         // (npm/yarn/bun, pnpm<9) must mirror the real PM and refuse, rather
         // than silently mis-resolve. nub-branded, role-named.
@@ -1491,6 +1503,75 @@ fn first_catalog_in_dep_maps(manifest: &aube_manifest::PackageJson) -> Option<St
 
 /// Hard error mirroring the active PM's refusal of a `catalog:` specifier —
 /// nub-branded, role-named, with the remedy.
+/// The refusal for a project still carrying the pre-cutover top-level
+/// `allowBuilds` map. Names the mechanical fix, because that is the whole
+/// migration: the key is renamed and the entries are unchanged.
+fn legacy_allow_builds_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "nub: package.json sets a top-level `allowBuilds` map — that field was renamed to \
+         `allowScripts`, which is also the field npm reads. Rename the key in package.json; \
+         the entries are unchanged. (`pnpm.allowBuilds` and a `pnpm-workspace.yaml` \
+         `allowBuilds:` block are pnpm's own surface and still read as-is.) \
+         [ERR_NUB_ALLOW_BUILDS_RENAMED]"
+    )
+}
+
+/// Manifest-ROOT install keys nub used to read and no longer does, each with
+/// the surface that replaces it.
+///
+/// All three were nub-only. No package manager reads a top-level `auditConfig`,
+/// `allowUnusedPatches` or `allowNonAppliedPatches`: npm 12 ships
+/// `patchedDependencies` but makes its relax flag CLI-ONLY on purpose (ignored
+/// in `.npmrc` and env, rejected by `npm ci`, so it cannot become project
+/// policy) and has no audit-ignore mechanism at all; bun's is `bun audit
+/// --ignore <CVE>`; pnpm keeps both under `pnpm.*` or the workspace yaml, which
+/// nub still reads under a pnpm incumbent. So the root spellings were three
+/// un-namespaced `package.json` names held on the strength of nobody having
+/// claimed them yet — the position `allowBuilds` was in when npm 12 shipped
+/// `allowScripts` into the same slot.
+const DROPPED_ROOT_INSTALL_FIELDS: [(&str, &str); 3] = [
+    (
+        "auditConfig",
+        "pass `nub audit --ignore <id>`, which takes advisory numbers, GHSA ids and CVE ids",
+    ),
+    (
+        "allowUnusedPatches",
+        "remove the `patchedDependencies` entry that matches no installed package",
+    ),
+    (
+        "allowNonAppliedPatches",
+        "remove the `patchedDependencies` entry that matches no installed package",
+    ),
+];
+
+/// Tell a project still carrying one of those keys that it does nothing.
+///
+/// A warning rather than the hard error `allowBuilds` gets: both of these fail
+/// SAFE when unread — advisories the project had muted come back, and an
+/// unmatched patch fails an install that used to warn — where a dropped
+/// `allowBuilds: false` would RUN a script the project denied. Silence is still
+/// the wrong answer, because the key looks like it is doing something.
+///
+/// Says nothing about the branded `pnpm.*` spellings: those are pnpm's own
+/// surface, read under a pnpm incumbent exactly as before.
+fn warn_dropped_root_install_fields(manifest: &aube_manifest::PackageJson) {
+    let dim = scope_warning_uses_dim();
+    for (root, remedy) in DROPPED_ROOT_INSTALL_FIELDS {
+        if !manifest.extra.contains_key(root) {
+            continue;
+        }
+        let line = format!(
+            "nub: package.json sets a top-level `{root}` — no package manager reads that key \
+             there, and nub no longer does either. Instead, {remedy}."
+        );
+        if dim {
+            eprintln!("\x1b[2m{line}\x1b[0m");
+        } else {
+            eprintln!("{line}");
+        }
+    }
+}
+
 fn catalog_unsupported_error(role: config_scope::Role, spec: &str) -> anyhow::Error {
     let pm = role.display();
     anyhow::anyhow!(
@@ -2761,13 +2842,26 @@ fn nub_setting_defaults(
     // Metro — can't reach the machine-global store at any version). `expo` is
     // version-gated: it gained store-awareness only in SDK 56 (On-demand
     // Filesystem), so a project declaring `expo` below the floor is ejected while
-    // 56+ keeps GVS. See [`expo_compat`]. The list stays curated and small
-    // because there is no manifest signal for "this tool canonicalizes
-    // symlinks"; it is unavoidably a behavioral-property list.
+    // 56+ keeps GVS. See [`expo_compat`]. `remix` is version-gated the other way
+    // round: Remix 3's unbundled asset server serves npm packages to the browser
+    // only from mounts relative to the project root, so a `remix` major ≥ 3 is
+    // ejected while the bundler-built earlier majors keep GVS. See
+    // [`remix_compat`]. The list stays curated and small because there is no
+    // manifest signal for "this tool canonicalizes symlinks"; it is unavoidably
+    // a behavioral-property list.
+    // The incumbent's root when detected, else the cwd — a fresh project
+    // (`detected.is_none()`) is rooted at the cwd. Workspace discovery expands
+    // the member globs against the disk, so it runs ONCE here and the three
+    // manifest scans below (the two version gates and the injected-deps check)
+    // share the result.
     let gvs_root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
+    let workspace_members = aube_workspace::find_workspace_packages(gvs_root).unwrap_or_default();
     let mut gvs_off: Vec<&str> = vec!["next", "react-native"];
-    if expo_compat::expo_below_gvs_floor(gvs_root) {
+    if expo_compat::expo_below_gvs_floor(gvs_root, &workspace_members) {
         gvs_off.push("expo");
+    }
+    if remix_compat::remix_needs_project_local_store(gvs_root, &workspace_members) {
+        gvs_off.push("remix");
     }
     let store_dir = format!("node_modules/{PROJECT_VIRTUAL_STORE_LEAF}");
     let mut defaults = vec![
@@ -2823,11 +2917,9 @@ fn nub_setting_defaults(
             data.join("store").to_string_lossy().into_owned(),
         ));
     }
-    // Scan for injected deps at the incumbent's root when detected, else the
-    // cwd — a fresh project (`detected.is_none()`) is rooted at the cwd, so it
-    // is still excluded from the GVS default below if it declares injected deps.
-    let injected_root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
-    let injected = unsupported_config::injected_deps_present(injected_root);
+    // Scan for injected deps at the same root, so a fresh project is still
+    // excluded from the GVS default below if it declares injected deps.
+    let injected = unsupported_config::injected_deps_present(gvs_root, &workspace_members);
     // EVERY project defaults to isolated. Hoisting is left GVS-AWARE via the
     // engine's `gvs_over_default_hoist` profile (nub's identity sets it): a
     // NON-injected project pushes NO `hoist`, so it resolves to the built-in

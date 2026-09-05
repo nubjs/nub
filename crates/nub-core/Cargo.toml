@@ -98,12 +98,21 @@ ruzstd = { version = "0.8", optional = true }
 # win-arm64/musl), vs ~6 ms for BLAKE3's portable SIMD. BLAKE3 is collision/preimage
 # resistant — fully adequate for integrity — and builds identically on every target.
 # (`sha2` stays for the 32-bit cache KEY, which is not on the hot path.)
-blake3 = { version = "1", optional = true }
+#
+# NOT optional, though the R2 digest use above is `embed-runtime`-only: the
+# per-binary Node flag cache (`node::discovery`, `FLAG_ENTRY_DIR`) names its entry
+# files by hashing the binary's path, and that cache is read on every spawn in
+# every build. Unconditional costs the shipped artifacts nothing — nub-launcher
+# already depends on blake3 directly and nub-cli's release build turns
+# `embed-runtime` on — so only a feature-off dev build gains it.
+blake3 = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # `GetConsoleWindow`, for `spawn::process_has_console`.
+    "Win32_System_Console",
 ] }
 
 # Build-time only (embed-runtime): tar + zstd-compress the staged runtime tree
@@ -115,6 +124,21 @@ zstd = { version = "0.13", optional = true }
 sha2 = { version = "0.11", optional = true }
 # Bakes the R2 per-entrypoint BLAKE3 digests (the runtime side decodes with the
 # `blake3` dep above). build-deps never reach the shipped binary.
+#
+# STILL OPTIONAL, and `embed-runtime` must keep listing `dep:blake3` even though the
+# NORMAL dependency of the same name is now unconditional — this is the activator for
+# THIS one, and nothing else is. Dropping it from the feature list compiles a
+# build.rs whose `#[cfg(feature = "embed-runtime")]` half calls `blake3::hash` with
+# the crate unlinked: E0433 from the build script.
+#
+# NO GATE WE RUN CATCHES THAT, which is the part worth remembering. An optional
+# dependency no feature mentions still gets an IMPLICIT feature of its own name, and
+# `--all-features` turns it on — so `clippy --all-targets --all-features` and the
+# whole test suite stay green while the real build, which asks for the exact set
+# (`--features embed-runtime,compile`), breaks. It surfaced on CI's musl
+# native-islands leg and nowhere before it. Verify a change here with
+# `cargo tree -p nub-core -e build --features nub-core/embed-runtime`: blake3 present
+# with the feature, absent without, so a feature-off dev build still pays nothing.
 blake3 = { version = "1", optional = true }
 
 # Unix-only: terminating-signal forwarding to the child (SIGINT/SIGTERM/SIGHUP).

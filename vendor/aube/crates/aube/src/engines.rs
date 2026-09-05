@@ -563,7 +563,7 @@ mod tests {
         // version (1.x) lives in a different namespace than pnpm's
         // (10.x+), so comparing them produces spurious warnings on
         // every install of a project that pins a pnpm version.
-        // Discussion: github.com/jdx/aube/discussions/626.
+        // Discussion: github.com/aubepkg/aube/discussions/626.
         let mut m = empty_manifest();
         m.engines.insert("pnpm".into(), ">=99999".into());
         assert!(check_root(&m, Some("18.0.0")).is_empty());

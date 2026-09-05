@@ -1019,15 +1019,14 @@ fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -
 
 /// A second `nub install` on an unchanged, fully-satisfied tree short-circuits
 /// to the instant "Already up to date" exit — even online under the default
-/// `trustPolicy=no-downgrade`. Before the fix the trust posture disabled the
-/// warm short-circuit on any online install (gated in `install_fast_path_eligible`
-/// before `check_needs_install` ran), so the second install re-ran the full
-/// resolve/fetch/link pipeline every time; nub's `warm_trust_revalidate=false`
-/// profile now lets a no-op skip the redundant re-validation. The short-circuit
-/// is the load-independent signal: `emit_up_to_date` fires ONLY on the fast path,
-/// and it does so here with a fresh (empty) packument cache, proving nothing was
-/// re-resolved or re-fetched. The security half (real work still trips the gate)
-/// is covered by `frozen_install_with_trust_downgrade_still_aborts`.
+/// `trustPolicy=no-downgrade`. The lockfile is the trust boundary: the policy is
+/// enforced when a version is NEWLY resolved, and a version already recorded in
+/// the lockfile is trusted without re-fetching its publishing evidence. The
+/// short-circuit is the load-independent signal: `emit_up_to_date` fires ONLY on
+/// the fast path, and it does so here with a fresh (empty) packument cache,
+/// proving nothing was re-resolved or re-fetched. The security half (a new pick
+/// still trips the gate) is covered by
+/// `cold_install_with_trust_downgrade_still_aborts`.
 #[test]
 #[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn warm_satisfied_install_short_circuits_under_no_downgrade() {
@@ -1066,19 +1065,17 @@ fn warm_satisfied_install_short_circuits_under_no_downgrade() {
     );
 }
 
-/// SECURITY INVARIANT: the warm short-circuit must NOT weaken the trust gate on
-/// an install that does real work. A fresh install of a package whose picked
-/// version dropped the trust evidence an earlier version carried
-/// (`node-gyp@10.3.0` lost the provenance attestation `10.3.1` had) is real work
-/// — `check_needs_install` returns `Some`, so the fast path is bypassed and the
-/// full pipeline runs, where `trustPolicy=no-downgrade` aborts during
-/// resolution. The short-circuit is reachable only on a no-op, never on this.
-/// (Depends on `node-gyp@10.3.0`'s live registry provenance metadata staying a
-/// downgrade vs `10.3.1`; the canonical case is recorded in
+/// SECURITY INVARIANT: trusting versions already in the lockfile must NOT weaken
+/// the gate on a version this install NEWLY resolves. There is no lockfile here,
+/// so every pick is new — including `node-gyp@10.3.0`, which dropped the
+/// provenance attestation `10.3.1` carried — and `trustPolicy=no-downgrade`
+/// aborts during resolution, before anything is linked. (Depends on
+/// `node-gyp@10.3.0`'s live registry provenance metadata staying a downgrade vs
+/// `10.3.1`; the canonical case is recorded in
 /// `.fray/install-warm-fastpath-trust-gate.md`.)
 #[test]
 #[ignore = "network: resolves node-gyp@10.3.0 from the npm registry to assert the trust-downgrade abort"]
-fn frozen_install_with_trust_downgrade_still_aborts() {
+fn cold_install_with_trust_downgrade_still_aborts() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
         return;
@@ -1167,6 +1164,47 @@ fn wildcard_peer_binds_resolved_major_not_registry_highest() {
 /// the node-gyp path. Holds whether or not the host happens to have a node-gyp
 /// on PATH: with one, no shim is written; without, the shim is written but never
 /// invoked. Either way the bootstrap bucket must not appear.
+/// The build allowlist moved from a top-level `allowBuilds` map to
+/// `allowScripts` (npm 12's own field). Honoring neither would silently drop
+/// the old map's explicit `false` denials, so the stale key is a hard refusal
+/// naming the rename. The paired positive control is the test below, which
+/// runs a build off an `allowScripts` entry.
+#[test]
+fn a_stale_top_level_allow_builds_map_is_refused_with_the_rename() {
+    let dir = pm_tmpdir("legacy-allow-builds");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,"allowBuilds":{"esbuild":false}}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("install")
+        .current_dir(&dir)
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a stale allowBuilds map must fail the install: {output}"
+    );
+    assert!(
+        output.contains("ERR_NUB_ALLOW_BUILDS_RENAMED"),
+        "the refusal must carry its code: {output}"
+    );
+    assert!(
+        output.contains("allowScripts"),
+        "the refusal must name the field to rename to: {output}"
+    );
+}
+
 #[test]
 fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
     let dir = pm_tmpdir("no-gyp-bootstrap");
@@ -1182,7 +1220,7 @@ fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
     .unwrap();
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowScripts":{"plainbuild@file:./plainbuild":true}}"#,
     )
     .unwrap();
     // `fetch-retries=0` so a regression fails fast instead of burning the
@@ -1245,7 +1283,7 @@ fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
     .unwrap();
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowScripts":{"plainbuild@file:./plainbuild":true}}"#,
     )
     .unwrap();
     std::fs::write(
@@ -1922,7 +1960,7 @@ fn an_owed_dependency_build_stops_the_next_install_reporting_up_to_date() {
     // bare-name entry never authorizes a source-backed build.
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowBuilds":{"plainbuild@file:./plainbuild":true}}"#,
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowScripts":{"plainbuild@file:./plainbuild":true}}"#,
     )
     .unwrap();
     // Dead registry + no retries: the fixture is entirely local, so any
@@ -2017,5 +2055,99 @@ fn an_owed_dependency_build_stops_the_next_install_reporting_up_to_date() {
     assert!(
         up_to_date(),
         "and that migration must be one-time: the re-check writes the field, so it cannot repeat"
+    );
+}
+
+/// The three manifest-ROOT install keys nub used to read, and no longer does.
+///
+/// No package manager reads a top-level `auditConfig`, `allowUnusedPatches` or
+/// `allowNonAppliedPatches` — npm 12 makes its own patch relax flag CLI-only on
+/// purpose and has no audit-ignore at all — so these were nub-only names held on
+/// an un-namespaced `package.json` key. Removing the read is the point of the
+/// change; the two halves asserted here are that the key no longer DOES
+/// anything, and that a project carrying it is told so rather than left to
+/// wonder why its install started failing.
+///
+/// Offline and dependency-free: the unused-patch check runs before any fetch,
+/// so this needs no registry.
+#[test]
+fn a_manifest_root_allow_unused_patches_no_longer_relaxes_the_patch_check() {
+    let dir = pm_tmpdir("root-allow-unused-patches");
+    std::fs::create_dir_all(dir.join("patches")).unwrap();
+    std::fs::write(dir.join("patches/ghost.patch"), "").unwrap();
+    let manifest = |extra: &str| {
+        std::fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{"name":"probe","version":"1.0.0",
+                     "patchedDependencies":{{"ghost@1.0.0":"patches/ghost.patch"}}{extra}}}"#
+            ),
+        )
+        .unwrap();
+    };
+
+    // The control: with no allowance anywhere the install fails. Without it a
+    // read that still worked would be indistinguishable from one that never ran.
+    manifest("");
+    let (_, stderr, code) = run_install(&dir, &["install", "--offline"]);
+    assert_eq!(
+        code, 1,
+        "an unused patch key must fail the install: {stderr}"
+    );
+    assert!(
+        stderr.contains("ERR_NUB_UNUSED_PATCH"),
+        "expected the unused-patch refusal, got: {stderr}"
+    );
+
+    // The root key must not change that verdict, and must say why it did not.
+    manifest(r#","allowUnusedPatches":true"#);
+    let (_, stderr, code) = run_install(&dir, &["install", "--offline"]);
+    assert_eq!(
+        code, 1,
+        "a top-level allowUnusedPatches must no longer relax the check: {stderr}"
+    );
+    assert!(
+        stderr.contains("ERR_NUB_UNUSED_PATCH"),
+        "expected the unused-patch refusal, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("sets a top-level `allowUnusedPatches`"),
+        "a project carrying the dropped key must be told it does nothing, got: {stderr}"
+    );
+}
+
+/// The same notice for the other two, and silence for a manifest carrying none.
+/// One run per key rather than one manifest holding all three, so a notice that
+/// fired for the wrong key cannot hide behind its neighbours.
+#[test]
+fn the_other_dropped_root_install_keys_are_announced_and_only_when_present() {
+    for (key, value) in [
+        ("auditConfig", r#"{"ignoreGhsas":["GHSA-xxxx-yyyy-zzzz"]}"#),
+        ("allowNonAppliedPatches", "true"),
+    ] {
+        let dir = pm_tmpdir(&format!("dropped-{key}"));
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name":"probe","version":"1.0.0","{key}":{value}}}"#),
+        )
+        .unwrap();
+        let (_, stderr, code) = run_install(&dir, &["install", "--offline"]);
+        assert_eq!(code, 0, "the notice must not fail the install: {stderr}");
+        assert!(
+            stderr.contains(&format!("sets a top-level `{key}`")),
+            "{key} must be announced, got: {stderr}"
+        );
+    }
+
+    let clean = pm_tmpdir("dropped-none");
+    std::fs::write(
+        clean.join("package.json"),
+        r#"{"name":"probe","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let (_, stderr, _) = run_install(&clean, &["install", "--offline"]);
+    assert!(
+        !stderr.contains("sets a top-level"),
+        "a manifest carrying none of the keys must say nothing, got: {stderr}"
     );
 }

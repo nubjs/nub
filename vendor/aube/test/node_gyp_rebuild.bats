@@ -123,6 +123,63 @@ JSON
 	assert_file_exists node_modules/aube-test-binding-gyp/side-effects-cache-output.txt
 }
 
+@test "intact build marker skips rebuild after side-effects cache cleanup" {
+	cat >"$TEST_TEMP_DIR/shim/node-gyp" <<'SHIM'
+#!/usr/bin/env bash
+count="${INIT_CWD:-$PWD}/node-gyp-count"
+n=0
+if [ -f "$count" ]; then
+  n="$(cat "$count")"
+fi
+printf '%s\n' "$((n + 1))" >"$count"
+printf 'built\n' >"$PWD/side-effects-cache-output.txt"
+SHIM
+	chmod +x "$TEST_TEMP_DIR/shim/node-gyp"
+
+	cat >package.json <<'JSON'
+{
+  "name": "binding-gyp-applied-marker-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "aube-test-binding-gyp": "^1.0.0"
+  },
+  "pnpm": {
+    "allowBuilds": {
+      "aube-test-binding-gyp": true
+    }
+  }
+}
+JSON
+	run aube install
+	assert_success
+	run cat node-gyp-count
+	assert_output "1"
+
+	# Force the normal resolve/finalize path while retaining the built
+	# package. The installer-owned marker verifies that build output remains
+	# intact even though the reusable snapshot was swept.
+	test -d "$XDG_CACHE_HOME/aube/side-effects-v1"
+	rm -rf "$XDG_CACHE_HOME/aube/side-effects-v1"
+	test ! -e "$XDG_CACHE_HOME/aube/side-effects-v1"
+	rm aube-lock.yaml
+	run aube install
+	assert_success
+	run cat node-gyp-count
+	assert_output "1"
+	assert_file_exists node_modules/aube-test-binding-gyp/side-effects-cache-output.txt
+
+	# The marker also records the built tree's hash. If generated output
+	# disappears, the next install must rebuild rather than trusting stale
+	# installer state.
+	rm node_modules/aube-test-binding-gyp/side-effects-cache-output.txt
+	rm aube-lock.yaml
+	run aube install
+	assert_success
+	run cat node-gyp-count
+	assert_output "2"
+	assert_file_exists node_modules/aube-test-binding-gyp/side-effects-cache-output.txt
+}
+
 @test "rebuild refreshes side-effects-cache output" {
 	cat >"$TEST_TEMP_DIR/shim/node-gyp" <<'SHIM'
 #!/usr/bin/env bash
@@ -193,8 +250,8 @@ JSON
 
 @test "bootstrap is skipped when node-gyp is already on PATH" {
 	# The shim installed in `setup()` is a `node-gyp` on PATH, so
-	# `node_gyp_bootstrap::lazy_shim_bin_dir()` must return `None` and
-	# leave the cache untouched. If we ever regress to bootstrapping
+	# the lazy bootstrap must stay out of the way and leave the cache
+	# untouched. If we ever regress to bootstrapping
 	# unconditionally this test will start hitting the real npm
 	# registry and fail in the hermetic CI environment.
 	cat >package.json <<'JSON'

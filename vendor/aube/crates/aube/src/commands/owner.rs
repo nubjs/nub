@@ -6,34 +6,46 @@
 //!   packument's `maintainers` array and PUT it back (the same authed
 //!   full-document write `deprecate` uses). Requires auth.
 
-use clap::{Args, Subcommand};
 use miette::miette;
 
 use crate::commands::make_client;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct OwnerArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: OwnerCommand,
 
     /// One-time password from a 2FA authenticator (for add/rm).
-    #[arg(long, value_name = "CODE", global = true)]
+    #[usage(long, value_name = "CODE", global)]
     pub otp: Option<String>,
 
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum OwnerCommand {
     /// List the maintainers of a package.
-    #[command(visible_alias = "list")]
-    Ls { package: String },
+    #[usage(alias = "list")]
+    Ls {
+        /// The package name.
+        package: String,
+    },
     /// Add a maintainer to a package.
-    Add { package: String, user: String },
+    Add {
+        /// The package name.
+        package: String,
+        /// The npm user to add.
+        user: String,
+    },
     /// Remove a maintainer from a package.
-    #[command(visible_alias = "remove")]
-    Rm { package: String, user: String },
+    #[usage(alias = "remove")]
+    Rm {
+        /// The package name.
+        package: String,
+        /// The npm user to remove.
+        user: String,
+    },
 }
 
 pub async fn run(args: OwnerArgs) -> miette::Result<()> {

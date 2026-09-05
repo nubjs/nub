@@ -1,4 +1,4 @@
-use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -228,6 +228,179 @@ pub struct Packument {
     /// time-based mode, uses it to derive the publish-date cutoff.
     #[serde(default, deserialize_with = "non_string_tolerant_map")]
     pub time: BTreeMap<String, String>,
+}
+
+/// The subset of a full packument needed to enforce publish-time and
+/// trust-downgrade policies for an exact version. Deserializing this shape
+/// skips dependency maps and distribution metadata for every historical
+/// release, avoiding the large retained heap of a full [`Packument`].
+/// Serializable so the lockfile trust-policy validator can persist it in
+/// its compact on-disk cache (`trust-history-v1/`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PackumentTrustHistory {
+    #[serde(default, deserialize_with = "non_string_tolerant_map")]
+    pub time: BTreeMap<String, String>,
+    #[serde(default)]
+    pub versions: BTreeMap<String, VersionTrustMetadata>,
+}
+
+/// One exact release plus the compact history needed for time and trust
+/// policy checks. The full registry document is decoded in a single pass:
+/// the selected release uses [`VersionMetadata`], while every other release
+/// uses [`VersionTrustMetadata`].
+#[derive(Debug)]
+pub struct ExactVersionPackument {
+    pub metadata: VersionMetadata,
+    pub history: PackumentTrustHistory,
+}
+
+pub(crate) struct ExactVersionPackumentSeed<'a> {
+    pub version: &'a str,
+}
+
+impl<'de> DeserializeSeed<'de> for ExactVersionPackumentSeed<'_> {
+    type Value = ExactVersionPackument;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ExactVersionPackumentVisitor {
+            version: self.version,
+        })
+    }
+}
+
+struct ExactVersionPackumentVisitor<'a> {
+    version: &'a str,
+}
+
+impl<'de> Visitor<'de> for ExactVersionPackumentVisitor<'_> {
+    type Value = ExactVersionPackument;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an npm packument containing the requested exact version")
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut metadata = None;
+        let mut history = BTreeMap::new();
+        let mut time = BTreeMap::new();
+
+        while let Some(field) = access.next_key::<String>()? {
+            match field.as_str() {
+                "versions" => {
+                    let decoded = access.next_value_seed(ExactVersionMapSeed {
+                        version: self.version,
+                    })?;
+                    metadata = decoded.0;
+                    history = decoded.1;
+                }
+                "time" => {
+                    time = access.next_value::<TolerantStringMap>()?.0;
+                }
+                _ => {
+                    access.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        let metadata = metadata.ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "packument does not contain requested version {}",
+                self.version
+            ))
+        })?;
+        Ok(ExactVersionPackument {
+            metadata,
+            history: PackumentTrustHistory {
+                time,
+                versions: history,
+            },
+        })
+    }
+}
+
+struct ExactVersionMapSeed<'a> {
+    version: &'a str,
+}
+
+impl<'de> DeserializeSeed<'de> for ExactVersionMapSeed<'_> {
+    type Value = (
+        Option<VersionMetadata>,
+        BTreeMap<String, VersionTrustMetadata>,
+    );
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ExactVersionMapVisitor {
+            version: self.version,
+        })
+    }
+}
+
+struct ExactVersionMapVisitor<'a> {
+    version: &'a str,
+}
+
+impl<'de> Visitor<'de> for ExactVersionMapVisitor<'_> {
+    type Value = (
+        Option<VersionMetadata>,
+        BTreeMap<String, VersionTrustMetadata>,
+    );
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an npm packument versions map")
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut metadata = None;
+        let mut history = BTreeMap::new();
+        while let Some(version) = access.next_key::<String>()? {
+            if version == self.version {
+                metadata = Some(access.next_value::<VersionMetadata>()?);
+            } else {
+                history.insert(version, access.next_value::<VersionTrustMetadata>()?);
+            }
+        }
+        Ok((metadata, history))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct TolerantStringMap(
+    #[serde(deserialize_with = "non_string_tolerant_map")] BTreeMap<String, String>,
+);
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionTrustMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver: Option<serde_json::Value>,
+    #[serde(
+        default,
+        rename = "_npmUser",
+        deserialize_with = "npm_user_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub npm_user: Option<NpmUser>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dist: Option<VersionTrustDist>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VersionTrustDist {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestations: Option<Attestations>,
 }
 
 /// Metadata for a specific version of a package.
@@ -972,6 +1145,9 @@ pub enum Error {
     #[error("access entity not found: {0}")]
     #[diagnostic(code(ERR_AUBE_ACCESS_ENTITY_NOT_FOUND))]
     AccessEntityNotFound(String),
+    #[error("registry identity endpoint is unavailable")]
+    #[diagnostic(code(ERR_AUBE_REGISTRY_ERROR))]
+    AccessIdentityUnavailable,
     #[error("version not found: {0}@{1}")]
     #[diagnostic(code(ERR_AUBE_VERSION_NOT_FOUND))]
     VersionNotFound(String, String),
@@ -1201,6 +1377,56 @@ mod tests {
             rendered.contains("127.0.0.1"),
             "redacted host should remain for debuggability: {rendered}"
         );
+    }
+
+    #[test]
+    fn exact_version_packument_seed_keeps_only_selected_full_metadata() {
+        let json = br#"{
+            "name":"platform-package",
+            "versions":{
+                "1.0.0":{
+                    "name":"platform-package",
+                    "version":"1.0.0",
+                    "dependencies":{"discarded":"1"},
+                    "approver":{"name":"release-manager"}
+                },
+                "2.0.0":{
+                    "name":"platform-package",
+                    "version":"2.0.0",
+                    "dependencies":{"retained":"2"},
+                    "dist":{"tarball":"https://registry.example/pkg.tgz"}
+                }
+            },
+            "time":{"1.0.0":"2025-01-01T00:00:00.000Z","2.0.0":"2025-02-01T00:00:00.000Z"}
+        }"#;
+        let mut deserializer = sonic_rs::Deserializer::from_slice(json);
+        let decoded = serde::de::DeserializeSeed::deserialize(
+            ExactVersionPackumentSeed { version: "2.0.0" },
+            &mut deserializer,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.metadata.version, "2.0.0");
+        assert_eq!(
+            decoded.metadata.dependencies.get("retained"),
+            Some(&"2".to_string())
+        );
+        assert!(!decoded.history.versions.contains_key("2.0.0"));
+        assert!(decoded.history.versions.contains_key("1.0.0"));
+        assert_eq!(decoded.history.time.len(), 2);
+    }
+
+    #[test]
+    fn exact_version_packument_seed_rejects_missing_selected_version() {
+        let json = br#"{"versions":{"1.0.0":{"name":"x","version":"1.0.0"}}}"#;
+        let mut deserializer = sonic_rs::Deserializer::from_slice(json);
+        let error = serde::de::DeserializeSeed::deserialize(
+            ExactVersionPackumentSeed { version: "2.0.0" },
+            &mut deserializer,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requested version 2.0.0"));
     }
 
     #[test]

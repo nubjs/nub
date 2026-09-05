@@ -1,8 +1,9 @@
-//! Manifest-root embedders such as nub write `allowBuilds` at package.json
+//! Manifest-root embedders such as nub write `allowScripts` at package.json
 //! root after migration and on the npm/bun/yarn-compat `approve-builds` heal
-//! path. The top-level `allowBuilds` is the embedder's own un-branded key, so
-//! the lifecycle build policy consumes it on every surface — while the
-//! pnpm-branded `pnpm.allowBuilds` is read only when the pnpm surface is active.
+//! path. The top-level `allowScripts` is the embedder's own un-branded key —
+//! and the field npm 12 gates its own install scripts on — so the lifecycle
+//! build policy consumes it on every surface, while the pnpm-branded
+//! `pnpm.allowBuilds` is read only when the pnpm surface is active.
 
 use aube_manifest::PackageJson;
 use aube_scripts::{AllowDecision, BuildPolicy};
@@ -42,7 +43,6 @@ static ROOT_TOOL: Embedder = Embedder {
     tty_progress: false,
     rich_update_picker: false,
     strict_unsupported_source: false,
-    warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,
     extra_settings_fingerprint: None,
     unsupported_settings: &[],
@@ -59,13 +59,13 @@ fn build_decision(manifest: &PackageJson, name: &str, version: &str) -> AllowDec
 }
 
 #[test]
-fn root_allow_builds_feeds_build_policy_on_every_surface() {
+fn root_allow_scripts_feeds_build_policy_on_every_surface() {
     aube_util::set_embedder(&ROOT_TOOL);
     let manifest = PackageJson::parse(
         std::path::Path::new("package.json"),
         r#"{
             "name": "x",
-            "allowBuilds": {
+            "allowScripts": {
                 "esbuild": true,
                 "sharp": false
             },

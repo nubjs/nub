@@ -54,6 +54,25 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
         ..Default::default()
     };
 
+    // npm does not tag remote-tarball package entries separately from
+    // registry packages: both use an HTTP(S) `resolved` URL. The declared
+    // dependency specifier is the discriminator. Collect every URL spec so
+    // matching entries retain their non-registry identity instead of later
+    // being sent through packument validation.
+    let remote_tarball_specs: BTreeSet<&str> = raw
+        .packages
+        .values()
+        .flat_map(|entry| {
+            entry
+                .dependencies
+                .values()
+                .chain(entry.dev_dependencies.values())
+                .chain(entry.optional_dependencies.values())
+        })
+        .map(String::as_str)
+        .filter(|spec| LocalSource::looks_like_remote_tarball_url(spec))
+        .collect();
+
     // npm workspace links come in pairs:
     // - `node_modules/@scope/pkg: { resolved: "packages/pkg", link: true }`
     // - `packages/pkg: { name, version, dependencies, ... }`
@@ -138,6 +157,15 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
             let local_source = entry.resolved.as_deref().and_then(|r| {
                 crate::npm::source::local_git_source_from_resolved(r)
                     .or_else(|| crate::npm::source::local_file_source_from_resolved(r))
+                    .or_else(|| {
+                        remote_tarball_specs.contains(r).then(|| {
+                            LocalSource::RemoteTarball(crate::RemoteTarballSource {
+                                url: r.to_string(),
+                                integrity: entry.integrity.clone().unwrap_or_default(),
+                                git_hosted: false,
+                            })
+                        })
+                    })
             });
             let dep_path = local_source.as_ref().map_or_else(
                 || format!("{install_name}@{version}"),
@@ -425,8 +453,49 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
     // `packages/app`, ...) carries that package's own dependency sections.
     // Preserve those target paths as graph importers so install/link and a
     // later package-lock rewrite keep each workspace's node_modules tree.
+    //
+    // But only for targets that are actually MEMBERS. npm writes the very
+    // same pair for a local directory dependency — `vendor/local` gets a
+    // bare `name`/`version` entry plus a `link: true` record — so taking
+    // every link target registered phantom importers for paths outside the
+    // workspace. `drift` then compared them against the real member list
+    // and failed every `--frozen-lockfile` with `workspace importer
+    // vendor/local is in the lockfile but not in the workspace`, including
+    // against lockfiles npm itself had written.
+    //
+    // The shapes are identical in the lockfile — a root importer's own
+    // `file:./dep` also produces a root link record — so the manifest's
+    // `workspaces` patterns are the only thing that can decide. A
+    // non-member still becomes a proper local-source package via the link
+    // entry's own synthesis pass above; it just stops pretending to be an
+    // importer.
+    // The LOCKFILE's own copy comes first: npm mirrors `workspaces` into
+    // `packages[""]`, so a lockfile is self-describing and a caller that
+    // passes a bare manifest still gets the right answer. The manifest is
+    // the fallback for a lockfile written before that field was emitted.
+    //
+    // When NEITHER carries patterns, keep every link target, exactly as
+    // before. That is the conservative direction on purpose: dropping a
+    // real member costs it its importer entry and breaks its install,
+    // while keeping a stray one only reproduces the pre-existing
+    // behaviour. It is also the case for a workspace whose members are
+    // declared outside package.json (a `pnpm-workspace.yaml` project
+    // converted to npm format), where absence of patterns says nothing
+    // about whether members exist.
+    let member_patterns: Vec<String> = raw
+        .packages
+        .get("")
+        .and_then(|root| root.workspaces.as_ref())
+        .or(manifest.workspaces.as_ref())
+        .map(|w| w.patterns().to_vec())
+        .unwrap_or_default();
     for target in &link_targets {
         if target.is_empty() {
+            continue;
+        }
+        if !member_patterns.is_empty()
+            && !aube_workspace::matches_member_patterns(target, &member_patterns)
+        {
             continue;
         }
         let Some(package_entry) = raw.packages.get(target) else {

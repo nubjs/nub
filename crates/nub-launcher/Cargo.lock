@@ -1005,6 +1005,7 @@ name = "nub-core"
 version = "0.8.3"
 dependencies = [
  "anyhow",
+ "blake3",
  "camino",
  "dirs-next",
  "dotenvy",

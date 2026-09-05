@@ -342,7 +342,7 @@ fn data_handlers_do_not_join_extensionless_resolution() {
 /// Import Text on the FAST tier where the flag does NOT exist (Node 24.4.0): sync
 /// `module.registerHooks`, but native `--experimental-import-text` is absent — it landed
 /// at 26.5.0 and was backported no lower than 24.19.0 — so nub serves text imports via
-/// its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
+/// its own `loadTextImport` short-circuit (the `nativeImportText() === false` arm of the
 /// makeHooks load hook). Pins the polyfill path deterministically — the host-Node
 /// `integration.rs` cases migrate to the native-defer path on any host that knows the
 /// flag, leaving the polyfill band otherwise uncovered.
@@ -369,7 +369,7 @@ fn import_text_works_on_fast_tier_without_native_flag() {
 
 /// Import Text on the NATIVE tier (Node >= 26.5.0). There nub injects
 /// `--experimental-import-text` and its preload DEFERS `with { type: "text" }` to
-/// Node's native text translator (feature-detected via the `NATIVE_IMPORT_TEXT` const
+/// Node's native text translator (feature-detected via the `nativeImportText()` probe
 /// in preload-common.cjs, `process.allowedNodeEnvironmentFlags`) instead of
 /// serving it with nub's own `loadTextImport`. The user-visible result must be
 /// byte-identical to the compat/host tiers — SAME fixture, SAME assertions — proving
@@ -712,11 +712,12 @@ fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
 /// `import defer` must actually DEFER under nub on Node 26.4+, with no flag and no
 /// configuration from the user.
 ///
-/// This is the only test that exercises the WIRING rather than the table. The matrix
-/// unit tests assert that `argv_unflag_flags_for` returns the flag; they would all
-/// still pass if every `argv_inject_flags` call site were deleted and the feature
-/// silently did nothing. This one fails in that case, because the entry does not even
-/// parse without the injected flag.
+/// This exercises the WIRING rather than the table: the spawn layer arming the flag
+/// for the preload, and the load hook turning it on before Node compiles the entry.
+/// The matrix unit tests assert that `runtime_v8_flags_for` returns the flag; they
+/// would all still pass if every `runtime_inject_flags` call site were deleted and the
+/// feature silently did nothing. This one fails in that case, because the entry does
+/// not even parse without the flag.
 ///
 /// The assertion is ORDERING, not merely a successful run: `dep.ts` prints at top
 /// level, so a non-deferring implementation would print it BEFORE the entry's
@@ -753,20 +754,84 @@ fn import_defer_actually_defers_evaluation() {
     );
 }
 
-/// nub's ARGV-only V8 flags must not be visible in `process.execArgv`.
+/// The flag must stay OFF for a program that never writes `import defer`.
+///
+/// This is what the runtime flip buys: V8 at its default flags keeps Node's embedded
+/// builtin code cache valid, so the ~6–20 ms the flag used to cost every program on
+/// 26.4+ is paid only by programs that use the syntax. The observable is the dynamic
+/// form. With the flag off, Node raises a catchable `SyntaxError` for `import.defer()`;
+/// with it on, the same file aborts the process (a V8 fatal in Node's phase wiring,
+/// exit 133). The fixture never uses the static form, so a nub that armed the flag for
+/// every program would fail this with a dead process instead of the marker.
+#[test]
+fn import_defer_flag_stays_off_for_a_program_that_never_uses_it() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "dynamic-only.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "a program without the static form must not have the V8 flag on — with it on, \
+         `import.defer()` is a fatal abort instead of a SyntaxError: stdout={stdout:?} \
+         stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("import-defer:dynamic-error=SyntaxError"),
+        "with the flag off, the dynamic form must fail with bare Node's catchable \
+         SyntaxError: stdout={stdout:?}"
+    );
+}
+
+/// A child that opts out on its own argv must not be re-armed by the signal it inherits.
+///
+/// The parent runs on 26.5 with the flag armed for its preload and spawns
+/// `--no-js-defer-import-eval nested-child.mjs` twice: as `node` through the PATH it
+/// was started with, and by `process.execPath`. Each path has its own guard. The PATH
+/// child re-enters nub, whose launch decision must replace or remove the inherited
+/// signal rather than leave it in place; the absolute-path child makes no nub launch
+/// decision and inherits the env verbatim, so the preload itself must skip a flag
+/// whose polarity already sits on its own `process.execArgv`. Either gap turns the
+/// user's opt-out into a working `import defer`.
+#[test]
+fn import_defer_user_negation_survives_an_inherited_signal() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "nested-negation.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "the parent must run: stdout={stdout:?} stderr={stderr}"
+    );
+    for path in ["path", "abs"] {
+        assert!(
+            stdout.contains(&format!("{path}:nested:error=SyntaxError")),
+            "a child ({path}) negating the flag on its own argv must keep bare Node's \
+             SyntaxError, not inherit the parent's armed signal: stdout={stdout:?} \
+             stderr={stderr}"
+        );
+        assert!(
+            !stdout.contains(&format!("{path}:nested:deferred")),
+            "the inherited signal re-armed the flag over the child's ({path}) explicit \
+             opt-out: stdout={stdout:?}"
+        );
+    }
+}
+
+/// Deferral must work inside a Worker that received the parent's `process.execArgv`,
+/// and nothing nub leaves in that array may be a flag Node refuses back.
 ///
 /// Regression guard for a real break: a Next.js 16 + Turbopack build died under nub with
 /// `ERR_WORKER_INVALID_EXEC_ARGV` — "`--js-defer-import-eval` is not allowed in
-/// NODE_OPTIONS". nub injects that flag on argv precisely because Node refuses it in
-/// NODE_OPTIONS, but a great deal of tooling forwards `process.execArgv` into a Worker
-/// or a child's NODE_OPTIONS, and Node then rejects nub's own flag.
-///
-/// Two halves, and the second is what makes the fix worth anything: every flag left in
-/// `execArgv` must be one Node would accept back, AND deferral must still work inside a
-/// worker that received that filtered `execArgv`. V8 parses these flags at startup, so
-/// hiding them must not turn the feature off.
+/// NODE_OPTIONS" — because the flag then rode argv and tooling forwards `execArgv` into
+/// Workers. The flag no longer touches argv at all; this pins that, and pins the half
+/// that makes it worth anything: the worker inherits nub's preload and the runtime-flag
+/// signal, so its own load hook turns the flag on and `import defer` works there.
 #[test]
-fn injected_argv_only_flags_are_hidden_from_exec_argv() {
+fn import_defer_works_inside_a_worker_fed_exec_argv() {
     let Some((stdout, stderr, code)) =
         run_nub_against_node((26, 5, 0), "import-defer", "execargv.mjs")
     else {
@@ -789,8 +854,8 @@ fn injected_argv_only_flags_are_hidden_from_exec_argv() {
     );
     assert!(
         stdout.contains("execargv:worker-value=42"),
-        "hiding the flag from execArgv must NOT disable the feature — deferral still \
-         has to work inside the worker: stdout={stdout:?}"
+        "keeping the flag off execArgv must NOT disable the feature — the worker's own \
+         load hook has to turn it on, so deferral still works there: stdout={stdout:?}"
     );
 }
 

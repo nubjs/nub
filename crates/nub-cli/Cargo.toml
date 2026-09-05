@@ -34,6 +34,7 @@ compile = [
     "dep:rolldown_utils",
     "dep:libsui",
     "dep:zstd",
+    "dep:brotli",
     "dep:oxc_allocator",
     "dep:oxc_ast",
     "dep:oxc_ast_visit",
@@ -41,6 +42,7 @@ compile = [
     "dep:oxc_semantic",
     "dep:oxc_span",
     "dep:string_wizard",
+    "dep:rolldown_sourcemap",
     "dep:glob-match",
     "dep:pathdiff",
     "dep:unicode-casefold",
@@ -82,6 +84,10 @@ oxc_span = { version = "=0.140.0", optional = true }
 # to construct the map, pinned in lockstep because Rolldown's crate APIs are
 # explicitly non-semver.
 string_wizard = { version = "=1.2.0", optional = true }
+# `collapse_sourcemaps`, to keep a chunk's map true after the post-minify eager
+# compilation rewrite in `compile::bundle` (the same composition Rolldown applies
+# to a `render_chunk` hook's map, which that rewrite runs too late to use).
+rolldown_sourcemap = { version = "=1.2.0", optional = true }
 # Two consumers: the compile path reads the entry's effective tsconfig (`extends`
 # chain applied) to decide whether `compilerOptions.jsx` is "preserve", and the
 # bare-preload resolver uses it unconditionally — so it is NOT optional, or a
@@ -94,6 +100,10 @@ libsui = { version = "0.16", optional = true }
 # zstd-19 compression of the embedded Node (encode side; the launcher decodes with
 # pure-Rust ruzstd).
 zstd = { version = "0.13", optional = true }
+# The inline (`no-extract`) payload's codec. Brotli rather than the zstd beside it
+# because the artifact's own JavaScript is what decompresses those bytes, and
+# `zlib.zstdDecompressSync` is absent on Node 23.5 and 23.6.
+brotli = { version = "8", optional = true }
 # `--include`/`--exclude` matching. Already in the tree at this version as a
 # nub-core dependency, so the compile feature adds no build cost — declared here
 # rather than reached through nub-core, which does not re-export it.
@@ -155,6 +165,10 @@ aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
 aube = { path = "../../vendor/aube/crates/aube", default-features = false, features = [
     "rustls",
     "publish",
+    # Comment/format-preserving edits of user-authored workspace YAML (catalogs,
+    # allowBuilds, patchedDependencies). Upstream made it optional in v2.2
+    # (aubepkg/aube#1278) and keeps it default; nub always had it, so re-name it.
+    "workspace-yaml-preserve",
 ] }
 # `EffectiveFilter` for the workspace-aware engine verbs (`nub publish
 # --filter/-r`); same type aube's own dispatch passes to publish/list/etc.
@@ -199,7 +213,7 @@ base64 = "0.22"
 # Global allocator for the `nub` binary only. NOT added to crates/nub-native
 # (the cdylib loaded into Node) — that must not hijack Node's allocator.
 mimalloc = "0.1"
-clap.workspace = true
+usage-rs.workspace = true
 # Same major as vendor/aube: `nubx -q` switches the engine's progress UI to
 # text mode via clx::progress::set_output, the same knob aube's own startup
 # flips for --silent (vendor/aube/crates/aube/src/startup.rs).

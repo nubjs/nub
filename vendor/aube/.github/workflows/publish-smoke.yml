@@ -32,6 +32,9 @@ concurrency:
   group: publish-smoke
   cancel-in-progress: false
 
+env:
+  MBX_DISABLE: "1"
+
 jobs:
   smoke:
     name: Publish smoke packages
@@ -64,6 +67,7 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - name: Build aube
         run: cargo build -p aube

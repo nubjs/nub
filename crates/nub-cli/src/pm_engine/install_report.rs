@@ -118,15 +118,16 @@ fn render_string_list(raw: &str) -> String {
     items.join(",")
 }
 
-/// The toolchain's own name for the package that triggered the opt-out. The two
-/// nub seeds are frameworks whose proper names are not their package ids, and
-/// the row is prose the reader is meant to recognize — "react-native projects"
+/// The toolchain's own name for the package that triggered the opt-out. The nub
+/// seeds are frameworks whose proper names are not their package ids, and the
+/// row is prose the reader is meant to recognize — "react-native projects"
 /// reads as a typo for the thing they actually use. Anything else is a pattern
 /// someone configured themselves, where their own spelling is the right answer.
 fn toolchain_display_name(package: &str) -> &str {
     match package {
         "next" => "Next",
         "react-native" => "React Native",
+        "remix" => "Remix",
         other => other,
     }
 }
@@ -1601,6 +1602,10 @@ mod tests {
         assert_eq!(
             Source::IncompatiblePackage("react-native".to_string()).to_string(),
             "global virtual store auto-disabled in React Native projects"
+        );
+        assert_eq!(
+            Source::IncompatiblePackage("remix".to_string()).to_string(),
+            "global virtual store auto-disabled in Remix projects"
         );
         assert_eq!(
             Source::IncompatiblePackage("some-local-pkg".to_string()).to_string(),

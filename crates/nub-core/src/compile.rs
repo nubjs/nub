@@ -40,9 +40,27 @@ pub const SECTION_NAME: &str = "__nubc";
 /// and must not vary with the entry's layout.
 pub const COMPILE_BOOTSTRAP_NAME: &str = "__nub_compile_bootstrap.cjs";
 
+/// The trailer that marks an inline (`no-extract`) payload, and the only thing in
+/// the container the compiled artifact's own JavaScript ever parses.
+///
+/// Written at the very END of the payload blob, so it is inside the injected
+/// section and therefore inside whatever the platform signs. The bootstrap reads a
+/// bounded window at the end of the executable, scans BACKWARDS for this magic, and
+/// takes the two little-endian `u64`s that follow it: the distance back from the
+/// magic's first byte to the app region's first byte, and the app region's length.
+///
+/// Sixteen bytes of non-ASCII so it cannot occur in the JavaScript or the manifest
+/// it sits behind, and searched from the end so the last match wins — the compiler
+/// writes exactly one, and nothing but the platform's signature follows it.
+pub const INLINE_LOCATOR_MAGIC: &[u8; 16] = b"\x00nub-inline-app\x00";
+
+/// Magic + `u64` back-distance + `u64` app-region length.
+pub const INLINE_LOCATOR_LEN: usize = 16 + 8 + 8;
+
 const MAGIC: &[u8; 4] = b"NUBC";
 const FORMAT_VERSION_V1: u8 = 1;
-const FORMAT_VERSION: u8 = 2;
+const FORMAT_VERSION_V2: u8 = 2;
+const FORMAT_VERSION: u8 = 3;
 const HEADER_LEN_V1: usize = 4 + 1 + 3 + 4 + 8 + 8; // magic, ver, pad, manifest_len, app_len, node_len
 const HEADER_LEN_V2: usize = HEADER_LEN_V1 + 8; // + license_len
 
@@ -170,6 +188,18 @@ pub struct Manifest {
     /// the launcher falls back to the digest then, so old artifacts keep working.
     #[serde(default)]
     pub node_size: u64,
+    /// The locales `--icu` kept in the embedded Node, comma-joined. Empty means the
+    /// Node is the official one, untrimmed — which is the default, and what every
+    /// manifest written before this field existed describes.
+    ///
+    /// Load-bearing at RUNTIME, not just informational: it is what forbids the
+    /// launcher's official-Node dedup. That dedup rests on the embedded and the
+    /// provisioned Node running identically, which a trim falsifies — so without
+    /// this gate one artifact would format through full ICU on a machine that has
+    /// Node in nub's store and through the trimmed data on a machine that does not,
+    /// and the publisher would be unable to reproduce their own user's bug.
+    #[serde(default)]
+    pub node_icu: String,
     /// Whether each app file's bytes are individually zstd-compressed.
     ///
     /// Per FILE, not per region: this module is a pure container (see the header —
@@ -217,14 +247,16 @@ pub struct Manifest {
     /// module loader at runtime. Presence, not extension: the CJS loader parses
     /// an exact-path `require()` of any unknown extension as JS.
     ///
-    /// What it buys: the launcher skips the feature matrix's `UnflagArgv` rows
-    /// (today `--js-defer-import-eval`). Those flags exist to enable in-progress
-    /// JS syntax in files Node parses at runtime, which `nub run` must assume
-    /// anywhere in the graph — but a sealed bundle has no such files, and the
-    /// bundler already lowered the graph it emitted (Rolldown evaluates
-    /// `import defer` eagerly, so the syntax never survives into the payload).
-    /// Measured on Node 26.7: the V8 flag alone costs ~6 ms of warm start,
-    /// because a non-default V8 flag invalidates the snapshot fast path.
+    /// What it buys: the launcher skips the feature matrix's `UnflagArgv` and
+    /// `RuntimeV8Flag` rows (today `--js-defer-import-eval`, a runtime row). Those
+    /// flags exist to enable in-progress JS syntax in files Node parses at
+    /// runtime, which `nub run` must assume anywhere in the graph — but a sealed
+    /// bundle has no such files, and the bundler already lowered the graph it
+    /// emitted (Rolldown evaluates `import defer` eagerly, so the syntax never
+    /// survives into the payload). Measured on Node 26.7 when the flag still rode
+    /// argv: it alone cost ~6 ms of warm start, because a non-default V8 flag at
+    /// startup makes Node reject its embedded builtin code cache for every
+    /// internal compiled afterwards.
     ///
     /// Residual channels a sealed graph still has — `createRequire()` on a
     /// computed path — behave exactly as they do under bare `node app.js`,
@@ -235,6 +267,65 @@ pub struct Manifest {
     /// (always inject) exactly.
     #[serde(default)]
     pub sealed_module_graph: bool,
+    /// Whether `--hide-console` built this artifact, which the launcher needs to
+    /// know at RUN time and cannot infer from the image it is running as.
+    ///
+    /// The subsystem flip alone does not hide anything here. Bun and Deno ARE the
+    /// process they hide, so a GUI subsystem is their whole fix; nub's launcher
+    /// SPAWNS Node, and Windows allocates a console for a console-subsystem child
+    /// whose parent has none — so the flash simply moves from the launcher to
+    /// Node. Closing that means passing `CREATE_NO_WINDOW` on the spawn, and the
+    /// launcher has no other way to tell a hidden build from an ordinary one:
+    /// nothing readable at run time distinguishes them, and reading its own PE
+    /// header back would be both slower and a layering inversion.
+    ///
+    /// Absent in legacy manifests, where `false` is exactly what they were doing.
+    #[serde(default)]
+    pub hide_console: bool,
+    /// Whether this payload runs WITHOUT being extracted: the launcher hands Node
+    /// the compiled bootstrap through `-e` and the bootstrap serves every chunk
+    /// from the executable's own bytes as a `data:` URL, so nothing the app needs
+    /// is ever written to disk.
+    ///
+    /// Set only for a payload that reduces to generated JavaScript chunks and the
+    /// bootstrap — no `--external` shim, no verbatim file, no worker chunk, and an
+    /// acyclic chunk graph (see `nub compile`'s `inline_launch_plan`). A payload
+    /// that misses any of those extracts exactly as it always has.
+    ///
+    /// Two container conventions follow from it, and they are the reason this is a
+    /// manifest field rather than a launcher inference:
+    /// - the app-file bytes are BROTLI-compressed, not zstd, because the code that
+    ///   decompresses them is the JavaScript bootstrap and
+    ///   `zlib.zstdDecompressSync` is missing on 23.5/23.6 while brotli is on every
+    ///   supported Node. [`Self::app_compressed`] is therefore false: no Rust code
+    ///   decompresses an inline payload.
+    /// - the payload blob carries an [`INLINE_LOCATOR_MAGIC`] trailer, which is how
+    ///   the bootstrap finds the app region's FILE offset. The launcher cannot
+    ///   supply one: `find_section` returns a pointer into the MAPPED image on all
+    ///   three platforms (`getsectdata`, `dl_iterate_phdr`, `LockResource`), and no
+    ///   file offset exists anywhere on that path.
+    ///
+    /// Absent in legacy manifests, where `false` is what every existing artifact
+    /// already does.
+    #[serde(default)]
+    pub inline_app: bool,
+    /// Whether the launcher starts Node WITHOUT `--require`ing the compiled
+    /// bootstrap, passing its path in `__NUB_COMPILED_BOOTSTRAP` instead for the
+    /// bundled preamble to publish the record from (`runtime/compile-record.mjs`).
+    ///
+    /// Set when the sealed graph names neither `child_process`/`cluster` nor
+    /// `Worker`/`worker_threads` — the bootstrap's only preload-time job is the
+    /// fork identity fix-up, and `nub compile` has already stripped that region for
+    /// such a payload — and the target Node has `process.getBuiltinModule` (22.3+),
+    /// which is how the preamble reaches builtins without the bootstrap's early CJS
+    /// `require`. The preload is what it saves: ~0.7 ms of CPU per start for the
+    /// mechanism alone, measured with an empty file, plus the bootstrap's own
+    /// evaluation.
+    ///
+    /// Absent in legacy manifests, where `false` is exactly the preload they were
+    /// built for.
+    #[serde(default)]
+    pub standalone_preamble: bool,
 }
 
 /// One logical file in the payload. `B` is `Vec<u8>` on the writing side and
@@ -251,13 +342,34 @@ pub struct AppFile<B> {
     /// Windows has no such mode, so a Windows BUILD host always records false;
     /// see [`AppFile::from_source_mode`].
     pub executable: bool,
+    /// What this file's length is once EXTRACTED — the length of the content the
+    /// build embedded, before whatever codec `bytes` is stored under. It equals
+    /// `bytes.len()` only where the payload stores content verbatim, so it is
+    /// taken from the source bytes rather than derived from `bytes`. An inline
+    /// payload never extracts, so nothing reads this for one.
+    ///
+    /// Recorded so a warm launch can accept an already-extracted tree by
+    /// comparing lengths rather than materializing the payload. The byte
+    /// comparison this replaces cost a zstd decode of the entire app region on
+    /// every start — invisible on a hello-world bundle, 45 ms on a 20 MB
+    /// `--include`. Length, not a digest, for the reason spelled out on
+    /// [`Manifest::node_size`].
+    ///
+    /// `None` only when decoded from an app-region format that predates the
+    /// field. Every writer sets it, and [`encode_with_license`] insists on it.
+    pub plain_size: Option<u64>,
 }
 
-impl<B> AppFile<B> {
+impl<B: AsRef<[u8]>> AppFile<B> {
     /// A generated payload file: compiler output, never executable.
+    ///
+    /// Records `bytes` as the extracted length, so it takes the file's real
+    /// content — a caller that has already compressed has to say what the bytes
+    /// came from instead.
     pub fn plain(name: impl Into<String>, bytes: B) -> Self {
         Self {
             name: name.into(),
+            plain_size: Some(bytes.as_ref().len() as u64),
             bytes,
             executable: false,
         }
@@ -277,6 +389,7 @@ impl<B> AppFile<B> {
     pub fn from_source_mode(name: impl Into<String>, bytes: B, mode: Option<u32>) -> Self {
         Self {
             name: name.into(),
+            plain_size: Some(bytes.as_ref().len() as u64),
             bytes,
             executable: mode.is_some_and(|mode| mode & 0o111 != 0),
         }
@@ -425,16 +538,16 @@ fn is_dos_device(stem: &str) -> bool {
 ///
 /// `node_blob` is the already-zstd-compressed Node binary (empty for `smol`).
 ///
-/// This compatibility wrapper produces V2 but carries no license. New compiled
-/// artifacts must use [`encode_with_license`]; keeping this spelling lets
-/// independent container-scanner fixtures continue to build V2 payloads without
-/// pretending they are redistributable Node artifacts.
+/// This compatibility wrapper carries no license. New compiled artifacts must use
+/// [`encode_with_license`]; keeping this spelling lets independent
+/// container-scanner fixtures continue to build payloads without pretending they
+/// are redistributable Node artifacts.
 pub fn encode(manifest: &Manifest, app_files: &[AppFile<Vec<u8>>], node_blob: &[u8]) -> Vec<u8> {
     encode_with_license(manifest, app_files, node_blob, &[])
 }
 
-/// Encode a V2 payload with the already-zstd-19-compressed official Node
-/// `LICENSE`. V2 stores each physical app byte sequence once: later logical
+/// Encode a current-format payload with the already-zstd-19-compressed official
+/// Node `LICENSE`. Each physical app byte sequence is stored once: later logical
 /// names with identical bytes reference the first record, while the logical
 /// file order (and consequently `app_sha256`) stays unchanged.
 pub fn encode_with_license(
@@ -445,18 +558,19 @@ pub fn encode_with_license(
 ) -> Vec<u8> {
     let manifest_bytes = serde_json::to_vec(manifest).expect("manifest serializes");
 
-    // V2 app region:
+    // V3 app region:
     // [logical file_count u32][physical data_count u32]
     // [per logical file: name_len u16, name, data_index u32 (bit 31 = executable)]
-    // [per physical data: data_len u64, data]
+    // [per physical data: data_len u64, plain_len u64, data]
     // The input bodies outlive encoding, so keys borrow them rather than cloning
     // every distinct asset just to find aliases. Slice hashing/equality is by
     // bytes, and first occurrence still decides each record's index. The
     // executable bit rides the LOGICAL record, so two names sharing one body may
-    // still differ in it.
+    // still differ in it; `plain_len` rides the PHYSICAL one, because identical
+    // bytes cannot extract to different lengths.
     let mut data_indices: HashMap<&[u8], u32> = HashMap::new();
     let mut files = Vec::with_capacity(app_files.len());
-    let mut data_records: Vec<&[u8]> = Vec::new();
+    let mut data_records: Vec<(&[u8], u64)> = Vec::new();
     for file in app_files {
         let data = file.bytes.as_slice();
         let index = match data_indices.get(data) {
@@ -466,8 +580,11 @@ pub fn encode_with_license(
                     .ok()
                     .filter(|index| *index < EXEC_FLAG)
                     .expect("too many app data records");
+                let plain_size = file
+                    .plain_size
+                    .expect("a payload writer records each app file's extracted length");
                 data_indices.insert(data, index);
-                data_records.push(data);
+                data_records.push((data, plain_size));
                 index
             }
         };
@@ -499,12 +616,13 @@ pub fn encode_with_license(
         app_region.extend_from_slice(name.as_bytes());
         app_region.extend_from_slice(&field.to_le_bytes());
     }
-    for data in data_records {
+    for (data, plain_size) in data_records {
         app_region.extend_from_slice(
             &u64::try_from(data.len())
                 .expect("app file length exceeds payload format limit")
                 .to_le_bytes(),
         );
+        app_region.extend_from_slice(&plain_size.to_le_bytes());
         app_region.extend_from_slice(data);
     }
 
@@ -542,6 +660,18 @@ pub fn encode_with_license(
     out.extend_from_slice(&app_region);
     out.extend_from_slice(node_blob);
     out.extend_from_slice(node_license_blob);
+    // The inline locator, and only for an inline payload: it is what the compiled
+    // artifact's own `-e` bootstrap uses to find the app region's FILE offset,
+    // which nothing on the Rust side can tell it (see `Manifest::inline_app`).
+    // Written past the last declared region, which `decode` already tolerates, so
+    // a payload carrying it decodes byte-identically to one that does not.
+    if manifest.inline_app {
+        let app_start = HEADER_LEN_V2 + manifest_bytes.len();
+        let back = (out.len() - app_start) as u64;
+        out.extend_from_slice(INLINE_LOCATOR_MAGIC);
+        out.extend_from_slice(&back.to_le_bytes());
+        out.extend_from_slice(&(app_region.len() as u64).to_le_bytes());
+    }
     out
 }
 
@@ -555,17 +685,20 @@ pub fn decode(bytes: &[u8]) -> Result<PayloadView<'_>> {
         bail!("compiled payload has a bad magic");
     }
     let version = bytes[4];
-    if version != FORMAT_VERSION_V1 && version != FORMAT_VERSION {
+    if !matches!(
+        version,
+        FORMAT_VERSION_V1 | FORMAT_VERSION_V2 | FORMAT_VERSION
+    ) {
         bail!(
             "compiled payload format version {} is unsupported",
             bytes[4]
         );
     }
     let corrupt = || anyhow::anyhow!("compiled payload corrupted (bad length)");
+    // V3 differs from V2 only inside the app region, so the two share a header.
     let header_len = match version {
         FORMAT_VERSION_V1 => HEADER_LEN_V1,
-        FORMAT_VERSION => HEADER_LEN_V2,
-        _ => unreachable!("version was checked above"),
+        _ => HEADER_LEN_V2,
     };
     if bytes.len() < header_len {
         bail!("compiled payload truncated (header)");
@@ -576,11 +709,11 @@ pub fn decode(bytes: &[u8]) -> Result<PayloadView<'_>> {
         .map_err(|_| corrupt())?;
     let node_len = usize::try_from(u64::from_le_bytes(bytes[20..28].try_into().unwrap()))
         .map_err(|_| corrupt())?;
-    let license_len = if version == FORMAT_VERSION {
+    let license_len = if version == FORMAT_VERSION_V1 {
+        0
+    } else {
         usize::try_from(u64::from_le_bytes(bytes[28..36].try_into().unwrap()))
             .map_err(|_| corrupt())?
-    } else {
-        0
     };
 
     // Cumulative offsets via checked_add: a corrupted section can carry garbage
@@ -604,8 +737,8 @@ pub fn decode(bytes: &[u8]) -> Result<PayloadView<'_>> {
     let app_region = bytes.get(manifest_end..app_end).ok_or_else(corrupt)?;
     let app_files = match version {
         FORMAT_VERSION_V1 => decode_app_region_v1(app_region)?,
-        FORMAT_VERSION => decode_app_region_v2(app_region)?,
-        _ => unreachable!("version was checked above"),
+        FORMAT_VERSION_V2 => decode_app_region_v2_or_v3(app_region, false)?,
+        _ => decode_app_region_v2_or_v3(app_region, true)?,
     };
     let node_blob = bytes.get(app_end..node_end).ok_or_else(corrupt)?;
     let node_license_blob = bytes.get(node_end..license_end).ok_or_else(corrupt)?;
@@ -642,13 +775,25 @@ fn decode_app_region_v1(region: &[u8]) -> Result<Vec<AppFile<&[u8]>>> {
         let data_len = usize::try_from(u64::from_le_bytes(take(8, &mut p)?.try_into().unwrap()))
             .map_err(|_| corrupt())?;
         let data = take(data_len, &mut p)?;
-        // V1 predates per-file metadata: nothing it carries can be executable.
-        files.push(AppFile::plain(name, data));
+        // V1 predates per-file metadata: nothing it carries can be executable, and
+        // its record length is the STORED length, which is the extracted length
+        // only when the payload is uncompressed. `None` rather than a guess.
+        files.push(AppFile {
+            name,
+            bytes: data,
+            executable: false,
+            plain_size: None,
+        });
     }
     Ok(files)
 }
 
-fn decode_app_region_v2(region: &[u8]) -> Result<Vec<AppFile<&[u8]>>> {
+/// V2 and V3 share a layout apart from the per-record extracted length V3 added,
+/// so one reader takes both and `records_plain_sizes` selects the version.
+fn decode_app_region_v2_or_v3(
+    region: &[u8],
+    records_plain_sizes: bool,
+) -> Result<Vec<AppFile<&[u8]>>> {
     let corrupt = || anyhow::anyhow!("compiled payload corrupted (app region)");
     let mut p = 0usize;
     let take = |len: usize, p: &mut usize| -> Result<&[u8]> {
@@ -672,7 +817,12 @@ fn decode_app_region_v2(region: &[u8]) -> Result<Vec<AppFile<&[u8]>>> {
     for _ in 0..data_count {
         let data_len = usize::try_from(u64::from_le_bytes(take(8, &mut p)?.try_into().unwrap()))
             .map_err(|_| corrupt())?;
-        records.push(take(data_len, &mut p)?);
+        let plain_size = if records_plain_sizes {
+            Some(u64::from_le_bytes(take(8, &mut p)?.try_into().unwrap()))
+        } else {
+            None
+        };
+        records.push((take(data_len, &mut p)?, plain_size));
     }
     if p != region.len() {
         bail!("compiled payload corrupted (app region)");
@@ -680,11 +830,12 @@ fn decode_app_region_v2(region: &[u8]) -> Result<Vec<AppFile<&[u8]>>> {
     names
         .into_iter()
         .map(|(name, index, executable)| {
-            let data = records.get(index as usize).copied().ok_or_else(corrupt)?;
+            let (data, plain_size) = records.get(index as usize).copied().ok_or_else(corrupt)?;
             Ok(AppFile {
                 name,
                 bytes: data,
                 executable,
+                plain_size,
             })
         })
         .collect()
@@ -865,12 +1016,16 @@ mod tests {
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "def456".into(),
             minify: false,
             install_message: None,
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
+            inline_app: false,
+            standalone_preamble: false,
         }
     }
 
@@ -894,6 +1049,7 @@ mod tests {
             node_sha256: "abc123".into(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "def456".into(),
             minify: true,
@@ -902,6 +1058,12 @@ mod tests {
             // encoding bug, so it would fix the build without covering the field.
             node_flags: vec!["--max-old-space-size=256".into(), "--no-warnings".into()],
             sealed_module_graph: false,
+            // True on purpose: `false` is this field's serde default, so a
+            // manifest carrying it would round-trip through an encoding bug that
+            // dropped the field entirely.
+            hide_console: true,
+            inline_app: false,
+            standalone_preamble: false,
         };
         let app = vec![
             AppFile::plain("main.js", b"import './c.js'\n".to_vec()),
@@ -918,6 +1080,10 @@ mod tests {
             view.manifest.node_flags,
             ["--max-old-space-size=256", "--no-warnings"],
             "flags baked into the binary must survive the round trip in order"
+        );
+        assert!(
+            view.manifest.hide_console,
+            "the hidden-console flag decides whether the launcher passes              CREATE_NO_WINDOW, so losing it in the payload un-hides the artifact"
         );
         assert_eq!(view.app_files.len(), 2);
         assert_eq!(view.app_files[0].name, "main.js");
@@ -941,6 +1107,7 @@ mod tests {
             node_sha256: String::new(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "aa".into(),
             minify: false,
@@ -948,6 +1115,9 @@ mod tests {
             // Empty here, so the pair covers both ends of the field.
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
+            inline_app: false,
+            standalone_preamble: false,
         };
         let app = vec![AppFile::plain("main.js", b"console.log(1)".to_vec())];
         let blob = encode_with_license(&manifest, &app, &[], &[]);
@@ -1028,9 +1198,80 @@ mod tests {
             view.manifest.smol_version_range.is_empty(),
             "a legacy manifest without a range retains floor mode"
         );
-        assert_eq!(view.app_files, vec![AppFile::plain("main.js", &b"app"[..])]);
+        assert_eq!(
+            view.app_files,
+            vec![AppFile {
+                name: "main.js".to_owned(),
+                bytes: &b"app"[..],
+                executable: false,
+                // V1's record length is the STORED length, which is the extracted
+                // length only when the payload is uncompressed. The decoder must
+                // report no length rather than guess one.
+                plain_size: None,
+            }]
+        );
         assert_eq!(view.node_blob, b"nz");
         assert!(view.node_license_blob.is_empty());
+    }
+
+    /// V2 is the last format whose app region records no extracted length. The
+    /// launcher's warm path reads `plain_size` to decide whether it can accept a
+    /// cached tree by length, so a V2 payload has to say so rather than let a
+    /// stored length be mistaken for an extracted one.
+    #[test]
+    fn a_v2_app_region_decodes_with_no_recorded_extracted_length() {
+        let manifest = serde_json::to_vec(&test_manifest(Shape::Smol)).unwrap();
+        let mut app = Vec::new();
+        app.extend_from_slice(&1u32.to_le_bytes()); // logical file count
+        app.extend_from_slice(&1u32.to_le_bytes()); // physical data count
+        app.extend_from_slice(&7u16.to_le_bytes());
+        app.extend_from_slice(b"main.js");
+        app.extend_from_slice(&0u32.to_le_bytes()); // data_index 0, not executable
+        app.extend_from_slice(&3u64.to_le_bytes());
+        app.extend_from_slice(b"app");
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(FORMAT_VERSION_V2);
+        bytes.extend_from_slice(&[0; 3]);
+        bytes.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(app.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // node_len
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // license_len
+        bytes.extend_from_slice(&manifest);
+        bytes.extend_from_slice(&app);
+
+        let view = decode(&bytes).expect("V2 payload decodes");
+        assert_eq!(
+            view.app_files,
+            vec![AppFile {
+                name: "main.js".to_owned(),
+                bytes: &b"app"[..],
+                executable: false,
+                plain_size: None,
+            }]
+        );
+    }
+
+    /// The recorded length is what the file becomes on DISK, so for a compressed
+    /// payload it is deliberately not the length of the bytes the container
+    /// stores. Only the compile side knows the difference, so the container has to
+    /// carry the value it is handed rather than derive one.
+    #[test]
+    fn the_recorded_length_is_the_extracted_one_not_the_stored_one() {
+        let app = vec![AppFile {
+            name: "main.js".to_owned(),
+            bytes: b"squeezed".to_vec(),
+            executable: false,
+            plain_size: Some(4096),
+        }];
+        let mut manifest = test_manifest(Shape::Smol);
+        manifest.app_compressed = true;
+
+        let blob = encode(&manifest, &app, &[]);
+        let view = decode(&blob).expect("payload decodes");
+        assert_eq!(view.app_files[0].bytes, b"squeezed");
+        assert_eq!(view.app_files[0].plain_size, Some(4096));
     }
 
     #[test]
@@ -1103,6 +1344,7 @@ mod tests {
                 name: "bin/run.sh".to_owned(),
                 bytes: b"#!/bin/sh\n".to_vec(),
                 executable: true,
+                plain_size: Some(b"#!/bin/sh\n".len() as u64),
             },
         ];
         let blob = encode(&test_manifest(Shape::Smol), &app, &[]);

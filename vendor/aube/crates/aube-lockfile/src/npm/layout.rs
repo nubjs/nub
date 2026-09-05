@@ -1,5 +1,5 @@
 use crate::{DirectDep, LockedPackage};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::raw::InstallPathInfo;
 
@@ -117,6 +117,7 @@ pub(crate) fn segments_to_install_path(segs: &[String]) -> String {
 pub(crate) fn build_hoist_tree(
     canonical: &BTreeMap<String, &LockedPackage>,
     roots: &[DirectDep],
+    preferred_roots: Option<&BTreeMap<String, String>>,
 ) -> BTreeMap<Vec<String>, String> {
     let mut placed: BTreeMap<Vec<String>, String> = BTreeMap::new();
     let mut queue: VecDeque<(Vec<String>, String)> = VecDeque::new();
@@ -129,6 +130,27 @@ pub(crate) fn build_hoist_tree(
         let segs = vec![dep.name.clone()];
         if placed.insert(segs.clone(), key.clone()).is_none() {
             queue.push_back((segs, key));
+        }
+    }
+
+    // npm preserves an existing valid top-level placement when an install
+    // changes an unrelated dependency. Seed those choices before traversing
+    // transitives so the first BFS path to a multi-version package does not
+    // arbitrarily replace the version npm had already hoisted. Direct roots
+    // above remain authoritative, and the reachability gate prevents stale
+    // lockfile entries from surviving after their last edge is removed.
+    if let Some(preferred_roots) = preferred_roots {
+        let reachable = reachable_canonical_keys(canonical, roots);
+        for (name, key) in preferred_roots {
+            if !reachable.contains(key) {
+                continue;
+            }
+            let root_slot = vec![name.clone()];
+            if placed.contains_key(&root_slot) {
+                continue;
+            }
+            placed.insert(root_slot.clone(), key.clone());
+            queue.push_back((root_slot, key.clone()));
         }
     }
 
@@ -185,6 +207,32 @@ pub(crate) fn build_hoist_tree(
     }
 
     placed
+}
+
+fn reachable_canonical_keys(
+    canonical: &BTreeMap<String, &LockedPackage>,
+    roots: &[DirectDep],
+) -> BTreeSet<String> {
+    let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    for dep in roots {
+        let key = canonical_key_from_dep_path(&dep.dep_path);
+        if canonical.contains_key(&key) && reachable.insert(key.clone()) {
+            queue.push_back(key);
+        }
+    }
+    while let Some(key) = queue.pop_front() {
+        let Some(pkg) = canonical.get(&key).copied() else {
+            continue;
+        };
+        for (child_name, child_value) in &pkg.dependencies {
+            let child_key = child_canonical_key(child_name, child_value);
+            if canonical.contains_key(&child_key) && reachable.insert(child_key.clone()) {
+                queue.push_back(child_key);
+            }
+        }
+    }
+    reachable
 }
 
 /// Three-way result of an ancestor-chain lookup. Differentiating

@@ -100,7 +100,7 @@ CI's `stable-immutable-release` job creates the prerelease with `generate_releas
 
 Build the notes from the **full** `git log "$PREV"..HEAD` changeset (Step 1), not just the headline fixes — every user-affecting change ships.
 
-**Notes must be SCANNABLE, not paragraph-dense.** A reader skims headings, tables, and the heads-up callout and gets the whole release at a glance — they should never have to read a run-on paragraph to find what changed. The cross-project prose/tone guide for all public-facing copy — including the release-notes shape — is [`PROSE.md`](../../../PROSE.md). The concrete rules:
+**Notes must be SCANNABLE, not paragraph-dense.** A reader skims headings, tables, and the heads-up callout and gets the whole release at a glance — they should never have to read a run-on paragraph to find what changed. The cross-project prose/tone guide for all public-facing copy — including the release-notes shape — is the `prose-writing` skill's guide. The concrete rules:
 
 - **One-line intro** stating what the release is about (the dominant theme).
 - **Themed `##` sections, not generic buckets.** Group by what the changes *touch* — e.g. "Lockfile compatibility" / "Performance" / "Runtime fixes" / "Documentation" / "Testing & internals" — not by Fixes/Compatibility/Internal abstractions. Each major change gets a short titled blurb or a table row, never a multi-sentence paragraph.
@@ -166,7 +166,7 @@ The v0.1.4 and v0.1.3 release bodies are the reference exemplars of this structu
 
 ## Step 4b — Publish the notes as a blog post (MANDATORY — every release)
 
-Every release also ships as a blog post under `site/content/blog/`. This is a standard release step, done on every version — the same content/presentation-to-`main` exception as docs (commit directly to `main`, no PR). Before writing, invoke the `prose-writing` skill and follow PROSE.md (blog copy: routine patch notes stay factual, neutral, unsigned, scannable — no hype, no personality; a milestone version gets a fuller treatment but the same neutral bar).
+Every release also ships as a blog post under `site/content/blog/`. This is a standard release step, done on every version — the same content/presentation-to-`main` exception as docs (commit directly to `main`, no PR). Before writing, invoke the `prose-writing` skill and follow its guide (blog copy: routine patch notes stay factual, neutral, unsigned, scannable — no hype, no personality; a milestone version gets a fuller treatment but the same neutral bar).
 
 - **File:** `site/content/blog/nub-<major>-<minor>-<patch>.mdx` (e.g. `nub-0-2-10.mdx`) — the filename is the URL slug; fumadocs auto-globs `content/blog/*.mdx`, so no index/meta wiring is needed.
 - **Frontmatter** (schema from `source.config.ts`, all four required): `title: "Nub <ver>"` (add a `: <theme>` subtitle only for a milestone), `description:` a plain sentence with **no inline code/backticks** (the field renders raw), `author: The Nub Team`, `date: <YYYY-MM-DD>` **back-dated to the release's `publishedAt`** so the timeline stays chronological.

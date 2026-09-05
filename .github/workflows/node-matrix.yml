@@ -18,11 +18,28 @@ name: Node matrix
 #   - push:main + nightly: the FULL version matrix + both real-app builds.
 #   - concurrency group with cancel-in-progress so superseded runs free their slots.
 
+# The path filter is `paths-ignore`, not `paths`, and the direction is deliberate: a
+# `paths` allowlist fails CLOSED — a new Rust directory nobody remembered to add would
+# silently stop running this workflow — while `paths-ignore` fails toward RUNNING, and
+# GitHub skips the workflow only when EVERY changed file matches. The listed surfaces
+# cannot change what `Build nub (once)` compiles, and that build is otherwise ~4 min of
+# Rust on a docs-only pull request. The nightly cron ignores path filters entirely, so
+# the full matrix still runs daily regardless.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "wiki/**"
+      - "*.md"
+      - ".claude/**"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "wiki/**"
+      - "*.md"
+      - ".claude/**"
   schedule:
     # Nightly full matrix at 05:00 UTC (offset from the other nightlies: CI 06:00,
     # lockfile-roundtrip 07:00, pnpm-conformance 08:00).
@@ -31,8 +48,12 @@ on:
 
 permissions: {}
 
+# The event name is part of the group so a trunk push cannot cancel the nightly
+# schedule run. rust-cache saves in a post-step that a cancelled job never reaches,
+# and 34 of the last 39 push:main runs were cancelled by the next push — so the
+# nightly is the one run guaranteed to refresh every trunk-scoped cache key.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:

@@ -23,6 +23,9 @@ pub enum Error {
     #[error("refusing to create node_modules entry for unsafe package name: {0:?}")]
     #[diagnostic(code(ERR_AUBE_UNSAFE_PACKAGE_NAME))]
     UnsafePackageName(String),
+    #[error("refusing to use a modules directory that is not inside the project: {0}")]
+    #[diagnostic(code(ERR_AUBE_UNSAFE_MODULES_DIR))]
+    UnsafeModulesDir(PathBuf),
     #[error(
         "cached package index references a missing CAS shard at {store_path} (file: {rel_path:?}). The store and its index cache are out of sync — rerun the install to re-fetch the tarball."
     )]

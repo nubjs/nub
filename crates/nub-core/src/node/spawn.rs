@@ -24,6 +24,26 @@ use super::discovery::ResolvedNode;
 use super::flags;
 use super::version::NodeVersion;
 
+/// Whether this process is attached to a console.
+///
+/// Only a compiled artifact built with `--hide-console` asks. Such a launcher
+/// carries the GUI subsystem, so Windows allocates it no console of its own — but
+/// a GUI process started FROM a console inherits that one, which is the difference
+/// between double-clicking the binary and running it from `cmd.exe`, and the
+/// difference decides whether suppressing the child's console loses the user's
+/// output or saves them a flashing window.
+///
+/// `GetConsoleWindow` is the question asked directly. Testing the standard handles
+/// instead answers a narrower one — `app.exe > out.txt` redirects stdout to a file
+/// while stderr stays on the console — and would suppress a console that is
+/// genuinely there.
+#[cfg(windows)]
+pub fn process_has_console() -> bool {
+    // SAFETY: no arguments, no out-params; returns the console's window handle or
+    // null, and is safe to call at any time from any thread.
+    !unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null()
+}
+
 #[cfg(windows)]
 #[derive(Debug)]
 struct FileHandle {
@@ -1417,6 +1437,13 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // is the only channel that can carry them at all (see the
     // `runtime_v8_flags` field doc) — so a broken install that cannot locate the preload
     // must not silently swallow them as well.
+    // The runtime V8 signal is SET or REMOVED by every launch, never inherited: an
+    // ancestor's positive signal must not outlive the decision this launch makes. A
+    // `--no-js-defer-import-eval` on this argv empties the set below, and the parent's
+    // env would otherwise re-arm the preload over that opt-out. Inheritance is for
+    // processes that make no Nub launch decision — a Worker, or a child spawned by
+    // absolute path — see `flags::RUNTIME_V8_FLAGS_ENV`.
+    cmd.env_remove(flags::RUNTIME_V8_FLAGS_ENV);
     if !config.compat_mode {
         // Matrix-derived ARGV-only V8 unflags (`Mitigation::UnflagArgv`) ride here for
         // the same reasons `v8Flags` do: NODE_OPTIONS refuses them outright, and this
@@ -1437,6 +1464,21 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             cmd.env(flags::ARGV_ONLY_FLAGS_ENV, argv_only.join(" "));
         }
         cmd.args(&argv_only);
+        // The matrix's runtime V8 flags (`Mitigation::RuntimeV8Flag`) never touch
+        // argv: the preload turns them on inside the process, on first use. Same
+        // probe and user-polarity filters, delivered through an env var stamped with
+        // this Node's version — see `flags::RUNTIME_V8_FLAGS_ENV`.
+        let runtime_v8 = flags::runtime_inject_flags(
+            Some(config.node.path.as_std_path()),
+            &config.node.version,
+            config.user_args,
+        );
+        if !runtime_v8.is_empty() {
+            cmd.env(
+                flags::RUNTIME_V8_FLAGS_ENV,
+                flags::runtime_v8_flags_env_value(&config.node.version, &runtime_v8),
+            );
+        }
         cmd.args(config.runtime_v8_flags);
     }
 

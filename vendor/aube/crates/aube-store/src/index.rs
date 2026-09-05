@@ -11,12 +11,93 @@ pub struct StoredFile {
     /// The hex hash of the file content.
     pub hex_hash: String,
     /// The path within the store.
+    #[serde(with = "stored_path")]
     pub store_path: PathBuf,
     /// Whether the file is executable.
     pub executable: bool,
     /// File size in bytes when the entry was imported.
     #[serde(default)]
     pub size: Option<u64>,
+}
+
+mod stored_path {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+    use std::path::{Path, PathBuf};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    enum NativePath {
+        UnixBytes(Vec<u8>),
+        WindowsWide(Vec<u16>),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredPath {
+        Utf8(String),
+        Native(NativePath),
+    }
+
+    pub(super) fn serialize<S>(path: &Path, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if let Some(path) = path.to_str() {
+            return serializer.serialize_str(path);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            NativePath::UnixBytes(path.as_os_str().as_bytes().to_vec()).serialize(serializer)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            NativePath::WindowsWide(path.as_os_str().encode_wide().collect()).serialize(serializer)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(serde::ser::Error::custom(
+                "path contains characters unsupported by this platform",
+            ))
+        }
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match StoredPath::deserialize(deserializer)? {
+            StoredPath::Utf8(path) => Ok(PathBuf::from(path)),
+            StoredPath::Native(NativePath::UnixBytes(bytes)) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStringExt;
+                    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = bytes;
+                    Err(de::Error::custom("Unix path cache read on a non-Unix host"))
+                }
+            }
+            StoredPath::Native(NativePath::WindowsWide(wide)) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::ffi::OsStringExt;
+                    Ok(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = wide;
+                    Err(de::Error::custom(
+                        "Windows path cache read on a non-Windows host",
+                    ))
+                }
+            }
+        }
+    }
 }
 
 /// Index of all files in a package, keyed by relative path within the package.
@@ -132,7 +213,7 @@ impl Store {
             // A stale entry served by the read fallback is not ours to
             // delete; the re-fetch this miss triggers saves a fresh index
             // into this store, which then shadows it.
-            if index_path.starts_with(self.index_dir()) {
+            if index_path.starts_with(self.index_dir()) && self.prepare_for_write().is_ok() {
                 let _ = xx::file::remove_file(&index_path);
             }
             return None;
@@ -158,6 +239,7 @@ impl Store {
         version: &str,
         integrity: Option<&str>,
     ) -> Result<bool, Error> {
+        self.prepare_for_write()?;
         let Some(index_path) = self.index_write_path(name, version, integrity) else {
             return Ok(false);
         };
@@ -179,13 +261,13 @@ impl Store {
         integrity: Option<&str>,
         index: &PackageIndex,
     ) -> Result<(), Error> {
+        self.prepare_for_write()?;
         let index_path = self.index_write_path(name, version, integrity).ok_or_else(|| {
             Error::Tar(format!(
                 "refusing to cache: invalid coordinate {name:?}@{version:?} or integrity {integrity:?}"
             ))
         })?;
-        let json =
-            serde_json::to_string(index).map_err(|e| Error::Tar(format!("serialize: {e}")))?;
+        let json = sonic_rs::to_vec(index).map_err(|e| Error::Tar(format!("serialize: {e}")))?;
         xx::file::write(&index_path, json).map_err(|e| Error::Xx(e.to_string()))?;
         trace!("cached index: {name}@{version}");
         Ok(())
@@ -253,5 +335,29 @@ impl Store {
             None => PathBuf::from(filename),
         };
         Some(rel)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::StoredFile;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn stored_file_round_trips_non_utf8_store_path() {
+        let stored = StoredFile {
+            hex_hash: "abc123".into(),
+            store_path: std::path::PathBuf::from(std::ffi::OsString::from_vec(
+                b"/store/path-\xff".to_vec(),
+            )),
+            executable: false,
+            size: Some(3),
+        };
+
+        let json = serde_json::to_string(&stored).unwrap();
+        let decoded: StoredFile = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.store_path, stored.store_path);
+        assert!(json.contains("unixBytes"));
     }
 }

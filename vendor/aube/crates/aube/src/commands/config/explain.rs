@@ -1,8 +1,7 @@
 use super::setting_for_key;
-use clap::Args;
 use miette::miette;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ExplainArgs {
     /// Setting key, `.npmrc` alias, env var, workspace YAML key, or CLI flag.
     pub key: String,

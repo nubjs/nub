@@ -1,9 +1,19 @@
 // Runtime globals compiled artifacts need without Nub's loader or installed runtime.
-const bootstrap = process[Symbol.for("nub.compile.bootstrap")];
+// First import, and it stays first: it publishes the record when the launcher skipped
+// the bootstrap preload, and the modules below read that record as they evaluate.
+import { bootstrap } from "./compile-record.mjs";
 const COMPILED_WORKER_STATE = "nub.compile.worker-state";
-const workerThreads = bootstrap.getBuiltin("node:worker_threads");
+// Loading node:worker_threads costs ~1.4 ms on every run of the artifact, so it is
+// skipped when the payload's sealed graph never reaches Worker or worker_threads.
+// The bootstrap made that call at build time — see its `nub:compile:worker` region
+// — and a null here means no Worker can exist in this process, so there is no
+// state to carry and nothing to publish.
+const workerThreads = bootstrap.needsWorker
+  ? bootstrap.getBuiltin("node:worker_threads")
+  : null;
 
 function readCompiledWorkerState() {
+  if (workerThreads === null) return null;
   let state;
   try {
     state = workerThreads.getEnvironmentData(COMPILED_WORKER_STATE);
@@ -46,7 +56,11 @@ if (
 ) {
   process.env.__NUB_NEUTRALIZE_LOCALSTORAGE = "1";
 }
-if (typeof compiledExecPath === "string" && compiledExecPath.length !== 0) {
+if (
+  workerThreads !== null &&
+  typeof compiledExecPath === "string" &&
+  compiledExecPath.length !== 0
+) {
   workerThreads.setEnvironmentData(COMPILED_WORKER_STATE, {
     compiledExecPath,
     neutralizeLocalStorage,
@@ -58,26 +72,25 @@ if (typeof compiledExecPath === "string" && compiledExecPath.length !== 0) {
 // the matching regions from this source before bundling — so the polyfill is never
 // pulled into the graph at all. Measured on Node 26, where Temporal, URLPattern,
 // Float16Array and navigator are all native: ~195 KB of the 206 KB bundle was dead
-// weight, and constructing it cost ~18 ms on every launch.
+// weight, and constructing it cost ~18 ms on every launch. A region that SURVIVES
+// — an older target, or an unknown one under `--smol` — installs a lazy global
+// instead: the package is bundled, but evaluated on the first read of the global
+// rather than at start (compile-lazy-*.cjs), as the run-time preload has always
+// done for Temporal.
 //
 // Keep an import and its use in regions of the SAME name, and keep every region
 // independently removable — stripping one must leave valid syntax behind.
 // #region nub:polyfill:urlpattern
-import { URLPattern } from "urlpattern-polyfill/urlpattern";
+import { installCompiledUrlPatternLazyGlobal } from "./compile-lazy-urlpattern.cjs";
 // #endregion
 // #region nub:polyfill:float16
-import * as float16 from "@petamoriken/float16";
+import { installCompiledFloat16LazyGlobals } from "./compile-lazy-float16.cjs";
 // #endregion
 // #region nub:polyfill:temporal
-import { Temporal, toTemporalInstant } from "@js-temporal/polyfill";
+import { installCompiledTemporalLazyGlobal } from "./compile-lazy-temporal.cjs";
 // #endregion
 import { installSyncPolyfills } from "./polyfills.cjs";
-import {
-  installCompiledChildProcess,
-  // #region nub:polyfill:temporal
-  installTemporalGlobal,
-  // #endregion
-} from "./preload-common.cjs";
+import { installCompiledChildProcess } from "./preload-common.cjs";
 // #region nub:polyfill:navigator
 import {
   installNavigatorShim,
@@ -90,8 +103,18 @@ import { installNavigatorLocks } from "./navigator-locks.mjs";
 import {
   installWorkerPolyfill,
   setBootstrapCreateRequire as setWorkerCreateRequire,
+  setBlobUrlModule,
   setCompiledBootstrapRequireArg,
 } from "./worker-polyfill.mjs";
+// Statically imported so it is BUNDLED rather than resolved beside the emitted
+// chunk. worker-polyfill reaches this module through
+// `createRequire(import.meta.url)("./worker-blob-url.cjs")` — correct for an
+// ordinary nub run, where the eager CommonJS preload must share the one registry
+// instance, but in a compiled artifact it is the only reason the payload has to
+// ship a sibling file at all. Importing it here keeps the whole preamble inside
+// the bundle, which is what lets a pure-JavaScript payload run straight from the
+// executable with nothing on disk.
+import { blobUrlSource, installBlobUrlSupport } from "./worker-blob-url.cjs";
 
 export function installCompilePreamble() {
   // Node 18/20 lack process.getBuiltinModule, so keep builtin lookup tied to the
@@ -100,31 +123,69 @@ export function installCompilePreamble() {
   setNavigatorCreateRequire(bootstrap.createRequire);
   // #endregion
   setWorkerCreateRequire(bootstrap.createRequire);
+  setBlobUrlModule({ blobUrlSource, installBlobUrlSupport });
   setCompiledBootstrapRequireArg(bootstrap.requireArg);
 
-  installCompiledChildProcess();
+  // Eagerly loads and patches node:child_process — the one place that cost is
+  // unavoidable when the payload uses it, because an ESM `import { spawn }`
+  // bypasses Module._load and so cannot be intercepted lazily. A payload whose
+  // sealed graph never names child_process or cluster skips it and the fork
+  // identity fix-up in the bootstrap together; neither has anything to correct.
+  if (bootstrap.needsChildProcess) installCompiledChildProcess();
   if (compiledExecPath !== undefined) {
     process.execPath = compiledExecPath;
     process.argv[0] = compiledExecPath;
   }
 
-  installSyncPolyfills({
-    // #region nub:polyfill:urlpattern
-    urlpattern: { URLPattern },
-    // #endregion
-    // #region nub:polyfill:float16
-    float16,
-    // #endregion
-  });
+  // Handed no packages: the bundled polyfills become LAZY globals below, each
+  // evaluated on its first read and never at start (compile-lazy-*.cjs).
+  installSyncPolyfills({});
+  // #region nub:polyfill:urlpattern
+  installCompiledUrlPatternLazyGlobal();
+  // #endregion
+  // #region nub:polyfill:float16
+  installCompiledFloat16LazyGlobals();
+  // #endregion
   // #region nub:polyfill:navigator
   installNavigatorShim();
   // #endregion
   // #region nub:polyfill:navigatorlocks
   installNavigatorLocks();
   // #endregion
-  installWorkerPolyfill();
+  if (bootstrap.needsWorker) {
+    installWorkerPolyfill();
+  } else {
+    // `globalThis.Worker` belongs to every compiled artifact's global surface, not
+    // only to artifacts whose source happens to spell it — computed access such as
+    // `globalThis["Work" + "er"]` must still find it. So the NAME goes on globalThis
+    // either way, and only the ~1.4 ms worker_threads load behind it is deferred.
+    // Global-surface parity is compared by own-property NAMES, which an accessor
+    // satisfies exactly.
+    //
+    // The getter removes itself BEFORE installing: `installWorkerPolyfill` opens by
+    // reading `typeof globalThis.Worker`, which would otherwise re-enter this getter
+    // forever. It then redefines the property as a data descriptor, so the accessor
+    // is replaced rather than shadowed.
+    Object.defineProperty(globalThis, "Worker", {
+      enumerable: false,
+      configurable: true,
+      get() {
+        delete globalThis.Worker;
+        installWorkerPolyfill();
+        return globalThis.Worker;
+      },
+      set(value) {
+        Object.defineProperty(globalThis, "Worker", {
+          value,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
+      },
+    });
+  }
   // #region nub:polyfill:temporal
-  installTemporalGlobal({ Temporal, toTemporalInstant });
+  installCompiledTemporalLazyGlobal();
   // #endregion
 }
 

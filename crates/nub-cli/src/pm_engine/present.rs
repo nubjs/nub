@@ -3,7 +3,7 @@
 //! occasional informational line a family verb relays.
 //!
 //! Three jobs (the maintainer's hard requirement: no `ERR_AUBE_*`/`WARN_AUBE_*`
-//! strings and no `aube.jdx.dev` URLs may reach nub's output; the rewrite
+//! strings and no engine-doc URLs (`aube.sh`, `aube.jdx.dev`) may reach nub's output; the rewrite
 //! happens at presentation time, never by renaming codes in the fork):
 //!
 //! 1. **Rewrite** rendered text: `ERR_AUBE_*` → `ERR_NUB_*`, `WARN_AUBE_*` →
@@ -79,7 +79,7 @@ pub(crate) fn info(msg: &str) {
 /// `aube-lock.yaml` sitting in a project), which the word pass deliberately
 /// preserves and this map would falsify.
 ///
-/// Also used for clap usage errors (same rendering path as help). Corner:
+/// Also used for parser usage errors (same rendering path as help). Corner:
 /// a user-typed argument that happens to contain one of these spellings
 /// would be echoed back mapped — accepted, the echo still names a file the
 /// engine would treat identically.
@@ -107,6 +107,10 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
         (".aube/<dep_path>", ".store/<dep_path>"),
         // The GVS location in engine docs;
         // described structurally — the literal path is engine cache state.
+        (
+            "`~/.cache/aube/virtual-store/v1/`",
+            "the global store cache",
+        ),
         ("`~/.cache/aube/virtual-store/`", "the global store cache"),
         // `patch-commit`'s arg help names the engine's on-disk state
         // sidecar; help describes the mechanism structurally.
@@ -241,10 +245,26 @@ fn redact_url_token(token: &str) -> String {
     format!("{lead}{}{trail}", aube_util::url::redact_url(core))
 }
 
-/// Host of the engine's documentation site. Any URL token containing it is
-/// stripped; nub has no equivalent page to substitute, and pointing users at
-/// another tool's docs is the leak this module exists to stop.
-const ENGINE_DOC_HOST: &str = "aube.jdx.dev";
+/// Hosts of the engine's documentation and source. Any URL token containing
+/// one is stripped; nub has no equivalent page to substitute, and pointing
+/// users at another tool's docs is the leak this module exists to stop. The
+/// project moved from `aube.jdx.dev` / `github.com/jdx/aube` to `aube.sh` /
+/// `github.com/aubepkg/aube` in v2.2 and a few old-host references remain, so
+/// all four are matched.
+const ENGINE_DOC_HOSTS: [&str; 4] = [
+    "aube.jdx.dev",
+    "aube.sh",
+    "github.com/aubepkg/aube",
+    "github.com/jdx/aube",
+];
+
+/// The first engine host a line mentions, if any.
+fn find_engine_host(s: &str) -> Option<usize> {
+    ENGINE_DOC_HOSTS
+        .iter()
+        .filter_map(|host| s.find(host))
+        .min()
+}
 
 /// Remove engine-doc URL tokens from one line. A one-word introductory
 /// label (`Details:`, `See:`) immediately before a stripped URL is removed
@@ -252,11 +272,14 @@ const ENGINE_DOC_HOST: &str = "aube.jdx.dev";
 /// Returns `None` when the whole line reduces to nothing but whitespace or a
 /// dangling label that only existed to introduce the URL.
 fn strip_engine_urls(line: &str) -> Option<String> {
-    if !line.contains(ENGINE_DOC_HOST) {
+    // `None` from this function means "drop the line", so a line that mentions
+    // no engine host has to short-circuit as an unchanged `Some` — propagating
+    // the miss with `?` would delete every ordinary line the engine prints.
+    if find_engine_host(line).is_none() {
         return Some(line.to_string());
     }
     let mut s = line.to_string();
-    while let Some(at) = s.find(ENGINE_DOC_HOST) {
+    while let Some(at) = find_engine_host(&s) {
         // Expand to the whole whitespace-delimited token (catches the
         // https:// prefix and any path suffix).
         let mut start = s[..at]
@@ -440,6 +463,16 @@ mod tests {
         // Inline URL: only the token goes, the sentence stays.
         let inline = rewrite("see https://aube.jdx.dev/cli for flags");
         assert_eq!(inline, "see  for flags");
+        // The v2 hosts strip the same way (aube.sh docs, the moved GitHub repo).
+        let moved = rewrite(
+            "Details: https://aube.sh/package-manager/global-virtual-store and \
+             https://github.com/aubepkg/aube/issues/1 both apply",
+        );
+        assert!(
+            !moved.contains("aube.sh") && !moved.contains("aubepkg"),
+            "{moved}"
+        );
+        assert!(moved.contains("both apply"), "{moved}");
     }
 
     #[test]

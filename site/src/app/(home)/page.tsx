@@ -1038,13 +1038,15 @@ const RULES = [
    `packageExtensions` row has no pm_engine dialect-scoping (no per-PM conflict);
    the nub=yes cell is grounded in the embedded aube engine, which honors a
    top-level `packageExtensions` natively (vendor/aube/crates/aube-manifest/src/lib.rs
-   `package_extensions()` → resolver package_ext.rs). Same for `allowBuilds` — a real
-   pnpm field (pnpm-workspace.yaml; pnpm/core/types/src/package.ts) that aube reads via
-   its pnpm-compat settings family; bun honors none of it (only `trustedDependencies`).
+   `package_extensions()` → resolver package_ext.rs). Same for `allowScripts` — a real
+   npm field (top-level package.json, npm 12; RFC npm/rfcs#868) that the engine reads at
+   the manifest root (vendor/aube/crates/aube-manifest/src/lib.rs ROOT_ALLOW_SCRIPTS_KEY).
+   pnpm=no because pnpm's own map is `allowBuilds` in pnpm-workspace.yaml, which nub
+   still reads under a pnpm incumbent — a different field, so a different row's claim.
    Both bun=no cells verified: zero refs in bun source + docs.
    `trustedDependencies` is nub=no on purpose: `honors_trusted_dependencies` returns
    true for Role::Bun ALONE (config_scope.rs, asserted for every other role), so under
-   its own identity nub reads the neutral `allowBuilds` and ignores bun's branded field.
+   its own identity nub reads the neutral `allowScripts` and ignores bun's branded field.
    `catalog:` is yarn=yes for berry — `role_honors_catalog` honors Role::Yarn at major>=2
    (pm_engine/mod.rs); only a `1.x` pin refuses. Version-gated cells show the modern
    line's truth, same as npm=yes for `overrides` (which npm gained in 8.3). Legend:
@@ -1076,8 +1078,8 @@ const PM_MATRIX: { field: ReactNode; cells: Record<(typeof PM_COLUMNS)[number], 
     cells: { npm: 'no', pnpm: 'yes', yarn: 'yes', bun: 'no', nub: 'yes' },
   },
   {
-    field: <><Mono>allowBuilds</Mono></>,
-    cells: { npm: 'no', pnpm: 'yes', yarn: 'no', bun: 'no', nub: 'yes' },
+    field: <><Mono>allowScripts</Mono></>,
+    cells: { npm: 'yes', pnpm: 'no', yarn: 'no', bun: 'no', nub: 'yes' },
   },
   {
     field: <><Mono>trustedDependencies</Mono></>,

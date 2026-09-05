@@ -360,7 +360,7 @@ RC
 	refute_output --partial "upgrade:"
 }
 
-@test "ignoreCompatibilityDb=true in .npmrc is accepted (no-op)" {
+@test "ignoreCompatibilityDb=true in .npmrc is accepted" {
 	_setup_basic_fixture
 	echo 'ignoreCompatibilityDb=true' >>"$HOME/.npmrc"
 	run aube install

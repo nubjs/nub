@@ -15,6 +15,7 @@
 //! not a re-read of whatever the writer happened to emit.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -23,16 +24,19 @@ use nub_core::compile::{ContainerFormat, TargetArch, TargetPlatform};
 /// Inject `payload` into a copy of `template`, writing the artifact to `out`.
 ///
 /// Signing policy is per format and lives here because it is inseparable from
-/// the write: Mach-O is ad-hoc signed by libsui's pure-Rust signer (arm64 refuses
-/// to execute an unsigned image, and Gatekeeper rejects an invalid one), while
-/// ELF and PE are never signed — an unsigned ELF is normal, and Authenticode is
-/// deliberately out of scope (an unsigned PE runs; SmartScreen may warn).
+/// the write: Mach-O is ad-hoc signed (arm64 refuses to execute an unsigned
+/// image, and Gatekeeper rejects an invalid one) — arm64 by libsui's pure-Rust
+/// signer, x86_64 by `codesign` on a staged temp file — while ELF and PE are
+/// never signed, an unsigned ELF being normal and Authenticode deliberately out
+/// of scope (an unsigned PE runs; SmartScreen may warn). Both Mach-O legs pin
+/// the same CodeDirectory identifier, so the artifact is byte-reproducible.
 pub fn inject(
     target: &TargetPlatform,
     template: &[u8],
     payload: &[u8],
     icon: Option<&[u8]>,
     version_info: Option<&[u8]>,
+    hide_console: bool,
     out: &Path,
 ) -> Result<()> {
     let format = target.format();
@@ -80,10 +84,23 @@ pub fn inject(
             if let Some(version_info) = version_info {
                 pe = pe.set_version_info(version_info.to_vec());
             }
+            // Built into memory rather than straight into the file, because the
+            // subsystem flip has to land on the FINISHED image. libsui rebuilds
+            // the PE headers while it rewrites the resource directory, so a
+            // subsystem set on the template is discarded here along with the
+            // template's own resources — the same reason the icon and the version
+            // resource are set inside this builder chain instead of baked in.
+            let mut image = Vec::with_capacity(template.len() + payload.len());
             pe.write_resource(nub_core::compile::SECTION_NAME, payload.to_vec())
                 .map_err(|e| anyhow!("injecting the payload resource: {e:?}"))?
-                .build(&mut file)
-                .map_err(|e| anyhow!("building the executable: {e:?}"))
+                .build(&mut image)
+                .map_err(|e| anyhow!("building the executable: {e:?}"))?;
+            if hide_console {
+                set_pe_subsystem_gui(&mut image)
+                    .context("hiding the console window (--hide-console)")?;
+            }
+            file.write_all(&image)
+                .with_context(|| format!("writing {}", out.display()))
         }
     }
 }
@@ -216,9 +233,75 @@ pub fn find_payload(format: ContainerFormat, image: &[u8]) -> Result<Option<&[u8
     let name = nub_core::compile::SECTION_NAME;
     match format {
         ContainerFormat::MachO => find_in_macho(image, name),
-        ContainerFormat::Elf => find_in_elf(image, name),
+        ContainerFormat::Elf => find_in_elf(image, name, NoteShape::Sui),
         ContainerFormat::Pe => find_in_pe(image, name),
     }
+}
+
+/// Locate a Node single-executable blob in a produced artifact, the way that
+/// artifact's own Node will locate it at start.
+///
+/// The Mach-O and PE legs are the same walks the launcher payload uses with
+/// different names, because postject reads the same structures libsui writes. Only
+/// ELF differs, and it differs in the NOTE rather than the traversal — see
+/// [`NoteShape`].
+pub fn find_sea_blob(format: ContainerFormat, image: &[u8]) -> Result<Option<&[u8]>> {
+    match format {
+        ContainerFormat::MachO => find_in_macho(image, super::sea::MACHO_SECTION),
+        ContainerFormat::Elf => find_in_elf(image, super::sea::RESOURCE_NAME, NoteShape::NodeSea),
+        ContainerFormat::Pe => find_in_pe(image, super::sea::RESOURCE_NAME),
+    }
+}
+
+/// Which ELF note layout a scan is looking for.
+///
+/// Both are ordinary notes in a `PT_NOTE` segment; they disagree about where the
+/// resource NAME lives. libsui puts a fixed `SUI` in `n_name` and length-prefixes
+/// the real name inside the descriptor, so one note type can carry many sections.
+/// postject — which is what a Node binary reads itself with — matches `n_name`
+/// directly and takes the descriptor as the payload with nothing in front of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoteShape {
+    /// libsui's: `n_name = "SUI"`, `desc = [u16 name_len][name][payload]`.
+    Sui,
+    /// postject's: `n_name = <the resource name>`, `desc = payload`.
+    NodeSea,
+}
+
+/// How many bytes of `image` are its ad-hoc code signature — 0 for a format that
+/// carries none, and for a Mach-O that was never signed.
+///
+/// Reported as its own component of the output size rather than being left in a
+/// remainder, because it is neither launcher nor payload and it is not small: the
+/// CodeDirectory holds one SHA-256 per 4 KiB page, so it grows at ~0.78% of the
+/// file — 228 KB on a 29 MB embed build, against a launcher template of 851 KB.
+pub fn code_signature_size(format: ContainerFormat, image: &[u8]) -> u64 {
+    // ELF is never signed and Authenticode is out of scope; see `inject`.
+    match format {
+        ContainerFormat::MachO => macho_code_signature_size(image).unwrap_or(0),
+        ContainerFormat::Elf | ContainerFormat::Pe => 0,
+    }
+}
+
+/// The same measurement against a file on disk, reading only the Mach-O header
+/// and its load commands. The artifact is up to ~30 MB and the answer lives in
+/// its first few KB, so this deliberately does not `read` the whole image.
+pub fn code_signature_size_of(format: ContainerFormat, path: &Path) -> Result<u64> {
+    if format != ContainerFormat::MachO {
+        return Ok(0);
+    }
+    let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut header = [0u8; 32];
+    file.read_exact(&mut header)
+        .with_context(|| format!("reading the Mach-O header of {}", path.display()))?;
+    // `sizeofcmds` comes out of the file, so cap the allocation it sizes. A
+    // launcher template's load commands are ~4 KB; nothing legitimate is near 1 MB.
+    let sizeofcmds = (u32le(&header, 20).context("truncated Mach-O header")? as usize).min(1 << 20);
+    let mut prefix = vec![0u8; 32usize.saturating_add(sizeofcmds)];
+    prefix[..32].copy_from_slice(&header);
+    file.read_exact(&mut prefix[32..])
+        .with_context(|| format!("reading the load commands of {}", path.display()))?;
+    Ok(macho_code_signature_size(&prefix).unwrap_or(0))
 }
 
 /// Find the `VS_VERSIONINFO` resource in a produced PE, walking the same
@@ -252,6 +335,44 @@ pub fn find_version_resource(image: &[u8]) -> Result<Option<&[u8]>> {
         return Ok(None);
     };
     resource_leaf_data(image, base, &sections, leaf).map(Some)
+}
+
+/// Find the application manifest in a PE, walking `RT_MANIFEST` → name 1 → the
+/// first language, and returning that language along with the bytes.
+///
+/// The one resource that has to survive a rewrite rather than merely look right
+/// afterwards. Windows' version-lie shim reports 6.2 to an image that declares no
+/// `<supportedOS>` GUID, and Node's `wmain` calls `IsWindows10OrGreater` before
+/// anything else and exits 216 when it fails — so a Node binary rewritten without
+/// its manifest does not start. Read off the INPUT here and handed back to
+/// libsui, which builds its resource directory from scratch.
+pub fn find_manifest_resource(image: &[u8]) -> Result<Option<(&[u8], u32)>> {
+    /// `RT_MANIFEST`.
+    const RT_MANIFEST: u32 = 24;
+    /// `CREATEPROCESS_MANIFEST_RESOURCE_ID` — the only name the loader reads for
+    /// an executable.
+    const CREATEPROCESS_MANIFEST: u32 = 1;
+
+    let Some((base, sections)) = pe_resource_root(image)? else {
+        return Ok(None);
+    };
+    let Some(types) = resource_subdir(image, base, base, |e| e == ResourceKey::Id(RT_MANIFEST))?
+    else {
+        return Ok(None);
+    };
+    let Some(named) = resource_subdir(image, base, types, |e| {
+        e == ResourceKey::Id(CREATEPROCESS_MANIFEST)
+    })?
+    else {
+        return Ok(None);
+    };
+    let Some(leaf) = resource_entries(image, named)?.first().copied() else {
+        return Ok(None);
+    };
+    // A language level is always keyed by id, so the high bit cannot be set here
+    // and the key is the language itself.
+    let language = leaf.0;
+    resource_leaf_data(image, base, &sections, leaf).map(|data| Some((data, language)))
 }
 
 // ---- little-endian readers ----------------------------------------------------
@@ -299,6 +420,31 @@ fn slice_at(image: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
 
 const MH_MAGIC_64: u32 = 0xfeed_facf;
 const LC_SEGMENT_64: u32 = 0x19;
+const LC_CODE_SIGNATURE: u32 = 0x1d;
+
+/// `datasize` of the `LC_CODE_SIGNATURE` load command, or `None` when the image
+/// is unparseable or unsigned. Never errors: a size split is a report, and a
+/// report must not fail a build that already produced a verified artifact.
+fn macho_code_signature_size(image: &[u8]) -> Option<u64> {
+    if u32le(image, 0) != Some(MH_MAGIC_64) {
+        return None;
+    }
+    let ncmds = u32le(image, 16)? as usize;
+    let mut cursor = 32usize; // sizeof(mach_header_64)
+    for _ in 0..ncmds {
+        let cmd = u32le(image, cursor)?;
+        let cmdsize = u32le(image, cursor + 4)? as usize;
+        if cmdsize == 0 {
+            return None;
+        }
+        // linkedit_data_command: cmd, cmdsize, dataoff, datasize.
+        if cmd == LC_CODE_SIGNATURE {
+            return u32le(image, cursor + 12).map(u64::from);
+        }
+        cursor = cursor.checked_add(cmdsize)?;
+    }
+    None
+}
 
 /// Walk `LC_SEGMENT_64` load commands for a section named `name`. libsui writes
 /// it under its own `__SUI` segment; matching on the SECTION name alone keeps the
@@ -346,7 +492,7 @@ const ELF_NOTE_TYPE: u32 = 0x5355_4901;
 /// Walk `PT_NOTE` program headers for libsui's `SUI` note carrying `name` — the
 /// same traversal the launcher's `dl_iterate_phdr` scan performs at runtime,
 /// against the file's own program header table.
-fn find_in_elf<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
+fn find_in_elf<'a>(image: &'a [u8], name: &str, shape: NoteShape) -> Result<Option<&'a [u8]>> {
     if image.get(0..4) != Some(b"\x7fELF") {
         bail!("not an ELF image");
     }
@@ -368,7 +514,7 @@ fn find_in_elf<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
         let filesz = u64le(image, ph + 32).context("truncated ELF program header")?;
         let align = u64le(image, ph + 48).unwrap_or(4).max(4) as usize;
         let segment = slice_at(image, offset, filesz)?;
-        if let Some(found) = find_in_note_segment(segment, align, name) {
+        if let Some(found) = find_in_note_segment(segment, align, name, shape) {
             return Ok(Some(found));
         }
     }
@@ -377,7 +523,12 @@ fn find_in_elf<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
 
 /// Walk one note segment: `namesz`/`descsz`/`type`, then the name and desc each
 /// padded up to the segment's alignment.
-fn find_in_note_segment<'a>(segment: &'a [u8], align: usize, name: &str) -> Option<&'a [u8]> {
+fn find_in_note_segment<'a>(
+    segment: &'a [u8],
+    align: usize,
+    name: &str,
+    shape: NoteShape,
+) -> Option<&'a [u8]> {
     let round_up = |v: usize| v.saturating_add(align - 1) & !(align - 1);
     let mut pos = 0usize;
     while pos + 12 <= segment.len() {
@@ -391,12 +542,21 @@ fn find_in_note_segment<'a>(segment: &'a [u8], align: usize, name: &str) -> Opti
         let desc = segment.get(pos..pos.checked_add(descsz)?)?;
         pos = round_up(pos.checked_add(descsz)?);
 
-        if note_name == ELF_NOTE_NAME && note_type == ELF_NOTE_TYPE {
-            // desc = [name_len u16][name][payload]
-            let name_len = u16le(desc, 0)? as usize;
-            if desc.get(2..2 + name_len)? == name.as_bytes() {
-                return desc.get(2 + name_len..);
+        match shape {
+            NoteShape::Sui if note_name == ELF_NOTE_NAME && note_type == ELF_NOTE_TYPE => {
+                // desc = [name_len u16][name][payload]
+                let name_len = u16le(desc, 0)? as usize;
+                if desc.get(2..2 + name_len)? == name.as_bytes() {
+                    return desc.get(2 + name_len..);
+                }
             }
+            // postject compares the name with `strncmp(…, sizeof(name))` where
+            // `name` is a POINTER, so it really only looks at the first eight
+            // bytes. This is the stricter check on purpose: it proves nub wrote
+            // the whole name, which is what a reader with a correct `strncmp`
+            // would need.
+            NoteShape::NodeSea if note_name == name.as_bytes() => return Some(desc),
+            _ => {}
         }
     }
     None
@@ -482,6 +642,62 @@ fn pe_header_offset(image: &[u8]) -> Result<usize> {
         bail!("not a PE image (missing PE signature)");
     }
     Ok(pe)
+}
+
+/// Flip a PE's subsystem to GUI, so Windows opens no console beside the app.
+///
+/// `Subsystem` sits at optional-header offset 68 in BOTH PE32 and PE32+. The two
+/// layouts differ earlier — PE32 carries an extra `BaseOfData`, and an `ImageBase`
+/// four bytes narrower than PE32+'s — and those differences cancel exactly, so the
+/// field lands at the same offset either way and no magic-dependent arithmetic is
+/// needed. Deno computes it as `standard_fields_size + 68`, which is correct only
+/// because Deno ships 64-bit alone; on a PE32 image that expression points four
+/// bytes past the field, into `DllCharacteristics`. Worth not copying.
+///
+/// Applied to the FINISHED artifact rather than the template: libsui rebuilds the
+/// headers while rewriting the resource directory, so a flip made beforehand is
+/// discarded — the same reason the icon is set inside the builder chain.
+///
+/// This is only HALF of hiding the console. nub's launcher spawns Node as a
+/// child, and a GUI-subsystem parent starting a console-subsystem child still
+/// gets a console allocated for that child, so the launcher must also pass
+/// `CREATE_NO_WINDOW`. Bun and Deno need this half alone because each one IS the
+/// process it is hiding.
+/// The PE `Subsystem` field, read back the way Windows' loader reads it.
+///
+/// Exists for the same reason the version-resource scanner does: a cross-compiled
+/// Windows binary cannot be run on this host, so reading the field back out of the
+/// finished file is the only evidence the flip survived libsui's header rebuild.
+/// `None` when the image is not a placeable PE.
+pub fn pe_subsystem(image: &[u8]) -> Option<u16> {
+    let pe = pe_header_offset(image).ok()?;
+    match u16le(image, pe + 24) {
+        Some(0x20b) | Some(0x10b) => u16le(image, pe + 24 + 68),
+        _ => None,
+    }
+}
+
+/// `IMAGE_SUBSYSTEM_WINDOWS_GUI` — the value that stops Windows allocating a
+/// console for the process it starts from this image.
+pub const SUBSYSTEM_WINDOWS_GUI: u16 = 2;
+
+pub(super) fn set_pe_subsystem_gui(image: &mut [u8]) -> Result<()> {
+    let pe = pe_header_offset(image)?;
+    let optional_header = pe + 24;
+    // Checked rather than assumed: a ROM image (0x107) lays its optional header
+    // out differently, so writing at +68 would land in an unrelated field and
+    // produce a corrupt executable that still passes every other check here.
+    match u16le(image, optional_header) {
+        Some(0x20b) | Some(0x10b) => {}
+        Some(other) => bail!("unexpected PE optional-header magic {other:#x}"),
+        None => bail!("truncated PE optional header"),
+    }
+    let at = optional_header + 68;
+    let slot = image
+        .get_mut(at..at + 2)
+        .context("truncated PE optional header")?;
+    slot.copy_from_slice(&SUBSYSTEM_WINDOWS_GUI.to_le_bytes());
+    Ok(())
 }
 
 /// `(virtual_address, virtual_size, raw_offset, raw_size)` per section.
@@ -584,12 +800,16 @@ mod tests {
             node_sha256: String::new(),
             node_blake3: String::new(),
             node_size: 0,
+            node_icu: String::new(),
             app_compressed: false,
             app_sha256: "aa".into(),
             minify: true,
             install_message: None,
             node_flags: Vec::new(),
             sealed_module_graph: false,
+            hide_console: false,
+            inline_app: false,
+            standalone_preamble: false,
         };
         nub_core::compile::encode(
             &manifest,
@@ -615,7 +835,7 @@ mod tests {
         let target = TargetPlatform::parse(triple).unwrap();
         let out = tmp(&format!("artifact-{triple}"));
         let payload = payload("main.js");
-        inject(&target, template, &payload, None, None, &out).expect("inject");
+        inject(&target, template, &payload, None, None, false, &out).expect("inject");
 
         let produced = fs::read(&out).unwrap();
         assert_eq!(
@@ -688,6 +908,7 @@ mod tests {
             &payload("main.js"),
             Some(&fixtures::png()),
             Some(&info.encode().expect("the fixture encodes")),
+            false,
             &out,
         )
         .expect("inject");
@@ -708,6 +929,71 @@ mod tests {
             "the payload must still be findable once RT_VERSION joins the table"
         );
         let _ = fs::remove_file(&out);
+    }
+
+    /// The flip has to survive the write, which is the whole reason it is applied
+    /// to the finished image instead of the template.
+    ///
+    /// libsui rebuilds the PE headers while it rewrites the resource directory, so
+    /// a subsystem set on the way in is discarded — silently, leaving a binary that
+    /// passes every other check here and still flashes a console on the user's
+    /// machine. The CUI assertion on the same build with the flag off is the
+    /// control: without it this would pass against a fixture that was never
+    /// console-subsystem to begin with.
+    #[test]
+    fn the_hidden_console_subsystem_survives_the_resource_rewrite() {
+        let target = TargetPlatform::parse("win32-x64").unwrap();
+        assert_eq!(
+            pe_subsystem(&fixtures::pe()),
+            Some(3),
+            "the fixture must start as CUI, or this test cannot fail"
+        );
+
+        let hidden = tmp("artifact-hidden");
+        inject(
+            &target,
+            &fixtures::pe(),
+            &payload("main.js"),
+            None,
+            None,
+            true,
+            &hidden,
+        )
+        .expect("inject");
+        let produced = fs::read(&hidden).unwrap();
+        assert_eq!(
+            pe_subsystem(&produced),
+            Some(SUBSYSTEM_WINDOWS_GUI),
+            "--hide-console must leave the produced artifact GUI-subsystem"
+        );
+        // The payload is what the flip is written next to, and a wrong offset would
+        // corrupt the header the scan walks, so assert both in one breath.
+        assert!(
+            find_payload(ContainerFormat::Pe, &produced)
+                .unwrap()
+                .is_some(),
+            "the payload must still be findable once the subsystem is flipped"
+        );
+
+        let plain = tmp("artifact-shown");
+        inject(
+            &target,
+            &fixtures::pe(),
+            &payload("main.js"),
+            None,
+            None,
+            false,
+            &plain,
+        )
+        .expect("inject");
+        assert_eq!(
+            pe_subsystem(&fs::read(&plain).unwrap()),
+            Some(3),
+            "without the flag the artifact must stay a console application"
+        );
+
+        let _ = fs::remove_file(&hidden);
+        let _ = fs::remove_file(&plain);
     }
 
     /// The negative control for the scan above: without one it must report none
@@ -740,6 +1026,7 @@ mod tests {
             &payload("main.js"),
             None,
             None,
+            false,
             &tmp("wrong"),
         )
         .unwrap_err();
@@ -770,6 +1057,7 @@ mod tests {
             &payload("main.js"),
             None,
             None,
+            false,
             &tmp("badarch"),
         )
         .unwrap_err();
@@ -786,6 +1074,7 @@ mod tests {
                 &payload("main.js"),
                 None,
                 None,
+                false,
                 &tmp("okarch")
             )
             .is_ok(),
@@ -804,6 +1093,7 @@ mod tests {
             &payload("main.js"),
             None,
             None,
+            false,
             &tmp("unknownarch"),
         )
         .unwrap_err();
@@ -820,6 +1110,48 @@ mod tests {
         assert!(msg.contains("unsupported or unreadable"), "{msg}");
         assert!(msg.contains("Mach-O (macOS)"), "{msg}");
         assert!(msg.contains("darwin-x64"), "{msg}");
+    }
+
+    /// The subsystem flip, asserted against the byte Windows actually reads.
+    ///
+    /// The fixture ships `3` (`WINDOWS_CUI`), so the starting state is a real
+    /// console executable rather than a zeroed field that would pass whatever this
+    /// wrote. The offset is the whole claim — a flip four bytes wide of it lands in
+    /// `DllCharacteristics` and silently changes ASLR or DEP instead — so the test
+    /// reads it back at `pe + 24 + 68` computed independently of the function, and
+    /// checks that its neighbours on both sides are untouched.
+    #[test]
+    fn the_subsystem_flip_writes_gui_at_the_offset_windows_reads() {
+        let mut image = fixtures::pe();
+        let opt = 0x80 + 24;
+        assert_eq!(
+            u16le(&image, opt + 68),
+            Some(3),
+            "fixture should start as a console executable, or this proves nothing"
+        );
+        let before = (u16le(&image, opt + 66), u16le(&image, opt + 70));
+
+        set_pe_subsystem_gui(&mut image).unwrap();
+
+        assert_eq!(u16le(&image, opt + 68), Some(2), "subsystem must be GUI");
+        assert_eq!(
+            (u16le(&image, opt + 66), u16le(&image, opt + 70)),
+            before,
+            "the write must not touch MinorSubsystemVersion or DllCharacteristics"
+        );
+    }
+
+    /// A magic this function does not understand must refuse rather than write.
+    ///
+    /// A ROM image lays the optional header out differently, so a blind write at
+    /// +68 would corrupt an unrelated field and still leave every structural check
+    /// in this module passing.
+    #[test]
+    fn the_subsystem_flip_refuses_an_optional_header_it_cannot_place() {
+        let mut rom = fixtures::pe();
+        rom[0x98..0x9a].copy_from_slice(&0x107u16.to_le_bytes());
+        let err = set_pe_subsystem_gui(&mut rom).unwrap_err();
+        assert!(format!("{err:#}").contains("0x107"), "{err:#}");
     }
 
     #[test]

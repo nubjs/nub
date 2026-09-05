@@ -19,12 +19,26 @@ name: Verb dispatch (one-binary platform package)
 #            changes Windows got a correctly-named `nubx.exe` and needed no verb
 #            plumbing, and launcher.yml still excludes Windows for that stale reason.
 #
-# Runs on pull_request for the paths below, plus workflow_dispatch. It was branch-scoped
-# while this was an exploratory probe; a branch filter left on main would name a deleted
-# branch and silently never fire.
-
+# Runs on pull_request and push:main for the paths below, plus workflow_dispatch. It was
+# branch-scoped while this was an exploratory probe; a branch filter left on main would
+# name a deleted branch and silently never fire.
+#
+# The push:main leg exists for the Rust cache. GitHub scopes a cache to the ref that
+# wrote it, so a pull-request-only workflow can only ever write caches that one PR can
+# read — four ~500 MB copies per PR, charged against the repository-wide 10 GB budget
+# and evicting the shared trunk caches every other workflow restores from. Trunk writes
+# them once; every PR reads them.
 on:
   pull_request:
+    paths:
+      - crates/nub-cli/**
+      - npm/nub/**
+      - tests/verb-dispatch/**
+      - .github/workflows/verb-dispatch.yml
+  # Keep this list in step with the pull_request one above. GitHub Actions does not
+  # support YAML anchors, so the two are duplicated rather than shared.
+  push:
+    branches: [main]
     paths:
       - crates/nub-cli/**
       - npm/nub/**
@@ -57,6 +71,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: verb-dispatch-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `fast` (not `release`): the probe asserts DISPATCH, which is independent of
       # optimization level, and release's thin-LTO would roughly triple the job for
@@ -112,6 +127,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: verb-dispatch-release-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # RELEASE, not `fast`: the question is about the shipped binary. A fast build
       # carries debuginfo at roughly 3x the size, which moves image-load time and would

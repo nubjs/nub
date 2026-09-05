@@ -38,6 +38,7 @@ use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -53,10 +54,9 @@ use rolldown::plugin::{
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
-    CodeSplittingMode, EmittedChunk, InnerOptions, IsExternal, ManualCodeSplittingOptions,
-    MatchGroup, MatchGroupName, ModuleType, Output, OutputFormat, Platform, RawCompressOptions,
-    RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed, ResolveOptions, ResolvedExternal,
-    SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    EmittedChunk, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
+    RawCompressOptions, RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed,
+    ResolveOptions, ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
@@ -84,6 +84,10 @@ pub enum SourcemapMode {
 
 /// Everything the bundler front end needs, and nothing about the artifact shape.
 pub struct BundleOptions {
+    /// Where the extracted app dir mirrors the source tree, for the per-module
+    /// `__dirname` in [`CjsPathGlobals`]. Default (both paths empty) disables the
+    /// offset entirely, which is what every caller outside `compile` wants.
+    pub module_mirror: ModuleMirror,
     pub minify: bool,
     /// Preserve `fn.name` / `Class.name` under minification. Default ON: minify
     /// silently renames a class, and the frameworks that key on `Class.name`
@@ -118,9 +122,22 @@ pub struct BundleOptions {
     pub unbundled: Vec<String>,
     /// Packages the user forced INTO the bundle, overriding detection.
     pub bundled: Vec<String>,
-    /// Let a dynamic `import()` whose specifier is not statically analyzable
-    /// survive into the output instead of failing the build. Off by default.
-    pub allow_dynamic_import: bool,
+    /// Where a dynamic `import()` whose specifier is not statically analyzable may
+    /// survive into the output instead of failing the build. Empty refuses every
+    /// one, which is the default.
+    ///
+    /// Each entry is a glob over the path of the module the import is WRITTEN IN,
+    /// relative to the working directory — the anchor `--include` already uses. An
+    /// empty pattern, which the bare flag produces, matches everything.
+    ///
+    /// Scoped by IMPORTER rather than by specifier, which is where this parts
+    /// company with Bun. Bun matches its glob against the specifier's extracted
+    /// template shape and needs an `'<empty>'` sentinel for the opaque ones — but
+    /// an opaque specifier is precisely the case the flag exists for, so that
+    /// matcher can only ever describe the imports that did not need it. The
+    /// importer's path is known for every site and is the thing an author
+    /// controls.
+    pub allow_dynamic_import: Vec<String>,
     /// Explicit tsconfig; `None` keeps Rolldown's auto-discovery.
     pub tsconfig: Option<PathBuf>,
     /// `EXT=TYPE` from `--loader`, applied over nub's defaults. See
@@ -151,6 +168,11 @@ pub struct BundleOptions {
     /// Keeping the accepted set from reaching below it is the caller's job; see
     /// `smol_version_range` in `compile/mod.rs`.
     pub target_node: Option<(u64, u64, u64)>,
+    /// Shape the chunks for a complete V8 code cache ([`finish_eager_startup`]).
+    /// The CLI sets it from the target with [`eager_startup_compilation_supported`];
+    /// an option rather than a version rule inside the bundler so a test can hold
+    /// the target fixed and vary only the shape.
+    pub eager_startup: bool,
 }
 
 /// One emitted file: a chunk, or a source map that travels with it.
@@ -184,6 +206,16 @@ pub struct BundleResult {
     /// Compile bootstrap which must be extracted at the payload root before any
     /// generated chunk can read the private builtin registry it installs.
     pub root_support_files: Vec<BundledFile>,
+    /// Whether no application module names `child_process`/`cluster` or
+    /// `Worker`/`worker_threads` — the same scan that strips the bootstrap's
+    /// regions — so the bootstrap has nothing left to do BEFORE the ESM graph and
+    /// the preamble may publish the record itself (`Manifest::standalone_preamble`).
+    pub bootstrap_optional: bool,
+    /// Whether an application module can compute a module specifier, so no pass
+    /// that reads the emitted chunks can know what it resolves. Read by
+    /// `compile::inline::classify` under `Mode::Sea`, which otherwise decides its
+    /// fork decline by scanning those chunks.
+    pub app_computes_module_specifier: bool,
     /// Computed `import()` sites `--allow-dynamic-import` let through. Zero
     /// unless the flag is set; the build would otherwise have failed. This is
     /// what decides whether the artifact needs a runtime resolve hook at all.
@@ -296,14 +328,17 @@ fn bundle_inner(
         // default installs `createRequire(import.meta.url)` for every unbound
         // `require` reference, which changes `require.main` from a ReferenceError
         // into an ordinary runtime value. Compiled artifacts preserve Node's ESM
-        // semantics here. CommonJS inputs are forced into their own chunk below,
-        // where [`CompilePreamble::intro`] supplies the loader their remaining
-        // external/dynamic require calls need without exposing it to ESM chunks.
+        // semantics here. A CommonJS module gets its loader from
+        // [`CompilePreamble::intro`], bound as `require` inside its own wrapper by
+        // [`hoist_module_wrappers`], so the chunk it shares with ESM declares none.
+        // Code splitting stays at Rolldown's default: one entry with no worker
+        // and no dynamic import is ONE chunk, and every extra file costs a start.
         polyfill_require: Some(false),
-        code_splitting: Some(compile_code_splitting(entry_abs)),
-        // The manual CommonJS boundary deliberately creates CJS↔ESM cross-chunk
-        // edges. Rolldown's default fast ordering does not promise cycle/order
-        // fidelity for that shape; its supported correctness mode does.
+        // Worker roots and dynamic imports still make cross-chunk edges, and a
+        // CommonJS package can be reached from both sides of one. Rolldown's
+        // default fast ordering does not promise cycle/order fidelity for that
+        // shape; its supported correctness mode does. It also fixes the wrapper
+        // shape [`hoist_module_wrappers`] matches.
         strict_execution_order: Some(true),
         // Compiled chunks always execute as ESM, regardless of the source
         // package's `type` field. Keeping that fact in their extension lets Node
@@ -364,7 +399,11 @@ fn bundle_inner(
         &loader_plan,
         Arc::clone(&collected),
     ));
-    let prelude = Arc::new(CompilePreamble::new(entry_abs, opts.target_node)?);
+    let prelude = Arc::new(CompilePreamble::new(
+        entry_abs,
+        opts.target_node,
+        opts.eager_startup,
+    )?);
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
@@ -422,7 +461,9 @@ fn bundle_inner(
         Arc::new(loaders::DataPlugin::new(&loader_plan)) as SharedPluginable,
         Arc::clone(&new_urls) as SharedPluginable,
         Arc::clone(&prelude) as SharedPluginable,
-        Arc::new(CjsPathGlobals) as SharedPluginable,
+        Arc::new(CjsPathGlobals {
+            mirror: opts.module_mirror.clone(),
+        }) as SharedPluginable,
     ]);
     if let Some(plugin) = &native_plugin {
         plugins.push(Arc::clone(plugin) as SharedPluginable);
@@ -512,14 +553,19 @@ fn bundle_inner(
             !(in_runtime && dead_preload_chain)
         })
         .collect();
+    // The anchor for the `--allow-dynamic-import` globs. Read once: a pattern must
+    // mean the same thing for every site, and `current_dir` can in principle move
+    // under a build.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     reject_unresolved(
         &sites,
         &output.warnings,
-        opts.allow_dynamic_import,
+        &opts.allow_dynamic_import,
+        &cwd,
         uses_plug_n_play(entry_abs),
         nothing_installed(entry_abs),
     )?;
-    let dynamic_import_sites = if opts.allow_dynamic_import {
+    let dynamic_import_sites = if !opts.allow_dynamic_import.is_empty() {
         // Both `import()` shapes are excused by the flag and both are served by
         // the same runtime hook, so both are counted — omitting the variable-held
         // one would ship an artifact whose hook the build decided it did not need.
@@ -554,6 +600,31 @@ fn bundle_inner(
     // Rolldown marks an emitted worker chunk `is_entry` exactly like the program's
     // own, so the filenames are the only thing telling them apart here.
     let worker_names = new_urls.worker_names();
+    // The eager-startup finish runs after Rolldown's minifier, so its map is
+    // composed here rather than returned from a hook, and a `.map` asset Rolldown
+    // already emitted for a finished chunk is replaced by the composed one.
+    let chunk_count = output
+        .assets
+        .iter()
+        .filter(|asset| matches!(asset, Output::Chunk(_)))
+        .count();
+    let mut finished_chunks: BTreeMap<String, String> = BTreeMap::new();
+    let mut finished_maps: BTreeMap<String, String> = BTreeMap::new();
+    if opts.eager_startup {
+        for asset in &output.assets {
+            let Output::Chunk(c) = asset else {
+                continue;
+            };
+            let Some((code, edit_map)) = finish_eager_startup(&c.code, chunk_count == 1)? else {
+                continue;
+            };
+            let (code, map) = finish_chunk_map(code, &edit_map, c.map.as_ref(), opts.sourcemap);
+            if let (Some(map), Some(name)) = (map, c.sourcemap_filename.as_deref()) {
+                finished_maps.insert(name.to_string(), map);
+            }
+            finished_chunks.insert(c.filename.to_string(), code);
+        }
+    }
     for asset in &output.assets {
         match asset {
             Output::Chunk(c) => {
@@ -565,13 +636,18 @@ fn bundle_inner(
                 }
                 files.push(BundledFile {
                     name: c.filename.to_string(),
-                    bytes: c.code.as_bytes().to_vec(),
+                    bytes: finished_chunks
+                        .remove(c.filename.as_str())
+                        .map_or_else(|| c.code.as_bytes().to_vec(), String::into_bytes),
                 });
             }
             Output::Asset(a) => {
-                let bytes = match &a.source {
-                    StrOrBytes::Str(s) => s.as_bytes().to_vec(),
-                    StrOrBytes::Bytes(b) => b.clone(),
+                let bytes = match finished_maps.remove(a.filename.as_str()) {
+                    Some(map) => map.into_bytes(),
+                    None => match &a.source {
+                        StrOrBytes::Str(s) => s.as_bytes().to_vec(),
+                        StrOrBytes::Bytes(b) => b.clone(),
+                    },
                 };
                 let file = BundledFile {
                     name: a.filename.to_string(),
@@ -683,14 +759,22 @@ fn bundle_inner(
         report.finish(&emitted, &modules, &edge_kinds, &external_imports)
     });
 
+    // Before `root_support_files` reads the decision: islands bypass `transform`,
+    // so this is the only place their usage can be folded in.
+    for file in &native_files {
+        prelude.note_island_usage(&file.bytes);
+    }
+
     Ok(BundleResult {
         entry,
         files,
         detached_maps,
         assets,
-        native_files,
         support_files: prelude.support_files().collect(),
         root_support_files: prelude.root_support_files().collect(),
+        bootstrap_optional: prelude.bootstrap_optional(),
+        app_computes_module_specifier: prelude.app_computes_module_specifier(),
+        native_files,
         dynamic_import_sites,
         native_addons,
         external_imports,
@@ -804,15 +888,29 @@ fn absolutize(path: &Path) -> PathBuf {
 /// and fail to parse. The transform hook is the only one of the three that can
 /// scope the shim to CJS-origin code.
 ///
-/// WHAT THE VALUE IS, AND WHY THAT IS THE HONEST ANSWER. `__dirname` resolves to
-/// the directory of the running chunk — the extracted app dir — not to the
-/// module's old `node_modules` path. Bundling fuses every module into one chunk,
-/// so a per-module directory no longer exists at runtime, and the entry's own
-/// directory is the one every other runtime path here already resolves against —
-/// `import.meta.dirname` in bundled code lands in exactly the same place. Deriving
-/// it from `import.meta.url` rather than `process.cwd()` is what keeps it correct
-/// from any cwd and inside a content-hashed cache dir, exactly as the `file` loader
-/// and [`NewUrlAssets`] already do.
+/// WHAT THE VALUE IS. `__dirname` is the module's own directory INSIDE the
+/// extracted app dir — the same place its source-tree directory maps to, because
+/// [`assets::Layout`] makes that dir a mirror of the anchor. Derived from
+/// `import.meta.url` rather than `process.cwd()`, so it stays correct from any cwd
+/// and inside a content-hashed cache dir, exactly as the `file` loader and
+/// [`NewUrlAssets`] already do.
+///
+/// WHY IT IS NOT SIMPLY THE CHUNK'S DIRECTORY, WHICH IS WHAT IT USED TO BE.
+/// Bundling fuses every module into one chunk, so the flat answer — every module
+/// gets the entry's directory — looked like the only honest one. It is not, and
+/// the cost was silent: `--include` extracts an asset at its own path relative to
+/// the anchor, so a module in `sub/` reading `path.join(__dirname, "data/x")` got
+/// the app ROOT's `data/x` when one existed, and `ENOENT` when it did not, while
+/// its real asset sat unreachable at `sub/data/x`. Exit 0, no warning, wrong file.
+/// That directly contradicted the promise in [`assets`]' header, which this now
+/// makes true. The offset is applied as a relative step from the chunk's own
+/// directory, so the entry keeps the exact value it had before.
+///
+/// SCOPED TO THE PROJECT'S OWN TREE. A module under `node_modules` keeps the
+/// chunk's directory. Nothing lays a bundled dependency's directory out in the
+/// extraction dir, so an offset there would only turn one path that does not exist
+/// into another — while breaking the dependency that writes a scratch file beside
+/// `__dirname` and today finds a real directory there.
 ///
 /// WHY THE URL COMES FROM A VIRTUAL MODULE INSTEAD OF `import.meta.url` INLINE.
 /// Rolldown parses a `.cjs`/`.cts` module with `with_commonjs(true)`
@@ -833,7 +931,94 @@ fn absolutize(path: &Path) -> PathBuf {
 /// emitted at chunk ROOT, outside every closure, so its own `__filename` is always
 /// Rolldown's and never a shadow — there is no cycle.
 #[derive(Debug)]
-struct CjsPathGlobals;
+struct CjsPathGlobals {
+    mirror: ModuleMirror,
+}
+
+/// Where a module's authored directory maps to inside the extracted app dir.
+///
+/// Both paths come from [`assets::plan`]. `anchor` is what the extraction dir is a
+/// mirror of, and is used only to decide whether a module is IN the mirror at all;
+/// `entry_dir` is what bundle output is emitted under, so it is what a relative
+/// step has to start from.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleMirror {
+    pub anchor: PathBuf,
+    pub entry_dir: PathBuf,
+    /// Anchor-relative, `/`-separated directories the payload ACTUALLY creates,
+    /// with every ancestor. Membership is what makes an offset safe to emit.
+    ///
+    /// The launcher creates a directory only as the parent of a file it writes, so
+    /// a source directory holding nothing but code — `src/`, in a project with no
+    /// assets under it — has no counterpart in the extracted app dir at all.
+    /// Offsetting into one would hand `__dirname` a path that does not exist and
+    /// turn `readdirSync(__dirname)` or a scratch write beside it from working code
+    /// into `ENOENT`. That is the same objection this already applies to
+    /// `node_modules`, and it applies here for the same reason.
+    pub materialized: BTreeSet<String>,
+}
+
+impl ModuleMirror {
+    /// The `/`-separated step from the chunk's directory to `module`'s own, or
+    /// `None` to leave `__dirname` at the chunk's directory.
+    ///
+    /// `None` covers everything the mirror does not describe: a module outside the
+    /// anchor, and a bundled dependency, which is laid out nowhere. A module that
+    /// sits in the entry's own directory yields `Some("")`, which the caller reads
+    /// as "no offset" — the pre-existing behavior, and the overwhelmingly common
+    /// case, so it costs no generated code.
+    /// Record `dir` and every ancestor as a directory the payload creates. `dir` is
+    /// anchor-relative and `/`-separated; `""` is the app root.
+    pub fn materialize(&mut self, dir: &str) {
+        self.materialized.insert(String::new());
+        let mut acc = String::new();
+        for part in dir.split('/').filter(|p| !p.is_empty()) {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(part);
+            self.materialized.insert(acc.clone());
+        }
+    }
+
+    fn offset_to(&self, module: &Path) -> Option<String> {
+        // The default (no mirror) must reject everything, and `strip_prefix` will
+        // not do it: an EMPTY prefix succeeds and hands back the whole path, so an
+        // absolute module id would come back through here as its own offset and be
+        // spliced in as one. Every caller outside `compile` uses the default.
+        if self.anchor.as_os_str().is_empty() {
+            return None;
+        }
+        let dir = module.parent()?;
+        let rel = dir.strip_prefix(&self.anchor).ok()?;
+        if rel.components().any(|c| c.as_os_str() == "node_modules") {
+            return None;
+        }
+        // Only into a directory the payload really has. Everything else keeps the
+        // chunk's directory, which always exists.
+        if !self.materialized.contains(&slash_path(rel)) {
+            return None;
+        }
+        let from = self.entry_dir.strip_prefix(&self.anchor).ok()?;
+        let mut from = from.components().peekable();
+        let mut to = rel.components().peekable();
+        while from.peek().is_some() && from.peek() == to.peek() {
+            from.next();
+            to.next();
+        }
+        let mut step: Vec<String> = from.map(|_| "..".to_string()).collect();
+        step.extend(to.map(|c| c.as_os_str().to_string_lossy().into_owned()));
+        Some(step.join("/"))
+    }
+}
+
+/// A relative path as the payload spells it: `/`-separated, whatever the host uses.
+fn slash_path(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 /// The module both spliced declarations read from. Rollup's `\0` prefix marks an id
 /// as plugin-owned, so it can never collide with a package a user could install.
@@ -844,9 +1029,12 @@ const PATH_GLOBALS_ID: &str = "\0nub-path-globals";
 /// hook's own cheap reject skips it.
 const PATH_GLOBALS_SOURCE: &str = concat!(
     "const { fileURLToPath: __nubToPath } = process[Symbol.for(\"nub.compile.bootstrap\")].getBuiltin(\"node:url\");\n",
-    "const { dirname: __nubDirname } = process[Symbol.for(\"nub.compile.bootstrap\")].getBuiltin(\"node:path\");\n",
+    "const { dirname: __nubDirname, join: __nubJoin } = process[Symbol.for(\"nub.compile.bootstrap\")].getBuiltin(\"node:path\");\n",
     "export const file = __nubToPath(import.meta.url);\n",
     "export const dir = __nubDirname(file);\n",
+    // The offset form. `rel` is `/`-separated and may lead with `..`; `join`
+    // normalizes both, so one helper serves a module above or below the entry.
+    "export const at = (rel) => __nubJoin(dir, rel);\n",
 );
 
 impl Plugin for CjsPathGlobals {
@@ -892,7 +1080,7 @@ impl Plugin for CjsPathGlobals {
             ModuleType::Js | ModuleType::Jsx | ModuleType::Ts | ModuleType::Tsx
         );
         let inserts = if scannable {
-            commonjs_source_inserts(clean_url(args.id), args.code)
+            commonjs_source_inserts(clean_url(args.id), args.code, &self.mirror)
         } else {
             Vec::new()
         };
@@ -919,23 +1107,187 @@ impl Plugin for CjsPathGlobals {
 /// Every correction a module needs before Rolldown scans it, as `(byte offset,
 /// text)` pairs. Both are pure insertions and neither reads the other's output, so
 /// they are independent and order-free.
-fn commonjs_source_inserts(path: &str, source: &str) -> Vec<(usize, String)> {
-    let mut inserts = concise_arrow_require_inserts(path, source);
-    if let Some((at, decls)) = cjs_path_globals_edit(path, source) {
-        inserts.push((at, decls));
+fn commonjs_source_inserts(path: &str, source: &str, mirror: &ModuleMirror) -> Vec<SourceEdit> {
+    let mut inserts: Vec<SourceEdit> = concise_arrow_require_inserts(path, source)
+        .into_iter()
+        .map(|(at, text)| SourceEdit::insert(at, text))
+        .collect();
+    if let Some((at, decls)) = cjs_path_globals_edit(path, source, mirror) {
+        inserts.push(SourceEdit::insert(at, decls));
+    } else {
+        // Only when the CJS shim did NOT apply, which is nearly but not exactly
+        // "this module is an ES module": that shim also declines a module that
+        // never names `__dirname`/`__filename`, one that binds either itself, and
+        // one with no positive CommonJS evidence. So this arm can see a
+        // CommonJS-classified module — but only one that uses `import.meta`, which
+        // Node rejects outright in CommonJS, so there is no valid source it can
+        // reach. The `.cjs`/`.cts` and parse-diagnostic guards below hold the line.
+        inserts.extend(esm_meta_dirname_edits(path, source, mirror));
     }
     inserts
 }
 
+/// Rewrite an ES module's `import.meta.dirname` / `import.meta.filename` to the
+/// module's own directory inside the extracted app dir.
+///
+/// The ESM half of the `__dirname` fix, and it exists so the two halves agree. A
+/// project's own helper under `sub/` reading `join(import.meta.dirname, "data/x")`
+/// had exactly the CommonJS defect — Rolldown resolves the pair against the CHUNK,
+/// so a nested module silently read the app root's copy of an asset that
+/// `--include` had extracted at `sub/data/x`. Fixing one module system and not the
+/// other would leave the same source failing or passing according to how it spells
+/// the same idea.
+///
+/// `import.meta.url` is deliberately untouched: it is what the `new URL(…)` asset
+/// rewrite resolves against, and those assets are re-emitted at the chunk root, so
+/// moving it would break the one idiom that already worked.
+///
+/// ONLY THE STATIC-MEMBER SPELLING. `import.meta["dirname"]`, and a module that
+/// copies `import.meta` into a variable first, keep the chunk's directory. Those
+/// are rewritable in principle — the scan would have to follow the binding — but
+/// the direct spelling is what real code writes, and the untouched forms degrade
+/// to the behavior every module had before this existed rather than to something
+/// wrong in a new way.
+fn esm_meta_dirname_edits(path: &str, source: &str, mirror: &ModuleMirror) -> Vec<SourceEdit> {
+    use oxc_allocator::Allocator;
+    use oxc_ast_visit::Visit;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // Cheap reject first, as the CJS half opens with: this hook sees every module
+    // and almost none of them name either.
+    if !source.contains("import.meta") {
+        return Vec::new();
+    }
+    // Node settles the format by extension before anything else, and `import.meta`
+    // is a syntax error in a CommonJS source — so a `.cjs` naming it is already
+    // broken and must not have an `import` statement spliced into it on top.
+    if matches!(
+        Path::new(path).extension().and_then(|e| e.to_str()),
+        Some("cjs" | "cts")
+    ) {
+        return Vec::new();
+    }
+    let Some(offset) = mirror.offset_to(Path::new(path)).filter(|o| !o.is_empty()) else {
+        return Vec::new();
+    };
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    // Any diagnostic at all, not merely a panic: the rewrite adds an `import`
+    // statement, which is valid ONLY in a module. A source this parse could not
+    // agree was one is left exactly as it is, so a build that used to succeed
+    // cannot start failing on a file this was never meant to touch.
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return Vec::new();
+    }
+    let mut scan = MetaDirnameScan {
+        offset: &offset,
+        path,
+        edits: Vec::new(),
+    };
+    scan.visit_program(&parsed.program);
+    if scan.edits.is_empty() {
+        return Vec::new();
+    }
+    // The binding the rewrites read, spliced only once something needs it. A static
+    // import, not a dynamic one: `import.meta.dirname` is legal inside an ordinary
+    // function, where `await` is a syntax error, so the value has to already be in
+    // scope. `splice_point` keeps a hashbang at byte 0.
+    scan.edits.push(SourceEdit::insert(
+        splice_point(&parsed.program, source),
+        format!(
+            ";import {{ at as {META_AT} }} from {};",
+            serde_json::to_string(PATH_GLOBALS_ID).expect("a virtual id serializes")
+        ),
+    ));
+    scan.edits
+}
+
+/// The name the ESM rewrite binds. Long and nub-private because, unlike the
+/// CommonJS splice, this one cannot check for a clashing declaration first — the
+/// rewrite is driven by expression spans, not by a whole-module scan for bindings.
+const META_AT: &str = "__nub_meta_at__";
+
+/// Collects the spans of `import.meta.dirname` / `import.meta.filename`.
+struct MetaDirnameScan<'s> {
+    offset: &'s str,
+    path: &'s str,
+    edits: Vec<SourceEdit>,
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for MetaDirnameScan<'_> {
+    fn visit_static_member_expression(&mut self, it: &oxc_ast::ast::StaticMemberExpression<'a>) {
+        let is_meta = matches!(
+            &it.object,
+            oxc_ast::ast::Expression::MetaProperty(m)
+                if m.meta.name == "import" && m.property.name == "meta"
+        );
+        if is_meta {
+            let rel = match it.property.name.as_str() {
+                "dirname" => Some(self.offset.to_string()),
+                "filename" => Path::new(self.path)
+                    .file_name()
+                    .map(|n| format!("{}/{}", self.offset, n.to_string_lossy())),
+                _ => None,
+            };
+            if let Some(rel) = rel {
+                let at = it.span.start as usize;
+                // A call expression, not a declaration: an ES module can hold
+                // `import.meta.dirname` anywhere an expression goes, including
+                // before any statement this could declare a binding ahead of.
+                let text = format!(
+                    "{META_AT}({})",
+                    serde_json::to_string(&rel).expect("a path offset serializes"),
+                );
+                self.edits.push(SourceEdit {
+                    at,
+                    replacing: it.span.end as usize - at,
+                    text,
+                });
+                return;
+            }
+        }
+        oxc_ast_visit::walk::walk_static_member_expression(self, it);
+    }
+}
+
 /// Applying from the highest offset down keeps every lower offset valid, so no
 /// insertion has to be rebased against the ones before it.
-fn apply_source_inserts(source: &str, mut inserts: Vec<(usize, String)>) -> String {
-    inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+fn apply_source_inserts(source: &str, mut inserts: Vec<SourceEdit>) -> String {
+    // Descending, and STABLE, which is load-bearing where two edits share an offset.
+    // A module whose very first token is `import.meta.dirname` gets both a rewrite
+    // of that expression at 0 and the `import` declaration spliced at 0, and only
+    // the order below puts the declaration in front of the rewrite rather than
+    // inside it. Producers therefore push replacements before the insertion that
+    // supports them; `sort_by_key` keeps that order for equal keys.
+    inserts.sort_by_key(|e| std::cmp::Reverse(e.at));
     let mut out = source.to_string();
-    for (at, text) in inserts {
-        out.insert_str(at, &text);
+    for edit in inserts {
+        out.replace_range(edit.at..edit.at + edit.replacing, &edit.text);
     }
     out
+}
+
+/// One correction to a module's source. `replacing == 0` is a pure insertion,
+/// which is what every edit was until `import.meta.dirname` needed rewriting — a
+/// property access cannot be shadowed by a declaration, so it is the one global
+/// here that has to be overwritten rather than declared around.
+#[derive(Debug)]
+struct SourceEdit {
+    at: usize,
+    replacing: usize,
+    text: String,
+}
+
+impl SourceEdit {
+    fn insert(at: usize, text: String) -> Self {
+        Self {
+            at,
+            replacing: 0,
+            text,
+        }
+    }
 }
 
 /// Give a `require()` written as the entire concise body of an arrow function an
@@ -1029,7 +1381,11 @@ fn is_static_require_call(expr: &Expression<'_>) -> bool {
 /// breaks its exports. `import.meta.url` survives verbatim because Rolldown
 /// rewrites it only for a CJS output format, and is NOT one of the signals that
 /// classification reads — both confirmed against a compiled binary.
-fn cjs_path_globals_edit(path: &str, source: &str) -> Option<(usize, String)> {
+fn cjs_path_globals_edit(
+    path: &str,
+    source: &str,
+    mirror: &ModuleMirror,
+) -> Option<(usize, String)> {
     use oxc_allocator::Allocator;
     use oxc_ast_visit::Visit;
     use oxc_parser::Parser;
@@ -1079,16 +1435,55 @@ fn cjs_path_globals_edit(path: &str, source: &str) -> Option<(usize, String)> {
     if !scan.commonjs && !extension_is_commonjs {
         return None;
     }
-    let bindings = match (scan.filename, scan.dirname) {
-        (true, true) => "{ file: __filename, dir: __dirname }",
-        (true, false) => "{ file: __filename }",
-        (false, true) => "{ dir: __dirname }",
-        (false, false) => return None,
+    if !scan.filename && !scan.dirname {
+        return None;
+    }
+    let id = &PATH_GLOBALS_ID[1..];
+    // An empty offset means the module sits in the entry's own directory, where the
+    // chunk already is. Emitting the plain destructuring there keeps the generated
+    // text — and every existing build's output — byte-identical.
+    let decls = match mirror.offset_to(Path::new(path)).filter(|o| !o.is_empty()) {
+        None => {
+            let bindings = match (scan.filename, scan.dirname) {
+                (true, true) => "{ file: __filename, dir: __dirname }",
+                (true, false) => "{ file: __filename }",
+                (false, true) => "{ dir: __dirname }",
+                (false, false) => unreachable!("guarded above"),
+            };
+            format!(";const {bindings} = require(\"\\0{id}\");")
+        }
+        Some(offset) => {
+            // Declared together so `path.dirname(__filename) === __dirname` holds,
+            // which is an invariant real CJS code reads even when it only names one
+            // of the two. A module's own basename is the only part of `__filename`
+            // that survives bundling meaningfully.
+            //
+            // This makes `__filename` asymmetric on purpose: an unmoved module keeps
+            // the CHUNK's path, because the empty-offset branch above is what leaves
+            // its generated text byte-identical, while a moved one reports its own
+            // source basename. Neither names a file that exists — the module was
+            // bundled away — so the asymmetry costs nothing a real program reads.
+            let mut out = format!(";const {{ at: __nubAt }} = require(\"\\0{id}\");");
+            if scan.dirname {
+                out.push_str(&format!(
+                    ";const __dirname = __nubAt({});",
+                    serde_json::to_string(&offset).expect("a path offset serializes")
+                ));
+            }
+            if scan.filename {
+                let base = Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    ";const __filename = __nubAt({});",
+                    serde_json::to_string(&format!("{offset}/{base}"))
+                        .expect("a path offset serializes")
+                ));
+            }
+            out
+        }
     };
-    let decls = format!(
-        ";const {bindings} = require(\"\\0{}\");",
-        &PATH_GLOBALS_ID[1..]
-    );
     Some((splice_point(&parsed.program, source), decls))
 }
 
@@ -1180,157 +1575,20 @@ impl<'a> oxc_ast_visit::Visit<'a> for PathGlobalScan {
 /// collide with the compiler's roots.
 const COMPILE_ROOT_ID: &str = "\0nub:compile-root";
 const COMPILE_PREAMBLE_ID: &str = "\0nub:compile-preamble";
-const COMPILE_COMMONJS_CHUNK: &str = "_nub_commonjs";
-const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "var __nubRequireCache; function __nubRequire() { return (__nubRequireCache ??= process[Symbol.for(\"nub.compile.bootstrap\")].createRequire(import.meta.url)); } function require(id) { return __nubRequire()(id); }";
+/// The name every chunk-level CommonJS loader is declared under. Deliberately
+/// NOT `require`: a chunk holds authored ESM beside the CommonJS modules it
+/// wraps, and Node gives ESM no `require` binding. [`hoist_module_wrappers`]
+/// binds this as `require` inside each CommonJS wrapper, and nowhere else.
+const COMPILE_COMMONJS_LOADER: &str = "__nubCjsRequire";
+const COMPILE_COMMONJS_REQUIRE_MARKER: &str = "var __nubRequireCache; function __nubRequire() { return (__nubRequireCache ??= process[Symbol.for(\"nub.compile.bootstrap\")].createRequire(import.meta.url)); } function __nubCjsRequire(id) { return __nubRequire()(id); }";
 
-/// Keep CommonJS inputs in a lexical scope application ESM can never share.
-///
-/// `polyfill_require: false` is bundle-global, while the desired semantics are
-/// not: authored ESM must keep `require` unbound, but bundled CommonJS needs a
-/// real Node loader for builtins, externals, and unanalyzable calls Rolldown
-/// intentionally leaves in the output. Rolldown exposes its final per-module
-/// classification to manual chunk naming, after parsing and package-boundary
-/// resolution have settled ambiguities which a source transform cannot settle.
-/// Grouping exactly those inputs creates a reliable lexical boundary; dependency
-/// recursion is deliberately off so an authored ESM dependency can never be
-/// pulled in. The one explicit ESM member is Nub's own path-globals bridge: it
-/// must evaluate `import.meta.url` in the chunk whose `__filename` it supplies.
-/// Placement does not make CommonJS eager: Rolldown retains each input's
-/// `__commonJS` wrapper and cross-chunk links invoke that cached wrapper at the
-/// original import/require site. `strict_execution_order` above enables its
-/// cycle/order-preserving linker path, while each wrapper's early module cache
-/// preserves partial exports through CommonJS cycles. The shared chunk evaluates
-/// only wrapper declarations.
-fn compile_code_splitting(entry_abs: &Path) -> CodeSplittingMode {
-    // Resolved ONCE here rather than per module: it is the same path on every
-    // call, and the predicate below runs across the whole graph.
-    let entry: Arc<Path> =
-        Arc::from(std::fs::canonicalize(entry_abs).unwrap_or_else(|_| entry_abs.to_path_buf()));
-    CodeSplittingMode::Advanced(ManualCodeSplittingOptions {
-        groups: Some(vec![MatchGroup {
-            name: MatchGroupName::Dynamic(Arc::new(move |id, ctx| {
-                let commonjs_scope = id == PATH_GLOBALS_ID
-                    || authored_entry_is_node_commonjs(id, &entry)
-                    || ctx
-                        .get_module_info(id)
-                        .is_some_and(|module| is_node_commonjs_module(&module))
-                    || is_commonjs_only_data_module(id, ctx);
-                Box::pin(
-                    async move { Ok(commonjs_scope.then(|| COMPILE_COMMONJS_CHUNK.to_string())) },
-                )
-            })),
-            include_dependencies_recursively: Some(false),
-            ..Default::default()
-        }]),
-        ..Default::default()
-    })
-}
-
-/// The authored entry, classified the way NODE would rather than the way
-/// Rolldown's scanner does.
-///
-/// Rolldown decides CommonJS from `module`/`exports` markers, so a `.js` entry
-/// that only CALLS `require` — with no marker anywhere — is scanned as ESM. Node
-/// disagrees: absent a `"type"` field the nearest package.json makes it
-/// CommonJS, and it runs. Without this the entry misses the CommonJS chunk, its
-/// `require` never gets the chunk's lexical binding, and the artifact dies with
-/// `require is not defined in ES module scope` — after a build that exited 0. It
-/// only surfaces when the entry requires a BUILTIN or an ejected package, since a
-/// require of a bundlable package is inlined and leaves nothing behind.
-///
-/// Scoped to the one authored entry ON PURPOSE. Widening
-/// [`is_node_commonjs_module`] itself to ignore Rolldown's verdict also fixes
-/// this and then breaks six unrelated tests: virtual roots, worker roots and
-/// loader-emitted modules all reach that predicate, Node's extension rule claims
-/// them too, and a worker root pulled into this chunk stops being emitted as its
-/// own. The entry is the only module whose format Node has already decided and
-/// whose `require` the user wrote.
-fn authored_entry_is_node_commonjs(id: &str, entry: &Path) -> bool {
-    let id = clean_url(id);
-    let path = Path::new(id);
-    // Extension first, deliberately. This predicate is called for EVERY module in
-    // the graph and at most one of them can match, so the cheap test has to come
-    // before anything that touches the filesystem — otherwise a large application
-    // pays two `canonicalize` syscalls per module to answer "no" a few thousand
-    // times. `.js` is also the only extension that can qualify (see below), so
-    // nothing is lost by checking it up front.
-    if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
-        return false;
-    }
-    // Compared through `canonicalize` because a raw `Path` equality misses the
-    // same file reached by a different prefix — /tmp vs /private/tmp on macOS is
-    // the everyday case, and the cost of a miss is the silent runtime failure
-    // this whole predicate exists to prevent. `entry` arrives already canonical
-    // (resolved once when the closure was built), so only the id is resolved
-    // here. Falls back to the lexical compare when the id names no real file.
-    let same = match std::fs::canonicalize(path) {
-        Ok(resolved) => resolved == entry,
-        Err(_) => path == entry,
-    };
-    if !same {
-        return false;
-    }
-    // ONLY `.js`. That is the whole gap: `.cjs`/`.cts` already reach the chunk
-    // because Rolldown classifies them from the extension, and `.mjs`/`.mts` are
-    // ESM to both. TypeScript is deliberately excluded even though Node applies
-    // the same package-type rule to it — nub transpiles `.ts` through the ESM
-    // path, and claiming it here pulls worker roots and loader-emitted modules
-    // into the CommonJS chunk, which stops their chunks being emitted at all
-    // (measured: 4 tests red, all of them worker/loader/new-URL cases).
-    node_package_defaults_to_commonjs(id)
-}
-
-/// Keep a JSON module in the CommonJS chunk when only CommonJS reaches it.
-///
-/// Without this the group splits a package across two chunks and the halves
-/// import each other. A `require("./data.json")` inside a dynamically imported
-/// CommonJS package is the shape that shows it: the package's own module is
-/// CommonJS so the group claims it, while the JSON stays in the dynamic import's
-/// chunk. That chunk then imports the wrapper it needs from `_nub_commonjs`, and
-/// `_nub_commonjs` imports the JSON wrapper back out of it.
-///
-/// The cycle is not survivable, because a dynamic import of a CommonJS module
-/// emits an EAGER `export default require_pkg()` at the top of its chunk. ESM
-/// evaluates one side of a cycle to completion while the other is still partway
-/// through its own body, so that call runs before `var require_pkg` has been
-/// assigned and throws `require_pkg is not a function`. Co-locating the JSON
-/// removes the edge that closes the cycle.
-///
-/// Only JSON qualifies, and deliberately so. Extending this to modules in
-/// general would move authored ESM — which a CommonJS module can `require()` on
-/// Node 22+ — into a chunk carrying a lexical `require`, exactly the binding
-/// `compile_code_splitting`'s group exists to keep away from ESM. A JSON module
-/// is data with no user code, so it cannot observe that binding.
-fn is_commonjs_only_data_module(id: &str, ctx: &rolldown_common::ChunkingContext) -> bool {
-    if Path::new(clean_url(id))
-        .extension()
-        .and_then(|ext| ext.to_str())
-        != Some("json")
-    {
-        return false;
-    }
-    let Some(module) = ctx.get_module_info(id) else {
-        return false;
-    };
-    // An entry, or a module something imports dynamically, is a chunk root in its
-    // own right; moving it would change what the graph loads and when.
-    if module.is_entry || !module.dynamic_importers.is_empty() || module.importers.is_empty() {
-        return false;
-    }
-    module.importers.iter().all(|importer| {
-        ctx.get_module_info(importer.as_str())
-            .is_some_and(|importer| is_node_commonjs_module(&importer))
-    })
-}
-
-/// Apply the chunk boundary only when Node and Rolldown agree on CommonJS.
+/// Give a chunk the CommonJS loader only when Node and Rolldown agree on CommonJS.
 ///
 /// Rolldown's scanner lets CommonJS `module`/`exports` markers outweigh even an
 /// `.mjs` suffix; Node does not. Trusting `input_format` alone would therefore
-/// move authored ESM into the loader-bearing chunk and silently make code run
-/// where plain Node throws. The scanner result is still the first gate because
-/// only a module Rolldown will wrap can safely consume the chunk's lexical
-/// `require`.
+/// hand authored ESM a `require` and silently make code run where plain Node
+/// throws. The scanner result is still the first gate because only a module
+/// Rolldown will wrap gets the loader bound as its `require`.
 fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
     if !module.input_format.is_commonjs() {
         return false;
@@ -1345,11 +1603,12 @@ fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
     }
 }
 
-/// A synchronous loader intro for CommonJS chunks. Its lexical `require` is
-/// isolated by the manual chunk boundary, and the payload-root bootstrap has
-/// already installed the private builtin registry before any chunk evaluates.
+/// The loader intro for a chunk that carries a CommonJS module. The bootstrap
+/// record has already installed the private builtin registry before any chunk
+/// evaluates, and the loader serves the `require` calls Rolldown intentionally
+/// leaves in a wrapped module: builtins, externals, and calls it cannot analyze.
 ///
-/// `require` is a FUNCTION DECLARATION, not a `const`, for the same reason
+/// The loader is a FUNCTION DECLARATION, not a `const`, for the same reason
 /// [`hoist_module_wrappers`] rewrites Rolldown's wrappers: a chunk in an import
 /// cycle can be re-entered before its own body has run, and a `const` is in its
 /// temporal dead zone then — `Cannot access 'require' before initialization`
@@ -1363,16 +1622,18 @@ fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
 /// first statement, and reaching a property means calling into the loader
 /// earlier than the loader's own chunk starts.
 fn compile_commonjs_require_intro() -> String {
+    let loader = COMPILE_COMMONJS_LOADER;
     format!(
         "{COMPILE_COMMONJS_REQUIRE_MARKER}\n\
-         require.resolve = (id, options) => __nubRequire().resolve(id, options);\n\
-         Object.defineProperty(require, \"cache\", {{ get: () => __nubRequire().cache }});\n\
-         Object.defineProperty(require, \"main\", {{ get: () => __nubRequire().main }});\n\
-         Object.defineProperty(require, \"extensions\", {{ get: () => __nubRequire().extensions }});\n"
+         {loader}.resolve = (id, options) => __nubRequire().resolve(id, options);\n\
+         Object.defineProperty({loader}, \"cache\", {{ get: () => __nubRequire().cache }});\n\
+         Object.defineProperty({loader}, \"main\", {{ get: () => __nubRequire().main }});\n\
+         Object.defineProperty({loader}, \"extensions\", {{ get: () => __nubRequire().extensions }});\n"
     )
 }
 
-/// Rolldown's lazy module wrappers, as function declarations instead of `var`s.
+/// Rolldown's lazy module wrappers, as function declarations instead of `var`s —
+/// and, for CommonJS, with the chunk's loader bound as their `require`.
 ///
 /// Rolldown emits one wrapper per non-inlined module:
 ///
@@ -1393,15 +1654,32 @@ fn compile_commonjs_require_intro() -> String {
 /// cycle runs, so rewriting each wrapper to
 ///
 /// ```js
-/// var __nub_lazy_require_pkg;
-/// function require_pkg() { return (__nub_lazy_require_pkg ??= __commonJSMin(((exports, module) => { … }))).apply(this, arguments) }
+/// var __nub_lazy_init_mod;
+/// function init_mod() { return (__nub_lazy_init_mod ??= __esmMin((() => { … }))).apply(this, arguments) }
 /// ```
 ///
 /// makes the call safe from the first moment the binding is reachable. The
-/// wrapper is still built on first call and `__commonJSMin` still memoizes it, so
+/// wrapper is still built on first call and `__esmMin` still memoizes it, so
 /// evaluation ORDER is unchanged — only the window in which the name is callable
-/// widens. Chunk membership is untouched, and so is the CommonJS/ESM `require`
-/// isolation that `compile_code_splitting` exists to protect.
+/// widens.
+///
+/// A CommonJS wrapper additionally opens with `const require = __nubCjsRequire;`:
+///
+/// ```js
+/// var __nub_lazy_require_pkg;
+/// function require_pkg() { const require = __nubCjsRequire; return (__nub_lazy_require_pkg ??= __commonJSMin(((exports, module) => { … }))).apply(this, arguments) }
+/// ```
+///
+/// The callback is created inside that activation, so every `require` the
+/// module body left behind resolves to the loader, while the chunk's own scope
+/// declares no `require` at all. That is what lets CommonJS and authored ESM
+/// share one chunk — a hello-world artifact ships as ONE file instead of an
+/// entry, a CommonJS chunk and a runtime chunk — with an ESM module's `typeof
+/// require` still `undefined`, exactly as on plain Node, because nothing in
+/// scope answers to the name. Only the two CommonJS helpers get the binding; an
+/// `__esm` wrapper holds ESM and must not. (Earlier builds kept every CommonJS
+/// module in a manual `_nub_commonjs` chunk whose intro declared `require` at
+/// chunk level; the boundary was the isolation, and it cost two files per start.)
 ///
 /// This runs in `render_chunk`, which Rolldown drives BEFORE `minify_chunks`, so
 /// the helper names are still the readable ones matched below rather than mangled
@@ -1412,12 +1690,18 @@ fn compile_commonjs_require_intro() -> String {
 /// same-named module-scope variable the wrapped body closes over — and bundled
 /// output is full of one-letter names, so `(...a)` silently rebound `a` for a
 /// whole module. That failed as `a is not a function` deep inside a command
-/// handler, long after the build reported success.
+/// handler, long after the build reported success. The `require` binding is the
+/// one deliberate exception: it shadows exactly the name the module body means.
 const ROLLDOWN_MODULE_WRAPPERS: [&str; 4] = ["__commonJS", "__commonJSMin", "__esm", "__esmMin"];
+const ROLLDOWN_COMMONJS_WRAPPERS: [&str; 2] = ["__commonJS", "__commonJSMin"];
 
 /// Rewrite every top-level Rolldown module wrapper in one chunk. Returns `None`
 /// when the chunk has none, so an untouched chunk keeps its original bytes.
-fn hoist_module_wrappers(code: &str) -> Option<String> {
+///
+/// A rewrite that cannot be applied is an ERROR, not a fallback to Rolldown's
+/// bytes: a CommonJS wrapper shipped un-rewritten has no `require` in scope and
+/// fails at run time on the user's machine, after a build that exited 0.
+fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::{Expression, Statement};
     use oxc_parser::Parser;
@@ -1428,7 +1712,7 @@ fn hoist_module_wrappers(code: &str) -> Option<String> {
     if parsed.panicked {
         // An unparseable chunk is already fatal further down the pipeline
         // (`reject_invalid_chunks`); reporting it there keeps one error path.
-        return None;
+        return Ok(None);
     }
 
     let mut magic = MagicString::new(code.to_owned());
@@ -1456,36 +1740,296 @@ fn hoist_module_wrappers(code: &str) -> Option<String> {
 
         let name = name.name.as_str();
         let lazy = format!("__nub_lazy_{name}");
-        // `var <lazy>; function <name>(...a) { return (<lazy> ??= ` replaces
-        // everything up to the wrapper call, dropping the `/* @__PURE__ */` with
-        // it — tree-shaking has already run by render_chunk, so the annotation
-        // has no reader left.
-        // A failed range abandons the WHOLE chunk rather than emitting a
-        // half-rewritten one: `magic` is discarded with the `None`, so the chunk
-        // ships exactly as Rolldown rendered it. The spans come from this same
-        // parse, so this is a guard, not an expected path.
-        if magic
+        let bind_require = if ROLLDOWN_COMMONJS_WRAPPERS.contains(&callee.name.as_str()) {
+            format!("const require = {COMPILE_COMMONJS_LOADER}; ")
+        } else {
+            String::new()
+        };
+        // `var <lazy>; function <name>() { [const require = …;] return (<lazy> ??= `
+        // replaces everything up to the wrapper call, dropping the
+        // `/* @__PURE__ */` with it — tree-shaking has already run by
+        // render_chunk, so the annotation has no reader left. The spans come from
+        // this same parse, so a failed range is a bug, and it surfaces as one.
+        magic
             .update(
                 decl.span.start,
                 call.span.start,
-                format!("var {lazy}; function {name}() {{ return ({lazy} ??= "),
+                format!("var {lazy}; function {name}() {{ {bind_require}return ({lazy} ??= "),
             )
-            .is_err()
-            || magic
-                .update(
+            .and_then(|magic| {
+                magic.update(
                     call.span.end,
                     decl.span.end,
                     ").apply(this, arguments) }".to_string(),
                 )
-                .is_err()
-        {
-            return None;
-        }
+            })
+            .map_err(|err| {
+                anyhow!("rewriting the module wrapper `{name}` in a compiled chunk: {err}")
+            })?;
         rewrote = true;
     }
-    rewrote.then(|| magic.to_string())
+    Ok(rewrote.then(|| magic.to_string()))
 }
 
+/// The oldest Node where shaping the chunk for eager compilation FILLS the V8
+/// code cache. Two facts sit behind it and only this one is the gate: Node
+/// persists no cache at all for an ES module entry below 22.1.0, and on the 22.x
+/// and 23.x line it persists one the shape makes SMALLER. With the target unknown
+/// (`--smol`) the shape is off for the same reason.
+///
+/// Measured on one hello chunk, the largest cache entry after two runs, comparing
+/// the shaped tree against the same tree unshaped:
+///
+/// | Node | unshaped | shaped |
+/// | --- | --- | --- |
+/// | 22.15.0 | 49,948 | **46,196** |
+/// | 22.23.2 | 49,964 | **46,164** |
+/// | 24.19.0 | 48,068 | 311,564 |
+/// | 24.20.0 | 48,052 | 311,548 |
+/// | 26.5.0 – 26.8.1 | 7,500 | 79,772 |
+///
+/// On 22.x the shaped tree caches LESS than the unshaped one, so the transform
+/// works against its own premise there and is switched off. From 24 it is worth
+/// 6.5x, and on 26 — where V8 is much lazier by default, hence the small
+/// baseline — 10.6x.
+const EAGER_STARTUP_FROM: (u64, u64, u64) = (24, 0, 0);
+
+pub fn eager_startup_compilation_supported(target_node: Option<(u64, u64, u64)>) -> bool {
+    target_node.is_some_and(|target| target >= EAGER_STARTUP_FROM)
+}
+
+/// Wraps a runtime module's hoisted function declaration between the transform
+/// hook and [`finish_eager_startup`], which deletes the name and keeps the
+/// parentheses. A free identifier, so neither Rolldown nor the minifier renames
+/// or removes it; a chunk that still contains it after the finish is a build error.
+const EAGER_MARKER: &str = "__nubEager";
+
+/// Move a runtime module's top-level function declarations to the top of the
+/// module as `var f = __nubEager(function f(…) {…});`, in source order, right
+/// after its directives.
+///
+/// A declaration is initialized when its scope is entered, so hoisting the
+/// assignments above every other statement is what keeps a helper callable from
+/// the code that used to run before its line. The named function expression
+/// keeps `f.name` and lets the body call itself; a name the module reassigns is
+/// left as a declaration, since the expression's inner binding would shadow the
+/// new value. Only nub's own runtime is treated this way: it runs on every start,
+/// so a complete code cache for it is pure win, while an application's helpers
+/// mostly do not and would only inflate the cache.
+fn hoist_runtime_declarations(path: &str, source: &str) -> Option<MagicString<'static>> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::Statement;
+    use oxc_parser::Parser;
+    use oxc_span::{GetSpan, SourceType};
+
+    if !source.contains("function") {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::cjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked {
+        return None;
+    }
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .build(&parsed.program)
+        .semantic;
+    let scoping = semantic.scoping();
+    let hoisted = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let Statement::FunctionDeclaration(function) = statement else {
+                return None;
+            };
+            let id = function.id.as_ref()?;
+            let symbol = id.symbol_id.get()?;
+            (!function.declare && !scoping.symbol_is_mutated(symbol))
+                .then(|| (function.span.start, function.span.end, id.name.as_str()))
+        })
+        .collect::<Vec<_>>();
+    if hoisted.is_empty() {
+        return None;
+    }
+    let mut anchor = parsed.program.directives.last().map_or_else(
+        || parsed.program.body.first().map_or(0, |s| s.span().start),
+        |directive| directive.span.end,
+    );
+    let mut magic = MagicString::new(source.to_owned());
+    for (start, end, name) in hoisted {
+        magic.prepend_right(start, format!("var {name} = {EAGER_MARKER}("));
+        magic.append_left(end, ");");
+        // A declaration already at the anchor stays; later ones land after it.
+        if start == anchor {
+            anchor = end;
+        } else {
+            magic.relocate(start, end, anchor).ok()?;
+        }
+    }
+    Some(magic)
+}
+
+/// Shape a finished chunk so Node's compile cache holds ALL of its startup code.
+///
+/// Node serializes a module's V8 code cache right after compiling it, before a
+/// line has run (`CompileCacheHandler::MaybeSave`), so the cache holds bytecode
+/// only for what V8 compiled at parse time. Every other function that runs is
+/// compiled again, from source, on every warm start — for a hello-world artifact
+/// on Node 26.7 that was more than half of the preamble's in-process time. V8
+/// compiles a function literal eagerly when it is parenthesized, and that
+/// eagerness reaches the parenthesized literals nested inside it, so the chain
+/// from the chunk's top level down to each helper the preamble calls is made of
+/// parenthesized function expressions:
+///
+/// ```js
+/// var require_polyfills=(function require_polyfills(){return(e??=__commonJSMin(((e,t)=>{
+///   var installSyncPolyfills=(function installSyncPolyfills(e){…});
+///   …
+/// }))).apply(this,arguments)});
+/// ```
+///
+/// Rolldown's wrapper callback stays the arrow it emits: with the forwarder
+/// parenthesized, the helpers inside the callback are compiled with it all the
+/// same — converting the callback to a function expression changed neither the
+/// cache size nor the time. The minifier drops parentheses the AST does not
+/// need, so the runtime helpers take their expression form before minification
+/// ([`hoist_runtime_declarations`]) and every parenthesis is added here, after
+/// it. The wrapper forwarders become `var`s only in a single-chunk bundle:
+/// across chunks a forwarder must be callable from the instant its chunk is
+/// instantiated, which only a function declaration gives (see
+/// [`hoist_module_wrappers`]), and a `var` is read too early in exactly that
+/// shape. Within one chunk every reference is checked to follow the declaration.
+///
+/// Measured on one box, min of 150: the entry's cache grew from 7 KB to 80 KB
+/// and the in-process time from bootstrap to user code fell by 0.6 ms.
+fn finish_eager_startup(
+    code: &str,
+    single_chunk: bool,
+) -> Result<Option<(String, rolldown_sourcemap::SourceMap)>> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::AstKind;
+    use oxc_ast::ast::{Expression, Statement};
+    use oxc_parser::Parser;
+    use oxc_span::{GetSpan, SourceType};
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if parsed.panicked {
+        // Reported by `reject_invalid_chunks`; one error path.
+        return Ok(None);
+    }
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+    let mut magic = MagicString::new(code.to_owned());
+    let mut edited = false;
+    for node in semantic.nodes().iter() {
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            continue;
+        };
+        let first = call
+            .arguments
+            .first()
+            .and_then(|argument| argument.as_expression());
+        if callee.name == EAGER_MARKER {
+            if call.arguments.len() != 1
+                || !matches!(first, Some(Expression::FunctionExpression(_)))
+            {
+                bail!(
+                    "the compile runtime's `{EAGER_MARKER}` marker reached the chunk in an unexpected shape"
+                );
+            }
+            magic
+                .remove(callee.span.start, callee.span.end)
+                .map_err(|err| anyhow!("finishing an eager runtime helper: {err}"))?;
+            edited = true;
+        } else if ROLLDOWN_MODULE_WRAPPERS.contains(&callee.name.as_str()) {
+            if let Some(Expression::FunctionExpression(function)) = first {
+                magic.prepend_right(function.span.start, "(");
+                magic.append_left(function.span.end, ")");
+                edited = true;
+            }
+        }
+    }
+    if single_chunk {
+        let scoping = semantic.scoping();
+        for statement in &parsed.program.body {
+            let Statement::FunctionDeclaration(function) = statement else {
+                continue;
+            };
+            let Some(id) = &function.id else {
+                continue;
+            };
+            let Some(symbol) = id.symbol_id.get() else {
+                continue;
+            };
+            let referenced_early = scoping.get_resolved_references(symbol).any(|reference| {
+                semantic
+                    .nodes()
+                    .get_node(reference.node_id())
+                    .kind()
+                    .span()
+                    .start
+                    < function.span.end
+            });
+            if referenced_early {
+                continue;
+            }
+            magic.prepend_right(function.span.start, format!("var {}=(", id.name));
+            magic.append_left(function.span.end, ");");
+            edited = true;
+        }
+    }
+    if !edited {
+        return Ok(None);
+    }
+    let finished = magic.to_string();
+    if finished.contains(EAGER_MARKER) {
+        bail!("the compile runtime's `{EAGER_MARKER}` marker survived the eager finish");
+    }
+    // The composed map takes its tokens from this one, so a token per word
+    // boundary keeps it as precise as Rolldown's; one per edited span (the
+    // default) would collapse everything between two edits onto one position.
+    let map = magic.source_map(SourceMapOptions {
+        hires: Hires::Boundary,
+        include_content: false,
+        source: "".into(),
+    });
+    Ok(Some((finished, map)))
+}
+
+/// Compose a post-minify rewrite's map onto the chunk's own and re-emit it the
+/// way the sourcemap mode expects: the inline data URL replaced in place, or the
+/// JSON for the `.map` asset Rolldown already emitted.
+fn finish_chunk_map(
+    code: String,
+    edit_map: &rolldown_sourcemap::SourceMap,
+    chunk_map: Option<&rolldown_sourcemap::SourceMap>,
+    mode: SourcemapMode,
+) -> (String, Option<String>) {
+    let Some(chunk_map) = chunk_map else {
+        return (code, None);
+    };
+    let composed = rolldown_sourcemap::collapse_sourcemaps(&[chunk_map, edit_map]);
+    match mode {
+        SourcemapMode::Inline => {
+            let mut code = code;
+            if let Some(at) = code.rfind("\n//# sourceMappingURL=") {
+                code.truncate(at);
+            }
+            code.push_str("\n//# sourceMappingURL=");
+            code.push_str(&composed.to_data_url());
+            (code, None)
+        }
+        SourcemapMode::Linked | SourcemapMode::External => (code, Some(composed.to_json_string())),
+        SourcemapMode::None => (code, None),
+    }
+}
 /// Supplies the program and worker root wrappers plus the prelude source itself.
 ///
 /// A wrapper, rather than a textual import prepended to every authored root, is
@@ -1518,6 +2062,21 @@ struct CompilePreamble {
     /// Runtime bootstrap extracted at the payload root rather than beside the
     /// content-addressed bundle layout. The launcher loads it before the entry.
     root_support_files: Vec<(String, Vec<u8>)>,
+    /// Whether an APP module — the graph minus nub's own runtime tree — names a
+    /// builtin the bootstrap would otherwise load eagerly. Written from `transform`,
+    /// which Rolldown drives concurrently, so these are atomics rather than a lock.
+    /// See [`strip_unused_bootstrap_regions`].
+    app_uses_child_process: AtomicBool,
+    app_uses_worker: AtomicBool,
+    /// Whether an APP module can COMPUTE a module specifier, which is the one
+    /// thing that defeats reading the emitted chunks for what they name. Set from
+    /// the same scan and on the same modules, kept apart from the flags above
+    /// because it is read for a different decision — see
+    /// [`Self::app_computes_module_specifier`].
+    app_computes_module_specifier: AtomicBool,
+    /// Whether the emitted chunk is shaped for a complete V8 code cache — see
+    /// [`finish_eager_startup`]. Decided by the target Node, never by the host.
+    eager: bool,
 }
 
 /// Polyfills the compile preamble installs, and the first Node version that ships
@@ -1569,12 +2128,22 @@ fn strip_native_polyfills(source: &str, target: Option<(u64, u64, u64)>) -> Stri
     if native.is_empty() {
         return source.to_string();
     }
+    strip_regions(source, "// #region nub:polyfill:", &native)
+}
+
+/// Remove `<prefix><name>` … `// #endregion` blocks for every name in `drop`.
+///
+/// The region contract is the same wherever it is used and it lives across two
+/// files: each region must be independently removable and must leave valid syntax
+/// behind, so the source it guards is written to survive its own deletion. Regions
+/// do not nest — the first `// #endregion` closes the block.
+fn strip_regions(source: &str, prefix: &str, drop: &[&str]) -> String {
     let mut out = String::with_capacity(source.len());
     let mut skipping = false;
     for line in source.lines() {
         let trimmed = line.trim();
-        if let Some(name) = trimmed.strip_prefix("// #region nub:polyfill:") {
-            if native.contains(&name) {
+        if let Some(name) = trimmed.strip_prefix(prefix) {
+            if drop.contains(&name) {
                 skipping = true;
                 continue;
             }
@@ -1591,20 +2160,125 @@ fn strip_native_polyfills(source: &str, target: Option<(u64, u64, u64)>) -> Stri
     out
 }
 
+/// Can this module reach a builtin by a name the substring scan cannot read?
+///
+/// Compiled CommonJS deliberately PRESERVES a non-static `require(expr)` rather
+/// than failing the build (see [`Requires::classify_require`], which declines to
+/// flag them because every real instance measured was a guarded optional loader).
+/// That is correct for the bundler and fatal for a literal scan:
+/// `require(["child", "process"].join("_")).fork(...)` reaches the builtin naming
+/// neither marker, and stripping the fork identity patch there would let `fork()`
+/// silently re-run the artifact instead of real Node.
+///
+/// So a module that can compute a specifier counts as using EVERYTHING. The same
+/// applies to the indirect accessors, which take a specifier this scan never sees.
+/// A template literal counts as computed even when its body is constant — the
+/// distinction is not worth reading, and the cheap answer is the safe one.
+/// Is the text after a `require(` / `import(` a WHOLE static specifier?
+///
+/// Opening with a quote proves nothing: `require("child" + "_process")` starts
+/// like a literal, names no contiguous marker, and is preserved by the compiler as
+/// a real runtime load — so accepting it on its first byte strips the fork identity
+/// patch for a payload that genuinely forks. The specifier must therefore END the
+/// argument: the string closes, and the next thing is the call's own `)` or a
+/// second argument (`import(spec, options)`), never an operator.
+///
+/// An immediately-closing paren is accepted because `import()` takes no specifier
+/// at all and is a SyntaxError, so it can reach nothing. That case is worth
+/// spelling out: the sequence occurs in PROSE, and one zod comment reading "an
+/// inline `import()` of an ESM path" was enough to keep both eager loads for every
+/// artifact depending on zod.
+fn argument_is_one_static_string(after_paren: &str) -> bool {
+    let arg = after_paren.trim_start();
+    let bytes = arg.as_bytes();
+    let quote = match bytes.first() {
+        Some(b')') => return true,
+        Some(&q @ (b'"' | b'\'')) => q,
+        _ => return false,
+    };
+    let mut i = 1;
+    let close = loop {
+        match bytes.get(i) {
+            // Unterminated within this slice — unreadable, so treat it as computed.
+            None => return false,
+            // An ESCAPE makes the literal's VALUE differ from its SPELLING, and the
+            // marker check that follows reads the spelling. A specifier written with
+            // `_` in place of the underscore is perfectly static and resolves
+            // the builtin at run time, while containing no contiguous marker — so
+            // accepting it would strip the fork patch for a payload that really
+            // forks. Decoding would be the precise answer; declining to read an
+            // escaped literal is the cheap one, and costs an eager load only on a
+            // spelling almost nobody writes.
+            Some(b'\\') => return false,
+            Some(&c) if c == quote => break i + 1,
+            _ => i += 1,
+        }
+    };
+    matches!(
+        arg[close..].trim_start().as_bytes().first(),
+        Some(b')') | Some(b',')
+    )
+}
+
+fn has_computed_module_access(code: &str) -> bool {
+    for accessor in ["createRequire", "getBuiltinModule", "process.binding"] {
+        if code.contains(accessor) {
+            return true;
+        }
+    }
+    for call in ["require(", "import("] {
+        let mut rest = code;
+        while let Some(at) = rest.find(call) {
+            rest = &rest[at + call.len()..];
+            if !argument_is_one_static_string(rest) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Drop the bootstrap's eager builtin loads when the APP graph never names them.
+///
+/// Loading `node:child_process` costs ~1.9 ms and `node:worker_threads` ~1.4 ms on
+/// every run of the artifact (measured on a quiet CI runner against interleaved
+/// duplicate baselines; 2.3 ms together, since they share a subgraph). A payload
+/// that touches neither pays that for nothing.
+///
+/// The scan behind `uses_*` covers the graph MINUS nub's own runtime tree, and that
+/// exclusion is what makes it work at all: the preamble bundles `worker-polyfill.mjs`
+/// (which declares `class Worker`) and `preload-common.cjs` (which names
+/// `child_process`), so a scan over the FINISHED chunks matches on every payload —
+/// verified against a bare `console.log("hello")`, which carries all four markers —
+/// and would strip nothing, ever.
+fn strip_unused_bootstrap_regions(
+    source: &[u8],
+    uses_child_process: bool,
+    uses_worker: bool,
+) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(source) else {
+        return source.to_vec();
+    };
+    let mut drop: Vec<&str> = Vec::new();
+    if !uses_child_process {
+        drop.push("childprocess");
+    }
+    if !uses_worker {
+        drop.push("worker");
+    }
+    if drop.is_empty() {
+        return source.to_vec();
+    }
+    strip_regions(text, "// #region nub:compile:", &drop).into_bytes()
+}
+
 impl CompilePreamble {
-    fn new(entry: &Path, target_node: Option<(u64, u64, u64)>) -> Result<Self> {
+    fn new(entry: &Path, target_node: Option<(u64, u64, u64)>, eager: bool) -> Result<Self> {
         let runtime_dir = compile_runtime_dir()?;
         let prelude = runtime_dir.join("compile-preamble.mjs");
         let source = std::fs::read_to_string(&prelude)
             .with_context(|| format!("reading the compile prelude at {}", prelude.display()))?;
         let source = strip_native_polyfills(&source, target_node);
-        let worker_blob = runtime_dir.join("worker-blob-url.cjs");
-        let worker_blob_bytes = std::fs::read(&worker_blob).with_context(|| {
-            format!(
-                "reading compile runtime support at {}",
-                worker_blob.display()
-            )
-        })?;
         // Two distinct names, deliberately: the runtime tree ships this as its own
         // source filename, while the payload publishes it under the `__nub_`-prefixed
         // fixed root name so it cannot collide with an application file. Reading by
@@ -1617,9 +2291,7 @@ impl CompilePreamble {
             )
         })?;
         let mut prelude = Self::from_source(entry, runtime_dir, source);
-        prelude
-            .support_files
-            .push(("worker-blob-url.cjs".to_string(), worker_blob_bytes));
+        prelude.eager = eager;
         prelude.root_support_files.push((
             nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
             bootstrap_bytes,
@@ -1638,6 +2310,66 @@ impl CompilePreamble {
             ]))),
             support_files: Vec::new(),
             root_support_files: Vec::new(),
+            app_uses_child_process: AtomicBool::new(false),
+            app_uses_worker: AtomicBool::new(false),
+            app_computes_module_specifier: AtomicBool::new(false),
+            eager: false,
+        }
+    }
+
+    /// Fold a native-addon island into the same decision.
+    ///
+    /// An island is a verbatim copy of a package directory rather than a bundled
+    /// module, so its files never reach [`Plugin::transform`] and the scan there
+    /// cannot see them. Island code runs in the artifact's own process, so an
+    /// island calling `fork` needs the identity fix-up exactly as application code
+    /// does. Scanned as raw bytes because an island carries binaries as well as
+    /// JavaScript; a stray match inside a `.node` only keeps a load.
+    fn note_island_usage(&self, bytes: &[u8]) {
+        let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        if contains(b"child_process") || contains(b"cluster") {
+            self.app_uses_child_process
+                .store(true, AtomicOrdering::Relaxed);
+        }
+        if contains(b"worker_threads") || contains(b"Worker") {
+            self.app_uses_worker.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Note that an application module names a builtin whose eager load in the
+    /// bootstrap cannot then be stripped.
+    ///
+    /// Substring matching over source text, deliberately. It over-detects — a
+    /// variable named `cluster` or a comment mentioning `Worker` is enough — and
+    /// that is the safe direction: a false positive keeps an eager load the payload
+    /// did not need and costs startup, whereas a false negative ships an artifact
+    /// whose `fork` is never identity-corrected, which is the failure that silently
+    /// bypassed the policy for every cluster worker before it was fixed.
+    fn note_app_builtin_usage(&self, id: &str, code: &str) {
+        // A leading NUL is Rollup's plugin-only namespace, which here means one of
+        // this compiler's own virtual roots — and the PREAMBLE is served from one.
+        // Its source names every marker, so without this the scan sets both flags
+        // on every payload and nothing is ever stripped. Its transitive imports are
+        // real paths under the runtime tree and the second test covers those.
+        if id.starts_with('\0') || Path::new(clean_url(id)).starts_with(&self.runtime_dir) {
+            return;
+        }
+        // A module that can COMPUTE a specifier defeats substring matching outright,
+        // so it counts as using everything. See [`has_computed_module_access`].
+        if has_computed_module_access(code) {
+            self.app_uses_child_process
+                .store(true, AtomicOrdering::Relaxed);
+            self.app_uses_worker.store(true, AtomicOrdering::Relaxed);
+            self.app_computes_module_specifier
+                .store(true, AtomicOrdering::Relaxed);
+            return;
+        }
+        if code.contains("child_process") || code.contains("cluster") {
+            self.app_uses_child_process
+                .store(true, AtomicOrdering::Relaxed);
+        }
+        if code.contains("worker_threads") || code.contains("Worker") {
+            self.app_uses_worker.store(true, AtomicOrdering::Relaxed);
         }
     }
 
@@ -1652,13 +2384,45 @@ impl CompilePreamble {
         })
     }
 
+    /// Read after the graph is walked, like [`Self::root_support_files`]: both
+    /// regions stripped means the bootstrap's preload-time work is gone entirely.
+    fn bootstrap_optional(&self) -> bool {
+        !self.app_uses_child_process.load(AtomicOrdering::Relaxed)
+            && !self.app_uses_worker.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Whether any application module could name a builtin this compiler cannot
+    /// see — a `createRequire`, a `getBuiltinModule`, a `process.binding`, or a
+    /// `require()`/`import()` whose argument is not one static string.
+    ///
+    /// The escape hatch for every pass that decides something by reading what the
+    /// emitted chunks NAME. Read for the single-executable container's fork
+    /// decline, which is otherwise an AST scan and would be blind to exactly these
+    /// shapes. Deliberately not the `app_uses_*` flags: those over-detect on the
+    /// bare words `cluster` and `Worker` on purpose, because their consequence is
+    /// keeping an eager load, and a decline is a much more expensive answer.
+    fn app_computes_module_specifier(&self) -> bool {
+        self.app_computes_module_specifier
+            .load(AtomicOrdering::Relaxed)
+    }
+
+    /// Collected AFTER the graph is walked, which is what makes the strip possible:
+    /// the bootstrap is not bundled, so unlike the preamble it can still be rewritten
+    /// once every application module has been seen.
     fn root_support_files(&self) -> impl Iterator<Item = BundledFile> + '_ {
-        self.root_support_files
-            .iter()
-            .map(|(name, bytes)| BundledFile {
+        let uses_child_process = self.app_uses_child_process.load(AtomicOrdering::Relaxed);
+        let uses_worker = self.app_uses_worker.load(AtomicOrdering::Relaxed);
+        self.root_support_files.iter().map(move |(name, bytes)| {
+            let bytes = if name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
+                strip_unused_bootstrap_regions(bytes, uses_child_process, uses_worker)
+            } else {
+                bytes.clone()
+            };
+            BundledFile {
                 name: name.clone(),
-                bytes: bytes.clone(),
-            })
+                bytes,
+            }
+        })
     }
 
     /// Register `source` as a static worker root and return the virtual entry id
@@ -1708,7 +2472,7 @@ impl CompilePreamble {
 /// Rolldown resolves the absolute id only while building and never emits it.
 /// Drop a Windows verbatim (`\\?\`) prefix. Pure over `windows` so both branches
 /// test on any host.
-fn strip_verbatim_prefix(path: PathBuf, windows: bool) -> PathBuf {
+pub fn strip_verbatim_prefix(path: PathBuf, windows: bool) -> PathBuf {
     if !windows {
         return path;
     }
@@ -1766,6 +2530,18 @@ fn compile_runtime_dir() -> Result<PathBuf> {
     Ok(runtime_dir)
 }
 
+/// Read one file out of the public runtime directory `nub compile` bundles from.
+///
+/// The same seam [`compile_runtime_dir`] establishes, exposed for compile stages
+/// that need a runtime file without going through the prelude plugin — the
+/// no-extract loader is the one caller. Going through this rather than a path of
+/// its own is what keeps a released binary reading its EXTRACTED embedded runtime
+/// instead of a Cargo checkout that is not there.
+pub fn compile_runtime_file(name: &str) -> Result<Vec<u8>> {
+    let path = compile_runtime_dir()?.join(name);
+    std::fs::read(&path).with_context(|| format!("reading compile runtime at {}", path.display()))
+}
+
 impl Plugin for CompilePreamble {
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("nub:compile-preamble")
@@ -1789,7 +2565,7 @@ impl Plugin for CompilePreamble {
     ) -> impl Future<Output = HookRenderChunkReturn> + Send {
         let hoisted = hoist_module_wrappers(&args.code);
         async move {
-            Ok(hoisted.map(|code| HookRenderChunkOutput {
+            Ok(hoisted?.map(|code| HookRenderChunkOutput {
                 code,
                 map: HookTransformOutputMap::Omitted,
             }))
@@ -1905,13 +2681,16 @@ impl Plugin for CompilePreamble {
                 let source = std::fs::read_to_string(&path).with_context(|| {
                     format!("reading compile root source at {}", path.display())
                 })?;
-                if let Some(code) =
-                    preserve_entry_esm_classification(&path.to_string_lossy(), &source)
+                let path = path.to_string_lossy();
+                if let Some(code) = preserve_entry_esm_classification(&path, &source)
+                    .or_else(|| preserve_entry_commonjs_classification(&path, &source))
                 {
                     // Rolldown chooses the module format before transform hooks.
-                    // Returning the marker here makes an authored `.mjs` root
-                    // unambiguously ESM without changing its physical id, which
-                    // is still needed by tsconfig, asset, and worker handling.
+                    // Returning the marker here makes a root's format unambiguous
+                    // — ESM for an authored `.mjs`, CommonJS for a type-less `.js`
+                    // that only calls `require` — without changing its physical
+                    // id, which is still needed by tsconfig, asset, and worker
+                    // handling.
                     return Ok(Some(HookLoadOutput {
                         code: code.into(),
                         // Let Rolldown infer the real source type from this
@@ -1929,24 +2708,45 @@ impl Plugin for CompilePreamble {
         _ctx: SharedTransformPluginContext,
         args: &HookTransformArgs<'_>,
     ) -> impl Future<Output = HookTransformReturn> + Send {
+        self.note_app_builtin_usage(args.id, args.code);
         let root = self.is_root_source(args.id);
         let rewritten = if root {
-            let cjs = rewrite_entry_main_checks(clean_url(args.id), args.code);
-            let source = cjs.as_deref().unwrap_or(args.code);
-            rewrite_import_meta_main(clean_url(args.id), source, "true")
+            let path = clean_url(args.id);
+            // The load hook marks a root it read itself. One another plugin loaded
+            // arrives unmarked and gets the same nudge here — BEFORE the main-check
+            // rewrite, which can erase the root's only `module` reference.
+            let nudged = preserve_entry_commonjs_classification(path, args.code);
+            let code = nudged.as_deref().unwrap_or(args.code);
+            let cjs = rewrite_entry_main_checks(path, code);
+            let source = cjs.as_deref().unwrap_or(code);
+            rewrite_import_meta_main(path, source, "true")
                 .map(|magic| import_meta_transform_output(args.id, magic))
                 .or_else(|| cjs.map(|code| (code, HookTransformOutputMap::Null)))
+                .or_else(|| nudged.map(|code| (code, HookTransformOutputMap::Null)))
                 .or_else(|| {
-                    preserve_entry_esm_classification(clean_url(args.id), args.code)
+                    preserve_entry_esm_classification(path, args.code)
                         .map(|code| (code, HookTransformOutputMap::Null))
                 })
         } else {
+            let path = clean_url(args.id);
+            let esm = preserve_dependency_esm_classification(path, args.code);
+            let code = esm.as_deref().unwrap_or(args.code);
             // Rolldown can flatten a static dependency into the executable's
             // entry chunk, where a raw `import.meta.main` would accidentally
             // observe the chunk's main-ness. Preserve Node/Deno's per-module
             // rule before chunking: only the executable root may see `true`.
-            rewrite_non_root_import_meta_main(clean_url(args.id), args.code)
+            let in_runtime = self.eager
+                && !args.id.starts_with('\0')
+                && Path::new(path).starts_with(&self.runtime_dir);
+            rewrite_non_root_import_meta_main(path, code)
                 .map(|magic| import_meta_transform_output(args.id, magic))
+                .or_else(|| {
+                    in_runtime
+                        .then(|| hoist_runtime_declarations(path, code))
+                        .flatten()
+                        .map(|magic| import_meta_transform_output(args.id, magic))
+                })
+                .or_else(|| esm.map(|code| (code, HookTransformOutputMap::Null)))
         };
         async move {
             Ok(rewritten.map(|(code, map)| HookTransformOutput {
@@ -2295,6 +3095,152 @@ fn preserve_entry_esm_classification(path: &str, source: &str) -> Option<String>
         return None;
     }
     Some(format!("{source}\nexport {{}};\n"))
+}
+
+/// A dependency Node runs as ESM but Rolldown would wrap as CommonJS: an `.mjs`,
+/// `.mts`, or type-module `.js`/`.ts` with no import or export that references
+/// `module` or `exports`. Rolldown's scan takes that reference as CommonJS
+/// evidence outweighing the extension and package, wraps the module, and hands
+/// it a real `module` — and, now that every CommonJS wrapper binds the chunk's
+/// loader as its `require`, a real `require` too. Plain Node gives it neither:
+/// the first such reference is a `ReferenceError`. The empty export makes
+/// Rolldown read the module the way Node does, so it is emitted as ESM with
+/// both names left unbound.
+///
+/// Narrower than the root marker on purpose. A dependency with no ESM syntax and
+/// no `module`/`exports` reference is already ESM to Rolldown by its extension or
+/// package, so marking it would only change its exports; only the shape Rolldown
+/// misreads gets the marker, and a module inside the prelude is never one.
+fn preserve_dependency_esm_classification(path: &str, source: &str) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // Every dependency passes through here, so the parse comes last: the
+    // extension and package answer for a CommonJS file without one.
+    let extension = Path::new(path).extension().and_then(|ext| ext.to_str());
+    if path.starts_with('\0')
+        || matches!(extension, Some("cjs" | "cts"))
+        || !(source.contains("module") || source.contains("exports"))
+        || (!matches!(extension, Some("mjs" | "mts")) && node_package_defaults_to_commonjs(path))
+    {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || has_esm_syntax(&parsed.program) {
+        return None;
+    }
+    let semantic = oxc_semantic::SemanticBuilder::new()
+        .build(&parsed.program)
+        .semantic;
+    // The references Rolldown misreads as proof of CommonJS, and the only ones the
+    // marker is for. Collected as REFERENCE IDS rather than as a yes/no, so the
+    // exemption below can require the assignment to target one of THESE and not a
+    // local binding that merely shares the name.
+    let unresolved: Vec<_> = semantic
+        .scoping()
+        .root_unresolved_references()
+        .iter()
+        .filter(|(name, _)| matches!(name.as_str(), "module" | "exports"))
+        .flat_map(|(_, ids)| ids.iter().copied())
+        .collect();
+    if unresolved.is_empty() {
+        return None;
+    }
+    let assigns_the_global = top_level_member_assignment_roots(&parsed.program)
+        .into_iter()
+        .any(|ident| {
+            ident
+                .reference_id
+                .get()
+                .is_some_and(|id| unresolved.contains(&id))
+        });
+    (!assigns_the_global).then(|| format!("{source}\nexport {{}};\n"))
+}
+
+/// The root identifier of every unconditional top-level `<root>.… = …` assignment.
+///
+/// A module that assigns the GLOBAL `module.exports` or `exports.<name>` this way
+/// is CommonJS by construction, not an ES module that merely mentions the name:
+/// run as ESM the statement throws the first time the module executes, so no
+/// working package ships one. What the marker above is really for is the GUARDED
+/// probe — `try { module.exports = … } catch {}`, and its
+/// `typeof module !== "undefined"` cousins — which Node does read as ESM.
+///
+/// The roots come back as REFERENCES rather than names so the caller can insist on
+/// the unresolved one. A local `const module = {}` shadowing the global must not
+/// buy the exemption: such a module can still need the marker for a SEPARATE
+/// unresolved `module`/`exports` reference elsewhere in it.
+///
+/// The distinction is load-bearing for the compiler's OWN generated modules.
+/// `native::addon_module` is CommonJS Nub wrote itself, but the id it is served
+/// under is the `.node` file, whose owning manifest is the application's — so an
+/// app with `"type": "module"` made the shim look like an ESM dependency. Marking
+/// it turned Rolldown's CommonJS wrapper off, `module` was left unbound, and every
+/// artifact carrying a native addon died at startup with the `ReferenceError` Node
+/// reports as `ERR_AMBIGUOUS_MODULE_SYNTAX`.
+fn top_level_member_assignment_roots<'a>(
+    program: &'a Program<'a>,
+) -> Vec<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    use oxc_ast::ast::{Expression, IdentifierReference, Statement};
+
+    fn root<'a>(expr: &'a Expression<'a>) -> Option<&'a IdentifierReference<'a>> {
+        match expr {
+            Expression::Identifier(ident) => Some(ident),
+            Expression::StaticMemberExpression(member) => root(&member.object),
+            Expression::ComputedMemberExpression(member) => root(&member.object),
+            _ => None,
+        }
+    }
+
+    program
+        .body
+        .iter()
+        .filter_map(|stmt| {
+            let Statement::ExpressionStatement(stmt) = stmt else {
+                return None;
+            };
+            let Expression::AssignmentExpression(assign) = &stmt.expression else {
+                return None;
+            };
+            root(assign.left.as_member_expression()?.object())
+        })
+        .collect()
+}
+
+/// The mirror image, for a root Node runs as CommonJS. Rolldown classifies a
+/// format-`Unknown` module — a `.js`/`.ts` under a package with no `"type"` — as
+/// CommonJS only when it references `module` or `exports`, so a root that merely
+/// CALLS `require` is scanned as ESM: Rolldown leaves it unwrapped, its `require`
+/// binds to nothing, and the artifact dies with `require is not defined` after a
+/// build that exited 0. A `module` reference is the smallest marker that scan
+/// accepts; inside the wrapper Rolldown then emits, `module` is the real module
+/// object and the statement is a no-op. `.cjs`/`.cts` need nothing: Rolldown
+/// reads those extensions the way Node does.
+///
+/// Root-only, like its twin: a dependency keeps its own package's rules.
+fn preserve_entry_commonjs_classification(path: &str, source: &str) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    const MARKER: &str = "void module;";
+    if matches!(
+        Path::new(path).extension().and_then(|ext| ext.to_str()),
+        Some("cjs" | "cts")
+    ) || source.contains(MARKER)
+    {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.panicked || !node_classifies_as_commonjs(path, &parsed.program) {
+        return None;
+    }
+    Some(format!("{source}\n{MARKER}\n"))
 }
 
 fn is_unbound_global(
@@ -4619,7 +5565,9 @@ fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
 /// UNRESOLVED_IMPORT warnings for named specifiers that resolved to nothing.
 ///
 /// `allow_dynamic` excuses the `import()` sites ONLY — both the computed and the
-/// variable-held shape, since the runtime hook serves them identically. An
+/// variable-held shape, since the runtime hook serves them identically — and only
+/// those whose IMPORTER a pattern selects, so a site the globs do not name is
+/// refused exactly as it would be with no flag at all. An
 /// indirect `require` is a different defect with a different fix (the resolver
 /// picked a UMD build), and an UNRESOLVED_IMPORT is a static specifier that
 /// resolved to nothing — neither is served by a runtime resolve hook, so neither
@@ -4648,10 +5596,44 @@ fn uses_plug_n_play(entry: &Path) -> bool {
         .any(|dir| dir.join(".pnp.cjs").is_file() && !dir.join("node_modules").is_dir())
 }
 
+/// Whether `patterns` excuse a dynamic import written in `module`.
+///
+/// `module` is rolldown's module id, an absolute path. The user's glob is
+/// project-relative, so it is compared against the portion below `cwd` — the same
+/// anchor `--include` resolves its patterns against, and the only one a pattern
+/// typed at a shell prompt can mean.
+///
+/// A module OUTSIDE `cwd` — a dependency resolved through a parent's
+/// `node_modules` — matches no relative pattern and stays refused. That is the
+/// intended reading rather than a gap: a scoped escape hatch names the code you
+/// are vouching for, and you cannot vouch for a path you cannot write down.
+fn dynamic_import_allowed(patterns: &[String], cwd: &Path, module: &str) -> bool {
+    // The bare flag: allow-everything, and the behavior this flag had before it
+    // could be scoped.
+    if patterns.iter().any(|p| p.is_empty()) {
+        return true;
+    }
+    let Ok(rel) = Path::new(module).strip_prefix(cwd) else {
+        return false;
+    };
+    let rel = to_slash_path(rel);
+    patterns
+        .iter()
+        .any(|pattern| glob_match::glob_match(pattern, &rel))
+}
+
+fn to_slash_path(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn reject_unresolved(
     sites: &[DynamicSite],
     warnings: &[BuildDiagnostic],
-    allow_dynamic: bool,
+    allow_dynamic: &[String],
+    cwd: &Path,
     pnp: bool,
     uninstalled: bool,
 ) -> Result<()> {
@@ -4668,7 +5650,9 @@ fn reject_unresolved(
         any_native |= specifier_names_native_addon(&site.snippet);
         any_dependency_site |= unresolved_importer_is_dependency(&site.module);
         match site.kind {
-            SiteKind::Dynamic | SiteKind::Variable | SiteKind::Attributed if allow_dynamic => {
+            SiteKind::Dynamic | SiteKind::Variable | SiteKind::Attributed
+                if dynamic_import_allowed(allow_dynamic, cwd, &site.module) =>
+            {
                 continue;
             }
             SiteKind::Dynamic => any_dynamic = true,
@@ -5039,6 +6023,7 @@ mod tests {
 
     fn opts() -> BundleOptions {
         BundleOptions {
+            module_mirror: ModuleMirror::default(),
             minify: true,
             keep_names: true,
             sourcemap: SourcemapMode::Inline,
@@ -5052,7 +6037,7 @@ mod tests {
             external: Vec::new(),
             unbundled: Vec::new(),
             bundled: Vec::new(),
-            allow_dynamic_import: false,
+            allow_dynamic_import: Vec::new(),
             tsconfig: None,
             loaders: Vec::new(),
             native_target: None,
@@ -5060,6 +6045,7 @@ mod tests {
             drop_debugger: false,
             metafile: false,
             target_node: None,
+            eager_startup: false,
         }
     }
 
@@ -5625,6 +6611,104 @@ mod tests {
         }
     }
 
+    /// The step from the chunk's directory to a module's own. This is the whole of
+    /// the `__dirname` fix: a nested module used to get the entry's directory, so
+    /// `path.join(__dirname, "data/x")` read the app ROOT's copy of an asset that
+    /// `--include` had extracted at `sub/data/x`.
+    #[test]
+    fn a_modules_dirname_offset_mirrors_its_place_in_the_source_tree() {
+        let mirror = |anchor: &str, entry_dir: &str, dirs: &[&str]| {
+            let mut m = ModuleMirror {
+                anchor: PathBuf::from(anchor),
+                entry_dir: PathBuf::from(entry_dir),
+                materialized: Default::default(),
+            };
+            for d in dirs {
+                m.materialize(d);
+            }
+            m
+        };
+        let flat = mirror("/p", "/p", &["", "sub", "deep"]);
+        assert_eq!(
+            flat.offset_to(Path::new("/p/index.js")).as_deref(),
+            Some(""),
+            "the entry's own directory IS the chunk's, so it must produce no offset \
+             and leave the generated text byte-identical to before"
+        );
+        assert_eq!(
+            flat.offset_to(Path::new("/p/sub/reader.js")).as_deref(),
+            Some("sub"),
+            "the defect itself: this module's assets extract under sub/"
+        );
+
+        // The entry below the anchor, which is what any --include above it produces.
+        // Bundle output carries the entry prefix, so reaching a sibling tree is a
+        // step UP first — the case a chunk-relative offset gets wrong if it assumes
+        // the chunk sits at the app root.
+        let nested = mirror("/p", "/p/src", &["src", "lib", "src/deep"]);
+        assert_eq!(
+            nested.offset_to(Path::new("/p/src/a.js")).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            nested.offset_to(Path::new("/p/lib/b.js")).as_deref(),
+            Some("../lib")
+        );
+        assert_eq!(
+            nested.offset_to(Path::new("/p/src/deep/c.js")).as_deref(),
+            Some("deep")
+        );
+
+        // Both directions of "the mirror does not describe this module", which must
+        // keep the chunk's directory rather than inventing a path.
+        assert_eq!(
+            flat.offset_to(Path::new("/p/node_modules/dep/lib/x.js")),
+            None,
+            "nothing lays a bundled dependency's directory out in the extraction dir"
+        );
+        assert_eq!(
+            flat.offset_to(Path::new("/elsewhere/x.js")),
+            None,
+            "a module outside the anchor would need an offset that escapes the app dir"
+        );
+
+        // The regression this gate exists for. A source directory holding only code
+        // is never created in the extracted app dir -- the launcher makes a
+        // directory only as the parent of a file it writes -- so offsetting into one
+        // would turn `readdirSync(__dirname)` and a scratch write beside it from
+        // working code into ENOENT.
+        assert_eq!(
+            flat.offset_to(Path::new("/p/codeonly/helper.js")),
+            None,
+            "no payload file lives under codeonly/, so the app dir has no such directory"
+        );
+
+        // The default, which every caller outside `compile` uses. `strip_prefix`
+        // does NOT reject an empty prefix — it succeeds and returns the whole path
+        // — so without an explicit guard this produced `//p/sub` as an "offset".
+        assert_eq!(
+            ModuleMirror::default().offset_to(Path::new("/p/sub/reader.js")),
+            None,
+            "no mirror means no offset, whatever the module's path looks like"
+        );
+
+        // The generated text, so the offset is provably reaching the splice and not
+        // merely computed. `dirname(__filename)` must equal `__dirname`.
+        let src = "module.exports = () => [__dirname, __filename];\n";
+        let (_, decls) =
+            cjs_path_globals_edit("/p/sub/reader.js", src, &flat).expect("a CJS shim applies");
+        assert!(
+            decls.contains("__nubAt(\"sub\")") && decls.contains("__nubAt(\"sub/reader.js\")"),
+            "the splice must carry the offset for both names, got:\n{decls}"
+        );
+        let (_, root) =
+            cjs_path_globals_edit("/p/index.js", src, &flat).expect("a CJS shim applies");
+        assert!(
+            !root.contains("__nubAt"),
+            "an unmoved module must keep the plain destructuring, got:\n{root}"
+        );
+    }
+
     // Where the declarations land, for the two module shapes where byte 0 would
     // change what the module means: a directive prologue that stops being one, and
     // a hashbang that stops being at byte 0. Asserted on the spliced TEXT rather
@@ -5633,7 +6717,8 @@ mod tests {
     #[test]
     fn the_declarations_splice_after_a_directive_prologue_and_after_a_hashbang() {
         let splice = |src: &str| {
-            let (at, decls) = cjs_path_globals_edit("dep.js", src).expect("a CJS shim applies");
+            let (at, decls) = cjs_path_globals_edit("dep.js", src, &ModuleMirror::default())
+                .expect("a CJS shim applies");
             format!("{}{decls}{}", &src[..at], &src[at..])
         };
 
@@ -5712,7 +6797,8 @@ mod tests {
         ];
         for (tag, pkg_json, body, why) in cases {
             assert!(
-                cjs_path_globals_edit("node_modules/dep/index.js", body).is_none(),
+                cjs_path_globals_edit("node_modules/dep/index.js", body, &ModuleMirror::default())
+                    .is_none(),
                 "{why}"
             );
             // The real bundle is the second half of the assertion: a duplicate
@@ -5947,6 +7033,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// How a chunk's own scope treats the name `require`, as oxc resolves it:
+    /// whether the top level declares it, and how many references bind to
+    /// nothing — one per mention plain Node would also leave unbound in ESM.
+    fn require_scope(code: &str) -> (bool, usize) {
+        use oxc_allocator::Allocator;
+        use oxc_parser::Parser;
+        use oxc_span::SourceType;
+
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+        assert!(!parsed.panicked, "an emitted chunk must parse:\n{code}");
+        let semantic = oxc_semantic::SemanticBuilder::new()
+            .build(&parsed.program)
+            .semantic;
+        let scoping = semantic.scoping();
+        let declared = scoping.get_root_binding("require".into()).is_some();
+        let unbound = scoping
+            .root_unresolved_references()
+            .iter()
+            .find(|(name, _)| name.as_str() == "require")
+            .map_or(0, |(_, refs)| refs.len());
+        (declared, unbound)
     }
 
     fn bundle_module_graph(tag: &str, entry: &str, files: &[(&str, &str)]) -> Result<BundleResult> {
@@ -6705,11 +7815,18 @@ mod tests {
             !intro.contains("node:module") && !intro.contains("__nubCompileCommonjs"),
             "the CommonJS loader must be a fixed bootstrap-backed binding: {intro}"
         );
-        // `require` has to survive a cycle re-entering this chunk before its body
-        // runs, which a `const` cannot — see `compile_commonjs_require_intro`.
+        // The loader has to survive a cycle re-entering this chunk before its
+        // body runs, which a `const` cannot — see `compile_commonjs_require_intro`.
+        // And it is never `require` itself: that name is bound per wrapper.
+        let declaration = format!("function {COMPILE_COMMONJS_LOADER}(id)");
         assert!(
-            intro.contains("function require(id)") && !intro.contains("const require"),
+            intro.contains(&declaration) && !intro.contains("const __nub"),
             "the loader must be a hoisted function declaration: {intro}"
+        );
+        let (declares_require, _) = require_scope(&intro);
+        assert!(
+            !declares_require,
+            "the intro must not declare `require` in chunk scope: {intro}"
         );
         for property in ["resolve", "cache", "main", "extensions"] {
             assert!(
@@ -6820,6 +7937,138 @@ mod tests {
         );
     }
 
+    /// A dependency Node reads as ESM keeps that reading even when it mentions
+    /// `module` or `exports`; one that mentions neither, or already has ESM
+    /// syntax, is left alone.
+    #[test]
+    fn esm_dependencies_that_mention_module_or_exports_get_the_marker() {
+        let dir = fixture_dir("esm-dependency-marker");
+        let mjs = dir.join("dep.mjs");
+        let source = "try { module.exports = 1; } catch (e) { console.log(e.name); }\n";
+        let marked = preserve_dependency_esm_classification(&mjs.to_string_lossy(), source)
+            .expect("an .mjs that mentions module must stay ESM");
+        assert!(marked.starts_with(source) && marked.ends_with("export {};\n"));
+        assert!(
+            preserve_dependency_esm_classification(&mjs.to_string_lossy(), "console.log(1);\n")
+                .is_none(),
+            "no module/exports reference, nothing for Rolldown to misread"
+        );
+        assert!(
+            preserve_dependency_esm_classification(&mjs.to_string_lossy(), &marked).is_none(),
+            "the marker is applied once"
+        );
+        assert!(
+            preserve_dependency_esm_classification(
+                &mjs.to_string_lossy(),
+                "const module = {}; module.exports = 1;\n"
+            )
+            .is_none(),
+            "a local binding named module is not the CommonJS global"
+        );
+        let cjs = dir.join("dep.cjs");
+        assert!(
+            preserve_dependency_esm_classification(&cjs.to_string_lossy(), source).is_none(),
+            ".cjs is CommonJS to both"
+        );
+        let js = dir.join("dep.js");
+        assert!(
+            preserve_dependency_esm_classification(&js.to_string_lossy(), source).is_none(),
+            "a type-less package makes .js CommonJS under Node"
+        );
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).unwrap();
+        assert!(
+            preserve_dependency_esm_classification(&js.to_string_lossy(), source).is_some(),
+            "a type-module package makes the same .js ESM"
+        );
+        assert!(
+            preserve_dependency_esm_classification("\0nub:virtual", source).is_none(),
+            "virtual modules are the compiler's own"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A module that assigns `module.exports` outright is CommonJS whatever its
+    /// package says, so the marker leaves it alone. The generated native-addon
+    /// shim is exactly that shape and is served under the `.node` id, whose
+    /// owning manifest is the APPLICATION's — so an app declaring
+    /// `"type": "module"` used to make the shim look like an ESM dependency,
+    /// and marking it left `module` unbound in every artifact carrying an addon.
+    #[test]
+    fn a_top_level_module_exports_assignment_keeps_its_commonjs_reading() {
+        let dir = fixture_dir("addon-shim-classification");
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).unwrap();
+        let addon = dir.join("watcher-a1b2c3d4.node");
+        let shim = crate::compile::native::addon_module("watcher-a1b2c3d4.node");
+        assert!(
+            preserve_dependency_esm_classification(&addon.to_string_lossy(), &shim).is_none(),
+            "the generated addon shim assigns module.exports and must stay CommonJS"
+        );
+        assert!(
+            preserve_dependency_esm_classification(
+                &dir.join("exports-member.mjs").to_string_lossy(),
+                "exports.answer = 42;\n"
+            )
+            .is_none(),
+            "assigning through `exports` is the same statement about the format"
+        );
+        assert!(
+            preserve_dependency_esm_classification(
+                &dir.join("probe.mjs").to_string_lossy(),
+                "try { module.exports = 1; } catch (e) { console.log(e.name); }\n"
+            )
+            .is_some(),
+            "a guarded probe is the shape the marker exists for and keeps it"
+        );
+        // The exemption follows the SEMANTIC reference, not the spelling. Here
+        // `module` is a local binding, so the assignment says nothing about the
+        // format — and the module still needs the marker for its separate
+        // unresolved `exports`, which is the reference Rolldown would misread.
+        assert!(
+            preserve_dependency_esm_classification(
+                &dir.join("shadowed.mjs").to_string_lossy(),
+                "const module = {};\nmodule.exports = 1;\n\
+                 try { exports.answer } catch (e) { console.log(e.name); }\n"
+            )
+            .is_some(),
+            "a local `module` must not suppress a marker another unresolved reference needs"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The CommonJS twin: a `.js` root under a type-less package that only calls
+    /// `require` gets the `module` marker Rolldown's scan needs; a root Rolldown
+    /// already reads as CommonJS, or Node reads as ESM, gets nothing.
+    #[test]
+    fn commonjs_roots_without_module_markers_get_a_module_reference() {
+        let dir = fixture_dir("commonjs-root-marker");
+        let entry = dir.join("entry.js");
+        let source = "const path = require('node:path'); console.log(path.sep);\n";
+        std::fs::write(&entry, source).unwrap();
+        let path = entry.to_string_lossy();
+        let marked = preserve_entry_commonjs_classification(&path, source)
+            .expect("a type-less .js root that only calls require needs the marker");
+        assert!(marked.starts_with(source));
+        assert!(marked.ends_with("void module;\n"));
+        assert!(
+            preserve_entry_commonjs_classification(&path, &marked).is_none(),
+            "the marker is applied once"
+        );
+        assert!(
+            preserve_entry_commonjs_classification(&path, "import x from 'x';\n").is_none(),
+            "ESM syntax is ESM under Node's rules too"
+        );
+        assert!(
+            preserve_entry_commonjs_classification("/tmp/entry.cjs", source).is_none(),
+            "Rolldown reads .cjs as CommonJS by itself"
+        );
+        std::fs::write(dir.join("package.json"), r#"{"type":"module"}"#).unwrap();
+        assert!(
+            preserve_entry_commonjs_classification(&path, source).is_none(),
+            "a type-module package makes the same .js ESM"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn esm_root_guard_stays_an_esm_reference_in_the_emitted_chunk() {
         let dir = fixture_dir("esm-main-guard-output");
@@ -6839,9 +8088,17 @@ mod tests {
             .map(|file| String::from_utf8_lossy(&file.bytes))
             .expect("the named entry chunk must be emitted");
         assert!(entry_code.contains("ESM_REFERENCE:"));
+        // The chunk carries the prelude's CommonJS and so its loader, but the
+        // loader is never `require` in chunk scope: the root's own mention stays
+        // the unbound reference plain Node would throw on.
+        let (declares_require, unbound) = require_scope(&entry_code);
         assert!(
-            !entry_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            !declares_require,
             "the CommonJS loader must never become a lexical binding in authored ESM:\n{entry_code}"
+        );
+        assert_eq!(
+            unbound, 1,
+            "the ESM root's `require.main` must be the one unbound require in the chunk:\n{entry_code}"
         );
         let code = res
             .files
@@ -6872,7 +8129,7 @@ mod tests {
         assert_eq!(
             commonjs_chunks.len(),
             1,
-            "the bundled runtime's CommonJS modules need one isolated loader scope"
+            "one loader, in the chunk that carries the prelude's CommonJS modules"
         );
         let runtime_commonjs = String::from_utf8_lossy(&commonjs_chunks[0].bytes);
         assert!(
@@ -6886,8 +8143,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A CommonJS root shares the entry chunk with the ESM prelude. Its builtin
+    /// `require` is served by the chunk's loader, bound as `require` inside the
+    /// root's own wrapper — never as a binding the chunk's scope declares.
     #[test]
-    fn commonjs_builtin_require_is_isolated_from_the_esm_entry_chunk() {
+    fn commonjs_builtin_require_binds_inside_its_wrapper_not_the_chunk() {
         let dir = fixture_dir("commonjs-require-output");
         let entry = dir.join("entry.cjs");
         std::fs::write(
@@ -6904,32 +8164,48 @@ mod tests {
             .find(|file| String::from_utf8_lossy(&file.bytes).contains("CJS_BUILTIN_REQUIRE:"))
             .expect("the authored CommonJS module must be emitted");
         let commonjs_code = String::from_utf8_lossy(&commonjs.bytes);
+        assert_eq!(
+            commonjs.name, res.entry,
+            "one root with no worker and no dynamic import is the entry chunk itself"
+        );
         assert!(
             commonjs_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
-            "a raw Node builtin require needs createRequire in its CommonJS chunk:\n{commonjs_code}"
+            "a raw Node builtin require needs createRequire in its chunk:\n{commonjs_code}"
         );
         assert!(
             commonjs_code.contains("require(\"node:path\")"),
-            "the fixture must retain the raw builtin call that needs the lexical loader:\n{commonjs_code}"
+            "the fixture must retain the raw builtin call that needs the loader:\n{commonjs_code}"
         );
         assert!(
-            commonjs.name.starts_with(COMPILE_COMMONJS_CHUNK),
-            "Rolldown must keep CommonJS behind the named manual boundary: {}",
-            commonjs.name
+            commonjs_code.contains(&format!("const require = {COMPILE_COMMONJS_LOADER};")),
+            "the loader must be bound as `require` inside the wrapper:\n{commonjs_code}"
         );
-        assert_ne!(
-            commonjs.name, res.entry,
-            "the CommonJS module must not share the ESM facade's lexical scope"
+        let (declares_require, unbound) = require_scope(&commonjs_code);
+        assert!(
+            !declares_require && unbound == 0,
+            "the chunk's own scope must neither declare nor leave unbound a `require`:\n{commonjs_code}"
         );
-        let entry_code = res
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The single-file guarantee: an entry that reaches no worker and no dynamic
+    /// import is emitted as ONE chunk, and every file a start opens is paid for.
+    #[test]
+    fn an_entry_without_workers_or_dynamic_imports_is_one_chunk() {
+        let dir = fixture_dir("single-chunk");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "console.log('hello');\n").unwrap();
+        let res = bundle(&entry, &opts()).expect("a hello world must compile");
+        let chunks: Vec<&str> = res
             .files
             .iter()
-            .find(|file| file.name == res.entry)
-            .map(|file| String::from_utf8_lossy(&file.bytes))
-            .expect("the named entry chunk must be emitted");
-        assert!(
-            !entry_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
-            "the ESM facade must keep require unbound:\n{entry_code}"
+            .filter(|file| !file.name.ends_with(".map"))
+            .map(|file| file.name.as_str())
+            .collect();
+        assert_eq!(
+            chunks,
+            vec![res.entry.as_str()],
+            "the entry must be the only chunk"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7013,22 +8289,417 @@ mod tests {
             "no wrapper may survive as a `var`, which is unassigned during a cycle:\n{all}"
         );
         assert!(
-            all.contains("function require(id)"),
-            "the CommonJS chunk's own loader must hoist too:\n{all}"
+            all.contains(&format!("function {COMPILE_COMMONJS_LOADER}(id)")),
+            "the chunk's own loader must hoist too:\n{all}"
         );
         assert!(
-            !all.contains("const require = "),
-            "a `const require` is in its temporal dead zone when a cycle re-enters:\n{all}"
+            !all.contains(&format!("const {COMPILE_COMMONJS_LOADER}")),
+            "a `const` loader is in its temporal dead zone when a cycle re-enters:\n{all}"
+        );
+        // The binding a CommonJS body sees lives INSIDE its wrapper's forwarder,
+        // evaluated on call — never in the chunk's scope.
+        let bound = |wrapper: &str| {
+            all.contains(&format!(
+                "function {wrapper}() {{ const require = {COMPILE_COMMONJS_LOADER};"
+            ))
+        };
+        assert!(
+            bound("require_index") || bound("require_cjsdep"),
+            "the CommonJS wrapper must bind the loader as its own require:\n{all}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Names of the chunk's top-level function declarations, in order.
+    fn top_level_function_declarations(code: &str) -> Vec<String> {
+        use oxc_allocator::Allocator;
+        use oxc_ast::ast::Statement;
+        use oxc_parser::Parser;
+        use oxc_span::SourceType;
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+        assert!(!parsed.panicked, "an emitted chunk must parse:\n{code}");
+        parsed
+            .program
+            .body
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::FunctionDeclaration(function) => {
+                    function.id.as_ref().map(|id| id.name.to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn entry_chunk(res: &BundleResult) -> String {
+        let chunk = res
+            .files
+            .iter()
+            .find(|file| file.name == res.entry)
+            .expect("the entry chunk is among the files");
+        String::from_utf8_lossy(&chunk.bytes).into_owned()
+    }
+
+    /// The chain [`finish_eager_startup`] describes, through the real bundler
+    /// and minifier: every forwarder a `var` bound to a parenthesized function
+    /// expression, every runtime helper the same, the marker gone.
+    #[test]
+    fn eager_startup_parenthesizes_the_chain_for_a_compile_cache_target() {
+        let dir = fixture_dir("eager-chain");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "console.log('hello, nub');\n").unwrap();
+        let mut o = opts();
+        o.target_node = Some((26, 0, 0));
+        o.eager_startup = true;
+        let res = bundle(&entry, &o).expect("hello must compile");
+        let code = entry_chunk(&res);
+
+        assert!(
+            !code.contains(EAGER_MARKER),
+            "the runtime marker must not reach the artifact:\n{code}"
+        );
+        assert!(
+            code.contains("=(function require_polyfills(")
+                && code.contains("=(function init__nub_compile_preamble("),
+            "each forwarder must be a var bound to a parenthesized function expression:\n{}",
+            &code[..code.len().min(800)]
+        );
+        assert!(
+            code.contains("(function installSyncPolyfills("),
+            "a runtime helper must be a parenthesized named function expression:\n{code}"
+        );
+        assert!(
+            top_level_function_declarations(&code).is_empty(),
+            "no forwarder may remain a lazily compiled declaration: {:?}",
+            top_level_function_declarations(&code)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The shape is off below 24 and on from it. Two different facts decide that
+    /// and only the second is the gate: Node persists no code cache at all below
+    /// 22.1, and on 22.x it persists one that the shape
+    /// makes SMALLER — 46 KB shaped against 50 KB unshaped, on both 22.15 and
+    /// 22.23. So the whole 22 and 23 band is out, including 22.1 itself. The
+    /// bundler reads the option, not the target: with it off, a cache-capable
+    /// target still gets the lazy shape.
+    #[test]
+    fn eager_startup_waits_for_a_target_the_shape_actually_helps() {
+        for target in [
+            None,
+            Some((20, 19, 0)),
+            Some((22, 0, 99)),
+            // 22.1.0: where the cache first exists, and still not where it helps.
+            Some((22, 1, 0)),
+            Some((22, 23, 2)),
+            Some((23, 99, 99)),
+        ] {
+            assert!(
+                !eager_startup_compilation_supported(target),
+                "target {target:?} does not gain from the shape"
+            );
+        }
+        assert!(eager_startup_compilation_supported(Some(
+            EAGER_STARTUP_FROM
+        )));
+        assert!(eager_startup_compilation_supported(Some((26, 0, 0))));
+
+        let dir = fixture_dir("eager-gate");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "console.log('hello, nub');\n").unwrap();
+        let mut o = opts();
+        o.target_node = Some((26, 0, 0));
+        let code = entry_chunk(&bundle(&entry, &o).expect("hello must compile"));
+        assert!(
+            !code.contains("=(function require_") && !code.contains(EAGER_MARKER),
+            "with the option off the chunk keeps the lazy shape:\n{}",
+            &code[..code.len().min(800)]
+        );
+        assert!(
+            top_level_function_declarations(&code)
+                .iter()
+                .any(|name| name == "require_polyfills"),
+            "with the option off the forwarders stay declarations"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A forwarder another chunk can call before this one's body has run must
+    /// stay a declaration (see [`hoist_module_wrappers`]); the runtime helpers
+    /// inside it are still parenthesized, they just wait for their forwarder.
+    #[test]
+    fn eager_startup_keeps_forwarders_as_declarations_across_chunks() {
+        let dir = fixture_dir("eager-two-chunks");
+        let pkg = dir.join("node_modules/cjsdyn");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"cjsdyn","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("index.js"),
+            "module.exports = { data: require('./data.json') };\n",
+        )
+        .unwrap();
+        std::fs::write(pkg.join("data.json"), r#"{"v":1}"#).unwrap();
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "const m = await import('cjsdyn'); console.log(m.default.data.v);\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        o.target_node = Some((26, 0, 0));
+        o.eager_startup = true;
+        let res = bundle(&entry, &o).expect("a dynamic CommonJS import must compile");
+        let chunks = res
+            .files
+            .iter()
+            .filter(|file| !file.name.ends_with(".map"))
+            .collect::<Vec<_>>();
+        assert!(
+            chunks.len() >= 2,
+            "the dynamic import must split a chunk off"
+        );
+        for chunk in &chunks {
+            let code = String::from_utf8_lossy(&chunk.bytes);
+            assert!(
+                !code.contains("=(function require_") && !code.contains("=(function init_"),
+                "{}: a forwarder must stay a declaration across chunks:\n{}",
+                chunk.name,
+                &code[..code.len().min(800)]
+            );
+            assert!(!code.contains(EAGER_MARKER), "{}: marker left", chunk.name);
+        }
+        let code = entry_chunk(&res);
+        assert!(
+            code.contains("(function installSyncPolyfills("),
+            "runtime helpers keep their parenthesized form:\n{code}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runtime_declarations_hoist_in_source_order_after_the_directive() {
+        let src = "// header\n\"use strict\";\nconst first = 1;\nfunction b() { return a(); }\nlet mid = b;\nfunction a() { return 1; }\nfunction c() {}\nc = 2;\nmodule.exports = { a, b };\n";
+        let out = hoist_runtime_declarations("/runtime/x.cjs", src)
+            .expect("declarations hoist")
+            .to_string();
+        let directive = out.find("\"use strict\";").unwrap();
+        let b = out
+            .find("var b = __nubEager(function b() { return a(); });")
+            .unwrap_or_else(|| panic!("b must hoist as a marked expression:\n{out}"));
+        let a = out
+            .find("var a = __nubEager(function a() { return 1; });")
+            .unwrap_or_else(|| panic!("a must hoist as a marked expression:\n{out}"));
+        let first = out.find("const first = 1;").unwrap();
+        assert!(
+            directive < b && b < a && a < first,
+            "hoisted in source order, right after the directive:\n{out}"
+        );
+        assert!(
+            out.contains("function c() {}") && !out.contains("__nubEager(function c"),
+            "a reassigned name stays a declaration:\n{out}"
+        );
+
+        // The first statement is itself a declaration: it stays, the rest follow it.
+        let out = hoist_runtime_declarations(
+            "/runtime/y.cjs",
+            "function a() {}\nconst k = 1;\nfunction b() {}\n",
+        )
+        .expect("declarations hoist")
+        .to_string();
+        assert_eq!(
+            out,
+            "var a = __nubEager(function a() {});var b = __nubEager(function b() {});\nconst k = 1;\n\n",
+        );
+
+        assert!(
+            hoist_runtime_declarations("/runtime/z.mjs", "export function e() {}\nconst k = 1;\n")
+                .is_none(),
+            "an exported declaration is not a plain statement and stays"
+        );
+        assert!(hoist_runtime_declarations("/runtime/w.cjs", "const k = 1;\n").is_none());
+    }
+
+    /// The finish inserts text on the minified chunk's one line, so every
+    /// column after the first insertion moves; the composed map must still
+    /// take the authored string back to its file and line.
+    #[test]
+    fn eager_startup_keeps_the_inline_source_map_pointing_at_authored_code() {
+        let dir = fixture_dir("eager-map");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "const greeting = 'hello, nub';\nconsole.log(greeting);\n",
+        )
+        .unwrap();
+        let mut o = opts();
+        o.target_node = Some((26, 0, 0));
+        o.eager_startup = true;
+        let res = bundle(&entry, &o).expect("hello must compile");
+        let code = entry_chunk(&res);
+        assert!(code.contains("=(function require_polyfills("));
+
+        let (body, tail) = code
+            .rsplit_once("base64,")
+            .expect("the chunk carries an inline sourcemap comment");
+        let json = {
+            use base64::Engine as _;
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(tail.trim())
+                    .expect("the inline map must be valid base64"),
+            )
+            .expect("the decoded map must be UTF-8")
+        };
+        // The alias is `SourceMap<'static>`, so the JSON it borrows must be too.
+        let json: &'static str = Box::leak(json.into_boxed_str());
+        let map = rolldown_sourcemap::SourceMap::from_json_string(json)
+            .expect("the inline map must parse");
+        // The minifier inlines the constant into the call on the second authored
+        // line, so the call is the position with one right answer. The entry's
+        // wrapper is the last module in the chunk, hence the last `console.log(`.
+        let at = body
+            .rfind("console.log(")
+            .expect("the authored call is in the chunk");
+        let line = body[..at].matches('\n').count() as u32;
+        let col = (at - body[..at].rfind('\n').map_or(0, |n| n + 1)) as u32;
+        let table = map.generate_lookup_table();
+        let token = map
+            .lookup_token(&table, line, col)
+            .unwrap_or_else(|| panic!("no mapping at {line}:{col} in:\n{json}"));
+        let source = token
+            .get_source_id()
+            .and_then(|id| map.get_source(id))
+            .unwrap_or_else(|| panic!("the token must name a source:\n{json}"));
+        assert!(
+            source.ends_with("entry.mjs") && token.get_src_line() == 1,
+            "the call must map to line 2 of the entry, got {source}:{}",
+            token.get_src_line() + 1
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn host_node_version() -> Option<(u64, u64, u64)> {
+        let out = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()?;
+        let text = String::from_utf8(out.stdout).ok()?;
+        let mut parts = text
+            .trim()
+            .strip_prefix('v')?
+            .split('.')
+            .map(|part| part.parse::<u64>().ok());
+        Some((parts.next()??, parts.next()??, parts.next()??))
+    }
+
+    fn largest_file_len(dir: &Path) -> u64 {
+        let mut largest = 0;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    largest = largest.max(meta.len());
+                }
+            }
+        }
+        largest
+    }
+
+    /// Positive control on the real runtime: after one run, Node's compile cache
+    /// for the finished chunk holds the runtime's startup functions, while the
+    /// lazy shape — the same sources for a target without a compile cache — leaves
+    /// an order of magnitude less on the same Node. The lazy run is the control
+    /// that proves the instrument. Skips below [`EAGER_STARTUP_FROM`], where the
+    /// shape is switched off because it caches LESS than leaving the tree alone.
+    #[test]
+    fn eager_startup_fills_the_compile_cache_on_the_first_run() {
+        let Some(version) = host_node_version() else {
+            eprintln!("skipping: no node on PATH");
+            return;
+        };
+        if version < EAGER_STARTUP_FROM {
+            eprintln!("skipping: the shape is off below Node {EAGER_STARTUP_FROM:?}");
+            return;
+        }
+        let cache_bytes = |eager: bool, tag: &str| -> u64 {
+            let dir = fixture_dir(tag);
+            let entry = dir.join("entry.mjs");
+            std::fs::write(&entry, "console.log('hello, nub');\n").unwrap();
+            let mut o = opts();
+            o.target_node = Some(version);
+            o.eager_startup = eager;
+            // V8 serializes the script's source-map URL into the code cache, so
+            // an inline map would put the map's bytes in the number under test.
+            o.sourcemap = SourcemapMode::None;
+            let res = bundle(&entry, &o).expect("hello must compile");
+            let out = dir.join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            for file in res
+                .files
+                .iter()
+                .chain(&res.root_support_files)
+                .chain(&res.support_files)
+            {
+                std::fs::write(out.join(&file.name), &file.bytes).unwrap();
+            }
+            let cache = dir.join("cc");
+            for _ in 0..2 {
+                let run = std::process::Command::new("node")
+                    .arg(out.join(&res.entry))
+                    .env("NODE_COMPILE_CACHE", &cache)
+                    .env(
+                        "__NUB_COMPILED_BOOTSTRAP",
+                        out.join(nub_core::compile::COMPILE_BOOTSTRAP_NAME),
+                    )
+                    .output()
+                    .expect("spawn node");
+                assert!(
+                    run.status.success()
+                        && String::from_utf8_lossy(&run.stdout).contains("hello, nub"),
+                    "the chunk must run under plain node (eager {eager}):\n{}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+            }
+            let largest = largest_file_len(&cache);
+            let _ = std::fs::remove_dir_all(&dir);
+            largest
+        };
+        let lazy = cache_bytes(false, "eager-cache-control");
+        let eager = cache_bytes(true, "eager-cache");
+        eprintln!("compile cache: lazy {lazy} bytes, eager {eager} bytes (node {version:?})");
+        // The claim is a RATIO, not a byte count, and only the ratio is portable.
+        // V8's parse-time eagerness is a version-dependent heuristic: this same
+        // chunk leaves 7.5 KB lazily on 26.7.0 and 48 KB on 24.20.0, so a ceiling
+        // on the control pins the test to whichever Node it was written against.
+        // The ratio holds on both (10.7x and 6.5x) and is what a broken transform
+        // destroys — it would leave the two shapes equal.
+        assert!(
+            eager > 4 * lazy && eager >= 40_000,
+            "the finished chunk's cache must hold the runtime's startup functions: \
+             {eager} bytes against {lazy} lazy (node {version:?})"
+        );
+    }
+
     /// A dynamically imported CommonJS package emits an eager
-    /// `export default require_pkg()` at the top of its own chunk. If the JSON it
-    /// requires stays behind in that chunk while the package itself moves to
-    /// `_nub_commonjs`, the two chunks import each other and that eager call runs
-    /// against an unassigned wrapper — `require_pkg is not a function` at startup.
-    /// Both halves must land in the same chunk.
+    /// `export default require_pkg()` at the top of its own chunk. When the JSON
+    /// it requires sat in that chunk while the package itself was moved to a
+    /// manual CommonJS chunk, the two chunks imported each other and that eager
+    /// call ran against an unassigned wrapper — `require_pkg is not a function`
+    /// at startup. Rolldown's own placement keeps both halves in the dynamic
+    /// chunk; this pins that no boundary of ours separates them again.
     #[test]
     fn a_dynamically_imported_commonjs_package_keeps_its_json_in_one_chunk() {
         let dir = fixture_dir("commonjs-dynamic-json-chunk");
@@ -7067,10 +8738,13 @@ mod tests {
             .expect("the JSON must be emitted somewhere");
         let holder_code = String::from_utf8_lossy(&holder.bytes);
         assert!(
-            !holder_code.contains(&format!("from \"./{COMPILE_COMMONJS_CHUNK}")),
-            "the chunk holding the package's JSON must not import back out of the CommonJS \
-             chunk — that edge is what closes the cycle:\n{}",
-            holder.name
+            holder_code.contains("module.exports = {"),
+            "the package must sit in the chunk that holds its JSON — a split is the \
+             edge that closes the cycle:\n{holder_code}"
+        );
+        assert_ne!(
+            holder.name, res.entry,
+            "a dynamically imported package is not part of the entry chunk"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7115,9 +8789,12 @@ mod tests {
             commonjs_code.contains("local"),
             "the fixture's shadowed require path must survive bundling:\n{commonjs_code}"
         );
+        // The required ESM leaf shares the chunk; what it must not share is a
+        // `require` binding, and the chunk's scope declares none.
+        let (declares_require, _) = require_scope(&commonjs_code);
         assert!(
-            !commonjs_code.contains("CJS_TO_ESM_LEAF"),
-            "non-recursive grouping must keep a required ESM leaf outside the loader scope:\n{commonjs_code}"
+            !declares_require,
+            "a required ESM leaf must not see a `require` in chunk scope:\n{commonjs_code}"
         );
         assert!(
             res.files
@@ -7148,9 +8825,11 @@ mod tests {
             .find(|file| String::from_utf8_lossy(&file.bytes).contains("MJS_REFERENCE:"))
             .expect("the authored ESM dependency must be emitted");
         let dependency_code = String::from_utf8_lossy(&dependency.bytes);
+        let (declares_require, unbound) = require_scope(&dependency_code);
         assert!(
-            !dependency_code.contains(COMPILE_COMMONJS_REQUIRE_MARKER),
-            "an .mjs dependency must retain Node's unbound-require semantics:\n{dependency_code}"
+            !declares_require && unbound == 1,
+            "an .mjs dependency must retain Node's unbound-require semantics — its one \
+             `require` binds to nothing in the chunk:\n{dependency_code}"
         );
         assert!(
             dependency_code.contains("require(\"node:path\")"),
@@ -7715,9 +9394,12 @@ console.log('CJS_ENTRY_MARK', path.sep);
         )
         .unwrap();
         let res = bundle(&entry, &o).expect("a CommonJS entry must compile");
+        let cjs_chunk = chunk_with(&res, "CJS_ENTRY_MARK");
         assert!(
-            chunk_with(&res, "CJS_ENTRY_MARK").contains(COMPILE_COMMONJS_REQUIRE_MARKER),
-            "the chunk holding the entry must also bind its require"
+            cjs_chunk.contains(COMPILE_COMMONJS_REQUIRE_MARKER)
+                && cjs_chunk.contains(&format!("const require = {COMPILE_COMMONJS_LOADER};")),
+            "a type-less .js entry that only calls require must be wrapped as CommonJS and \
+             get the loader as its require:\n{cjs_chunk}"
         );
 
         let esm = dir.join("esm.mjs");
@@ -7729,8 +9411,9 @@ console.log('ESM_ENTRY_MARK', path.sep);
         )
         .unwrap();
         let res = bundle(&esm, &o).expect("an ESM entry must compile");
+        let (declares_require, _) = require_scope(&chunk_with(&res, "ESM_ENTRY_MARK"));
         assert!(
-            !chunk_with(&res, "ESM_ENTRY_MARK").contains(COMPILE_COMMONJS_REQUIRE_MARKER),
+            !declares_require,
             "authored ESM must not be handed a require binding Node would not give it"
         );
     }
@@ -7840,7 +9523,7 @@ console.log('ESM_ENTRY_MARK', path.sep);
         let mut o = opts();
         o.minify = false;
         o.external = vec!["peer".into()];
-        o.allow_dynamic_import = true;
+        o.allow_dynamic_import = vec![String::new()];
         let res = bundle_for_compile(&entry, &o, &dir)
             .expect("worker external and computed imports must stay runtime-resolvable");
 
@@ -8292,7 +9975,7 @@ await import("./data.json", { with: { type: "json" } });
 
         // The refusal itself, and the flag that excuses it — the specifier is
         // path-like, so the runtime hook can serve it from the launch directory.
-        let err = reject_unresolved(&scan.sites, &[], false, false, false)
+        let err = reject_unresolved(&scan.sites, &[], &[], Path::new("/p"), false, false)
             .expect_err("must refuse")
             .to_string();
         assert!(
@@ -8301,7 +9984,7 @@ await import("./data.json", { with: { type: "json" } });
              a literal to write a literal: {err}"
         );
         assert!(
-            reject_unresolved(&scan.sites, &[], true, false, false).is_ok(),
+            reject_unresolved(&scan.sites, &[], ALLOW_ALL, Path::new("/p"), false, false).is_ok(),
             "--allow-dynamic-import must still excuse it"
         );
     }
@@ -8382,7 +10065,7 @@ await import("./" + process.env.NUB_SUFFIX + ".mjs");
         let mut allowed = opts();
         allowed.minify = false;
         allowed.sourcemap = SourcemapMode::None;
-        allowed.allow_dynamic_import = true;
+        allowed.allow_dynamic_import = vec![String::new()];
         let result = bundle(&entry, &allowed)
             .expect("the opt-in must preserve every nonliteral dynamic import for runtime");
         assert_eq!(
@@ -8529,6 +10212,9 @@ const pkg = require("./package.json");
         assert!(sites[0].snippet.contains("./package.json"), "{sites:?}");
     }
 
+    /// The bare `--allow-dynamic-import`, whose empty pattern matches everything.
+    const ALLOW_ALL: &[String] = &[String::new()];
+
     fn dynamic_site() -> DynamicSite {
         DynamicSite {
             kind: SiteKind::Dynamic,
@@ -8538,6 +10224,45 @@ const pkg = require("./package.json");
             snippet: "import(pluginPath)".into(),
             resolves_to: Vec::new(),
         }
+    }
+
+    /// The scoped escape hatch: a glob over the file the import is WRITTEN IN.
+    ///
+    /// This is where nub parts company with Bun, which matches its glob against
+    /// the specifier's extracted template shape. An opaque specifier is exactly
+    /// what the flag exists for, so a specifier matcher can only ever describe the
+    /// imports that did not need it; the importer's path is known for every site.
+    #[test]
+    fn a_scoped_allow_excuses_only_the_files_its_glob_names() {
+        let cwd = Path::new("/p");
+        let site = dynamic_site(); // /p/src/plugins.ts
+
+        let scoped = [String::from("src/plugins/**")];
+        reject_unresolved(&[dynamic_site()], &[], &scoped, cwd, false, false)
+            .expect_err("a site outside the glob stays refused");
+
+        let hits = [String::from("src/*.ts")];
+        reject_unresolved(&[dynamic_site()], &[], &hits, cwd, false, false)
+            .expect("a site the glob names is excused");
+
+        // Repeatable, and any pattern matching is enough.
+        let several = [String::from("nope/**"), String::from("src/plugins.ts")];
+        reject_unresolved(&[dynamic_site()], &[], &several, cwd, false, false)
+            .expect("one matching pattern out of several is enough");
+
+        // The pattern is anchored at the working directory, the same anchor
+        // --include resolves against, so an absolute-looking glob does NOT match.
+        let absolute = [String::from("/p/src/*.ts")];
+        reject_unresolved(&[dynamic_site()], &[], &absolute, cwd, false, false)
+            .expect_err("globs are project-relative, not absolute");
+
+        // A module outside the working directory can be named by no relative
+        // pattern and stays refused — a dependency is not something you can vouch
+        // for by typing a path.
+        let mut outside = site;
+        outside.module = "/elsewhere/node_modules/x/index.js".into();
+        reject_unresolved(&[outside], &[], &hits, cwd, false, false)
+            .expect_err("a module outside the cwd matches no relative pattern");
     }
 
     /// A site the author cannot rewrite must be told about --unbundled, and one
@@ -8556,8 +10281,8 @@ const pkg = require("./package.json");
             snippet: "require('mdn-data/css/properties.json')".into(),
             ..dynamic_site()
         };
-        let err =
-            reject_unresolved(&[in_dependency], &[], false, false, false).expect_err("must fail");
+        let err = reject_unresolved(&[in_dependency], &[], &[], Path::new("/p"), false, false)
+            .expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("--unbundled"), "got: {msg}");
         assert!(
@@ -8566,7 +10291,8 @@ const pkg = require("./package.json");
         );
 
         let own_source =
-            reject_unresolved(&[dynamic_site()], &[], false, false, false).expect_err("must fail");
+            reject_unresolved(&[dynamic_site()], &[], &[], Path::new("/p"), false, false)
+                .expect_err("must fail");
         assert!(
             !own_source.to_string().contains("--unbundled"),
             "the author's own site must not be sent to --unbundled: {own_source}"
@@ -8579,8 +10305,8 @@ const pkg = require("./package.json");
     // scanner instead.
     #[test]
     fn rejection_names_the_site_the_fix_and_the_flag() {
-        let err =
-            reject_unresolved(&[dynamic_site()], &[], false, false, false).expect_err("must fail");
+        let err = reject_unresolved(&[dynamic_site()], &[], &[], Path::new("/p"), false, false)
+            .expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/plugins.ts:12:20"), "got: {msg}");
         assert!(msg.contains("import(pluginPath)"), "got: {msg}");
@@ -8613,7 +10339,15 @@ const pkg = require("./package.json");
     #[test]
     fn the_flag_excuses_only_the_computed_import() {
         assert!(
-            reject_unresolved(&[dynamic_site()], &[], true, false, false).is_ok(),
+            reject_unresolved(
+                &[dynamic_site()],
+                &[],
+                ALLOW_ALL,
+                Path::new("/p"),
+                false,
+                false
+            )
+            .is_ok(),
             "a permitted dynamic site must not fail the build"
         );
 
@@ -8625,8 +10359,15 @@ const pkg = require("./package.json");
             snippet: r#"require("./impl/format")"#.into(),
             resolves_to: Vec::new(),
         };
-        let err = reject_unresolved(&[dynamic_site(), indirect], &[], true, false, false)
-            .expect_err("an indirect require must still fail");
+        let err = reject_unresolved(
+            &[dynamic_site(), indirect],
+            &[],
+            ALLOW_ALL,
+            Path::new("/p"),
+            false,
+            false,
+        )
+        .expect_err("an indirect require must still fail");
         let msg = err.to_string();
         assert!(msg.contains("umd.js:4:15"), "got: {msg}");
         assert!(
@@ -8658,8 +10399,15 @@ const pkg = require("./package.json");
             snippet: "import(pkg)".into(),
             resolves_to: vec!["@x/core-darwin".into(), "@x/core-linux".into()],
         };
-        let err = reject_unresolved(std::slice::from_ref(&site), &[], false, false, false)
-            .expect_err("must fail");
+        let err = reject_unresolved(
+            std::slice::from_ref(&site),
+            &[],
+            &[],
+            Path::new("/p"),
+            false,
+            false,
+        )
+        .expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("/p/src/platform.ts:7:22"), "got: {msg}");
         assert!(msg.contains("import(pkg)"), "got: {msg}");
@@ -8669,7 +10417,7 @@ const pkg = require("./package.json");
         );
         assert!(msg.contains("--allow-dynamic-import"), "got: {msg}");
 
-        reject_unresolved(&[site], &[], true, false, false)
+        reject_unresolved(&[site], &[], ALLOW_ALL, Path::new("/p"), false, false)
             .expect("the flag must excuse a variable specifier exactly as it does a computed one");
     }
 
@@ -9181,6 +10929,262 @@ after
         // Surrounding code always survives — otherwise the assertions above could
         // pass by the stripper eating the whole file.
         for out in [&n26, &n24, &n18] {
+            assert!(
+                out.contains("before") && out.contains("after"),
+                "the stripper must only remove its own regions"
+            );
+        }
+    }
+
+    /// The usage scan counts application modules and ignores the compiler's own.
+    ///
+    /// Written after shipping the inverse by accident: the preamble is served from
+    /// a virtual id rather than a path under the runtime tree, so excluding only
+    /// the runtime tree let the preamble's own source — which names every marker —
+    /// set both flags on every payload, and nothing was ever stripped. The failure
+    /// was silent, because over-detection only costs startup.
+    #[test]
+    fn the_builtin_scan_ignores_the_compilers_own_modules() {
+        let every_marker = "child_process cluster worker_threads Worker";
+        let fresh = || {
+            CompilePreamble::from_source(
+                Path::new("/app/entry.ts"),
+                PathBuf::from("/nub/runtime"),
+                String::new(),
+            )
+        };
+        let uses = |p: &CompilePreamble| {
+            (
+                p.app_uses_child_process.load(AtomicOrdering::Relaxed),
+                p.app_uses_worker.load(AtomicOrdering::Relaxed),
+            )
+        };
+
+        let virtual_root = fresh();
+        virtual_root.note_app_builtin_usage(COMPILE_PREAMBLE_ID, every_marker);
+        assert_eq!(
+            uses(&virtual_root),
+            (false, false),
+            "the preamble's own virtual module must not count as application usage"
+        );
+
+        let runtime_file = fresh();
+        runtime_file.note_app_builtin_usage("/nub/runtime/worker-polyfill.mjs", every_marker);
+        assert_eq!(
+            uses(&runtime_file),
+            (false, false),
+            "a file in nub's runtime tree must not count as application usage"
+        );
+
+        // The positive control. Without it the assertions above would pass just as
+        // well against a scan that never records anything at all.
+        let app = fresh();
+        app.note_app_builtin_usage(
+            "/app/entry.ts",
+            "import { fork } from 'node:child_process';",
+        );
+        assert_eq!(
+            uses(&app),
+            (true, false),
+            "an application module naming child_process must keep only that load"
+        );
+
+        let app_worker = fresh();
+        app_worker.note_app_builtin_usage("/app/entry.ts", "const w = new Worker(url);");
+        assert_eq!(
+            uses(&app_worker),
+            (false, true),
+            "an application module naming Worker must keep only that load"
+        );
+    }
+
+    /// A module that can compute a specifier keeps every eager load.
+    ///
+    /// This is the hole a literal scan leaves: compiled CommonJS preserves a
+    /// non-static `require(expr)`, so `require(["child", "process"].join("_"))`
+    /// reaches the builtin naming neither marker. Stripping there would drop the
+    /// fork identity patch and let `fork()` re-run the artifact with no error
+    /// raised, which is the silent failure this whole scan is written around.
+    #[test]
+    fn a_computed_specifier_keeps_every_eager_load() {
+        for computed in [
+            r#"require(["child", "process"].join("_"))"#,
+            r#"const m = "fs"; require(m);"#,
+            r#"await import(specifier)"#,
+            r#"createRequire(import.meta.url)("child_process")"#,
+            r#"process.getBuiltinModule(name)"#,
+            "require(`fs`)", // a template is not read, and cheap-and-safe wins
+            // A QUOTED PREFIX is not a static specifier. This one opens with a
+            // quote and names no contiguous marker, so reading only the first byte
+            // stripped the fork patch for a payload that really does fork.
+            r#"require("child" + "_process")"#,
+            r#"await import("node:" + name)"#,
+            r#"require("fs".concat(""))"#,
+            // An ESCAPED literal is static, but its spelling is not the marker, so
+            // the substring scan that follows finds nothing in it. Both spellings
+            // resolve the builtin at run time.
+            r#"require("child\u005fprocess")"#,
+            r#"require("child\x5fprocess")"#,
+        ] {
+            assert!(
+                has_computed_module_access(computed),
+                "must be treated as computed: {computed}"
+            );
+        }
+
+        // The negative half is what keeps the optimisation alive at all: if every
+        // ordinary module read as computed, nothing would ever be stripped and the
+        // positive assertions above would still pass.
+        for literal in [
+            r#"import { readFile } from "node:fs/promises";"#,
+            r#"const fs = require("node:fs");"#,
+            r#"await import("./chunk.mjs")"#,
+            r#"console.log("plain");"#,
+            // Prose, not code. A zod comment shaped exactly like this kept both
+            // eager loads for every artifact depending on zod until empty parens
+            // were excluded — `import()` takes no specifier, so it reaches nothing.
+            "// emits an indexed access rather than an inline `import()` of a path",
+        ] {
+            assert!(
+                !has_computed_module_access(literal),
+                "must stay readable: {literal}"
+            );
+        }
+
+        // And the whole point: a computed specifier forces BOTH loads, even though
+        // it names neither builtin.
+        let p = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        p.note_app_builtin_usage("/app/entry.ts", r#"require(["child","process"].join("_"))"#);
+        assert!(
+            p.app_uses_child_process.load(AtomicOrdering::Relaxed)
+                && p.app_uses_worker.load(AtomicOrdering::Relaxed),
+            "an unreadable specifier must keep every eager load"
+        );
+
+        // The same, for a specifier that merely BEGINS like a literal. This is the
+        // shape that reached the builtin while both flags stayed false.
+        let split = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        split.note_app_builtin_usage("/app/entry.ts", r#"require("child" + "_process").fork(m)"#);
+        assert!(
+            split.app_uses_child_process.load(AtomicOrdering::Relaxed)
+                && split.app_uses_worker.load(AtomicOrdering::Relaxed),
+            "a quoted-prefix concatenation must keep every eager load"
+        );
+
+        // And for a literal whose SPELLING is not its value. This one is fully
+        // static, so the specifier reader would accept it, while the marker scan
+        // that follows reads the raw text and finds nothing.
+        let escaped = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        escaped.note_app_builtin_usage("/app/entry.ts", r#"require("child\u005fprocess").fork(m)"#);
+        assert!(
+            escaped.app_uses_child_process.load(AtomicOrdering::Relaxed)
+                && escaped.app_uses_worker.load(AtomicOrdering::Relaxed),
+            "an escaped builtin spelling must keep every eager load"
+        );
+    }
+
+    /// The preload is dropped only when BOTH regions are: a payload naming either
+    /// builtin still needs the bootstrap to run before the ESM graph.
+    #[test]
+    fn the_bootstrap_is_optional_only_when_the_app_graph_names_neither_builtin() {
+        let neither = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        neither.note_app_builtin_usage("/app/entry.ts", r#"console.log("hello")"#);
+        // The preamble's own source names every marker and must not count.
+        neither.note_app_builtin_usage("/nub/runtime/worker-polyfill.mjs", "class Worker {}");
+        assert!(neither.bootstrap_optional());
+
+        let worker = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        worker.note_app_builtin_usage("/app/entry.ts", "new Worker(u)");
+        assert!(!worker.bootstrap_optional());
+
+        let cluster = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        cluster.note_island_usage(b"require('cluster')");
+        assert!(!cluster.bootstrap_optional());
+    }
+
+    /// The bootstrap keeps an eager builtin load exactly when the app graph names
+    /// it, and the two regions are independent.
+    ///
+    /// The KEPT direction is the one that matters. Dropping the `childprocess`
+    /// region when the payload does use `fork`/`cluster` produces an artifact whose
+    /// child processes silently re-run the executable itself — a wrong answer with
+    /// no error — so every uncertain case must land on "keep".
+    #[test]
+    fn the_bootstrap_keeps_a_builtin_load_the_app_graph_names() {
+        let src = b"\
+before
+let needsChildProcess = false;
+let needsWorker = false;
+// #region nub:compile:childprocess
+needsChildProcess = true;
+// #endregion
+// #region nub:compile:worker
+needsWorker = true;
+// #endregion
+after
+";
+        let text = |v: Vec<u8>| String::from_utf8(v).expect("stripper must emit UTF-8");
+
+        let neither = text(strip_unused_bootstrap_regions(src, false, false));
+        assert!(
+            !neither.contains("needsChildProcess = true")
+                && !neither.contains("needsWorker = true"),
+            "a payload naming neither builtin must carry neither eager load"
+        );
+
+        let both = text(strip_unused_bootstrap_regions(src, true, true));
+        assert_eq!(
+            both,
+            String::from_utf8(src.to_vec()).unwrap(),
+            "a payload naming both must be left exactly as written"
+        );
+
+        // Independence: stripping one region must not disturb the other.
+        let cp_only = text(strip_unused_bootstrap_regions(src, true, false));
+        assert!(
+            cp_only.contains("needsChildProcess = true") && !cp_only.contains("needsWorker = true"),
+            "child_process usage alone must keep only that region"
+        );
+        let worker_only = text(strip_unused_bootstrap_regions(src, false, true));
+        assert!(
+            !worker_only.contains("needsChildProcess = true")
+                && worker_only.contains("needsWorker = true"),
+            "Worker usage alone must keep only that region"
+        );
+
+        // Every variant must still assign the flags and keep surrounding code, or
+        // the assertions above could pass by the stripper eating the whole file and
+        // leaving an undefined binding behind.
+        for out in [&neither, &both, &cp_only, &worker_only] {
+            assert!(
+                out.contains("let needsChildProcess = false")
+                    && out.contains("let needsWorker = false"),
+                "the `false` initializers are what make a region removable"
+            );
             assert!(
                 out.contains("before") && out.contains("after"),
                 "the stripper must only remove its own regions"

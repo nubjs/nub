@@ -167,9 +167,44 @@ pub fn argv_inject_flags(
     node_version: &NodeVersion,
     user_argv: &[String],
 ) -> Vec<&'static str> {
-    let banded = feature_matrix::argv_unflag_flags_for(node_version);
-    // Below every argv-unflag floor there is nothing to probe, so an out-of-band
-    // Node pays no extra spawn at all.
+    probed_v8_flags(
+        feature_matrix::argv_unflag_flags_for(node_version),
+        node_path,
+        user_argv,
+    )
+}
+
+/// Every V8 flag the PRELOAD should turn on from inside the process for this
+/// invocation, derived from the feature matrix's
+/// [`super::feature_matrix::Mitigation::RuntimeV8Flag`] rows. Never placed on argv:
+/// the caller hands the set to the preload in [`RUNTIME_V8_FLAGS_ENV`], and the
+/// preload calls `v8.setFlagsFromString` the first time it loads a module whose
+/// source uses the syntax — keeping V8's flags at their defaults, and Node's embedded
+/// builtin code cache valid, for every program that never does.
+///
+/// Same filters as [`argv_inject_flags`]: a user polarity on argv wins (V8 already
+/// has the flag, or the user negated it), and the binary is probed for the flag,
+/// because one V8 no longer knows is an "Error: unrecognized flag" on stderr from
+/// `setFlagsFromString` just as it is a "bad option" abort on argv.
+pub fn runtime_inject_flags(
+    node_path: Option<&std::path::Path>,
+    node_version: &NodeVersion,
+    user_argv: &[String],
+) -> Vec<&'static str> {
+    probed_v8_flags(
+        feature_matrix::runtime_v8_flags_for(node_version),
+        node_path,
+        user_argv,
+    )
+}
+
+fn probed_v8_flags(
+    banded: Vec<&'static str>,
+    node_path: Option<&std::path::Path>,
+    user_argv: &[String],
+) -> Vec<&'static str> {
+    // Below every floor there is nothing to probe, so an out-of-band Node pays no
+    // extra spawn at all.
     if banded.is_empty() {
         return Vec::new();
     }
@@ -231,6 +266,35 @@ pub const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 /// `execArgv` afterwards keeps the feature ON while restoring the `execArgv` a
 /// plain-Node user would have seen. Plumbing, not a user-facing option.
 pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
+
+/// Internal child-process signal carrying the matrix's runtime V8 flags — the
+/// [`super::feature_matrix::Mitigation::RuntimeV8Flag`] rows — for the preload to turn
+/// on with `v8.setFlagsFromString` the first time it loads a module that needs one.
+/// Value shape: `<node-version> <flag> [<flag>…]`, built by
+/// [`runtime_v8_flags_env_value`].
+///
+/// Every Nub launch decision SETS or REMOVES it, never leaves an ancestor's value in
+/// place: a child that re-enters Nub carries exactly its own decision, so a `--no-…`
+/// polarity on its argv empties the set instead of being overridden by the parent's
+/// signal. The preload does not delete it either (unlike [`ARGV_ONLY_FLAGS_ENV`]), so
+/// a process that makes no Nub launch decision inherits it — a `Worker`, the
+/// `module.register` loader worker, a child spawned by absolute path — and gets the
+/// feature; the preload skips a flag whose polarity already sits on its own
+/// `process.execArgv`. The version stamp covers the remaining case: a descendant on a
+/// different Node — an inherited-`NODE_OPTIONS` grandchild running an older binary —
+/// ignores a set computed for another one and keeps that Node's bare behavior.
+/// Plumbing, not a user-facing option.
+pub const RUNTIME_V8_FLAGS_ENV: &str = "__NUB_RUNTIME_V8_FLAGS";
+
+/// The [`RUNTIME_V8_FLAGS_ENV`] value for `flags` computed against `node_version`.
+pub fn runtime_v8_flags_env_value(node_version: &NodeVersion, flags: &[&str]) -> String {
+    let mut value = node_version.to_string();
+    for flag in flags {
+        value.push(' ');
+        value.push_str(flag);
+    }
+    value
+}
 
 fn user_supplied_webstorage_flag(user_argv: &[String], node_options: Option<&str>) -> bool {
     let is_webstorage_flag = |token: &str| {
@@ -784,7 +848,7 @@ mod tests {
 
     /// The CONVERSE invariant, for `--experimental-import-text` specifically: if the host
     /// Node KNOWS the flag, nub must inject it at that version. The preload's step-aside
-    /// (`NATIVE_IMPORT_TEXT` in preload-common.cjs) keys off exactly this accepted-flag
+    /// (`nativeImportText()` in preload-common.cjs) keys off exactly this accepted-flag
     /// set, so a release that knows the flag but sits outside the feature-matrix band
     /// hands `with { type: "text" }` to Node's default loader with the feature off —
     /// ERR_UNKNOWN_FILE_EXTENSION. That is #688: Node backported the flag to 24.19.0 while
@@ -815,6 +879,31 @@ mod tests {
              translator — but the feature-matrix import-text bands do not inject it there, \
              leaving text imports broken. Widen the bands to cover this release.",
             node.version
+        );
+    }
+
+    /// The runtime V8 set travels to the preload as `<node-version> <flag>…`, and a
+    /// user polarity on argv — either sign — keeps a flag out of it, exactly as for the
+    /// argv-only set. `node_path: None` skips the binary probe.
+    #[test]
+    fn runtime_v8_flags_honor_user_polarity_and_stamp_the_version() {
+        let ver = v(26, 5, 0);
+        let flag = "--js-defer-import-eval";
+        let armed = runtime_inject_flags(None, &ver, &[]);
+        assert_eq!(armed, vec![flag]);
+        assert_eq!(
+            runtime_v8_flags_env_value(&ver, &armed),
+            "26.5.0 --js-defer-import-eval"
+        );
+        for supplied in [flag, "--no-js-defer-import-eval"] {
+            assert!(
+                runtime_inject_flags(None, &ver, &[supplied.to_string()]).is_empty(),
+                "a user-supplied {supplied} must keep the preload from re-arming the flag"
+            );
+        }
+        assert!(
+            runtime_inject_flags(None, &v(26, 3, 0), &[]).is_empty(),
+            "below the band floor nothing is armed"
         );
     }
 

@@ -246,7 +246,7 @@ pub const INSTALL_SHAPE_FIELDS: &[&str] = &[
     // invalidate the install — without this, an approval written to the
     // neutral field left the warm fast path reporting "up to date" and
     // the script never ran.
-    "allowBuilds",
+    "allowScripts",
     "bundleDependencies",
     "bundledDependencies",
     "catalog",
@@ -452,14 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn manifest_digest_reacts_to_allow_builds_change() {
-        // The neutral `allowBuilds` review map gates which dep build scripts
+    fn manifest_digest_reacts_to_allow_scripts_change() {
+        // The neutral `allowScripts` review map gates which dep build scripts
         // run, so an approval must invalidate the install (a stale digest let
         // the warm fast path skip newly-approved scripts).
         let a: serde_json::Value =
             serde_json::from_str(r#"{"dependencies":{"esbuild":"0.20.2"}}"#).unwrap();
         let b: serde_json::Value = serde_json::from_str(
-            r#"{"dependencies":{"esbuild":"0.20.2"},"allowBuilds":{"esbuild":true}}"#,
+            r#"{"dependencies":{"esbuild":"0.20.2"},"allowScripts":{"esbuild":true}}"#,
         )
         .unwrap();
         assert_ne!(

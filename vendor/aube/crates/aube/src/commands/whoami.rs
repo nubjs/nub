@@ -5,14 +5,13 @@
 //! token configured (or an invalid one) the registry returns 401, which
 //! surfaces as an "authentication required" error pointing at `aube login`.
 
-use clap::Args;
 use miette::miette;
 
 use crate::commands::make_client;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct WhoamiArgs {
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 

@@ -19,9 +19,9 @@ switch ($Arch) {
 # --- Version ---
 $Version = if ($args.Count -gt 0) { $args[0] } else { "latest" }
 if ($Version -eq "canary") {
-    # The rolling canary prerelease — rebuilt from every commit to main and
-    # published under the un-versioned `canary` tag, so there is no version to
-    # resolve. May be broken; `nub upgrade --stable` returns to a release.
+    # The rolling canary prerelease — rebuilt nightly from main and published
+    # under the un-versioned `canary` tag, so there is no version to resolve.
+    # May be broken; `nub upgrade --stable` returns to a release.
     $ReleaseTag = "canary"
     $DisplayVersion = "canary"
 } else {

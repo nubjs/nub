@@ -20,6 +20,7 @@ on:
       - 'tests/compile-augmentation/**'
       - 'tests/compile-corpus/**'
       - 'tests/compile-metadata/**'
+      - 'tests/compile-hide-console/**'
       - '.github/workflows/compile-native.yml'
   pull_request:
     branches: [main]
@@ -37,6 +38,7 @@ on:
       - 'tests/compile-augmentation/**'
       - 'tests/compile-corpus/**'
       - 'tests/compile-metadata/**'
+      - 'tests/compile-hide-console/**'
       - '.github/workflows/compile-native.yml'
   workflow_dispatch:
 
@@ -261,6 +263,23 @@ jobs:
           version="$(node --version)"
           NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
             tests/compile-metadata/run.sh "${version#v}"
+      # Windows only, and the other half of the metadata step above: the subsystem
+      # is a PE field, and the launcher this job built is the host's. The unit
+      # tests already prove the byte survives the resource rewrite — what needs a
+      # real host is that a GUI-subsystem launcher, whose standard handles are no
+      # longer a console's, still spawns Node and still delivers its output.
+      - name: A hidden-console artifact runs with no console
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub="$GITHUB_WORKSPACE/target/release/nub.exe"
+          launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher.exe"
+          test -f "$nub"
+          test -f "$launcher"
+          version="$(node --version)"
+          NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
+            tests/compile-hide-console/run.sh "${version#v}"
       - name: Upload native-island failure logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4

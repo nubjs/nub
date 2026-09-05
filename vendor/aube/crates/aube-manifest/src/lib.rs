@@ -114,6 +114,44 @@ pub struct UpdateConfig {
     pub ignore_dependencies: Vec<String>,
 }
 
+/// The manifest-ROOT (un-branded) key holding the lifecycle-script allowlist,
+/// for embedders whose `manifest_namespace` is empty. npm 12 reads the same
+/// top-level `allowScripts` map out of `package.json` (RFC npm/rfcs#868), so
+/// sharing the field means one allowlist per project rather than two competing
+/// maps in one file. The pnpm-branded `pnpm.allowBuilds` map keeps its own
+/// spelling — that surface belongs to pnpm.
+///
+/// REGISTRY keys are interchangeable with npm's: a bare `name` and a pinned
+/// `name@version` mean the same thing to both tools, and both fold with
+/// `false` winning. NON-REGISTRY keys are NOT yet interchangeable, and this is
+/// a known gap rather than a claim: npm writes a source-ONLY key for a file,
+/// tarball or Git dependency (`file:../local`, `github:owner/repo#sha` — see
+/// its `lib/utils/allow-scripts-writer.js`), whereas the engine builds a
+/// name-qualified one (`pkg@file:../local`, see
+/// `aube_lockfile::…::source_approval_key`). An npm-authored approval for a
+/// non-registry package therefore reads as unreviewed here. Closing that means
+/// deciding whether a bare source key may grant whatever package occupies that
+/// source, which is a security call, not a parsing one.
+pub const ROOT_ALLOW_SCRIPTS_KEY: &str = "allowScripts";
+
+/// The pre-cutover manifest-root spelling of [`ROOT_ALLOW_SCRIPTS_KEY`]. No
+/// package manager reads a top-level `allowBuilds` — pnpm reads it from
+/// `pnpm-workspace.yaml` or `package.json#pnpm`, npm reads `allowScripts`, bun
+/// reads `trustedDependencies` — so a project still carrying it is refused
+/// with a rename remedy rather than silently losing its whole build policy.
+pub const LEGACY_ROOT_ALLOW_BUILDS_KEY: &str = "allowBuilds";
+
+/// The allowlist field name to NAME in user-facing text on the active surface:
+/// the neutral root key for a manifest-root embedder, pnpm's spelling
+/// otherwise.
+pub fn allow_scripts_field_name() -> &'static str {
+    if aube_util::embedder().manifest_namespace.is_empty() {
+        ROOT_ALLOW_SCRIPTS_KEY
+    } else {
+        LEGACY_ROOT_ALLOW_BUILDS_KEY
+    }
+}
+
 /// Parsed `package.json`.
 ///
 /// Deserializes via [`PackageJsonRaw`] (`#[serde(from = ...)]`) so a
@@ -468,14 +506,16 @@ impl PackageJson {
     /// Extract the `pnpm.allowBuilds` / `aube.allowBuilds` object from
     /// the raw `package.json` payload, if present. For embedders whose native
     /// manifest config lives at root (`manifest_namespace == ""`), the
-    /// top-level `allowBuilds` map is *always* read — it is the embedder's own
-    /// un-branded key (not a foreign brand's surface), so it is honored on
-    /// every config surface (nub identity, npm/bun/yarn compat, pnpm/fresh),
-    /// not only the root-native one. This is what makes `approve-builds`
-    /// effective under an npm/bun/yarn incumbent: the approval it writes at the
-    /// top level is read back here regardless of incumbent. Standalone aube
-    /// keeps a non-empty `manifest_namespace`, so this branch never fires for
-    /// it — its behavior is unchanged. Returns a map keyed by the raw
+    /// top-level [`ROOT_ALLOW_SCRIPTS_KEY`] map is *always* read — it is the
+    /// embedder's own un-branded key (not a foreign brand's surface), so it is
+    /// honored on every config surface (nub identity, npm/bun/yarn compat,
+    /// pnpm/fresh), not only the root-native one. This is what makes
+    /// `approve-builds` effective under an npm/bun/yarn incumbent: the approval
+    /// it writes at the top level is read back here regardless of incumbent —
+    /// and under an npm incumbent it is the very field npm 12 itself gates on,
+    /// so one map serves both tools. Standalone aube keeps a non-empty
+    /// `manifest_namespace`, so this branch never fires for it — its behavior
+    /// is unchanged. Returns a map keyed by the raw
     /// pattern string (e.g. `"esbuild"`, `"@swc/core@1.3.0"`) with `bool`
     /// values preserved as `bool` and any other shape captured verbatim so the
     /// caller can warn about it. The tool's own namespace/root surface wins
@@ -493,13 +533,30 @@ impl PackageJson {
             }
         }
         if aube_util::embedder().manifest_namespace.is_empty()
-            && let Some(map) = self.extra.get("allowBuilds").and_then(|v| v.as_object())
+            && let Some(map) = self
+                .extra
+                .get(ROOT_ALLOW_SCRIPTS_KEY)
+                .and_then(|v| v.as_object())
         {
             for (k, v) in map {
                 out.insert(k.clone(), AllowBuildRaw::from_json(v));
             }
         }
         out
+    }
+
+    /// Whether this manifest still carries the pre-cutover top-level
+    /// [`LEGACY_ROOT_ALLOW_BUILDS_KEY`] map. Only meaningful for a
+    /// manifest-root embedder — for a namespaced tool the same top-level key
+    /// was never read, so it is somebody else's field and not ours to refuse.
+    /// The caller turns a hit into a hard error: silently ignoring the map
+    /// would drop every approval AND every explicit denial it records.
+    pub fn has_legacy_root_allow_builds(&self) -> bool {
+        aube_util::embedder().manifest_namespace.is_empty()
+            && self
+                .extra
+                .get(LEGACY_ROOT_ALLOW_BUILDS_KEY)
+                .is_some_and(serde_json::Value::is_object)
     }
 
     /// Extract `pnpm.onlyBuiltDependencies` / `aube.onlyBuiltDependencies`
@@ -714,15 +771,26 @@ impl PackageJson {
     /// key that matched no installed package from a hard error to a
     /// warning.
     ///
-    /// Read from exactly the homes `patchedDependencies` itself uses, so
-    /// the setting always travels with the config it governs: the
-    /// branded `pnpm.*` object (only under a pnpm incumbent, per
-    /// `pnpm_aube_objects`), this tool's own namespace, and — for a
-    /// root-namespace embedder — the neutral top-level key, which is
-    /// what keeps a nub-identity project off another tool's brand.
-    /// Deliberately NOT an npmrc/env setting: pnpm 10 honors it only
-    /// here and in the workspace yaml (verified against 10.15.1), and
-    /// accepting it where pnpm doesn't would be its own divergence.
+    /// The MANIFEST half of the lookup, and only that: the branded
+    /// `pnpm.*` object (read solely under a pnpm incumbent, per
+    /// `pnpm_aube_objects`) and this tool's own namespace, which are
+    /// exactly the manifest homes `patchedDependencies` itself uses, so
+    /// the setting travels with the config it governs. pnpm 10 honors
+    /// the knob here and in the workspace yaml and nowhere else
+    /// (verified against 10.15.1); `patches.rs` reads the yaml and
+    /// prefers it over this reader, matching how `patchedDependencies`
+    /// itself merges.
+    ///
+    /// There is deliberately no manifest-ROOT read, and a manifest-root
+    /// embedder therefore has no persistent home for the knob at all.
+    /// That un-namespaced key was nub-only: no package manager reads a
+    /// top-level `allowUnusedPatches`, and npm 12 — which ships the
+    /// feature — makes its own `--allow-unused-patches` command-line
+    /// only on purpose, ignored in `.npmrc` and env and rejected by
+    /// `npm ci`, so it cannot become project policy anywhere. Squatting
+    /// an un-namespaced `package.json` name that only one tool honors
+    /// is what removing the read undoes.
+    ///
     /// `allowNonAppliedPatches` is pnpm's deprecated spelling, still
     /// accepted by pnpm 10; the current name wins when both appear.
     pub fn allow_unused_patches(&self) -> Option<bool> {
@@ -735,13 +803,12 @@ impl PackageJson {
                 }
             }
         }
-        if aube_util::embedder().manifest_namespace.is_empty() {
-            for key in KEYS {
-                if let Some(v) = self.extra.get(key).and_then(|v| v.as_bool()) {
-                    out = Some(v);
-                }
-            }
-        }
+        // No manifest-ROOT read, and no replacement home. The root key was
+        // nub-only — no package manager reads a top-level
+        // `allowUnusedPatches` or `allowNonAppliedPatches` — so nothing
+        // outside nub ever saw it. npm ships the feature and refuses to let it
+        // be project policy at all; the remedy for a key matching no installed
+        // package is to delete the key.
         out
     }
 
@@ -929,11 +996,22 @@ impl PackageJson {
         unresolved
     }
 
+    /// Return every raw `packageExtensions` value in precedence order so
+    /// callers can validate the enclosing shape before object extraction.
+    pub fn package_extension_values(&self) -> Vec<&serde_json::Value> {
+        let mut out = self
+            .pnpm_aube_objects()
+            .filter_map(|ns| ns.get("packageExtensions"))
+            .collect::<Vec<_>>();
+        if let Some(value) = self.extra.get("packageExtensions") {
+            out.push(value);
+        }
+        out
+    }
+
     /// Extract `packageExtensions` from root package.json. Supports
     /// top-level `packageExtensions`, `pnpm.packageExtensions`, and
-    /// `aube.packageExtensions`. Precedence (low → high):
-    /// `pnpm.packageExtensions`, `aube.packageExtensions`, top-level
-    /// `packageExtensions` — later writes win for duplicate selectors.
+    /// `aube.packageExtensions`. Later values win for duplicate selectors.
     pub fn package_extensions(&self) -> BTreeMap<String, serde_json::Value> {
         // Embedder seam: a host that scopes which packageExtensions home
         // applies per active PM (e.g. honoring the top-level home only under
@@ -943,20 +1021,11 @@ impl PackageJson {
             return scoped;
         }
         let mut out = BTreeMap::new();
-        for ns in self.pnpm_aube_objects() {
-            if let Some(obj) = ns.get("packageExtensions").and_then(|v| v.as_object()) {
+        for value in self.package_extension_values() {
+            if let Some(obj) = value.as_object() {
                 for (k, v) in obj {
                     out.insert(k.clone(), v.clone());
                 }
-            }
-        }
-        if let Some(obj) = self
-            .extra
-            .get("packageExtensions")
-            .and_then(|v| v.as_object())
-        {
-            for (k, v) in obj {
-                out.insert(k.clone(), v.clone());
             }
         }
         out
@@ -1472,9 +1541,96 @@ fn line_col_to_byte_offset(content: &str, line: usize, column: usize) -> usize {
     content.len()
 }
 
+/// Detect the indentation style used in a JSON string.
+///
+/// Returns a slice of `raw` representing one level of indentation
+/// (e.g. `"  "`, `"   "`, `"    "`, `"\t"`), or `"  "` if no indentation
+/// could be detected.
+pub fn detect_json_indent(raw: &str) -> &str {
+    let mut root_indent: Option<&str> = None;
+    let mut detected: Option<&str> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        let indent_len = line.len() - trimmed.len();
+        let current_indent = &line[..indent_len];
+
+        match root_indent {
+            None => {
+                root_indent = Some(current_indent);
+            }
+            Some(root) => {
+                if current_indent.len() > root.len() && current_indent.starts_with(root) {
+                    let candidate = &current_indent[root.len()..];
+                    if detected.is_none_or(|indent| candidate.len() < indent.len()) {
+                        detected = Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    detected.unwrap_or("  ")
+}
+
+/// Serialize `value` as pretty JSON using `indent` for indentation.
+pub fn serialize_json_with_indent<T: serde::Serialize>(
+    value: &T,
+    indent: &str,
+) -> Result<String, serde_json::Error> {
+    let mut buf = Vec::with_capacity(128);
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+    let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value.serialize(&mut serializer)?;
+    String::from_utf8(buf)
+        .map_err(|e| serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_detect_json_indent() {
+        assert_eq!(detect_json_indent("{\n  \"name\": \"foo\"\n}"), "  ");
+        assert_eq!(detect_json_indent("{\n   \"name\": \"foo\"\n}"), "   ");
+        assert_eq!(detect_json_indent("{\n    \"name\": \"foo\"\n}"), "    ");
+        assert_eq!(detect_json_indent("{\n\t\"name\": \"foo\"\n}"), "\t");
+        assert_eq!(
+            detect_json_indent("\u{FEFF}{\n\t\"name\": \"foo\"\n}"),
+            "\t"
+        );
+        assert_eq!(detect_json_indent("  {\n    \"name\": \"foo\"\n  }"), "  ");
+        assert_eq!(detect_json_indent("{\"name\":\"foo\"}"), "  ");
+    }
+
+    #[test]
+    fn detect_json_indent_uses_shallowest_indented_line() {
+        assert_eq!(
+            detect_json_indent("{\"dependencies\": {\n    \"foo\": \"1.0.0\"\n  }\n}"),
+            "  "
+        );
+    }
+
+    #[test]
+    fn test_serialize_json_with_indent() {
+        let val = serde_json::json!({
+            "name": "foo",
+            "version": "1.0.0"
+        });
+        assert_eq!(
+            serialize_json_with_indent(&val, "   ").unwrap(),
+            "{\n   \"name\": \"foo\",\n   \"version\": \"1.0.0\"\n}"
+        );
+        assert_eq!(
+            serialize_json_with_indent(&val, "\t").unwrap(),
+            "{\n\t\"name\": \"foo\",\n\t\"version\": \"1.0.0\"\n}"
+        );
+    }
 
     fn parse(json: &str) -> PackageJson {
         serde_json::from_str(json).unwrap()

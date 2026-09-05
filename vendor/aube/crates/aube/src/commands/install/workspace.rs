@@ -357,7 +357,7 @@ pub(super) fn order_lifecycle_manifests(
 /// already ships a `pnpm-lock.yaml` (or any other supported lockfile)
 /// keeps getting that file rewritten in place instead of gaining a
 /// surprise `aube-lock.yaml` next to it. This mirrors the single-project
-/// write path ([`aube_lockfile::write_lockfile_preserving_existing`]) and
+/// write path ([`aube_lockfile::write_lockfile_as`]) and
 /// pnpm's own `sharedWorkspaceLockfile=false` behavior, where each
 /// member keeps its own `pnpm-lock.yaml`. `fallback_kind` is only used
 /// for projects (root or member) that have no lockfile yet (the

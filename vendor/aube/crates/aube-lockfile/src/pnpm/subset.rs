@@ -240,6 +240,13 @@ impl<'a> Parser<'a> {
             catalogs,
             patched_dependencies,
             ignored_optional_dependencies,
+            // The subset parser bails to serde on any unrecognized
+            // top-level key, so a pre-v9 root dependency block never
+            // reaches this constructor.
+            dependencies: None,
+            dev_dependencies: None,
+            optional_dependencies: None,
+            specifiers: None,
             importers,
             packages,
             snapshots,

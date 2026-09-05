@@ -20,10 +20,6 @@ function main() {
     var pjson = require('./package.json');
     var version = pjson.version;
 
-    // Nested `npm install` must stay local; otherwise it'd try to write
-    // into the global prefix when the user ran `npm i -g @endevco/aube`.
-    process.env.npm_config_global = 'false';
-
     var platform = process.platform; // darwin | linux | win32
     var arch = process.arch;         // arm64 | x64
     // On Linux, `process.report` exposes `glibcVersionRuntime` when the
@@ -43,7 +39,7 @@ function main() {
     // when the user installs the trusted root @endevco/aube.
     var args = ['install', '--no-save', '--no-package-lock', '--ignore-scripts', subpkgName + '@' + version];
 
-    var cp = spawn(npmCmd, args, { stdio: 'inherit', shell: true });
+    var cp = spawn(npmCmd, args, { stdio: 'inherit', shell: true, env: childNpmEnv(process.env) });
     cp.on('close', function(code, signal) {
         // `code` is null when the child was killed by a signal (e.g.
         // OOM). `process.exit(null)` coerces to 0, which would tell
@@ -65,6 +61,24 @@ function main() {
             process.exit(1);
         }
     });
+}
+
+function childNpmEnv(parentEnv) {
+    var env = Object.assign({}, parentEnv);
+    // npm 12 exports the outer global install's allowlist into lifecycle
+    // scripts. The nested project-scoped install rejects that global-only
+    // setting with EALLOWSCRIPTS even though it already uses --ignore-scripts.
+    Object.keys(env).forEach(function(key) {
+        var normalized = key.toLowerCase();
+        if (normalized === 'npm_config_allow_scripts' || normalized === 'npm_config_global') {
+            delete env[key];
+        }
+    });
+    // Nested `npm install` must stay local; otherwise it'd try to write
+    // into the global prefix when the user ran `npm i -g @endevco/aube`.
+    // Add one canonical key after removing case variants for Windows.
+    env.npm_config_global = 'false';
+    return env;
 }
 
 // Only these names are ever produced by aube's own build pipeline; ignore
@@ -145,4 +159,6 @@ function linkSubpkgBins(subpkgName, platform) {
     });
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { childNpmEnv: childNpmEnv };
