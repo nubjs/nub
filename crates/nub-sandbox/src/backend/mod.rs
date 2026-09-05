@@ -117,6 +117,12 @@ pub mod windows_jail_bin;
 // zero-privilege import (epic row 0.3): it was the privileged second-principal tier, and the
 // zero-privilege skeleton keeps only the unprivileged AppContainer backend (`windows`).
 
+// The window-station / desktop ACE machinery the AppContainer backend needs (a USER32-importing
+// child on a non-interactive station dies in loader init without it) — resurrected from the
+// dropped `windows_account` module, which is where it happened to live (epic row 3.2).
+#[cfg(target_os = "windows")]
+mod windows_ace;
+
 // The OS-agnostic Linux mount-plan derivation. Compiled on Linux (its real consumer)
 // and under `test` on any host so authored-order and rejection invariants are tested
 // without a Linux kernel.
@@ -258,10 +264,8 @@ pub struct CommandSpec {
     /// backend already has a mechanism except macOS: bubblewrap reaps through its PID
     /// namespace, Landlock through a group it takes unconditionally (its `setsid` is also
     /// its terminal hardening), the Windows AppContainer through a `KILL_ON_JOB_CLOSE` job
-    /// object the child is assigned to while still suspended, and the Windows dedicated
-    /// account through the same job object BEST-EFFORT (seclogon commonly owns the child's
-    /// job first — see `windows_account/launch.rs`). So this flag is honored by the macOS
-    /// backend alone, and as an OPT-IN rather than a default: leaving nub's process group
+    /// object the child is assigned to while still suspended. So this flag is honored by the
+    /// macOS backend alone, and as an OPT-IN rather than a default: leaving nub's process group
     /// is what forfeits a terminal Ctrl-C by membership, so only a caller that arranges its
     /// own signal reach should pay for it. Default `false` = today's behavior, byte-for-byte.
     ///
@@ -912,25 +916,12 @@ fn start_proxy_if_needed(
         })
 }
 
-/// The loopback window the proxy must bind inside, when one applies.
-///
-/// Only Windows' dedicated-account backend has one: its WFP permit is installed ONCE, by the
-/// elevated setup, over a fixed port window — so the proxy binds into that window rather than
-/// a filter chasing an ephemeral port, which would cost a UAC prompt every run. Everywhere
-/// else the deny-layer carves the exact port at launch and no range is needed.
-#[cfg(target_os = "windows")]
-fn proxy_port_range(policy: &SandboxPolicy) -> Option<(u16, u16)> {
-    if !windows_account::needs_account_backend(policy) {
-        return None;
-    }
-    // An absent or unreadable marker is NOT decided here: `windows_account::apply` fails
-    // closed with the actionable "run the elevated setup" message, and an ephemeral bind in
-    // the meantime is harmless because that launch never happens.
-    let m = windows_account::state::read_marker().ok().flatten()?;
-    Some((m.port_low, m.port_high))
-}
-
-#[cfg(not(target_os = "windows"))]
+/// The loopback window the proxy must bind inside, when one applies. Always `None` now: the only
+/// backend that needed a fixed window was Windows' dedicated-account + WFP tier (its elevated
+/// setup pre-authorized one port range, so the proxy bound into it rather than a filter chasing
+/// an ephemeral port), and that tier was dropped with the curated import (epic row 0.3). Every
+/// surviving backend carves the exact proxy port at launch, so the proxy is free to take an
+/// ephemeral one. Kept as a seam because Phase 5.1's per-host proxy may reintroduce a window.
 fn proxy_port_range(_policy: &SandboxPolicy) -> Option<(u16, u16)> {
     None
 }

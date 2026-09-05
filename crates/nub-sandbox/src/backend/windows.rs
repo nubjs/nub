@@ -2042,13 +2042,13 @@ pub(super) mod launch {
             // remoted/service session does. It is cheap and it makes the jail behave the same
             // way in both, so it is unconditional rather than gated on detecting the station.
             //
-            // The same guard the dedicated-account backend uses, deliberately: it FAILS FORWARD
-            // (a station whose DACL cannot be rewritten still launches, rather than losing a run
-            // that worked before this existed) and RESTORES the prior DACL on drop.
-            let _window =
-                match unsafe { crate::backend::windows_account::account::sid_to_string(ac_sid) } {
+            // FAILS FORWARD deliberately: a station whose DACL cannot be rewritten still
+            // launches, rather than losing a run that worked before this existed; and it strips
+            // exactly its own ace on drop (`windows_ace`, resurrected from the dropped tier).
+            let window =
+                match unsafe { crate::backend::windows_ace::sid_to_string(ac_sid) } {
                     Ok(sid_str) => Some(
-                        crate::backend::windows_account::launch::WindowAceGuard::grant(&sid_str),
+                        crate::backend::windows_ace::WindowAceGuard::grant(&sid_str),
                     ),
                     Err(error) => {
                         tracing::debug!(
@@ -2060,6 +2060,14 @@ pub(super) mod launch {
                         None
                     }
                 };
+            // Under NUB_JAIL_DUMP_POLICY, report whether the ace actually landed on THIS station:
+            // `station_ace=false` printed next to a child `code=3221225794` (0xC0000142) names the
+            // fault outright, where the bare exit code says only "the child could not start".
+            if let Some(guard) = &window
+                && std::env::var_os("NUB_JAIL_DUMP_POLICY").is_some()
+            {
+                eprintln!("JAILDUMP window-station {}", guard.probe());
+            }
 
             // 1a. ⛔ THE CHILD RESOLVES ITS PROFILE FROM `%LOCALAPPDATA%`; THE PARENT DOES NOT.
             //
@@ -3182,13 +3190,12 @@ pub(super) mod launch {
             }
             std::thread::sleep(POLL);
         }
-        // A member still running at the cap contributes nothing: it has no exit code, and inventing one
-        // is the STILL_ACTIVE defect this path already paid for once.
-        let status = match last_exit.map(|(_, code)| code) {
+        // A member still running at the cap contributes nothing: it has no exit code, and inventing
+        // one is the STILL_ACTIVE defect this path already paid for once.
+        match last_exit.map(|(_, code)| code) {
             Some(0) | None => None,
             other => other,
-        };
-        status
+        }
     }
 
     /// The confinement Job: whole-tree reap on handle close, plus the active-process
@@ -3997,20 +4004,6 @@ mod tests {
             ..Default::default()
         };
 
-        // ⛔ THE PROXY PORT IS NOT A FREE PARAMETER ON A PROVISIONED MACHINE, and the hardcoded
-        // one this used to pass asserted the OPPOSITE of the contract there. Provisioning is part
-        // of `account_route`'s predicate, so the two hosts take different routes: a stock runner
-        // has no sandbox account and falls through to the AppContainer tier, which never looks at
-        // the port; a machine someone ran `nub setup-sandbox` on takes the dedicated-account
-        // route, which fail-CLOSES unless the proxy bound inside the loopback window that setup
-        // pre-authorized in WFP — a proxy the child cannot reach is silent no-net rather than a
-        // degradation. MEASURED on a provisioned Windows Server 2022 host: the literal `9999` is
-        // outside the installed 59080-59089 window, so `apply` refused and the elevated arm
-        // panicked on a machine behaving exactly as designed.
-        let marker = crate::backend::windows_account::state::read_marker()
-            .ok()
-            .flatten();
-
         // Pure deny-all: coarse egress-deny, fully enforced — never a net-per-host loss.
         // Elevation-independent (no proxy, no exemption).
         let deny_all = mk(NetPolicy {
@@ -4046,29 +4039,11 @@ mod tests {
             ..Default::default()
         });
 
-        // On a provisioned machine an off-window port is an ERROR rather than a degradation.
-        // Pinned here so the refusal that produced the measurement above stays asserted instead
-        // of being rediscovered as a mystery failure.
-        if let Some(marker) = &marker {
-            let Err(off_window) = apply(
-                &per_host,
-                crate::CommandSpec::new("cmd.exe"),
-                Some(marker.port_high.wrapping_add(1)),
-                None,
-                None,
-                None,
-            ) else {
-                panic!("a proxy bound outside the WFP window must fail-closed, not apply");
-            };
-            assert!(
-                off_window.lost.iter().any(|s| s == "net-per-host"),
-                "the off-window refusal must name net-per-host (got {:?})",
-                off_window.lost
-            );
-        }
-
-        // In the window where one applies; an unprovisioned host never reads this.
-        let port = marker.as_ref().map_or(59080, |marker| marker.port_low);
+        // The dedicated-account + WFP tier owned the provisioned loopback window; it was dropped
+        // (epic row 0.3), so there is no window and the proxy takes an ephemeral port. Phase 5.1's
+        // same-package-SID loopback funnel is what will honor a per-host policy on Windows; until
+        // then per-host fail-closes below, unconditionally and without any elevation path.
+        let port = 59080;
         let res = apply(
             &per_host,
             crate::CommandSpec::new("cmd.exe"),

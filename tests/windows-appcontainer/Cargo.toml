@@ -1,0 +1,16 @@
+# Phase-3 probe (epic 3.2): the compiler + matcher drive the Windows AppContainer backend
+# end-to-end through the REAL public API (`compile` -> `apply` -> `status`). The Windows analog
+# of seatbelt-fs / supervised-fs. Own workspace, Windows-only — must run in an SSH/service session
+# (a non-interactive `Service-0x0-...$` station) so the resurrected window-station ACE is actually
+# exercised (an interactive `WinSta0` auto-grants it and would mask a broken port).
+[workspace]
+
+[package]
+name = "windows-appcontainer-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nub-sandbox = { path = "../../crates/nub-sandbox" }
+serde_json = "1"
