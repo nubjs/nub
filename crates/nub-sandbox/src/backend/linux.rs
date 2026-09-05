@@ -241,20 +241,11 @@ pub fn apply(
         // The supervised (seccomp USER_NOTIF) launch — epic 1.1d/1.4. This is the seam the removed
         // bubblewrap backend filled: a policy that needs confinement but is not a build-jail
         // Landlock policy. NET is transparent per-host egress through the in-process supervisor;
-        // FS (allow-only) rides a Landlock ruleset the child `restrict_self`s. Private/Deny tmp
-        // still FAILS CLOSED — it needs a per-run scratch dir created + granted (a later 1.4 step),
-        // and launching without it would leave the tmp axis unenforced. (Env is enforced by
-        // construction — `base_command`/`envp` — always.)
-        if policy.fs.tmp != TmpMode::Shared {
-            return Err(Degradation {
-                lost: vec!["fs".to_string()],
-                reason: Some(
-                    "supervised private/deny tmp is not yet wired (epic 1.4); refusing to launch \
-                     without the tmp boundary this policy requires"
-                        .to_string(),
-                ),
-            });
-        }
+        // FS (allow-only) rides a Landlock ruleset the child `restrict_self`s; write-intent ops
+        // ride the USER_NOTIF broker. Private tmp is the per-run scratch dir `make_private_tmp`
+        // created (threaded in as `tmp_dir`), granted rw by the ruleset + broker with `TMPDIR`
+        // pointed at it; Deny tmp grants nothing, so the shared `/tmp` is simply never in the
+        // allow-set. (Env is enforced by construction — `base_command`/`envp` — always.)
         let plan = build_supervised_plan(policy, &spec, tmp_dir)?;
         return Ok(Prepared {
             command: base_command(&spec, policy),
@@ -315,9 +306,22 @@ fn build_supervised_plan(
     for arg in spec.args.tokens() {
         argv.push(to_cstring(arg.as_bytes(), "argument")?);
     }
-    let mut envp = Vec::with_capacity(policy.env.constructed.len());
+    let mut envp = Vec::with_capacity(policy.env.constructed.len() + 3);
+    // A private tmp overrides the temp-dir env so tools write the per-run scratch dir, never the
+    // shared `/tmp` (which the allow-set does not grant). Drop any constructed temp key first so
+    // the child sees no duplicate — `execve` env with a repeated key is undefined.
+    let is_tmp_key = |k: &str| tmp_dir.is_some() && matches!(k, "TMPDIR" | "TMP" | "TEMP");
     for (key, value) in &policy.env.constructed {
+        if is_tmp_key(key) {
+            continue;
+        }
         envp.push(to_cstring(format!("{key}={value}").as_bytes(), "environment entry")?);
+    }
+    if let Some(tmp) = tmp_dir {
+        let tmp = tmp.to_string_lossy();
+        for key in ["TMPDIR", "TMP", "TEMP"] {
+            envp.push(to_cstring(format!("{key}={tmp}").as_bytes(), "temp-dir env")?);
+        }
     }
     let cwd = match &spec.cwd {
         Some(dir) => Some(to_cstring(dir.as_os_str().as_bytes(), "working directory")?),

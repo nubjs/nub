@@ -121,6 +121,20 @@ fn main() {
     );
     let hook_after_control = Path::new(&format!("{hooks}/pre-commit")).exists();
 
+    // ---- private tmp (epic 1.4c): the child gets a fresh per-run scratch dir at $TMPDIR and the
+    // shared /tmp is not in the allow-set. ----
+    let tmp_policy = policy(json!({ "fs": { &allowed: "rw", "$tmp": true } }));
+    let tmp_compat = run(
+        "tmp     compat",
+        &tmp_policy,
+        "echo hi > \"$TMPDIR/probe\" && test -f \"$TMPDIR/probe\"",
+    );
+    let escape = format!("/tmp/nub-escape-{}", std::process::id());
+    let _ = std::fs::remove_file(&escape);
+    let tmp_attack = run("tmp     attack", &tmp_policy, &format!("echo evil > {escape}"));
+    let escaped = Path::new(&escape).exists();
+    let _ = std::fs::remove_file(&escape);
+
     // Independent oracle: the allowlisted file exists, the denied one does not.
     let allowed_written = Path::new(&format!("{allowed}/f")).exists();
     let denied_written = Path::new(&format!("{denied}/f")).exists();
@@ -134,6 +148,8 @@ fn main() {
     println!("carve   compat  (write repo/src)            -> exit {carve_compat}   [want 0]");
     println!("carve   attack  (write .git/hooks, carved)  -> exit {carve_attack}   [want != 0], hook_written={hook_after_attack} [want false]");
     println!("carve   control (write .git/hooks, no deny) -> exit {carve_control}   [want 0], hook_written={hook_after_control} [want true]");
+    println!("tmp     compat  (write $TMPDIR, private tmp) -> exit {tmp_compat}   [want 0]");
+    println!("tmp     attack  (write shared /tmp)          -> exit {tmp_attack}   [want != 0], escaped={escaped} [want false]");
     println!("oracle  <allowed>/f exists={allowed_written} (want true)");
 
     let _ = std::fs::remove_dir_all(&base);
@@ -149,7 +165,10 @@ fn main() {
         && carve_attack != 0
         && !hook_after_attack // the broker refused the hook write
         && carve_control == 0
-        && hook_after_control; // same write lands when the carve-out is absent
+        && hook_after_control // same write lands when the carve-out is absent
+        && tmp_compat == 0
+        && tmp_attack != 0
+        && !escaped; // shared /tmp is not reachable from a private-tmp launch
     println!("RESULT: {}", if pass { "PASS" } else { "FAIL" });
     std::process::exit(if pass { 0 } else { 1 });
 }
