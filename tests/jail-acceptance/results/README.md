@@ -60,6 +60,14 @@ The three adjudicated sweep files carry 180 rows rather than 179. The extra row 
 
 ⛔ **The coverage figure is scoped to the band the population is drawn from, so it cannot detect what lies below it.** "Covers the script-carrying userbase" is measured against the npm top-downloaded set, and that set is the packages above 100,000 weekly downloads - the gate `scripts/npm-install-script-census.ts` applies with its default `--threshold`. The metric therefore compares the population against the set it was drawn from, and would read the same wherever the gate sat. Read it as completeness within the band, never as a claim about the ecosystem.
 
+Measured below that gate on 2026-09-05, over ranks ~25,500 to ~70,000: 44,057 packages resolved, one unresolved, and **720 of them still carry an install script, holding 19.9M weekly downloads** - about 3.5% of the weight this population covers. Two independent runs agreed on every count. Three properties of that band decide what to do about it, and they pull in different directions:
+
+- **It does not run dry.** Carrier density is flat at 1.33%-1.83% across all eight rank slices, so scanning further back keeps finding carriers at the same rate.
+- **It decays by weight.** The weekly downloads per slice fall about sevenfold from the top of the band to the bottom, so what limits going deeper is weight, not carrier supply.
+- **The missed weight is diffuse, not concentrated.** The top 25 carriers hold 10.9% of it, the top 100 hold 35.4%, and reaching 80% takes about 400 packages. There is no small head to add cheaply.
+
+The uncovered head is mostly native builders and prebuilt fetchers - `@vscode/windows-process-tree`, `@vscode/spdlog`, `iconv`, `lzma-native`, `couchbase`, `cld`, `webgpu`, `@ffmpeg-installer/linux-arm` - so the band is not a low-risk tail. ⛔ Extending the population is a standing cost, not a one-off: the sweep runs packages serially (`for pkg in $PKGS`), so 720 more is roughly seven hours per platform per run. Discovery is the cheap half at about 25 minutes for the whole band, which is why the two are worth keeping separate: scan wide, sweep by weight.
+
 ⛔ **One Linux row was not produced by a single sweep run: `duckdb`.** Its three arms each allow
 twenty minutes, and no prebuilt exists for its Node ABI, so every arm falls back to a source build
 that outlives any one builder - three arms together never fit. It was measured instead as three
