@@ -3114,32 +3114,50 @@ fn preserve_dependency_esm_classification(path: &str, source: &str) -> Option<St
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked
-        || has_esm_syntax(&parsed.program)
-        || assigns_commonjs_exports_at_top_level(&parsed.program)
-    {
+    if parsed.panicked || has_esm_syntax(&parsed.program) {
         return None;
     }
     let semantic = oxc_semantic::SemanticBuilder::new()
         .build(&parsed.program)
         .semantic;
-    let misread = semantic
+    // The references Rolldown misreads as proof of CommonJS, and the only ones the
+    // marker is for. Collected as REFERENCE IDS rather than as a yes/no, so the
+    // exemption below can require the assignment to target one of THESE and not a
+    // local binding that merely shares the name.
+    let unresolved: Vec<_> = semantic
         .scoping()
         .root_unresolved_references()
         .iter()
-        .any(|(name, _)| matches!(name.as_str(), "module" | "exports"));
-    misread.then(|| format!("{source}\nexport {{}};\n"))
+        .filter(|(name, _)| matches!(name.as_str(), "module" | "exports"))
+        .flat_map(|(_, ids)| ids.iter().copied())
+        .collect();
+    if unresolved.is_empty() {
+        return None;
+    }
+    let assigns_the_global = top_level_member_assignment_roots(&parsed.program)
+        .into_iter()
+        .any(|ident| {
+            ident
+                .reference_id
+                .get()
+                .is_some_and(|id| unresolved.contains(&id))
+        });
+    (!assigns_the_global).then(|| format!("{source}\nexport {{}};\n"))
 }
 
-/// Whether the module assigns `module.exports` or `exports.<name>` as an
-/// unconditional top-level statement.
+/// The root identifier of every unconditional top-level `<root>.… = …` assignment.
 ///
-/// Such a module is CommonJS by construction, not an ES module that merely
-/// mentions the name: run as ESM the statement is a guaranteed `ReferenceError`
-/// the first time the module executes, so no working package ships one. What the
-/// marker above is really for is the GUARDED probe — `try { module.exports = … }
-/// catch {}`, and its `typeof module !== "undefined"` cousins — which Node does
-/// read as ESM and which stays marked.
+/// A module that assigns the GLOBAL `module.exports` or `exports.<name>` this way
+/// is CommonJS by construction, not an ES module that merely mentions the name:
+/// run as ESM the statement throws the first time the module executes, so no
+/// working package ships one. What the marker above is really for is the GUARDED
+/// probe — `try { module.exports = … } catch {}`, and its
+/// `typeof module !== "undefined"` cousins — which Node does read as ESM.
+///
+/// The roots come back as REFERENCES rather than names so the caller can insist on
+/// the unresolved one. A local `const module = {}` shadowing the global must not
+/// buy the exemption: such a module can still need the marker for a SEPARATE
+/// unresolved `module`/`exports` reference elsewhere in it.
 ///
 /// The distinction is load-bearing for the compiler's OWN generated modules.
 /// `native::addon_module` is CommonJS Nub wrote itself, but the id it is served
@@ -3148,31 +3166,33 @@ fn preserve_dependency_esm_classification(path: &str, source: &str) -> Option<St
 /// it turned Rolldown's CommonJS wrapper off, `module` was left unbound, and every
 /// artifact carrying a native addon died at startup with the `ReferenceError` Node
 /// reports as `ERR_AMBIGUOUS_MODULE_SYNTAX`.
-fn assigns_commonjs_exports_at_top_level(program: &Program<'_>) -> bool {
-    use oxc_ast::ast::{Expression, Statement};
+fn top_level_member_assignment_roots<'a>(
+    program: &'a Program<'a>,
+) -> Vec<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    use oxc_ast::ast::{Expression, IdentifierReference, Statement};
 
-    fn root_object<'a>(expr: &'a Expression<'a>) -> Option<&'a str> {
+    fn root<'a>(expr: &'a Expression<'a>) -> Option<&'a IdentifierReference<'a>> {
         match expr {
-            Expression::Identifier(ident) => Some(ident.name.as_str()),
-            Expression::StaticMemberExpression(member) => root_object(&member.object),
-            Expression::ComputedMemberExpression(member) => root_object(&member.object),
+            Expression::Identifier(ident) => Some(ident),
+            Expression::StaticMemberExpression(member) => root(&member.object),
+            Expression::ComputedMemberExpression(member) => root(&member.object),
             _ => None,
         }
     }
 
-    program.body.iter().any(|stmt| {
-        let Statement::ExpressionStatement(stmt) = stmt else {
-            return false;
-        };
-        let Expression::AssignmentExpression(assign) = &stmt.expression else {
-            return false;
-        };
-        assign
-            .left
-            .as_member_expression()
-            .and_then(|member| root_object(member.object()))
-            .is_some_and(|name| matches!(name, "module" | "exports"))
-    })
+    program
+        .body
+        .iter()
+        .filter_map(|stmt| {
+            let Statement::ExpressionStatement(stmt) = stmt else {
+                return None;
+            };
+            let Expression::AssignmentExpression(assign) = &stmt.expression else {
+                return None;
+            };
+            root(assign.left.as_member_expression()?.object())
+        })
+        .collect()
 }
 
 /// The mirror image, for a root Node runs as CommonJS. Rolldown classifies a
@@ -7983,6 +8003,19 @@ mod tests {
             )
             .is_some(),
             "a guarded probe is the shape the marker exists for and keeps it"
+        );
+        // The exemption follows the SEMANTIC reference, not the spelling. Here
+        // `module` is a local binding, so the assignment says nothing about the
+        // format — and the module still needs the marker for its separate
+        // unresolved `exports`, which is the reference Rolldown would misread.
+        assert!(
+            preserve_dependency_esm_classification(
+                &dir.join("shadowed.mjs").to_string_lossy(),
+                "const module = {};\nmodule.exports = 1;\n\
+                 try { exports.answer } catch (e) { console.log(e.name); }\n"
+            )
+            .is_some(),
+            "a local `module` must not suppress a marker another unresolved reference needs"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
