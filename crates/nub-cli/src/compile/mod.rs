@@ -323,7 +323,10 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         sealed_module_graph,
         worker_roots: bundled.worker_roots.len(),
         worker_wrappers: worker_wrappers.len(),
-        sourcemap: opts.bundle.sourcemap != bundle::SourcemapMode::None,
+        // The mode, not whether one was asked for: two of the three are reachable
+        // from a container that writes nothing, and one of those two only from the
+        // single-executable one.
+        sourcemap: opts.bundle.sourcemap,
         embeds_node: !opts.smol,
         computes_module_specifier: bundled.app_computes_module_specifier,
         entry: &entry_name,
