@@ -8,14 +8,15 @@
 //! shared engine, so the build jail and the agent sandbox run ONE implementation (the epic 4.1
 //! de-duplication) — and the build jail gains the shared engine's write-broker carve-outs.
 //!
-//! POSTURE — this reproduces today's aube jail exactly, so it cannot regress a working install:
-//! read-anywhere, write only under {package dir, jail home, resolved write paths}, coarse egress
-//! (all-or-nothing per the jail's `network`). Read-anywhere is a `"/"` read grant; `/dev`, the
-//! system read floor and proc reads are added by the backend, not the surface. On Linux the
-//! secret-deny floor the compiler adds is dropped by `enforce_pure_allowlist` (Landlock has no
-//! deny), matching aube's read-`/` base; on macOS Seatbelt keeps it, a slightly stricter (secret-
-//! protecting) read surface than aube's `(allow default)`. Tightening reads to a per-package
-//! allowlist (the catalog's value) is a later, corpus-validated step, not this one.
+//! POSTURE — reproduces aube's jail closely, so it does not regress a working install: reads are the
+//! whole disk MINUS secret subtrees, write only under {package dir, jail home, resolved write paths},
+//! coarse egress (all-or-nothing per the jail's `network`). The reads are NOT a surface `"/"` grant —
+//! the Landlock lowering silently drops a whole-root read as an unclawable credential leak — but a
+//! post-compile `relax_reads_to_disk_minus_secrets` relaxation; `/dev`, the system read floor and proc
+//! reads are added by the backend, not the surface. This is slightly STRICTER than aube's read-`/` /
+//! `(allow default)`: `$HOME`-anchored secret subtrees are excluded (a `.env*` basename residual
+//! remains on Landlock, which has no deny). Tightening reads further to a per-package allowlist (the
+//! catalog's value) is a later, corpus-validated step, not this one.
 //!
 //! Linux (Landlock, `pre_exec`) and macOS (Seatbelt, `sandbox-exec` wrap) are wired. Windows keeps
 //! aube's behavior — aube-scripts has no Windows jail today, so wiring AppContainer here is additive.
@@ -132,10 +133,13 @@ fn build_jail_policy(
     use serde_json::json;
 
     let mut fs = serde_json::Map::new();
-    // Read anywhere (aube's `add_rule(/, read_access)` / `(allow default)`); the write grants below
-    // win under last-match-wins for their own subtrees. `/dev`, the system read floor and proc
-    // reads are the backend's job — a surface allow under a reserved kernel tree is refused.
-    fs.insert("/".to_string(), json!("r"));
+    // Only the WRITE grants go on the surface. Reads are relaxed to disk-minus-secrets AFTER compile
+    // (below) rather than named here. A surface `"/": "r"` grant does NOT work: the Landlock lowering
+    // (`nub-sandbox backend::linux_grants::compile_mount_plan`) deliberately DROPS a whole-root read
+    // as an unclawable credential leak, so read-`/` silently collapsed to system-floor reads — which
+    // broke every `node`-spawning lifecycle script, since node could not read nub's injected preload.
+    // Writes stay allow-only and win under last-match-wins over the broad read allows. `/dev`, the
+    // system read floor and proc reads are the backend's job.
     fs.insert(home.to_string_lossy().into_owned(), json!("rw"));
     fs.insert(jail.package_dir.to_string_lossy().into_owned(), json!("rw"));
     for path in &jail.write_paths {
@@ -150,10 +154,17 @@ fn build_jail_policy(
         project: jail.package_dir.clone(),
     };
     let ctx = nub_sandbox::CompileCtx::new(
-        homes,
+        homes.clone(),
         jail.package_dir.clone(),
         nub_sandbox::ScopeCapabilities::approved(),
         std::env::vars().collect(),
     );
-    nub_sandbox::compile(&surface, &ctx)
+    let mut policy = nub_sandbox::compile(&surface, &ctx)?;
+    // Generous reads (disk minus secret subtrees), the sandbox-sanctioned "read almost everything":
+    // reproduces aube's read-anywhere posture minus `$HOME`-anchored secrets, so lifecycle tooling
+    // (node + its runtime/preload, module tree, system libs) reads what it needs while writes stay
+    // confined. On Linux, Landlock drops the secret denies but the allows already exclude the secret
+    // subtrees; Seatbelt keeps them (stricter). `.env*` basename reads are a per-backend residual.
+    nub_sandbox::relax_reads_to_disk_minus_secrets(&mut policy, &homes);
+    Ok(policy)
 }

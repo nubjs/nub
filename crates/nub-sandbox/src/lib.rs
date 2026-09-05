@@ -212,6 +212,22 @@ pub use matcher::Homes;
 pub use policy::SandboxPolicy;
 pub use proxy::{Decision, EgressProxy, GrantDecider, Host, StaticDecider};
 
+/// Relax a compiled policy's READ axis to the whole disk MINUS secret subtrees — the
+/// sandbox-sanctioned expression of "read almost everything". A whole-root `/` read grant is
+/// deliberately DROPPED by the Landlock lowering (`backend::linux_grants::compile_mount_plan`) as
+/// an unclawable credential leak, so a raw `{"fs": {"/": "r"}}` surface silently collapses to
+/// system-floor reads. This front-inserts the disk-minus-secrets read allows so pre-existing (more
+/// specific) write grants still win under last-match-wins.
+///
+/// The build-jail embedder seam uses this to reproduce the generous read posture dependency
+/// lifecycle scripts need — a `node` interpreter must read its own runtime/preload, its module
+/// tree, and system libs — while keeping WRITES allow-only. It is stricter than a bare read-`/`:
+/// `$HOME`-anchored secret SUBTREES are excluded. `.env*` basename reads remain a per-backend
+/// residual on Landlock (which has no deny primitive).
+pub fn relax_reads_to_disk_minus_secrets(policy: &mut SandboxPolicy, homes: &Homes) {
+    compiler::relax_fs_read_to_disk_minus_secrets(policy, homes);
+}
+
 /// Whether applying this policy needs the embedder to supply bounded current-path
 /// roots for wildcard deny inventory. Exact denies are enforced directly and need
 /// no enumeration.

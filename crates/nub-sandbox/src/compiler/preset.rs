@@ -1473,7 +1473,7 @@ fn relax_fs_to_full_disk(policy: &mut SandboxPolicy) {
 // No longer gated: the `read:"disk"` rung is emitted from the v2 catalog path, and that path is now
 // compiled into every build because every build bakes a catalog. The gate existed only because the
 // sole production caller was itself feature-gated.
-fn relax_fs_read_to_disk_minus_secrets(policy: &mut SandboxPolicy, homes: &Homes) {
+pub fn relax_fs_read_to_disk_minus_secrets(policy: &mut SandboxPolicy, homes: &Homes) {
     policy
         .fs
         .rules

@@ -43,7 +43,10 @@ pub use package_network::{
     PACKAGE_NETWORK_ALLOWED, build_jail_net_allowed, package_network_allowed,
 };
 pub use preset::build_jail_net_allowed_for;
-pub use preset::{PROJECT_VIRTUAL_STORE_LEAF, compile_build_jail, jail_private_home};
+pub use preset::{
+    PROJECT_VIRTUAL_STORE_LEAF, compile_build_jail, jail_private_home,
+    relax_fs_read_to_disk_minus_secrets,
+};
 pub use resolve::{CommandRunner, ShellRunner};
 
 /// The `$downloads` host set, re-exported for the EMBEDDER's out-of-jail prefetch alone,
