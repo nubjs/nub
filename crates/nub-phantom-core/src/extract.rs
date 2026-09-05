@@ -24,7 +24,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::AstKind;
 use oxc_ast::ast::{
     Argument, BindingPattern, ConditionalExpression, Expression, FormalParameters, IfStatement,
-    ImportDeclarationSpecifier, LogicalExpression, Statement, TryStatement,
+    ImportDeclarationSpecifier, LogicalExpression, Statement, TSImportType, TryStatement,
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
@@ -244,6 +244,32 @@ impl<'a> Visit<'a> for SpecVisitor {
         }
         walk::walk_expression(self, it);
     }
+
+    /// A TYPE-position `import("x")` — `typeof import("typescript")`,
+    /// `import("pkg").Foo`. A distinct AST node from `Expression::ImportExpression`
+    /// (which is the value-position dynamic import), so visiting expressions never
+    /// reaches it, and every occurrence was invisible before this.
+    ///
+    /// This is the idiomatic way a `.d.ts` types a dependency it does not import at
+    /// runtime — an injected one above all, where the value arrives as a parameter:
+    /// `volar-service-typescript-twoslash-queries`' whole declaration surface is
+    /// `create(ts: typeof import("typescript"))`, against a manifest that declares
+    /// `typescript` nowhere. Yarn carries a hand-written rule for exactly that
+    /// package (yarnpkg/berry#7232) and this scan could not rediscover it. Measured
+    /// over a 59-package spread of the download ranking: 2 packages carry an
+    /// undeclared bare type-position import, ~3% of the corpus.
+    ///
+    /// Gated on `capture_types`, like `import type … from …` above it, so it
+    /// surfaces only on the `.d.ts`/SFC type surface and a plain `.ts` still drops
+    /// it — a devDep used purely for types is never promoted to a runtime phantom.
+    /// `source` is a `StringLiteral`, so unlike a dynamic import there is no
+    /// computed form to skip.
+    fn visit_ts_import_type(&mut self, it: &TSImportType<'a>) {
+        if self.capture_types {
+            self.record(&it.source.value, RefKind::StaticImport);
+        }
+        walk::walk_ts_import_type(self, it);
+    }
 }
 
 /// A named import declaration is a runtime (value) import unless every specifier
@@ -456,6 +482,48 @@ mod tests {
             .into_iter()
             .map(|o| (o.spec, o.soft, o.kind))
             .collect()
+    }
+
+    #[test]
+    fn a_type_position_import_on_the_declaration_surface_is_an_edge() {
+        // `typeof import("x")` is a TS type node, not an expression, so the
+        // expression visitor never reached it. It is how a `.d.ts` types an
+        // injected dependency the package never imports at runtime —
+        // `volar-service-typescript-twoslash-queries` declares `typescript`
+        // nowhere and its entire surface is `create(ts: typeof
+        // import("typescript"))`. Yarn hand-wrote a rule for that package
+        // (yarnpkg/berry#7232) precisely because a scan could not find it.
+        let dts: Vec<String> = extract(
+            "index.d.ts",
+            r#"
+            import type { Plugin } from '@volar/language-service';
+            export declare function create(ts: typeof import('typescript')): Plugin;
+            export declare const cfg: import('webpack').Configuration;
+            "#,
+        )
+        .into_iter()
+        .map(|o| o.spec)
+        .collect();
+        assert_eq!(
+            dts,
+            vec!["@volar/language-service", "typescript", "webpack"],
+            "the declaration surface must carry both the type import and the type-position import(): {dts:?}"
+        );
+
+        // THE CONTROL, and the reason this is gated on `capture_types`: a plain
+        // `.ts` still drops it. A package that only names a devDep in a type
+        // annotation must not be reported as needing it at runtime.
+        let ts: Vec<String> = extract(
+            "src/index.ts",
+            "export function f(ts: typeof import('typescript')) { return ts; }",
+        )
+        .into_iter()
+        .map(|o| o.spec)
+        .collect();
+        assert!(
+            ts.is_empty(),
+            "a type-position import in a runtime .ts stays erased: {ts:?}"
+        );
     }
 
     #[test]
