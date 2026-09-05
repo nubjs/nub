@@ -187,10 +187,9 @@
   // Both raised from `exit`, and the line written rather than emitted, for the
   // reasons the single-executable loader spells out: `beforeExit` can run any
   // number of times so it proves nothing, `process.emitWarning` cannot write from
-  // `exit`, and Node's own gate is readable off the `warning` listener it attaches
-  // during pre-execution.
-  const warningsEnabled =
-    process.listenerCount("warning") > 0 || process.env.NODE_NO_WARNINGS === "1";
+  // `exit`, and `process.noProcessWarnings` is the parsed option Node's own copy
+  // of this diagnostic is gated on.
+  const warningsEnabled = !process.noProcessWarnings;
 
   let settled = false;
   const unsettled = () => {

@@ -191,17 +191,17 @@
   // composed and dropped; a synchronous write is also exactly what Node does for
   // this same diagnostic in `ModuleWrap::…`.
   //
-  // Node gates its copy on `--warnings`, and the gate is readable without parsing
-  // a flag: Node attaches its own `warning` listener during pre-execution exactly
-  // when `--warnings` is on AND `NODE_NO_WARNINGS` is unset
-  // (`pre_execution.js::setupWarningHandler`), and this runs before any
-  // application code can add one. Measured against `nub <file>`: `--no-warnings`
-  // suppresses the diagnostic and `NODE_NO_WARNINGS=1` does not, which is why the
-  // environment variable is the second term rather than another way to say no.
-  // Setting both spellings at once is the one combination this reads as enabled
-  // where Node would not.
-  const warningsEnabled =
-    process.listenerCount("warning") > 0 || process.env.NODE_NO_WARNINGS === "1";
+  // Node gates its copy on `env()->options()->warnings`, which is the parsed
+  // `--no-warnings` and nothing else — `process.noProcessWarnings` is a read-only
+  // alias of exactly that option (`pre_execution.js::addReadOnlyProcessAlias`),
+  // present since Node 10 and so below every version either shape supports.
+  //
+  // Reading the option rather than anything downstream of it is what makes this
+  // right in the two places a proxy is not. `NODE_NO_WARNINGS=1` removes Node's
+  // own `warning` listener but does NOT suppress this diagnostic — measured, the
+  // control still prints it — so listener state answers a different question; and
+  // a `--require` preload can add a listener of its own before either loader runs.
+  const warningsEnabled = !process.noProcessWarnings;
 
   let settled = false;
   const unsettled = () => {

@@ -62,6 +62,18 @@ const CASES = [
     stderrExcludes: "Detected unsettled top-level await",
   },
   {
+    name: "unsettled top-level await under both warning controls",
+    // The two spellings are not the same switch. `--no-warnings` is the parsed
+    // option Node gates this diagnostic on; `NODE_NO_WARNINGS=1` only removes
+    // Node's `warning` listener and leaves the diagnostic printing. Setting both
+    // is what separates reading the option from reading anything downstream of
+    // it — a listener-count proxy calls this one enabled, and Node does not.
+    source: 'console.log("before"); await new Promise(() => {}); console.log("never");',
+    node: "26.7.0",
+    env: { NODE_OPTIONS: "--no-warnings", NODE_NO_WARNINGS: "1" },
+    stderrExcludes: "Detected unsettled top-level await",
+  },
+  {
     name: "an entry settled by the application's own beforeExit listener",
     // The counterpart to the two cases above, and the one that keeps the
     // diagnostic honest: an entry whose await is resolved from `beforeExit` is
