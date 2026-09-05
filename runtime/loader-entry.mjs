@@ -153,11 +153,14 @@ export function arm({ esm = true, cjs = true } = {}) {
   // loader (tsx, ts-node, an OTel ESM attach) would crash resolution. Register
   // via the async path there instead so both loaders compose all-async — the same
   // tier decision the CLI preload makes, minus counting ourselves as foreign.
-  const forceAsync = common.nodeHookComposeBroken() && foreignAsyncLoaderPresent();
+  const foreignLoaderFlagPresent = foreignAsyncLoaderPresent();
+  const forceAsync = common.nodeHookComposeBroken() && foreignLoaderFlagPresent;
 
   if (wantEsm) {
     if (hasSyncHooks && !forceAsync) {
-      const { resolve, load } = common.makeHooks(core, watchReporting);
+      // The standalone --import is our own loader, not a foreign async hook.
+      // Share that distinction with the import-of-CJS require.cache repair.
+      const { resolve, load } = common.makeHooks(core, watchReporting, foreignLoaderFlagPresent);
       module_.registerHooks({ resolve, load });
       armed.esmMode = "sync";
     } else {

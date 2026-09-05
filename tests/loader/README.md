@@ -19,6 +19,7 @@ TSX=1 tests/loader/run-matrix.sh                        # differential: same fix
 | `using.ts` | `using` lowering — resolves the `@oxc-project/runtime` helpers from the package's real dependency |
 | `worker-main.ts` | a worker thread inheriting the preload and transpiling its own `.ts` entry |
 | `clobber.ts` | a real installed `@js-temporal/polyfill` must load, not the CLI's synthetic global re-export — covers the clear on both tiers |
+| `cache-main.ts` | imported CommonJS retains `require.cache`, `require.extensions` and `require.resolve.paths`, with the loader in argv or `NODE_OPTIONS` |
 
 The fixture project is `"type": "module"`, so `.ts` files with `import`/`export` are ES modules; `.cts` content must be CommonJS (`module.exports`) because the loader transpiles syntax without converting module formats.
 

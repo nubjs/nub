@@ -48,10 +48,10 @@ fail=0
 run_one() {  # <label> <argv...>
   local label="$1"; shift
   local fixture="${@: -1}"
-  local want got
+  local want got status=0
   want="$(grep "^${fixture}=" "$fixtures/expected.txt" | cut -d= -f2- | sed 's/\\n/\n/g')"
-  got="$(cd "$work" && "$@" 2>&1 || true)"
-  if [[ "$got" == "$want" ]]; then
+  got="$(cd "$work" && "$@" 2>&1)" || status=$?
+  if [[ "$status" == 0 && "$got" == "$want" ]]; then
     printf "  ok   %-10s %s\n" "$label" "$fixture"
   elif [[ "$label" == "tsx" ]]; then
     # The tsx column is the differential reference, not a gate: a tsx miss is a
@@ -66,11 +66,12 @@ run_one() {  # <label> <argv...>
 
 run_version() {
   echo "== node $(node --version)"
-  for f in main.ts paths.ts req.cts using.ts worker-main.ts clobber.ts; do
+  for f in main.ts paths.ts req.cts using.ts worker-main.ts clobber.ts cache-main.ts; do
     run_one "--import" node --import "$pkg_name" "$f"
   done
+  run_one "env-import" env NODE_OPTIONS="--import $pkg_name" node cache-main.ts
   if supports_require; then
-    for f in main.ts req.cts; do
+    for f in main.ts req.cts cache-main.ts; do
       run_one "--require" node --require "$pkg_name" "$f"
     done
   else

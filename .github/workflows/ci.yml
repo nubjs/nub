@@ -1204,6 +1204,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo "__NUB_BUSYBOX_EXE=$GITHUB_WORKSPACE/vendor/busybox-w32/busybox64.exe" >> "$GITHUB_ENV"
+      - name: Standalone loader package fixtures
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.15'
+        run: tests/loader/run-matrix.sh
       - run: cargo test
       # `compile` is not a default feature, so the bare `cargo test` above never
       # builds `src/compile/**` — including the bundler's emitted-chunk validity
