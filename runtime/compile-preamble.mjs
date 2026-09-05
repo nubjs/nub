@@ -1,5 +1,7 @@
 // Runtime globals compiled artifacts need without Nub's loader or installed runtime.
-const bootstrap = process[Symbol.for("nub.compile.bootstrap")];
+// First import, and it stays first: it publishes the record when the launcher skipped
+// the bootstrap preload, and the modules below read that record as they evaluate.
+import { bootstrap } from "./compile-record.mjs";
 const COMPILED_WORKER_STATE = "nub.compile.worker-state";
 // Loading node:worker_threads costs ~1.4 ms on every run of the artifact, so it is
 // skipped when the payload's sealed graph never reaches Worker or worker_threads.

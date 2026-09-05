@@ -202,6 +202,11 @@ pub struct BundleResult {
     /// Compile bootstrap which must be extracted at the payload root before any
     /// generated chunk can read the private builtin registry it installs.
     pub root_support_files: Vec<BundledFile>,
+    /// Whether no application module names `child_process`/`cluster` or
+    /// `Worker`/`worker_threads` — the same scan that strips the bootstrap's
+    /// regions — so the bootstrap has nothing left to do BEFORE the ESM graph and
+    /// the preamble may publish the record itself (`Manifest::standalone_preamble`).
+    pub bootstrap_optional: bool,
     /// Computed `import()` sites `--allow-dynamic-import` let through. Zero
     /// unless the flag is set; the build would otherwise have failed. This is
     /// what decides whether the artifact needs a runtime resolve hook at all.
@@ -721,6 +726,7 @@ fn bundle_inner(
         assets,
         support_files: prelude.support_files().collect(),
         root_support_files: prelude.root_support_files().collect(),
+        bootstrap_optional: prelude.bootstrap_optional(),
         native_files,
         dynamic_import_sites,
         native_addons,
@@ -2166,6 +2172,13 @@ impl CompilePreamble {
             name: name.clone(),
             bytes: bytes.clone(),
         })
+    }
+
+    /// Read after the graph is walked, like [`Self::root_support_files`]: both
+    /// regions stripped means the bootstrap's preload-time work is gone entirely.
+    fn bootstrap_optional(&self) -> bool {
+        !self.app_uses_child_process.load(AtomicOrdering::Relaxed)
+            && !self.app_uses_worker.load(AtomicOrdering::Relaxed)
     }
 
     /// Collected AFTER the graph is walked, which is what makes the strip possible:
@@ -10088,6 +10101,37 @@ after
                 && escaped.app_uses_worker.load(AtomicOrdering::Relaxed),
             "an escaped builtin spelling must keep every eager load"
         );
+    }
+
+    /// The preload is dropped only when BOTH regions are: a payload naming either
+    /// builtin still needs the bootstrap to run before the ESM graph.
+    #[test]
+    fn the_bootstrap_is_optional_only_when_the_app_graph_names_neither_builtin() {
+        let neither = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        neither.note_app_builtin_usage("/app/entry.ts", r#"console.log("hello")"#);
+        // The preamble's own source names every marker and must not count.
+        neither.note_app_builtin_usage("/nub/runtime/worker-polyfill.mjs", "class Worker {}");
+        assert!(neither.bootstrap_optional());
+
+        let worker = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        worker.note_app_builtin_usage("/app/entry.ts", "new Worker(u)");
+        assert!(!worker.bootstrap_optional());
+
+        let cluster = CompilePreamble::from_source(
+            Path::new("/app/entry.ts"),
+            PathBuf::from("/nub/runtime"),
+            String::new(),
+        );
+        cluster.note_island_usage(b"require('cluster')");
+        assert!(!cluster.bootstrap_optional());
     }
 
     /// The bootstrap keeps an eager builtin load exactly when the app graph names

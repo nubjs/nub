@@ -309,6 +309,23 @@ pub struct Manifest {
     /// already does.
     #[serde(default)]
     pub inline_app: bool,
+    /// Whether the launcher starts Node WITHOUT `--require`ing the compiled
+    /// bootstrap, passing its path in `__NUB_COMPILED_BOOTSTRAP` instead for the
+    /// bundled preamble to publish the record from (`runtime/compile-record.mjs`).
+    ///
+    /// Set when the sealed graph names neither `child_process`/`cluster` nor
+    /// `Worker`/`worker_threads` — the bootstrap's only preload-time job is the
+    /// fork identity fix-up, and `nub compile` has already stripped that region for
+    /// such a payload — and the target Node has `process.getBuiltinModule` (22.3+),
+    /// which is how the preamble reaches builtins without the bootstrap's early CJS
+    /// `require`. The preload is what it saves: ~0.7 ms of CPU per start for the
+    /// mechanism alone, measured with an empty file, plus the bootstrap's own
+    /// evaluation.
+    ///
+    /// Absent in legacy manifests, where `false` is exactly the preload they were
+    /// built for.
+    #[serde(default)]
+    pub standalone_preamble: bool,
 }
 
 /// One logical file in the payload. `B` is `Vec<u8>` on the writing side and
@@ -1008,6 +1025,7 @@ mod tests {
             sealed_module_graph: false,
             hide_console: false,
             inline_app: false,
+            standalone_preamble: false,
         }
     }
 
@@ -1045,6 +1063,7 @@ mod tests {
             // dropped the field entirely.
             hide_console: true,
             inline_app: false,
+            standalone_preamble: false,
         };
         let app = vec![
             AppFile::plain("main.js", b"import './c.js'\n".to_vec()),
@@ -1098,6 +1117,7 @@ mod tests {
             sealed_module_graph: false,
             hide_console: false,
             inline_app: false,
+            standalone_preamble: false,
         };
         let app = vec![AppFile::plain("main.js", b"console.log(1)".to_vec())];
         let blob = encode_with_license(&manifest, &app, &[], &[]);
