@@ -52,16 +52,13 @@ pub use resolve::{CommandRunner, ShellRunner};
 /// catalog override; the `const` is the compiled floor behind it.
 pub use builtin_sets::{DOWNLOAD_HOSTS, download_hosts};
 
-/// The secret-file deny floor, re-exported for the Linux backend ALONE — it recognizes
-/// the floor positionally and by membership, and must read the same arrays
-/// `finalize_env_deny` emits rather than restate them. Exposing these three rather than
-/// the whole `defaults` module keeps the policy CONSTRUCTORS out of backend reach, so
-/// "backends replicate the IR, they do not author policy" stays enforced by the compiler
-/// rather than by convention.
-#[cfg(any(target_os = "linux", test))]
+/// The secret-file deny leaf-glob floor, re-exported for a cross-backend TEST that pins the
+/// floor's contents. The Linux mask-placement emitter that read these positionally was the
+/// bwrap mount-stream tier, dropped with the privileged engine (epic 1.6); the Landlock
+/// backend builds flat rulesets and does not need them. Exposing just this one rather than
+/// the whole `defaults` module keeps the policy CONSTRUCTORS out of backend reach.
+#[cfg(test)]
 pub(crate) use defaults::ENV_DENY_LEAF_GLOBS;
-#[cfg(target_os = "linux")]
-pub(crate) use defaults::{ENV_DENY_SUBTREE_GLOBS, env_deny_floor_start};
 
 use crate::matcher::path::Homes;
 use crate::policy::{Effect, EnvPolicy, FsPolicy, Inspection, NetPolicy, ProxyMode, SandboxPolicy};

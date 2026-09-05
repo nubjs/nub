@@ -293,37 +293,6 @@ impl PathMatcher {
         self.decide_normalized(&norm, None)
     }
 
-    /// Evaluate one logical directory-entry spelling and its resolved object as a
-    /// single candidate. A deny matching either spelling wins at its authored
-    /// position, which prevents a symlink named `.env` from losing its logical-name
-    /// deny when canonicalization follows the link.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn decide_logical_or_resolved(&self, logical: &Path, resolved: &Path) -> FsDecision {
-        let logical = normalize_slashes(&logical.to_string_lossy());
-        let resolved = normalize_slashes(&resolved.to_string_lossy());
-        self.decide_normalized(&logical, Some(&resolved))
-    }
-
-    /// Last matching effect among entries before `end`. Used by the Linux mask
-    /// planner to distinguish an explicit user deny from compiler-injected dotenv
-    /// defaults without adding backend provenance to the public policy IR.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn last_matching_effect_before(
-        &self,
-        logical: &Path,
-        resolved: &Path,
-        end: usize,
-    ) -> Option<Effect> {
-        let logical = normalize_slashes(&logical.to_string_lossy());
-        let resolved = normalize_slashes(&resolved.to_string_lossy());
-        self.entries
-            .iter()
-            .take(end)
-            .filter(|(glob, _, _, _)| glob.is_match(&logical) || glob.is_match(&resolved))
-            .map(|(_, effect, _, _)| *effect)
-            .next_back()
-    }
-
     /// Last matching effect among entries AT OR AFTER `start`, i.e. does anything the
     /// policy says LATER override this one. The Linux mount-plan compiler asks this of
     /// each allow before turning it into a bind.
@@ -347,30 +316,6 @@ impl PathMatcher {
             .filter(|(glob, _, _, _)| glob.is_match(&logical) || glob.is_match(&resolved))
             .map(|(_, effect, _, _)| *effect)
             .next_back()
-    }
-
-    /// Authored position of the LAST rule matching either spelling. The Linux emitter
-    /// keys a deny mask's place in the mount-operation stream off this, so a mask lands
-    /// where the policy put the deny that produced it rather than after every grant.
-    /// `None` means no rule matched — the candidate is backend infrastructure, not policy.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn last_matching_index(&self, logical: &Path, resolved: &Path) -> Option<usize> {
-        let logical = normalize_slashes(&logical.to_string_lossy());
-        let resolved = normalize_slashes(&resolved.to_string_lossy());
-        self.entries
-            .iter()
-            .filter(|(glob, _, _, _)| glob.is_match(&logical) || glob.is_match(&resolved))
-            .map(|(_, _, _, index)| *index)
-            .next_back()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn matches_deny_entry(&self, logical: &Path, resolved: &Path) -> bool {
-        let logical = normalize_slashes(&logical.to_string_lossy());
-        let resolved = normalize_slashes(&resolved.to_string_lossy());
-        self.entries.iter().any(|(glob, effect, _, _)| {
-            *effect == Effect::Deny && (glob.is_match(&logical) || glob.is_match(&resolved))
-        })
     }
 
     fn decide_normalized(&self, first: &str, second: Option<&str>) -> FsDecision {

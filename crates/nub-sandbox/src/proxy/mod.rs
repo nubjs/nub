@@ -340,12 +340,6 @@ impl EgressProxy {
     pub fn ca_bundle_path(&self) -> Option<&std::path::Path> {
         self.mitm.as_ref().map(|m| m.bundle_path())
     }
-
-    /// Immutable Linux launch authority for the child trust bundle.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn ca_bundle_file(&self) -> io::Result<Option<std::fs::File>> {
-        self.mitm.as_ref().map(|m| m.bundle_file()).transpose()
-    }
 }
 
 impl Drop for EgressProxy {

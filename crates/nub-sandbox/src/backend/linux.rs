@@ -920,12 +920,7 @@ fn resolve_program(program: &OsStr, child_cwd: &Path, path: Option<&OsStr>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{CompileCtx, ScopeCapabilities, compile};
-    use crate::matcher::path::Homes;
-    use serde_json::json;
-    use std::collections::BTreeMap;
     use std::os::unix::ffi::OsStringExt;
-    use std::os::unix::process::CommandExt;
     use tempfile::tempdir;
 
     /// The minimal-root floor is a system-START set, not a convenience set. Both halves of
@@ -970,25 +965,6 @@ mod tests {
         ] {
             assert!(!covered(withheld), "the floor must not mount {withheld}");
         }
-    }
-
-    fn policy(root: &Path, surface: serde_json::Value) -> SandboxPolicy {
-        let homes = Homes {
-            home: root.join("home"),
-            tmp: root.join("tmp"),
-            cache: root.join("cache"),
-            project: root.join("project"),
-        };
-        compile(
-            &surface,
-            &CompileCtx::new(
-                homes,
-                root.join("project"),
-                ScopeCapabilities::approved(),
-                BTreeMap::new(),
-            ),
-        )
-        .unwrap()
     }
 
     fn seccomp_data_arg1(

@@ -102,10 +102,9 @@ const SECRET_READ_RELPATHS: &[&str] = &[
 /// `fold::finalize_env_deny`. Each glob carries a rootless twin mirroring it for a
 /// depth-0 match; canonical candidates are absolute, so `**/…` is the form that bites.
 ///
-/// These two arrays are the SINGLE SOURCE OF TRUTH for the floor: [`env_deny_floor_start`]
-/// recognizes it POSITIONALLY (last N entries, leaf band then subtree band) and the Linux
-/// backend's `is_builtin_env_glob` by membership, and both derive from these constants
-/// rather than restating them — a hand-copied list silently desynced on every edit here.
+/// These two arrays are the SINGLE SOURCE OF TRUTH for the floor: `finalize_env_deny` emits
+/// it and every consumer derives from these constants rather than restating them — a
+/// hand-copied list silently desynced on every edit here.
 pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &[
     "**/.env*",
     ".env*",
@@ -165,32 +164,6 @@ pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
         .iter()
         .map(|g| deny(g.to_string()))
         .collect()
-}
-
-/// Index where the builtin secret-file floor begins in `entries` — the boundary between
-/// the user/default band and the two bands `fold::finalize_env_deny` appends LAST. `None`
-/// when the floor is absent (a fully-relaxed or no-read policy) or no longer trailing.
-///
-/// Exists so a post-fold pass that needs to add band-1 entries can splice BEFORE the floor
-/// instead of appending after it. Displacing the floor is not a matching bug (deny order
-/// among denies is irrelevant) but it defeats this positional recognizer, which the Linux
-/// backend calls to tell an explicit USER `.env` deny from the builtin floor when planning
-/// the dotenv mask kind — a floor no longer trailing reads as "absent", silently
-/// downgrading an explicit deny's genuinely-unreadable mask to the present-but-empty
-/// dotenv shape.
-#[cfg(target_os = "linux")]
-pub(crate) fn env_deny_floor_start(entries: &[FsRule]) -> Option<usize> {
-    let floor_len = ENV_DENY_LEAF_GLOBS.len() + ENV_DENY_SUBTREE_GLOBS.len();
-    let start = entries.len().checked_sub(floor_len)?;
-    ENV_DENY_LEAF_GLOBS
-        .iter()
-        .chain(ENV_DENY_SUBTREE_GLOBS)
-        .enumerate()
-        .all(|(offset, glob)| {
-            let rule = &entries[start + offset];
-            rule.effect == Effect::Deny && rule.matcher.as_str() == *glob
-        })
-        .then_some(start)
 }
 
 /// The SUBTREE `.env*` READ-deny entries ([`ENV_DENY_SUBTREE_GLOBS`]) — the CONTENTS of

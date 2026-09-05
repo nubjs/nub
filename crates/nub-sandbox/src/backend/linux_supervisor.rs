@@ -515,10 +515,10 @@ fn tgid_of(tid: u32) -> u32 {
     let path = format!("/proc/{tid}/status");
     if let Ok(text) = std::fs::read_to_string(&path) {
         for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("Tgid:") {
-                if let Ok(v) = rest.trim().parse::<u32>() {
-                    return v;
-                }
+            if let Some(rest) = line.strip_prefix("Tgid:")
+                && let Ok(v) = rest.trim().parse::<u32>()
+            {
+                return v;
             }
         }
     }
@@ -674,11 +674,11 @@ fn start_stub() -> io::Result<()> {
     let mut upstream_be: u32 = u32::from_ne_bytes([127, 0, 0, 53]);
     if let Ok(text) = std::fs::read_to_string("/etc/resolv.conf") {
         for line in text.lines() {
-            if let Some(ip) = line.strip_prefix("nameserver ") {
-                if let Some(be) = parse_ipv4(ip.trim()) {
-                    upstream_be = be;
-                    break;
-                }
+            if let Some(ip) = line.strip_prefix("nameserver ")
+                && let Some(be) = parse_ipv4(ip.trim())
+            {
+                upstream_be = be;
+                break;
             }
         }
     }
@@ -1373,18 +1373,17 @@ fn supervisor(nfd: RawFd) {
                 None => false,
             }
         };
-        let sfd: RawFd;
         let mut pidfd: RawFd = -1;
-        if by_construction {
-            sfd = -2; // classified, no dup needed
+        let sfd: RawFd = if by_construction {
+            -2 // classified, no dup needed
         } else {
             pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, tgid, 0) } as RawFd;
-            sfd = if pidfd >= 0 {
+            if pidfd >= 0 {
                 unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd, cfd, 0) as RawFd }
             } else {
                 -1
-            };
-        }
+            }
+        };
         if sfd >= 0 {
             let mut ol = size_of::<i32>() as libc::socklen_t;
             unsafe {
@@ -1891,10 +1890,10 @@ pub(super) fn spawn_supervised(
             {
                 libc::_exit(15);
             }
-            if let Some(filter) = launch.seccomp_ceiling {
-                if install_target_seccomp(filter).is_err() {
-                    libc::_exit(16);
-                }
+            if let Some(filter) = launch.seccomp_ceiling
+                && install_target_seccomp(filter).is_err()
+            {
+                libc::_exit(16);
             }
             // The USER_NOTIF listener, LAST so the ceiling above never traps to this supervisor.
             // `nfd` is handed to the parent then CLOSED before `execve`, so it never leaks into
@@ -1914,10 +1913,10 @@ pub(super) fn spawn_supervised(
             libc::close(nfd);
             libc::close(c2p[1]);
             libc::close(p2c[0]);
-            if let Some(cwd) = cwd_ptr {
-                if libc::chdir(cwd) != 0 {
-                    libc::_exit(20);
-                }
+            if let Some(cwd) = cwd_ptr
+                && libc::chdir(cwd) != 0
+            {
+                libc::_exit(20);
             }
             libc::execve(argv_ptrs[0], argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
             libc::_exit(127);

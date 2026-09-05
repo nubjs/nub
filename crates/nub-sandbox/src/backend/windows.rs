@@ -105,15 +105,14 @@ pub(crate) struct AppContainerLaunch {
     register_loopback_exemption: bool,
 }
 
-/// Which Windows mechanism owns this launch. Exactly one applies, which is why this is an
-/// enum rather than two `Option` fields: build-jail's admin-free AppContainer and
-/// agent-sandbox's dedicated account are alternatives, never a combination.
+/// Which Windows mechanism owns this launch. The zero-privilege engine keeps only the
+/// admin-free AppContainer path; the dedicated-account + WFP variant was the privileged
+/// tier, dropped with the curated import (epic 0.3). Left an enum rather than collapsed to
+/// a struct because Phase 3.2 rebuilds this backend on the shared engine.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) enum WindowsLaunch {
     /// Per-run AppContainer (LowBox) — the pure-allowlist path. No elevation, ever.
     AppContainer(AppContainerLaunch),
-    /// Dedicated local account + WFP — the full-grammar path. Needs a one-time elevated setup.
-    Account(super::windows_account::AccountLaunch),
 }
 
 #[cfg(target_os = "windows")]
@@ -121,7 +120,6 @@ impl WindowsLaunch {
     pub(crate) fn run(self) -> std::io::Result<std::process::ExitStatus> {
         match self {
             WindowsLaunch::AppContainer(l) => l.run(),
-            WindowsLaunch::Account(l) => l.run(),
         }
     }
 }

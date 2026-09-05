@@ -29,9 +29,7 @@ use crate::policy::{Effect, Inspection, ProxyMode, SandboxPolicy};
 use crate::proxy::mitm::{BrokerSession, MitmEngine, RuntimeCredentialBroker};
 use crate::proxy::{EgressProxy, StaticDecider};
 #[cfg(target_os = "linux")]
-use std::collections::BTreeMap;
-#[cfg(target_os = "linux")]
-use std::ffi::{CString, OsString};
+use std::ffi::CString;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -199,20 +197,6 @@ impl CommandArgs {
         }
     }
 
-    /// The argv elements, or `None` for a verbatim line.
-    ///
-    /// For a launcher that `execve`s the target directly — the Linux PID-1 monitor,
-    /// which serializes argv across its handshake — rather than building a command line.
-    /// A verbatim tail has no representation there at all, so the caller must FAIL on
-    /// `None` rather than substitute an empty argv, which would silently launch the
-    /// shell with no script.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn argv(&self) -> Option<&[std::ffi::OsString]> {
-        match self {
-            Self::Argv(v) => Some(v),
-            Self::Verbatim(_) => None,
-        }
-    }
 
     /// Apply to a plain `std::process::Command` (the paths that spawn without a custom
     /// `CreateProcessW`).
@@ -982,25 +966,6 @@ fn set_ca_env(command: &mut Command, bundle: &std::path::Path) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn insert_ca_env(env: &mut BTreeMap<OsString, OsString>, bundle: &std::path::Path) {
-    for key in [
-        "NODE_EXTRA_CA_CERTS",
-        "SSL_CERT_FILE",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        "GIT_SSL_CAINFO",
-        "PIP_CERT",
-        "NPM_CONFIG_CAFILE",
-        "npm_config_cafile",
-        "CARGO_HTTP_CAINFO",
-        "AWS_CA_BUNDLE",
-        "DENO_CERT",
-    ] {
-        env.insert(OsString::from(key), bundle.as_os_str().to_owned());
-    }
-}
-
 /// One-line stderr notice when TLS termination engages — the honesty bar (§5, option 2):
 /// nub never silently decrypts, even when the user's own config demanded it.
 fn emit_mitm_notice(policy: &SandboxPolicy) {
@@ -1100,21 +1065,6 @@ fn set_proxy_blackhole(command: &mut Command) {
     for key in PROXY_BYPASS_KEYS {
         command.env_remove(key);
     }
-}
-
-#[cfg(target_os = "linux")]
-fn insert_proxy_env(env: &mut BTreeMap<OsString, OsString>, port: u16, token: Option<&str>) {
-    let url = match token {
-        Some(token) => format!("http://{token}@127.0.0.1:{port}"),
-        None => format!("http://127.0.0.1:{port}"),
-    };
-    for key in PROXY_URL_KEYS {
-        env.insert(OsString::from(*key), OsString::from(&url));
-    }
-    for key in PROXY_BYPASS_KEYS {
-        env.remove(OsString::from(*key).as_os_str());
-    }
-    env.insert(OsString::from("NODE_USE_ENV_PROXY"), OsString::from("1"));
 }
 
 /// Apply a resolved policy to a command, dispatching to the per-OS backend.
@@ -1496,13 +1446,6 @@ fn make_private_tmp(policy: &SandboxPolicy) -> Option<tempfile::TempDir> {
 fn set_tmp_env(command: &mut Command, dir: &std::path::Path) {
     for key in ["TMPDIR", "TMP", "TEMP"] {
         command.env(key, dir);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn insert_tmp_env(env: &mut BTreeMap<OsString, OsString>, dir: &std::path::Path) {
-    for key in ["TMPDIR", "TMP", "TEMP"] {
-        env.insert(OsString::from(key), dir.as_os_str().to_owned());
     }
 }
 
