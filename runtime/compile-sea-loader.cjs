@@ -70,7 +70,25 @@
   // has to splice it in; here there is nothing to do, and `process.execArgv`
   // holds the real flags because Node parsed them out of the blob.
 
-  if (NEUTRALIZE_LOCALSTORAGE) process.env.__NUB_NEUTRALIZE_LOCALSTORAGE = "1";
+  // The build could only ask whether this Node's `localStorage` throws WITHOUT a
+  // storage file, because a blob is written once and the user's `NODE_OPTIONS`
+  // does not exist yet. The launcher recomputes it per run from the real
+  // environment; here the run itself answers, which is better than either — the
+  // getter is the property, so reading it cannot drift from Node's own accepted
+  // spellings of `--localstorage-file`. Without a file it throws and the preamble
+  // must remove it; with one it returns a working Storage and must not. Measured:
+  // an artifact on Node 22.20 deleted a `localStorage` that
+  // `NODE_OPTIONS=--localstorage-file=…` had made work.
+  let neutralize = NEUTRALIZE_LOCALSTORAGE;
+  if (neutralize) {
+    try {
+      void globalThis.localStorage;
+      neutralize = false;
+    } catch {
+      // Still the throwing getter, so the baked answer stands.
+    }
+  }
+  if (neutralize) process.env.__NUB_NEUTRALIZE_LOCALSTORAGE = "1";
   // Set or REMOVED, never inherited: a sealed artifact launched from an armed nub
   // process must not take its parent's runtime-V8 signal. Every SEA payload is
   // sealed — an unsealed one stays on the launcher — so the removal is
@@ -103,9 +121,19 @@
   }
 
   const files = new Set(FILES);
-  const nameOf = (specifier) => {
-    if (specifier.startsWith("./")) return specifier.slice(2);
+  // An absolute `ROOT` URL names a payload file and nothing else, so it needs no
+  // parent to disambiguate. A bare `./name` does: these hooks are process-global,
+  // and a module loaded from DISK whose own relative import happens to spell a
+  // payload name would otherwise be handed the embedded file instead. Nothing can
+  // reach that today — every route to a disk module (an `--external` package, a
+  // retained computed `import()`, a computed `require`) also refuses this
+  // container — but the scoping is what makes that safety local rather than a
+  // consequence of an unrelated eligibility rule.
+  const nameOf = (specifier, parentURL) => {
     if (specifier.startsWith(ROOT)) return specifier.slice(ROOT.length);
+    if (specifier.startsWith("./") && (parentURL ?? "").startsWith(ROOT)) {
+      return specifier.slice(2);
+    }
     return null;
   };
   // `.cjs` is the extension every generated CommonJS support file carries, and
@@ -115,14 +143,16 @@
 
   Module.registerHooks({
     resolve(specifier, context, next) {
-      const name = nameOf(specifier);
+      const name = nameOf(specifier, context.parentURL);
       if (name !== null && files.has(name)) {
         return { url: ROOT + name, format: formatOf(name), shortCircuit: true };
       }
       return next(specifier, context);
     },
     load(url, context, next) {
-      const name = nameOf(url);
+      // A load URL is always the absolute one `resolve` returned, so the parent is
+      // not consulted and cannot be.
+      const name = nameOf(url, ROOT);
       if (name !== null && files.has(name)) {
         // The ArrayBuffer straight out of the mapped blob. Node decodes it in
         // C++; handing it a string instead costs a copy of the whole chunk.
@@ -137,12 +167,38 @@
   // builtin — the hooks above are irrelevant to it, because the rejection happens
   // before resolution. A module compiled through the REAL CommonJS loader gets the
   // ordinary dynamic-import callback, which goes through them.
-  //
-  // Not awaited, and deliberately not wrapped: an import failure must surface as
-  // the ordinary unhandled rejection Node prints for a failed ESM entry, with the
-  // `ROOT`-rooted frames the hooks establish.
   const shim = new Module(ROOT + "__nub_sea_entry", null);
   shim.filename = ROOT + "__nub_sea_entry";
   shim.paths = [];
-  shim._compile(`import(${JSON.stringify(ROOT + ENTRY)});`, shim.filename);
+  shim._compile(`module.exports = import(${JSON.stringify(ROOT + ENTRY)});`, shim.filename);
+
+  // The promise has to be OBSERVED, because Node decides two things by watching
+  // its own entry module's evaluation and this import is not that. Measured
+  // against `nub app.mjs` on the same file: an entry ending in an unsettled
+  // top-level await exited 0 rather than 13, and a throwing entry under
+  // `--unhandled-rejections=warn` exited 0 rather than 1.
+  let settled = false;
+  const unsettled = () => {
+    if (settled || process.exitCode !== undefined) return;
+    process.exitCode = 13;
+    process.emitWarning(`Detected unsettled top-level await at ${ROOT}${ENTRY}`);
+  };
+  process.on("exit", unsettled);
+  shim.exports.then(
+    () => {
+      settled = true;
+      process.off("exit", unsettled);
+    },
+    (error) => {
+      settled = true;
+      process.off("exit", unsettled);
+      // Rethrown rather than reported, because a failed ESM ENTRY is an uncaught
+      // exception in Node and not an unhandled rejection — so it must fail the
+      // process whatever `--unhandled-rejections` says, and it must still reach an
+      // `uncaughtException` handler the application installed.
+      process.nextTick(() => {
+        throw error;
+      });
+    },
+  );
 })();

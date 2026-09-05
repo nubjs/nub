@@ -70,6 +70,17 @@ jobs:
         shell: bash
         run: node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/native-probe"
 
+      # One runner: these are behaviour assertions rather than platform ones, and
+      # each case compiles its own artifact. `--modern-node-only` drops the case
+      # that targets Node 22, which needs polyfill packages a fresh checkout has
+      # not staged — the same gap that made the old version-gate row meaningless.
+      - name: Entry and Web Storage semantics
+        if: matrix.runner == 'ubuntu-latest'
+        shell: bash
+        run: |
+          node tests/compile-sea-probe/semantics.mjs --nub "$NUB" \
+            --out-dir "$RUNNER_TEMP/semantics" --modern-node-only 1
+
       - name: musl target, run in Alpine
         if: matrix.musl
         shell: bash
