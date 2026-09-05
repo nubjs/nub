@@ -1236,8 +1236,8 @@ fn apply_legacy_gvs_prune(plan: &LegacyGvsPrunePlan) {
     }
 }
 
-/// Every `node_modules` directory in a project, workspace packages
-/// included. Records a `node_modules` without descending into it — the
+/// Every standard or configured modules directory in a project, workspace
+/// packages included. Records a modules directory without descending into it — the
 /// store walk enters it separately — and skips dot directories, which is
 /// what pnpm's own `findAllNodeModulesDirs` does: `.git`, `.next`,
 /// `.turbo`, `.venv` are large and none of them holds a project. The one
@@ -1246,15 +1246,20 @@ fn apply_legacy_gvs_prune(plan: &LegacyGvsPrunePlan) {
 /// filter.
 fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
+    let modules_dir_name = super::resolve_modules_dir_name_for_cwd(project);
     let mut stack = vec![project.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        let configured = dir.join(&modules_dir_name);
+        if configured.is_dir() && !found.contains(&configured) {
+            found.push(configured.clone());
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name == "node_modules" {
+            if name == "node_modules" || entry.path() == configured {
                 // Take it whether it is a real directory or a symlink to one.
                 // `DirEntry::file_type` does NOT follow links, so testing
                 // `is_dir()` here silently skipped every project whose
@@ -1263,7 +1268,7 @@ fn find_node_modules_dirs(project: &Path) -> Vec<std::path::PathBuf> {
                 // and its entries were swept while it was still using them.
                 // `read_dir` in `mark_from` follows the link, and its
                 // `visited` set is canonicalized, so this cannot loop.
-                if entry.path().is_dir() {
+                if entry.path().is_dir() && !found.contains(&entry.path()) {
                     found.push(entry.path());
                 }
                 continue;
@@ -1288,6 +1293,7 @@ fn mark_from(
     reachable: &mut HashSet<String>,
     visited: &mut HashSet<std::path::PathBuf>,
 ) {
+    let vstore = std::fs::canonicalize(vstore).unwrap_or_else(|_| vstore.to_path_buf());
     let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     if !visited.insert(key) {
         return;
@@ -1304,15 +1310,15 @@ fn mark_from(
             let Ok(target) = std::fs::read_link(&path) else {
                 continue;
             };
-            // GVS targets are absolute today (the linker byte-compares
-            // them against an absolute path); resolve a relative one
-            // anyway rather than silently failing to mark it.
+            // Compare physical paths: relative links and an aliased store
+            // root must mark the same entry as their absolute equivalents.
             let target = if target.is_absolute() {
                 target
             } else {
                 dir.join(target)
             };
-            let Ok(rest) = target.strip_prefix(vstore) else {
+            let target = std::fs::canonicalize(&target).unwrap_or(target);
+            let Ok(rest) = target.strip_prefix(&vstore) else {
                 continue;
             };
             let Some(name) = rest.components().next() else {
@@ -1324,14 +1330,14 @@ fn mark_from(
             reachable.insert(name.to_string());
             mark_from(
                 &vstore.join(name).join("node_modules"),
-                vstore,
+                &vstore,
                 reachable,
                 visited,
             );
         } else if file_type.is_dir() {
             // Scope directories (`@scope/`) and the project-local
             // `.aube/` tree both hold links one level down.
-            mark_from(&path, vstore, reachable, visited);
+            mark_from(&path, &vstore, reachable, visited);
         }
     }
 }
@@ -1550,6 +1556,83 @@ mod legacy_gvs_prune_tests {
         assert!(live.is_dir(), "a linked entry survives its own expiry");
         assert!(!orphan.exists(), "the unreferenced entry is removed");
         assert!(current.is_dir(), "the versioned store is never touched");
+    }
+
+    #[test]
+    fn legacy_prune_keeps_relative_links_and_aliased_store_paths() {
+        for relative in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (root, current) = layout(tmp.path());
+            let live = entry(&root, "live@1.0.0-aaaa");
+            let orphan = entry(&root, "orphan@1.0.0-bbbb");
+            let project = tmp.path().join("proj");
+            let local = project.join("node_modules/.store");
+            std::fs::create_dir_all(&local).unwrap();
+            let alias = tmp.path().join("store-alias");
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            let target = if relative {
+                std::path::PathBuf::from("../../../store/live@1.0.0-aaaa")
+            } else {
+                live.clone()
+            };
+            let link = local.join("live@1.0.0");
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            record(&root, &project);
+            expire(&root, "live@1.0.0-aaaa");
+            expire(&root, "orphan@1.0.0-bbbb");
+
+            let selected = if relative { current } else { alias.join("v1") };
+            let plan = plan_legacy_gvs_prune(&selected);
+            assert_eq!(
+                planned(&plan),
+                vec!["orphan@1.0.0-bbbb"],
+                "relative={relative}"
+            );
+            apply_legacy_gvs_prune(&plan);
+            assert!(
+                link.join("node_modules/index.js").is_file(),
+                "relative={relative}"
+            );
+            assert!(!orphan.exists());
+        }
+    }
+
+    #[test]
+    fn legacy_prune_keeps_configured_modules_directories() {
+        for modules in [
+            "vendor_modules",
+            ".dependencies",
+            "nested/deps",
+            "../external-deps",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (root, current) = layout(tmp.path());
+            let live = entry(&root, "live@1.0.0-aaaa");
+            let orphan = entry(&root, "orphan@1.0.0-bbbb");
+            let project = tmp.path().join("proj");
+            let local = project.join(modules).join(".store");
+            std::fs::create_dir_all(&local).unwrap();
+            std::fs::write(project.join("package.json"), r#"{"name":"prune-fixture"}"#).unwrap();
+            std::fs::write(project.join(".npmrc"), format!("modules-dir={modules}\n")).unwrap();
+            let link = local.join("live@1.0.0");
+            std::os::unix::fs::symlink(&live, &link).unwrap();
+            record(&root, &project);
+            expire(&root, "live@1.0.0-aaaa");
+            expire(&root, "orphan@1.0.0-bbbb");
+
+            let plan = plan_legacy_gvs_prune(&current);
+            assert_eq!(
+                planned(&plan),
+                vec!["orphan@1.0.0-bbbb"],
+                "modules={modules}"
+            );
+            apply_legacy_gvs_prune(&plan);
+            assert!(
+                link.join("node_modules/index.js").is_file(),
+                "modules={modules}"
+            );
+            assert!(!orphan.exists());
+        }
     }
 
     /// No record resolves, so the layout carries no evidence at all — which is
