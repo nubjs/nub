@@ -87,13 +87,16 @@ function isOwnLoaderToken(value) {
 // delivery channel (execArgv or NODE_OPTIONS). Same two-channel scan as
 // preload-common's computeForeignAsyncLoaderFlagPresent, but value-aware so our
 // own token is excluded.
-function foreignAsyncLoaderPresent() {
+function foreignAsyncLoaderPresent(includeRequire = false) {
   const tokens = [];
+  const flags = ["--import", "--loader", "--experimental-loader", "--experimental_loader"];
+  if (includeRequire) flags.push("--require", "-r");
   const argv = Array.isArray(process.execArgv) ? process.execArgv : [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (typeof a !== "string") continue;
-    for (const flag of ["--import", "--loader", "--experimental-loader"]) {
+    if (includeRequire && a.startsWith("-r") && a.length > 2) tokens.push(a.slice(2));
+    for (const flag of flags) {
       if (a === flag) {
         if (typeof argv[i + 1] === "string") tokens.push(argv[i + 1]);
       } else if (a.startsWith(`${flag}=`)) {
@@ -103,7 +106,9 @@ function foreignAsyncLoaderPresent() {
   }
   const opts = process.env.NODE_OPTIONS;
   if (typeof opts === "string" && opts !== "") {
-    const re = /(?:^|\s)--(?:experimental-)?(?:import|loader)(?:=|\s)("[^"]*"|\S*)/g;
+    const re = includeRequire
+      ? /(?:^|\s)(?:--(?:(?:experimental[-_])?(?:import|loader)|require)(?:=|\s)|-r(?:\s|=)?)("[^"]*"|\S*)/g
+      : /(?:^|\s)--(?:experimental[-_])?(?:import|loader)(?:=|\s)("[^"]*"|\S*)/g;
     for (const match of opts.matchAll(re)) {
       tokens.push((match[1] || "").replace(/^"|"$/g, ""));
     }
@@ -159,8 +164,10 @@ export function arm({ esm = true, cjs = true } = {}) {
   if (wantEsm) {
     if (hasSyncHooks && !forceAsync) {
       // The standalone --import is our own loader, not a foreign async hook.
-      // Share that distinction with the import-of-CJS require.cache repair.
-      const { resolve, load } = common.makeHooks(core, watchReporting, foreignLoaderFlagPresent);
+      // Earlier --require preloads may have registered hooks before our detectors
+      // were installed. Decline the cache repair for them too, without assuming
+      // their hooks are async when choosing the composition tier above.
+      const { resolve, load } = common.makeHooks(core, watchReporting, foreignAsyncLoaderPresent(true));
       module_.registerHooks({ resolve, load });
       armed.esmMode = "sync";
     } else {

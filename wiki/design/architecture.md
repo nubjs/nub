@@ -56,7 +56,7 @@ The 23.x exclusion is not a special case, it is the tier definition applied corr
 
 Using `--require` on the fast tier is a correctness mechanism, not an optimization. An `--import` preload forces eager ESM loader initialization, which routes even a CommonJS entry point through the async module job and breaks `executionAsyncId`, sync exception origin, `require.main.id` and `module.parent`. Coverage and composition behavior of the hooks API is measured in [[research/registerhooks-coverage-matrix]].
 
-The standalone loader also accepts `--import @nubjs/loader`. Its own preload is excluded from foreign-loader detection, while additional loader flags and runtime hook registrations retain the composition guards. When it is the only loader, imported CommonJS dependencies retain their `require.cache`, `require.extensions` and `require.resolve.paths` APIs.
+The standalone loader also accepts `--import @nubjs/loader`. Its own preload is excluded from foreign-loader detection, while additional loader flags and runtime hook registrations retain the composition guards. Earlier foreign `--require` preloads conservatively disable the CommonJS cache repair because they may register hooks before detection starts. When it is the only loader, imported CommonJS dependencies retain their `require.cache`, `require.extensions` and `require.resolve.paths` APIs.
 
 ## TypeScript and resolution
 
