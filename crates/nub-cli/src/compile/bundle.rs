@@ -1770,8 +1770,29 @@ fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
 /// eager compilation would only make every start slower.
 const COMPILE_CACHE_FROM: (u64, u64, u64) = (22, 1, 0);
 
+/// The oldest Node where shaping the chunk for eager compilation actually FILLS
+/// that cache. Later than [`COMPILE_CACHE_FROM`] on purpose: a cache existing and
+/// the shape helping are different facts, and on 22.x the second is false.
+///
+/// Measured on one hello chunk, the largest cache entry after two runs, comparing
+/// the shaped tree against the same tree unshaped:
+///
+/// | Node | unshaped | shaped |
+/// | --- | --- | --- |
+/// | 22.15.0 | 49,948 | **46,196** |
+/// | 22.23.2 | 49,964 | **46,164** |
+/// | 24.19.0 | 48,068 | 311,564 |
+/// | 24.20.0 | 48,052 | 311,548 |
+/// | 26.5.0 – 26.8.1 | 7,500 | 79,772 |
+///
+/// On 22.x the shaped tree caches LESS than the unshaped one, so the transform
+/// works against its own premise there and is switched off. From 24 it is worth
+/// 6.5x, and on 26 — where V8 is much lazier by default, hence the small
+/// baseline — 10.6x.
+const EAGER_STARTUP_FROM: (u64, u64, u64) = (24, 0, 0);
+
 pub fn eager_startup_compilation_supported(target_node: Option<(u64, u64, u64)>) -> bool {
-    target_node.is_some_and(|target| target >= COMPILE_CACHE_FROM)
+    target_node.is_some_and(|target| target >= EAGER_STARTUP_FROM)
 }
 
 /// Wraps a runtime module's hoisted function declaration between the transform
@@ -8214,20 +8235,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Below 22.1 Node persists no code cache, so the eager shape would only
-    /// make every start compile more; the floor itself is in. The bundler reads
-    /// the option, not the target: with it off, a cache-capable target still
-    /// gets the lazy shape.
+    /// The shape is off below 24 and on from it. Two different facts decide that
+    /// and only the second is the gate: Node persists no code cache at all below
+    /// [`COMPILE_CACHE_FROM`] (22.1), and on 22.x it persists one that the shape
+    /// makes SMALLER — 46 KB shaped against 50 KB unshaped, on both 22.15 and
+    /// 22.23. So the whole 22 and 23 band is out, including 22.1 itself. The
+    /// bundler reads the option, not the target: with it off, a cache-capable
+    /// target still gets the lazy shape.
     #[test]
-    fn eager_startup_waits_for_a_target_with_a_compile_cache() {
-        for target in [None, Some((20, 19, 0)), Some((22, 0, 99))] {
+    fn eager_startup_waits_for_a_target_the_shape_actually_helps() {
+        for target in [
+            None,
+            Some((20, 19, 0)),
+            Some((22, 0, 99)),
+            Some(COMPILE_CACHE_FROM),
+            Some((22, 23, 2)),
+            Some((23, 99, 99)),
+        ] {
             assert!(
                 !eager_startup_compilation_supported(target),
-                "target {target:?} has no compile cache"
+                "target {target:?} does not gain from the shape"
             );
         }
         assert!(eager_startup_compilation_supported(Some(
-            COMPILE_CACHE_FROM
+            EAGER_STARTUP_FROM
         )));
         assert!(eager_startup_compilation_supported(Some((26, 0, 0))));
 
@@ -8448,15 +8479,16 @@ mod tests {
     /// for the finished chunk holds the runtime's startup functions, while the
     /// lazy shape — the same sources for a target without a compile cache — leaves
     /// an order of magnitude less on the same Node. The lazy run is the control
-    /// that proves the instrument. Skips without a Node 22.1+ on PATH.
+    /// that proves the instrument. Skips below [`EAGER_STARTUP_FROM`], where the
+    /// shape is switched off because it caches LESS than leaving the tree alone.
     #[test]
     fn eager_startup_fills_the_compile_cache_on_the_first_run() {
         let Some(version) = host_node_version() else {
             eprintln!("skipping: no node on PATH");
             return;
         };
-        if version < COMPILE_CACHE_FROM {
-            eprintln!("skipping: Node {version:?} persists no compile cache");
+        if version < EAGER_STARTUP_FROM {
+            eprintln!("skipping: the shape is off below Node {EAGER_STARTUP_FROM:?}");
             return;
         }
         let cache_bytes = |eager: bool, tag: &str| -> u64 {
@@ -8504,13 +8536,17 @@ mod tests {
         };
         let lazy = cache_bytes(false, "eager-cache-control");
         let eager = cache_bytes(true, "eager-cache");
+        eprintln!("compile cache: lazy {lazy} bytes, eager {eager} bytes (node {version:?})");
+        // The claim is a RATIO, not a byte count, and only the ratio is portable.
+        // V8's parse-time eagerness is a version-dependent heuristic: this same
+        // chunk leaves 7.5 KB lazily on 26.7.0 and 48 KB on 24.20.0, so a ceiling
+        // on the control pins the test to whichever Node it was written against.
+        // The ratio holds on both (10.7x and 6.5x) and is what a broken transform
+        // destroys — it would leave the two shapes equal.
         assert!(
-            lazy < 20_000,
-            "control: the lazy shape must leave an eager-only cache, got {lazy} bytes"
-        );
-        assert!(
-            eager >= 40_000 && eager > 4 * lazy,
-            "the finished chunk's cache must hold the runtime's functions: {eager} bytes against {lazy} lazy"
+            eager > 4 * lazy && eager >= 40_000,
+            "the finished chunk's cache must hold the runtime's startup functions: \
+             {eager} bytes against {lazy} lazy (node {version:?})"
         );
     }
 
