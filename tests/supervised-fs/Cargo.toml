@@ -1,0 +1,14 @@
+# Standalone verification harness for the zero-privilege supervised launch's FILESYSTEM axis
+# (the allow-only Landlock ruleset the forked child `restrict_self`s — epic 1.4). Own workspace
+# root: the nub workspace lists members explicitly and does not include this. Linux-only.
+[workspace]
+
+[package]
+name = "supervised-fs-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nub-sandbox = { path = "../../crates/nub-sandbox" }
+serde_json = "1"

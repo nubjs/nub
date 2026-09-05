@@ -238,23 +238,24 @@ pub fn apply(
         return apply_landlock(policy, spec, landlock, tmp_dir);
     }
     if preflight.confine_without_landlock {
-        // The supervised (seccomp USER_NOTIF) launch — epic 1.1d. This is the seam the removed
+        // The supervised (seccomp USER_NOTIF) launch — epic 1.1d/1.4. This is the seam the removed
         // bubblewrap backend filled: a policy that needs confinement but is not a build-jail
-        // Landlock policy. The NET axis is wired here (transparent per-host egress through the
-        // in-process supervisor); FS and private-tmp under the supervisor are a later increment,
-        // so FAIL CLOSED when the policy asks for them rather than launch a child that would
-        // enforce neither. (Env is enforced by construction — `base_command`/`envp` — always.)
-        if fs_confines(&policy.fs) || policy.fs.tmp != TmpMode::Shared {
+        // Landlock policy. NET is transparent per-host egress through the in-process supervisor;
+        // FS (allow-only) rides a Landlock ruleset the child `restrict_self`s. Private/Deny tmp
+        // still FAILS CLOSED — it needs a per-run scratch dir created + granted (a later 1.4 step),
+        // and launching without it would leave the tmp axis unenforced. (Env is enforced by
+        // construction — `base_command`/`envp` — always.)
+        if policy.fs.tmp != TmpMode::Shared {
             return Err(Degradation {
                 lost: vec!["fs".to_string()],
                 reason: Some(
-                    "supervised filesystem confinement is not yet wired (epic 1.1d); refusing to \
-                     launch without the filesystem boundary this policy requires"
+                    "supervised private/deny tmp is not yet wired (epic 1.4); refusing to launch \
+                     without the tmp boundary this policy requires"
                         .to_string(),
                 ),
             });
         }
-        let plan = build_supervised_plan(policy, &spec)?;
+        let plan = build_supervised_plan(policy, &spec, tmp_dir)?;
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
@@ -284,12 +285,15 @@ pub fn apply(
 }
 
 /// Build the [`super::SupervisedPlan`] a `confine_without_landlock` policy forks with. The net
-/// axis becomes an [`EgressPolicy`](super::linux_supervisor::EgressPolicy); the environment is
-/// the same `constructed` map `base_command` uses; argv0 is resolved to an absolute path for the
-/// bespoke `execve`. No Landlock ruleset and no seccomp ceiling yet (net-only increment).
+/// axis becomes an [`EgressPolicy`](super::linux_supervisor::EgressPolicy); the FS axis (allow-only)
+/// becomes a Landlock ruleset the child `restrict_self`s; the environment is the same `constructed`
+/// map `base_command` uses; argv0 is resolved to an absolute path for the bespoke `execve`. No
+/// seccomp deny-ceiling yet — the connect-notifier already denies io_uring; keyctl/xattr/metadata
+/// hardening for this path is a later 1.4 step.
 fn build_supervised_plan(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
+    tmp_dir: Option<&Path>,
 ) -> Result<super::SupervisedPlan, Degradation> {
     let to_cstring = |bytes: &[u8], label: &str| -> Result<CString, Degradation> {
         CString::new(bytes).map_err(|_| Degradation {
@@ -333,12 +337,29 @@ fn build_supervised_plan(
             _ => None,
         })
         .collect();
+    // Allow-only FS boundary: build the same Landlock ruleset the build-jail path uses, granting
+    // the authored allow-set plus the system read floor plus the entry program. `None` when the
+    // policy does not confine the filesystem (a pure net/env policy) — the child then skips
+    // `restrict_self`. Deny-inside-allow write carve-outs (the USER_NOTIF write-broker) layer on
+    // top of this in a later 1.4 step.
+    let ruleset = if fs_confines(&policy.fs) {
+        Some(
+            super::linux_landlock::build(policy, tmp_dir, Some(&program_abs)).map_err(|reason| {
+                Degradation {
+                    lost: vec!["fs".to_string()],
+                    reason: Some(reason),
+                }
+            })?,
+        )
+    } else {
+        None
+    };
     Ok(super::SupervisedPlan {
         egress: super::linux_supervisor::EgressPolicy { allow_all, allow },
         argv,
         envp,
         cwd,
-        ruleset: None,
+        ruleset,
         seccomp_ceiling: None,
         setsid: true,
     })
