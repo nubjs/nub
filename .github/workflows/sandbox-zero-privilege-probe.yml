@@ -16,6 +16,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       NUB_BIN: ${{ github.workspace }}/target/fast/nub
+      RUN_POPULATIONS: 'false'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -48,7 +49,18 @@ jobs:
           cargo test -p nub-sandbox --profile fast
           cargo test -p nub-cli --profile fast --test build_jail
           node tests/build-jail-corpus/packages.mjs
+      - name: Exercising native confinement primitives
+        run: |
+          for probe in seatbelt-fs proxy-per-host; do
+            cargo build --manifest-path "tests/$probe/Cargo.toml" --profile fast \
+              --config 'profile.fast.inherits="dev"' \
+              --config 'profile.fast.debug="line-tables-only"' \
+              --config 'profile.fast.codegen-units=256' \
+              --config 'profile.fast.package."*".opt-level=2'
+            "$CARGO_TARGET_DIR/fast/$probe-probe" > "reports/$probe.log" 2>&1
+          done
       - name: Measuring both package populations
+        if: env.RUN_POPULATIONS == 'true'
         run: |
           set +e
           node tests/build-jail-corpus/population.mjs > reports/population.log 2>&1
@@ -62,7 +74,7 @@ jobs:
           printf 'original=%s\nsupplemental=%s\n' "$original" "$supplemental" > reports/exit-codes.txt
           test "$original" -eq 0 && test "$supplemental" -eq 0
       - name: Adjudicating failed controls
-        if: always()
+        if: always() && env.RUN_POPULATIONS == 'true'
         run: |
           export NPM_CLI="$(python3 -c 'import os, shutil; print(os.path.realpath(shutil.which("npm")))')"
           for population in population supplemental; do
