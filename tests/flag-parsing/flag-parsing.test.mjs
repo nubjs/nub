@@ -30,7 +30,7 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 // `.exe` on Windows (the binary is `nub.exe` there) — without it the lookup
 // missed the binary and the whole parity leg silently skipped on Windows.
 const EXE = process.platform === 'win32' ? '.exe' : ''
-const NUB = [`target/release/nub${EXE}`, `target/debug/nub${EXE}`]
+const NUB = [`target/release/nub${EXE}`, `target/debug/nub${EXE}`, `target/fast/nub${EXE}`]
   .map((p) => join(REPO, p))
   .find((p) => existsSync(p))
 
