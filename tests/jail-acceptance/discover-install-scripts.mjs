@@ -101,6 +101,9 @@ const CANDIDATES = [
 ];
 
 const out = process.argv.includes('--out') ? process.argv[process.argv.indexOf('--out') + 1] : null;
+const TOP_VERSIONS = process.argv.includes('--top-versions')
+  ? Number(process.argv[process.argv.indexOf('--top-versions') + 1])
+  : 5;
 
 // A scoped name is one path segment, so the `/` must be escaped but the `@` must not.
 const enc = (name) => encodeURIComponent(name).replace('%40', '@');
@@ -178,10 +181,23 @@ function cmpSemver(a, b) {
  * `environment` would otherwise qualify on a 0.0.1 release holding 14 weekly downloads against 36M
  * on its current one.
  *
+ * ⛔ N IS 5 HERE AND 3 IN THE CENSUS, DELIBERATELY, BECAUSE THE TWO ASK DIFFERENT QUESTIONS. The
+ * census classifies a package as install-relevant or not; this builds the population a safety net is
+ * measured over, where missing a package costs a breakage nobody sees and including one costs a few
+ * seconds of sweep. Measured 2026-09-05 at N=3, seven above-gate carriers holding 7.1M weekly fell
+ * out with their script-carrying release sitting at rank 4 or 5 and still holding 5-10% of installs
+ * -- `@fortawesome/fontawesome-svg-core` at 8.4%, `type-graphql` at 9.7%, `@pulumi/gcp` at 5.7%.
+ * A jail that breaks a tenth of a package's users is broken. The 1% floor below, not N, is what
+ * keeps noise out, so widening N is close to free.
+ *
+ * ⛔ THE RANKING INPUT MOVES, so a package whose carrier sits at the N boundary flips between runs
+ * on ordinary day-to-day download churn rather than on anything changing. Expect small membership
+ * churn between regenerations and read it as that, not as packages gaining or losing scripts.
+ *
  * Returns the most-downloaded script-carrying version among the top N, or null if none qualifies.
  * Exported so the ordering can be pinned by a test rather than trusted.
  */
-export function pickInstalledVersion(versions, downloads, topN = 3) {
+export function pickInstalledVersion(versions, downloads, topN = TOP_VERSIONS) {
   const total = Object.values(downloads).reduce((a, b) => a + (b || 0), 0);
   if (!total) return null;
   const ranked = Object.keys(versions)

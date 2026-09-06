@@ -59,9 +59,18 @@ test('⛔ a version nobody installs cannot qualify a package, however it ranks',
   assert.equal(pickInstalledVersion(versions, { '1.1.0': 36_000_000, '1.0.0': 1_000, '0.0.1': 14 }), null);
 });
 
-test('a carrier outside the top N is not the population\'s problem to solve', () => {
-  const versions = vs({ '3.0.0': false, '2.0.0': false, '1.0.0': false, '0.1.0': true });
-  const downloads = { '3.0.0': 900, '2.0.0': 80, '1.0.0': 15, '0.1.0': 5 };
-  assert.equal(pickInstalledVersion(versions, downloads), null);
-  assert.equal(pickInstalledVersion(versions, downloads, 4), null, 'still below the 1% floor at N=4');
+test('the window is N versions deep, and N is 5 rather than the census\'s 3', () => {
+  // The carrier sits at rank 6 holding a healthy 10% of installs. It is outside the window, so the
+  // package does not qualify — but the default window must reach 5, because seven real above-gate
+  // carriers were lost at N=3 with their script-carrying release at rank 4 or 5.
+  const versions = vs({ a: false, b: false, c: false, d: false, e: false, f: true });
+  const downloads = { a: 300, b: 200, c: 180, d: 120, e: 100, f: 100 };
+  assert.equal(pickInstalledVersion(versions, downloads), null, 'rank 6 is outside the window');
+  assert.equal(pickInstalledVersion(versions, downloads, 6), 'f', 'and inside it at N=6');
+
+  // A carrier at rank 5 IS caught by the default. This is the case N=3 dropped.
+  const atFive = vs({ a: false, b: false, c: false, d: false, e: true });
+  assert.equal(pickInstalledVersion(atFive, { a: 300, b: 200, c: 180, d: 120, e: 100 }), 'e');
+  assert.equal(pickInstalledVersion(atFive, { a: 300, b: 200, c: 180, d: 120, e: 100 }, 3), null,
+    'and dropped at the census default, which is the measured regression');
 });
