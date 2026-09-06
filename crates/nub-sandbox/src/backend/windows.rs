@@ -23,8 +23,8 @@
 //!     built by construction exactly as the mac/linux backends do.
 //!   - coarse egress: no `internetClient` capability ⇒ ALL egress (incl. loopback)
 //!     is blocked. An AppContainer with `internetClient` has public outbound access,
-//!     not full host networking. Per-host requests fail closed because the available
-//!     exemption exposes every loopback listener, including local forwarders.
+//!     not full host networking. Per-host policies use an unprivileged co-package
+//!     proxy helper with `internetClient`; the confined child has no direct egress.
 //!   - process-reap: a Job Object with `KILL_ON_JOB_CLOSE`; the whole tree dies when
 //!     the job handle closes (after the child exits, or if nub does).
 //!   - process-count: the same Job carries `ACTIVE_PROCESS` (see

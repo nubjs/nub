@@ -83,15 +83,17 @@ const CHANNEL_ENV = "__NUB_JAIL_IPC";
 const FORCE_ENV = "__NUB_JAIL_STDIO_SHIM_FORCE";
 const WIN = process.platform === "win32";
 const FORCE = process.env[FORCE_ENV] || "";
-const SELF_URL = import.meta.url;
+// A compressed loader keeps its transport URL in the evaluated module's fragment.
+// Descendants must inherit that loader, not append the expanded module to NODE_OPTIONS.
+const LOADER_FRAGMENT = new URL(import.meta.url).hash;
+const SELF_URL = LOADER_FRAGMENT.startsWith('#loader=')
+  ? decodeURIComponent(LOADER_FRAGMENT.slice('#loader='.length))
+  : import.meta.url;
 
-// ⛔ NAMES THE OPT-OUT THAT EXISTS. This said `dependenciesMeta: { <package>: { sandbox: false } }`, which
-// nothing reads for the build jail — it is only a config SCOPE for capability gating — so the instruction
-// silently did nothing. Windows was the only platform that ever showed this text, so Windows users were the
-// only ones who got it, and it was wrong. `allowBuilds: "no-jail"` is the working per-package opt-out.
+// The opt-out is root-authored script approval, not dependency-controlled sandbox metadata.
 const IPC_HELP =
   "To run this package's build scripts unsandboxed, add to your package.json: " +
-  '"allowBuilds": { "<package>": "no-jail" }';
+  '"allowScripts": { "<package>": "no-jail" }';
 
 const refusal = (what) => {
   const e = new Error(

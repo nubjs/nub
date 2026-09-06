@@ -44,6 +44,7 @@ semver = "1"
 # ring/rand; base64 via rustls-pemfile) — no new supply-chain surface.
 getrandom = "0.2"
 base64 = "0.22"
+flate2 = { workspace = true }
 
 # TLS termination for the MITM credential-brokering tier (proxy/mitm.rs, proxy/ca.rs).
 # Engaged ONLY when a net rule uses a capability that cannot be enforced without

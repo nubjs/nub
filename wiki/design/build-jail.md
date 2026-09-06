@@ -40,6 +40,8 @@ The build jail is defense in depth, not a boundary suitable for arbitrary hostil
 
 Windows full-disk catalog grants omit AppContainer. Those launches keep environment filtering and process-tree ownership but have no OS filesystem or network boundary. This compatibility tier covers packages whose build tools cannot operate under a LowBox token. Other policies may reject a launch when a required guarantee is unavailable; callers must surface reported degradation.
 
+Windows Node preloads are compressed inline modules. They need no writable preload file, and their combined environment value stays below the limit used by downstream tools such as MSBuild. Successful process creation alone does not establish that those tools can copy the environment.
+
 The engine does not infer whether a repository is trustworthy. Configuration capabilities follow their source: dependency-controlled policy cannot acquire root-authored dynamic environment or credential-broker privileges.
 
 ## Tools and cache ownership

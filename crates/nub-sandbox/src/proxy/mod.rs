@@ -249,28 +249,6 @@ pub struct EgressProxy {
     mitm: Option<Arc<mitm::MitmEngine>>,
 }
 
-/// Walk `[low, high]` for a free loopback port. An in-use port is skipped rather than fatal
-/// (a sibling nub run legitimately holds one); exhausting the window is an error naming it,
-/// because silently falling back to an ephemeral port would bind OUTSIDE the range the
-/// Windows WFP permit covers and leave the child unable to reach the proxy at all.
-fn bind_in_range(low: u16, high: u16) -> io::Result<TcpListener> {
-    let mut last: Option<io::Error> = None;
-    for port in low..=high {
-        match TcpListener::bind((IpAddr::from([127, 0, 0, 1]), port)) {
-            Ok(l) => return Ok(l),
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AddrInUse,
-        format!(
-            "every loopback port in the sandbox proxy window {low}-{high} is in use{}",
-            last.map(|e| format!(" (last error: {e})"))
-                .unwrap_or_default()
-        ),
-    ))
-}
-
 impl EgressProxy {
     /// Bind a loopback listener and start the accept loop. `decider` gates every tunnel;
     /// `mitm` (when present) terminates the hosts whose rules demand inspection. Returns
@@ -280,28 +258,9 @@ impl EgressProxy {
         decider: Arc<dyn GrantDecider>,
         mitm: Option<Arc<mitm::MitmEngine>>,
     ) -> io::Result<EgressProxy> {
-        Self::start_in_range(decider, mitm, None)
-    }
-
-    /// As [`EgressProxy::start`], but constrained to bind inside `[low, high]` when a range is
-    /// given.
-    ///
-    /// WHY A RANGE EXISTS AT ALL: Windows' dedicated-account backend fences egress with WFP
-    /// filters keyed on the account SID, and every WFP write needs administrator. Baking the
-    /// run's ephemeral port into a filter would therefore mean a UAC prompt per run, so the
-    /// one-time elevated setup pre-authorizes a narrow loopback WINDOW instead and the proxy
-    /// binds into it. mac/Linux carve the exact port at launch and pass `None`.
-    pub fn start_in_range(
-        decider: Arc<dyn GrantDecider>,
-        mitm: Option<Arc<mitm::MitmEngine>>,
-        range: Option<(u16, u16)>,
-    ) -> io::Result<EgressProxy> {
         // Loopback only — the sandboxed child reaches us via 127.0.0.1; nothing off-box
         // should ever see this listener.
-        let listener = match range {
-            None => TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))?,
-            Some((low, high)) => bind_in_range(low, high)?,
-        };
+        let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))?;
         let port = listener.local_addr()?.port();
         let token: Arc<str> = Arc::from(mint_token());
         let shutdown = Arc::new(AtomicBool::new(false));

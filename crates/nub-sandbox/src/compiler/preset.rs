@@ -1020,10 +1020,8 @@ pub fn build_jail_net_allowed_for(
 /// - **macOS** and **Windows** get `true` (`enforce = false`). Seatbelt emits `(allow network*)`
 ///   and starts no proxy; Windows' unprivileged egress lever is the AppContainer
 ///   `internetClient` capability, which the backend grants on exactly `!net.enforce`, so
-///   coarse-allow is the ONLY spelling that reaches it. A host array there would instead select
-///   the per-host tier via `needs_account_backend` / `plan_net`, which needs an admin-registered
-///   loopback exemption, so an ordinary `nub install` would fail closed (or divert to the
-///   admin-only dedicated-account backend) for every catalogued package. `true` is still not
+///   coarse-allow is the ONLY spelling that reaches it. A host array instead selects the
+///   unprivileged co-package proxy helper, which is unnecessary for a coarse grant. `true` is not
 ///   "unrestricted" on Windows: WFP refuses an AppContainer's loopback whatever its capabilities
 ///   and `privateNetworkClientServer` stays withheld, so the grant is public outbound only.
 /// - **Linux** gets `["*"]` — a catch-all Allow, naming no host. It CANNOT be `true`, because
@@ -1961,6 +1959,33 @@ mod tests {
             "v1 still serves a package v2 has never measured — deferring to v2 must not mean \
              discarding v1"
         );
+    }
+
+    #[test]
+    fn windows_only_native_exception_preserves_other_platform_baselines() {
+        let baseline = crate::catalog_v2::baseline_caps();
+        for (name, version) in [
+            ("heapdump", "0.3.15"),
+            ("prisma", "7.10.0"),
+            ("gatsby-cli", "5.16.0"),
+            ("core-js", "3.50.0"),
+            ("core-js-pure", "3.50.0"),
+            ("es5-ext", "0.10.64"),
+            ("lmdb", "2.5.2"),
+            ("@parcel/watcher", "2.6.0"),
+        ] {
+            let grant = crate::catalog_override::v2_grant_for(name, Some(version)).unwrap();
+            for platform in [
+                crate::catalog_v2::Platform::Linux,
+                crate::catalog_v2::Platform::Macos,
+            ] {
+                let caps = grant.on(platform);
+                assert_eq!(caps.read, baseline.read);
+                assert_eq!(caps.write, baseline.write);
+                assert_eq!(caps.network, baseline.network);
+                assert_eq!(caps.write_paths, baseline.write_paths);
+            }
+        }
     }
 
     /// A package the catalog has never heard of gets the BASELINE, on BOTH axes.
@@ -3442,6 +3467,39 @@ mod tests {
             "dotnet-2.0.0",
             "epoll",
             "flow-bin",
+            // Paired Windows installs, including silent native-artifact loss, require this tier.
+            "bigint-buffer",
+            "node-expat",
+            "nodejieba",
+            "openclaw",
+            "optipng-bin",
+            "phantomjs-prebuilt",
+            "pngquant-bin",
+            "pprof",
+            "prisma",
+            "segfault-handler",
+            "ssh2",
+            "ttf2woff2",
+            "unix-dgram",
+            "zopflipng-bin",
+            // Windows paired native/binary installs pass at this tier after scoped failures.
+            "gc-stats",
+            "gifsicle",
+            "heapdump",
+            "iconv",
+            "jpegtran-bin",
+            "lz4",
+            "mozjpeg",
+            "n8n-nodes-evolution-api",
+            // Paired Gatsby dependency-tree and isolated-vm MSBuild installs require this tier.
+            "@parcel/watcher",
+            "core-js",
+            "core-js-pure",
+            "es5-ext",
+            "gatsby",
+            "gatsby-cli",
+            "isolated-vm",
+            "lmdb",
             "opencode-ai",
             "pizzip",
             "pngout-bin",

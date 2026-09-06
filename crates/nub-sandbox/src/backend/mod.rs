@@ -987,7 +987,7 @@ fn start_proxy_if_needed(
     // Result mapping is the epic branch's posture and is what `proxy_needed`'s doc
     // promises — a required proxy that fails to start is an apply error, never a
     // silent `None` that would launch the child with no egress mediation.
-    EgressProxy::start_in_range(decider, mitm, None)
+    EgressProxy::start(decider, mitm)
         .map(Some)
         .map_err(|error| Degradation {
             lost: vec!["net-per-host".to_string()],

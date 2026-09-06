@@ -1007,11 +1007,8 @@ const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js"
 /// stamped shim — stdio, net gate and realpath — so the sources stay densely commented (which is
 /// where their provenance lives) while the delivered payload does not carry the prose.
 ///
-/// THIS IS A BUDGET, NOT A TIDY-UP. The stamp is by far the largest thing in the child's
-/// environment block, and how much block a `CreateProcessW` child will accept is not a number we
-/// have a documented ceiling for (see `stamped_node_options_fits_the_env_block` — the widely-cited
-/// 32767 belongs to other API paths, not to `lpEnvironment`). That test pins the margin so an
-/// innocent-looking edit cannot quietly push the stamp past anything we have measured to launch.
+/// The composed stamp must fit downstream tools' environment APIs as well as process launch.
+/// `stamped_node_options_fits_the_env_block` checks all three compressed preloads together.
 ///
 /// WHOLE LINES ONLY, and NOT a step on the way to a character-level stripper. Deciding what a
 /// mid-line `/` means is context-sensitive grammar — regex-literal versus division is settled by
@@ -1065,7 +1062,7 @@ pub fn build_jail_stdio_preload_js() -> String {
 /// touching the filesystem, so the preload needs no grant of its own and cannot be tampered
 /// with by the package it confines.
 ///
-/// REQUIRES `--import`, i.e. Node 20.6+. The caller gates on the interpreter's version rather
+/// REQUIRES `--import`, i.e. Node 18.18+ or 19+. The caller gates on the interpreter's version rather
 /// than stamping blind — an unknown flag in `NODE_OPTIONS` aborts Node at startup, which would
 /// turn a missing repair into a broken install.
 #[cfg(windows)]
@@ -1306,30 +1303,29 @@ pub fn net_gate_node_options(package_name: Option<&str>, package_version: Option
     data_url_import(&js)
 }
 
-/// An `--import` term carrying `js` as a base64 `data:` module.
-///
-/// BASE64, NOT PERCENT-ENCODING — and the reason is the ALPHABET, not the size. `NODE_OPTIONS`
-/// is split on WHITESPACE and each term re-parsed by Node's own option reader, so a payload that
-/// can contain whitespace does not corrupt a URL that Node then rejects — it silently truncates
-/// the preload into a half-loaded shim, or into an option fragment Node aborts on. Base64's
-/// alphabet contains no whitespace at all, which makes that class of failure structurally
-/// unreachable rather than merely avoided by careful escaping. It is also more compact, but only
-/// modestly: MEASURED on both shims together back when neither was stripped, 37,227 chars against
-/// 47,261 percent-encoded, i.e. 1.27×. The ratio is a property of the alphabets and survives
-/// [`strip_js_comments`]; the absolutes do not. (A 2.6× figure circulated earlier; it compared
-/// base64 with comments STRIPPED against percent-encoding with comments kept, which is not the
-/// same input twice.)
-///
-/// NEITHER IS A FIX FOR A SIZE LIMIT, because there is no limit here to fix. The documented
-/// 32,767-character Windows cap governs `SetEnvironmentVariable`, NOT an environment BLOCK handed
-/// to `CreateProcess`, which is how Node spawns: real `windows-latest` accepted a 49,381-char
-/// percent-encoded pair and armed the gate (run 30503464536), which is why the "payload exceeds
-/// the cap" blocker was retracted. Do not reintroduce it.
+/// A compressed inline module keeps `NODE_OPTIONS` below Windows environment-value limits.
+/// `CreateProcessW` accepts larger blocks, but MSBuild copies values through
+/// `SetEnvironmentVariable` and rejects values at 32,767 characters. The outer module uses
+/// only Node builtins; the actual preload still resolves from `data:` without filesystem access.
 fn data_url_import(js: &str) -> String {
     use base64::Engine as _;
+    use std::io::Write as _;
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(js.as_bytes())
+        .expect("writing to a Vec cannot fail");
+    let compressed = encoder.finish().expect("finishing in-memory deflate");
+    let payload = base64::engine::general_purpose::STANDARD.encode(compressed);
+    let loader = format!(
+        "import{{inflateRawSync}}from'node:zlib';\
+         await import('data:text/javascript;base64,'+\
+         inflateRawSync(Buffer.from('{payload}','base64')).toString('base64')+\
+         '#loader='+encodeURIComponent(import.meta.url));"
+    );
     format!(
         "--import data:text/javascript;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(js)
+        base64::engine::general_purpose::STANDARD.encode(loader)
     )
 }
 
@@ -1719,6 +1715,11 @@ mod tests {
         // not generally a substring of the encoding.
         assert!(decode_import(terms[1]).contains("writableScratchDir"));
         assert!(decode_import(terms[3]).contains("ERR_NUB_JAIL_NET_DENIED"));
+        for url in [terms[1], terms[3]] {
+            let source = decode_import(url);
+            assert!(source.contains("allowScripts"));
+            assert!(!source.contains("allowBuilds"));
+        }
     }
 
     /// Round-trips an `--import data:…;base64,…` term back to its JS, so an assertion can be
@@ -1729,12 +1730,26 @@ mod tests {
         let b64 = url
             .strip_prefix("data:text/javascript;base64,")
             .expect("a base64 data: URL");
-        String::from_utf8(
+        let loader = String::from_utf8(
             base64::engine::general_purpose::STANDARD
                 .decode(b64)
                 .expect("the generator emitted valid base64"),
         )
-        .expect("the shim is UTF-8")
+        .expect("the loader is UTF-8");
+        let payload = loader
+            .split("Buffer.from('")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap();
+        let compressed = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        let mut decoder = flate2::read::DeflateDecoder::new(compressed.as_slice());
+        let mut js = String::new();
+        std::io::Read::read_to_string(&mut decoder, &mut js).unwrap();
+        js
     }
 
     /// The placeholder must be SUBSTITUTED, and the delivered module must carry a real policy
@@ -1878,48 +1893,11 @@ mod tests {
         );
     }
 
-    /// The stamp is the largest thing in a jailed child's environment block by an order of
-    /// magnitude, so a runaway payload is worth catching — but the ceiling is EMPIRICAL, not a
-    /// documented API limit. This test previously asserted 26000 against "a `CreateProcessW`
-    /// environment block is capped at 32767 characters in total"; that premise is REFUTED. The
-    /// 32767 figure attaches to `lpCommandLine` and to `SetEnvironmentVariable`'s per-variable
-    /// maximum, not to the `lpEnvironment` block nub passes straight through under
-    /// `CREATE_UNICODE_ENVIRONMENT`. Measured: the full production stamp launched confined inside a
-    /// 56790-character block (~1.73x the supposed cap) with the CHILD reporting all three preload
-    /// sentinels — `__nubJailRealpathShim`, `__nubJailStdioShim`, `__nubJailNetGate` — true off its
-    /// own `globalThis`, reproduced across both principals in runs 30568739579, 30568304451 and
-    /// 30569197328. HONEST RESIDUAL: what that establishes is that 56790 STARTS, not that no cap
-    /// exists above it.
-    ///
-    /// MEASURE THE WHOLE STAMP. Production carries three `--import` terms — `build_jail_node_options`
-    /// composes stdio + net gate, then `build_jail.rs` appends the realpath term — and this test
-    /// used to size the stdio term ALONE, which is why an earlier shrink of one term read as
-    /// sufficient and was not. The realpath term EMBEDS the granted roots, so its size is
-    /// deployment-dependent; the roots below are deep and multi-root on purpose, because shallow
-    /// ones understate a real jail.
-    ///
-    /// THE NUMBER, and why it is far below the 56790 that launched. All three shims now go
-    /// through [`strip_js_comments`], which took the stamp from ~55.6k to ~33.8k; a budget still
-    /// pinned near the measured ceiling would leave ~22k of slack and stop guarding anything. So
-    /// this tracks the payload rather than the ceiling — it is set just over the composition
-    /// below, whose Windows form is the larger one because [`with_alternate_spellings`] can
-    /// double the roots (~34.3k worst case). The ceiling remains the real constraint and is not
-    /// re-measured here; it is simply no longer the binding number.
-    ///
-    /// If a future edit trips this, the first question is what grew, not whether to raise the
-    /// budget — the cheap reclaim (comments) is already spent, so growth here is real payload.
-    ///
-    /// IT TRIPPED ONCE, and the answer is recorded here so the next reader need not re-derive it.
-    /// The binding seam (`installBindingSeam` in `windows_realpath_shim.js`) took the realpath
-    /// payload from 6,588 to 9,468 base64 characters and the whole stamp from 33,834 to 36,714,
-    /// against a budget of 36,000. That growth IS the repair — it is the layer that reaches the
-    /// ESM resolver, which the fs-layer replacement provably cannot — so the ratchet moved rather
-    /// than the code. Slack over the composition is kept at roughly what it was (~2.2k), and the
-    /// EMPIRICAL ceiling is untouched and still far away: 56,790 characters launched a confined
-    /// child with all three sentinels reported.
+    /// MSBuild must be able to copy the whole value through SetEnvironmentVariable, not merely
+    /// launch with it. Exercise deep roots as well as all three compressed preloads.
     #[test]
     fn stamped_node_options_fits_the_env_block() {
-        const BUDGET: usize = 39_000;
+        const BUDGET: usize = 26_000;
         let roots: Vec<std::path::PathBuf> = [
             r"C:\Users\runneradmin\AppData\Local\nub\store\v1\registry.npmjs.org\esbuild\0.21.5\node_modules\esbuild",
             r"C:\Users\runneradmin\work\monorepo\packages\web-app\node_modules\.pnpm\esbuild@0.21.5\node_modules\esbuild",
@@ -1935,9 +1913,7 @@ mod tests {
         );
         assert!(
             stamped.len() <= BUDGET,
-            "the stamped NODE_OPTIONS is {} chars, over the {BUDGET} budget; the largest env \
-             block measured to launch a confined child is 56790 chars and must still fit PATH \
-             and npm_config_*",
+            "the stamped NODE_OPTIONS is {} chars, over the {BUDGET} budget for downstream Windows tools",
             stamped.len()
         );
 

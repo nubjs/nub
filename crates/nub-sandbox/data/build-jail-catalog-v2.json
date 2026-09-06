@@ -734,6 +734,25 @@
     }
    }
   },
+  "@parcel/watcher": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "win": {
+     "write": "disk",
+     "network": true
+    }
+   }
+  },
   "@pdftron/pdfnet-node": {
    "default": {
     "network": true
@@ -1707,7 +1726,8 @@
     },
     "win": {
      "writePaths": null,
-     "write": null
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -1941,6 +1961,44 @@
       "deps": true,
       "project": true
      }
+    }
+   }
+  },
+  "core-js": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "win": {
+     "write": "disk",
+     "network": true
+    }
+   }
+  },
+  "core-js-pure": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "win": {
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -2397,6 +2455,25 @@
     }
    }
   },
+  "es5-ext": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "win": {
+     "write": "disk",
+     "network": true
+    }
+   }
+  },
   "esbuild": {
    "default": {
     "write": {
@@ -2675,7 +2752,30 @@
   },
   "gatsby": {
    "default": {
-    "network": true
+    "network": true,
+    "win": {
+     "write": "disk",
+     "network": true
+    }
+   }
+  },
+  "gatsby-cli": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "win": {
+     "write": "disk",
+     "network": true
+    }
    }
   },
   "gc-stats": {
@@ -2697,9 +2797,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -2776,9 +2874,8 @@
      "write": null
     },
     "win": {
-     "write": {
-      "deps": true
-     }
+     "write": "disk",
+     "network": true
     }
    },
    "versions": {
@@ -2841,6 +2938,25 @@
      "write": {
       "deps": true
      }
+    }
+   }
+  },
+  "heapdump": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "win": {
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -2933,9 +3049,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -3033,7 +3147,11 @@
     "write": {
      "deps": true
     },
-    "network": true
+    "network": true,
+    "win": {
+     "write": "disk",
+     "network": true
+    }
    },
    "versions": {
     "<7.0.1": {
@@ -3154,7 +3272,11 @@
   "jpegtran-bin": {
    "default": {
     "network": true,
-    "write": null
+    "write": null,
+    "win": {
+     "write": "disk",
+     "network": true
+    }
    }
   },
   "json-schema-library": {
@@ -3328,6 +3450,25 @@
     "network": true
    }
   },
+  "lmdb": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "win": {
+     "write": "disk",
+     "network": true
+    }
+   }
+  },
   "lz4": {
    "default": {
     "writePaths": [
@@ -3347,9 +3488,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -3455,7 +3594,11 @@
   "mozjpeg": {
    "default": {
     "network": true,
-    "write": null
+    "write": null,
+    "win": {
+     "write": "disk",
+     "network": true
+    }
    }
   },
   "muhammara": {
@@ -3476,6 +3619,10 @@
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -3564,9 +3711,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -3606,6 +3751,10 @@
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": "disk",
+     "network": true
     }
    },
    "versions": {
@@ -3750,7 +3899,9 @@
      "network": true
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -3794,9 +3945,8 @@
      "write": null
     },
     "win": {
-     "write": {
-      "deps": true
-     }
+     "write": "disk",
+     "network": true
     }
    },
    "versions": {
@@ -3833,6 +3983,10 @@
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -3979,9 +4133,8 @@
      "write": null
     },
     "win": {
-     "write": {
-      "deps": true
-     }
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -4086,9 +4239,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    },
@@ -4125,6 +4276,25 @@
      "linux": {
       "write": null
      }
+    }
+   }
+  },
+  "prisma": {
+   "default": {
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "win": {
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -4556,9 +4726,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -4730,7 +4898,9 @@
      "writePaths": null
     },
     "win": {
-     "writePaths": null
+     "writePaths": null,
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -5207,9 +5377,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    },
@@ -5340,9 +5508,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -5572,9 +5738,8 @@
      "write": null
     },
     "win": {
-     "write": {
-      "deps": true
-     }
+     "write": "disk",
+     "network": true
     }
    }
   },

@@ -59,6 +59,8 @@ for (const mode of ['confined', 'global-off', 'user-global-off', 'package-off', 
     writeFileSync(join(pkg, 'probe.cjs'), `
       const fs = require('node:fs');
       const out = { ran: true, token: process.env.AWS_SECRET_ACCESS_KEY ?? null };
+      out.nodeOptionsLength = (process.env.NODE_OPTIONS ?? '').length;
+      out.preloads = ['__nubJailRealpathShim', '__nubJailStdioShim', '__nubJailNetGate'].map(k => Boolean(globalThis[k]));
       try { fs.writeFileSync(${JSON.stringify(outside)}, 'outside'); out.write = true; }
       catch (e) { out.write = e.code; }
       try { out.read = fs.readFileSync(${JSON.stringify(secret)}, 'utf8'); }
@@ -66,6 +68,7 @@ for (const mode of ['confined', 'global-off', 'user-global-off', 'package-off', 
       try { out.toolConfig = fs.readFileSync(${JSON.stringify(toolConfig)}, 'utf8'); }
       catch (e) { out.toolConfig = e.code; }
       fs.writeFileSync('contract.json', JSON.stringify(out));
+      if (process.platform === 'win32') require('child_process').spawn(process.execPath, ['-e', "require('fs').writeFileSync('descendant-options.json',JSON.stringify({length:(process.env.NODE_OPTIONS||'').length,preloads:['__nubJailRealpathShim','__nubJailStdioShim','__nubJailNetGate'].map(k=>Boolean(globalThis[k]))}))"], {stdio:'pipe'}).on('error', error => {throw error;});
     `);
     const archive = join(base, 'dep.tgz');
     run('tar', ['-czf', archive, '-C', base, 'package']);
@@ -106,6 +109,13 @@ for (const mode of ['confined', 'global-off', 'user-global-off', 'package-off', 
       assert.notEqual(observed.write, true, JSON.stringify(observed));
       assert.notEqual(observed.read, 'fixture-secret', JSON.stringify(observed));
       assert.equal(observed.token, null, JSON.stringify(observed));
+      if (process.platform === 'win32') {
+        assert.ok(observed.nodeOptionsLength > 0 && observed.nodeOptionsLength < 32767, JSON.stringify(observed));
+        assert.deepEqual(observed.preloads, [true, true, true]);
+        const child = JSON.parse(readFileSync(join(project, 'node_modules', name, 'descendant-options.json')));
+        assert.equal(child.length, observed.nodeOptionsLength, 'descendants must retain the compressed transport');
+        assert.deepEqual(child.preloads, [true, true, true]);
+      }
       assert.ok(!observed.toolConfig.includes('fixture-registry-secret'), JSON.stringify(observed));
       assert.equal(existsSync(outside), false);
     } else {

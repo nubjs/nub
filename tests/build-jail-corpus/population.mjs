@@ -2,10 +2,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installedArtifacts } from './artifact-inventory.mjs';
 
 const binary = resolve(process.env.NUB_BIN);
 const source = join(dirname(fileURLToPath(import.meta.url)), 'population.tsv');
@@ -22,32 +23,13 @@ const digest = path => createHash('sha256').update(readFileSync(path)).digest('h
 const provenance = {
   binary, binarySha256: digest(binary), populationSha256: digest(source),
   harnessSha256: digest(fileURLToPath(import.meta.url)),
+  inventorySha256: digest(fileURLToPath(new URL('./artifact-inventory.mjs', import.meta.url))),
   node: process.execPath, nodeVersion: process.version, platform: process.platform,
   arch: process.arch, expected: selected.length, started: new Date().toISOString(),
 };
 writeFileSync(join(root, 'provenance.json'), JSON.stringify(provenance, null, 2));
 const results = [];
 
-function nativeArtifacts(packageRoot) {
-  const files = [];
-  const seen = new Set();
-  function walk(dir) {
-    const real = realpathSync(dir);
-    if (seen.has(real)) return;
-    seen.add(real);
-    for (const name of readdirSync(dir)) {
-      if (name === 'node_modules' || name === '.git') continue;
-      const path = join(dir, name);
-      const stat = lstatSync(path);
-      if (stat.isDirectory()) walk(path);
-      else if (stat.isFile() && /\.(node|exe|dll|so|dylib)$/.test(name)) {
-        files.push({ path: relative(packageRoot, path).replaceAll('\\', '/'), nonempty: stat.size > 0 });
-      }
-    }
-  }
-  walk(packageRoot);
-  return files.sort((a, b) => a.path.localeCompare(b.path));
-}
 
 function arm(name, version, confined) {
   const label = `${name.replaceAll('/', '-')}-${confined ? 'jailed' : 'control'}`;
@@ -76,9 +58,10 @@ function arm(name, version, confined) {
   const launches = [...log.matchAll(/JAILDUMP pkg=Some\("([^"\n]+)"\)/g)].map(match => match[1]);
   return {
     status: install.status, error: install.error?.message, milliseconds: Date.now() - start,
+    policyBlocked: /ERR_(?:NUB|AUBE)_MALICIOUS_PACKAGE|blockExoticSubdeps/.test(log),
     installedVersion: manifest?.version, launches,
     targetHasLifecycle: ['preinstall', 'install', 'postinstall'].some(key => manifest?.scripts?.[key]),
-    artifacts: manifest ? nativeArtifacts(packageRoot) : [],
+    artifacts: manifest ? installedArtifacts(packageRoot) : [],
     optOut: /running without the build sandbox/.test(log),
   };
 }
@@ -86,9 +69,11 @@ function arm(name, version, confined) {
 for (const [name, version] of selected) {
   const control = arm(name, version, false);
   const jailed = arm(name, version, true);
+  const matchesVersion = actual => actual === version || actual === `v${version}`;
   let verdict;
-  if (control.status !== 0 || control.error || control.installedVersion !== version) verdict = 'CONTROL-FAILED';
-  else if (jailed.status !== 0 || jailed.error || jailed.installedVersion !== version) verdict = 'JAIL-FAILED';
+  if (control.policyBlocked && jailed.policyBlocked) verdict = 'POLICY-BLOCKED';
+  else if (control.status !== 0 || control.error || !matchesVersion(control.installedVersion)) verdict = 'CONTROL-FAILED';
+  else if (jailed.status !== 0 || jailed.error || !matchesVersion(jailed.installedVersion)) verdict = 'JAIL-FAILED';
   else if (!jailed.launches.length) verdict = 'NO-LIFECYCLE';
   else if (!control.optOut) verdict = 'INVALID-CONTROL';
   else if (jailed.targetHasLifecycle && !jailed.launches.includes(name)) verdict = 'TARGET-NOT-CONFINED';

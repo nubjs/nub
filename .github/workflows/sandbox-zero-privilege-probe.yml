@@ -55,11 +55,24 @@ jobs:
           original=$?
           mkdir -p "$RUNNER_TEMP/supplemental"
           cp tests/build-jail-corpus/population.mjs "$RUNNER_TEMP/supplemental/population.mjs"
+          cp tests/build-jail-corpus/artifact-inventory.mjs "$RUNNER_TEMP/supplemental/artifact-inventory.mjs"
           cp tests/build-jail-corpus/supplemental.tsv "$RUNNER_TEMP/supplemental/population.tsv"
           node "$RUNNER_TEMP/supplemental/population.mjs" > reports/supplemental.log 2>&1
           supplemental=$?
           printf 'original=%s\nsupplemental=%s\n' "$original" "$supplemental" > reports/exit-codes.txt
           test "$original" -eq 0 && test "$supplemental" -eq 0
+      - name: Adjudicating failed controls
+        if: always()
+        run: |
+          export NPM_CLI="$(python3 -c 'import os, shutil; print(os.path.realpath(shutil.which("npm")))')"
+          for population in population supplemental; do
+            root="$(sed -n 's/^Fixture root: //p' "reports/$population.log" | head -1)"
+            test -f "$root/results.json"
+            export CORPUS_RESULTS="$root/results.json"
+            if node -e 'process.exit(JSON.parse(require("fs").readFileSync(process.env.CORPUS_RESULTS)).some(row => row.verdict === "CONTROL-FAILED") ? 0 : 1)'; then
+              node tests/build-jail-corpus/reference-controls.mjs > "reports/$population-reference.log" 2>&1
+            fi
+          done
       - name: Collecting fixture evidence
         if: always()
         run: |

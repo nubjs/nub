@@ -22,6 +22,18 @@ fn dependency_lifecycle_contract() {
         ))
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/build-jail-corpus/reference-controls.test.mjs"
+        ))
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/build-jail-corpus/artifact-inventory.test.mjs"
+        ))
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/build-jail-corpus/network.mjs"
+        ))
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
             "/../../tests/build-jail-corpus/private-registry.mjs"
         ))
         .arg(concat!(

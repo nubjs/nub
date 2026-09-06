@@ -16,7 +16,17 @@ assert.ok(cases.length, 'at least one failed control must be selected');
 const root = mkdtempSync(join(tmpdir(), 'nub-jail-reference-'));
 console.log(`Fixture root: ${root}`);
 const results = [];
+function record(row) {
+  results.push(row);
+  writeFileSync(join(root, 'results.json'), JSON.stringify({ input, provenance, npm: process.env.NPM_CLI, expected: cases.length, results }, null, 2));
+  console.log(`${results.length}/${cases.length} ${row.name}@${row.version}: ${row.verdict ?? `npm ${row.status ?? row.error ?? row.signal}`}`);
+}
 for (const { name, version } of cases) {
+  const controlLog = readFileSync(join(dirname(input), 'logs', `${name.replaceAll('/', '-')}-control.log`), 'utf8');
+  if (/ERR_(?:NUB|AUBE)_MALICIOUS_PACKAGE|blockExoticSubdeps/.test(controlLog)) {
+    record({ name, version, verdict: 'POLICY-BLOCKED', reason: 'package admission policy; no reference install attempted' });
+    continue;
+  }
   const home = join(root, name.replaceAll('/', '-'));
   const project = join(home, 'p');
   mkdirSync(project, { recursive: true });
@@ -44,8 +54,6 @@ for (const { name, version } of cases) {
   if (process.platform !== 'win32') killTree();
   closeSync(fd);
   const row = { name, version, ...result, timedOut };
-  results.push(row);
-  writeFileSync(join(root, 'results.json'), JSON.stringify({ input, provenance, npm: process.env.NPM_CLI, expected: cases.length, results }, null, 2));
-  console.log(`${results.length}/${cases.length} ${name}@${version}: npm ${result.status ?? result.error ?? result.signal}`);
+  record(row);
 }
 assert.equal(results.length, cases.length, 'every failed control gets a reference result');
