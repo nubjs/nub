@@ -985,10 +985,22 @@ fn any_expected_under(
         .is_some_and(|(name, _)| name.starts_with(relative))
 }
 
-fn app_cache_tree_matches(
+/// Every path under `dir`, enumerated without a stat of its own: `read_dir`
+/// already carries the entry type, so deciding whether to descend costs no
+/// extra syscall. Metadata is fetched afterwards, in parallel, because on a real
+/// extracted tree it is the dominant half — 2431 entries measured at ~12 ms of
+/// `symlink_metadata` against ~8.6 ms of `read_dir`.
+///
+/// A symlink reports as a symlink rather than a directory, so this descends into
+/// exactly the real directories the serial walk did. A directory that is real
+/// but NOT trusted is descended into here and rejected in the matching pass
+/// instead — the tree is stale either way, so only the work differs, never the
+/// answer.
+fn collect_tree_paths(
     root: &Path,
     dir: &Path,
-    expected: &mut std::collections::BTreeMap<PathBuf, (Extracted<'_>, bool)>,
+    expected: &std::collections::BTreeMap<PathBuf, (Extracted<'_>, bool)>,
+    out: &mut Vec<PathBuf>,
 ) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;
@@ -999,19 +1011,90 @@ fn app_cache_tree_matches(
         let Ok(relative) = path.strip_prefix(root) else {
             return false;
         };
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
+        let Ok(file_type) = entry.file_type() else {
             return false;
         };
-
-        if metadata_is_trusted_real_directory(&path, &metadata) {
+        if file_type.is_dir() {
             if !any_expected_under(expected, relative) {
                 phase_with(|| format!("    MISMATCH: unexpected directory {relative:?}"));
                 return false;
             }
-            if !app_cache_tree_matches(root, &path, expected) {
+            out.push(path.clone());
+            if !collect_tree_paths(root, &path, expected, out) {
                 return false;
             }
-        } else if metadata_is_trusted_regular_file(&path, &metadata) {
+        } else {
+            out.push(path);
+        }
+    }
+    true
+}
+
+/// `symlink_metadata` for every collected path, fanned out across threads.
+///
+/// A warm start is syscall-bound here and the calls are independent, so this is
+/// the one place in it where parallelism buys real time. Each thread owns a
+/// disjoint slice and returns its own results, so nothing is shared mutably:
+/// there is no lock to contend and no ordering to get wrong. Below the
+/// threshold the threads cost more than the stats they would save.
+fn stat_paths(paths: &[PathBuf]) -> Option<Vec<fs::Metadata>> {
+    const SERIAL_BELOW: usize = 256;
+
+    let threads = if paths.len() < SERIAL_BELOW {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
+    };
+    if threads <= 1 {
+        return paths
+            .iter()
+            .map(|path| fs::symlink_metadata(path).ok())
+            .collect();
+    }
+
+    let parts: Vec<Vec<Option<fs::Metadata>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(paths.len().div_ceil(threads))
+            .map(|slice| {
+                scope.spawn(move || {
+                    slice
+                        .iter()
+                        .map(|path| fs::symlink_metadata(path).ok())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().ok())
+            .collect::<Option<Vec<_>>>()
+    })?;
+    parts.into_iter().flatten().collect()
+}
+
+fn app_cache_tree_matches(
+    root: &Path,
+    dir: &Path,
+    expected: &mut std::collections::BTreeMap<PathBuf, (Extracted<'_>, bool)>,
+) -> bool {
+    let mut paths = Vec::new();
+    if !collect_tree_paths(root, dir, expected, &mut paths) {
+        return false;
+    }
+    let Some(all_metadata) = stat_paths(&paths) else {
+        return false;
+    };
+
+    for (path, metadata) in paths.iter().zip(all_metadata) {
+        let path = path.as_path();
+        let Ok(relative) = path.strip_prefix(root) else {
+            return false;
+        };
+
+        if metadata_is_trusted_real_directory(path, &metadata) {
+            // Its children are already in `paths`; the enumeration descended.
+            continue;
+        } else if metadata_is_trusted_regular_file(path, &metadata) {
             if relative == Path::new(CACHE_COMPLETE_MARKER) {
                 if !completion_marker_is_ready(root) {
                     return false;
@@ -1026,7 +1109,7 @@ fn app_cache_tree_matches(
                 // `metadata` is this entry's own, already established trusted and
                 // regular above, so the length is free here.
                 Extracted::Size(size) => metadata.len() == *size,
-                Extracted::Bytes(bytes) => regular_file_matches_bytes(&path, bytes),
+                Extracted::Bytes(bytes) => regular_file_matches_bytes(path, bytes),
             };
             if !accepted {
                 phase_with(|| {
