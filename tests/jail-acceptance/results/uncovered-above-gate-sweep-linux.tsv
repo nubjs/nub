@@ -1,0 +1,127 @@
+# Sweep of the 121 install-script carriers the population misses INSIDE the band it claims to
+# cover (results/uncovered-above-gate.tsv), measured 2026-09-05 on linux.
+#
+# Versions are PINNED to the release that actually carries the install script, not latest:
+# 40 of these run one only on an older release, and sweeping latest would have produced
+# NO-SCRIPT-RAN rows that measure nothing. 116 of 121 ran a confined script.
+@andrewstory18/is-real-odd	BLOCKED	rc=46	confined-spawns=0	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=2.0.3
+@apollo/rover	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=0.35.0
+@azure/mcp	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=4	ver=3.0.0-beta.41
+@azure/msal-node-extensions	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=5.5.0
+@biomejs/biome	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=1.9.4
+@carbon/feature-flags	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=4	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=1	ver=1.8.0
+@carbon/grid	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=8	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=2	ver=11.61.0
+@carbon/icon-helpers	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=4	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=1	ver=10.81.0
+@carbon/layout	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=4	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=1	ver=11.58.0
+@carbon/motion	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=4	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=1	ver=11.51.0
+@carbon/react	OK	rc=0	confined-spawns=22	jail-lines=0	net-err=0	deny=84	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=12	ver=1.115.0
+@carbon/styles	OK	rc=0	confined-spawns=17	jail-lines=0	net-err=0	deny=68	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=6	ver=1.114.0
+@carbon/themes	OK	rc=0	confined-spawns=5	jail-lines=0	net-err=0	deny=20	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=2	ver=11.80.0
+@carbon/type	OK	rc=0	confined-spawns=3	jail-lines=0	net-err=0	deny=12	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=1	ver=11.66.0
+@central-icons-react/round-outlined-radius-3-stroke-2	UPSTREAM	rc=1	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script preinstall failed for @central-icons-react/round-	npm error code 1	jail-s=4	ver=1.1.318
+@central-icons-react/square-outlined-radius-0-stroke-2	UPSTREAM	rc=1	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script preinstall failed for @central-icons-react/square-	npm error code 1	jail-s=4	ver=1.1.318
+@clerk/shared	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=3.47.8
+@compodoc/compodoc	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=1.2.1
+@confluentinc/kafka-javascript	UPSTREAM	rc=1	confined-spawns=1	jail-lines=0	net-err=0	deny=4	nojail-rc=1	npm-rc=1	× lifecycle script install failed for @confluentinc/kafka-javascript@1.10.0:	npm error code 1	jail-s=438	ver=1.10.0
+@coze/cli	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=0.3.10
+@datadog/native-appsec	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=11.0.1
+@datadog/native-iast-taint-tracking	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=4.2.0
+@datadog/pprof	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=5.14.1
+@evilmartians/lefthook	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=2.1.12
+@ffprobe-installer/linux-x64	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=5.2.0
+@fortawesome/fontawesome-free	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=5.15.4
+@fortawesome/fontawesome-svg-core	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=1.2.36
+@fortawesome/free-brands-svg-icons	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=5.15.4
+@fortawesome/free-regular-svg-icons	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=5.15.4
+@fortawesome/free-solid-svg-icons	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=5.15.4
+@googleworkspace/cli	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=0.22.5
+@hatchet-dev/typescript-sdk	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=1.31.1
+@ibm/plex	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=4	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=4	ver=6.4.1
+@ibm/plex-sans	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=4	nojail-rc=—	npm-rc=—	EACCES: permission denied	—	jail-s=2	ver=1.1.0
+@infisical/cli	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=4	ver=0.43.129
+@launchql/protobufjs	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=7.2.6
+@lavamoat/preinstall-always-fail	UPSTREAM	rc=1	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script preinstall failed for @lavamoat/preinstall-always-	npm error code 1	jail-s=3	ver=3.0.0
+@medusajs/telemetry	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=2.20.1
+@microsoft/m365agentstoolkit-cli	OK	rc=0	confined-spawns=3	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=5	ver=1.1.16
+@modelcontextprotocol/ext-apps	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	Cannot find module '/home/nub/iss-dJuiZR/project/node_modules/.store/@modelcontextprotocol+ext-apps@0.2.2_@modelcontextprotocol+sdk@1.30.0_zod@4.5.4__zod@4.5.4/node_modules/@modelcontextprotocol/ext-apps/scripts/setup-bun.mjs'	—	jail-s=4	ver=0.2.2
+@modelcontextprotocol/inspector	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=2.5.0
+@opencode-ai/cli	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=12	ver=0.0.0-beta-17823
+@openuidev/lang-core	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.2.17
+@playwright/browser-firefox	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=4	ver=1.63.0
+@pulumi/aws-native	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=10	ver=1.77.0
+@pulumi/docker	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=3.6.1
+@pulumi/gcp	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=4	ver=5.26.0
+@railway/cli	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=5.49.2
+@sap/hana-client	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=2.29.27
+@sentry-internal/node-native-stacktrace	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.5.0
+@shopify/react-native-skia	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=7	ver=2.6.2
+@stdlib/math-base-special-exp	NO-SCRIPT-RAN	rc=0	confined-spawns=0	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=0.1.0
+@stdlib/math-base-special-ln	NO-SCRIPT-RAN	rc=0	confined-spawns=0	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.1.1
+@stdlib/number-float64-base-exponent	NO-SCRIPT-RAN	rc=0	confined-spawns=0	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.1.1
+@stdlib/number-float64-base-normalize	NO-SCRIPT-RAN	rc=0	confined-spawns=0	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.0.9
+@stellar/stellar-sdk	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=14.2.0
+@temporalio/core-bridge	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=5	ver=1.13.0
+@tloncorp/tlon-skill	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=0.5.0
+@trufflesuite/bigint-buffer	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=1.1.10
+@turbodocx/html-to-docx	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=1.22.2
+@vaadin/vaadin-usage-statistics	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=2.1.3
+@vscode/ripgrep	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=1.15.14
+@vscode/sqlite3	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=78	ver=5.1.14-vscode
+@whiskeysockets/baileys	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=7.0.0-rc14
+agentdb	OK	rc=0	confined-spawns=7	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=81	ver=3.0.0-alpha.20
+appium-chromedriver	UPSTREAM	rc=1	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script postinstall failed for appium-chromedriver@5.6.69:	npm error code 1	jail-s=2	ver=5.6.69
+appium-ios-tuntap	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=2.0.4
+azure-functions-core-tools	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=7	ver=4.14.0
+backport	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=12.0.4
+baileys	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=7.0.0-rc14
+better-sqlite3	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=12.11.1
+bootstrap-vue	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=2.23.1
+cbor-extract	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=2.2.2
+ccxt	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=4	ver=4.5.77
+chrome-local-mcp	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=4	ver=1.3.0
+chromium	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=8	ver=3.0.3
+cline	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=7	ver=3.0.61
+cloudflared	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=0.7.3
+contentful	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=9.3.7
+dd-trace	OK	rc=0	confined-spawns=5	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=5	ver=5.100.0
+deno	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=2.9.6
+dprint	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=0.57.4
+fs-xattr	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.4.0
+hnswlib-node	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=8	ver=3.0.0
+iframe-resizer	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=4.4.5
+iltorb	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=21	ver=2.4.5
+javascript-obfuscator	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=4.1.1
+jss	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=9.8.7
+less	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=4.5.1
+libxmljs	UPSTREAM	rc=1	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	node-pre-gyp ERR! install response status 404 Not Found on https://github.com/libxmljs/libxmljs/releases/download/v1.0.11/node-v147-linux-x64.tar.gz 	npm error code 1	jail-s=11	ver=1.0.11
+memlab	OK	rc=0	confined-spawns=4	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=8	ver=2.0.5
+mongodb-client-encryption	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=7.2.1
+native-keymap	UPSTREAM	rc=1	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=1	npm-rc=1	× lifecycle script install failed for native-keymap@3.3.9:	npm error code 1	jail-s=1	ver=3.3.9
+nestjs-pino	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=6	ver=4.4.0
+ngrok	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=4	ver=5.0.0-beta.2
+node-hid	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=3.4.0
+node-jq	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=6.3.1
+nodent-runtime	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=3.2.1
+playwright-chromium	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=9	ver=1.63.0
+playwright-webkit	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=9	ver=1.63.0
+postman-code-generators	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=13	ver=2.1.1
+protobufjs	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=7.6.5
+sharp	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.34.5
+sleep	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=5	ver=6.3.0
+sonar-scanner	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=3.1.0
+spawn-sync	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=1.0.15
+sse4_crc32	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=7.0.0
+style-dictionary	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=4.4.0
+tiny-secp256k1	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=5	ver=1.1.7
+tree-sitter-c-sharp	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.23.5
+tree-sitter-cli	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=2	ver=0.27.0
+tree-sitter-cpp	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.23.4
+tree-sitter-go	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.25.0
+tree-sitter-php	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.24.2
+tree-sitter-python	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.25.0
+tree-sitter-rust	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=0.24.0
+type-graphql	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=1.1.1
+uglifyjs-webpack-plugin	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=0.4.6
+vue-echarts	OK	rc=0	confined-spawns=2	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=3	ver=6.7.3
+wd	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=1.14.0
+win-ca	OK	rc=0	confined-spawns=1	jail-lines=0	net-err=0	deny=0	nojail-rc=—	npm-rc=—	—	—	jail-s=1	ver=3.5.1
