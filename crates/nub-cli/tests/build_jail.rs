@@ -14,7 +14,13 @@ fn unsupported_catalog_override_is_not_silently_ignored() {
 
 #[test]
 fn dependency_lifecycle_contract() {
-    let output = std::process::Command::new("node")
+    let mut command = std::process::Command::new("node");
+    // Each fixture creates cold tool caches and filesystem grants. Keep Windows
+    // setup from competing with the descendant-progress deadlines in another file.
+    if cfg!(windows) {
+        command.arg("--test-concurrency=1");
+    }
+    let output = command
         .arg("--test")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),

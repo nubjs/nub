@@ -1933,7 +1933,4 @@ mod tests {
             libc::utimes(c.as_ptr(), times.as_ptr());
         }
     }
-
-    #[cfg(not(unix))]
-    fn filetime_set(_path: &Path, _time: SystemTime) {}
 }

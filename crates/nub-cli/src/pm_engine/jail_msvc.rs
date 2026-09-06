@@ -238,7 +238,7 @@ fn harvest() -> Option<MsvcToolchain> {
 fn vswhere_path() -> Option<PathBuf> {
     ["ProgramFiles(x86)", "ProgramFiles"]
         .iter()
-        .filter_map(|var| std::env::var_os(var))
+        .filter_map(std::env::var_os)
         .map(|dir| PathBuf::from(dir).join(r"Microsoft Visual Studio\Installer\vswhere.exe"))
         .find(|p| p.is_file())
 }

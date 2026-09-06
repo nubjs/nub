@@ -67,6 +67,7 @@ fn fixture(name: &str) -> PathBuf {
 
 /// `(major, minor)` of the `node` first on PATH. 22.15 is the fast-tier floor; the
 /// classic `require.extensions` behavior one test below pins exists only under it.
+#[cfg(unix)]
 fn path_node_version() -> Option<(u32, u32)> {
     let out = Command::new("node").arg("--version").output().ok()?;
     if !out.status.success() {
@@ -78,6 +79,7 @@ fn path_node_version() -> Option<(u32, u32)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
+#[cfg(unix)]
 fn on_compat_tier() -> bool {
     matches!(path_node_version(), Some((m, n)) if (m, n) < (22, 15))
 }

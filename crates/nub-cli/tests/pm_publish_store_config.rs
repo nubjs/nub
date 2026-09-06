@@ -691,6 +691,7 @@ const PNPM_UNVERSIONED_MANIFEST: &str =
 
 /// Generic pnpm-incumbent manifest used where the SCALAR home is irrelevant
 /// (the global read/write tests). Points at v11.
+#[cfg(unix)]
 const PNPM_MANIFEST: &str = PNPM11_MANIFEST;
 
 /// Write routing under a pnpm-**v11** incumbent: a non-shared scalar lands in

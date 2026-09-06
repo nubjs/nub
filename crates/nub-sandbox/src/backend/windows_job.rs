@@ -106,10 +106,9 @@ fn resume_initial_thread(child: &Child) -> io::Result<()> {
         if entry.dwSize as usize
             >= std::mem::offset_of!(THREADENTRY32, th32OwnerProcessID) + size_of::<u32>()
             && entry.th32OwnerProcessID == child.id()
+            && thread_id.replace(entry.th32ThreadID).is_some()
         {
-            if thread_id.replace(entry.th32ThreadID).is_some() {
-                return Err(io::Error::other("suspended child has more than one thread"));
-            }
+            return Err(io::Error::other("suspended child has more than one thread"));
         }
         entry.dwSize = size_of::<THREADENTRY32>() as u32;
         // SAFETY: same live snapshot and valid buffer as Thread32First.
