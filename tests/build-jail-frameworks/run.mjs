@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
@@ -93,7 +93,9 @@ function outputFiles(path) {
 async function arm(fixture, confined) {
   const label = `${fixture.name}-${confined ? 'jailed' : 'control'}`;
   const evidence = join(root, label);
-  const base = mkdtempSync(join(tmpdir(), `nub-framework-${label}-`));
+  const temporary = mkdtempSync(join(tmpdir(), `nub-framework-${label}-`));
+  // Framework manifests compare cwd with real paths; expand Windows 8.3 aliases.
+  const base = process.platform === 'win32' ? realpathSync.native(temporary) : temporary;
   const project = join(base, 'project');
   const home = join(base, 'home');
   mkdirSync(project, { recursive: true });

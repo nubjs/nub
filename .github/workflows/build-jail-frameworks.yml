@@ -72,6 +72,11 @@ jobs:
           node --test --test-concurrency=1 tests/build-jail-corpus/contract.mjs tests/build-jail-corpus/network.mjs > reports/contracts.log 2>&1
       - name: Testing framework applications
         run: node tests/build-jail-frameworks/run.mjs
+      - name: Comparing Windows path spellings with npm
+        if: always() && runner.os == 'Windows'
+        env:
+          FRAMEWORK_PATH_REPORT: ${{ github.workspace }}/reports/windows-paths
+        run: node tests/build-jail-frameworks/windows-paths.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
