@@ -7,6 +7,10 @@
  *
  *   - `--check`            validate every pin (shape, SRI prefix, soak
  *                          annotations on any soakBypass) — CI gate, no network
+ *   - `--fix`              prune soakBypass annotations whose window has
+ *                          cleared, then run the same checks (the scheduled
+ *                          soak-autofix workflow commits the result so the
+ *                          gate never sits red waiting for a human)
  *   - `--install <name>`   download + SRI-verify + install into the local
  *                          tool rack (see paths.mts RACK_DIR) with a PATH
  *                          handle in BIN_DIR
@@ -71,13 +75,39 @@ function loadTools(): Record<string, ToolPin> {
   return JSON.parse(readFileSync(EXTERNAL_TOOLS_JSON, 'utf8')).tools
 }
 
+const OS_KEYS: Record<string, string> = { darwin: 'darwin', linux: 'linux', win32: 'win' }
+const ARCH_KEYS: Record<string, string> = { arm64: 'arm64', x64: 'x64' }
+
+/**
+ * Every key `platformKey()` can produce, derived from the same maps so the
+ * two cannot drift. A `platforms` entry spelled any other way is a DEAD
+ * pin: nothing ever resolves it, and the tool silently has no asset for
+ * that host until an install runs there and fails. That is not
+ * hypothetical — the `-musl` pnpm entries sat dead until the musl branch
+ * below was added, and only an alpine install would have surfaced it.
+ */
+export const PLATFORM_KEYS: ReadonlySet<string> = new Set(
+  Object.values(OS_KEYS).flatMap(os =>
+    Object.values(ARCH_KEYS).flatMap(arch =>
+      os === 'linux' ? [`${os}-${arch}`, `${os}-${arch}-musl`] : [`${os}-${arch}`],
+    ),
+  ),
+)
+
 function platformKey(): string {
-  const osKey = { darwin: 'darwin', linux: 'linux', win32: 'win' }[process.platform]
-  const archKey = { arm64: 'arm64', x64: 'x64' }[process.arch]
+  const osKey = OS_KEYS[process.platform]
+  const archKey = ARCH_KEYS[process.arch]
   if (!osKey || !archKey) {
     throw new Error(`unsupported platform ${process.platform}-${process.arch}`)
   }
-  return `${osKey}-${archKey}`
+  // musl vs glibc via the loader-presence heuristic. Without this a musl
+  // host silently resolved the glibc pin (the `-musl` pnpm entries were
+  // dead keys) and installed a binary that can't run; tools with no -musl
+  // pin now fail loud with "no pinned asset" instead.
+  const musl =
+    process.platform === 'linux' &&
+    (existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1'))
+  return `${osKey}-${archKey}${musl ? '-musl' : ''}`
 }
 
 function sriSha512(buf: Buffer): string {
@@ -102,8 +132,25 @@ export function checkPins(tools: Record<string, ToolPin>): string[] {
         out.push(`${name}: integrity is not a sha512 SRI: ${sri}`)
       }
     }
+    for (const key of Object.keys(pin.platforms ?? {})) {
+      if (!PLATFORM_KEYS.has(key)) {
+        out.push(
+          `${name}: platform key '${key}' is not one platformKey() produces — a dead pin (want one of: ${[...PLATFORM_KEYS].join(', ')})`,
+        )
+      }
+    }
     if (pin.soakBypass) {
       const { published, removable } = pin.soakBypass
+      // A bypass names the version it was granted for. Bump the pin and
+      // leave the annotation behind and it now vouches for a version that
+      // is no longer installed — the ledger says "1.13.1 was adopted early"
+      // while 1.14.0 ships unreviewed. Mismatch is a hard finding, not a
+      // stale-annotation warning.
+      if (pin.soakBypass.version !== pin.version) {
+        out.push(
+          `${name}: soakBypass is for ${pin.soakBypass.version} but the pin is ${pin.version} — re-date the annotation for the version actually pinned, or drop it`,
+        )
+      }
       if (!isValidIsoDate(published) || !isValidIsoDate(removable)) {
         out.push(`${name}: soakBypass dates are not real YYYY-MM-DD calendar dates`)
         continue
@@ -112,15 +159,75 @@ export function checkPins(tools: Record<string, ToolPin>): string[] {
       if (removable !== expected) {
         out.push(`${name}: soakBypass removable ${removable}, wanted ${expected} (published + ${SOAK_DAYS}d)`)
       }
-      // A bypass whose window has passed is dead weight: the version has
-      // soaked, so the annotation must come off (same rule the workspace
-      // yaml excludes live under).
-      if (removable < todayIso()) {
-        out.push(`${name}: soakBypass expired (removable ${removable}) — the pin has soaked, remove the annotation`)
-      }
     }
   }
   return out
+}
+
+/**
+ * Expired soakBypass annotations are STALE, not unsafe: the version has
+ * soaked, the bypass no longer bypasses anything, and the pin stays
+ * SRI-verified. They are reported as WARNINGS (exit 0), never failures —
+ * a date boundary must not redden CI overnight with zero code change.
+ * The soak-autofix workflow prunes them daily via --fix, so the ledger
+ * still converges to clean. Missing/malformed/wrong-arithmetic
+ * annotations stay hard checkPins failures: those are unauditable,
+ * which IS unsafe.
+ */
+export function staleBypasses(tools: Record<string, ToolPin>): string[] {
+  const out: string[] = []
+  const today = todayIso()
+  for (const [name, pin] of Object.entries(tools)) {
+    const bypass = pin.soakBypass
+    if (!bypass) {
+      continue
+    }
+    if (!isValidIsoDate(bypass.published) || !isValidIsoDate(bypass.removable)) {
+      continue
+    }
+    // Wrong-arithmetic annotations are a hard checkPins failure, never
+    // stale/prunable — a too-early removable must not read as "cleared".
+    if (bypass.removable !== addDaysIso(bypass.published, SOAK_DAYS)) {
+      continue
+    }
+    if (bypass.removable < today) {
+      out.push(name)
+    }
+  }
+  return out
+}
+
+/**
+ * Prune expired soakBypass annotations in place and return the pruned tool
+ * names. Once `removable` is in the past the version has soaked and the
+ * annotation is dead weight — staleBypasses warns about it until this
+ * prunes it. Only valid, expired dates are pruned; malformed annotations
+ * stay findings for a human (never silently rewritten).
+ */
+export function pruneExpiredSoakBypasses(doc: {
+  tools: Record<string, ToolPin>
+}): string[] {
+  const pruned: string[] = []
+  const today = todayIso()
+  for (const [name, pin] of Object.entries(doc.tools)) {
+    const bypass = pin.soakBypass
+    if (!bypass) {
+      continue
+    }
+    if (!isValidIsoDate(bypass.published) || !isValidIsoDate(bypass.removable)) {
+      continue
+    }
+    // Wrong-arithmetic annotations are a hard checkPins failure, never
+    // stale/prunable — a too-early removable must not read as "cleared".
+    if (bypass.removable !== addDaysIso(bypass.published, SOAK_DAYS)) {
+      continue
+    }
+    if (bypass.removable < today) {
+      delete pin.soakBypass
+      pruned.push(name)
+    }
+  }
+  return pruned
 }
 
 function sriToHex(sri: string): string {
@@ -145,7 +252,16 @@ export function checkDockerPrebake(
   if (shimList && shimList.join(' ') !== SFW_ECOSYSTEMS.join(' ')) {
     out.push(`docker prebake: shim list [${shimList.join(' ')}] != SFW_ECOSYSTEMS [${SFW_ECOSYSTEMS.join(' ')}]`)
   }
-  if (rustVersion && !dockerBody.includes(`toolchain install ${rustVersion}`)) {
+  // Parse the install line's full argument list rather than substring-
+  // matching: `rustup toolchain install 1.91.0 1.93.0` must satisfy an
+  // msrv of 1.93 even though "toolchain install 1.93" never appears.
+  const installedToolchains = [...dockerBody.matchAll(/toolchain install ([^\\\n]+)/g)]
+    .flatMap(m => m[1]!.trim().split(/\s+/))
+    .filter(a => /^\d/.test(a))
+  if (
+    rustVersion &&
+    !installedToolchains.some(t => t === rustVersion || t.startsWith(`${rustVersion}.`))
+  ) {
     out.push(`docker prebake: image does not pre-install the ${rustVersion} msrv toolchain`)
   }
   const sfw = tools['sfw-free']
@@ -183,20 +299,40 @@ export function checkDockerPrebake(
 }
 
 export async function download(url: string, expectedSri: string): Promise<Buffer> {
-  const headers: Record<string, string> = {}
-  // Only GitHub gets the token (private release assets); sending it to any
-  // other host (e.g. the npm registry for purl tools) would leak the
+  // The token buys the authenticated GitHub rate limit, nothing more —
+  // every pinned asset repo is public. Only github.com gets it: sending it
+  // to any other host (e.g. the npm registry for purl tools) would leak the
   // credential. Cross-origin redirects strip the header automatically.
-  if (process.env.GITHUB_TOKEN && new URL(url).hostname === 'github.com') {
-    headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`
-  }
+  const token =
+    process.env.GITHUB_TOKEN && new URL(url).hostname === 'github.com'
+      ? process.env.GITHUB_TOKEN
+      : ''
   // Fail fast on a stalled release/registry response instead of hanging
   // CI; 120s is generous for the largest pinned binary on a slow runner.
-  const res = await fetch(url, {
-    headers,
-    redirect: 'follow',
-    signal: AbortSignal.timeout(120_000),
-  })
+  const attempt = (withAuth: boolean) =>
+    fetch(url, {
+      headers: withAuth && token ? { authorization: `Bearer ${token}` } : {},
+      redirect: 'follow',
+      signal: AbortSignal.timeout(120_000),
+    })
+  let res = await attempt(Boolean(token))
+  // Retry semantics, split by what the status actually means:
+  //   401/403/404 with a token — the credential is the problem (a PUBLIC
+  //     cross-repo asset endpoint rejecting an Actions token). Retry
+  //     WITHOUT it; public assets need none.
+  //   >=500 — transient. Retry with the SAME auth: dropping it turns a
+  //     recoverable blip into a bogus "download failed 404" the moment a
+  //     pin points at an asset the token is what reaches, and the retry
+  //     can then never succeed.
+  // The URL is fixed and the SRI is verified below either way, so no retry
+  // can substitute a different artifact.
+  if (!res.ok && token && [401, 403, 404].includes(res.status)) {
+    res = await attempt(false)
+  }
+  if (!res.ok && res.status >= 500) {
+    await new Promise(r => setTimeout(r, 2_000))
+    res = await attempt(Boolean(token))
+  }
   if (!res.ok) {
     throw new Error(`download failed ${res.status} ${url}`)
   }
@@ -266,9 +402,19 @@ export function linkHandle(target: string, name: string): void {
 }
 
 async function installAssetTool(name: string, pin: ToolPin): Promise<void> {
-  const plat = pin.platforms?.[platformKey()]
+  const key = platformKey()
+  const plat = pin.platforms?.[key]
   if (!plat) {
-    throw new Error(`${name}: no pinned asset for ${platformKey()}`)
+    const available = Object.keys(pin.platforms ?? {}).join(', ') || '(none)'
+    // Name the musl case explicitly: several upstreams (sfw today) ship no
+    // musl asset, and the failure is otherwise a puzzle on an alpine
+    // runner. Failing loud beats installing a glibc binary that cannot
+    // run, but the message has to say what to do about it.
+    const muslHint = key.endsWith('-musl')
+      ? `\n  ${name} publishes no musl asset. Either run this on a glibc host, ` +
+        `or add a ${key} entry to external-tools.json once upstream ships one.`
+      : ''
+    throw new Error(`${name}: no pinned asset for ${key} (pinned: ${available})${muslHint}`)
   }
   // A platform pinned to a registry .tgz (pnpm has no darwin-x64 SEA
   // upstream) routes through the npm-tarball path instead.
@@ -481,10 +627,22 @@ REAL=$(PATH="$CLEAN_PATH" command -v '${cmd}' || true)`
 set -euo pipefail
 ${resolveReal}
 if [ -n "\${${sentinel}:-}" ] || [ -z "$REAL" ] || ! command -v sfw >/dev/null 2>&1; then
+  # Fail-open must not be SILENT-open: say so once on stderr when the
+  # firewall is missing (never on the sentinel re-entry path, where sfw
+  # itself is the caller).
+  if [ -z "\${${sentinel}:-}" ] && [ -n "$REAL" ]; then
+    echo "[sfw-shim] sfw not on PATH — running ${cmd} unfirewalled" >&2
+  fi
   [ -n "$REAL" ] && exec "$REAL" "$@"
   echo "${cmd}: not found" >&2; exit 127
 fi
 export ${sentinel}=1
+# Enterprise sfw defaults to BLOCK for non-registry hosts
+# (SFW_UNKNOWN_HOST_ACTION, parsed by the enterprise config), which
+# breaks ordinary dev flows the day a Socket key lands. Only the
+# enterprise build reads the var — it is inert for the free tier — so
+# setting it unconditionally is safe.
+export SFW_UNKNOWN_HOST_ACTION=ignore
 exec sfw '${cmd}' "$@"
 `
     // Remove the handle before writing: writeFileSync FOLLOWS a symlink, so
@@ -503,8 +661,16 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     console.log(BIN_DIR)
     return 0
   }
+  if (argv.includes('--fix')) {
+    const doc = JSON.parse(readFileSync(EXTERNAL_TOOLS_JSON, 'utf8'))
+    const pruned = pruneExpiredSoakBypasses(doc)
+    if (pruned.length > 0) {
+      writeFileSync(EXTERNAL_TOOLS_JSON, `${JSON.stringify(doc, null, 2)}\n`)
+      console.log(`[external-tools] pruned expired soakBypass: ${pruned.join(', ')}`)
+    }
+  }
   const tools = loadTools()
-  if (argv.includes('--check') || argv.length === 0) {
+  if (argv.includes('--check') || argv.includes('--fix') || argv.length === 0) {
     const problems = checkPins(tools)
     if (DOCKER_PREBAKE) {
       const dockerAbs = path.join(REPO_ROOT, DOCKER_PREBAKE)
@@ -524,6 +690,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     }
     for (const p of problems) {
       console.error(`[external-tools] ${p}`)
+    }
+    for (const name of staleBypasses(tools)) {
+      console.warn(
+        `[external-tools] warn: ${name} soakBypass has cleared — stale annotation, pruned by --fix / the soak-autofix workflow`,
+      )
     }
     if (problems.length === 0) {
       console.log(`[external-tools] ${Object.keys(tools).length} pins valid`)

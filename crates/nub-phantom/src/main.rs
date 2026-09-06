@@ -228,6 +228,12 @@ struct Offender {
     /// The subset of `hard_phantoms` that are the subpath-adapter class
     /// (consumer-provided backend, reached only via a `<pkg>/<adapter>` subpath).
     subpath_adapter_phantoms: Vec<Finding>,
+    /// The subset of `hard_phantoms` that are the legacy deep-path class — reached
+    /// only through a published file no declared surface references, importable
+    /// because the package ships no `exports` map. Lower confidence than the other
+    /// two classes: real per Node resolution, but speculative as to whether any
+    /// consumer takes that path.
+    deep_path_phantoms: Vec<Finding>,
 }
 
 #[derive(Debug, Serialize)]
@@ -249,8 +255,12 @@ struct Totals {
     packages_with_subpath_adapter: usize,
     /// Subpath-adapter phantom edges across the scan.
     subpath_adapter_edges: usize,
+    /// Packages exhibiting the legacy deep-path class.
+    packages_with_deep_path: usize,
+    /// Legacy deep-path phantom edges across the scan.
+    deep_path_edges: usize,
     /// The complement: hard phantoms reachable from the main graph (accidental
-    /// undeclared deps — "genuine junk", not the adapter class).
+    /// undeclared deps — "genuine junk", not the adapter or deep-path classes).
     main_graph_hard_edges: usize,
     /// How many findings a NAIVE detector (undeclared incl. optional peers + soft
     /// loads) would have flagged as phantoms across the scan…
@@ -272,11 +282,14 @@ fn aggregate(reports: &[PackageReport], failures: &[(String, String)]) -> ScanRe
     let mut soft = 0usize;
     let mut adapter_pkgs = 0usize;
     let mut adapter_edges = 0usize;
+    let mut deep_pkgs = 0usize;
+    let mut deep_edges = 0usize;
 
     for r in reports {
         naive += r.naive_phantom_count();
         let hard: Vec<Finding> = r.hard_phantoms().cloned().collect();
         let adapters: Vec<Finding> = r.subpath_adapter_phantoms().cloned().collect();
+        let deep: Vec<Finding> = r.deep_path_phantoms().cloned().collect();
         let soft_ph: Vec<Finding> = r
             .findings
             .iter()
@@ -291,6 +304,10 @@ fn aggregate(reports: &[PackageReport], failures: &[(String, String)]) -> ScanRe
         if !adapters.is_empty() {
             adapter_pkgs += 1;
         }
+        deep_edges += deep.len();
+        if !deep.is_empty() {
+            deep_pkgs += 1;
+        }
         for f in &hard {
             target_importers
                 .entry(f.package.clone())
@@ -304,6 +321,7 @@ fn aggregate(reports: &[PackageReport], failures: &[(String, String)]) -> ScanRe
                 hard_phantoms: hard,
                 soft_phantoms: soft_ph,
                 subpath_adapter_phantoms: adapters,
+                deep_path_phantoms: deep,
             });
         }
     }
@@ -351,7 +369,9 @@ fn aggregate(reports: &[PackageReport], failures: &[(String, String)]) -> ScanRe
             distinct_hard_phantom_targets: phantom_targets.len(),
             packages_with_subpath_adapter: adapter_pkgs,
             subpath_adapter_edges: adapter_edges,
-            main_graph_hard_edges: total_hard_edges - adapter_edges,
+            packages_with_deep_path: deep_pkgs,
+            deep_path_edges: deep_edges,
+            main_graph_hard_edges: total_hard_edges - adapter_edges - deep_edges,
             naive_phantom_flags: naive,
             real_hard_phantom_flags: real_hard,
             optional_peers_excluded: optional_peers,
@@ -373,13 +393,22 @@ fn print_report_human(r: &PackageReport) {
             Verdict::Declared => "ok       ",
             Verdict::Builtin => "builtin  ",
             Verdict::SelfRef => "self     ",
+            Verdict::DevOnlyDeepPath => "dev-deep ",
         };
         // Only surface the interesting verdicts by default.
         if matches!(
             f.verdict,
             Verdict::HardPhantom | Verdict::SoftPhantom | Verdict::DeclaredOptionalPeer
         ) {
-            println!("  {tag} {}  [{}]", f.package, f.specifiers.join(", "));
+            // A deep-path-only phantom is real per Node resolution but speculative
+            // as to whether a consumer takes that path — marked so a reader never
+            // has to infer the difference from the provenance bits.
+            let via = if f.is_deep_path_only() {
+                "  (deep-path only)"
+            } else {
+                ""
+            };
+            println!("  {tag} {}  [{}]{via}", f.package, f.specifiers.join(", "));
         }
     }
 }
@@ -409,6 +438,24 @@ fn print_scan_human(a: &ScanReport) {
         a.totals.subpath_adapter_edges,
         a.totals.main_graph_hard_edges
     );
+    println!(
+        "LEGACY DEEP-PATH CLASS (no exports map; lower confidence): {} packages, {} edges",
+        a.totals.packages_with_deep_path, a.totals.deep_path_edges
+    );
+
+    println!("\n-- legacy deep-path offenders (reachable only by deep import) --");
+    for o in a
+        .offenders
+        .iter()
+        .filter(|o| !o.deep_path_phantoms.is_empty())
+    {
+        let names: Vec<&str> = o
+            .deep_path_phantoms
+            .iter()
+            .map(|f| f.package.as_str())
+            .collect();
+        println!("  {}@{}  ->  {}", o.package, o.version, names.join(", "));
+    }
 
     println!("\n-- subpath-adapter offenders (consumer-provided backend, breaks under GVS) --");
     for o in a

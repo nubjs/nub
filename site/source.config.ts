@@ -16,9 +16,16 @@ import { envSpecLang } from './src/lib/shiki-env-spec';
 import { remarkNodeVersion } from './src/lib/remark-node-version';
 import { remarkGithubAlerts } from './src/lib/remark-github-alerts';
 
+// `unpublished: true` in any page's frontmatter keeps it out of a production
+// build — no route, no nav entry, no sitemap, search or llms.txt line — while
+// `next dev` still serves it for review. The filter is `published()` in
+// `src/lib/source.ts`; the key is declared here so every collection accepts it.
+const unpublished = { unpublished: z.boolean().optional() };
+
 export const docs = defineDocs({
   dir: 'content/docs',
   docs: {
+    schema: frontmatterSchema.extend(unpublished),
     // Export stringified Markdown via `_markdown` so `page.data.getText('processed')`
     // works (used by /llms.txt, /llms-full.txt, and /llms/*.mdx).
     postprocess: {
@@ -30,6 +37,7 @@ export const docs = defineDocs({
 export const guides = defineDocs({
   dir: 'content/guides',
   docs: {
+    schema: frontmatterSchema.extend(unpublished),
     postprocess: {
       includeProcessedMarkdown: true,
     },
@@ -46,6 +54,7 @@ export const blog = defineCollections({
     // middleware rewrites /blog/<slug>?hn to the statically prerendered
     // /blog/hn/<slug> variant, which renders this as the title server-side.
     hnTitle: z.string().optional(),
+    ...unpublished,
   }),
   postprocess: {
     includeProcessedMarkdown: true,

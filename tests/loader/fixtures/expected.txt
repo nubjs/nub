@@ -4,3 +4,5 @@ req.cts=cjs: 14 a
 using.ts=in scope\ndisposed
 worker-main.ts=from worker: hello thread blue
 clobber.ts=number
+cache-main.ts=cjs-cache-ok
+foreign-async-main.mjs=foreign-loader-ok

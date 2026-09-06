@@ -6,7 +6,7 @@
 //!
 //! - [`install_family`] — dependency-graph mutation and linking (`install`,
 //!   `ci`, `add`, `remove`, `update`, `link`, `patch*`, …). All are wired to
-//!   the embedded engine; `install`/`ci` dispatch via live clap verbs.
+//!   the embedded engine; `install`/`ci` dispatch via live parser verbs.
 //! - [`info_family`] — read-only project/graph/registry queries (`list`,
 //!   `why`, `outdated`, `audit`, `view`, …).
 //! - [`publish_family`] — registry writes, packaging, and auth (`publish`,
@@ -39,7 +39,7 @@
 //!   [`run_node_gyp_bootstrap`], because the engine's lazy node-gyp shims
 //!   re-invoke `current_exe()` (= nub) with it mid-lifecycle-script.
 //!
-//! `install`/`i`/`ci` are *not* in the registry: they are live clap verbs
+//! `install`/`i`/`ci` are *not* in the registry: they are live parser verbs
 //! in `cli.rs` (SUBCOMMANDS) dispatching straight to
 //! [`install_family::run_install`] / [`install_family::run_ci`]. `init` is
 //! not in the registry either — the spelling is reserved for nub's own
@@ -114,7 +114,7 @@ pub enum Family {
 }
 
 /// One registered engine verb: its canonical spelling, accepted aliases
-/// (mirroring aube's clap aliases), owning family, and — documentation for
+/// (mirroring aube's own aliases), owning family, and — documentation for
 /// the Surface phase — the aube args type the wired implementation parses.
 pub struct VerbSpec {
     pub canonical: &'static str,
@@ -259,7 +259,7 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         aube_args: "commands::create::CreateArgs",
     },
     // `init` is deliberately NOT registered: the spelling belongs to nub's
-    // own project scaffold (src/init.rs, a clap subcommand), not the engine's
+    // own project scaffold (src/init.rs, a native subcommand), not the engine's
     // npm-style manifest write — the fourth deliberate pnpm-compat exception
     // (AGENTS.md); design record in internal/commands/init.md.
     // Workspace fanout meta-verb. Registered so it errors with the honest
@@ -540,7 +540,7 @@ pub fn dispatch_verb(
 /// node-gyp and prints its executable path on stdout. The lazy shims the
 /// engine drops into a project's `.bin` re-invoke `current_exe()` with
 /// this verb mid-lifecycle-script — and under nub, `current_exe()` IS
-/// nub — so cli.rs intercepts the spelling before clap and lands here.
+/// nub — so cli.rs intercepts the spelling before the parser and lands here.
 /// The printed path is data for the shim (it lands under nub's own cache
 /// root, which the identity profile's `cache_namespace` carries), so stdout
 /// is passed through; failures route through the brand rewrite like every
@@ -556,17 +556,17 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     // __node-gyp-bootstrap <dir>`, where `current_exe()` is nub) before any other
     // preflight, so the namespace registration has to happen here.
     engine_brand_preflight();
-    // The bootstrap entry (`pub`-widened in vendor/aube @ b1a90d5: `pub mod
-    // node_gyp_bootstrap` + `pub async fn {ensure_cached, print_bootstrapped_binary}`)
-    // resolves/bootstraps the cached node-gyp and prints its executable path on
-    // stdout for the shim to exec. Drive it on a fresh runtime; route any failure
-    // through the brand rewrite like every other engine report.
+    // The embed facade's bootstrap entry resolves/bootstraps the cached
+    // node-gyp and returns its executable, which is printed on stdout for the
+    // shim to exec. Drive it on a fresh runtime; route any failure through the
+    // brand rewrite like every other engine report.
     let rt = build_runtime()?;
     let project = std::path::Path::new(project_dir);
-    match rt
-        .block_on(aube::commands::install::node_gyp_bootstrap::print_bootstrapped_binary(project))
-    {
-        Ok(()) => Ok(0),
+    match rt.block_on(aube::embed::bootstrap_node_gyp(project)) {
+        Ok(binary) => {
+            println!("{}", binary.display());
+            Ok(0)
+        }
         Err(report) => Ok(present::emit_report(&report)),
     }
 }
@@ -1046,7 +1046,7 @@ pub(crate) fn project_supplied_settings(cwd: &Path) -> (Vec<String>, bool) {
         VirtualStoreLocality::Default,
     );
     // The config verbs dispatch through `lookup_verb` and RETURN before the
-    // clap match that initializes the snapshot for ordinary routes, so on this
+    // parser match that initializes the snapshot for ordinary routes, so on this
     // path `effective_config` is unset unless it is asked for here. Without
     // this the whole check reported "nothing is shadowed" for every project —
     // inert, and silently so, because failing to recognize a shadow just lets

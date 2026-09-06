@@ -1002,10 +1002,14 @@ jobs:
     # upgrades itself to enterprise when the secret appears.
     env:
       SOCKET_SECURITY_KEY: ${{ secrets.SOCKET_SECURITY_KEY }}
-      # cargo test spawns nub test binaries that talk to LOCAL registry
-      # mocks; routing `cargo` through the sfw shim would wrap that traffic
-      # in the firewall proxy and mangle it (upstream ECONNRESET, 405s on
-      # registry writes). The sentinel makes the cargo shim exec the real
+      # cargo test spawns nub test binaries that fetch from nodejs.org (Node
+      # provisioning on the sub-22.15 legs, the embedded runtime for the
+      # compile tests). The cargo shim exports sfw's SSL_CERT_FILE — a
+      # bundle holding only the firewall's own CA — which REPLACES the
+      # trust store for those fetches, so every ubuntu test leg fails with
+      # `invalid peer certificate: UnknownIssuer` (sfw 1.15.1, measured
+      # 2026-09-05; the loopback registry mocks are fine since 1.14.0
+      # exempts localhost). The sentinel makes the cargo shim exec the real
       # cargo directly — pnpm/npm installs stay firewalled.
       SFW_SHIM_ACTIVE_CARGO: "1"
     strategy:
@@ -1130,6 +1134,13 @@ jobs:
         shell: bash
         env:
           MATRIX_NODE: ${{ matrix.node }}
+          # download() attaches this to github.com fetches only (release
+          # assets: pnpm/sfw binaries), for the authenticated rate limit —
+          # unauthenticated runners share a per-IP budget. It grants no
+          # extra reach: every pinned asset repo is public, and a
+          # repo-scoped Actions token cannot read another org's private
+          # one anyway.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           # The soak scripts are erasable-TS .mts and need a type-stripping
           # Node; the compat legs run them with the side-installed 26.5
@@ -1204,6 +1215,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo "__NUB_BUSYBOX_EXE=$GITHUB_WORKSPACE/vendor/busybox-w32/busybox64.exe" >> "$GITHUB_ENV"
+      - name: Standalone loader package fixtures
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.15'
+        run: tests/loader/run-matrix.sh
       - run: cargo test
       # `compile` is not a default feature, so the bare `cargo test` above never
       # builds `src/compile/**` — including the bundler's emitted-chunk validity

@@ -8,7 +8,7 @@ thread_local! {
     static B3_HASHER: RefCell<blake3::Hasher> = RefCell::new(blake3::Hasher::new());
 }
 
-/// Per-shard mutex array used by the macOS CAS fast path to serialize
+/// Per-shard mutex array used by the Linux/macOS CAS fast path to serialize
 /// concurrent writers within a single process. Indexed by the first
 /// byte of the file's BLAKE3 hash (matching the on-disk 2-char shard
 /// layout), so two threads writing the same hash always collide; threads
@@ -17,12 +17,8 @@ thread_local! {
 /// per install, and a static avoids carrying 256 mutexes in every cheap
 /// `Store::clone()` along the fetch pipeline.
 ///
-/// macOS-gated rather than `not(linux)` because the fast-path block
-/// itself uses `OpenOptionsExt::mode`, which only exists on Unix —
-/// Windows would fail to compile under `not(linux)`. Linux already has
-/// `O_TMPFILE + linkat` (atomic-by-construction, faster than either
-/// alternative); Windows keeps the tempfile + persist_noclobber path.
-#[cfg(target_os = "macos")]
+/// Windows keeps the tempfile + persist_noclobber path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 static FAST_PATH_SHARD_LOCKS: [std::sync::Mutex<()>; 256] =
     [const { std::sync::Mutex::new(()) }; 256];
 
@@ -85,7 +81,7 @@ fn wait_for_cas_file_len(path: &Path, expected_len: u64) {
 ///
 /// A malformed size predicate disables compression (returns `None`)
 /// rather than silently widening the gate; the addon still lands plain.
-fn store_compression_gate() -> Option<&'static Gate> {
+pub(crate) fn store_compression_gate() -> Option<&'static Gate> {
     static GATE: std::sync::OnceLock<Option<Gate>> = std::sync::OnceLock::new();
     GATE.get_or_init(|| {
         let raw = aube_util::env::embedder_env("COMPRESS_STORE")?;
@@ -185,6 +181,7 @@ impl Store {
     /// the directory already exists, but callers should still hoist the
     /// call out of tight loops.
     pub fn ensure_shards_exist(&self) -> Result<(), Error> {
+        self.prepare_for_write()?;
         std::fs::create_dir_all(&self.root).map_err(|e| Error::Io(self.root.clone(), e))?;
         // Windows Defender and Search both touch every file in the
         // store on default installs. Setting this attribute makes
@@ -239,7 +236,7 @@ impl Store {
                     let disabled = *O_TMPFILE_DISABLED.get_or_init(|| {
                         aube_util::env::embedder_env("DISABLE_O_TMPFILE").is_some()
                     });
-                    if !disabled {
+                    if !disabled && !this.fast_path.load(Ordering::Acquire) {
                         match try_o_tmpfile_publish(path, bytes) {
                             Ok(outcome) => return Ok(outcome),
                             Err(OTmpfileFallback::Unsupported) => {}
@@ -248,7 +245,7 @@ impl Store {
                     }
                 }
 
-                // macOS fast path: direct O_CREAT|O_EXCL at the final
+                // Linux/macOS fast path: direct O_CREAT|O_EXCL at the final
                 // content-addressed path, no tempfile dance. Caller (the
                 // install command) flips `fast_path` on only after
                 // acquiring an exclusive store-level lock against other
@@ -270,10 +267,10 @@ impl Store {
                 //
                 // On APFS the fast path is ~2.25x faster than
                 // tempfile+chmod+persist (~64µs/file vs ~145µs/file in
-                // isolation). macOS-gated rather than `not(linux)`
-                // because `OpenOptionsExt::mode` is unix-only — Windows
-                // keeps the tempfile path.
-                #[cfg(target_os = "macos")]
+                // isolation). Linux also uses it while the install owns
+                // the exclusive store lock; contended installs retain the
+                // atomic O_TMPFILE path. Windows keeps named tempfiles.
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 if this.fast_path.load(Ordering::Acquire) {
                     use std::io::Write;
                     use std::os::unix::fs::OpenOptionsExt;
@@ -380,7 +377,7 @@ impl Store {
                 // orders and clobbered each other's recovery. The
                 // fast-path branch above re-enables it under an
                 // exclusive store lock.
-                let _ = this; // suppress unused warning on Linux
+                let _ = this; // suppress unused warning on non-Unix targets
                 let parent = path.parent().ok_or_else(|| {
                     Error::Io(path.to_path_buf(), std::io::ErrorKind::NotFound.into())
                 })?;
@@ -437,6 +434,133 @@ impl Store {
         }
     }
 
+    /// Publish a tempfile that was written and BLAKE3-hashed while its tar
+    /// entry was decoded. The tempfile lives under the CAS root, so
+    /// `persist_noclobber` is an atomic same-filesystem publish and does not
+    /// copy the entry a second time.
+    pub(crate) fn import_hashed_tempfile(
+        &self,
+        mut temp: tempfile::NamedTempFile,
+        hex_hash: String,
+        len: u64,
+        executable: bool,
+    ) -> Result<StoredFile, Error> {
+        let store_path = self.write_path_from_hex(&hex_hash);
+        let parent = store_path
+            .parent()
+            .ok_or_else(|| Error::Io(store_path.clone(), std::io::ErrorKind::NotFound.into()))?;
+        std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o644))
+                .map_err(|e| Error::Io(store_path.clone(), e))?;
+        }
+
+        // The macOS byte importer publishes directly into the final path while
+        // holding this same shard lock. Hold it through publication and any
+        // recovery so a streamed writer cannot unlink an in-progress file.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let _shard_guard = hex_hash
+            .get(..2)
+            .and_then(|shard| u8::from_str_radix(shard, 16).ok())
+            .map(|shard| {
+                FAST_PATH_SHARD_LOCKS[shard as usize]
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            });
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut recovery_lock = None;
+
+        let mut retried_missing_parent = false;
+        let mut retried_torn_entry = false;
+        let outcome = loop {
+            match temp.persist_noclobber(&store_path) {
+                Ok(_) => break CasWriteOutcome::Created,
+                Err(e) if e.error.kind() == std::io::ErrorKind::NotFound => {
+                    temp = e.file;
+                    if retried_missing_parent {
+                        return Err(Error::Io(store_path.clone(), e.error));
+                    }
+                    // A concurrent prune may remove the shard after the
+                    // initial create. Match the buffered importer by
+                    // recreating it and retrying publication once.
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+                    retried_missing_parent = true;
+                }
+                Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    temp = e.file;
+                    if !cas_file_matches_len(&store_path, len) {
+                        wait_for_cas_file_len(&store_path, len);
+                    }
+                    // A slow-path process can observe a partial final file
+                    // owned by another process that holds the macOS install
+                    // lock and is writing directly. Wait for that process
+                    // before deciding the entry is torn. The in-process shard
+                    // mutex above separately serializes recovery threads in
+                    // this process.
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    if !self.fast_path.load(Ordering::Acquire)
+                        && !cas_file_matches_len(&store_path, len)
+                        && recovery_lock.is_none()
+                    {
+                        let lock_dir = self
+                            .root
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| self.root.clone());
+                        std::fs::create_dir_all(&lock_dir)
+                            .map_err(|e| Error::Io(lock_dir.clone(), e))?;
+                        let lock_path = lock_dir.join(".install.lock");
+                        let file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .truncate(false)
+                            .write(true)
+                            .open(&lock_path)
+                            .map_err(|e| Error::Io(lock_path.clone(), e))?;
+                        file.lock().map_err(|e| Error::Io(lock_path.clone(), e))?;
+                        recovery_lock = Some(file);
+                    }
+                    if cas_file_matches_len(&store_path, len) {
+                        break CasWriteOutcome::AlreadyExisted;
+                    } else if retried_torn_entry {
+                        return Err(Error::Io(store_path.clone(), e.error));
+                    } else {
+                        // Match `import_bytes` recovery for a crashed predecessor:
+                        // retain our complete staging file, remove the torn CAS
+                        // entry, and retry the no-clobber publish once.
+                        let _ = xx::file::remove_file(&store_path);
+                        retried_torn_entry = true;
+                    }
+                }
+                Err(e) => return Err(Error::Io(store_path.clone(), e.error)),
+            }
+        };
+
+        if aube_util::diag::enabled() {
+            let name = match outcome {
+                CasWriteOutcome::Created => "cas_miss",
+                CasWriteOutcome::AlreadyExisted => "cas_hit",
+            };
+            aube_util::diag::instant_lazy(aube_util::diag::Category::Store, name, || {
+                format!(r#"{{"size":{len}}}"#)
+            });
+        }
+
+        if executable {
+            self.write_exec_marker(&store_path)?;
+        }
+        Ok(StoredFile {
+            hex_hash,
+            store_path,
+            executable,
+            size: Some(len),
+        })
+    }
+
     /// Import a single file's content into the store. Returns the stored file info.
     ///
     /// Hot path on cold installs: callers should invoke
@@ -445,6 +569,7 @@ impl Store {
     /// exist yet, the `create_new` open will fail with `NotFound`; we
     /// fall back to the slow path for correctness.
     pub fn import_bytes(&self, content: &[u8], executable: bool) -> Result<StoredFile, Error> {
+        self.prepare_for_write()?;
         let hash_t0 = std::time::Instant::now();
         let hex_hash = blake3_hex(content);
         if aube_util::diag::enabled() {
@@ -503,26 +628,22 @@ impl Store {
                 format!(r#"{{"size":{}}}"#, content.len())
             });
         }
-        // The macOS fast path verifies the file size inline under its
+        // The Linux/macOS fast path verifies the file size inline under its
         // shard mutex before returning `AlreadyExisted`, so this
         // recovery only needs to run when we took the tempfile path.
         // Skipping it there also prevents a race where the recovery
         // unlinks a file that another in-process thread is concurrently
         // re-creating after observing the same crashed-predecessor.
         //
-        // `cfg!(target_os = "macos")` matches the cfg gate on the only
-        // code path that flips `fast_path` to true (and on the inline
-        // recovery inside `create_cas_file`). Without the cfg!, a future
-        // caller setting the flag on Linux would silently disable this
-        // recovery — the Linux O_TMPFILE branch has no inline
-        // length-check substitute, so torn CAS files would be accepted.
-        let fast_path_handled_recovery =
-            cfg!(target_os = "macos") && self.fast_path.load(Ordering::Acquire);
+        // The target check matches the cfg gate on the only code path that
+        // flips `fast_path` to true and the inline recovery above.
+        let fast_path_handled_recovery = (cfg!(target_os = "linux") || cfg!(target_os = "macos"))
+            && self.fast_path.load(Ordering::Acquire);
         if outcome == CasWriteOutcome::AlreadyExisted && !fast_path_handled_recovery {
             // A length mismatch from this branch can mean either
             //   (a) a crashed predecessor left a torn file (the recovery
             //       case this code was originally written for), or
-            //   (b) on macOS, another *process* is currently writing to
+            //   (b) on Linux/macOS, another *process* is currently writing to
             //       the same path via the fast path (no atomic publish
             //       at the final path, so its in-progress fd is visible
             //       by name to other writers).
@@ -534,6 +655,29 @@ impl Store {
             if !cas_file_matches_len(&store_path, content.len() as u64) {
                 wait_for_cas_file_len(&store_path, content.len() as u64);
             }
+            // An unlocked writer may have observed a direct writer's
+            // in-progress final path. Coordinate with that writer before
+            // deciding the entry is torn, then recheck under the lock.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let _recovery_lock = if !cas_file_matches_len(&store_path, content.len() as u64) {
+                let lock_dir = self
+                    .root
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| self.root.clone());
+                std::fs::create_dir_all(&lock_dir).map_err(|e| Error::Io(lock_dir.clone(), e))?;
+                let lock_path = lock_dir.join(".install.lock");
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(&lock_path)
+                    .map_err(|e| Error::Io(lock_path.clone(), e))?;
+                file.lock().map_err(|e| Error::Io(lock_path, e))?;
+                Some(file)
+            } else {
+                None
+            };
             if !cas_file_matches_len(&store_path, content.len() as u64) {
                 let _ = xx::file::remove_file(&store_path);
                 self.create_cas_file(&store_path, Some(content))?;
@@ -622,6 +766,7 @@ impl Store {
         executable: bool,
         gate: Option<&Gate>,
     ) -> Result<StoredFile, Error> {
+        self.prepare_for_write()?;
         let Some(gate) = gate else {
             return self.import_bytes(content, executable);
         };
@@ -827,9 +972,9 @@ fn cas_small_file_threshold() -> usize {
     })
 }
 
-// Open anonymous file in parent dir, write, linkat via /proc/self/fd.
-// Skips the tempfile unique-name probe and explicit fchmod. Falls
-// back via Unsupported on EOPNOTSUPP, ENOENT (no /proc), or EXDEV.
+// Open an anonymous file in the parent dir, write it, then publish it
+// directly with linkat(AT_EMPTY_PATH). Kernels that reject the direct
+// form fall back to /proc/self/fd before the named-tempfile fallback.
 // AUBE_DISABLE_O_TMPFILE forces the legacy path.
 #[cfg(target_os = "linux")]
 fn try_o_tmpfile_publish(path: &Path, bytes: &[u8]) -> Result<CasWriteOutcome, OTmpfileFallback> {
@@ -891,62 +1036,99 @@ fn try_o_tmpfile_publish(path: &Path, bytes: &[u8]) -> Result<CasWriteOutcome, O
     // between write and linkat is acceptable, lockfile + state hash
     // recovers the missing entry on next install.
 
-    let proc_link = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file));
-    let proc_c = CString::new(proc_link.as_bytes()).map_err(|_| {
-        OTmpfileFallback::Hard(Error::Io(
-            path.to_path_buf(),
-            std::io::Error::other("fd path has nul"),
-        ))
-    })?;
     let final_c = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         OTmpfileFallback::Hard(Error::Io(
             path.to_path_buf(),
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has nul"),
         ))
     })?;
-    // SAFETY: both CStrings live through the call. AT_SYMLINK_FOLLOW
-    // resolves the /proc/self/fd magic-link to the anon inode.
-    let r = unsafe {
+
+    // Publish directly from the owned O_TMPFILE descriptor. This avoids
+    // allocating and resolving `/proc/self/fd/<fd>` for every CAS object.
+    // Some kernels/filesystems require CAP_DAC_READ_SEARCH for
+    // AT_EMPTY_PATH; those fall back to the procfs method below.
+    let empty = c"";
+    // SAFETY: `file` owns a valid fd and both C strings live through the call.
+    let direct = unsafe {
         libc::linkat(
-            libc::AT_FDCWD,
-            proc_c.as_ptr(),
+            std::os::fd::AsRawFd::as_raw_fd(&file),
+            empty.as_ptr(),
             libc::AT_FDCWD,
             final_c.as_ptr(),
-            libc::AT_SYMLINK_FOLLOW,
+            libc::AT_EMPTY_PATH,
         )
     };
-    if r == 0 {
-        // CAS bytes are read-once into reflinks/hardlinks. Drop them
-        // from the page cache so the parallel linker pass over many
-        // packages doesn't push the working set out. Per-file cost is
-        // roughly fixed regardless of size, so small files paid a
-        // disproportionate share — gate on `small_threshold` to match
-        // the fallocate gate above.
-        if is_large {
-            use std::os::fd::AsRawFd;
-            let fd = file.as_raw_fd();
-            // SAFETY: fd is still owned by `file` here. POSIX_FADV_DONTNEED
-            // is advisory, return value is ignored.
-            unsafe {
-                libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED);
+    if direct != 0 {
+        let direct_err = std::io::Error::last_os_error();
+        match direct_err.raw_os_error() {
+            Some(libc::EEXIST) => return Ok(CasWriteOutcome::AlreadyExisted),
+            Some(libc::EPERM)
+            | Some(libc::EACCES)
+            | Some(libc::EINVAL)
+            | Some(libc::ENOENT)
+            | Some(libc::EOPNOTSUPP)
+            | Some(libc::EXDEV) => {
+                let proc_link = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file));
+                let proc_c = CString::new(proc_link.as_bytes()).map_err(|_| {
+                    OTmpfileFallback::Hard(Error::Io(
+                        path.to_path_buf(),
+                        std::io::Error::other("fd path has nul"),
+                    ))
+                })?;
+                // SAFETY: both CStrings live through the call.
+                // AT_SYMLINK_FOLLOW resolves the procfs magic-link.
+                let proc_result = unsafe {
+                    libc::linkat(
+                        libc::AT_FDCWD,
+                        proc_c.as_ptr(),
+                        libc::AT_FDCWD,
+                        final_c.as_ptr(),
+                        libc::AT_SYMLINK_FOLLOW,
+                    )
+                };
+                if proc_result != 0 {
+                    let err = std::io::Error::last_os_error();
+                    return match err.raw_os_error() {
+                        Some(libc::EEXIST) => Ok(CasWriteOutcome::AlreadyExisted),
+                        // No /proc in this sandbox.
+                        Some(libc::ENOENT) => Err(OTmpfileFallback::Unsupported),
+                        // Kernel opens O_TMPFILE but rejects linkat from
+                        // /proc/self/fd. ENOTSUP equals EOPNOTSUPP on Linux.
+                        Some(libc::EOPNOTSUPP) | Some(libc::EXDEV) => {
+                            Err(OTmpfileFallback::Unsupported)
+                        }
+                        // Seccomp-filtered containers can block linkat.
+                        Some(libc::EPERM) | Some(libc::EACCES) => {
+                            Err(OTmpfileFallback::Unsupported)
+                        }
+                        _ => Err(OTmpfileFallback::Hard(Error::Io(path.to_path_buf(), err))),
+                    };
+                }
+            }
+            _ => {
+                return Err(OTmpfileFallback::Hard(Error::Io(
+                    path.to_path_buf(),
+                    direct_err,
+                )));
             }
         }
-        return Ok(CasWriteOutcome::Created);
     }
-    let err = std::io::Error::last_os_error();
-    match err.raw_os_error() {
-        Some(libc::EEXIST) => Ok(CasWriteOutcome::AlreadyExisted),
-        // No /proc in this sandbox.
-        Some(libc::ENOENT) => Err(OTmpfileFallback::Unsupported),
-        // Kernel opens O_TMPFILE but rejects linkat from /proc/self/fd.
-        // ENOTSUP is same value as EOPNOTSUPP on Linux.
-        Some(libc::EOPNOTSUPP) | Some(libc::EXDEV) => Err(OTmpfileFallback::Unsupported),
-        // Seccomp-filtered containers (gVisor, strict k8s pod-security
-        // profiles) block linkat and return EPERM/EACCES. Fall through
-        // to the tempfile path instead of aborting the install.
-        Some(libc::EPERM) | Some(libc::EACCES) => Err(OTmpfileFallback::Unsupported),
-        _ => Err(OTmpfileFallback::Hard(Error::Io(path.to_path_buf(), err))),
+    // CAS bytes are read-once into reflinks/hardlinks. Drop them
+    // from the page cache so the parallel linker pass over many
+    // packages doesn't push the working set out. Per-file cost is
+    // roughly fixed regardless of size, so small files paid a
+    // disproportionate share — gate on `small_threshold` to match
+    // the fallocate gate above.
+    if is_large {
+        use std::os::fd::AsRawFd;
+        let fd = file.as_raw_fd();
+        // SAFETY: fd is still owned by `file` here. POSIX_FADV_DONTNEED
+        // is advisory, return value is ignored.
+        unsafe {
+            libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED);
+        }
     }
+    Ok(CasWriteOutcome::Created)
 }
 
 /// Map a nibble (0–15) to its lowercase hex ASCII byte. Used by

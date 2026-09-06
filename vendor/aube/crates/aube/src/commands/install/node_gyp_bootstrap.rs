@@ -9,13 +9,11 @@
 //! and npm solve this by bundling node-gyp with themselves; aube (a
 //! Rust binary) bootstraps it lazily on first need.
 //!
-//! User precedence: if `node-gyp` is already resolvable on the
-//! ambient `PATH` (system install, nvm, a shim in a test fixture),
-//! [`ensure`] returns `None` and we stay out of the way — the user's
-//! copy wins. Otherwise node-gyp is installed under
-//! `<cache_dir>/tools/node-gyp/<bucket>/` and the returned `.bin`
-//! dir is prepended to the lifecycle script's `PATH` *after* the
-//! dep's own `.bin`.
+//! User precedence: if `node-gyp` is already resolvable from the
+//! package's own `.bin` or ambient `PATH` (system install, nvm, a shim
+//! in a test fixture), [`lazy_shim_bin_dir`] stays out of the way — the
+//! user's copy wins. Otherwise it prepends a cheap shim that installs
+//! node-gyp under `<cache_dir>/tools/node-gyp/<bucket>/` only if invoked.
 //!
 //! The install runs in-process against a freshly-written
 //! `package.json` that pins node-gyp, via
@@ -68,11 +66,43 @@ fn node_gyp_on_path() -> bool {
 /// (sometimes `.exe` alongside), so a bare-string check would always
 /// miss the bootstrapped shim and the fast-path would never fire.
 pub(crate) fn node_gyp_bin_exists(bin_dir: &Path) -> bool {
-    BINARY_NAMES.iter().any(|name| bin_dir.join(name).exists())
+    node_gyp_binary(bin_dir).is_some()
 }
 
-fn primary_binary_name() -> &'static str {
-    BINARY_NAMES[0]
+fn node_gyp_binary(bin_dir: &Path) -> Option<PathBuf> {
+    BINARY_NAMES
+        .iter()
+        .map(|name| bin_dir.join(name))
+        .find(|path| path.is_file())
+}
+
+/// Resolve a cached binary all the way through an aube-generated wrapper.
+///
+/// Isolated installs use regular shell/cmd wrappers rather than symlinks so
+/// they can inject `NODE_PATH`. The wrapper itself remains a valid file after
+/// its virtual-store target disappears, which made the cache fast path accept
+/// a broken node-gyp install. Unknown regular files are retained for forward
+/// compatibility; only wrappers we can decode are held to target existence.
+fn cached_node_gyp_binary(bin_dir: &Path) -> Option<PathBuf> {
+    let mut opaque_binary = None;
+    let mut stale_wrapper = false;
+    for path in BINARY_NAMES.iter().map(|name| bin_dir.join(name)) {
+        if !path.is_file() {
+            continue;
+        }
+        match aube_linker::sys::resolve_bin_shim(&path) {
+            // A decoded live wrapper wins. Record stale wrappers so their
+            // opaque Windows siblings cannot make the cache look healthy,
+            // while still allowing a later decoded live wrapper to win.
+            Ok(Some(shim)) if shim.target.is_file() => return Some(path),
+            Ok(Some(_)) => stale_wrapper = true,
+            Ok(None) => {
+                opaque_binary.get_or_insert(path);
+            }
+            Err(_) => continue,
+        };
+    }
+    (!stale_wrapper).then_some(opaque_binary).flatten()
 }
 
 fn tool_root() -> miette::Result<PathBuf> {
@@ -162,7 +192,7 @@ pub async fn ensure_cached(project_dir: &Path) -> miette::Result<PathBuf> {
 }
 
 fn tool_tree_usable(tool_dir: &Path, bin_dir: &Path) -> bool {
-    node_gyp_bin_exists(bin_dir)
+    cached_node_gyp_binary(bin_dir).is_some()
         && tool_dir
             .join("node_modules/node-gyp/package.json")
             .is_file()
@@ -198,7 +228,6 @@ pub(crate) fn lazy_shim_bin_dir(project_bin_dir: &Path) -> miette::Result<Option
         return Ok(None);
     }
     let shim_dir = tool_root()?.join("lazy-bin");
-    std::fs::create_dir_all(&shim_dir).into_diagnostic()?;
     write_lazy_shims(&shim_dir)?;
     Ok(Some(shim_dir))
 }
@@ -210,36 +239,54 @@ pub(crate) fn lazy_shim_bin_dir(project_bin_dir: &Path) -> miette::Result<Option
 /// from `PATH`, and npm/pnpm always set it even when a system node-gyp
 /// exists. Writing the shim is cheap (a few tiny files) and never
 /// bootstraps; the real node-gyp install is deferred until a tool runs
-/// `node $npm_config_node_gyp`. Rewritten on every call (like
+/// `node $npm_config_node_gyp`. Content-checked on every call (like
 /// [`lazy_shim_bin_dir`]) so a shipped shim fix self-heals rather than
-/// being pinned to whatever first landed in the cache.
+/// being pinned to whatever first landed in the cache — see
+/// [`write_lazy_shims`] for why that check beats an unconditional
+/// rewrite.
+// `pub`: an embedder that spawns Node itself (nub's file runner) points
+// `npm_config_node_gyp` at this shim so a `node-gyp` invocation inside the
+// child resolves through the cached bootstrap.
 pub fn lazy_js_shim_path() -> miette::Result<PathBuf> {
     let shim_dir = tool_root()?.join("lazy-bin");
-    std::fs::create_dir_all(&shim_dir).into_diagnostic()?;
     write_lazy_shims(&shim_dir)?;
     Ok(shim_dir.join("node-gyp.js"))
 }
 
-/// `pub` so an embedder driving the lazy node-gyp shim re-entry (its own
-/// `current_exe()` is what the shim execs) can print the bootstrapped binary
-/// path. Pairs with the `pub`-widened [`ensure_cached`]; standalone aube is
-/// unaffected.
-pub async fn print_bootstrapped_binary(project_dir: &Path) -> miette::Result<()> {
+/// Materialize aube's cached node-gyp installation and return its executable.
+///
+/// Aube's lazy `node-gyp` shims invoke the current executable with the private
+/// `__node-gyp-bootstrap <project-dir>` command. For a standalone aube process
+/// that executable is aube itself. An embedding host must intercept that
+/// command before its own argument parser, call this function, and print the
+/// returned path to stdout.
+///
+/// The bootstrap stays fully in-process and inherits the outer project's
+/// registry configuration. Aube owns the cache layout, version selection, and
+/// cross-process locking; the host does not need an `aube` or `npm` executable.
+pub async fn bootstrap_node_gyp(project_dir: &Path) -> miette::Result<PathBuf> {
     let bin_dir = ensure_cached(project_dir).await?;
-    println!("{}", bin_dir.join(primary_binary_name()).display());
-    Ok(())
+    node_gyp_binary(&bin_dir).ok_or_else(|| {
+        miette!(
+            code = aube_codes::errors::ERR_AUBE_EMBED_INSTALL_FAILED,
+            "node-gyp bootstrap completed but no executable exists in {}",
+            bin_dir.display()
+        )
+    })
 }
 
-fn write_lazy_shims(shim_dir: &Path) -> miette::Result<()> {
-    // `AUBE_NODE_GYP_PROJECT_DIR` is optional (cwd fallback, matching the
-    // `.js` shim below), so it must be expanded defensively — under
-    // `set -u` a bare `$AUBE_NODE_GYP_PROJECT_DIR` aborts with "unbound
-    // variable" on any path that doesn't set it. `AUBE_NODE_GYP_EXE` is
-    // the one hard requirement, and it gets an explicit message rather
-    // than an exec of the empty string. There is deliberately no fallback
-    // to a bare `node-gyp`: this file *is* the `node-gyp` on PATH, so
-    // resolving that name again would re-exec the shim forever.
-    let sh = r#"#!/usr/bin/env sh
+/// The `node-gyp` shell shim: resolves the real binary through the
+/// hidden `__node-gyp-bootstrap` subcommand, then execs it.
+///
+/// `AUBE_NODE_GYP_PROJECT_DIR` is optional (cwd fallback, matching the `.js`
+/// shim below), so it is expanded defensively — under `set -u` a bare
+/// `$AUBE_NODE_GYP_PROJECT_DIR` aborts with "unbound variable" on any path
+/// that doesn't set it. `AUBE_NODE_GYP_EXE` is the one hard requirement, and
+/// it gets an explicit message rather than an exec of the empty string. There
+/// is deliberately no fallback to a bare `node-gyp`: this file *is* the
+/// `node-gyp` on PATH, so resolving that name again would re-exec the shim
+/// forever.
+const SH_SHIM: &str = r#"#!/usr/bin/env sh
 set -eu
 if [ -z "${AUBE_NODE_GYP_EXE:-}" ]; then
   echo "node-gyp shim invoked outside a lifecycle script (AUBE_NODE_GYP_EXE unset)" >&2
@@ -248,22 +295,14 @@ fi
 real="$("$AUBE_NODE_GYP_EXE" __node-gyp-bootstrap "${AUBE_NODE_GYP_PROJECT_DIR:-$PWD}")"
 exec "$real" "$@"
 "#;
-    let sh_path = shim_dir.join("node-gyp");
-    aube_util::fs_atomic::atomic_write(&sh_path, sh.as_bytes()).into_diagnostic()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&sh_path, std::fs::Permissions::from_mode(0o755))
-            .into_diagnostic()?;
-    }
 
-    // `node-gyp.js`: the value of `npm_config_node_gyp`. Consumers run it
-    // as `node $npm_config_node_gyp …`, so it must be a Node script (not
-    // the shell `node-gyp` shim above). It resolves the real node-gyp the
-    // same way — via the hidden `__node-gyp-bootstrap` subcommand — then
-    // forwards argv. Falls back to a `node-gyp` on PATH when aube's env
-    // markers are absent (e.g. a script spawned outside aube's wrappers).
-    let js = r#"#!/usr/bin/env node
+/// `node-gyp.js`: the value of `npm_config_node_gyp`. Consumers run it
+/// as `node $npm_config_node_gyp …`, so it must be a Node script (not
+/// the shell `node-gyp` shim above). It resolves the real node-gyp the
+/// same way — via the hidden `__node-gyp-bootstrap` subcommand — then
+/// forwards argv. Falls back to a `node-gyp` on PATH when aube's env
+/// markers are absent (e.g. a script spawned outside aube's wrappers).
+const JS_SHIM: &str = r#"#!/usr/bin/env node
 "use strict";
 // aube lazy node-gyp stand-in for npm_config_node_gyp. Resolves (and
 // bootstraps on first use) aube's node-gyp, then forwards argv. Kept
@@ -299,33 +338,25 @@ if (result.error) {
   process.exit(1);
 }
 process.exit(result.status === null ? 1 : result.status);
-"#.replace("__NODE_GYP_BUCKET__", BUCKET);
-    let js_path = shim_dir.join("node-gyp.js");
-    aube_util::fs_atomic::atomic_write(&js_path, js.as_bytes()).into_diagnostic()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&js_path, std::fs::Permissions::from_mode(0o755))
-            .into_diagnostic()?;
-    }
+"#;
 
-    #[cfg(windows)]
-    {
-        // Two cmd.exe rules bite here, and both were live bugs that never
-        // surfaced while the eager bootstrap kept a real node-gyp on PATH:
-        //
-        // 1. `for /f` runs its command through `cmd /c`, which STRIPS the outer
-        //    quote pair when the string both starts and ends with a quote. The
-        //    natural spelling therefore degrades to
-        //    `C:\...\nub.exe" __node-gyp-bootstrap "C:\...\proj` and dies with
-        //    "The filename, directory name, or volume label syntax is
-        //    incorrect" — measured on windows-latest, with and without spaces
-        //    in the path. Wrapping the whole command in one MORE quote pair
-        //    makes that strip leave exactly the intended string.
-        // 2. An undefined `%VAR%` expands to its own literal text, so without
-        //    the fallback the bootstrap receives `%AUBE_NODE_GYP_PROJECT_DIR%`
-        //    as a path. `setlocal` keeps that fallback out of the caller's env.
-        let cmd = r#"@echo off
+/// The Windows `node-gyp.cmd` shim. Two cmd.exe rules bite here, and both
+/// were live bugs that never surfaced while the eager bootstrap kept a real
+/// node-gyp on PATH:
+///
+/// 1. `for /f` runs its command through `cmd /c`, which STRIPS the outer
+///    quote pair when the string both starts and ends with a quote. The
+///    natural spelling therefore degrades to
+///    `C:\...\nub.exe" __node-gyp-bootstrap "C:\...\proj` and dies with
+///    "The filename, directory name, or volume label syntax is incorrect" —
+///    measured on windows-latest, with and without spaces in the path.
+///    Wrapping the whole command in one MORE quote pair makes that strip
+///    leave exactly the intended string.
+/// 2. An undefined `%VAR%` expands to its own literal text, so without the
+///    fallback the bootstrap receives `%AUBE_NODE_GYP_PROJECT_DIR%` as a
+///    path. `setlocal` keeps that fallback out of the caller's env.
+#[cfg(windows)]
+const CMD_SHIM: &str = r#"@echo off
 setlocal
 if not defined AUBE_NODE_GYP_EXE (
   echo node-gyp shim invoked outside a lifecycle script ^(AUBE_NODE_GYP_EXE unset^)>&2
@@ -336,11 +367,86 @@ for /f "usebackq delims=" %%i in (`""%AUBE_NODE_GYP_EXE%" __node-gyp-bootstrap "
 if not defined AUBE_REAL_NODE_GYP exit /b 1
 "%AUBE_REAL_NODE_GYP%" %*
 "#;
-        aube_util::fs_atomic::atomic_write(&shim_dir.join("node-gyp.cmd"), cmd.as_bytes())
+
+/// Write one shim, skipping the write when the file on disk already
+/// matches — see [`write_lazy_shims`] for why that matters.
+///
+/// The comparison reads through a single open handle and takes the mode
+/// from that same handle's `fstat`, so a hit costs open + fstat + read +
+/// close and touches nothing. A miss (absent, stale content, or an exec
+/// bit that got stripped) falls through to the original
+/// atomic-write-then-chmod, which is also what repairs the file.
+fn write_shim_if_stale(path: &Path, contents: &str) -> miette::Result<()> {
+    if shim_is_current(path, contents) {
+        return Ok(());
+    }
+    // `atomic_write` creates the parent dir, so the fast path above can
+    // skip `create_dir_all` entirely: a matching file proves the dir.
+    aube_util::fs_atomic::atomic_write(path, contents.as_bytes()).into_diagnostic()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(SHIM_MODE))
             .into_diagnostic()?;
     }
-
     Ok(())
+}
+
+#[cfg(unix)]
+const SHIM_MODE: u32 = 0o755;
+
+/// True when `path` already holds exactly `contents` and (on unix) is
+/// still executable. Any error — missing file, permission trouble,
+/// unreadable — reports "not current" so the caller rewrites it.
+fn shim_is_current(path: &Path, contents: &str) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(meta) = f.metadata() else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() != contents.len() as u64 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Compare only the permission bits; `st_mode` also carries the
+        // file type, which `is_file` above has already vetted.
+        if meta.permissions().mode() & 0o777 != SHIM_MODE {
+            return false;
+        }
+    }
+    let mut on_disk = Vec::with_capacity(contents.len());
+    f.read_to_end(&mut on_disk).is_ok() && on_disk == contents.as_bytes()
+}
+
+/// Materialize the lazy shims into `shim_dir`.
+///
+/// Called on *every* `aube run` (twice — once for `PATH`, once for
+/// `npm_config_node_gyp`) and once per dependency during install
+/// lifecycle scripts, so the steady state has to be cheap. Each shim is
+/// only rewritten when its on-disk copy differs, which keeps the common
+/// case to a couple of small reads instead of a
+/// create-dir + write-temp + rename + chmod per file per invocation.
+/// Content-addressed rather than pinned, so a shipped shim fix still
+/// self-heals on the first run of the new binary — the bytes change, the
+/// comparison misses, and the file is rewritten.
+///
+/// Not writing unless the content changed also stops concurrent
+/// lifecycle jobs from renaming over each other's shims, and stops the
+/// interrupted-write temp files from accumulating in the cache dir.
+fn write_lazy_shims(shim_dir: &Path) -> miette::Result<()> {
+    write_shim_if_stale(&shim_dir.join("node-gyp"), SH_SHIM)?;
+    write_shim_if_stale(&shim_dir.join("node-gyp.js"), &js_shim())?;
+    #[cfg(windows)]
+    write_shim_if_stale(&shim_dir.join("node-gyp.cmd"), CMD_SHIM)?;
+    Ok(())
+}
+
+fn js_shim() -> String {
+    JS_SHIM.replace("__NODE_GYP_BUCKET__", BUCKET)
 }
 
 /// Materialize the synthetic single-package project that the bootstrap
@@ -451,11 +557,223 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("node_modules/.bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join(primary_binary_name()), "shim").unwrap();
+        std::fs::write(bin.join(BINARY_NAMES[0]), "shim").unwrap();
         assert!(!tool_tree_usable(root.path(), &bin));
         let package = root.path().join("node_modules/node-gyp");
         std::fs::create_dir(&package).unwrap();
         std::fs::write(package.join("package.json"), "{}").unwrap();
         assert!(tool_tree_usable(root.path(), &bin));
+    }
+
+    fn tempdir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aube-gyp-shim-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The shims land even though nothing created `shim_dir` first —
+    /// the entry points rely on `atomic_write` for that.
+    #[test]
+    fn writes_shims_into_a_missing_dir() {
+        let dir = tempdir().join("lazy-bin");
+        write_lazy_shims(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("node-gyp")).unwrap(),
+            SH_SHIM
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("node-gyp.js")).unwrap(),
+            js_shim()
+        );
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// The point of the change: a second call with the content already
+    /// in place must not touch the files.
+    #[test]
+    fn repeat_calls_do_not_rewrite() {
+        let dir = tempdir().join("lazy-bin");
+        write_lazy_shims(&dir).unwrap();
+        let sh = dir.join("node-gyp");
+        let js = dir.join("node-gyp.js");
+        let before = (
+            std::fs::metadata(&sh).unwrap().modified().unwrap(),
+            std::fs::metadata(&js).unwrap().modified().unwrap(),
+        );
+        assert!(shim_is_current(&sh, SH_SHIM));
+        assert!(shim_is_current(&js, &js_shim()));
+
+        write_lazy_shims(&dir).unwrap();
+
+        let after = (
+            std::fs::metadata(&sh).unwrap().modified().unwrap(),
+            std::fs::metadata(&js).unwrap().modified().unwrap(),
+        );
+        assert_eq!(before, after, "shims were rewritten despite matching bytes");
+        // No temp files left behind either.
+        let strays: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(strays.is_empty(), "left temp files behind: {strays:?}");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// Self-heal: a shim whose bytes drifted (an older aube shipped
+    /// different content) is rewritten rather than pinned.
+    #[test]
+    fn stale_content_is_rewritten() {
+        let dir = tempdir().join("lazy-bin");
+        write_lazy_shims(&dir).unwrap();
+        let sh = dir.join("node-gyp");
+        std::fs::write(&sh, "#!/usr/bin/env sh\necho from an older aube\n").unwrap();
+        assert!(!shim_is_current(&sh, SH_SHIM));
+
+        write_lazy_shims(&dir).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&sh).unwrap(), SH_SHIM);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// Same-length-but-different content must not slip through the
+    /// length pre-check.
+    #[test]
+    fn same_length_different_bytes_is_not_current() {
+        let dir = tempdir().join("lazy-bin");
+        write_lazy_shims(&dir).unwrap();
+        let sh = dir.join("node-gyp");
+        let mut drifted = SH_SHIM.as_bytes().to_vec();
+        *drifted.last_mut().unwrap() = b' ';
+        std::fs::write(&sh, &drifted).unwrap();
+        assert_eq!(drifted.len(), SH_SHIM.len());
+        assert!(!shim_is_current(&sh, SH_SHIM));
+
+        write_lazy_shims(&dir).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&sh).unwrap(), SH_SHIM);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn missing_file_is_not_current() {
+        let dir = tempdir();
+        assert!(!shim_is_current(&dir.join("nope"), SH_SHIM));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A shim that lost its exec bit is still repaired — the mode is
+    /// part of "current", not just the bytes.
+    #[cfg(unix)]
+    #[test]
+    fn stripped_exec_bit_is_restored() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().join("lazy-bin");
+        write_lazy_shims(&dir).unwrap();
+        let sh = dir.join("node-gyp");
+        assert_eq!(
+            std::fs::metadata(&sh).unwrap().permissions().mode() & 0o777,
+            SHIM_MODE
+        );
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!shim_is_current(&sh, SH_SHIM));
+
+        write_lazy_shims(&dir).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&sh).unwrap().permissions().mode() & 0o777,
+            SHIM_MODE
+        );
+        assert_eq!(std::fs::read_to_string(&sh).unwrap(), SH_SHIM);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// A directory sitting where the shim belongs must not read as
+    /// current (and must not panic).
+    #[test]
+    fn directory_in_the_way_is_not_current() {
+        let dir = tempdir();
+        let path = dir.join("node-gyp");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(!shim_is_current(&path, SH_SHIM));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_exe_only_cache() {
+        let dir = tempdir();
+        let exe = dir.join("node-gyp.exe");
+        std::fs::write(&exe, b"").unwrap();
+
+        assert_eq!(node_gyp_binary(&dir), Some(exe.clone()));
+        assert!(exe.is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_decoded_wrapper_wins_over_an_earlier_stale_wrapper() {
+        let dir = tempdir();
+        let target = dir.join("target/node-gyp.js");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "#!/usr/bin/env node\n").unwrap();
+        aube_linker::create_bin_shim(
+            &dir,
+            "node-gyp",
+            &target,
+            aube_linker::BinShimOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(target).unwrap();
+        let live_target = dir.join("live.js");
+        std::fs::write(&live_target, "#!/usr/bin/env node\n").unwrap();
+        let shell_wrapper = dir.join("node-gyp");
+        std::fs::write(
+            &shell_wrapper,
+            format!(
+                "#!/bin/sh\n{}live.js\n",
+                aube_linker::sys::POSIX_SHIM_MARKER_PREFIX
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(cached_node_gyp_binary(&dir), Some(shell_wrapper));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cached_wrapper_requires_its_target() {
+        let dir = tempdir();
+        let bin_dir = dir.join("node_modules/.bin");
+        let target = dir.join("node_modules/node-gyp/bin/node-gyp.js");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "#!/usr/bin/env node\n").unwrap();
+        aube_linker::create_bin_shim(
+            &bin_dir,
+            "node-gyp",
+            &target,
+            aube_linker::BinShimOptions {
+                prefer_symlinked_executables: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(node_gyp_bin_exists(&bin_dir));
+        assert!(cached_node_gyp_binary(&bin_dir).is_some());
+
+        std::fs::remove_file(target).unwrap();
+        assert!(
+            node_gyp_bin_exists(&bin_dir),
+            "the wrapper itself should still exist"
+        );
+        assert!(cached_node_gyp_binary(&bin_dir).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

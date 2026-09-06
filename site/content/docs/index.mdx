@@ -70,13 +70,13 @@ In CI, swap `actions/setup-node` for the [setup-nub action](/docs/deployment/git
 
 ### Canary builds
 
-Every code commit to `main` publishes a canary build for all platforms, versioned `<version>-canary.<date>.<n>`:
+A nightly build of `main` publishes a canary for all platforms, versioned `<version>-canary.<date>.<n>`:
 
 ```bash
 npm install -g @nubjs/nub@canary
 ```
 
-The same binaries are attached to the rolling [canary release](https://github.com/nubjs/nub/releases/tag/canary) on GitHub. Canary tracks the newest commit and passes build and smoke checks only; pin back to `@nubjs/nub@latest` to return to the stable channel.
+The same binaries are attached to the rolling [canary release](https://github.com/nubjs/nub/releases/tag/canary) on GitHub. Canary tracks `main` as of the last nightly and passes build and smoke checks only; pin back to `@nubjs/nub@latest` to return to the stable channel.
 
 ## Package management
 

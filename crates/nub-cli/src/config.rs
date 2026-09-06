@@ -25,7 +25,7 @@
 //! schema field [`crate::config_fields`] writes, in the PROJECT file as well as
 //! this one, so there is exactly one writer both files go through.
 //!
-//! The `nub config get/set …` surface is NOT a separate clap verb (the `config`
+//! The `nub config get/set …` surface is NOT a separate parser verb (the `config`
 //! verb already exists as the engine's `.npmrc` config): a key naming a nub
 //! setting is intercepted in `pm_engine::store_config_family` and routed here or
 //! to [`crate::config_fields`], while every other key stays on the `.npmrc` path.

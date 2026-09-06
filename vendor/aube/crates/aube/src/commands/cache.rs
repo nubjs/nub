@@ -16,19 +16,18 @@
 //! This is a read-only / file-deletion command — no project lock,
 //! no lockfile, no node_modules.
 
-use clap::{Args, Subcommand};
 use glob::Pattern;
 use miette::{IntoDiagnostic, miette};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct CacheArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: CacheCommand,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum CacheCommand {
     /// Delete metadata cache for the specified package(s).
     ///
@@ -42,11 +41,13 @@ pub enum CacheCommand {
     List(ListArgs),
     /// List configured registries from the project + user `.npmrc`.
     ///
-    /// Aube stores all packuments in a single flat directory (unlike
+    /// aube stores all packuments in a single flat directory (unlike
     /// pnpm's per-host layout), so this prints the registries you're
     /// currently configured to talk to rather than the registries that
     /// happen to be in the cache.
     ListRegistries,
+    /// Print the directory used for metadata and policy caches.
+    Path,
     /// Remove stale extracted primer files from the metadata cache.
     Prune(PruneArgs),
     /// View the cached metadata for a single package.
@@ -56,16 +57,16 @@ pub enum CacheCommand {
     View(ViewArgs),
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct DeleteArgs {
     /// One or more package name patterns.
     ///
     /// Glob metacharacters (`*`, `?`, `[...]`) are supported.
-    #[arg(required = true)]
+    #[usage(arg, required)]
     pub patterns: Vec<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ListArgs {
     /// Optional glob patterns to filter the listing.
     ///
@@ -73,22 +74,22 @@ pub struct ListArgs {
     pub patterns: Vec<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ViewArgs {
     /// Package name (scoped names like `@babel/core` are accepted).
     pub name: String,
     /// Dump the raw on-disk cache JSON instead of a summary.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PruneArgs {
     /// Minimum age in days before an old primer file is removed.
-    #[arg(long, default_value_t = 30)]
+    #[usage(long, default_value_t = 30, default = "30")]
     pub age_days: u64,
     /// Do not actually delete anything.
-    #[arg(long)]
+    #[usage(long)]
     pub dry_run: bool,
 }
 
@@ -99,7 +100,14 @@ pub async fn run(args: CacheArgs) -> miette::Result<()> {
         CacheCommand::Prune(a) => prune(a),
         CacheCommand::View(a) => view(a),
         CacheCommand::ListRegistries => list_registries(),
+        CacheCommand::Path => path(),
     }
+}
+
+fn path() -> miette::Result<()> {
+    let cwd = super::metadata_cache_anchor()?;
+    println!("{}", super::resolved_cache_dir(&cwd).display());
+    Ok(())
 }
 
 /// Both packument cache directories. Returned in a fixed order so

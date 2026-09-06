@@ -54,6 +54,15 @@ impl PackageReport {
             .filter(|f| f.verdict == Verdict::HardPhantom)
     }
 
+    /// Hard phantoms of the LEGACY DEEP-PATH class — reached only through a
+    /// published file no declared surface references, which Node's legacy
+    /// resolution still lets a consumer import (`redux-persist/lib/integration/
+    /// react` → `react`). Separable so a downstream consumer can weigh them
+    /// against `main`-reachable phantoms rather than merging the two.
+    pub fn deep_path_phantoms(&self) -> impl Iterator<Item = &Finding> {
+        self.findings.iter().filter(|f| f.is_deep_path_only())
+    }
+
     /// Hard phantoms of the subpath-adapter class (subpath-only) — the
     /// consumer-provided-backend pattern that breaks under GVS-default.
     pub fn subpath_adapter_phantoms(&self) -> impl Iterator<Item = &Finding> {
@@ -83,7 +92,18 @@ pub fn analyze_extracted(root: &Path, version: &str) -> Result<PackageReport, St
     let raw =
         std::fs::read(root.join("package.json")).map_err(|e| format!("read package.json: {e}"))?;
     let manifest = Manifest::parse(&raw).ok_or("unparseable package.json / no name")?;
-    let walk = graph::walk(root, &manifest.entry_points);
+    // An `exports` map is the authoritative public surface, so a package that has
+    // one is walked from it alone. Without one, Node's legacy resolution lets a
+    // consumer import ANY published file by deep path — `redux-persist` ships no
+    // `exports`, and its `lib/integration/react.js` (a documented import target)
+    // is reached by nothing from `main`, so its undeclared `require("react")` was
+    // invisible. The eval tool opts in; the shipped disk-eject scan does not (see
+    // `nub_phantom_scan::scan_extracted`), because these findings are speculative
+    // and the eject decision must not act on them unreviewed.
+    let opts = graph::WalkOptions {
+        deep_path_roots: !manifest.has_exports,
+    };
+    let walk = graph::walk_with(root, &manifest.entry_points, opts);
     let findings = classify::classify(&manifest, &walk.references);
     Ok(PackageReport {
         name: manifest.name,
@@ -105,6 +125,66 @@ mod tests {
     use super::analyze_extracted;
     use crate::classify::Verdict;
     use std::fs;
+
+    /// The legacy deep-path class, end to end and both ways round: a package with
+    /// NO `exports` map has every published file speculatively seeded (the
+    /// redux-persist@6.0.0 miss), while the SAME tree with an `exports` map keeps
+    /// its unexported internals out of the walk — `exports` is Node's encapsulation
+    /// boundary, so a file it does not name cannot be imported and must not
+    /// manufacture a phantom.
+    #[test]
+    fn deep_path_roots_apply_only_without_an_exports_map() {
+        let build = |manifest: &str| {
+            let root = std::env::temp_dir().join(format!(
+                "nub-phantom-deep-{}-{:x}",
+                std::process::id(),
+                manifest.len()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join("lib/integration")).unwrap();
+            fs::create_dir_all(root.join("test")).unwrap();
+            fs::write(root.join("package.json"), manifest).unwrap();
+            fs::write(root.join("lib/index.js"), "module.exports = {};").unwrap();
+            // Reachable only by `<pkg>/lib/integration/react` — a documented import
+            // target that `main` never references.
+            fs::write(
+                root.join("lib/integration/react.js"),
+                "var r = require('react');",
+            )
+            .unwrap();
+            // Ships in the tarball, imports a devDep: must stay invisible either way.
+            fs::write(root.join("test/index.js"), "require('ava');").unwrap();
+            root
+        };
+
+        let legacy =
+            build(r#"{"name":"demo","main":"lib/index.js","devDependencies":{"ava":"1"}}"#);
+        let r = analyze_extracted(&legacy, "0.0.0").unwrap();
+        let f = r.findings.iter().find(|f| f.package == "react").unwrap();
+        assert_eq!(f.verdict, Verdict::HardPhantom);
+        assert!(
+            f.is_deep_path_only(),
+            "flagged as the deep-path class: {f:?}"
+        );
+        assert_eq!(r.deep_path_phantoms().count(), 1);
+        assert!(
+            !r.findings.iter().any(|f| f.package == "ava"),
+            "test/ never seeds the walk: {:?}",
+            r.findings
+        );
+        let _ = fs::remove_dir_all(&legacy);
+
+        let encapsulated = build(
+            r#"{"name":"demo","exports":{".":"./lib/index.js"},"devDependencies":{"ava":"1"}}"#,
+        );
+        let r = analyze_extracted(&encapsulated, "0.0.0").unwrap();
+        assert!(
+            r.findings.is_empty(),
+            "an `exports` map bars deep imports — no speculative roots: {:?}",
+            r.findings
+        );
+        let _ = fs::remove_dir_all(&encapsulated);
+    }
 
     /// End-to-end over a hand-built package tree: exercises the whole pipeline —
     /// entry resolution, graph walk, extraction, and classification of every

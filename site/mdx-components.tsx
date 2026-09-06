@@ -10,12 +10,15 @@ import type { ComponentProps, ReactNode } from 'react';
 import { Bench } from '@/components/code';
 import { ShimDemo } from '@/components/shim-demo';
 import { CompatTable } from '@/components/compat-table';
+import { ToolMatrix } from '@/components/tool-matrix';
 import { PmSupport } from '@/components/pm-support-table';
 import { InstallTabs } from '@/components/install-tabs';
 import { TypesSetup } from '@/components/types-setup';
 import { NubIntro } from '@/components/nub-intro';
 import { GetStarted } from '@/components/get-started';
 import { SectionHeading } from '@/components/section-heading';
+import { Figure } from '@/components/figure';
+import { AnsiPlayer } from '@/components/ansi-player';
 
 // Neutral info glyph (lucide "info" path) drawn with currentColor so it inherits a
 // muted tone — no loud accent. Inline SVG keeps us off a runtime icon dependency,
@@ -105,11 +108,14 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     Bench,
     ShimDemo,
     CompatTable,
+    ToolMatrix,
     PmSupport,
     InstallTabs,
     TypesSetup,
     NubIntro,
     GetStarted,
+    Figure,
+    AnsiPlayer,
     ...components,
   };
 }

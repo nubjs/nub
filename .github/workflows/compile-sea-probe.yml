@@ -1,0 +1,116 @@
+# Branch-scoped probe for the single-executable `nub compile` shape on the five
+# runtime cells the dev Mac cannot reach: native darwin-x64, win32-x64,
+# win32-arm64, linux-arm64, and musl on both arches. No pull request — it runs on
+# pushes to the branch below.
+name: compile SEA probe
+
+on:
+  push:
+    branches: [sea-embed]
+    # An EXCLUDE list, not an include one. Two attempts at naming what the probe
+    # depends on both missed real inputs — the second missed the very commit that
+    # fixed the Windows defect the probe had just caught. The dependency set is
+    # most of the repo anyway: the writer, both loaders, the launcher, the
+    # preamble that supplies the asserted `Worker`, the polyfills that consume the
+    # Web Storage signal, and the flag logic that decides both. So the question is
+    # inverted, and only what demonstrably cannot reach a compiled artifact is
+    # listed. Skipping a probe run costs a Windows regression; running one
+    # needlessly costs half an hour of runners on a short-lived branch.
+    paths-ignore:
+      - 'wiki/**'
+      - 'site/**'
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Matching ci.yml. Load-bearing now that the filter is an exclude list: a run
+# takes half an hour across five runners, two of them scarce (macos-15-intel,
+# windows-11-arm), and without this every push in a working session piles another
+# five on top of the ones it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-x64 (native)
+            runner: macos-15-intel
+          - name: win32-x64
+            runner: windows-latest
+          - name: win32-arm64
+            runner: windows-11-arm
+          - name: linux-x64 and linux-x64-musl
+            runner: ubuntu-latest
+            musl: linux-x64-musl
+          - name: linux-arm64 and linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            musl: linux-arm64-musl
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes tags; commit verified upstream
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '24'
+
+      - name: Build nub
+        run: cargo build -p nub-cli --profile fast --features compile
+
+      # Nothing here should open a launcher template — every row asserts the
+      # single-executable shape. It is built anyway so that a payload which
+      # unexpectedly declines fails on the assertion below rather than on a
+      # missing template, which reads like a different bug. Its own workspace, and
+      # it defines no `fast` profile, so this one is `release`.
+      - name: Build the launcher template
+        shell: bash
+        working-directory: crates/nub-launcher
+        run: cargo build --locked --release
+
+      # `fast` inherits `dev`, so the binary lands in target/fast on every host.
+      - name: Resolve the built binaries
+        shell: bash
+        run: |
+          echo "NUB=$(ls target/fast/nub target/fast/nub.exe 2>/dev/null | head -1)" >> "$GITHUB_ENV"
+          echo "__NUB_LAUNCHER_TEMPLATE=$(ls crates/nub-launcher/target/release/nub-launcher crates/nub-launcher/target/release/nub-launcher.exe 2>/dev/null | head -1)" >> "$GITHUB_ENV"
+
+      - name: Native target
+        shell: bash
+        run: node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/native-probe"
+
+      # One runner: these are behaviour assertions rather than platform ones, and
+      # each case compiles its own artifact. `--modern-node-only` drops the case
+      # that targets Node 22, which needs polyfill packages a fresh checkout has
+      # not staged — the same gap that made the old version-gate row meaningless.
+      - name: Entry and Web Storage semantics
+        if: matrix.runner == 'ubuntu-latest'
+        shell: bash
+        run: |
+          node tests/compile-sea-probe/semantics.mjs --nub "$NUB" \
+            --out-dir "$RUNNER_TEMP/semantics" --modern-node-only 1
+
+      - name: musl target, run in Alpine
+        if: matrix.musl
+        shell: bash
+        run: |
+          node tests/compile-sea-probe/probe.mjs --nub "$NUB" --out "$RUNNER_TEMP/musl-probe" \
+            --platform ${{ matrix.musl }} --docker alpine:3.20
+
+      # The version gate that decides the container is deliberately not probed
+      # here. Compiling for a Node below the execArgv floor pulls in the Temporal,
+      # URLPattern and Float16Array polyfills, which live in `runtime/node_modules`
+      # and are not in a fresh checkout, so the step measured the staging rather
+      # than the gate. `compile::sea`'s
+      # `gates_exec_argv_on_the_backport_bands_rather_than_one_floor` covers the
+      # predicate across eleven versions, including the hole across 23.x.

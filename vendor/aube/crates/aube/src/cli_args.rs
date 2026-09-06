@@ -1,6 +1,6 @@
-//! Shared `clap::Args` groups flattened into per-command argument structs.
+//! Shared `usage_rs::Args` groups flattened into per-command argument structs.
 //!
-//! Flags here used to live as `global = true` on the top-level `Cli`,
+//! Flags here used to live as `global` on the top-level `Cli`,
 //! which made every command's `--help` display the union of every flag
 //! the binary accepted. Bucketing them into per-command groups keeps
 //! `--help` focused on what each command actually consumes.
@@ -8,24 +8,23 @@
 //! Pre-subcommand placement (`aube --frozen-lockfile install`,
 //! `aube --registry=URL install`, …) keeps working through the
 //! argv-rewriting pass in `main::lift_per_subcommand_flags`, which
-//! shifts these flags past the subcommand before clap parses argv.
+//! shifts these flags past the subcommand before usage parses argv.
 
 use crate::commands;
-use clap::Args;
 
-#[derive(Args, Debug, Default, Clone, Copy)]
-#[command(next_help_heading = "Lockfile")]
+#[derive(usage_rs::Args, Debug, Default, Clone, Copy)]
+#[usage(next_help_heading = "Lockfile")]
 pub struct LockfileArgs {
     /// Error if the lockfile drifts from package.json.
-    #[arg(long, conflicts_with_all = ["no_frozen_lockfile", "prefer_frozen_lockfile"])]
+    #[usage(long, conflicts("--no-frozen-lockfile", "--prefer-frozen-lockfile"))]
     pub frozen_lockfile: bool,
 
     /// Always re-resolve, even if the lockfile is up to date.
-    #[arg(long, conflicts_with_all = ["frozen_lockfile", "prefer_frozen_lockfile"])]
+    #[usage(long, conflicts("--frozen-lockfile", "--prefer-frozen-lockfile"))]
     pub no_frozen_lockfile: bool,
 
     /// Use the lockfile when fresh, re-resolve when stale.
-    #[arg(long, conflicts_with_all = ["frozen_lockfile", "no_frozen_lockfile"])]
+    #[usage(long, conflicts("--frozen-lockfile", "--no-frozen-lockfile"))]
     pub prefer_frozen_lockfile: bool,
 }
 
@@ -50,53 +49,52 @@ impl LockfileArgs {
     }
 }
 
-#[derive(Args, Debug, Default, Clone)]
-#[command(next_help_heading = "Network")]
+#[derive(usage_rs::Args, Debug, Default, Clone)]
+#[usage(next_help_heading = "Network")]
 pub struct NetworkArgs {
     /// Number of retry attempts for failed registry fetches.
     ///
     /// Overrides `fetchRetries` / `fetch-retries` from `.npmrc` /
     /// `aube-workspace.yaml` when set. Pair with `--fetch-timeout` to
     /// fail fast in scripted test runs.
-    #[arg(long, value_name = "N")]
+    #[usage(long, value_name = "N")]
     pub fetch_retries: Option<u64>,
 
     /// Exponential backoff factor between retry attempts.
     ///
     /// Overrides `fetchRetryFactor` / `fetch-retry-factor` from
-    /// `.npmrc` / `aube-workspace.yaml` when set. Integer-only — the
-    /// underlying `FetchPolicy.retry_factor` is `u32`. Fractional
-    /// values like `1.5` are rejected by clap.
-    #[arg(long, value_name = "N")]
+    /// `.npmrc` / `aube-workspace.yaml` when set. Integer-only;
+    /// fractional values like `1.5` are rejected.
+    #[usage(long, value_name = "N")]
     pub fetch_retry_factor: Option<u64>,
 
     /// Upper bound (ms) on the computed retry backoff.
     ///
     /// Overrides `fetchRetryMaxtimeout` / `fetch-retry-maxtimeout` from
     /// `.npmrc` / `aube-workspace.yaml` when set.
-    #[arg(long, value_name = "MS")]
+    #[usage(long, value_name = "MS")]
     pub fetch_retry_maxtimeout: Option<u64>,
 
     /// Lower bound (ms) on the computed retry backoff.
     ///
     /// Overrides `fetchRetryMintimeout` / `fetch-retry-mintimeout` from
     /// `.npmrc` / `aube-workspace.yaml` when set.
-    #[arg(long, value_name = "MS")]
+    #[usage(long, value_name = "MS")]
     pub fetch_retry_mintimeout: Option<u64>,
 
     /// Per-request HTTP timeout in milliseconds.
     ///
     /// Overrides `fetchTimeout` / `fetch-timeout` from `.npmrc` /
-    /// `aube-workspace.yaml` when set. Applied via `reqwest`'s
-    /// `.timeout()` so it covers headers + body together.
-    #[arg(long, value_name = "MS")]
+    /// `aube-workspace.yaml` when set. Covers the whole request
+    /// (headers and body together).
+    #[usage(long, value_name = "MS")]
     pub fetch_timeout: Option<u64>,
 
     /// Override the default registry URL for this invocation.
     ///
     /// Use this npm registry URL for package metadata, tarballs,
     /// audit requests, dist-tags, and registry writes.
-    #[arg(long, value_name = "URL")]
+    #[usage(long, value_name = "URL")]
     pub registry: Option<String>,
 }
 
@@ -133,29 +131,23 @@ impl NetworkArgs {
     }
 }
 
-#[derive(Args, Debug, Default, Clone, Copy)]
-#[command(next_help_heading = "Virtual store")]
+#[derive(usage_rs::Args, Debug, Default, Clone, Copy)]
+#[usage(next_help_heading = "Virtual store")]
 pub struct VirtualStoreArgs {
     /// Force the shared global virtual store off for this invocation.
     ///
     /// Packages are materialized inside the project's virtual store
-    /// instead of symlinked from `~/.cache/aube/virtual-store/`.
-    #[arg(
-        long,
-        visible_alias = "disable-gvs",
-        conflicts_with = "enable_global_virtual_store"
-    )]
+    /// instead of symlinked from the shared tree under
+    /// `<cacheDir>/virtual-store/v1/` (by default
+    /// `~/.cache/aube/virtual-store/v1/`).
+    #[usage(long, long = "disable-gvs", conflicts = "--enable-gvs")]
     pub disable_global_virtual_store: bool,
 
     /// Force the shared global virtual store on for this invocation.
     ///
     /// Overrides CI's default per-project materialization and the
     /// `disableGlobalVirtualStoreForPackages` auto-disable heuristic.
-    #[arg(
-        long,
-        visible_alias = "enable-gvs",
-        conflicts_with = "disable_global_virtual_store"
-    )]
+    #[usage(long, long = "enable-gvs", conflicts = "--disable-gvs")]
     pub enable_global_virtual_store: bool,
 }
 

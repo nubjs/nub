@@ -220,8 +220,9 @@ pub struct WorkspaceConfig {
 
     /// Lockfile format written when the project has no lockfile yet
     /// (`aube` | `pnpm` | `npm` | `yarn` | `bun`, default `aube`).
-    /// Same semantics as the `defaultLockfileFormat` setting resolved
-    /// via `aube_settings::resolved`; declared here so the
+    /// Existing lockfiles still take precedence. Same semantics as the
+    /// `defaultLockfileFormat` setting resolved via
+    /// `aube_settings::resolved`; declared here so the
     /// `workspace_yaml_keys_deserialize_onto_workspace_config` parity
     /// test sees a real field behind the workspaceYaml source.
     #[serde(default)]
@@ -418,8 +419,8 @@ pub struct WorkspaceConfig {
     /// Per-package allowlist for dependency lifecycle scripts. Keys are
     /// pnpm-style patterns (`name`, `name@version`, `name@v1 || v2`);
     /// values are `true` to allow or `false` to deny. Merged with
-    /// `package.json`'s `pnpm.allowBuilds` — workspace-level entries
-    /// take precedence for the same key.
+    /// `package.json`'s `pnpm.allowBuilds`; an explicit denial from
+    /// either source takes precedence for the same key.
     #[serde(default)]
     pub allow_builds: BTreeMap<String, yaml_serde::Value>,
 
@@ -452,8 +453,8 @@ pub struct WorkspaceConfig {
     #[serde(default, rename = "childConcurrency")]
     pub child_concurrency: Option<u64>,
 
-    /// Cap concurrent tarball downloads. When unset, aube uses an
-    /// auto-scaled worker count x3 default, clamped to 16-64. Same
+    /// Seed the adaptive tarball-download concurrency. When unset,
+    /// aube auto-scales worker count x3, clamped to 16-128. Same
     /// typed/raw duality as `child_concurrency`.
     #[serde(default, rename = "networkConcurrency")]
     pub network_concurrency: Option<u64>,
@@ -506,9 +507,13 @@ pub struct WorkspaceConfig {
 
     // -- Catalog Settings --
     /// Drop catalog entries that no importer references after resolve.
-    /// Wired through `aube_settings::resolved::cleanup_unused_catalogs`;
+    /// Wired through `aube_settings::resolved::catalog_prune`;
     /// the typed field exists only so `meta::workspace_yaml_keys_...`
     /// sees the key as a real field and doesn't fall through to `extra`.
+    #[serde(default)]
+    pub catalog_prune: Option<bool>,
+
+    /// Deprecated pre-pnpm-11.22 alias for `catalogPrune`.
     #[serde(default)]
     pub cleanup_unused_catalogs: Option<bool>,
 

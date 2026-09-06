@@ -200,7 +200,7 @@ pub struct Embedder {
     /// unaffected. Embedder-fixed.
     pub self_engines_check: bool,
     /// When `true` (aube's default), this tool owns its own self-update:
-    /// the update notifier (and its `aube.jdx.dev` endpoints) runs. An
+    /// the update notifier (and its `aube.sh` endpoints) runs. An
     /// embedder that owns its own upgrade path sets this `false` so those
     /// code paths never run. Embedder-fixed.
     pub self_update_enabled: bool,
@@ -352,28 +352,6 @@ pub struct Embedder {
     /// equals the incumbent PM's, or an eager precise refusal" (nub) sets
     /// this `true`. Embedder-fixed: it's the host's call, not the user's.
     pub strict_unsupported_source: bool,
-    /// When `true` (aube's default), an online install under a re-validating
-    /// trust posture (`trustPolicy=no-downgrade` or `paranoid`) disables the
-    /// warm "already up to date" short-circuit, so even a fully-satisfied tree
-    /// re-runs the resolve/fetch/link pipeline to re-assert the trust check.
-    /// When `false`, a fully-satisfied no-op (`check_needs_install` => `None`:
-    /// lockfile, manifest, settings, layout all match the on-disk tree) takes
-    /// the short-circuit regardless of trust policy.
-    ///
-    /// Safe because the short-circuit is reachable ONLY on a no-op — zero
-    /// resolve, zero fetch, zero link — whose bytes were already trust-validated
-    /// when they were installed; `trustPolicy` is a resolve-time downgrade
-    /// defense with nothing to validate when no version is (re)resolved. Any
-    /// install that does REAL work returns `Some(reason)` and falls through to
-    /// the full pipeline, where the trust check still fires during resolution —
-    /// so this never weakens the guard on an install that installs anything. It
-    /// only drops the redundant re-validation of an unchanged tree, matching
-    /// aube's own offline path and `aube run` auto-install (both already
-    /// short-circuit a satisfied tree with no trust gate), and matching npm /
-    /// pnpm / bun (none re-validate a satisfied tree). An embedder that wants the
-    /// instant warm exit (nub) sets this `false`; standalone aube keeps `true`
-    /// so its online-install behavior is byte-for-byte unchanged. Embedder-fixed.
-    pub warm_trust_revalidate: bool,
     /// Embedder-fixed default (in **minutes**) for `trustPolicyIgnoreAfter`
     /// when the user leaves that setting unset: a picked version whose registry
     /// publish time is older than this window is exempted from the `trustPolicy`
@@ -499,9 +477,6 @@ pub const AUBE: Embedder = Embedder {
     // (warn+drop for berry, reclassify-to-registry for classic/bun) so its
     // default install behavior is byte-identical.
     strict_unsupported_source: false,
-    // Standalone aube re-validates the trust posture on every online install,
-    // even a fully-satisfied no-op, so its online-install behavior is unchanged.
-    warm_trust_revalidate: true,
     // Standalone aube leaves `trustPolicyIgnoreAfter` unset, so the downgrade
     // check applies to every version — behavior byte-for-byte unchanged.
     trust_policy_ignore_after_default: None,

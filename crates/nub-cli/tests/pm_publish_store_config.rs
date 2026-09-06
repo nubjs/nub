@@ -1384,7 +1384,7 @@ fn config_help_lists_the_wired_subcommands_only() {
     assert_eq!(code, 0, "stderr: {stderr}");
 
     let commands = stdout
-        .split("Options:")
+        .split("Flags:")
         .next()
         .expect("help starts with the command list");
     for wired in ["get", "set", "delete", "list", "init", "path"] {

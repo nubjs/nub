@@ -99,6 +99,8 @@ pub const RT_RCDATA: WORD = 0x0A;
 pub const RT_GROUP_ICON: WORD = 0x0E;
 // libsui: added for PortableExecutable::set_version_info.
 pub const RT_VERSION: WORD = 0x10;
+// libsui: added for PortableExecutable::set_manifest.
+pub const RT_MANIFEST: WORD = 0x18;
 
 // https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#section-flags
 pub const IMAGE_SCN_CNT_INITIALIZED_DATA: DWORD = 0x00000040;

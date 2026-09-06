@@ -16,7 +16,7 @@
 //! sibling-dedupe → lockfile-reuse → fetch-and-pick) is staged for a
 //! later refactor.
 
-use super::fetch::FetchScheduler;
+use super::fetch::{FetchKey, FetchScheduler, TrustHistory};
 use super::seed::seed_direct_deps;
 use super::vulnerable::{is_vulnerable, prefer_non_vulnerable_pick};
 use crate::local_source::{
@@ -192,11 +192,16 @@ pub(crate) struct ResolveDriver<'a> {
     /// mismatch or `pnpm.ignoredOptionalDependencies`).
     skipped_optional_dependencies: BTreeMap<String, BTreeMap<String, String>>,
     /// Packument fetches that failed (registry 404, network error, etc.),
-    /// keyed by package name. Errors are stored here instead of
+    /// keyed by request identity. Errors are stored here instead of
     /// propagated from `join_next` so a failed fetch for one package
-    /// doesn't crash the wrong task. Checked after the fetch-wait loop
-    /// to decide skip (optional) vs propagate (required).
-    failed_fetches: FxHashMap<String, Error>,
+    /// doesn't crash the wrong task or suppress another exact version.
+    /// Checked after the fetch-wait loop to decide skip (optional) vs
+    /// propagate (required).
+    failed_fetches: FxHashMap<FetchKey, Error>,
+    /// Compact trust histories fetched alongside an exact optional pick,
+    /// keyed by registry name. Presence also marks the cached packument as
+    /// non-authoritative, forcing a full refresh before a range pick.
+    trust_histories: FxHashMap<String, TrustHistory>,
     /// `name@refused -> substitute` for every pick the trust gate refused and
     /// the resolver then backtracked past, so the substitution notice is
     /// printed once per outcome rather than once per parent that depends on
@@ -284,8 +289,10 @@ impl<'a> ResolveDriver<'a> {
                 if resolver.auto_install_peers {
                     names.extend(
                         manifest
-                            .non_optional_peer_dependencies()
-                            .map(|(name, _)| name.clone()),
+                            .peer_dependencies
+                            .keys()
+                            .filter(|name| !manifest.peer_dependency_is_optional(name))
+                            .cloned(),
                     );
                 }
                 (importer_path.clone(), names)
@@ -391,6 +398,7 @@ impl<'a> ResolveDriver<'a> {
             resolved_times: BTreeMap::new(),
             skipped_optional_dependencies: BTreeMap::new(),
             failed_fetches: FxHashMap::default(),
+            trust_histories: FxHashMap::default(),
             trust_repicks: FxHashSet::default(),
             catalog_picks: BTreeMap::new(),
             deferred_transitives: Vec::new(),
@@ -427,10 +435,21 @@ impl<'a> ResolveDriver<'a> {
         let resolved_count = self.resolved.len();
         let lockfile_reuse_count = self.lockfile_reuse_count;
         let packument_fetch_count = self.packument_fetch_count;
+        let packument_cache_count = self.resolver.cache.len();
+        let packument_version_count: usize = self
+            .resolver
+            .cache
+            .values()
+            .map(|packument| packument.versions.len())
+            .sum();
         aube_util::diag::instant_lazy(aube_util::diag::Category::Resolver, "decision_mix", || {
             format!(
-                r#"{{"resolved":{},"lockfile_reused":{},"packuments_fetched":{}}}"#,
-                resolved_count, lockfile_reuse_count, packument_fetch_count
+                r#"{{"resolved":{},"lockfile_reused":{},"packuments_fetched":{},"packuments_cached":{},"packument_versions_cached":{}}}"#,
+                resolved_count,
+                lockfile_reuse_count,
+                packument_fetch_count,
+                packument_cache_count,
+                packument_version_count
             )
         });
 
@@ -453,6 +472,25 @@ impl<'a> ResolveDriver<'a> {
     /// popped.
     fn seed_initial_prefetches(&mut self) {
         for task in self.queue.iter() {
+            // Time-aware resolution needs publish times and trust evidence
+            // from package history. Exact optionals use the compact-history
+            // path so every platform variant can stay in the lockfile without
+            // retaining every release's dependency metadata.
+            if self.needs_time
+                && task.dep_type == DepType::Optional
+                && node_semver::Version::parse(&task.range).is_ok()
+            {
+                let ready = self
+                    .resolver
+                    .cache
+                    .get(task.name.as_str())
+                    .is_some_and(|packument| packument.versions.contains_key(&task.range));
+                if !ready {
+                    self.fetcher
+                        .ensure_exact_optional_fetch(task.name.as_str(), task.range.as_str());
+                }
+                continue;
+            }
             if !self.resolver.is_prefetchable(
                 task.name.as_str(),
                 task.range.as_str(),
@@ -464,7 +502,7 @@ impl<'a> ResolveDriver<'a> {
                 continue;
             }
             if !self.resolver.cache.contains_key(task.name.as_str()) {
-                self.fetcher.ensure_fetch(task.name.as_str());
+                self.fetcher.ensure_fetch(task.name.as_str(), false);
             }
         }
     }
@@ -485,9 +523,49 @@ impl<'a> ResolveDriver<'a> {
     /// prefetching names already covered by the lockfile check
     /// `existing_names` explicitly before invoking this.
     fn ensure_fetch(&mut self, name: &str) {
-        if !self.resolver.cache.contains_key(name) && !self.failed_fetches.contains_key(name) {
-            self.fetcher.ensure_fetch(name);
+        let force_refresh = self.trust_histories.contains_key(name);
+        let needs_full = !self.resolver.cache.contains_key(name) || force_refresh;
+        let key = FetchKey::Full(name.to_string());
+        if needs_full && !self.failed_fetches.contains_key(&key) {
+            self.fetcher.ensure_fetch(name, force_refresh);
         }
+    }
+
+    fn ensure_exact_optional_fetch(&mut self, name: &str, version: &str) {
+        let ready = self
+            .resolver
+            .cache
+            .get(name)
+            .is_some_and(|packument| packument.versions.contains_key(version));
+        let key = FetchKey::Exact(name.to_string(), version.to_string());
+        if !ready && !self.failed_fetches.contains_key(&key) {
+            self.fetcher.ensure_exact_optional_fetch(name, version);
+        }
+    }
+
+    fn cache_satisfies(&self, name: &str, exact_optional_version: Option<&str>) -> bool {
+        let Some(packument) = self.resolver.cache.get(name) else {
+            return false;
+        };
+        if let Some(version) = exact_optional_version {
+            return packument.versions.contains_key(version);
+        }
+        !self.trust_histories.contains_key(name)
+    }
+
+    fn record_fetch_result(
+        &mut self,
+        name: String,
+        packument: aube_registry::Packument,
+        trust_history: Option<TrustHistory>,
+    ) {
+        merge_fetch_result(
+            &mut self.resolver.cache,
+            &mut self.trust_histories,
+            name,
+            packument,
+            trust_history,
+        );
     }
 
     /// Outer BFS loop. Pops tasks until the queue drains, with a
@@ -738,28 +816,52 @@ impl<'a> ResolveDriver<'a> {
         let _diag_task_wait =
             aube_util::diag::Span::new(aube_util::diag::Category::Resolver, "task_wait_packument")
                 .with_meta_fn(|| format!(r#"{{"name":{}}}"#, aube_util::diag::jstr(&fetch_name)));
-        while !self.resolver.cache.contains_key(&fetch_name)
-            && !self.failed_fetches.contains_key(&fetch_name)
+        let exact_optional_version = (self.needs_time
+            && task.dep_type == DepType::Optional
+            && node_semver::Version::parse(&task.range).is_ok())
+        .then_some(task.range.as_str());
+        let fetch_key = exact_optional_version.map_or_else(
+            || FetchKey::Full(fetch_name.clone()),
+            |version| FetchKey::Exact(fetch_name.clone(), version.to_string()),
+        );
+        // A compact exact result that landed after an optional full-fetch
+        // failure proves the package is reachable and leaves a trust-history
+        // marker requiring authoritative full metadata. Discard the stale
+        // prefetch failure so this range task can perform that refresh.
+        if exact_optional_version.is_none() && self.trust_histories.contains_key(&fetch_name) {
+            self.failed_fetches.remove(&fetch_key);
+        }
+        while !self.cache_satisfies(&fetch_name, exact_optional_version)
+            && (!self.failed_fetches.contains_key(&fetch_key)
+                || (exact_optional_version.is_none()
+                    && self.fetcher.has_active_exact_fetch(&fetch_name)))
         {
-            self.ensure_fetch(&fetch_name);
+            if let Some(version) = exact_optional_version {
+                self.ensure_exact_optional_fetch(&fetch_name, version);
+            } else {
+                self.ensure_fetch(&fetch_name);
+            }
             match self.fetcher.join_next().await {
-                Some(Ok(Ok((name, packument, primer_seed)))) => {
-                    self.fetcher.release_in_flight(&name);
-                    if let Some(seed) = primer_seed {
-                        self.fetcher.note_primer_seeded(name.clone(), seed);
+                Some(Ok((key, Ok((name, packument, source, trust_history))))) => {
+                    if let FetchKey::Exact(exact_name, _) = &key {
+                        self.failed_fetches
+                            .remove(&FetchKey::Full(exact_name.clone()));
                     }
-                    self.resolver.cache.insert(name, packument);
+                    if let super::fetch::FetchSource::Primer { sparse } = source {
+                        self.fetcher
+                            .note_primer_seeded(name.clone(), super::fetch::PrimerSeed { sparse });
+                    }
+                    self.record_fetch_result(name, packument, trust_history);
                     self.packument_fetch_count += 1;
                 }
-                Some(Ok(Err(e))) => {
+                Some(Ok((key, Err(e)))) => {
                     // Store failed fetches in the side table instead
                     // of propagating immediately. pnpm parity.
-                    let name = match &e {
-                        crate::Error::Registry(n, _) => n.clone(),
+                    match &e {
+                        crate::Error::Registry(_, _) => {}
                         _ => return Err(e),
-                    };
-                    self.fetcher.release_in_flight(&name);
-                    self.failed_fetches.insert(name, e);
+                    }
+                    self.failed_fetches.insert(key, e);
                 }
                 Some(Err(join_err)) => {
                     return Err(Error::Registry("(join)".to_string(), join_err.to_string()));
@@ -779,12 +881,19 @@ impl<'a> ResolveDriver<'a> {
         }
         self.packument_fetch_time += wait_start.elapsed();
 
+        // A different request shape may have populated this task's data while
+        // its own request failed (for example, a full fetch satisfying an
+        // exact optional). In that case the usable cache entry wins.
+        if self.cache_satisfies(&fetch_name, exact_optional_version) {
+            self.failed_fetches.remove(&fetch_key);
+        }
+
         // Post-loop: if this task's packument fetch failed, decide
         // whether to skip (optional) or propagate (required).
         // For optional deps the error stays in `failed_fetches` so
         // sibling tasks that share the same transitive optional dep
         // don't re-fetch and re-fail for each importer.
-        if task.dep_type == DepType::Optional && self.failed_fetches.contains_key(&fetch_name) {
+        if task.dep_type == DepType::Optional && self.failed_fetches.contains_key(&fetch_key) {
             tracing::debug!(
                 "skipping optional dep {}@{}: registry fetch failed",
                 task.name,
@@ -795,7 +904,7 @@ impl<'a> ResolveDriver<'a> {
             }
             return Ok(());
         }
-        if let Some(e) = self.failed_fetches.remove(&fetch_name) {
+        if let Some(e) = self.failed_fetches.remove(&fetch_key) {
             return Err(e);
         }
 
@@ -829,11 +938,12 @@ impl<'a> ResolveDriver<'a> {
             .map(|p| p.version.as_str())
             .filter(|v| !is_vulnerable(task.registry_name(), v, &self.resolver.vulnerable_ranges));
 
-        // Direct deps in time-based mode pick the lowest
-        // satisfying version; everything else (transitives,
-        // and all picks in Highest mode) picks highest.
-        let pick_lowest =
-            self.resolver.resolution_mode == ResolutionMode::TimeBased && task.is_root;
+        // Direct deps in time-based and lowest-direct modes pick the
+        // lowest satisfying version; everything else picks highest.
+        let pick_lowest = matches!(
+            self.resolver.resolution_mode,
+            ResolutionMode::TimeBased | ResolutionMode::LowestDirect
+        ) && task.is_root;
         // `minimumReleaseAgeExclude` is applied per-candidate-version
         // inside `pick_version` via the `is_age_exempt` closure below. A
         // name-only exclude rule matches every version; a `pkg@1.2.3`
@@ -1071,6 +1181,7 @@ impl<'a> ResolveDriver<'a> {
                     self.packument_fetch_time += fetch_start.elapsed();
                     self.packument_fetch_count += 1;
                     self.resolver.cache.insert(registry_name.clone(), live);
+                    self.trust_histories.remove(&registry_name);
                 }
                 // Only surface `AgeGate` when the cutoff actually
                 // came from `minimumReleaseAge`. When it came from
@@ -1160,14 +1271,28 @@ impl<'a> ResolveDriver<'a> {
         // compare. The check needs the live packument's `time`
         // map and all version metadata, both of which are still
         // in scope here from L1191.
+        // A compact history fetched alongside an exact optional pick carries
+        // the prior releases' trust evidence without their dependency
+        // metadata, so the check reads it instead of the version-truncated
+        // packument that landed with it.
         if self.resolver.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade
-            && let Err(err) = crate::trust::check_no_downgrade(
-                packument,
-                &picked_ref.version,
-                picked_ref,
-                &self.resolver.dependency_policy.trust_policy_exclude,
-                self.resolver.dependency_policy.trust_policy_ignore_after,
-            )
+            && let Err(err) = match self.trust_histories.get(&registry_name) {
+                Some(history) => crate::trust::check_no_downgrade_compact(
+                    packument,
+                    &picked_ref.version,
+                    picked_ref,
+                    history,
+                    &self.resolver.dependency_policy.trust_policy_exclude,
+                    self.resolver.dependency_policy.trust_policy_ignore_after,
+                ),
+                None => crate::trust::check_no_downgrade(
+                    packument,
+                    &picked_ref.version,
+                    picked_ref,
+                    &self.resolver.dependency_policy.trust_policy_exclude,
+                    self.resolver.dependency_policy.trust_policy_ignore_after,
+                ),
+            }
         {
             let downgrade = match err {
                 crate::trust::TrustCheckError::Downgrade(d) => d,
@@ -1452,7 +1577,7 @@ impl<'a> ResolveDriver<'a> {
                 name: task.name.clone(),
                 dep_path: dep_path.clone(),
                 dep_type: task.dep_type,
-                specifier: task.original_specifier.clone(),
+                specifier: task.lockfile_specifier(),
             });
         }
 
@@ -1794,7 +1919,9 @@ impl<'a> ResolveDriver<'a> {
                 );
                 continue;
             }
-            if !self.existing_names.contains(dep_name.as_str())
+            if self.needs_time && node_semver::Version::parse(dep_range).is_ok() {
+                self.ensure_exact_optional_fetch(dep_name, dep_range);
+            } else if !self.existing_names.contains(dep_name.as_str())
                 && self.resolver.is_prefetchable(
                     dep_name.as_str(),
                     dep_range.as_str(),
@@ -2104,7 +2231,7 @@ impl<'a> ResolveDriver<'a> {
                 name: task.name.clone(),
                 dep_path: dep_path.clone(),
                 dep_type: task.dep_type,
-                specifier: task.original_specifier.clone(),
+                specifier: task.lockfile_specifier(),
             });
         }
 
@@ -2228,8 +2355,8 @@ impl<'a> ResolveDriver<'a> {
         // Catalog protocol: rewrite `catalog:` / `catalog:<name>` to
         // the workspace catalog's actual range *before* the override
         // loop, so overrides can still target a catalog dep by bare
-        // name. The original `catalog:...` text stays in
-        // `original_specifier` for the lockfile importer.
+        // name. The raw `catalog:...` text stays in `original_specifier`;
+        // the separate lockfile field changes only if an override fires.
         if let Some((catalog_name, real_range)) = self
             .resolver
             .resolve_catalog_spec(&task.name, &task.range)?
@@ -2276,6 +2403,13 @@ impl<'a> ResolveDriver<'a> {
                     }
                     None => (override_spec, None),
                 };
+                // pnpm records the override-applied specifier for direct
+                // importer dependencies. Keep ordinary `catalog:` dependencies
+                // verbatim, but once an override fires use its effective value
+                // (including catalog expansion) in the lockfile importer.
+                if task.is_root {
+                    task.lockfile_override_specifier = Some(effective_spec.clone());
+                }
                 if task.range != effective_spec {
                     if let Some((catalog_name, real_range)) = pending_pick {
                         self.catalog_picks
@@ -2442,7 +2576,7 @@ impl<'a> ResolveDriver<'a> {
                 name: task.name.clone(),
                 dep_path: dep_path.clone(),
                 dep_type: task.dep_type,
-                specifier: task.original_specifier.clone(),
+                specifier: task.lockfile_specifier(),
             });
         }
         if let Some(ref parent_dp) = task.parent
@@ -2676,7 +2810,7 @@ impl<'a> ResolveDriver<'a> {
                 name: task.name.clone(),
                 dep_path: dep_path.clone(),
                 dep_type: task.dep_type,
-                specifier: task.original_specifier.clone(),
+                specifier: task.lockfile_specifier(),
             });
         }
         if let Some(ref parent_dp) = task.parent
@@ -2900,6 +3034,74 @@ impl<'a> ResolveDriver<'a> {
     }
 }
 
+fn merge_fetch_result(
+    cache: &mut FxHashMap<String, aube_registry::Packument>,
+    trust_histories: &mut FxHashMap<String, TrustHistory>,
+    name: String,
+    mut packument: aube_registry::Packument,
+    trust_history: Option<TrustHistory>,
+) {
+    let Some(history) = trust_history else {
+        if trust_histories.contains_key(&name)
+            && let Some(existing) = cache.get(&name)
+        {
+            let missing_versions = existing
+                .versions
+                .iter()
+                .filter(|(version, _)| !packument.versions.contains_key(*version))
+                .map(|(version, metadata)| (version.clone(), metadata.clone()))
+                .collect::<Vec<_>>();
+            if !missing_versions.is_empty() {
+                for (version, metadata) in missing_versions {
+                    packument.versions.insert(version, metadata);
+                }
+                // Compact history contains publish times for every historical
+                // release used by no-downgrade checks, not only the selected
+                // version retained in `versions`.
+                for (version, time) in &existing.time {
+                    packument
+                        .time
+                        .entry(version.clone())
+                        .or_insert_with(|| time.clone());
+                }
+                cache.insert(name, packument);
+                return;
+            }
+        }
+        cache.insert(name.clone(), packument);
+        trust_histories.remove(&name);
+        return;
+    };
+
+    // A full result is normally authoritative. It can be stale, though: a
+    // later exact endpoint response may contain a newly published version
+    // that the cached full packument lacks. Preserve the full data while
+    // merging that missing exact version and its fresher compact history.
+    if !trust_histories.contains_key(&name)
+        && let Some(existing) = cache.get_mut(&name)
+    {
+        let has_missing_version = packument
+            .versions
+            .keys()
+            .any(|version| !existing.versions.contains_key(version));
+        if !has_missing_version {
+            return;
+        }
+        existing.versions.append(&mut packument.versions);
+        existing.time.append(&mut packument.time);
+        trust_histories.insert(name, history);
+        return;
+    }
+
+    if let Some(existing) = cache.get_mut(&name) {
+        existing.versions.append(&mut packument.versions);
+        existing.time.append(&mut packument.time);
+    } else {
+        cache.insert(name.clone(), packument);
+    }
+    trust_histories.entry(name).or_default().extend(history);
+}
+
 fn attach_integrity_to_git_source(local: &mut LocalSource, integrity: Option<&str>) {
     if let LocalSource::Git(git) = local
         && git.integrity.is_none()
@@ -2913,6 +3115,164 @@ mod tests {
     use super::*;
     use crate::semver_util::is_semver_range;
     use aube_lockfile::GitSource;
+
+    fn test_packument(versions: &[&str]) -> aube_registry::Packument {
+        aube_registry::Packument {
+            name: "shared".to_string(),
+            modified: None,
+            versions: versions
+                .iter()
+                .map(|version| {
+                    (
+                        (*version).to_string(),
+                        serde_json::from_value(serde_json::json!({
+                            "name": "shared",
+                            "version": version,
+                        }))
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+            dist_tags: BTreeMap::new(),
+            time: versions
+                .iter()
+                .map(|version| {
+                    (
+                        (*version).to_string(),
+                        "2024-01-01T00:00:00.000Z".to_string(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn test_history() -> TrustHistory {
+        [(
+            "0.9.0".to_string(),
+            aube_registry::VersionTrustMetadata {
+                approver: None,
+                npm_user: None,
+                dist: None,
+            },
+        )]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn full_fetch_remains_authoritative_when_it_finishes_first() {
+        let mut cache = FxHashMap::default();
+        let mut histories = FxHashMap::default();
+
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0", "2.0.0"]),
+            None,
+        );
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0"]),
+            Some(test_history()),
+        );
+
+        assert_eq!(cache["shared"].versions.len(), 2);
+        assert!(!histories.contains_key("shared"));
+    }
+
+    #[test]
+    fn full_fetch_replaces_compact_result_when_it_finishes_last() {
+        let mut cache = FxHashMap::default();
+        let mut histories = FxHashMap::default();
+
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0"]),
+            Some(test_history()),
+        );
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0", "2.0.0"]),
+            None,
+        );
+
+        assert_eq!(cache["shared"].versions.len(), 2);
+        assert!(!histories.contains_key("shared"));
+    }
+
+    #[test]
+    fn stale_full_fetch_preserves_compact_version_when_it_finishes_last() {
+        let mut cache = FxHashMap::default();
+        let mut histories = FxHashMap::default();
+
+        let mut compact = test_packument(&["2.0.0"]);
+        compact
+            .time
+            .insert("0.9.0".to_string(), "2023-01-01T00:00:00.000Z".to_string());
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            compact,
+            Some(test_history()),
+        );
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0"]),
+            None,
+        );
+
+        assert_eq!(
+            cache["shared"]
+                .versions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["1.0.0", "2.0.0"]
+        );
+        assert!(histories.contains_key("shared"));
+        assert_eq!(cache["shared"].time["0.9.0"], "2023-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn compact_fetch_adds_exact_version_missing_from_stale_full_result() {
+        let mut cache = FxHashMap::default();
+        let mut histories = FxHashMap::default();
+
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0"]),
+            None,
+        );
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["2.0.0"]),
+            Some(test_history()),
+        );
+
+        assert_eq!(
+            cache["shared"]
+                .versions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["1.0.0", "2.0.0"]
+        );
+        assert!(histories.contains_key("shared"));
+    }
 
     #[test]
     fn attach_integrity_to_git_source_fills_missing_git_integrity() {

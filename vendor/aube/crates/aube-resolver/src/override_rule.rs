@@ -98,75 +98,55 @@ fn parse_key(key: &str) -> Option<(Vec<Segment>, Segment)> {
 
 /// Split a selector key into its segment strings. pnpm uses `>` as a
 /// hard separator between `name[@versionreq]` segments; yarn uses `/`
-/// and expects scoped names to count as a single segment. We
-/// auto-detect: `>` wins if present, otherwise fall back to yarn-style
-/// slash tokenization that respects scopes.
+/// and expects scoped names to count as a single segment. Both passes
+/// are applied because a yarn-style selector may contain `>` inside a
+/// version comparator.
 ///
-/// The `>` split isn't a blind `str::split('>')` because a `>`
-/// character is also legal *inside* a version req (`>=2`, `>1.0.0`).
-/// We walk the key instead, tracking whether we're sitting inside a
-/// version req (entered via an `@` that isn't the scope prefix) and
-/// only splitting on `>` that *starts a new segment* — i.e. isn't
-/// followed by something that looks like a semver comparator
-/// continuation (`=`, a digit, whitespace, or a leading `v`). Any
-/// other `>` ends the current version req and introduces the next
-/// segment.
+/// The `>` split isn't a blind `str::split('>')` because a `>` is also
+/// legal inside a version req (`>=2`, `>1.0.0`). pnpm recognizes a
+/// parent delimiter with `/[^ |@]>/`: a `>` preceded by a space, `|`,
+/// or `@` remains part of the range, and every other `>` is a boundary.
 fn split_segments(key: &str) -> Option<Vec<&str>> {
-    if key.contains('>') {
-        let mut parts: Vec<&str> = Vec::new();
-        let bytes = key.as_bytes();
-        let mut start = 0;
-        let mut i = 0;
-        // `in_req` flips true as soon as we see the `@` that
-        // introduces a segment's version req. It resets to false on
-        // every segment boundary.
-        let mut in_req = false;
-        while i < bytes.len() {
-            let c = bytes[i];
-            if c == b'@' && !in_req && i != start {
-                // A non-leading `@` inside a segment starts the
-                // version req. (A leading `@` is the scope prefix
-                // and is handled by `parse_segment`.)
-                in_req = true;
-            } else if c == b'>' {
-                if in_req {
-                    // Could be part of a semver comparator: `>=2`,
-                    // `>1.0`, `> 1` (whitespace), `>v2`. If so, keep
-                    // consuming as part of the version req.
-                    let looks_like_comparator_cont = bytes
-                        .get(i + 1)
-                        .is_some_and(|&n| matches!(n, b'=' | b' ' | b'v') || n.is_ascii_digit());
-                    if looks_like_comparator_cont {
-                        i += 1;
-                        continue;
-                    }
-                }
-                // Segment boundary.
-                if start == i {
-                    return None; // empty segment, e.g. `>foo` or `foo>>bar`
-                }
-                parts.push(&key[start..i]);
-                start = i + 1;
-                in_req = false;
+    let mut pnpm_parts: Vec<&str> = Vec::new();
+    let bytes = key.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'>' && i == 0 {
+            return None;
+        }
+        if bytes[i] == b'>' && !matches!(bytes[i - 1], b' ' | b'|' | b'@') {
+            // Segment boundary.
+            if start == i {
+                return None; // empty segment, e.g. `>foo` or `foo>>bar`
             }
-            i += 1;
+            pnpm_parts.push(&key[start..i]);
+            start = i + 1;
         }
-        if start >= bytes.len() {
-            return None; // key ended on `>`
-        }
-        parts.push(&key[start..]);
-        return Some(parts);
+        i += 1;
     }
+    if start >= bytes.len() {
+        return None; // key ended on `>`
+    }
+    pnpm_parts.push(&key[start..]);
+
+    let mut out: Vec<&str> = Vec::new();
+    for part in pnpm_parts {
+        split_slash_segments(part, &mut out)?;
+    }
+    Some(out)
+}
+
+fn split_slash_segments<'a>(part: &'a str, out: &mut Vec<&'a str>) -> Option<()> {
     // Yarn slash form. Walk byte-by-byte so we can tell scope `/` from
     // ancestor `/`: a `/` inside a segment that started with `@` and
     // hasn't seen a `/` yet is a scope separator.
-    let bytes = key.as_bytes();
-    let mut out: Vec<&str> = Vec::new();
+    let bytes = part.as_bytes();
     let mut start = 0;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'/' {
-            let current = &key[start..i];
+            let current = &part[start..i];
             let looks_like_scope = current.starts_with('@') && !current[1..].contains('/');
             if !looks_like_scope {
                 if current.is_empty() {
@@ -178,12 +158,12 @@ fn split_segments(key: &str) -> Option<Vec<&str>> {
         }
         i += 1;
     }
-    let tail = &key[start..];
+    let tail = &part[start..];
     if tail.is_empty() {
         return None;
     }
     out.push(tail);
-    Some(out)
+    Some(())
 }
 
 /// Parse one segment string into a `Segment`. Handles `**` (wildcard),
@@ -426,6 +406,27 @@ mod tests {
         assert_eq!(r.parents.len(), 1);
         assert_eq!(r.parents[0].name, "@scope/parent");
         assert_eq!(r.target.name, "foo");
+    }
+
+    #[test]
+    fn parses_yarn_ancestor_targets_with_comparators() {
+        let unscoped = rule("parent/lodash@>=4.0.0", "catalog:");
+        assert_eq!(unscoped.parents[0].name, "parent");
+        assert_eq!(unscoped.target.name, "lodash");
+        assert_eq!(unscoped.target.version_req.as_deref(), Some(">=4.0.0"));
+
+        let scoped = rule("parent/@scope/pkg@>1.0.0", "catalog:");
+        assert_eq!(scoped.parents[0].name, "parent");
+        assert_eq!(scoped.target.name, "@scope/pkg");
+        assert_eq!(scoped.target.version_req.as_deref(), Some(">1.0.0"));
+    }
+
+    #[test]
+    fn parses_numeric_pnpm_chain_target() {
+        let rule = rule("parent@^1>123numeric", "catalog:");
+        assert_eq!(rule.parents[0].name, "parent");
+        assert_eq!(rule.parents[0].version_req.as_deref(), Some("^1"));
+        assert_eq!(rule.target.name, "123numeric");
     }
 
     #[test]

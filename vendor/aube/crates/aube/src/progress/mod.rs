@@ -1046,7 +1046,11 @@ impl InstallProgress {
                     reused: Arc::downgrade(reused),
                     downloaded: Arc::downgrade(downloaded),
                     phase_num: Arc::downgrade(phase_num),
-                    name: name.to_string(),
+                    // Sanitized on capture, not on render: a registry-supplied
+                    // name reaches the single-line field through the shared
+                    // `current_pkg` slot, and control/format characters there
+                    // can rewrite the whole line.
+                    name: aube_util::terminal::sanitize_inline(name).into_owned(),
                     current_pkg: Arc::downgrade(current_pkg),
                 },
                 completed: false,
@@ -1691,6 +1695,7 @@ impl Drop for FetchRow {
 /// instead, but this works without one.
 pub fn safe_eprintln(msg: &str) {
     use std::io::Write;
+    let msg = aube_util::terminal::sanitize(msg);
     let was_paused = clx::progress::is_paused();
     if !was_paused {
         clx::progress::pause();
@@ -1740,6 +1745,8 @@ impl Drop for PausingWriterGuard {
             return;
         }
         let buf = std::mem::take(&mut self.buf);
+        let text = String::from_utf8_lossy(&buf);
+        let sanitized = aube_util::terminal::strip_formatting(&text);
         // Pause *before* taking `TERM_LOCK`: `pause()` internally
         // calls `clear()`, which also grabs `TERM_LOCK`, and
         // `std::sync::Mutex` isn't reentrant — taking the lock first
@@ -1767,7 +1774,7 @@ impl Drop for PausingWriterGuard {
         // explicit annotation silences its `#[must_use]`.
         let _: () = clx::progress::with_terminal_lock(|| {
             let mut stderr = std::io::stderr().lock();
-            let _ = stderr.write_all(&buf);
+            let _ = stderr.write_all(sanitized.as_bytes());
             let _ = stderr.flush();
         });
         if !was_paused {

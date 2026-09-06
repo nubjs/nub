@@ -23,7 +23,7 @@ for non-npm consumers. Package versions track the aube workspace version.
 
 ## Header and operation model
 
-The hand-written [`aube.h`](https://github.com/jdx/aube/blob/main/crates/aube-ffi/include/aube.h)
+The hand-written [`aube.h`](https://github.com/aubepkg/aube/blob/main/crates/aube-ffi/include/aube.h)
 declares these operations:
 
 ```c
@@ -39,6 +39,7 @@ uint64_t aube_add(
     void *ctx);
 char *aube_wait(uint64_t handle);
 int32_t aube_cancel(uint64_t handle);
+char *aube_events_next(uint64_t handle);
 void aube_string_free(char *value);
 ```
 

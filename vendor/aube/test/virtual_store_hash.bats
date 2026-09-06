@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # Tests for content-addressed virtual-store paths. The global virtual
-# store (`~/.cache/aube/virtual-store/`) keys each entry by
+# store (`~/.cache/aube/virtual-store/v1/`) keys each entry by
 # `<dep_path>-<hex>` where `<hex>` is a sha256-based digest of the
 # package's dep subgraph (and, for packages that transitively require
 # build scripts, the engine string too). These tests verify that the
@@ -40,7 +40,7 @@ JSON
 	# Every subdir under the global virtual store carries a
 	# `-<hex>` suffix. Use a single run + grep rather than -regex
 	# so the assertion is portable.
-	run bash -c 'ls "$HOME/.cache/aube/virtual-store/"'
+	run bash -c 'ls "$HOME/.cache/aube/virtual-store/v1/"'
 	assert_success
 	# is-odd is a direct dep; every node in the graph gets hashed,
 	# and the suffix is 16 hex chars.

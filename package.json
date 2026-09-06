@@ -31,6 +31,7 @@
     "soak:fix": "node scripts/soak/soak.mts --fix",
     "deps:update": "node scripts/soak/update-deps.mts",
     "tools:check": "node scripts/soak/external-tools.mts --check",
+    "tools:fix": "node scripts/soak/external-tools.mts --fix",
     "tools:install": "node scripts/soak/external-tools.mts --install-all --shims",
     "remotes:check": "node scripts/soak/remotes.mts --check",
     "remotes:fix": "node scripts/soak/remotes.mts --fix",

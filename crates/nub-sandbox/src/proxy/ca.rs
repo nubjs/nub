@@ -63,7 +63,7 @@ pub(super) struct MitmCa {
     _bundle: tempfile::NamedTempFile,
     bundle_path: PathBuf,
     /// Linux launches consume an immutable descriptor instead of reopening the
-    /// same-user-writable temporary pathname during Bubblewrap setup.
+    /// same-user-writable temporary pathname during child preparation.
     #[cfg(target_os = "linux")]
     bundle_file: File,
 }

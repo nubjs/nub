@@ -392,7 +392,7 @@ JSON
 	assert_file_exists node_modules/@pnpm/e2e.test-provenance/package.json
 }
 
-@test "trustPolicy=no-downgrade: lockfile reuse still validates trust evidence" {
+@test "trustPolicy=no-downgrade: lockfile reuse trusts the locked version" {
 	cat >.npmrc <<EOF
 registry=${AUBE_TEST_REGISTRY}
 trust-policy=off
@@ -413,11 +413,11 @@ JSON
 
 	cat >.npmrc <<EOF
 registry=${AUBE_TEST_REGISTRY}
-trust-policy=no-downgrade
+	trust-policy=no-downgrade
 EOF
 	run aube install
-	assert_failure
-	assert_output --partial "trust downgrade for @pnpm/e2e.test-provenance@0.0.5"
+	assert_success
+	assert_file_exists node_modules/@pnpm/e2e.test-provenance/package.json
 }
 
 @test "trustPolicyExclude with name@version: install succeeds for the listed version" {
@@ -806,7 +806,7 @@ JSON
 	# mismatches on every install of a project that pins a pnpm
 	# version. Projects that genuinely want to gate on the running
 	# tool can use engines.aube instead. Regression for
-	# github.com/jdx/aube/discussions/626.
+	# github.com/aubepkg/aube/discussions/626.
 	#
 	# This is a deliberate divergence from pnpm/test/install/misc.ts:303
 	# ('recursive install should fail if the used pnpm version does

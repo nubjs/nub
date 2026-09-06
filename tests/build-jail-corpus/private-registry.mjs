@@ -69,6 +69,8 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
       const nestedSource = `file:${archive.replaceAll('\\', '/')}`;
       nestedApproval = `nested-probe@${nestedSource}`;
       const manifest = JSON.parse(readFileSync(join(dep, 'package.json'), 'utf8'));
+      manifest.scripts['pnpm:devPreinstall'] = 'node early.cjs';
+      writeFileSync(join(dep, 'early.cjs'), `require('fs').writeFileSync('early-proof.json', JSON.stringify({ran:true, token:process.env.AWS_SECRET_ACCESS_KEY ?? null}));`);
       manifest.devDependencies = {'nested-probe':nestedSource};
       manifest.allowScripts = {[nestedApproval]:'no-jail'};
       writeFileSync(join(dep, 'package.json'), JSON.stringify(manifest));
@@ -98,6 +100,8 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
     const proof = JSON.parse(readFileSync(join(project, 'node_modules', 'private-bootstrap-probe', 'proof.json'), 'utf8'));
     assert.match(proof.output, /private-node-gyp-ran/);
     if (sourceKind === 'git') {
+      const early = JSON.parse(readFileSync(join(project, 'node_modules', 'private-bootstrap-probe', 'early-proof.json'), 'utf8'));
+      assert.deepEqual(early, {ran:true, token:null}, 'fetched early hooks must run with confinement');
       const nested = JSON.parse(readFileSync(join(project, 'node_modules', 'private-bootstrap-probe', 'nested-proof.json'), 'utf8'));
       assert.equal(nested.token, null, 'fetched manifests cannot opt their dependencies out of confinement');
     }

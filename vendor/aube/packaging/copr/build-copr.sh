@@ -193,8 +193,8 @@ Release:        1%{?dist}
 Summary:        A fast Node.js package manager
 
 License:        MIT
-URL:            https://aube.jdx.dev
-Source0:        https://github.com/jdx/aube/archive/v%{tarball_version}/%{name}-%{tarball_version}.tar.gz
+URL:            https://aube.sh
+Source0:        https://github.com/aubepkg/aube/archive/v%{tarball_version}/%{name}-%{tarball_version}.tar.gz
 Source1:        %{name}-vendor-%{tarball_version}.tar.gz
 
 BuildRequires:  rust >= 1.93

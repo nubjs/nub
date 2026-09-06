@@ -177,7 +177,6 @@ pub(super) fn project_lockfile_score(raw: &RawPnpmLockfile) -> u64 {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RawPnpmLockfile {
-    #[allow(dead_code)]
     pub(super) lockfile_version: yaml_serde::Value,
     #[serde(default)]
     pub(super) settings: Option<RawSettings>,
@@ -204,6 +203,23 @@ pub(super) struct RawPnpmLockfile {
     pub(super) patched_dependencies: Option<BTreeMap<String, RawPatchedDependency>>,
     #[serde(default)]
     pub(super) ignored_optional_dependencies: Option<Vec<String>>,
+    /// Pre-v9 root-level dependency blocks. pnpm v5/v6 listed the root
+    /// importer's deps at the document root; v9 moved them under
+    /// `importers:`. No v9+ document carries them (pnpm v11's bootstrap
+    /// doc keeps `packageManagerDependencies` *under* an importer), so
+    /// their presence identifies a pre-v9 body whatever the declared
+    /// `lockfileVersion` says. Only presence matters, so the values
+    /// stay opaque — nothing reads them back.
+    #[serde(default)]
+    pub(super) dependencies: Option<yaml_serde::Value>,
+    #[serde(default)]
+    pub(super) dev_dependencies: Option<yaml_serde::Value>,
+    #[serde(default)]
+    pub(super) optional_dependencies: Option<yaml_serde::Value>,
+    /// pnpm v5's root-level `specifiers:` block, the v5 counterpart to
+    /// the blocks above.
+    #[serde(default)]
+    pub(super) specifiers: Option<yaml_serde::Value>,
     #[serde(default)]
     pub(super) importers: BTreeMap<String, RawImporter>,
     #[serde(default)]

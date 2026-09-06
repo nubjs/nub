@@ -149,6 +149,7 @@ pub(super) async fn run_git_dep_prepare(
     // Treat this as if it were an argumentless `aube install` against the
     // dep's clone directory.
     opts.skip_root_lifecycle = false;
+    opts.run_dev_preinstall = true;
     let spec = spec.to_string();
     tokio::task::spawn_blocking(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -28,14 +28,9 @@ pub struct SandboxPolicy {
     pub net: NetPolicy,
     pub env: EnvPolicy,
     pub pid: PidPolicy,
-    /// This policy is nub's dependency-lifecycle BUILD JAIL, not a `nub sandbox` scope.
-    ///
-    /// The two products get different Linux mechanisms and must not be unified: the build
-    /// jail is a pure allowlist, so it can be enforced by Landlock with no namespace — which
-    /// is the only way it works on a host that denies unprivileged user namespaces. A
-    /// `nub sandbox` scope expresses deny-inside-allow and relies on the mount/PID/net
-    /// namespaces, none of which Landlock has, so it stays on bubblewrap. Set ONLY by
-    /// [`crate::compile_build_jail`].
+    /// This policy uses Nub's dependency-lifecycle build-jail profile.
+    /// Set only by [`crate::compile_build_jail`]. Both profiles use the same
+    /// unprivileged backends; this marker selects build-specific grants and behavior.
     ///
     /// Skipped in serde deliberately: it is a provenance marker for backend selection, not
     /// part of the policy IR, and adding it to the serialized form would churn every dump

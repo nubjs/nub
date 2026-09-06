@@ -52,7 +52,7 @@ hit — the common cases never touch the network:
    and from aube's own runtime dir (`~/.local/share/aube/nodejs/`);
 3. download.
 
-When a download is needed, the [`runtimeInstaller`](/settings/#runtimeinstaller)
+When a download is needed, the [`runtimeInstaller`](/settings/#setting-runtimeinstaller)
 setting decides who fetches it:
 
 - `auto` (default): delegate to `mise install node@<version>` when
@@ -63,7 +63,7 @@ setting decides who fetches it:
 
 Self-downloads are verified against Node's published `SHASUMS256.txt`
 (or the lockfile's recorded checksum) before extraction. Corporate
-mirrors are supported via [`nodeDownloadMirrors`](/settings/#nodedownloadmirrors).
+mirrors are supported via [`nodeDownloadMirrors`](/settings/#setting-nodedownloadmirrors).
 
 ## Shell activation
 
@@ -98,7 +98,7 @@ version is available locally:
 
 `.node-version` / `.nvmrc` pins have no `onFail` vocabulary and behave
 as `download` — that's what writing one means. The
-[`runtimeOnFail`](/settings/#runtimeonfail) setting overrides the policy
+[`runtimeOnFail`](/settings/#setting-runtimeonfail) setting overrides the policy
 everywhere; set `runtimeOnFail=error` in air-gapped CI to forbid
 runtime downloads outright.
 
@@ -147,7 +147,7 @@ pnpm's `managePackageManagerVersions` — on by default). Pin via either:
 When the running aube doesn't satisfy the pin, it locates the pinned
 version — mise installs (`~/.local/share/mise/installs/aube/`) are
 reused, missing versions install per
-[`runtimeInstaller`](/settings/#runtimeinstaller) (mise delegation, or
+[`runtimeInstaller`](/settings/#setting-runtimeinstaller) (mise delegation, or
 a GitHub release download into `~/.local/share/aube/self/` verified
 against GitHub's server-computed asset digest) — and re-execs it with
 the same
@@ -155,7 +155,7 @@ arguments. `aubr` and `aubx` switch the same way. The corepack
 `packageManager` field takes exact versions; `devEngines.packageManager`
 accepts ranges, `lts`-style aliases excluded, plus the usual `onFail`
 vocabulary. Set
-[`managePackageManagerVersions=false`](/settings/#managepackagemanagerversions)
+[`managePackageManagerVersions=false`](/settings/#setting-managepackagemanagerversions)
 to fall back to validation-only (`packageManagerStrict`).
 
 ## Inspecting

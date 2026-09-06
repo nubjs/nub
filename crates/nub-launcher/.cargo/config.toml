@@ -30,3 +30,21 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Drop the Apple frameworks the launcher links but never calls, on macOS targets.
+#
+# nub-core's `reqwest` brings `rustls-platform-verifier`, whose build scripts emit
+# `link-lib=framework=Security` and `framework=CoreFoundation` unconditionally. Fat
+# LTO removes every function that used them — `nm -u` on the shipped launcher shows
+# zero `_Sec*`/`_CF*` imports — but a `LC_LOAD_DYLIB` is a link-time fact, not a
+# symbol, so dyld still loads Security, Foundation, CoreFoundation and their
+# private-framework tail on every exec and runs their initializers. Measured on
+# darwin-arm64 in child CPU time against a C `int main(){return 0;}` linking only
+# libSystem: the launcher template cost +3.0 ms per exec with the frameworks and
+# the artifact's warm start paid all of it. `-dead_strip_dylibs` makes the linker
+# keep only the dylibs an actual reference reaches, which leaves libSystem.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-dead_strip_dylibs"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-dead_strip_dylibs"]

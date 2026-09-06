@@ -151,13 +151,51 @@ pub enum Decline {
     /// summary would have claimed "nothing is written to disk" beside a 28 MB Node
     /// being unpacked.
     EmbeddedNode,
-    /// The build asked for source maps. Measured on Node 26.7: `--enable-source-maps`
-    /// does not apply an inline map to a `data:` URL module at all — with or without
-    /// a `//# sourceURL` — so an inline artifact would report unmapped frames where
-    /// the extracted one reports `app.ts:1`. Extracting is what keeps the maps the
-    /// build was asked to produce, so a build that wants them gets exactly today's
-    /// behavior.
+    /// The build asked for a source map this container cannot honour. Which maps
+    /// those are is per container and per mode, and the answer is measured rather
+    /// than argued — the same throwing `app.ts`, compiled six ways on Node 26.8:
+    ///
+    /// | `--sourcemap=` | extracted (the control) | `Mode::Sea` | `Mode::Inline` |
+    /// | --- | --- | --- | --- |
+    /// | `inline` | `app.ts:2:13` | `app.ts:2:13` | `app.mjs:3:10743` |
+    /// | `linked` | `app.ts:2:13` | needs a file | needs a file |
+    /// | `external` | `app.mjs:2:10743` | `app.mjs:2:10743` | `app.mjs:3:10743` |
+    ///
+    /// `linked` ships a `.map` beside the chunks and names it in a
+    /// `sourceMappingURL`, which neither container can resolve; it is caught by
+    /// [`Decline::NonChunkFile`] too, and kept here only because this reason reads
+    /// better.
+    ///
+    /// `Mode::Inline` declines EVERY map, and the reason is not that it cannot find
+    /// one — it is that no map made by the bundler still describes what that
+    /// container runs. [`rewrite_chunk`] edits each chunk AFTER bundling: it
+    /// prepends one generated line and rewrites cross-chunk specifiers in place,
+    /// which moves every line by one and moves columns on the lines it touches. The
+    /// map is made before that. The shift is visible in the table above — the same
+    /// frame is line 2 under a container that runs the bundler's bytes and line 3
+    /// under the one that rewrites them. An unresolvable map is a missing map, which
+    /// a reader notices; a map that resolves to the WRONG line is worse, because
+    /// nothing reports it. Composing `rewrite_chunk`'s edit into each map would
+    /// admit both `inline` and `external` here, and is what that would take.
+    ///
+    /// `Mode::Sea` rewrites nothing — it serves the emitted chunk verbatim through
+    /// a `registerHooks` `load` hook, where V8 honours the `sourceMappingURL` it
+    /// finds (`sea.rs`: "`EVAL_GLOBAL_CLEANUP` has no counterpart here"). So its
+    /// maps still describe its code, and only `linked` is out of reach.
     SourceMap,
+    /// The payload names `child_process`, so the bootstrap installs its `fork()`
+    /// identity fix-up — which sets the fork's executable to the Node the artifact
+    /// runs on. A single-executable artifact IS that Node, and Node ignores a
+    /// single-executable's `argv[1]`, so such a fork re-runs the application
+    /// rather than the requested module, and an application that forks forks
+    /// itself without end. Measured, not reasoned: a two-line `fork()` fixture
+    /// printed its first line until it was killed.
+    ///
+    /// A launcher artifact has a real Node path to hand the child, so this is a
+    /// [`Mode::Sea`] decline only. [`Self::ClusterReentry`] is the same hazard
+    /// reached through `node:cluster` and is refused for both shapes, because
+    /// `cluster` re-executes the entry rather than forking a named module.
+    ChildProcessReentry,
 }
 
 impl Decline {
@@ -171,6 +209,7 @@ impl Decline {
             Self::EmbeddedNode => "it extracts its embedded Node anyway",
             Self::ClusterReentry => "it uses node:cluster, which re-runs the executable",
             Self::SourceMap => "it was built with source maps",
+            Self::ChildProcessReentry => "it forks child processes, which re-run the executable",
         }
     }
 }
@@ -182,12 +221,36 @@ pub struct Inputs<'a> {
     /// Statically traced worker roots, plus the public wrappers written for them.
     pub worker_roots: usize,
     pub worker_wrappers: usize,
-    /// Whether any source map was asked for.
-    pub sourcemap: bool,
+    /// Which source map the build asked for. The MODE rather than a yes/no,
+    /// because the three differ in what has to be reachable at run time and only
+    /// one of them is out of reach here — see [`Decline::SourceMap`].
+    pub sourcemap: bundle::SourcemapMode,
     /// Whether the artifact carries a Node of its own — everything but `--smol`.
     pub embeds_node: bool,
+    /// `BundleResult::app_computes_module_specifier`.
+    pub computes_module_specifier: bool,
     /// The entry chunk's payload name.
     pub entry: &'a str,
+}
+
+/// Which no-extract container is asking. The eligibility rules are ALMOST the
+/// same, and the two differences are both about what a chunk's identity is.
+///
+/// The inline shape serves each chunk as a `data:` URL, which has no base: a
+/// relative specifier cannot resolve against one, so the compiler substitutes
+/// every cross-chunk specifier ahead of time and needs a topological order to do
+/// it — hence [`Decline::CyclicChunks`]. A SEA serves the same chunks from
+/// `module.registerHooks` at ordinary `file:` URLs, where relative specifiers
+/// resolve the way they do in the extracted tree and a cycle is just an ESM
+/// cycle. And [`Decline::EmbeddedNode`] is the reverse: it exists because an
+/// artifact that unpacks a Node to the cache gains nothing from serving its app
+/// from memory. A SEA unpacks nothing, so the whole premise is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// `-e` plus `data:` URLs, read back out of the executable's own tail.
+    Inline,
+    /// A Node single-executable blob, with the chunks as assets.
+    Sea,
 }
 
 /// What [`rewrite`] decided. The files come back either way: a declined payload
@@ -210,7 +273,7 @@ const ROOT_MANIFEST_NAME: &str = "package.json";
 /// reads them back out of the executable. The caller compresses the result with
 /// brotli and sets `Manifest::inline_app`.
 pub fn rewrite(files: AppFiles, inputs: &Inputs<'_>) -> Result<Rewritten> {
-    match classify(&files, inputs)? {
+    match classify(&files, inputs, Mode::Inline)? {
         Err(decline) => Ok(Rewritten::Extract(files, decline)),
         Ok(chunk_names) => {
             let loader = loader_source(inputs.entry)?;
@@ -254,19 +317,29 @@ pub fn rewrite(files: AppFiles, inputs: &Inputs<'_>) -> Result<Rewritten> {
 
 /// The eligibility half, kept separate so the borrow of `files` ends before the
 /// rewrite consumes it. Returns the chunk names on success.
-fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<String>, Decline>> {
+pub fn classify(
+    files: &AppFiles,
+    inputs: &Inputs<'_>,
+    mode: Mode,
+) -> Result<Result<BTreeSet<String>, Decline>> {
     if !inputs.sealed_module_graph {
         return Ok(Err(Decline::UnsealedGraph));
     }
     if inputs.worker_roots != 0 || inputs.worker_wrappers != 0 {
         return Ok(Err(Decline::StaticWorker));
     }
-    if inputs.sourcemap {
+    // `Linked` needs a file no container can reach. Everything else is a question
+    // of whether the map still describes the code: `Mode::Inline` rewrites its
+    // chunks after the map is made, so none of them does. See
+    // [`Decline::SourceMap`].
+    if matches!(inputs.sourcemap, bundle::SourcemapMode::Linked)
+        || (mode == Mode::Inline && !matches!(inputs.sourcemap, bundle::SourcemapMode::None))
+    {
         return Ok(Err(Decline::SourceMap));
     }
     // Cheap and last of the caller-supplied checks, so a payload that could never
     // inline still reports the reason it could never inline rather than this one.
-    if inputs.embeds_node {
+    if mode == Mode::Inline && inputs.embeds_node {
         return Ok(Err(Decline::EmbeddedNode));
     }
     let bootstrap_name = nub_core::compile::COMPILE_BOOTSTRAP_NAME;
@@ -301,12 +374,27 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
         );
     }
 
-    if files
-        .iter()
-        .filter(|file| file.name.ends_with(".mjs"))
-        .any(|file| std::str::from_utf8(&file.bytes).is_ok_and(reaches_cluster))
-    {
+    let any_chunk_reaches = |is_target: fn(&str) -> bool| {
+        files
+            .iter()
+            .filter(|file| file.name.ends_with(".mjs"))
+            .any(|file| {
+                std::str::from_utf8(&file.bytes)
+                    .is_ok_and(|source| reaches_builtin(source, is_target))
+            })
+    };
+
+    if any_chunk_reaches(is_cluster) {
         return Ok(Err(Decline::ClusterReentry));
+    }
+
+    // A computed specifier is checked FIRST because it is the case the scan cannot
+    // answer: a module that builds its specifier resolves something this pass
+    // never sees, so the only safe reading is that it might be `child_process`.
+    if mode == Mode::Sea
+        && (inputs.computes_module_specifier || any_chunk_reaches(is_child_process))
+    {
+        return Ok(Err(Decline::ChildProcessReentry));
     }
 
     // The chunk graph, read the way the loader will read it: a chunk depends on
@@ -324,38 +412,52 @@ fn classify(files: &AppFiles, inputs: &Inputs<'_>) -> Result<Result<BTreeSet<Str
             .collect();
         edges.insert(file.name.as_str(), deps);
     }
-    if has_cycle(&edges) {
+    if mode == Mode::Inline && has_cycle(&edges) {
         return Ok(Err(Decline::CyclicChunks));
     }
     Ok(Ok(chunk_names))
 }
 
-/// Whether a chunk names the `cluster` builtin as a module specifier.
+/// `node:cluster` under both spellings the emitted bundle can carry.
 ///
-/// Both spellings reach the emitted bundle: the authored ESM `node:cluster` keeps
-/// its prefix, and the interop shim Rolldown writes around it is a bare
-/// `require("cluster")`. Import syntax is not the only route — a chunk can also
-/// take the module from `createRequire(import.meta.url)(…)`, from
-/// `process.getBuiltinModule(…)`, or from the renamed `__require` a bundler emits —
-/// and every one of them ends in the same re-entry crash, so the callee shapes in
-/// `resolves_builtin` count too. AST rather than a substring search because the
-/// word is an ordinary English one — a payload logging "cluster failed" resolves
-/// nothing and must still inline. A chunk that fails to parse yields false: the
-/// bundler already emitted it, so a parse failure here is this pass being wrong
-/// about the syntax, and it must never be what fails or degrades a build.
-fn reaches_cluster(source: &str) -> bool {
+/// The authored ESM `node:cluster` keeps its prefix, and the interop shim Rolldown
+/// writes around it is a bare `require("cluster")`.
+fn is_cluster(specifier: &str) -> bool {
+    matches!(specifier, "cluster" | "node:cluster")
+}
+
+/// `node:child_process`, likewise.
+fn is_child_process(specifier: &str) -> bool {
+    matches!(specifier, "child_process" | "node:child_process")
+}
+
+/// Whether a chunk names a builtin `is_target` accepts as a module specifier.
+///
+/// Import syntax is not the only route — a chunk can also take the module from
+/// `createRequire(import.meta.url)(…)`, from `process.getBuiltinModule(…)`, or from
+/// the renamed `__require` a bundler emits — and every one of them ends in the same
+/// re-entry crash, so the callee shapes in `resolves_builtin` count too. AST rather
+/// than a substring search because both builtins this is asked about are spelled
+/// with ordinary English words: a payload logging "cluster failed", or one whose
+/// dependency ships a `clusterApiUrl` export, resolves nothing and must still take
+/// the no-extract container. A chunk that fails to parse yields false: the bundler
+/// already emitted it, so a parse failure here is this pass being wrong about the
+/// syntax, and it must never be what fails or degrades a build.
+///
+/// What it cannot see is a COMPUTED specifier, and nothing reading the emitted
+/// chunks can. `Inputs::computes_module_specifier` carries that case, from a scan
+/// of the application's own modules before they were bundled.
+fn reaches_builtin(source: &str, is_target: fn(&str) -> bool) -> bool {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::{
-        CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression,
-        ImportDeclaration, MemberExpression,
+        AssignmentExpression, AssignmentTarget, CallExpression, ExportAllDeclaration,
+        ExportNamedDeclaration, Expression, ImportDeclaration, MemberExpression,
+        VariableDeclarator,
     };
     use oxc_ast_visit::{Visit, walk};
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-
-    fn is_cluster(specifier: &str) -> bool {
-        matches!(specifier, "cluster" | "node:cluster")
-    }
+    use std::collections::BTreeSet;
 
     /// A no-substitution template literal is as static as a string literal, and
     /// the minifier emits both.
@@ -370,16 +472,42 @@ fn reaches_cluster(source: &str) -> bool {
         }
     }
 
+    /// Whether an identifier NAMES a require.
+    ///
+    /// Case-insensitive and a substring, which is wider than it looks and has to
+    /// be. The suffix test this replaced missed nub's OWN emitted helper: a
+    /// CommonJS wrapper opens `const require = __nubCjsRequire`, and
+    /// `__nubCjsRequire` ends in a capital R, so `ends_with("require")` was false
+    /// for every CommonJS payload the compiler produces. Minification then renames
+    /// the wrapper's own `require` binding, leaving `let e = __nubCjsRequire` and a
+    /// call site reading `e("node:cluster")` with nothing left to match on. A
+    /// suffix test also misses `require$1`, which the comment it carried claimed
+    /// it caught.
+    ///
+    /// The cost of the width is a payload whose `requireAuth("cluster")` resolves
+    /// nothing and extracts anyway. That is the direction this pass is documented
+    /// to err in, and the call must additionally pass one of four exact builtin
+    /// specifiers as its first argument.
+    fn names_require(name: &str) -> bool {
+        name.to_ascii_lowercase().contains("require")
+    }
+
     /// Whether a callee is a plausible way to obtain a builtin module by name.
     ///
     /// Targeted on purpose: an unnecessary decline costs a real optimization, so
-    /// this matches the shapes that hand back the module — a `require` binding under
-    /// whatever name the bundler renamed it to, the three property names that stand
-    /// in for one, and the require a `createRequire` call returns — and leaves
-    /// `logger.info("cluster")` alone.
-    fn resolves_builtin(callee: &Expression<'_>) -> bool {
+    /// this matches the shapes that hand back the module — a name containing
+    /// `require` under any casing, a name bound to one of those, the three property
+    /// names that stand in for one, and the require a `createRequire` call returns —
+    /// and leaves `logger.info("cluster")` alone.
+    fn resolves_builtin(callee: &Expression<'_>, aliases: &BTreeSet<String>) -> bool {
         match callee.get_inner_expression() {
-            Expression::Identifier(id) => id.name.ends_with("require"),
+            // `aliases` is what closes the one shape the name test cannot reach:
+            // `const load = require` rebinds it under a name that says nothing, and
+            // the emitted chunk then reads `load("child_process")`. See
+            // [`require_aliases`].
+            Expression::Identifier(id) => {
+                names_require(&id.name) || aliases.contains(id.name.as_str())
+            }
             // `createRequire(import.meta.url)("cluster")`: the require is the value a
             // call produced, so the callee is itself a call. ANY call, deliberately.
             // Requiring the inner callee to name `createRequire` was tried and
@@ -408,26 +536,27 @@ fn reaches_cluster(source: &str) -> bool {
         }
     }
 
-    #[derive(Default)]
-    struct Visitor {
+    struct Visitor<'s> {
+        is_target: fn(&str) -> bool,
+        aliases: &'s BTreeSet<String>,
         found: bool,
     }
 
-    impl<'a> Visit<'a> for Visitor {
+    impl<'a> Visit<'a> for Visitor<'_> {
         fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
-            self.found |= is_cluster(it.source.value.as_str());
+            self.found |= (self.is_target)(it.source.value.as_str());
             walk::walk_import_declaration(self, it);
         }
 
         fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
             if let Some(source) = &it.source {
-                self.found |= is_cluster(source.value.as_str());
+                self.found |= (self.is_target)(source.value.as_str());
             }
             walk::walk_export_named_declaration(self, it);
         }
 
         fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
-            self.found |= is_cluster(it.source.value.as_str());
+            self.found |= (self.is_target)(it.source.value.as_str());
             walk::walk_export_all_declaration(self, it);
         }
 
@@ -435,20 +564,86 @@ fn reaches_cluster(source: &str) -> bool {
             if let Expression::ImportExpression(import) = expr
                 && let Some(specifier) = literal_specifier(&import.source)
             {
-                self.found |= is_cluster(specifier);
+                self.found |= (self.is_target)(specifier);
             }
             walk::walk_expression(self, expr);
         }
 
         fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-            if resolves_builtin(&call.callee)
+            if resolves_builtin(&call.callee, self.aliases)
                 && let Some(argument) = call.arguments.first().and_then(|a| a.as_expression())
                 && let Some(specifier) = literal_specifier(argument)
             {
-                self.found |= is_cluster(specifier);
+                self.found |= (self.is_target)(specifier);
             }
             walk::walk_call_expression(self, call);
         }
+    }
+
+    /// Every local name this chunk binds to a require, directly or through another
+    /// such name.
+    ///
+    /// `resolves_builtin` recognizes a require by its NAME, which covers every
+    /// renaming that keeps the word — `__require`, `require$1`, `__nubCjsRequire`.
+    /// An alias keeps nothing: `const load = require` produces a call
+    /// site reading `load("child_process")`, where neither the callee nor anything
+    /// else in the expression says what `load` is. That shape reached the emitted
+    /// chunk from ordinary authored CommonJS, and before the scan replaced a
+    /// substring search it was caught by accident, because the specifier's own
+    /// letters were in the file.
+    ///
+    /// One pass in source order is enough for the chained case. A binding can only
+    /// alias a name declared before it — the reverse is a temporal-dead-zone error
+    /// at run time — so `const a = require; const b = a;` adds `a` before `b` is
+    /// reached, and nothing needs a second pass.
+    fn require_aliases(program: &oxc_ast::ast::Program<'_>) -> BTreeSet<String> {
+        struct Collect {
+            names: BTreeSet<String>,
+        }
+
+        impl Collect {
+            /// Whether an initializer hands back a require: the builtin under any
+            /// name the bundler gave it, one of the property spellings, or a name
+            /// already known to be one.
+            fn is_require(&self, expr: &Expression<'_>) -> bool {
+                match expr.get_inner_expression() {
+                    Expression::Identifier(id) => {
+                        names_require(&id.name) || self.names.contains(id.name.as_str())
+                    }
+                    other => other
+                        .as_member_expression()
+                        .and_then(MemberExpression::static_property_name)
+                        .is_some_and(|property| matches!(property, "require" | "createRequire")),
+                }
+            }
+        }
+
+        impl<'a> Visit<'a> for Collect {
+            fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+                if let Some(init) = &it.init
+                    && self.is_require(init)
+                    && let Some(name) = it.id.get_identifier_name()
+                {
+                    self.names.insert(name.to_string());
+                }
+                walk::walk_variable_declarator(self, it);
+            }
+
+            fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
+                if self.is_require(&it.right)
+                    && let AssignmentTarget::AssignmentTargetIdentifier(id) = &it.left
+                {
+                    self.names.insert(id.name.to_string());
+                }
+                walk::walk_assignment_expression(self, it);
+            }
+        }
+
+        let mut collect = Collect {
+            names: BTreeSet::new(),
+        };
+        collect.visit_program(program);
+        collect.names
     }
 
     let allocator = Allocator::default();
@@ -456,7 +651,12 @@ fn reaches_cluster(source: &str) -> bool {
     if parsed.panicked {
         return false;
     }
-    let mut visitor = Visitor::default();
+    let aliases = require_aliases(&parsed.program);
+    let mut visitor = Visitor {
+        is_target,
+        aliases: &aliases,
+        found: false,
+    };
     visitor.visit_program(&parsed.program);
     visitor.found
 }
@@ -584,8 +784,9 @@ mod tests {
             sealed_module_graph: true,
             worker_roots: 0,
             worker_wrappers: 0,
-            sourcemap: false,
+            sourcemap: bundle::SourcemapMode::None,
             embeds_node: false,
+            computes_module_specifier: false,
             entry,
         }
     }
@@ -603,6 +804,209 @@ mod tests {
             Rewritten::Extract(_, why) => Some(why),
             Rewritten::Inline(_) => None,
         }
+    }
+
+    /// Classify the same one-chunk payload for a single-executable container.
+    fn sea_decline_of(source: &str) -> Option<Decline> {
+        sea_decline_with(source, false)
+    }
+
+    /// As above, with the caller's "this payload can compute a specifier" signal.
+    fn sea_decline_with(source: &str, computes_module_specifier: bool) -> Option<Decline> {
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), source.as_bytes().to_vec()),
+        ];
+        let mut inputs = sealed("main.mjs");
+        inputs.computes_module_specifier = computes_module_specifier;
+        classify(&files, &inputs, Mode::Sea)
+            .expect("classification succeeds")
+            .err()
+    }
+
+    /// Which source maps each container can honour — one cell per measured row of
+    /// the table on [`Decline::SourceMap`].
+    ///
+    /// The two `Inline` cells are the whole point. The same mode is reachable from
+    /// the single-executable container and not from the no-extract launcher, so a
+    /// test that checked one of them would read as coverage whichever way the code
+    /// went.
+    ///
+    /// `External` pins the correction that a review caught: it looked admissible
+    /// everywhere, because its map is never named by the bundle and its frames come
+    /// back unmapped in every shape. But `Mode::Inline` publishes a DETACHED map
+    /// made before [`rewrite_chunk`] shifts the code it describes, so admitting it
+    /// there hands an error tracker a map that resolves to the wrong line and says
+    /// nothing about it.
+    #[test]
+    fn each_container_declines_only_the_source_maps_it_cannot_honour() {
+        use bundle::SourcemapMode::{External, Inline as InlineMap, Linked, None as NoMap};
+
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), b"console.log(1);\n".to_vec()),
+        ];
+        let decline = |map, mode| {
+            let mut inputs = sealed("main.mjs");
+            inputs.sourcemap = map;
+            classify(&files, &inputs, mode)
+                .expect("classification succeeds")
+                .err()
+        };
+
+        for (map, sea, inline, why) in [
+            (NoMap, None, None, "no map was asked for"),
+            (
+                InlineMap,
+                None,
+                Some(Decline::SourceMap),
+                "an inline map is honoured through the blob's load hook, and not from a `data:` URL",
+            ),
+            (
+                Linked,
+                Some(Decline::SourceMap),
+                Some(Decline::SourceMap),
+                "a linked map is a file neither container can reach",
+            ),
+            (
+                External,
+                None,
+                Some(Decline::SourceMap),
+                "an external map is published unchanged, so the container that rewrites its \
+                 chunks would describe them with a map made before the rewrite",
+            ),
+        ] {
+            assert_eq!(
+                decline(map, Mode::Sea),
+                sea,
+                "{map:?} in a single-executable: {why}"
+            );
+            assert_eq!(
+                decline(map, Mode::Inline),
+                inline,
+                "{map:?} in a no-extract launcher: {why}"
+            );
+        }
+    }
+
+    /// A single-executable artifact's `process.execPath` is the artifact, and Node
+    /// ignores a single-executable's `argv[1]`, so the bootstrap's `fork()` fix-up
+    /// would point every fork back at the application. Only that container is
+    /// affected: a launcher artifact hands the child a real Node path, which is why
+    /// the same payload stays eligible for the inline shape.
+    #[test]
+    fn a_payload_that_forks_declines_the_sea_shape_only() {
+        let source = "import{fork}from\"node:child_process\";fork(\"./w.js\");";
+        assert_eq!(sea_decline_of(source), Some(Decline::ChildProcessReentry));
+        assert_eq!(
+            decline_of(source),
+            None,
+            "the inline shape keeps a real Node to fork, so it must stay eligible"
+        );
+    }
+
+    /// The routes are the ones `Decline::ClusterReentry` already covers, because
+    /// both declines read the emitted chunks through the same scan — and the last
+    /// two cases are the reason that scan replaced a substring search. `cluster` and
+    /// `child_process` are both spellings a payload can carry without resolving
+    /// anything: `clusterApiUrl` is a real export of a published package, and a
+    /// message naming either builtin is ordinary.
+    #[test]
+    fn the_fork_decline_reads_what_a_chunk_resolves_rather_than_what_it_spells() {
+        assert_eq!(
+            sea_decline_of("const cp = require(\"child_process\");cp.fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "the interop shim requires the bare builtin name"
+        );
+        assert_eq!(
+            sea_decline_of("process.getBuiltinModule(\"node:child_process\").fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "getBuiltinModule hands back the builtin with no import at all"
+        );
+        assert_eq!(
+            sea_decline_with("export default 1;", true),
+            Some(Decline::ChildProcessReentry),
+            "a payload that can build its own specifier resolves something this scan \
+             never sees, so the only safe reading is that it might fork"
+        );
+        assert_eq!(
+            sea_decline_of("import{clusterApiUrl}from\"./rpc.mjs\";clusterApiUrl(\"devnet\");"),
+            None,
+            "a published export whose NAME contains the word resolves no builtin"
+        );
+        assert_eq!(
+            sea_decline_of("console.log(\"child_process spawn failed\");"),
+            None,
+            "and neither does a message naming one"
+        );
+    }
+
+    /// The one shape a name test cannot reach, and the one the replaced substring
+    /// search caught by accident: an alias keeps none of the letters that identify
+    /// a require, so the call site says nothing about what it resolves. Both
+    /// builtins go through the same scan, so both are covered here.
+    #[test]
+    fn a_require_reached_through_an_alias_still_declines() {
+        assert_eq!(
+            sea_decline_of("const load = require;load(\"node:child_process\").fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "a plain rebinding is the shape authored CommonJS produces"
+        );
+        assert_eq!(
+            sea_decline_of("const r = __require;const load = r;load(\"child_process\").fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "and it chains, from the name the bundler emitted"
+        );
+        assert_eq!(
+            sea_decline_of("let load;load = require;load(\"child_process\").fork(m);"),
+            Some(Decline::ChildProcessReentry),
+            "an assignment binds it as surely as a declaration"
+        );
+        assert_eq!(
+            decline_of("const load = require;load(\"cluster\").fork();"),
+            Some(Decline::ClusterReentry),
+            "the cluster decline reads the same aliases, for both containers"
+        );
+        assert_eq!(
+            sea_decline_of("const load = makeLoader;load(\"child_process\");"),
+            None,
+            "a name bound to something that is not a require resolves nothing"
+        );
+    }
+
+    /// The shape the compiler emits for its OWN CommonJS wrapper, minified, which
+    /// is what every CommonJS payload actually carries. Written out rather than
+    /// paraphrased: `__nubCjsRequire` ends in a capital R, so a suffix test on the
+    /// word was false here, and the minifier had already renamed the wrapper's
+    /// `require` binding to a single letter — which left a real `node:cluster`
+    /// payload with nothing for the scan to match and the wrong container.
+    #[test]
+    fn the_compilers_own_commonjs_require_is_recognized_after_minification() {
+        assert_eq!(
+            sea_decline_of(
+                "var f=(function f(){let e=__nubCjsRequire;\
+                 return(R??=__commonJSMin(((t,n)=>{let r=e(`node:child_process`);r.fork(n)}))).\
+                 apply(this,arguments)});"
+            ),
+            Some(Decline::ChildProcessReentry),
+            "the emitted CommonJS wrapper, minified, is the common case and not a corner"
+        );
+        assert_eq!(
+            decline_of("let e=__nubCjsRequire;e(`cluster`).fork();"),
+            Some(Decline::ClusterReentry),
+            "and the cluster decline reads the same binding, for both containers"
+        );
+        assert_eq!(
+            decline_of("const cluster = require$1(\"cluster\");cluster.fork();"),
+            Some(Decline::ClusterReentry),
+            "a suffixed rename resolves the builtin as surely as a prefixed one"
+        );
     }
 
     /// `cluster.fork()` re-runs `process.argv[1]`, which an inline artifact

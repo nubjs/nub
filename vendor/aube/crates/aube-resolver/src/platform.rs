@@ -341,7 +341,13 @@ pub fn filter_graph(
             continue;
         }
         if let Some(pkg) = graph.packages.get(&dep_path) {
-            for (name, tail) in &pkg.dependencies {
+            // pnpm mirrors active optional edges into `dependencies`, but
+            // Yarn Berry records them only in `optional_dependencies`.
+            for (name, tail) in pkg
+                .dependencies
+                .iter()
+                .chain(pkg.optional_dependencies.iter())
+            {
                 // Resolve the edge through every reader convention,
                 // including the git/remote-tarball `name@url+<hash>` form
                 // — otherwise a canonically-keyed git/tarball child (and
@@ -694,6 +700,52 @@ mod tests {
         assert!(!host.dependencies.contains_key("native-linux"));
         assert!(graph.packages.contains_key("native-darwin@1.0.0"));
         assert!(!graph.packages.contains_key("native-linux@1.0.0"));
+    }
+
+    #[test]
+    fn filter_graph_keeps_supported_yarn_berry_optional_children() {
+        let supported = SupportedArchitectures {
+            os: s(&["darwin"]),
+            cpu: s(&["arm64"]),
+            ..Default::default()
+        };
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![aube_lockfile::DirectDep {
+                name: "host".to_string(),
+                dep_path: "host@1.0.0".to_string(),
+                dep_type: aube_lockfile::DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            }],
+        );
+        graph.packages.insert(
+            "host@1.0.0".to_string(),
+            aube_lockfile::LockedPackage {
+                name: "host".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: "host@1.0.0".to_string(),
+                // Yarn Berry does not mirror optional edges here.
+                dependencies: Default::default(),
+                optional_dependencies: [("native-darwin".to_string(), "1.0.0".to_string())].into(),
+                ..Default::default()
+            },
+        );
+        graph.packages.insert(
+            "native-darwin@1.0.0".to_string(),
+            aube_lockfile::LockedPackage {
+                name: "native-darwin".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: "native-darwin@1.0.0".to_string(),
+                os: s(&["darwin"]).into(),
+                cpu: s(&["arm64"]).into(),
+                ..Default::default()
+            },
+        );
+
+        filter_graph(&mut graph, &supported, &Default::default());
+
+        assert!(graph.packages.contains_key("native-darwin@1.0.0"));
     }
 
     fn dep(name: &str, dep_type: aube_lockfile::DepType) -> aube_lockfile::DirectDep {

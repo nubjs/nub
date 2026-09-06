@@ -17,7 +17,8 @@
 //! existence of an `allowBuilds` map does not disable it.
 //!
 //! A listed package ([`aube_scripts::is_default_trusted`], Bun's
-//! vendored list) is trusted only when every gate holds:
+//! vendored list plus the additions pnpm's trusted-dependencies list
+//! carries) is trusted only when every gate holds:
 //!
 //! - **registry provenance** — the package resolved from a registry.
 //!   git / file / link / tarball sources never qualify, so a malicious

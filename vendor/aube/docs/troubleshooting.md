@@ -217,5 +217,5 @@ Keep the existing lockfile while evaluating aube. Since aube writes supported
 lockfiles in place, the original package manager can keep using the same file
 during rollout. If aube hits a bug in a project, fall back for that job,
 keep the failing command and lockfile handy, and open a thread in
-[GitHub Discussions](https://github.com/jdx/aube/discussions) with the
+[GitHub Discussions](https://github.com/aubepkg/aube/discussions) with the
 exact command and package manager versions.

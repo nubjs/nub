@@ -31,6 +31,8 @@ tracing = { workspace = true }
 regex = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
+# `direct.rs` asks `access(X_OK)` — the same question a shell's PATH search
+# asks — instead of re-deriving executability from mode bits and our uid.
 libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

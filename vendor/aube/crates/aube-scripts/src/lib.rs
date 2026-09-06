@@ -14,6 +14,7 @@
 
 pub mod content_sniff;
 pub mod default_trust;
+pub mod direct;
 pub mod policy;
 #[cfg(unix)]
 pub mod unix_group;
@@ -32,6 +33,19 @@ use aube_manifest::PackageJson;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+const MAX_SCRIPT_OUTPUT_RECORD_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptOutputStream {
+    Stdout,
+    Stderr,
+}
+
+pub trait ScriptOutputReporter: Send + Sync + 'static {
+    fn report(&self, stream: ScriptOutputStream, line: String);
+}
 
 /// Settings that affect every package-script shell aube spawns.
 #[derive(Debug, Clone, Default)]
@@ -40,10 +54,8 @@ pub struct ScriptSettings {
     pub script_shell: Option<PathBuf>,
     pub unsafe_perm: Option<bool>,
     pub shell_emulator: bool,
-    /// Directory of the project's resolved Node runtime, prepended to
-    /// PATH after the project `.bin` so the switched node beats the
-    /// system one while project-local binaries still win. `None` when
-    /// no runtime switching is active.
+    /// Directory of the project's resolved Node runtime. `None` when no
+    /// runtime switching is active.
     pub node_bin_dir: Option<PathBuf>,
     /// The node exported as `NODE` (npm parity) — the program a
     /// script's `$NODE` / bare `node` re-spawns. A wrapper's shim; the
@@ -179,10 +191,17 @@ impl Drop for ScriptJailHomeCleanup {
     }
 }
 
-static SCRIPT_SETTINGS: std::sync::OnceLock<std::sync::RwLock<ScriptSettings>> =
+#[derive(Clone, Default)]
+struct ScriptSettingsState {
+    settings: ScriptSettings,
+    node_bin_dir_precedes_project_bins: bool,
+    output_reporter: Option<std::sync::Arc<dyn ScriptOutputReporter>>,
+}
+
+static SCRIPT_SETTINGS: std::sync::OnceLock<std::sync::RwLock<ScriptSettingsState>> =
     std::sync::OnceLock::new();
 
-type ScriptSettingsSlot = std::sync::Arc<std::sync::RwLock<ScriptSettings>>;
+type ScriptSettingsSlot = std::sync::Arc<std::sync::RwLock<ScriptSettingsState>>;
 
 tokio::task_local! {
     static INSTALL_SCRIPT_SETTINGS: ScriptSettingsSlot;
@@ -192,7 +211,7 @@ tokio::task_local! {
 pub async fn scope<F: std::future::Future>(future: F) -> F::Output {
     INSTALL_SCRIPT_SETTINGS
         .scope(
-            std::sync::Arc::new(std::sync::RwLock::new(ScriptSettings::default())),
+            std::sync::Arc::new(std::sync::RwLock::new(ScriptSettingsState::default())),
             future,
         )
         .await
@@ -211,34 +230,77 @@ pub fn scope_current<F: std::future::Future>(
     }
 }
 
-fn script_settings_lock() -> &'static std::sync::RwLock<ScriptSettings> {
-    SCRIPT_SETTINGS.get_or_init(|| std::sync::RwLock::new(ScriptSettings::default()))
+fn script_settings_lock() -> &'static std::sync::RwLock<ScriptSettingsState> {
+    SCRIPT_SETTINGS.get_or_init(|| std::sync::RwLock::new(ScriptSettingsState::default()))
 }
 
 /// Replace the current install's script settings snapshot, or the process-wide
 /// fallback when called outside an install scope.
 pub fn set_script_settings(settings: ScriptSettings) {
+    set_script_settings_with_path_order(settings, false);
+}
+
+/// Replace the script settings and control whether the runtime bin directory
+/// precedes project-local bins. Wrapping runtimes use `true` so a local `node`
+/// cannot bypass their shim; selectors use `false`.
+#[doc(hidden)]
+pub fn set_script_settings_with_path_order(
+    settings: ScriptSettings,
+    node_bin_dir_precedes_project_bins: bool,
+) {
     if INSTALL_SCRIPT_SETTINGS
         .try_with(|slot| match slot.write() {
-            Ok(mut guard) => *guard = settings.clone(),
-            Err(poisoned) => *poisoned.into_inner() = settings.clone(),
+            Ok(mut guard) => {
+                guard.settings = settings.clone();
+                guard.node_bin_dir_precedes_project_bins = node_bin_dir_precedes_project_bins;
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                guard.settings = settings.clone();
+                guard.node_bin_dir_precedes_project_bins = node_bin_dir_precedes_project_bins;
+            }
         })
         .is_ok()
     {
         return;
     }
     match script_settings_lock().write() {
-        Ok(mut guard) => *guard = settings,
-        Err(poisoned) => *poisoned.into_inner() = settings,
+        Ok(mut guard) => {
+            guard.settings = settings;
+            guard.node_bin_dir_precedes_project_bins = node_bin_dir_precedes_project_bins;
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            guard.settings = settings;
+            guard.node_bin_dir_precedes_project_bins = node_bin_dir_precedes_project_bins;
+        }
     }
 }
 
-fn script_settings() -> ScriptSettings {
-    if let Ok(settings) = INSTALL_SCRIPT_SETTINGS.try_with(|slot| match slot.read() {
+/// Route lifecycle child output through an embedding host. When unset,
+/// scripts inherit the parent process's stdout and stderr as usual.
+pub fn set_output_reporter(reporter: Option<std::sync::Arc<dyn ScriptOutputReporter>>) {
+    if INSTALL_SCRIPT_SETTINGS
+        .try_with(|slot| match slot.write() {
+            Ok(mut guard) => guard.output_reporter = reporter.clone(),
+            Err(poisoned) => poisoned.into_inner().output_reporter = reporter.clone(),
+        })
+        .is_ok()
+    {
+        return;
+    }
+    match script_settings_lock().write() {
+        Ok(mut guard) => guard.output_reporter = reporter,
+        Err(poisoned) => poisoned.into_inner().output_reporter = reporter,
+    }
+}
+
+fn script_settings_state() -> ScriptSettingsState {
+    if let Ok(state) = INSTALL_SCRIPT_SETTINGS.try_with(|slot| match slot.read() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     }) {
-        return settings;
+        return state;
     }
     match script_settings_lock().read() {
         Ok(guard) => guard.clone(),
@@ -255,7 +317,9 @@ pub fn script_settings_snapshot() -> ScriptSettings {
     script_settings()
 }
 
-/// A caller-injected sandbox engine for dependency lifecycle scripts.
+fn script_settings() -> ScriptSettings {
+    script_settings_state().settings
+}
 
 #[cfg(test)]
 mod scoped_settings_tests {
@@ -268,14 +332,23 @@ mod scoped_settings_tests {
         let second_barrier = std::sync::Arc::clone(&barrier);
 
         let first = scope(async move {
-            set_script_settings(ScriptSettings {
-                command: Some("first".to_string()),
-                ..ScriptSettings::default()
-            });
+            set_script_settings_with_path_order(
+                ScriptSettings {
+                    command: Some("first".to_string()),
+                    ..ScriptSettings::default()
+                },
+                true,
+            );
             first_barrier.wait().await;
-            tokio::spawn(scope_current(async { script_settings().command }))
-                .await
-                .unwrap()
+            tokio::spawn(scope_current(async {
+                let state = script_settings_state();
+                (
+                    state.settings.command,
+                    state.node_bin_dir_precedes_project_bins,
+                )
+            }))
+            .await
+            .unwrap()
         });
         let second = scope(async move {
             set_script_settings(ScriptSettings {
@@ -283,14 +356,22 @@ mod scoped_settings_tests {
                 ..ScriptSettings::default()
             });
             second_barrier.wait().await;
-            tokio::spawn(scope_current(async { script_settings().command }))
-                .await
-                .unwrap()
+            tokio::spawn(scope_current(async {
+                let state = script_settings_state();
+                (
+                    state.settings.command,
+                    state.node_bin_dir_precedes_project_bins,
+                )
+            }))
+            .await
+            .unwrap()
         });
 
         let (first, second) = tokio::join!(first, second);
-        assert_eq!(first.as_deref(), Some("first"));
-        assert_eq!(second.as_deref(), Some("second"));
+        assert_eq!(first.0.as_deref(), Some("first"));
+        assert!(first.1);
+        assert_eq!(second.0.as_deref(), Some("second"));
+        assert!(!second.1);
     }
 }
 
@@ -306,6 +387,50 @@ pub fn prepend_paths(bin_dirs: &[PathBuf]) -> std::ffi::OsString {
     let mut entries: Vec<PathBuf> = bin_dirs.to_vec();
     entries.extend(std::env::split_paths(&path));
     std::env::join_paths(entries).unwrap_or(path)
+}
+
+/// Place a runtime bin directory around project-local bin directories.
+/// Wrappers lead so a local `node` cannot bypass their shim; selectors follow
+/// so package-provided commands retain normal precedence.
+pub fn order_path_entries(
+    mut project_bins: Vec<PathBuf>,
+    runtime_bin: Option<&Path>,
+    runtime_precedes_project_bins: bool,
+) -> Vec<PathBuf> {
+    let Some(runtime_bin) = runtime_bin else {
+        return project_bins;
+    };
+    if runtime_precedes_project_bins {
+        project_bins.insert(0, runtime_bin.to_path_buf());
+    } else {
+        project_bins.push(runtime_bin.to_path_buf());
+    }
+    project_bins
+}
+
+#[cfg(test)]
+mod path_entry_tests {
+    use super::*;
+
+    #[test]
+    fn wrapper_runtime_leads_project_bins() {
+        let runtime = Path::new("/shim");
+        let project = PathBuf::from("/project/node_modules/.bin");
+        assert_eq!(
+            order_path_entries(vec![project.clone()], Some(runtime), true),
+            vec![runtime.to_path_buf(), project]
+        );
+    }
+
+    #[test]
+    fn selector_runtime_follows_project_bins() {
+        let runtime = Path::new("/opt/node/bin");
+        let project = PathBuf::from("/project/node_modules/.bin");
+        assert_eq!(
+            order_path_entries(vec![project.clone()], Some(runtime), false),
+            vec![project, runtime.to_path_buf()]
+        );
+    }
 }
 
 /// Spawn a shell command line. On Unix we go through `sh -c`, on
@@ -356,6 +481,40 @@ pub fn resolved_shell_id() -> String {
     } else {
         id
     }
+}
+
+/// Spawn a resolved program directly, skipping the shell.
+///
+/// The counterpart to [`spawn_shell`] for a script body that
+/// [`direct::direct_argv`] found to be a single plain command. `program`
+/// is the absolute path `direct_argv` resolved; `arg0` is the program as
+/// written in the script body, passed through as `argv[0]` so the child
+/// sees what a shell would have given it.
+///
+/// Env parity with the shell path is structural, not a parallel list:
+/// this calls the same [`apply_script_settings_env`] and shares
+/// `kill_on_drop`. Which now kills the tool itself rather than a shell
+/// holding it as a child — strictly more direct, and the reason the
+/// Windows Job Object story in [`spawn_shell`] does not apply here (the
+/// fast path is Unix-only).
+pub fn spawn_program<I, S>(program: &Path, arg0: &str, args: I) -> tokio::process::Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let settings = script_settings();
+    let mut cmd = tokio::process::Command::new(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().arg0(arg0);
+    }
+    #[cfg(not(unix))]
+    let _ = arg0;
+    cmd.args(args);
+    apply_script_settings_env(&mut cmd, &settings);
+    cmd.kill_on_drop(true);
+    cmd
 }
 
 fn spawn_shell_with_settings(
@@ -923,6 +1082,12 @@ fn apply_jail_env(
         .env("TMPDIR", home)
         .env("TMP", home)
         .env("TEMP", home)
+        // `run_script` stamps this before entering the jail, but `env_clear`
+        // removes it. Restore the outer project so the lazy node-gyp shim
+        // inherits the right registry/auth and bootstrap-lock context.
+        // `apply_script_settings_env` runs after this and intentionally lets
+        // an embedder's `extra_env` override the default.
+        .env("AUBE_NODE_GYP_PROJECT_DIR", project_root)
         .env("npm_lifecycle_event", script_name);
     if std::env::var_os("INIT_CWD").is_none() {
         cmd.env("INIT_CWD", project_root);
@@ -1164,6 +1329,11 @@ async fn run_command_killing_descendants(
 ) -> Result<std::process::ExitStatus, Error> {
     #[cfg(unix)]
     unix_group::group_on_spawn(&mut cmd);
+    let output_reporter = script_settings_state().output_reporter;
+    if output_reporter.is_some() {
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
@@ -1201,10 +1371,103 @@ async fn run_command_killing_descendants(
             None
         }
     };
-    child
-        .wait()
-        .await
-        .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))
+    let Some(reporter) = output_reporter else {
+        return child
+            .wait()
+            .await
+            .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()));
+    };
+    let stdout = child.stdout.take().ok_or_else(|| {
+        Error::Spawn(
+            script_name.to_string(),
+            "failed to capture lifecycle stdout".to_string(),
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        Error::Spawn(
+            script_name.to_string(),
+            "failed to capture lifecycle stderr".to_string(),
+        )
+    })?;
+    let (status, stdout_result, stderr_result) = tokio::join!(
+        child.wait(),
+        report_script_output(stdout, ScriptOutputStream::Stdout, reporter.clone()),
+        report_script_output(stderr, ScriptOutputStream::Stderr, reporter),
+    );
+    stdout_result.map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
+    stderr_result.map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
+    status.map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))
+}
+
+async fn report_script_output<R: tokio::io::AsyncRead + Unpin>(
+    reader: R,
+    stream: ScriptOutputStream,
+    reporter: std::sync::Arc<dyn ScriptOutputReporter>,
+) -> std::io::Result<()> {
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut buffer = Vec::new();
+    let mut continued_record = false;
+    loop {
+        buffer.clear();
+        let mut limited = (&mut reader).take(MAX_SCRIPT_OUTPUT_RECORD_BYTES as u64);
+        if limited.read_until(b'\n', &mut buffer).await? == 0 {
+            return Ok(());
+        }
+        let record_terminated = buffer.last() == Some(&b'\n');
+        if record_terminated {
+            buffer.pop();
+            if buffer.last() == Some(&b'\r') {
+                buffer.pop();
+            }
+        }
+        if !(continued_record && record_terminated && buffer.is_empty()) {
+            reporter.report(stream, String::from_utf8_lossy(&buffer).into_owned());
+        }
+        continued_record = !record_terminated;
+    }
+}
+
+#[cfg(test)]
+mod script_output_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[derive(Default)]
+    struct RecordingReporter(std::sync::Mutex<Vec<String>>);
+
+    impl ScriptOutputReporter for RecordingReporter {
+        fn report(&self, _stream: ScriptOutputStream, line: String) {
+            self.0.lock().unwrap().push(line);
+        }
+    }
+
+    #[tokio::test]
+    async fn unterminated_output_is_reported_in_bounded_chunks() {
+        let reporter = std::sync::Arc::new(RecordingReporter::default());
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let mut output = vec![b'x'; MAX_SCRIPT_OUTPUT_RECORD_BYTES * 2 + 17];
+        output.extend_from_slice(b"\nnext\n");
+        let write = tokio::spawn(async move {
+            writer.write_all(&output).await.unwrap();
+        });
+
+        report_script_output(reader, ScriptOutputStream::Stdout, reporter.clone())
+            .await
+            .unwrap();
+        write.await.unwrap();
+
+        let messages = reporter.0.lock().unwrap();
+        assert_eq!(
+            messages.iter().map(String::len).collect::<Vec<_>>(),
+            [
+                MAX_SCRIPT_OUTPUT_RECORD_BYTES,
+                MAX_SCRIPT_OUTPUT_RECORD_BYTES,
+                17,
+                4,
+            ]
+        );
+        assert_eq!(messages.last().map(String::as_str), Some("next"));
+    }
 }
 
 /// Run a single npm-style script line through `sh -c` with the usual
@@ -1220,7 +1483,8 @@ async fn run_command_killing_descendants(
 /// `&[]` — their transitive bins are already hoisted into the
 /// project-level `.bin`.
 ///
-/// Inherits stdio from the parent so the user sees script output live.
+/// Inherits stdio from the parent so the user sees script output live, unless
+/// an embedding host installed a [`ScriptOutputReporter`].
 /// Returns Err on non-zero exit so install fails fast if a lifecycle
 /// script breaks, matching pnpm.
 #[allow(clippy::too_many_arguments)]
@@ -1256,24 +1520,22 @@ pub async fn run_script(
     // `"node_modules"` at the call site, but a workspace may have
     // configured something else.
     let project_bin = project_root.join(modules_dir_name).join(".bin");
-    let settings = script_settings();
+    let state = script_settings_state();
+    let settings = &state.settings;
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut entries: Vec<PathBuf> = Vec::with_capacity(extra_bin_dirs.len() + 2);
+    let mut project_bins: Vec<PathBuf> = Vec::with_capacity(extra_bin_dirs.len() + 1);
     for dir in extra_bin_dirs {
-        entries.push(dir.to_path_buf());
+        project_bins.push(dir.to_path_buf());
     }
-    entries.push(project_bin);
-    // The switched Node runtime sits between project bins and the
-    // inherited PATH: scripts spawning `node` (directly or via
-    // `#!/usr/bin/env node`) get the project's pinned version, while
-    // anything installed into `.bin` still wins.
-    if let Some(dir) = &settings.node_bin_dir {
-        entries.push(dir.clone());
-    }
+    project_bins.push(project_bin);
+    let mut entries = order_path_entries(
+        project_bins,
+        settings.node_bin_dir.as_deref(),
+        state.node_bin_dir_precedes_project_bins,
+    );
     entries.extend(std::env::split_paths(&path));
     let new_path = std::env::join_paths(entries).unwrap_or(path);
 
-    let settings = script_settings();
     // Embedder PATH prepends (e.g. nub's node-shim dir) lead the composed
     // PATH so a bare `node` in a build script hits the augmented runtime
     // before `extra_bin_dirs` / the project `.bin` / the system PATH. Flows
@@ -1286,8 +1548,8 @@ pub async fn run_script(
             .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
     }
     let mut cmd = match (jail, jail_home.as_deref()) {
-        (Some(jail), Some(home)) => spawn_jailed_shell(script_cmd, &settings, jail, home),
-        _ => spawn_shell_with_settings(script_cmd, &settings),
+        (Some(jail), Some(home)) => spawn_jailed_shell(script_cmd, settings, jail, home),
+        _ => spawn_shell_with_settings(script_cmd, settings),
     };
     cmd.current_dir(script_dir)
         .stderr(child_stderr())
@@ -1314,7 +1576,12 @@ pub async fn run_script(
             script_name,
             &jail.env,
         );
-        apply_script_settings_env(&mut cmd, &settings);
+        apply_script_settings_env(&mut cmd, settings);
+    } else {
+        // The lazy node-gyp shim needs the outer project for registry/auth
+        // settings and bootstrap locking. The jailed branch restores this in
+        // `apply_jail_env` after clearing the environment.
+        cmd.env("AUBE_NODE_GYP_PROJECT_DIR", project_root);
     }
 
     // npm-compat manifest env, applied last so it survives the jail's
@@ -2053,6 +2320,60 @@ mod env_overlay_tests {
 }
 
 #[cfg(test)]
+mod spawn_program_tests {
+    use super::*;
+
+    fn env_keys(cmd: &tokio::process::Command) -> Vec<String> {
+        let mut keys: Vec<String> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// The direct path must be indistinguishable from the shell path as
+    /// far as the child's environment goes. Diffing the two commands
+    /// pins that mechanically, rather than trusting that two call sites
+    /// stamp the same list — `aube run` exports a documented `npm_*`
+    /// surface that build tooling reads.
+    #[tokio::test]
+    async fn spawn_program_stamps_the_same_env_as_spawn_shell() {
+        let settings = ScriptSettings {
+            node_options: Some("--max-old-space-size=100".to_string()),
+            node_program: Some(PathBuf::from("/usr/bin/node")),
+            node_execpath: Some(PathBuf::from("/usr/bin/node")),
+            command: Some("run-script".to_string()),
+            http_proxy: Some("http://proxy.invalid".to_string()),
+            https_proxy: Some("http://proxy.invalid".to_string()),
+            ..ScriptSettings::default()
+        };
+        scope(async move {
+            set_script_settings(settings);
+            let shell = spawn_shell("tool --flag");
+            let direct = spawn_program(Path::new("/usr/bin/tool"), "tool", ["--flag"]);
+            assert_eq!(
+                env_keys(&shell),
+                env_keys(&direct),
+                "direct exec must export the same env keys as `sh -c`"
+            );
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_program_runs_the_program_with_its_args() {
+        let mut cmd = spawn_program(Path::new("/bin/echo"), "echo", ["a b", "$HOME"]);
+        let out = cmd.output().await.unwrap();
+        assert!(out.status.success());
+        // `$HOME` arrives literally: there is no shell to expand it.
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a b $HOME\n");
+    }
+}
+
+#[cfg(test)]
 mod jail_tests {
     use super::*;
 
@@ -2152,9 +2473,41 @@ mod jail_tests {
         assert_eq!(env("NODE_OPTIONS"), Some("--conditions=aube"));
         assert_eq!(env("npm_config_unsafe_perm"), Some("false"));
         assert_eq!(env("npm_config_shell_emulator"), Some("true"));
+        assert_eq!(env("AUBE_NODE_GYP_PROJECT_DIR"), Some("/tmp/project"));
         assert_eq!(env("npm_lifecycle_event"), Some("postinstall"));
         assert_eq!(env("npm_package_name"), Some("pkg"));
         assert_eq!(env("npm_package_version"), Some("1.2.3"));
+    }
+
+    #[test]
+    fn embedder_env_overrides_jailed_node_gyp_project_default() {
+        let mut cmd = tokio::process::Command::new("node");
+        let settings = ScriptSettings {
+            extra_env: vec![(
+                "AUBE_NODE_GYP_PROJECT_DIR".into(),
+                "/tmp/embedder-project".into(),
+            )],
+            ..Default::default()
+        };
+
+        apply_jail_env(
+            &mut cmd,
+            std::ffi::OsStr::new("/bin"),
+            Path::new("/tmp/aube-jail/home"),
+            Path::new("/tmp/project"),
+            &PackageJson::default(),
+            "postinstall",
+            &[],
+        );
+        apply_script_settings_env(&mut cmd, &settings);
+
+        let project_dir = cmd
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("AUBE_NODE_GYP_PROJECT_DIR"))
+            .and_then(|(_, value)| value)
+            .and_then(|value| value.to_str());
+        assert_eq!(project_dir, Some("/tmp/embedder-project"));
     }
 
     fn proxy_env(settings: ScriptSettings) -> impl Fn(&str) -> Option<String> {

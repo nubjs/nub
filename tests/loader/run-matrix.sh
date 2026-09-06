@@ -48,10 +48,19 @@ fail=0
 run_one() {  # <label> <argv...>
   local label="$1"; shift
   local fixture="${@: -1}"
-  local want got
-  want="$(grep "^${fixture}=" "$fixtures/expected.txt" | cut -d= -f2- | sed 's/\\n/\n/g')"
-  got="$(cd "$work" && "$@" 2>&1 || true)"
-  if [[ "$got" == "$want" ]]; then
+  local want got status=0
+  if [[ "$fixture" == "foreign-main.mjs" ]]; then
+    # Node majors differ in their native imported-CJS hook call sequence.
+    if ! want="$(cd "$work" && node --require ./foreign-sync.cjs "$fixture" 2>&1)"; then
+      echo "  FAIL plain Node sync-hook control: $want"
+      fail=1
+      return
+    fi
+  else
+    want="$(grep "^${fixture}=" "$fixtures/expected.txt" | cut -d= -f2- | sed 's/\\n/\n/g')"
+  fi
+  got="$(cd "$work" && "$@" 2>&1)" || status=$?
+  if [[ "$status" == 0 && "$got" == "$want" ]]; then
     printf "  ok   %-10s %s\n" "$label" "$fixture"
   elif [[ "$label" == "tsx" ]]; then
     # The tsx column is the differential reference, not a gate: a tsx miss is a
@@ -66,13 +75,23 @@ run_one() {  # <label> <argv...>
 
 run_version() {
   echo "== node $(node --version)"
-  for f in main.ts paths.ts req.cts using.ts worker-main.ts clobber.ts; do
+  for f in main.ts paths.ts req.cts using.ts worker-main.ts clobber.ts cache-main.ts; do
     run_one "--import" node --import "$pkg_name" "$f"
   done
+  run_one "env-import" env NODE_OPTIONS="--import $pkg_name" node cache-main.ts
+  run_one "loader-alias" node --no-warnings --experimental_loader ./foreign-hooks.mjs --import "$pkg_name" foreign-async-main.mjs
+  run_one "env-alias" env NODE_OPTIONS="--experimental_loader=./foreign-hooks.mjs" node --no-warnings --import "$pkg_name" foreign-async-main.mjs
+  run_one "early-async" node --no-warnings --require ./foreign-async.cjs --import "$pkg_name" foreign-async-main.mjs
+  run_one "env-async" env NODE_OPTIONS="--require ./foreign-async.cjs" node --no-warnings --import "$pkg_name" foreign-async-main.mjs
+  if node -e 'process.exit(typeof require("node:module").registerHooks === "function" ? 0 : 1)'; then
+    run_one "early-sync" node --require ./foreign-sync.cjs --import "$pkg_name" foreign-main.mjs
+    run_one "env-sync" env NODE_OPTIONS="-r ./foreign-sync.cjs" node --import "$pkg_name" foreign-main.mjs
+  fi
   if supports_require; then
-    for f in main.ts req.cts; do
+    for f in main.ts req.cts cache-main.ts; do
       run_one "--require" node --require "$pkg_name" "$f"
     done
+    run_one "own-preload" node --require "$pkg_name" --import "$pkg_name" cache-main.ts
   else
     echo "  skip --require (no require(esm) on this Node)"
   fi

@@ -47,6 +47,18 @@ teardown() {
 	assert_failure
 }
 
+@test "aube install --resolution-mode=lowest-direct picks the lowest direct version without time metadata" {
+	_setup_basic_fixture
+	rm aube-lock.yaml
+	jq '.dependencies = {"is-number": ">=3"}' package.json >package.json.tmp
+	mv package.json.tmp package.json
+	run aube install --resolution-mode=lowest-direct
+	assert_success
+	assert_file_exists node_modules/.aube/is-number@3.0.0/node_modules/is-number/package.json
+	run grep -E '^time:' aube-lock.yaml
+	assert_failure
+}
+
 @test "aube install --resolution-mode rejects unknown values via .npmrc fallback" {
 	_setup_basic_fixture
 	rm aube-lock.yaml

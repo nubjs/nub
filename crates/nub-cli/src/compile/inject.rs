@@ -15,7 +15,7 @@
 //! not a re-read of whatever the writer happened to emit.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -233,9 +233,75 @@ pub fn find_payload(format: ContainerFormat, image: &[u8]) -> Result<Option<&[u8
     let name = nub_core::compile::SECTION_NAME;
     match format {
         ContainerFormat::MachO => find_in_macho(image, name),
-        ContainerFormat::Elf => find_in_elf(image, name),
+        ContainerFormat::Elf => find_in_elf(image, name, NoteShape::Sui),
         ContainerFormat::Pe => find_in_pe(image, name),
     }
+}
+
+/// Locate a Node single-executable blob in a produced artifact, the way that
+/// artifact's own Node will locate it at start.
+///
+/// The Mach-O and PE legs are the same walks the launcher payload uses with
+/// different names, because postject reads the same structures libsui writes. Only
+/// ELF differs, and it differs in the NOTE rather than the traversal — see
+/// [`NoteShape`].
+pub fn find_sea_blob(format: ContainerFormat, image: &[u8]) -> Result<Option<&[u8]>> {
+    match format {
+        ContainerFormat::MachO => find_in_macho(image, super::sea::MACHO_SECTION),
+        ContainerFormat::Elf => find_in_elf(image, super::sea::RESOURCE_NAME, NoteShape::NodeSea),
+        ContainerFormat::Pe => find_in_pe(image, super::sea::RESOURCE_NAME),
+    }
+}
+
+/// Which ELF note layout a scan is looking for.
+///
+/// Both are ordinary notes in a `PT_NOTE` segment; they disagree about where the
+/// resource NAME lives. libsui puts a fixed `SUI` in `n_name` and length-prefixes
+/// the real name inside the descriptor, so one note type can carry many sections.
+/// postject — which is what a Node binary reads itself with — matches `n_name`
+/// directly and takes the descriptor as the payload with nothing in front of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoteShape {
+    /// libsui's: `n_name = "SUI"`, `desc = [u16 name_len][name][payload]`.
+    Sui,
+    /// postject's: `n_name = <the resource name>`, `desc = payload`.
+    NodeSea,
+}
+
+/// How many bytes of `image` are its ad-hoc code signature — 0 for a format that
+/// carries none, and for a Mach-O that was never signed.
+///
+/// Reported as its own component of the output size rather than being left in a
+/// remainder, because it is neither launcher nor payload and it is not small: the
+/// CodeDirectory holds one SHA-256 per 4 KiB page, so it grows at ~0.78% of the
+/// file — 228 KB on a 29 MB embed build, against a launcher template of 851 KB.
+pub fn code_signature_size(format: ContainerFormat, image: &[u8]) -> u64 {
+    // ELF is never signed and Authenticode is out of scope; see `inject`.
+    match format {
+        ContainerFormat::MachO => macho_code_signature_size(image).unwrap_or(0),
+        ContainerFormat::Elf | ContainerFormat::Pe => 0,
+    }
+}
+
+/// The same measurement against a file on disk, reading only the Mach-O header
+/// and its load commands. The artifact is up to ~30 MB and the answer lives in
+/// its first few KB, so this deliberately does not `read` the whole image.
+pub fn code_signature_size_of(format: ContainerFormat, path: &Path) -> Result<u64> {
+    if format != ContainerFormat::MachO {
+        return Ok(0);
+    }
+    let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut header = [0u8; 32];
+    file.read_exact(&mut header)
+        .with_context(|| format!("reading the Mach-O header of {}", path.display()))?;
+    // `sizeofcmds` comes out of the file, so cap the allocation it sizes. A
+    // launcher template's load commands are ~4 KB; nothing legitimate is near 1 MB.
+    let sizeofcmds = (u32le(&header, 20).context("truncated Mach-O header")? as usize).min(1 << 20);
+    let mut prefix = vec![0u8; 32usize.saturating_add(sizeofcmds)];
+    prefix[..32].copy_from_slice(&header);
+    file.read_exact(&mut prefix[32..])
+        .with_context(|| format!("reading the load commands of {}", path.display()))?;
+    Ok(macho_code_signature_size(&prefix).unwrap_or(0))
 }
 
 /// Find the `VS_VERSIONINFO` resource in a produced PE, walking the same
@@ -269,6 +335,44 @@ pub fn find_version_resource(image: &[u8]) -> Result<Option<&[u8]>> {
         return Ok(None);
     };
     resource_leaf_data(image, base, &sections, leaf).map(Some)
+}
+
+/// Find the application manifest in a PE, walking `RT_MANIFEST` → name 1 → the
+/// first language, and returning that language along with the bytes.
+///
+/// The one resource that has to survive a rewrite rather than merely look right
+/// afterwards. Windows' version-lie shim reports 6.2 to an image that declares no
+/// `<supportedOS>` GUID, and Node's `wmain` calls `IsWindows10OrGreater` before
+/// anything else and exits 216 when it fails — so a Node binary rewritten without
+/// its manifest does not start. Read off the INPUT here and handed back to
+/// libsui, which builds its resource directory from scratch.
+pub fn find_manifest_resource(image: &[u8]) -> Result<Option<(&[u8], u32)>> {
+    /// `RT_MANIFEST`.
+    const RT_MANIFEST: u32 = 24;
+    /// `CREATEPROCESS_MANIFEST_RESOURCE_ID` — the only name the loader reads for
+    /// an executable.
+    const CREATEPROCESS_MANIFEST: u32 = 1;
+
+    let Some((base, sections)) = pe_resource_root(image)? else {
+        return Ok(None);
+    };
+    let Some(types) = resource_subdir(image, base, base, |e| e == ResourceKey::Id(RT_MANIFEST))?
+    else {
+        return Ok(None);
+    };
+    let Some(named) = resource_subdir(image, base, types, |e| {
+        e == ResourceKey::Id(CREATEPROCESS_MANIFEST)
+    })?
+    else {
+        return Ok(None);
+    };
+    let Some(leaf) = resource_entries(image, named)?.first().copied() else {
+        return Ok(None);
+    };
+    // A language level is always keyed by id, so the high bit cannot be set here
+    // and the key is the language itself.
+    let language = leaf.0;
+    resource_leaf_data(image, base, &sections, leaf).map(|data| Some((data, language)))
 }
 
 // ---- little-endian readers ----------------------------------------------------
@@ -316,6 +420,31 @@ fn slice_at(image: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
 
 const MH_MAGIC_64: u32 = 0xfeed_facf;
 const LC_SEGMENT_64: u32 = 0x19;
+const LC_CODE_SIGNATURE: u32 = 0x1d;
+
+/// `datasize` of the `LC_CODE_SIGNATURE` load command, or `None` when the image
+/// is unparseable or unsigned. Never errors: a size split is a report, and a
+/// report must not fail a build that already produced a verified artifact.
+fn macho_code_signature_size(image: &[u8]) -> Option<u64> {
+    if u32le(image, 0) != Some(MH_MAGIC_64) {
+        return None;
+    }
+    let ncmds = u32le(image, 16)? as usize;
+    let mut cursor = 32usize; // sizeof(mach_header_64)
+    for _ in 0..ncmds {
+        let cmd = u32le(image, cursor)?;
+        let cmdsize = u32le(image, cursor + 4)? as usize;
+        if cmdsize == 0 {
+            return None;
+        }
+        // linkedit_data_command: cmd, cmdsize, dataoff, datasize.
+        if cmd == LC_CODE_SIGNATURE {
+            return u32le(image, cursor + 12).map(u64::from);
+        }
+        cursor = cursor.checked_add(cmdsize)?;
+    }
+    None
+}
 
 /// Walk `LC_SEGMENT_64` load commands for a section named `name`. libsui writes
 /// it under its own `__SUI` segment; matching on the SECTION name alone keeps the
@@ -363,7 +492,7 @@ const ELF_NOTE_TYPE: u32 = 0x5355_4901;
 /// Walk `PT_NOTE` program headers for libsui's `SUI` note carrying `name` — the
 /// same traversal the launcher's `dl_iterate_phdr` scan performs at runtime,
 /// against the file's own program header table.
-fn find_in_elf<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
+fn find_in_elf<'a>(image: &'a [u8], name: &str, shape: NoteShape) -> Result<Option<&'a [u8]>> {
     if image.get(0..4) != Some(b"\x7fELF") {
         bail!("not an ELF image");
     }
@@ -385,7 +514,7 @@ fn find_in_elf<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
         let filesz = u64le(image, ph + 32).context("truncated ELF program header")?;
         let align = u64le(image, ph + 48).unwrap_or(4).max(4) as usize;
         let segment = slice_at(image, offset, filesz)?;
-        if let Some(found) = find_in_note_segment(segment, align, name) {
+        if let Some(found) = find_in_note_segment(segment, align, name, shape) {
             return Ok(Some(found));
         }
     }
@@ -394,7 +523,12 @@ fn find_in_elf<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
 
 /// Walk one note segment: `namesz`/`descsz`/`type`, then the name and desc each
 /// padded up to the segment's alignment.
-fn find_in_note_segment<'a>(segment: &'a [u8], align: usize, name: &str) -> Option<&'a [u8]> {
+fn find_in_note_segment<'a>(
+    segment: &'a [u8],
+    align: usize,
+    name: &str,
+    shape: NoteShape,
+) -> Option<&'a [u8]> {
     let round_up = |v: usize| v.saturating_add(align - 1) & !(align - 1);
     let mut pos = 0usize;
     while pos + 12 <= segment.len() {
@@ -408,12 +542,21 @@ fn find_in_note_segment<'a>(segment: &'a [u8], align: usize, name: &str) -> Opti
         let desc = segment.get(pos..pos.checked_add(descsz)?)?;
         pos = round_up(pos.checked_add(descsz)?);
 
-        if note_name == ELF_NOTE_NAME && note_type == ELF_NOTE_TYPE {
-            // desc = [name_len u16][name][payload]
-            let name_len = u16le(desc, 0)? as usize;
-            if desc.get(2..2 + name_len)? == name.as_bytes() {
-                return desc.get(2 + name_len..);
+        match shape {
+            NoteShape::Sui if note_name == ELF_NOTE_NAME && note_type == ELF_NOTE_TYPE => {
+                // desc = [name_len u16][name][payload]
+                let name_len = u16le(desc, 0)? as usize;
+                if desc.get(2..2 + name_len)? == name.as_bytes() {
+                    return desc.get(2 + name_len..);
+                }
             }
+            // postject compares the name with `strncmp(…, sizeof(name))` where
+            // `name` is a POINTER, so it really only looks at the first eight
+            // bytes. This is the stricter check on purpose: it proves nub wrote
+            // the whole name, which is what a reader with a correct `strncmp`
+            // would need.
+            NoteShape::NodeSea if note_name == name.as_bytes() => return Some(desc),
+            _ => {}
         }
     }
     None
@@ -538,7 +681,7 @@ pub fn pe_subsystem(image: &[u8]) -> Option<u16> {
 /// console for the process it starts from this image.
 pub const SUBSYSTEM_WINDOWS_GUI: u16 = 2;
 
-fn set_pe_subsystem_gui(image: &mut [u8]) -> Result<()> {
+pub(super) fn set_pe_subsystem_gui(image: &mut [u8]) -> Result<()> {
     let pe = pe_header_offset(image)?;
     let optional_header = pe + 24;
     // Checked rather than assumed: a ROM image (0x107) lays its optional header
@@ -666,6 +809,7 @@ mod tests {
             sealed_module_graph: false,
             hide_console: false,
             inline_app: false,
+            standalone_preamble: false,
         };
         nub_core::compile::encode(
             &manifest,

@@ -20,6 +20,9 @@ pub const ERR_AUBE_RESOLUTION_SHAPE_MISMATCH: &str = "ERR_AUBE_RESOLUTION_SHAPE_
 pub const ERR_AUBE_OUTDATED_LOCKFILE: &str = "ERR_AUBE_OUTDATED_LOCKFILE";
 #[rustfmt::skip] pub const ERR_AUBE_LOCKFILE_DECLARATION_MISMATCH: &str = "ERR_AUBE_LOCKFILE_DECLARATION_MISMATCH";
 pub const ERR_AUBE_LOCKFILE_AMBIGUOUS: &str = "ERR_AUBE_LOCKFILE_AMBIGUOUS";
+pub const ERR_AUBE_LOCKFILE_CONFIG_MISMATCH: &str = "ERR_AUBE_LOCKFILE_CONFIG_MISMATCH";
+pub const ERR_AUBE_UNSUPPORTED_NAMED_REGISTRY: &str = "ERR_AUBE_UNSUPPORTED_NAMED_REGISTRY";
+#[rustfmt::skip] pub const ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION: &str = "ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION";
 
 // ── resolver ─────────────────────────────────────────────────────────
 pub const ERR_AUBE_NO_MATCHING_VERSION: &str = "ERR_AUBE_NO_MATCHING_VERSION";
@@ -65,6 +68,10 @@ pub const ERR_AUBE_PKG_CONTENT_MISMATCH: &str = "ERR_AUBE_PKG_CONTENT_MISMATCH";
 pub const ERR_AUBE_TARBALL_URL_MISMATCH: &str = "ERR_AUBE_TARBALL_URL_MISMATCH";
 pub const ERR_AUBE_NO_HOME: &str = "ERR_AUBE_NO_HOME";
 pub const ERR_AUBE_GIT_ERROR: &str = "ERR_AUBE_GIT_ERROR";
+pub const ERR_AUBE_STORE_INDEX_SCAN_FAILED: &str = "ERR_AUBE_STORE_INDEX_SCAN_FAILED";
+pub const ERR_AUBE_GVS_PRUNE_FAILED: &str = "ERR_AUBE_GVS_PRUNE_FAILED";
+pub const ERR_AUBE_STORE_PRUNE_LOCK_FAILED: &str = "ERR_AUBE_STORE_PRUNE_LOCK_FAILED";
+pub const ERR_AUBE_STORE_PRUNE_FAILED: &str = "ERR_AUBE_STORE_PRUNE_FAILED";
 
 // ── linker ──────────────────────────────────────────────────────────
 pub const ERR_AUBE_LINK_FAILED: &str = "ERR_AUBE_LINK_FAILED";
@@ -76,6 +83,7 @@ pub const ERR_AUBE_MISSING_PACKAGE_INDEX: &str = "ERR_AUBE_MISSING_PACKAGE_INDEX
 pub const ERR_AUBE_UNSAFE_INDEX_KEY: &str = "ERR_AUBE_UNSAFE_INDEX_KEY";
 pub const ERR_AUBE_UNSAFE_PACKAGE_NAME: &str = "ERR_AUBE_UNSAFE_PACKAGE_NAME";
 pub const ERR_AUBE_MISSING_STORE_FILE: &str = "ERR_AUBE_MISSING_STORE_FILE";
+pub const ERR_AUBE_UNSAFE_MODULES_DIR: &str = "ERR_AUBE_UNSAFE_MODULES_DIR";
 
 // ── scripts ─────────────────────────────────────────────────────────
 pub const ERR_AUBE_SCRIPT_SPAWN: &str = "ERR_AUBE_SCRIPT_SPAWN";
@@ -94,6 +102,7 @@ pub const ERR_AUBE_FILTER_GIT_FAILED: &str = "ERR_AUBE_FILTER_GIT_FAILED";
 // ── manifest ────────────────────────────────────────────────────────
 pub const ERR_AUBE_MANIFEST_PARSE: &str = "ERR_AUBE_MANIFEST_PARSE";
 pub const ERR_AUBE_MANIFEST_YAML_PARSE: &str = "ERR_AUBE_MANIFEST_YAML_PARSE";
+pub const ERR_AUBE_INVALID_PACKAGE_EXTENSION: &str = "ERR_AUBE_INVALID_PACKAGE_EXTENSION";
 
 // ── engine / cli ────────────────────────────────────────────────────
 pub const ERR_AUBE_UNSUPPORTED_ENGINE: &str = "ERR_AUBE_UNSUPPORTED_ENGINE";
@@ -108,6 +117,7 @@ pub const ERR_AUBE_NO_BRANDED_CONFIG_FILE: &str = "ERR_AUBE_NO_BRANDED_CONFIG_FI
 #[rustfmt::skip] pub const ERR_AUBE_CONFIG_SETTING_UNSUPPORTED: &str = "ERR_AUBE_CONFIG_SETTING_UNSUPPORTED";
 pub const ERR_AUBE_CONFLICTING_BUILD_FLAGS: &str = "ERR_AUBE_CONFLICTING_BUILD_FLAGS";
 pub const ERR_AUBE_ACCESS_INVALID_ARGUMENT: &str = "ERR_AUBE_ACCESS_INVALID_ARGUMENT";
+pub const ERR_AUBE_PUBLISH_SOURCE_NOT_FOUND: &str = "ERR_AUBE_PUBLISH_SOURCE_NOT_FOUND";
 pub const ERR_AUBE_SHIM_CREATE_FAILED: &str = "ERR_AUBE_SHIM_CREATE_FAILED";
 pub const ERR_AUBE_SHIM_EXEC_FAILED: &str = "ERR_AUBE_SHIM_EXEC_FAILED";
 
@@ -168,7 +178,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_LOCKFILE_PARSE,
         category: category::LOCKFILE,
-        description: "Lockfile is structurally invalid — version guard failed, YAML shape is wrong, or `yaml_serde` couldn't round-trip the contents.",
+        description: "Lockfile is structurally invalid — version guard failed, YAML shape is wrong, or the contents couldn't be parsed.",
         exit_code: Some(11),
     },
     CodeMeta {
@@ -206,6 +216,27 @@ pub const ALL: &[CodeMeta] = &[
         category: category::LOCKFILE,
         description: "Lockfiles from two or more package managers coexist and `package.json` doesn't declare which tool owns the project. Remove the stale lockfile(s) or add a `packageManager` declaration.",
         exit_code: Some(18),
+    },
+    // The lockfile band (10–19, `exit.rs`) holds ten slots and the category
+    // now has eleven codes, so one lockfile code lives outside it. The bands
+    // are documentation; `exit_codes_are_unique` is the real constraint.
+    CodeMeta {
+        name: ERR_AUBE_LOCKFILE_CONFIG_MISMATCH,
+        category: category::LOCKFILE,
+        description: "A frozen install found configuration, such as patch-file content, that no longer matches the lockfile.",
+        exit_code: Some(19),
+    },
+    CodeMeta {
+        name: ERR_AUBE_UNSUPPORTED_NAMED_REGISTRY,
+        category: category::LOCKFILE,
+        description: "A pnpm lockfile contains registry-qualified package identities that aube cannot safely resolve yet.",
+        exit_code: Some(15),
+    },
+    CodeMeta {
+        name: ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION,
+        category: category::LOCKFILE,
+        description: "A pnpm lockfile aube cannot read: a `lockfileVersion` older than 9 (the pnpm 8.x and earlier formats), a malformed version, or a v9 header over a pre-v9 body.",
+        exit_code: Some(93),
     },
     // Resolver
     CodeMeta {
@@ -317,6 +348,30 @@ pub const ALL: &[CodeMeta] = &[
         description: "`HOME` (or platform equivalent) is unset, so aube can't locate its store.",
         exit_code: None,
     },
+    CodeMeta {
+        name: ERR_AUBE_STORE_INDEX_SCAN_FAILED,
+        category: category::TARBALL_STORE,
+        description: "A store maintenance command couldn't completely read or parse the cached package indexes.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_GVS_PRUNE_FAILED,
+        category: category::TARBALL_STORE,
+        description: "The global virtual store project registry or prune walk failed.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_STORE_PRUNE_LOCK_FAILED,
+        category: category::TARBALL_STORE,
+        description: "aube couldn't acquire the store-wide maintenance lock for pruning.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_STORE_PRUNE_FAILED,
+        category: category::TARBALL_STORE,
+        description: "A planned content-store file couldn't be removed during pruning.",
+        exit_code: None,
+    },
     // Registry / network
     CodeMeta {
         name: ERR_AUBE_PACKAGE_NOT_FOUND,
@@ -373,7 +428,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_INVALID_PACKAGE_NAME,
         category: category::REGISTRY_NETWORK,
-        description: "A name doesn't match npm's grammar — rejected before any I/O so a hostile manifest can't use the cache-path builder as a write primitive.",
+        description: "A name doesn't match npm's grammar — rejected before any I/O so a hostile manifest can't turn a package name into an arbitrary filesystem path.",
         exit_code: Some(44),
     },
     CodeMeta {
@@ -385,7 +440,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_MALICIOUS_PACKAGE,
         category: category::REGISTRY_NETWORK,
-        description: "`aube add` refused a package because OSV reports it as malicious (`MAL-*` advisory). Hard block — confirmed-malicious advisories aren't a judgement call.",
+        description: "`aube add` or an install's OSV advisory check (`advisoryCheck`, `advisoryCheckOnInstall`, `advisoryBloomCheck`) refused a package because OSV reports it as malicious (`MAL-*` advisory). Hard block — confirmed-malicious advisories aren't a judgement call.",
         exit_code: Some(46),
     },
     CodeMeta {
@@ -415,7 +470,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_ADVISORY_CHECK_FAILED,
         category: category::REGISTRY_NETWORK,
-        description: "`aube add` couldn't reach the OSV advisory API and `advisoryCheck = required` is set. Distinct from `ERR_AUBE_MALICIOUS_PACKAGE` so CI tooling can tell a network outage from a confirmed malicious advisory.",
+        description: "An OSV advisory check couldn't complete — the live API was unreachable, or the local mirror / bloom filter couldn't refresh — and the governing setting (`advisoryCheck`, `advisoryCheckOnInstall`, or `advisoryBloomCheck`) is `required`. Distinct from `ERR_AUBE_MALICIOUS_PACKAGE` so CI tooling can tell a network outage from a confirmed malicious advisory.",
         exit_code: Some(49),
     },
     CodeMeta {
@@ -495,7 +550,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_MISSING_PACKAGE_INDEX,
         category: category::LINKER,
-        description: "Internal: a caller skipped `load_index` but the package wasn't already materialized.",
+        description: "A package could not be linked because its store index was unavailable and the package was not already materialized. Re-run the install; if it persists, report it at https://github.com/aubepkg/aube/discussions.",
         exit_code: Some(62),
     },
     CodeMeta {
@@ -504,11 +559,17 @@ pub const ALL: &[CodeMeta] = &[
         description: "A package index references a CAS shard that doesn't exist on disk. Re-run install to re-fetch.",
         exit_code: Some(63),
     },
+    CodeMeta {
+        name: ERR_AUBE_UNSAFE_MODULES_DIR,
+        category: category::LINKER,
+        description: "The configured modules directory resolves to the project root or outside it, where linker cleanup could remove unrelated files.",
+        exit_code: Some(64),
+    },
     // Manifest / workspace
     CodeMeta {
         name: ERR_AUBE_MANIFEST_PARSE,
         category: category::MANIFEST_WORKSPACE,
-        description: "A `package.json` had a syntax error. miette renders a pointer at the offending byte.",
+        description: "A `package.json` had a syntax error. The diagnostic points at the offending byte.",
         exit_code: Some(70),
     },
     CodeMeta {
@@ -527,6 +588,12 @@ pub const ALL: &[CodeMeta] = &[
         name: ERR_AUBE_MANIFEST_YAML_PARSE,
         category: category::MANIFEST_WORKSPACE,
         description: "A workspace YAML helper file was structurally invalid (no source pointer available).",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_INVALID_PACKAGE_EXTENSION,
+        category: category::MANIFEST_WORKSPACE,
+        description: "A `packageExtensions` entry had an invalid object shape or non-string dependency range.",
         exit_code: None,
     },
     CodeMeta {
@@ -563,7 +630,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_NPM_ONLY_COMMAND,
         category: category::ENGINE_CLI,
-        description: "The user invoked an npm-only command (`whoami`, `token`, `owner`, `search`, `pkg`, `set-script`) — aube doesn't implement these; use npm.",
+        description: "The user invoked an npm-only command (`whoami`, `token`, `owner`, `search`, `pkg`, `set-script`, `stage`) — aube doesn't implement these; run them with npm, or set `npmPath` to let aube delegate them.",
         exit_code: Some(82),
     },
     CodeMeta {
@@ -618,6 +685,12 @@ pub const ALL: &[CodeMeta] = &[
         name: ERR_AUBE_ACCESS_INVALID_ARGUMENT,
         category: category::ENGINE_CLI,
         description: "`aube access` received an invalid access setting, permission level, team, or package argument.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_PUBLISH_SOURCE_NOT_FOUND,
+        category: category::ENGINE_CLI,
+        description: "`aube publish` was given a package directory or tarball path that doesn't exist.",
         exit_code: None,
     },
     CodeMeta {
@@ -684,7 +757,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_SELF_UPDATE_UNSUPPORTED_PLATFORM,
         category: category::ENGINE_CLI,
-        description: "`aube self-update` has no published aube release archive for this OS/architecture (e.g. FreeBSD, Intel macOS). Install aube via your system package manager or mise. Distinct from ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM, which is about the Node.js download.",
+        description: "`aube self-update` has no published aube release archive for this OS/architecture (e.g. FreeBSD, Intel macOS). Install aube via your system package manager or mise. Distinct from `ERR_AUBE_RUNTIME_UNSUPPORTED_PLATFORM`, which is about the Node.js download.",
         exit_code: None,
     },
     // Misc / safety
@@ -703,7 +776,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_UNSAFE_SHEBANG_INTERPRETER,
         category: category::MISC_SAFETY,
-        description: "A `#!` shebang named an unsafe interpreter when generating a shim — substituted with `node` instead. Surfaced as `tracing::error!` but install continues.",
+        description: "A `#!` shebang named an unsafe interpreter when generating a shim — substituted with `node` instead. Reported as an error, but install continues.",
         exit_code: Some(91),
     },
     CodeMeta {

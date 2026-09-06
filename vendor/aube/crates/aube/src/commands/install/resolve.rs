@@ -61,7 +61,7 @@ pub(super) struct LockfileOnlyInput<'a> {
     pub revalidate_release_policy: bool,
     pub lockfile_conflict_marker_warning_emitted: bool,
     pub existing_for_resolver: Option<&'a LockfileGraph>,
-    pub source_kind_before: Option<LockfileKind>,
+    pub write_kind: LockfileKind,
     pub lockfile_enabled: bool,
     pub lockfile_include_tarball_url: bool,
     pub shared_workspace_lockfile: bool,
@@ -97,7 +97,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         revalidate_release_policy,
         lockfile_conflict_marker_warning_emitted,
         existing_for_resolver,
-        source_kind_before,
+        write_kind,
         lockfile_enabled,
         lockfile_include_tarball_url,
         shared_workspace_lockfile,
@@ -284,14 +284,10 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             // `lockfile=false` collapses to `None` so the resolver
             // doesn't waste a fetch widening a lockfile that will
             // never be written. With lockfiles enabled, a missing
-            // `source_kind_before` means "we'll create the default
-            // aube-lock.yaml", so the aube-native wide default
-            // applies.
-            target_lockfile_kind: lockfile_enabled.then(|| {
-                source_kind_before
-                    .unwrap_or_else(|| crate::commands::default_lockfile_kind(settings_ctx))
-            }),
-            dependency_policy: Some(dependency_policy.clone()),
+            // With lockfiles enabled, `write_kind` is either the existing
+            // format or the configured creation default.
+            target_lockfile_kind: lockfile_enabled.then_some(write_kind),
+            dependency_policy: dependency_policy.clone(),
             cache_full_packuments: true,
             ignore_scripts,
         },
@@ -339,8 +335,10 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             }
         }
     }
-    let lo_write_kind =
-        source_kind_before.unwrap_or_else(|| crate::commands::default_lockfile_kind(settings_ctx));
+    let lo_write_kind = write_kind;
+    if matches!(lo_write_kind, LockfileKind::Pnpm) {
+        graph.patched_dependencies = crate::patches::read_patched_dependencies(cwd)?;
+    }
     // Same runtime-pin recording as the main install path.
     crate::runtime::refresh_lockfile_pin(
         &mut graph,
@@ -626,6 +624,26 @@ pub(super) fn select_lockfile_result(
             }
         }
     }
+}
+
+/// Patch-config drift for a caller outside the install pipeline
+/// (`remove`'s lockfile-trim fast path). The install modes above run the
+/// same comparison inline. It has to be the hash-aware check: a pnpm
+/// lockfile records each patch as a content hash, and nub's reader keeps
+/// that hash rather than a path, so a path-map comparison would report
+/// every recorded pnpm patch as missing.
+pub(crate) fn check_patch_drift(
+    cwd: &Path,
+    graph: &LockfileGraph,
+    kind: LockfileKind,
+) -> miette::Result<DriftStatus> {
+    let (effective_patch_paths, effective_patch_hashes) =
+        crate::patches::effective_patch_config(cwd)?;
+    Ok(graph.check_patched_dependencies_drift(
+        kind,
+        &effective_patch_paths,
+        &effective_patch_hashes,
+    ))
 }
 
 fn active_lockfile_has_conflict_markers(lockfile_dir: &Path) -> bool {

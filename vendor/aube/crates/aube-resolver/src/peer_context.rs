@@ -26,7 +26,7 @@
 
 use crate::version_satisfies;
 use crate::{FxHashMap, FxHashSet};
-use aube_lockfile::{DepType, DirectDep, LockedPackage, LockfileGraph, LockfileKind};
+use aube_lockfile::{DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph, LockfileKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A peer dependency whose declared range doesn't match the version the
@@ -112,18 +112,22 @@ pub type AutoInstalledPeers = BTreeMap<String, BTreeSet<String>>;
 /// direct deps, returning the graph plus a record of what was added.
 ///
 /// Walks each importer's direct dependencies and hoists any peer they
-/// declare that isn't already a direct dep of the importer up to the
-/// importer's `dependencies` list — mirroring how pnpm's
-/// `auto-install-peers=true` resolution treats missing peers as if the
-/// root had requested them. The hoisted entries exist so that
-/// [`apply_peer_contexts`] can resolve peers from the importer scope and
-/// so reachability-based passes (`platform::filter_graph`'s GC) keep
-/// peer-only packages alive. They are *not* part of the final graph:
-/// pnpm never records auto-installed peers as importer specifiers in
-/// `pnpm-lock.yaml` (a lockfile that carries them fails
-/// `pnpm install --frozen-lockfile` with `ERR_PNPM_OUTDATED_LOCKFILE`)
-/// and never links them into the project's top-level `node_modules/`,
-/// so callers must strip the additions with
+/// declare that isn't already a direct dep of the importer into a synthetic
+/// importer entry — mirroring how pnpm's `auto-install-peers=true`
+/// resolution treats a missing REQUIRED peer as if the root had requested
+/// it. An optional peer (`peerDependenciesMeta.optional`) is never
+/// promoted; the synthetic entry inherits the requiring package's
+/// dependency kind so section-filtered installs retain it only when they
+/// retain the package that needs it.
+///
+/// The hoisted entries exist so that [`apply_peer_contexts`] can resolve
+/// peers from the importer scope and so reachability-based passes
+/// (`platform::filter_graph`'s GC) keep peer-only packages alive. They are
+/// *not* part of the final graph: pnpm never records auto-installed peers
+/// as importer specifiers in `pnpm-lock.yaml` (a lockfile that carries
+/// them fails `pnpm install --frozen-lockfile` with
+/// `ERR_PNPM_OUTDATED_LOCKFILE`) and never links them into the project's
+/// top-level `node_modules/`, so callers must strip the additions with
 /// [`remove_auto_installed_peers`] once the peer-context pass has run.
 /// Peers declared by transitive dependencies stay in the resolved graph
 /// for peer-context sibling wiring and are never hoisted at all.
@@ -141,8 +145,9 @@ pub type AutoInstalledPeers = BTreeMap<String, BTreeSet<String>>;
 ///   2. Visit only those direct dependency packages and examine their
 ///      `peer_dependencies` declarations. For each declared peer not
 ///      already satisfied by the importer, find a resolved version somewhere
-///      in the graph and synthesize a `DirectDep` entry. Mark it as
-///      satisfied so a second direct dep doesn't add a duplicate.
+///      in the graph and synthesize one `DirectDep` entry. If another direct
+///      dependency needs the same peer, promote the synthetic entry to the
+///      strongest section classification required by either package.
 ///   3. Stable: we walk in-order and take the first declared peer range
 ///      encountered per name as the specifier. Conflicting ranges across
 ///      the tree are not reconciled — first one wins. This matches pnpm
@@ -157,20 +162,53 @@ pub fn hoist_auto_installed_peers(mut graph: LockfileGraph) -> (LockfileGraph, A
         let Some(direct_deps) = graph.importers.get(&importer_path) else {
             continue;
         };
-        let mut satisfied: FxHashSet<String> = direct_deps.iter().map(|d| d.name.clone()).collect();
+        let satisfied: FxHashSet<String> = direct_deps.iter().map(|d| d.name.clone()).collect();
 
         // Additions are gathered into a separate vec so we don't mutate
         // the importer's direct-dep list while still borrowing from it.
         let mut additions: Vec<DirectDep> = Vec::new();
+        let mut additions_by_name: FxHashMap<String, usize> =
+            FxHashMap::with_capacity_and_hasher(direct_deps.len(), Default::default());
 
-        for dep_path in direct_deps.iter().map(|d| &d.dep_path) {
-            let Some(pkg) = graph.packages.get(dep_path) else {
+        for direct_dep in direct_deps {
+            let Some(pkg) = graph.packages.get(&direct_dep.dep_path) else {
                 continue;
             };
 
             // Collect unmet peer declarations from this package.
             for (peer_name, peer_range) in &pkg.peer_dependencies {
                 if satisfied.contains(peer_name) {
+                    continue;
+                }
+                // Optional peers (`peerDependenciesMeta.optional = true`)
+                // are opt-in integrations — pnpm's `auto-install-peers`
+                // only fills in *required* peers and never promotes an
+                // optional one to the importer, even when another
+                // dependency already pulled a matching version into the
+                // graph. Mirrors the enqueue-side skip in
+                // `resolve/driver.rs`. Skipped before the dep_type
+                // reconciliation below so an optional declaration can't
+                // reclassify an entry hoisted for a required peer.
+                let optional = pkg
+                    .peer_dependencies_meta
+                    .get(peer_name)
+                    .map(|m| m.optional)
+                    .unwrap_or(false);
+                if optional {
+                    continue;
+                }
+                if let Some(&idx) = additions_by_name.get(peer_name) {
+                    let current = additions[idx].dep_type;
+                    // A peer needed by roots from different sections cannot
+                    // safely inherit either narrower classification: the
+                    // other section's filter could then drop it while keeping
+                    // a requirer. Normalize mixed classifications to
+                    // Production, which survives both --production and
+                    // --no-optional. Matching classifications stay unchanged.
+                    additions[idx].dep_type = match (current, direct_dep.dep_type) {
+                        (left, right) if left == right => left,
+                        _ => DepType::Production,
+                    };
                     continue;
                 }
                 // Find any resolved version in the graph for this peer.
@@ -216,13 +254,11 @@ pub fn hoist_auto_installed_peers(mut graph: LockfileGraph) -> (LockfileGraph, A
                     // rather than writing a dangling DirectDep.
                     continue;
                 }
-                satisfied.insert(peer_name.clone());
+                additions_by_name.insert(peer_name.clone(), additions.len());
                 additions.push(DirectDep {
                     name: peer_name.clone(),
                     dep_path: synth_dep_path,
-                    // Peers auto-hoisted to the root are in the prod
-                    // graph by convention — matches what pnpm writes.
-                    dep_type: DepType::Production,
+                    dep_type: direct_dep.dep_type,
                     specifier: Some(peer_range.clone()),
                 });
             }
@@ -276,7 +312,7 @@ pub fn remove_auto_installed_peers(graph: &mut LockfileGraph, hoisted: &AutoInst
 /// neighborhoods.
 ///
 /// Algorithm per visited package P, reached at some point in a DFS from an
-/// importer with `ancestor_scope: name -> dep_path_tail`:
+/// importer with `ancestor_scope: name -> peer provider`:
 ///
 ///  1. For each peer name declared by P, look it up in `ancestor_scope`
 ///     (nearest-ancestor-wins, since the scope is rebuilt per recursion).
@@ -308,7 +344,9 @@ pub fn remove_auto_installed_peers(graph: &mut LockfileGraph, hoisted: &AutoInst
 /// contextualized tails in every `pkg.dependencies` map, so when a
 /// descendant looks a peer up in ancestor scope it sees the full
 /// nested tail and serializes it as such. Most peer chains converge in
-/// 2–3 iterations; we cap at 16 as a safety belt.
+/// 2–3 iterations. The safety limit scales with the graph's package count
+/// so deeper finite chains can converge; a pathological graph is caught by
+/// the repeated-graph-state check rather than by a fixed ceiling.
 ///
 /// Limitations (documented as follow-ups in the README):
 ///   - No per-peer range satisfaction — we take whatever the ancestor has,
@@ -712,7 +750,7 @@ pub(crate) fn dedupe_peer_variants(graph: LockfileGraph) -> LockfileGraph {
 /// for the wrapping fixed-point loop.
 ///
 /// Algorithm per visited package P, reached at some point in a DFS from an
-/// importer with `ancestor_scope: name -> dep_path_tail`:
+/// importer with `ancestor_scope: name -> peer provider`:
 ///
 ///  1. For each peer name declared by P, look it up in `ancestor_scope`
 ///     (nearest-ancestor-wins, since the scope is rebuilt per recursion).
@@ -759,10 +797,10 @@ fn apply_peer_contexts_once(
     // Computed once from the canonical input so it reflects the
     // contextualized state of every root dep on fixed-point iterations
     // 2+ — same logic as per-importer `importer_scope` below.
-    let root_scope: FxHashMap<String, String> = canonical
+    let root_scope: FxHashMap<String, PeerProvider> = canonical
         .importers
         .get(".")
-        .map(|deps| scope_map_from_deps(deps))
+        .map(|deps| scope_map_from_deps(&canonical, deps))
         .unwrap_or_default();
 
     for (importer_path, direct_deps) in &canonical.importers {
@@ -776,7 +814,7 @@ fn apply_peer_contexts_once(
         // it's already contextualized, and passing the plain version
         // would make descendants look up keys that don't exist in the
         // (now-nested) graph.
-        let importer_scope = scope_map_from_deps(direct_deps);
+        let importer_scope = scope_map_from_deps(&canonical, direct_deps);
 
         let mut new_deps = Vec::with_capacity(direct_deps.len());
         for dep in direct_deps {
@@ -858,12 +896,45 @@ fn canonical_tail(s: &str) -> &str {
     s.split('(').next().unwrap_or(s)
 }
 
-/// Build a `name → contextualized tail` map from a direct-dep slice.
-/// The tail is the dep_path with the `{name}@` prefix stripped, which
-/// on pass 1 is equal to `pkg.version` and on pass 2+ carries the
-/// nested peer-context suffix. Used both for the root scope and for
-/// each importer's own scope inside `apply_peer_contexts_once`.
-fn scope_map_from_deps(deps: &[DirectDep]) -> FxHashMap<String, String> {
+/// A peer provider's graph target and semver identity.
+///
+/// Those are normally the same tail. For linked directories, the target
+/// remains the content-addressed local dep path while peer matching and
+/// suffixes use the target manifest's version.
+#[derive(Debug, Clone)]
+struct PeerProvider {
+    /// Tail used to find and link the package in the graph.
+    target_tail: String,
+    /// Tail used for semver checks and the consumer's peer suffix.
+    context_tail: String,
+}
+
+fn peer_provider(graph: &LockfileGraph, name: &str, target_tail: &str) -> PeerProvider {
+    let context_tail =
+        aube_lockfile::resolve_dep_edge(name, target_tail, |key| graph.packages.contains_key(key))
+            .and_then(|key| graph.packages.get(&key))
+            .filter(|pkg| {
+                matches!(
+                    pkg.local_source,
+                    Some(LocalSource::Directory(_) | LocalSource::Link(_) | LocalSource::Portal(_))
+                )
+            })
+            .map(|pkg| pkg.version.clone())
+            .unwrap_or_else(|| target_tail.to_string());
+    PeerProvider {
+        target_tail: target_tail.to_string(),
+        context_tail,
+    }
+}
+
+/// Build a `name → provider` map from a direct-dependency slice.
+///
+/// Used for the workspace root and for each importer's own scope inside
+/// `apply_peer_contexts_once`.
+fn scope_map_from_deps(
+    graph: &LockfileGraph,
+    deps: &[DirectDep],
+) -> FxHashMap<String, PeerProvider> {
     let mut out = FxHashMap::with_capacity_and_hasher(deps.len(), Default::default());
     for d in deps {
         let prefix_len = d.name.len() + 1;
@@ -875,7 +946,7 @@ fn scope_map_from_deps(deps: &[DirectDep]) -> FxHashMap<String, String> {
         } else {
             d.dep_path.clone()
         };
-        out.insert(d.name.clone(), tail);
+        out.insert(d.name.clone(), peer_provider(graph, &d.name, &tail));
     }
     out
 }
@@ -1641,8 +1712,8 @@ fn visit_peer_context<'g>(
     input_dep_path: &str,
     graph: &'g LockfileGraph,
     name_index: &FxHashMap<&'g str, Vec<&'g LockedPackage>>,
-    ancestor_scope: &FxHashMap<String, String>,
-    root_scope: &FxHashMap<String, String>,
+    ancestor_scope: &FxHashMap<String, PeerProvider>,
+    root_scope: &FxHashMap<String, PeerProvider>,
     out_packages: &mut BTreeMap<String, LockedPackage>,
     visiting: &mut FxHashSet<String>,
     options: &PeerContextOptions,
@@ -1721,27 +1792,30 @@ fn visit_peer_context<'g>(
     // global-virtual-store singleton in two and surfacing at runtime as a
     // duplicate-instance "Cannot find module". Matching pnpm's *deduped*
     // output — bare — keeps the singleton intact.
-    let mut peer_context: Vec<(String, String)> = Vec::new();
+    let mut peer_context: Vec<(String, PeerProvider)> = Vec::new();
     for (peer_name, declared_range) in &pkg.peer_dependencies {
-        let satisfies_declared = |v: &str| -> bool {
+        let satisfies_declared = |provider: &PeerProvider| -> bool {
             // The tail may carry a nested peer suffix on fixed-point
             // iterations 2+; strip it before checking the semver.
-            let canonical = canonical_tail(v);
+            let canonical = canonical_tail(&provider.context_tail);
             version_satisfies(canonical, declared_range)
         };
 
         let from_ancestor = ancestor_scope
             .get(peer_name)
-            .filter(|v| satisfies_declared(v))
+            .filter(|provider| satisfies_declared(provider))
             .cloned();
         let from_ancestor_incompatible = ancestor_scope.get(peer_name).cloned();
 
         let from_pkg_deps = pkg
             .dependencies
             .get(peer_name)
-            .filter(|v| satisfies_declared(v))
-            .cloned();
-        let from_pkg_deps_incompatible = pkg.dependencies.get(peer_name).cloned();
+            .map(|tail| peer_provider(graph, peer_name, tail))
+            .filter(|provider| satisfies_declared(provider));
+        let from_pkg_deps_incompatible = pkg
+            .dependencies
+            .get(peer_name)
+            .map(|tail| peer_provider(graph, peer_name, tail));
 
         // `resolve-peers-from-workspace-root`: fall back to the root
         // importer's direct deps before the graph-wide scan. Common in
@@ -1752,7 +1826,7 @@ fn visit_peer_context<'g>(
         let from_root = if options.resolve_from_workspace_root {
             root_scope
                 .get(peer_name)
-                .filter(|v| satisfies_declared(v))
+                .filter(|provider| satisfies_declared(provider))
                 .cloned()
         } else {
             None
@@ -1786,12 +1860,13 @@ fn visit_peer_context<'g>(
                         .strip_prefix(&format!("{}@", p.name))
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| p.version.clone());
-                    node_semver::Version::parse(&p.version)
-                        .ok()
-                        .map(|ver| (ver, tail))
+                    node_semver::Version::parse(&p.version).ok().map(|ver| {
+                        let provider = peer_provider(graph, peer_name, &tail);
+                        (ver, provider)
+                    })
                 })
                 .max_by(|a, b| a.0.cmp(&b.0))
-                .map(|(_, tail)| tail)
+                .map(|(_, provider)| provider)
         };
 
         // pnpm resolves an *optional* peer (one flagged
@@ -1819,8 +1894,8 @@ fn visit_peer_context<'g>(
                 .or_else(from_graph_scan)
                 .or(from_root_incompatible)
         };
-        if let Some(version) = resolved {
-            peer_context.push((peer_name.clone(), version));
+        if let Some(provider) = resolved {
+            peer_context.push((peer_name.clone(), provider));
         }
     }
     peer_context.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1846,12 +1921,12 @@ fn visit_peer_context<'g>(
     // `dedupe_peer_suffixes` after cycle detection is done.
     let suffix: String = peer_context
         .iter()
-        .map(|(n, v)| {
-            let cycles_back = contains_canonical_back_ref(v, &canonical_base);
+        .map(|(n, provider)| {
+            let cycles_back = contains_canonical_back_ref(&provider.context_tail, &canonical_base);
             let display_v = if cycles_back {
-                canonical_tail(v).to_string()
+                canonical_tail(&provider.context_tail).to_string()
             } else {
-                v.clone()
+                provider.context_tail.clone()
             };
             format!("({n}@{display_v})")
         })
@@ -1886,11 +1961,11 @@ fn visit_peer_context<'g>(
     // serialize as `(react-dom@18.2.0(react@18.2.0))`. That's the
     // nested form pnpm writes.
     let mut child_scope = ancestor_scope.clone();
-    for (name, version) in &pkg.dependencies {
-        child_scope.insert(name.clone(), version.clone());
+    for (name, tail) in &pkg.dependencies {
+        child_scope.insert(name.clone(), peer_provider(graph, name, tail));
     }
-    for (name, version) in &peer_context {
-        child_scope.insert(name.clone(), version.clone());
+    for (name, provider) in &peer_context {
+        child_scope.insert(name.clone(), provider.clone());
     }
 
     // Recurse into each child, rewriting its dependency map entry to
@@ -1904,7 +1979,8 @@ fn visit_peer_context<'g>(
     // sibling symlink target inconsistent with the peer-context claim.
     // When the ancestor's version doesn't satisfy the declared range,
     // `detect_unmet_peers` will flag it as a warning after the pass.
-    let peer_context_versions: FxHashMap<String, String> = peer_context.iter().cloned().collect();
+    let peer_context_versions: FxHashMap<String, PeerProvider> =
+        peer_context.iter().cloned().collect();
 
     let mut new_dependencies: BTreeMap<String, String> = BTreeMap::new();
     let mut visited_dep_names: FxHashSet<String> = FxHashSet::default();
@@ -1914,7 +1990,7 @@ fn visit_peer_context<'g>(
         // peer context (which may be nested). Otherwise we use the
         // tail we already have — also possibly nested on a 2nd pass.
         let lookup_tail = match peer_context_versions.get(child_name) {
-            Some(v) => v.clone(),
+            Some(provider) => provider.target_tail.clone(),
             None => child_version_tail.clone(),
         };
         let child_canonical_dep_path = format!("{child_name}@{lookup_tail}");
@@ -1943,11 +2019,11 @@ fn visit_peer_context<'g>(
     // have been in `pkg.dependencies` at all (no auto-install needed).
     // Wire them as deps now so the linker creates the sibling symlink
     // and the lockfile snapshot records them.
-    for (peer_name, peer_version) in &peer_context {
+    for (peer_name, provider) in &peer_context {
         if visited_dep_names.contains(peer_name) {
             continue;
         }
-        let child_canonical_dep_path = format!("{peer_name}@{peer_version}");
+        let child_canonical_dep_path = format!("{peer_name}@{}", provider.target_tail);
         let child_new = visit_peer_context(
             &child_canonical_dep_path,
             graph,
@@ -1962,7 +2038,7 @@ fn visit_peer_context<'g>(
             let new_tail = new_dep_path
                 .strip_prefix(&format!("{peer_name}@"))
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| peer_version.clone());
+                .unwrap_or_else(|| provider.target_tail.clone());
             new_dependencies.insert(peer_name.clone(), new_tail);
         }
     }
@@ -2100,6 +2176,59 @@ mod tests {
         assert!(
             out.packages.contains_key("plugin@1.0.0(theme@1.0.0)"),
             "a required peer should still resolve through the graph-wide scan"
+        );
+    }
+
+    #[test]
+    fn linked_workspace_root_peer_uses_manifest_version_and_local_target() {
+        let mut g = LockfileGraph::default();
+        g.importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "theme".to_string(),
+                dep_path: "theme@link+0123456789abcdef".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("link:theme".to_string()),
+            }],
+        );
+        g.importers.insert(
+            "packages/app".to_string(),
+            vec![DirectDep {
+                name: "plugin".to_string(),
+                dep_path: "plugin@1.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            }],
+        );
+        g.packages.insert(
+            "theme@link+0123456789abcdef".to_string(),
+            LockedPackage {
+                name: "theme".to_string(),
+                version: "4.10.0".to_string(),
+                dep_path: "theme@link+0123456789abcdef".to_string(),
+                local_source: Some(LocalSource::Link("theme".into())),
+                ..Default::default()
+            },
+        );
+        let mut plugin = locked("plugin", &[]);
+        plugin
+            .peer_dependencies
+            .insert("theme".to_string(), "^4.0.0".to_string());
+        plugin
+            .peer_dependencies_meta
+            .insert("theme".to_string(), PeerDepMeta { optional: true });
+        g.packages.insert(plugin.dep_path.clone(), plugin);
+
+        let out = apply_peer_contexts(g, &PeerContextOptions::default()).expect("peer pass");
+
+        let plugin = out
+            .packages
+            .get("plugin@1.0.0(theme@4.10.0)")
+            .expect("linked root dependency should satisfy the peer at its manifest version");
+        assert_eq!(
+            plugin.dependencies.get("theme").map(String::as_str),
+            Some("link+0123456789abcdef"),
+            "the peer suffix uses the manifest version while the linker keeps the local target"
         );
     }
 }

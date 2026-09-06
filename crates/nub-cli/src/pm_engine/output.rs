@@ -30,9 +30,9 @@ use super::log;
 // nub accepts the output flags in TWO positions: after the verb (`nub install
 // --silent`, parsed by the per-verb `OutputFlags` below) and BEFORE it (`nub
 // --silent install`, `nub --reporter=silent add foo`). The pre-verb position is
-// parsed by the hand-rolled scan in `cli::dispatch`, never by clap — the PM
-// verbs are dispatched through their own clap `Command` (install/ci) or a
-// separately-built one (the registry verbs), neither of which sees the
+// parsed by the hand-rolled scan in `cli::dispatch`, never by the parser — the
+// PM verbs are dispatched through their own usage `Cli` (install/ci) or a
+// separately-derived one (the registry verbs), neither of which sees the
 // top-level globals. So the pre-verb values are recorded here as process
 // defaults and merged UNDER the per-verb flags (per-verb always wins). This
 // mirrors the existing `cli::SILENT` atomic that already carries `--silent` to
@@ -90,12 +90,12 @@ pub fn set_global_silent() {
 
 /// Parse + record a pre-verb `--reporter <value>` as a process default. Returns
 /// the invalid value (for a clean usage error) when the spelling isn't one of
-/// `default`/`append-only`/`silent`. Reuses clap's `ValueEnum` parse so the
-/// accepted set can't drift from the per-verb flag — `false` = case-sensitive,
-/// matching the per-verb clap surface (which has no `ignore_case`).
+/// `default`/`append-only`/`silent`. Reuses the derived `ValueEnum` words so the
+/// accepted set can't drift from the per-verb flag — case-sensitive, matching
+/// the per-verb surface (the enum declares no `ignore_case`).
 pub fn set_global_reporter_str(value: &str) -> Result<(), String> {
-    use clap::ValueEnum as _;
-    let r = Reporter::from_str(value, false).map_err(|_| value.to_string())?;
+    use usage_rs::spec::ValueEnum as _;
+    let r = Reporter::from_choice(value).ok_or_else(|| value.to_string())?;
     PROC_REPORTER.store(reporter_to_u8(r), Ordering::Relaxed);
     Ok(())
 }
@@ -104,8 +104,8 @@ pub fn set_global_reporter_str(value: &str) -> Result<(), String> {
 /// the invalid value when the spelling isn't one of
 /// `silent`/`error`/`warn`/`info`/`debug`. Case-sensitive, matching per-verb.
 pub fn set_global_loglevel_str(value: &str) -> Result<(), String> {
-    use clap::ValueEnum as _;
-    let l = LogLevel::from_str(value, false).map_err(|_| value.to_string())?;
+    use usage_rs::spec::ValueEnum as _;
+    let l = LogLevel::from_choice(value).ok_or_else(|| value.to_string())?;
     PROC_LOGLEVEL.store(loglevel_to_u8(l), Ordering::Relaxed);
     Ok(())
 }
@@ -120,8 +120,9 @@ fn proc_loglevel() -> Option<LogLevel> {
 /// `--reporter` values nub accepts, mirroring pnpm's. `ndjson` is deliberately
 /// absent: a machine-readable event stream is a separate feature from quieting
 /// and is not yet wired through the embedder — see the issue thread.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-#[clap(rename_all = "kebab-case")]
+// Variant names kebab-case into the accepted words, which is what makes
+// `AppendOnly` spell `append-only` without a rename attribute.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, usage_rs::ValueEnum)]
 pub enum Reporter {
     /// The default progress display.
     Default,
@@ -133,8 +134,7 @@ pub enum Reporter {
 
 /// `--loglevel` values nub accepts, mirroring pnpm's documented set (`debug`,
 /// `info`, `warn`, `error`) plus `silent` (what `--silent` resolves to).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-#[clap(rename_all = "lowercase")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, usage_rs::ValueEnum)]
 pub enum LogLevel {
     Silent,
     Error,
@@ -143,24 +143,24 @@ pub enum LogLevel {
     Debug,
 }
 
-// The forwarded output flags, flattened into the install/ci clap surfaces and
-// the engine-verb globals (and embedded in the install/ci flag structs).
+// The forwarded output flags, flattened into the install/ci surfaces and the
+// engine-verb globals (and embedded in the install/ci flag structs).
 // Default = no override (the engine's normal output). Spellings mirror pnpm's;
 // each field's `///` doc is its `--help` text. (Plain `//` on the struct: a
 // rustdoc comment here would clobber the flattened command's about-text.)
-#[derive(Debug, Default, Clone, Copy, clap::Args)]
+#[derive(Debug, Default, Clone, Copy, usage_rs::Args)]
 pub struct OutputFlags {
     /// Output format: `default`, `append-only`, or `silent`.
-    #[arg(long, value_name = "NAME", value_enum)]
+    #[usage(long, value_name = "NAME", value_enum)]
     pub reporter: Option<Reporter>,
 
     /// Suppress all output except errors (alias for `--reporter=silent`).
-    #[arg(short = 's', long)]
+    #[usage(short = 's', long)]
     pub silent: bool,
 
     /// Log level: logs at or above this level are shown. One of `debug`,
     /// `info`, `warn`, `error`, `silent`.
-    #[arg(long, value_name = "LEVEL", value_enum)]
+    #[usage(long, value_name = "LEVEL", value_enum)]
     pub loglevel: Option<LogLevel>,
 }
 

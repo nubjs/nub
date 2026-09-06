@@ -107,9 +107,9 @@ fi
 
 version=${1:-latest}
 if [[ "$version" == canary ]]; then
-    # The rolling canary prerelease — rebuilt from every commit to main and
-    # published under the un-versioned `canary` tag, so there is no version to
-    # resolve. May be broken; `nub upgrade --stable` returns to a release.
+    # The rolling canary prerelease — rebuilt nightly from main and published
+    # under the un-versioned `canary` tag, so there is no version to resolve.
+    # May be broken; `nub upgrade --stable` returns to a release.
     release_tag=canary
     display_version=canary
 else

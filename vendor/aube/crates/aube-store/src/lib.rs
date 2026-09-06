@@ -23,7 +23,8 @@ use cas::copy_dir_recursive;
 pub(crate) use cas::parse_compress_store_gate;
 #[cfg(test)]
 use git::{
-    codeload_cache_paths, extract_codeload_tarball_at, git_commit_matches, validate_git_positional,
+    codeload_cache_paths, extract_codeload_tarball_at, git_command, git_commit_matches,
+    validate_git_positional,
 };
 pub use index::{PackageIndex, StoredFile, index_content_fingerprint};
 pub use integrity::{
@@ -47,10 +48,10 @@ use sha1::Sha1;
 #[cfg(test)]
 use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub const CACHE_DIR_NAME: &str = "aube-cache";
 pub const INDEX_SUBDIR: &str = "index";
@@ -59,43 +60,34 @@ pub const INDEX_SUBDIR: &str = "index";
 /// fast path. See [`Store::trees_dir`].
 pub const TREES_SUBDIR: &str = "trees";
 /// Registry of projects that have installed against the global virtual
-/// store, kept INSIDE it as `<virtual-store>/.projects/<hash>` files, each
-/// holding one absolute project path.
+/// store, kept INSIDE it as `<virtual-store>/.projects/<hash>.json` records.
 /// A leading dot cannot collide with a store entry: entry names come from
 /// `dep_path_to_filename`, and an npm package name may not begin with a
 /// dot. Living inside the store keeps one delete/backup unit for the whole
-/// tier, matching pnpm's `<store>/projects/`.
+/// tier, matching pnpm's `<store>/projects/`. The record format and every
+/// read/write of it belong to the `aube` crate's project registry; this
+/// crate only names the directory.
 pub const PROJECTS_SUBDIR: &str = ".projects";
 pub const PACKUMENT_CACHE_SUBDIR: &str = "packuments-v1";
 pub const PACKUMENT_FULL_CACHE_SUBDIR: &str = "packuments-full-v1";
+pub const MAINTENANCE_LOCK_FILE: &str = ".maintenance.lock";
 
-/// Outcome of trying to take the sweep lock.
-///
-/// Three-valued on purpose: "another process holds it" and "this filesystem
-/// has no advisory locks" call for opposite responses — wait for the first,
-/// proceed without the second — and a two-valued result silently turns the
-/// latter into a store that can never be pruned.
-pub enum SweepLock {
-    Held(std::fs::File),
-    /// An install holds it. Skip; the next prune will get it.
-    Busy,
-    /// Locking is unavailable here. Proceed unsynchronized, as the CAS sweep
-    /// did before this lock existed.
-    Unsupported,
+#[derive(Default)]
+struct MaintenanceState {
+    shared: Mutex<Option<std::fs::File>>,
 }
 
-/// One entry in the store's project registry.
+/// Exclusive store-maintenance lease held by `aube store prune`.
 ///
-/// Carries `exists` rather than being filtered on it, because "the path does
-/// not resolve" is ambiguous — deleted, unmounted, or temporarily
-/// untraversable — and the sweep must treat an unresolvable project as
-/// incomplete knowledge instead of as a dead one.
-#[derive(Debug, Clone)]
-pub struct RegisteredProject {
-    /// The registry file's name, for [`Store::forget_project`].
-    pub record: String,
-    pub dir: PathBuf,
-    pub exists: bool,
+/// Every CAS/index writer takes the corresponding shared lease through
+/// [`Store::prepare_for_write`], so holding this guard freezes one complete
+/// prune snapshot across the GVS, cached indexes, and CAS files.
+pub struct StoreMaintenanceGuard(std::fs::File);
+
+impl Drop for StoreMaintenanceGuard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 /// The global content-addressable store, owned by aube.
@@ -131,13 +123,16 @@ pub struct Store {
     /// `storeDir` volume so materialized packages can be hardlinked
     /// out of the CAS.
     virtual_store_dir: PathBuf,
+    maintenance: Arc<MaintenanceState>,
+    migration_done: Arc<OnceLock<()>>,
     /// When set, `create_cas_file` writes directly to the final
-    /// content-addressed path on non-Linux platforms instead of the
-    /// tempfile-then-rename dance. Caller must guarantee no concurrent
-    /// installer is writing into this store — typically via an exclusive
-    /// file lock taken at install start. Linux is unaffected because the
-    /// O_TMPFILE+linkat path is already atomic-by-construction.
+    /// content-addressed path on Linux/macOS instead of using atomic
+    /// publication. The paired lock file remains owned by every clone of
+    /// this state, so detached blocking imports cannot outlive the exclusive
+    /// store lock that makes direct writes safe.
     fast_path: Arc<AtomicBool>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fast_path_lock: Arc<Mutex<Option<std::fs::File>>>,
 }
 
 impl Store {
@@ -178,15 +173,17 @@ impl Store {
     /// pipeline can honor a configured `storeDir` in an environment with no
     /// HOME (a stripped test env, a minimal container).
     pub fn with_dirs(root: PathBuf, cache_dir: PathBuf) -> Self {
-        let store = Self {
+        Self {
             root,
             read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
+            maintenance: Arc::new(MaintenanceState::default()),
+            migration_done: Arc::new(OnceLock::new()),
             fast_path: Arc::new(AtomicBool::new(false)),
-        };
-        store.migrate_legacy_index_dir();
-        store
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            fast_path_lock: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Point the global virtual store somewhere other than
@@ -237,27 +234,29 @@ impl Store {
             read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
+            maintenance: Arc::new(MaintenanceState::default()),
+            migration_done: Arc::new(OnceLock::new()),
             fast_path: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            fast_path_lock: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Enable the macOS direct-write fast path for CAS imports. Bypasses
+    /// Enable the Linux/macOS direct-write fast path for CAS imports. Bypasses
     /// the tempfile + persist_noclobber pattern and writes straight to
     /// the final content-addressed path, saving ~80µs/file on APFS. The
-    /// caller MUST hold an exclusive lock against the store for the
-    /// duration any thread might invoke `import_bytes`; otherwise a
-    /// concurrent installer can observe a partial file and the
-    /// `AlreadyExisted` recovery dance can clobber an in-flight write.
+    /// `lock` MUST already hold the store's exclusive install lock. The
+    /// store takes ownership so the lock remains held until all clones used
+    /// by blocking imports are dropped.
     ///
-    /// macOS-gated rather than just declared inert on other platforms.
-    /// On Linux the `O_TMPFILE+linkat` path has no inline length-check
-    /// recovery — that recovery only lives inside the macOS fast-path
-    /// branch — so the outer skip in `import_bytes` (also macOS-gated
-    /// via `cfg!`) must never see the flag set on Linux. Removing the
-    /// method on non-macOS platforms makes that mismatch a build error
-    /// rather than a silent acceptance of torn CAS files.
-    #[cfg(target_os = "macos")]
-    pub fn enable_fast_path(&self) {
+    /// Unix-gated because the implementation relies on `OpenOptionsExt`.
+    /// Windows retains the named-tempfile publication path.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn enable_fast_path(&self, lock: std::fs::File) {
+        *self
+            .fast_path_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(lock);
         self.fast_path.store(true, Ordering::Release);
     }
 
@@ -294,12 +293,18 @@ impl Store {
     /// aube wrote cached package indexes before they were moved next
     /// to the CAS files. Used only by [`migrate_legacy_index_dir`]; new
     /// code should always go through [`index_dir`].
-    fn legacy_index_dir(&self) -> PathBuf {
+    pub fn legacy_index_dir(&self) -> PathBuf {
         self.cache_dir.join(INDEX_SUBDIR)
     }
 
+    /// Whether opening this store for writes would migrate the legacy index.
+    pub fn legacy_index_migration_needed(&self) -> bool {
+        self.legacy_index_dir().exists() && !self.index_dir().exists()
+    }
+
     /// One-shot migration from the legacy XDG-cache index location to
-    /// the in-store `v1/index/` directory. Runs at `Store::open`-time.
+    /// the in-store `v1/index/` directory. Runs when the store first prepares
+    /// for a write, after its shared maintenance lease is acquired.
     ///
     /// The legacy location was a footgun under Docker BuildKit cache
     /// mounts: users would mount the CAS files dir, the indexes would
@@ -372,6 +377,89 @@ impl Store {
         }
     }
 
+    pub fn maintenance_lock_path(&self) -> PathBuf {
+        self.store_v1_dir().join(MAINTENANCE_LOCK_FILE)
+    }
+
+    fn open_maintenance_lock(&self) -> Result<std::fs::File, Error> {
+        let path = self.maintenance_lock_path();
+        let Some(parent) = path.parent() else {
+            return Err(Error::Io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "store maintenance lock has no parent",
+                ),
+            ));
+        };
+        std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| Error::Io(path, e))
+    }
+
+    /// Acquire the shared writer lease and perform any pending legacy-index
+    /// migration. The lease is retained by this `Store` and all of its clones.
+    pub fn prepare_for_write(&self) -> Result<(), Error> {
+        // `migration_done` is set only after the shared lease has been stored
+        // in `maintenance.shared` and migration has completed. Once visible,
+        // the Arc-owned lease remains live for every Store clone, so hot CAS
+        // and index writes can skip the maintenance mutex entirely.
+        if self.migration_done.get().is_some() {
+            return Ok(());
+        }
+        let mut shared = self.maintenance.shared.lock().map_err(|_| {
+            Error::Io(
+                self.maintenance_lock_path(),
+                std::io::Error::other("store maintenance lock state is poisoned"),
+            )
+        })?;
+        if shared.is_none() {
+            let file = self.open_maintenance_lock()?;
+            file.lock_shared()
+                .map_err(|e| Error::Io(self.maintenance_lock_path(), e))?;
+            *shared = Some(file);
+        }
+        drop(shared);
+        self.migration_done.get_or_init(|| {
+            self.migrate_legacy_index_dir();
+        });
+        Ok(())
+    }
+
+    /// Acquire an exclusive lease for a complete prune plan/apply operation.
+    pub fn lock_for_maintenance(&self) -> Result<StoreMaintenanceGuard, Error> {
+        let shared = self.maintenance.shared.lock().map_err(|_| {
+            Error::Io(
+                self.maintenance_lock_path(),
+                std::io::Error::other("store maintenance lock state is poisoned"),
+            )
+        })?;
+        if shared.is_some() {
+            return Err(Error::Io(
+                self.maintenance_lock_path(),
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "this Store already holds a writer lease",
+                ),
+            ));
+        }
+        let file = self.open_maintenance_lock()?;
+        file.lock()
+            .map_err(|e| Error::Io(self.maintenance_lock_path(), e))?;
+        Ok(StoreMaintenanceGuard(file))
+    }
+
+    /// Apply the legacy-index migration while an exclusive maintenance lease
+    /// is held. Used by real prune after its candidate plan is complete.
+    pub fn migrate_legacy_index_for_maintenance(&self, _guard: &StoreMaintenanceGuard) {
+        self.migrate_legacy_index_dir();
+    }
+
+    /// Directory for the global virtual store (materialized packages).
     /// `<cacheDir>/<leaf>/` unless `globalVirtualStoreDir` moved it, so it
     /// follows `cacheDir` by default.
     ///
@@ -390,39 +478,6 @@ impl Store {
         self.virtual_store_dir.join(PROJECTS_SUBDIR)
     }
 
-    /// Record `project_dir` as a user of the global virtual store, so a
-    /// later `store prune` can reach its `node_modules` and mark the
-    /// entries it depends on. Without this the store has no way to know
-    /// which of its entries are live, and it grows without bound.
-    ///
-    /// The entry is a plain file holding the absolute path, not a symlink:
-    /// a symlink would need junction handling on Windows (and that lives
-    /// in `aube-linker`, which depends on this crate, not the reverse).
-    ///
-    /// Best-effort and idempotent — registration failing must never fail
-    /// an install, so the error is returned for logging and nothing else.
-    pub fn register_project(&self, project_dir: &Path) -> std::io::Result<()> {
-        // A store nested inside the project would make the project's own
-        // node_modules walk re-enter the store. Skip, as pnpm does.
-        if self.virtual_store_dir.starts_with(project_dir) {
-            return Ok(());
-        }
-        let dir = self.projects_dir();
-        std::fs::create_dir_all(&dir)?;
-        let path = project_dir.to_string_lossy();
-        let name = blake3::hash(path.as_bytes()).to_hex()[..16].to_string();
-        // Write-then-rename so a concurrent reader never sees a half file.
-        let tmp = dir.join(format!(".tmp-{}-{name}", std::process::id()));
-        std::fs::write(&tmp, path.as_bytes())?;
-        match std::fs::rename(&tmp, dir.join(name)) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                Err(e)
-            }
-        }
-    }
-
     /// Advisory lock serializing a store sweep against in-flight installs.
     ///
     /// The linker publishes a virtual-store entry under its FINAL name in
@@ -431,6 +486,12 @@ impl Store {
     /// that window the entry is reachable from nothing, so an unsynchronized
     /// sweep would delete a directory the running install is about to link —
     /// and the install would then symlink at nothing and still exit 0.
+    ///
+    /// **No exclusive taker remains.** `store prune` now excludes installs
+    /// through [`Self::lock_for_maintenance`] and `.maintenance.lock`, which
+    /// every store writer takes shared via [`Self::prepare_for_write`], so
+    /// `.gc.lock` has shared holders only and the acquisitions below always
+    /// succeed immediately.
     ///
     /// Distinct from the existing `.install.lock`, which cannot serve here:
     /// it is macOS-only and a `try_lock` whose failure path deliberately
@@ -447,8 +508,9 @@ impl Store {
             .ok()
     }
 
-    /// Take the sweep lock SHARED for the duration of a link phase. Blocks
-    /// only while a sweep is actually running, which is a directory walk.
+    /// Take the sweep lock SHARED for the duration of a link phase. Nothing
+    /// takes `.gc.lock` exclusively any more, so the wait path below is
+    /// currently unreachable.
     ///
     /// `on_wait` runs if the lock is not immediately available, before the
     /// blocking acquire. Without it an install just stalls with no output and
@@ -476,82 +538,6 @@ impl Store {
     /// critical section is a single file write, where a wait is imperceptible.
     pub fn lock_for_link(&self) -> Option<std::fs::File> {
         self.lock_for_link_with(|| {})
-    }
-
-    /// Take the sweep lock EXCLUSIVELY, without waiting.
-    ///
-    /// `None` means an install holds it, and the caller must skip the sweep
-    /// rather than race: a prune deferred to the next run costs disk, while
-    /// a prune racing an install costs the user a broken `node_modules`.
-    pub fn try_lock_for_sweep(&self) -> SweepLock {
-        let Some(file) = self.gc_lock_file() else {
-            return SweepLock::Unsupported;
-        };
-        match file.try_lock() {
-            Ok(()) => SweepLock::Held(file),
-            Err(std::fs::TryLockError::WouldBlock) => SweepLock::Busy,
-            // NOT the same as contention. `flock` is unavailable on some FUSE
-            // and NFS mounts, and collapsing that into "busy" would make prune
-            // a permanent no-op there — including the CAS half, which ran
-            // unconditionally before this lock existed. Degrade instead.
-            Err(std::fs::TryLockError::Error(_)) => SweepLock::Unsupported,
-        }
-    }
-
-    /// Every still-existing project in the registry, with entries whose
-    /// project has been deleted swept as they are found.
-    ///
-    /// An EMPTY result is meaningful and load-bearing: it means nothing is
-    /// known to reference the store, which is indistinguishable from "the
-    /// registry predates this feature". Callers must treat it as "prune
-    /// nothing", never as "everything is garbage".
-    pub fn registered_projects(&self) -> Vec<RegisteredProject> {
-        let dir = self.projects_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
-        let mut projects = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(record) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
-                continue;
-            };
-            // Skip ALL dot-prefixed names, not just `.tmp-`. A registry record
-            // is a hex hash and never starts with a dot, while callers keep
-            // their own bookkeeping in here — the missing-project state file
-            // among it. Reading that back as a registration turned its
-            // contents into a phantom project that never resolves.
-            if record.starts_with('.') {
-                continue;
-            }
-            let Ok(target) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            // Strip ONLY the line terminator. `trim()` also eats spaces, and a
-            // project directory may legitimately end in one — which made the
-            // trimmed path not exist, so the registration was deleted and the
-            // project's entries were swept out from under it.
-            let target = target.trim_end_matches(['\n', '\r']);
-            projects.push(RegisteredProject {
-                record,
-                exists: Path::new(target).is_dir(),
-                dir: PathBuf::from(target),
-            });
-        }
-        projects
-    }
-
-    /// Delete one registry record by its file name.
-    ///
-    /// Deliberately separate from [`Self::registered_projects`], which used to
-    /// drop a record the moment its path did not resolve. A path can be absent
-    /// because the project was deleted OR because its disk is unmounted, its
-    /// parent is momentarily untraversable, or a container volume is not
-    /// attached — and destroying the registration in those cases loses the
-    /// project's protection permanently, without it ever coming back. The
-    /// caller decides, with a grace period.
-    pub fn forget_project(&self, record: &str) {
-        let _ = std::fs::remove_file(self.projects_dir().join(record));
     }
 
     /// Root of the per-package *extracted-tree* tier, a sibling of the
@@ -698,8 +684,102 @@ mod tests {
             read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
+            maintenance: Arc::new(MaintenanceState::default()),
+            migration_done: Arc::new(OnceLock::new()),
             fast_path: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            fast_path_lock: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fast_path_lock_lives_until_last_store_clone_drops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("v1/files");
+        std::fs::create_dir_all(&root).unwrap();
+        let lock_path = tmp.path().join("v1/.install.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock().unwrap();
+
+        let store = Store::at(root);
+        store.enable_fast_path(lock);
+        let blocking_import_store = store.clone();
+        drop(store);
+
+        let contender = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+
+        drop(blocking_import_store);
+        contender.try_lock().unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn unlocked_import_waits_for_direct_writer_before_recovery() {
+        use std::io::Write;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("v1/files");
+        let store = Store::at(root);
+        store.ensure_shards_exist().unwrap();
+
+        let content = b"a direct writer may still be filling this CAS object";
+        let hex_hash = blake3_hex(content);
+        let store_path = store.file_path_from_hex(&hex_hash);
+        let lock_path = tmp.path().join("v1/.install.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock().unwrap();
+
+        let mut partial = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&store_path)
+            .unwrap();
+        partial.write_all(&content[..1]).unwrap();
+        partial.flush().unwrap();
+
+        let import_store = store.clone();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let importer = std::thread::spawn(move || {
+            let result = import_store.import_bytes(content, false);
+            finished_tx.send(()).unwrap();
+            result
+        });
+
+        assert!(matches!(
+            finished_rx.recv_timeout(Duration::from_millis(200)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        partial.write_all(&content[1..]).unwrap();
+        partial.flush().unwrap();
+        drop(partial);
+        drop(lock);
+
+        finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let stored = importer.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(stored.store_path).unwrap(), content);
     }
 
     #[test]
@@ -797,6 +877,32 @@ mod tests {
             !store.index_dir().exists(),
             "migration must not create an empty new dir when there's nothing to migrate"
         );
+    }
+
+    #[test]
+    fn maintenance_lock_waits_for_writer_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store/v1/files");
+        let cache = tmp.path().join("cache");
+        let writer = Store::with_dirs(root.clone(), cache.clone());
+        writer.prepare_for_write().unwrap();
+
+        let maintenance = Store::with_dirs(root, cache);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let guard = maintenance.lock_for_maintenance().unwrap();
+            tx.send(()).unwrap();
+            drop(guard);
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "maintenance must wait while a writer lease is live"
+        );
+        drop(writer);
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("maintenance should proceed after the writer exits");
+        handle.join().unwrap();
     }
 
     #[test]
@@ -2048,6 +2154,16 @@ mod tests {
     }
 
     #[test]
+    fn test_git_commands_disable_terminal_prompts() {
+        let command = git_command();
+        let prompt = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_TERMINAL_PROMPT")
+            .and_then(|(_, value)| value);
+        assert_eq!(prompt, Some(std::ffi::OsStr::new("0")));
+    }
+
+    #[test]
     fn test_git_resolve_ref_full_sha_is_offline() {
         // 40-char hex committish short-circuits `ls-remote`. Confirm
         // by handing a non-existent URL — if the fast path regressed
@@ -2348,6 +2464,31 @@ mod tests {
         let index = store.import_tarball(&tarball).unwrap();
         assert_eq!(index.len(), 1);
         assert!(index.contains_key("index.js"));
+    }
+
+    #[test]
+    fn test_import_tarball_streams_large_entry_into_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("files"));
+        store.ensure_shards_exist().unwrap();
+        let content: Vec<u8> = (0..(256 << 10)).map(|i| (i % 251) as u8).collect();
+        let tarball = build_tarball("package/bin/native", &content);
+
+        let index = store.import_tarball(&tarball).unwrap();
+        let stored = &index["bin/native"];
+
+        assert_eq!(stored.hex_hash, blake3_hex(&content));
+        assert_eq!(stored.size, Some(content.len() as u64));
+        assert_eq!(std::fs::read(&stored.store_path).unwrap(), content);
+        assert!(
+            std::fs::read_dir(dir.path().join("files"))
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".aube-stream-"))
+        );
     }
 
     #[cfg(not(windows))]

@@ -1,28 +1,31 @@
 ---
 **Scope:** Whether Nub should pre-bake its `--import` preload via Node's `--build-snapshot` / `--snapshot-blob` to cut cold-start tax and sidestep `--permission` grants for the preload path.
-**Status:** v1, 2026-05-18. Empirically tested on Node v24.14.0, macOS arm64. Findings supersede earlier speculation about a snapshot-based preload. That record's decision — don't auto-inject snapshot flags, document as not-warranted for default mode — stands; this research strengthens it with the addon-impossible and dynamic-import-broken findings, and by showing the cold-start math does not justify the architecture cost.
+**Status:** v2, 2026-09-05. Tested on Node v24.14.0/macOS arm64, Node v26.7.0/Linux x64, and Node main at `6f41e415639b5ec3dd816e44945cc73b4d7651e3`. The preload decision still stands; the expanded evidence explains why Node's built-in snapshot helps while application snapshots often do not.
 **Builds on:** [[research/snapshot-env-reads]] — `process.env` semantics in snapshotted JS; [[research/cold-start]] — Node cold-start phase breakdown.
 ---
 
-# Snapshot-based preload — architecture evaluation
+# Node.js snapshot startup economics
 
-An empirical evaluation of pre-baking Nub's preload into a V8 startup snapshot, run against Node v24.14.0 on macOS arm64. The verdict is no, and the addon route is dead outright.
+An empirical evaluation of Node.js startup snapshots for preloads and single executables. Snapshots are effective when they replace expensive computation with little serialized state, but they cannot remove Node's native startup floor.
 
 ## 1. TL;DR
 
-**Verdict: not viable today. Possibly viable later for a narrow slice (snapshot-only-the-hook-registration, leave all FS work lazy) with material caveats. Not viable at all as a way to sidestep `--allow-addons` under `--permission`.**
+**Verdict: not useful as Nub's default startup path. Node's built-in snapshot captures the generic win; an application snapshot pays the same native startup floor plus workload-specific deserialization.**
 
-The five vectors:
+It becomes useful only when it replaces substantially more computation than state. It cannot sidestep `--allow-addons` under `--permission`.
+
+Six findings:
 
 1. **`--snapshot-blob` does load under `--permission` with no fs grant** — verified. The blob is opened with raw `fopen()` in `node.cc:1525` *before* `Environment` exists, so the permission gate isn't installed yet. This is not an "explicit-input auto-grant" carve-out like the entry script gets in `env.cc:967`; snapshot load simply happens in an earlier phase of process lifetime than permissions. **Consequence:** the load path itself is fine, but everything the snapshot can usefully do is gated by post-deserialize permission checks, which run normally.
-2. **N-API addons cannot be snapshotted.** Trying to `require()` a real-world addon (sqlite3) during `--build-snapshot` produces a V8 fatal: `CheckGlobalAndEternalHandles failed`. Third-party addons don't register external references via `NODE_BINDING_EXTERNAL_REFERENCE` and the V8 serializer refuses to proceed. **Consequence:** snapshot pre-load cannot bypass `--allow-addons`. That entire line of investigation is dead.
+2. **N-API addons cannot be snapshotted.** Trying to `require()` a real-world addon (sqlite3) during `--build-snapshot` produces a V8 fatal: `CheckGlobalAndEternalHandles failed`. Third-party addons don't register external references via `NODE_BINDING_EXTERNAL_REFERENCE` and the V8 serializer refuses to proceed. **Consequence:** snapshot pre-load cannot bypass `--allow-addons`.
 3. **Module-customization hooks DO survive the snapshot.** Hooks registered via `module.registerHooks()` at build time fire for post-deserialize CJS resolves invoked through `Module.createRequire(anchor)`. The hook arrays in `lib/internal/modules/customization_hooks.js` are plain module-scope arrays and serialize correctly.
 4. **Dynamic `import()` is broken across snapshot boundary.** Any `import('node:fs')` or user URL from a snapshot-built script fails with `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`, even though `initializeESM()` is called from `prepareMainThreadExecution(false)` in the snapshot-deserialize main wrapper. Root cause: the script was compiled with a `host_defined_options` symbol at build time that doesn't bind to anything in the post-deserialize realm. **Consequence:** any preload that does `await import(...)` at runtime — which Nub's preload may need to do — is broken under snapshot.
-5. **Cold-start delta is negligible-to-negative.** For a noop preload, snapshot is ~2ms *slower* than plain `node -e ""` (the 5.7MB blob read cost exceeds the bootstrap it skips). For a deliberately heavy preload (fs walk + JSON parsing of `node_modules/*/package.json`), snapshot saves ~9ms (38ms → 29ms) — but Nub's design is explicitly to avoid that kind of eager work in the preload (hooks are lazy by construction). For a realistic Nub preload (register hooks, set up resolver, no eager FS work), the savings collapse to ~1-3ms — below the noise floor on macOS dyld jitter and not worth the architecture cost.
+5. **The payoff follows a compute-to-state ratio, not executable packaging.** On Node v26.7.0/Linux, a built-in snapshot reduced empty-process startup from 77.60ms to 29.17ms. The same runtime's SEA user snapshot made an empty program 3.75ms slower and a 100,000-object program 7.19ms slower, but saved 23.56ms when 20 million loop iterations collapsed to one serialized integer.
+6. **SEA snapshot loading contains a separate avoidable copy.** Node copies the V8 startup-data region out of the executable's process-lifetime resource before deserializing it. A source prototype that borrowed those mapped bytes reduced median startup by 1.64–1.72ms for 6.75MB snapshots and 4.74ms for a 12.9MB object snapshot.
 
-The vectors pushing away — addon-impossible, dynamic-import-broken, marginal perf, cache-invalidation complexity, opaque failures — are stronger than they looked before testing, and the ones pushing toward are weaker.
+Together, the addon and module limitations constrain what can be captured, while the measurements constrain when capturing the remaining state can pay for itself.
 
-**Recommendation: do not pursue snapshot. Reconsider only if (a) a future `nub compile` command needs it for its own bundling pipeline, or (b) Node ships `--build-snapshot` work that fixes the dynamic-import and `node:module` warnings.**
+**Decision: do not use an application snapshot for Nub's preload or enable SEA `useSnapshot` by default. A snapshot is an opt-in workload optimization only when measurement shows that build-time computation dominates the added deserialization and artifact cost.**
 
 ## 2. Verified behaviors
 
@@ -194,73 +197,36 @@ Twelve categories of build-time state and whether each survives deserialization.
 
 The pattern: **plain JS data round-trips. Anything that depends on V8 isolate state or external (dlopen) state doesn't.** This is consistent with how V8 snapshots work everywhere (Lambda SnapStart, Chrome process snapshots) — they're a JS-heap-and-bytecode mechanism, not a "freeze the entire OS process" mechanism.
 
-## 5. Cache architecture proposal — if we were to do this
+## 5. Cache economics
 
-Hypothetical, to make the cost of a design we recommend against concrete.
+Application snapshots bind serialized state to the exact Node.js/V8 build and to every application input captured before serialization. The invalidation boundary is wider than the startup work worth caching for Nub's lazy preload.
 
-### Storage
+A valid artifact key must cover the Node.js and V8 versions, executable, platform, architecture, Nub version, and preload source. Any snapshotted resolver table, parsed `tsconfig.json`, dependency metadata, or transpile output also makes the corresponding project files part of the key.
 
-Blobs live at `~/.cache/nub/snapshots/<key>.blob` on Linux/macOS and `%LOCALAPPDATA%\nub\snapshots\<key>.blob` on Windows — the standard XDG / Apple cache layout.
+That creates the central mismatch for Nub's preload:
 
-### Invalidation key
+- Hook registration and empty resolver construction are stable but cheap, so snapshot loading has little work to replace.
+- Filesystem walks, dependency metadata, and transpile output can be expensive but become stale when the project changes.
+- `process.env` and command-line-dependent state must be refreshed after deserialization rather than treated as build-time constants. Node.js documents this model in [the environment and CLI handling discussion](https://github.com/nodejs/node/issues/55603).
+- Snapshot and code-cache artifacts are platform-specific. Node.js requires both features to be disabled for cross-platform SEA generation in [the SEA documentation](https://github.com/nodejs/node/blob/main/doc/api/single-executable-applications.md#single-executable-application-configuration).
 
-The key must include every input that, if changed, would silently produce wrong behavior:
-
-```
-key = sha256(
-  nub_version           // our own version
-  + node_executable_path // user may have multiple nodes
-  + node_version_string  // process.versions
-  + node_v8_version      // process.versions.v8 — V8 snapshot format compatibility
-  + arch                 // arm64 vs x64 vs ...
-  + platform             // darwin vs linux vs win32
-  + preload_source_hash  // our preload JS hash
-)
-```
-
-What's missing from this key (and why it's hard to add):
-
-- **`node_modules` contents.** If the preload populates a resolver cache pointing at `node_modules/x/y.js`, and the user updates the package, the cache is wrong. Including `node_modules` in the key is impractical (multi-GB hash). Mitigation: don't pre-populate the resolver from the preload; only register the hook.
-- **`tsconfig.json` contents along the walk-up path.** Cached `compilerOptions` would be stale. Mitigation: don't cache it in the preload.
-- **`.env` contents.** Read in-body, not at top scope (per [[research/snapshot-env-reads]] pattern).
-- **User source files (`.ts`, `.tsx`).** Any cached transpile output is stale on edit. Mitigation: the per-file content-hashed transpile cache already covers this; do NOT put cached transpile output into the snapshot.
-
-The pattern that emerges: **anything snapshot-worth-baking is trivially small (hook registration), and anything substantive is invalidated by user edits we can't predict.** The snapshot therefore pays for itself only on the minimal "register hook, construct empty resolver table" payload — the ~1-3ms savings we measured.
-
-### Generation strategy
-
-Three options:
-
-1. **Ship pre-built blobs in distribution.** One blob per `(node_version × arch × platform)` tuple. With 7 supported Node versions × 3 arches × 3 platforms = ~63 blobs. Each ~6MB. Adds ~380MB to distribution — unacceptable.
-2. **Lazy generate at first run.** Spawn `node --build-snapshot --snapshot-blob=... preload-anchor.js` once on first Nub invocation. Adds ~500-1000ms to the first run, $0 after. Need a lock file to handle concurrent first-invocations. Workable but adds a "first run is slow" footgun.
-3. **Generate at install time.** `npm install -g @nubjs/nub` postinstall hook runs the snapshot build. Adds ~1s to install but warm from first run. Risks: postinstall scripts are often disabled (`npm install --ignore-scripts`); Node version may change after install (nvm switch) and invalidate the snapshot; permission model on the install target may not allow writing the cache dir.
-
-
-### Cache busting
-
-Invalidate (delete-and-regenerate) when the key changes. Since the key includes Nub version and Node version, normal Nub upgrades and nvm switches handle it for free. Disk consumption: at most a few blobs per user's lifetime, ~6MB each. Acceptable.
-
-### Permission-model interaction
-
-The cache dir is in `$HOME` (or `%LOCALAPPDATA%`). Under `--permission`, reading from `~/.cache/nub/snapshots/<key>.blob` does NOT require a grant (per §3, snapshot blob load is pre-permission).
-
-Writing the cache at generation time does require `--allow-fs-write=$HOME/.cache/nub`. The existing "disable transpile-cache writes under `--permission`" decision would apply here too: skip snapshot generation when `--permission` is detected, take the cold-start tax.
+The cache therefore cannot turn Nub's deliberately lazy preload into a large startup win without also capturing volatile project state.
 
 ## 6. The addon question — definitive answer
 
-**Q: Can we use snapshot pre-load to carry an N-API addon's state past the `--allow-addons` requirement under `--permission`?**
+**Q: Can snapshot pre-load carry an N-API addon's state past the `--allow-addons` requirement under `--permission`?**
 
 **A: No. The snapshotter refuses to serialize addon state.** Loading any third-party N-API addon during `--build-snapshot` triggers a V8 fatal (`CheckGlobalAndEternalHandles failed`) — see §2.2 for the stack trace. The cause is structural: V8's serializer requires every external reference (C++ function pointers, eternal handles) to be registered in the snapshot's external-reference table, which Node does for its built-in bindings via `NODE_BINDING_EXTERNAL_REFERENCE` (declared in `src/node_external_reference.h`) and third-party addons cannot do without forking Node.
 
 This rules out the "build snapshot at install time when there's no permission gate, load the snapshot under `--permission --no-allow-addons` and skip the dlopen" trick.
 
-The path forward for any addon that Nub ships (the resolver crate exposed as N-API for in-process use, websocket vendoring, etc.) is to **document that `--permission` requires `--allow-addons=<addon-path>`**.
+Supporting addon state would require V8 external-reference patching, an addon API for registering those references, and snapshot compatibility keyed to addon versions. That is a different mechanism from the current user snapshot and does not solve post-deserialize permission checks.
 
-Getting an addon snapshotted by patching V8 / Node is theoretically possible, but the patch surface is large: the snapshot would need to record external-reference patches per-addon, addon authors would need a new API to register their externals with the snapshot system, and the snapshot format itself would become addon-version-dependent. Multi-year upstream work, not in scope for Nub.
+## 7. Startup economics
 
-## 7. Performance estimate
+Snapshots replace repeatable JavaScript work with blob deserialization. They do not remove executable loading, native-library initialization, V8 isolate creation, post-deserialize refresh work, or process teardown.
 
-Method: `hyperfine --warmup 5 --runs 50` on macOS 25.5.0 / arm64 / Node v24.14.0.
+The original preload measurements used `hyperfine --warmup 5 --runs 50` on macOS 25.5.0/arm64 with Node v24.14.0.
 
 ### Baseline
 
@@ -300,84 +266,120 @@ Net delta: snapshot saves ~9ms. But this is a degenerate case — the entire poi
 
 ### Implication
 
-The realistic Nub preload sits between "noop" and "heavy" — closer to noop because we don't eagerly walk filesystems or pre-parse JSON in the preload. Savings expected: ~1-3ms.
+The realistic Nub preload sits between "noop" and "heavy" — closer to noop because it does not eagerly walk filesystems or pre-parse JSON. Savings expected: ~1-3ms.
+
+### Built-in snapshot control
+
+Node's own embedded snapshot is materially effective because it replaces the runtime's large, stable bootstrap rather than a small application prelude.
+
+On an idle Linux x64 VM with the official Node v26.7.0 binary, 160 randomized interleaved cycles after 20 warmups produced:
+
+| Command | Median |
+|---|---:|
+| `node empty.cjs` | 29.172ms |
+| `node --no-node-snapshot empty.cjs` | 77.600ms |
+
+The built-in snapshot saved 48.428ms, or 62.4%. Node's bootstrap source describes that snapshot as the V8 heap initialized by `lib/internal/bootstrap/`, which is deserialized instead of running the bootstrap scripts on the main thread ([source](https://github.com/nodejs/node/blob/6f41e415639b5ec3dd816e44945cc73b4d7651e3/lib/internal/bootstrap/node.js#L25-L35)). This is the generic snapshot win; an application snapshot starts after the same native process startup and replaces only application-specific work.
+
+Node has continued moving stable initialization into its built-in snapshot. Including the ESM loader improved the measured ESM process case by 6.06% ([landed change](https://github.com/nodejs/node/pull/61769)), and starting Workers from the built-in main context reduced the empty Worker bootstrap from 21.1ms to 10.6ms ([landed change](https://github.com/nodejs/node/pull/65336)). Those wins do not imply that a second, application-level snapshot is free.
+
+### SEA state-size sweep
+
+Application snapshots carry a fixed V8 startup-data payload before application state is added. For Node v26.7.0, an empty SEA snapshot added 6,754,304 bytes to the executable.
+
+The same Linux host ran 160 randomized interleaved cycles for functionally identical SEA programs that constructed arrays of small objects:
+
+| Objects | Plain SEA | Snapshot SEA | Snapshot delta | Snapshot blob |
+|---:|---:|---:|---:|---:|
+| 0 | 27.255ms | 31.010ms | +3.755ms | 6,755,762 bytes |
+| 1,000 | 27.499ms | 31.278ms | +3.778ms | 6,807,098 bytes |
+| 10,000 | 34.684ms | 34.405ms | -0.279ms | 7,361,026 bytes |
+| 100,000 | 56.637ms | 63.825ms | +7.188ms | 12,948,026 bytes |
+
+Serialization does not turn this object graph into ready-to-map heap pages. V8 consumes a serialization stream and reconstructs the isolate state, so the larger graph trades object construction for larger binary reads and more deserialization. The 10,000-object case reached parity; the 100,000-object snapshot lost despite moving all construction to build time.
+
+`useCodeCache: true` was within 0.24ms of the plain SEA at every object count. The small script leaves parsing and compilation below the native startup floor, and a cache does not remove that floor.
+
+### Compute-to-state sweep
+
+The inverse control performed increasing build-time computation but retained only one integer in the snapshot. The snapshot stayed near 6.75MB at every count.
+
+| Loop iterations | Plain SEA | Snapshot SEA | Snapshot delta |
+|---:|---:|---:|---:|
+| 100,000 | 29.155ms | 32.061ms | +2.906ms |
+| 1,000,000 | 30.779ms | 31.713ms | +0.934ms |
+| 5,000,000 | 36.368ms | 31.666ms | -4.703ms |
+| 20,000,000 | 55.041ms | 31.477ms | -23.565ms |
+
+This is the crossover Node snapshots are designed for: expensive deterministic initialization whose output is small. Packaging the program as an executable is not the relevant property. The relevant quantity is runtime work avoided per byte of serialized state.
+
+### SEA snapshot copy
+
+The SEA path adds one avoidable cost that external `--snapshot-blob` loading does not make avoidable in the same way.
+
+At Node main commit `6f41e415639b5ec3dd816e44945cc73b4d7651e3`, the SEA loader receives a `std::string_view` into a process-lifetime executable resource ([`src/node.cc`](https://github.com/nodejs/node/blob/6f41e415639b5ec3dd816e44945cc73b4d7651e3/src/node.cc#L1512-L1532), [`src/node_sea.cc`](https://github.com/nodejs/node/blob/6f41e415639b5ec3dd816e44945cc73b4d7651e3/src/node_sea.cc#L249-L260)). `SnapshotDeserializer::Read<v8::StartupData>()` then allocates another buffer and copies the entire V8 startup-data region into it ([`src/node_snapshotable.cc`](https://github.com/nodejs/node/blob/6f41e415639b5ec3dd816e44945cc73b4d7651e3/src/node_snapshotable.cc#L179-L195)).
+
+A source prototype kept copying file-backed snapshot blobs but let SEA borrow the process-lifetime resource bytes. A clean Node build and 240 randomized interleaved cycles after 30 warmups on an idle Linux x64 VM produced:
+
+| Workload | Baseline | Borrowed bytes | Delta |
+|---|---:|---:|---:|
+| Empty snapshot, 6.75MB | 28.335ms | 26.610ms | -1.725ms |
+| 20-million-iteration result, 6.75MB | 28.131ms | 26.491ms | -1.640ms |
+| 100,000 objects, 12.9MB | 56.285ms | 51.541ms | -4.745ms |
+
+The executable bytes already remain mapped for the process lifetime in `FindSingleExecutableBlob()` ([source](https://github.com/nodejs/node/blob/6f41e415639b5ec3dd816e44945cc73b4d7651e3/src/node_sea_bin.cc#L45-L66)), so borrowing them preserves the lifetime V8 needs. This removes duplicate allocation and copying, but it does not remove V8 deserialization or the native startup floor. It is a bounded improvement to SEA snapshots, not a general snapshot breakthrough.
 
 
-Bun's startup advantage over Node (~22ms) comes from JSC vs V8 macOS dyld characteristics, static linking, and skipping `pre_execution.js`. None of those are capturable by a snapshot mechanism on top of the user's installed Node. See [[research/cold-start]] for the full breakdown.
+The remaining process and isolate floor is outside the application snapshot. See [[research/cold-start]] for its measured phase breakdown.
 
 ## 8. Security considerations
 
-The snapshot blob loads before the permission gate exists (§3), so an attacker who can write the cache dir gets pre-bootstrap code execution. Version, dependency and source drift each have a mitigation; the opacity of snapshot failures does not.
+A user snapshot is executable state loaded before Node's permission gate exists. Integrity, compatibility, and input freshness must therefore be properties of the artifact pipeline rather than assumptions made after deserialization.
 
-### Blob tampering
+### Blob integrity
 
-The snapshot blob is loaded with raw `fopen()` before the permission system exists (§3). An attacker who can write to `~/.cache/nub/snapshots/<key>.blob` can replace it with a malicious blob that runs arbitrary code at deserialize time.
+An attacker who can replace a snapshot blob can run captured code at deserialization time.
 
-The deserialized code runs with whatever permissions the user grants the process, but the *bootstrap path* is entirely unsanitized.
+Restrictive filesystem permissions provide the ordinary cache trust boundary. An independent digest provides stronger integrity but requires reading the blob again and erodes the startup benefit.
 
-Mitigations:
+An embedded SEA snapshot inherits the executable's distribution and signing boundary instead of adding a separate writable file. That improves artifact integrity but does not change the authority of code after deserialization.
 
-- Verify a sha256 of the blob against an expected value at load time. This has to happen before `--snapshot-blob` is passed to Node — a Rust-side verification in the Nub CLI wrapper — and adds a disk read of the blob for hashing, defeating most of the perf win.
-- Trust filesystem permissions: `~/.cache/nub/snapshots/` is 0700, blob files 0600. An attacker with write access already controls the user's account, so this is the standard cache trust model. The impact of a cache write is arbitrary code in the user's Node processes, the same end state as tampering with the transpile cache.
-- Skip snapshot entirely under `--permission`, matching the transpile-cache write-disable decision.
+### Version and input drift
 
-The un-snapshotted preload, by contrast, ships with Nub and is read from Nub's install directory (under `/opt/homebrew/...` or `~/.local/share/...`), which is harder for an attacker to write to than a user cache dir.
+Snapshots are tied to the producing Node.js/V8 version and platform. A version mismatch normally fails at load time, while stale application state can remain structurally valid and produce wrong answers.
 
-### Version drift
+Any source file, dependency manifest, environment-derived constant, or resolver result captured before serialization becomes an artifact input. Content-addressing or post-deserialize refresh is required for each one.
 
-The snapshot is V8-version-tied. Node version mismatch produces either a hard fail (`Cannot use snapshot, V8 version mismatch`) or in pathological cases subtle bytecode misbehavior.
+### Failure opacity
 
-Mitigation: include `process.versions.v8` in the cache key (§5). On nvm-switch, the old cache becomes invalid and is regenerated — costing ~500ms-1s on the next Nub invocation after the switch. Not catastrophic but a footgun.
+Snapshot failures often surface inside `node:internal/v8/startup_snapshot` rather than at the application source that produced the stale or unserializable state. This makes a snapshot path harder to diagnose than the equivalent ordinary preload.
 
-### Dependency drift
+## 9. Current decision
 
-The preload doesn't depend on the user's `node_modules` directly (it only registers hooks). But if we ever cached resolver state in the snapshot, dep changes would silently produce wrong results.
+The results separate Nub's product decision from improvements that belong in Node.js core. Application snapshots are workload-dependent; the SEA loader's duplicate copy is not.
 
-Mitigation: don't cache resolver state in the snapshot. Resolution runs at hook-fire time, against the current FS.
+### Nub application snapshots
 
-### Source drift
+Nub should not snapshot its preload or enable SEA `useSnapshot` by default.
 
-When a user edits a `.ts` file, the transpile cache, separately keyed by content hash, handles it correctly.
+- The preload deliberately defers filesystem and transpiler work, leaving little expensive deterministic initialization for a snapshot to replace.
+- The snapshot cannot carry N-API addon state and breaks important module behaviors across the serialization boundary.
+- An empty application snapshot adds about 6.75MB and a few milliseconds before it captures any useful state.
+- Single-executable packaging does not change the economics. The state-size and compute-to-state sweeps show that snapshot eligibility must be established by a workload measurement, not by output format.
 
-Putting transpile output into the snapshot would force a choice between (a) stale output served post-edit, or (b) invalidating the whole snapshot per `.ts` edit, which is unworkable — it would invalidate on every keystroke. Don't put transpile output in the snapshot.
+Nub continues to pass Node.js snapshot flags through unchanged. Node's SEA interface exposes `useSnapshot`, but current `nub compile` output does not enable it, and executable output alone provides no basis for enabling it.
 
-### New attack surfaces
+### Node.js core
 
-Surfaces the non-snapshot path does not have:
+The SEA startup-data copy is the strongest snapshot-specific Node.js contribution found here. It is localized and reduced median startup by 1.64–4.74ms in a clean source-build comparison.
 
-1. **Pre-permission-gate code execution** via blob tampering.
-2. **Cache-poisoning across permission-mode invocations** — even if the user runs Nub under `--permission`, the snapshot blob was built with full FS access at generation time. An attacker who controlled the generation environment can ship a backdoored blob.
-3. **Opacity of failures.** When something goes wrong with a snapshot, errors look like `ERR_INTERNAL_ASSERTION` from `node:internal/v8/startup_snapshot:112:5` — uselessly internal. Compare the un-snapshotted preload, where errors point at user-visible Nub JS files with clear stack traces.
+The prototype preserves existing file-backed snapshot ownership and borrows only the SEA resource whose lifetime is already process-wide.
 
-## 9. Recommendation
+That change cannot eliminate the fixed native floor. Work that removes process-wide initialization helps every Node.js invocation and composes with snapshots: current examples include symbol-visibility work on macOS ([#65526](https://github.com/nodejs/node/pull/65526)), deferred `atexit` and crypto initialization ([#65549](https://github.com/nodejs/node/pull/65549)), and seeding V8 directly from the OS CSPRNG ([#65796](https://github.com/nodejs/node/pull/65796)). A V8 hash-seed optimization was closed in Node.js because it belongs upstream in V8 first ([#65795](https://github.com/nodejs/node/pull/65795)).
 
-**Do not pursue snapshot. Reconsider only if specific conditions are met.**
+Moving more stable Node.js bootstrap into the built-in snapshot also has direct precedent in the ESM-loader and Worker results above. Expanding user snapshots to more built-ins, ESM module graphs, dynamic import, or addons would increase the workloads that can be represented, but it would not change the fixed-floor or deserialization math. Node.js tracks the packaging limitations explicitly in [the startup snapshot integration discussion](https://github.com/nodejs/node/issues/42566) and [the current snapshot documentation](https://github.com/nodejs/node/blob/main/doc/api/cli.md#--build-snapshot).
 
-### Today: no snapshot
-
-The posture stays as it is today: pass the flags through, generate nothing, ship no blobs.
-
-- The "Does our preload still run on snapshot-load?" question is settled: hook registrations persist; dynamic `import()` is broken; `createRequire` usage must be re-constructed post-deserialize; addons are impossible.
-- Continue the existing posture: pass `--build-snapshot` / `--snapshot-blob` through to Node unchanged; recommend `--node` / `NODE_COMPAT=1` for users who actually need snapshots.
-- Don't auto-generate snapshots from the Nub CLI. Don't ship blob files. Don't add a `~/.cache/nub/snapshots/` directory.
-
-### Conditions under which to reconsider
-
-Three triggers: a `nub compile` pipeline that needs a snapshot internally, an upstream fix for the `node:module` warning, or cold-start pressure that no lazier preload design can relieve.
-
-1. **`nub compile` needs a snapshot internally** for a SEA-wrapped output. SEA can embed a snapshot blob, and the compile-time environment is controlled. Internal snapshot use as part of `nub compile`'s output is a different question — evaluate when that command is designed.
-2. **Node fixes the snapshot warning for `node:module`.** The warning text — *"It's not yet fully verified whether built-in module 'node:module' works in user snapshot builder scripts. It may still work in some cases, but in other cases certain run-time states may be out-of-sync after snapshot deserialization."* — indicates that the Node team is aware this is broken and hasn't fixed it yet. When the warning is removed and the dynamic-import and createRequire issues are resolved upstream, revisit.
-3. **A specific cold-start budget pressure forces it.** If `nub <file.ts>` cold-start becomes the bottleneck (it won't — the bottleneck is V8 isolate construction, not the preload), and we've exhausted lazier preload designs, snapshot could shave 1-3ms. Not before.
-
-## 10. Open questions
-
-Five questions left open, none of them blocking the recommendation. Each becomes relevant only if the snapshot direction is reconsidered.
-
-- **Worker threads + snapshot.** All testing here was main-thread. Workers re-bootstrap via the embedded snapshot with a per-thread Realm. Whether a user-snapshot-built script can register hooks that fire for worker-thread imports is untested, and becomes relevant only if we reconsider snapshot.
-- **SEA + snapshot interaction for `nub compile`.** SEA can embed a snapshot blob via the `useSnapshot: true` config. Whether the combination simplifies or complicates the Nub preload story is a question for when `nub compile` is designed.
-- **PR/issue history for dynamic-import-callback-missing under snapshot.** Worth a sweep of nodejs/node issues for `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` + `snapshot` keywords to confirm this is a known-unfixed limitation rather than a misuse on our part. Not blocking the recommendation, but useful context if we re-investigate.
-- **Snapshot + `--inspect-brk`.** Untested. If snapshot mangles the source map / script-id mapping, the debugger could attach to a process that has no recognizable user scripts. Relevant to any future debugger integration.
-- **Whether Node 25/26 fixes any of this.** The `node:module` warning suggests upstream work is in progress. A quick check of the Node 25 nightlies (if/when available) for snapshot-related PRs would be worth doing before re-evaluating in 6+ months.
+A process checkpoint, zygote, or resident daemon would attack a different layer by avoiding OS loading and isolate creation. It is not a refinement of Node's V8 startup snapshot and would introduce lifecycle, security, native-resource, and cross-platform constraints far beyond the SEA mechanism.
 
 ## Changelog
 
@@ -385,3 +387,4 @@ Revision history for this document.
 
 - 2026-07-30 — Initial publication.
 - 2026-08-28 — Trimmed to the measured findings and current behavior.
+- 2026-09-05 — Added controlled SEA state/compute sweeps, the built-in-snapshot control, and a source-built measurement of the SEA startup-data copy.

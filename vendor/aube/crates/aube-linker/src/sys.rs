@@ -1048,10 +1048,25 @@ fn interpreter_launch_block(prog: &str, rel_target_fwdslash: &str) -> String {
 /// Marker the POSIX shim writer stamps into every generated file so
 /// [`parse_posix_shim_target`] can unambiguously identify our shims and
 /// recover the `$basedir`-relative target path on uninstall. Any format
-/// change here must bump the `v1` suffix so older shims stop being
+/// change here must bump the version suffix so older shims stop being
 /// recognized (forcing a reinstall) rather than being silently
 /// misparsed.
-pub const POSIX_SHIM_MARKER_PREFIX: &str = "# aube-bin-shim v1 target=";
+pub const POSIX_SHIM_MARKER_PREFIX: &str = "# aube-bin-shim v2 target=";
+
+/// Resolve the invoked shim through absolute and relative symlink hops before
+/// deriving `$basedir`. The 40-hop cap matches the Linux kernel's `ELOOP`
+/// limit and prevents a user-created symlink cycle from hanging execution.
+const POSIX_SHIM_BASEDIR: &str = "link=\"$0\"\n\
+hops=0\n\
+while [ -L \"$link\" ] && [ \"$hops\" -lt 40 ]; do\n\
+  hops=$((hops+1))\n\
+  target=$(readlink \"$link\")\n\
+  case \"$target\" in\n\
+    /*) link=\"$target\" ;;\n\
+    *)  link=\"$(dirname \"$link\")/$target\" ;;\n\
+  esac\n\
+done\n\
+basedir=$(dirname \"$link\")\n";
 
 /// POSIX shell-script shim used when `prefer_symlinked_executables=false`
 /// (so `extend_node_path` can actually inject `NODE_PATH`). Mirrors the
@@ -1074,7 +1089,7 @@ fn generate_posix_shim(
         return format!(
             "#!/bin/sh\n\
              {POSIX_SHIM_MARKER_PREFIX}{rel_target_fwdslash}\n\
-             basedir=$(dirname \"$0\")\n\
+             {POSIX_SHIM_BASEDIR}\
              {node_path}\
              exec \"$basedir/{rel_target_fwdslash}\" \"$@\"\n"
         );
@@ -1086,7 +1101,7 @@ fn generate_posix_shim(
     format!(
         "#!/bin/sh\n\
          {POSIX_SHIM_MARKER_PREFIX}{rel_target_fwdslash}\n\
-         basedir=$(dirname \"$0\")\n\
+         {POSIX_SHIM_BASEDIR}\
          {node_path}\
          {launch_block}"
     )
@@ -2216,6 +2231,47 @@ mod tests {
         create_bin_shim(&bin_dir, "gone", &target, BinShimOptions::default()).unwrap();
 
         assert_eq!(std::fs::read_link(bin_dir.join("gone")).unwrap(), target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_shim_executes_target_through_external_symlink_chain() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let pkg_dir = dir.path().join("node_modules/pkg/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let target = pkg_dir.join("tool");
+        std::fs::write(&target, "#!/bin/sh\necho shim-target\n").unwrap();
+
+        create_bin_shim(
+            &bin_dir,
+            "tool",
+            &target,
+            BinShimOptions {
+                extend_node_path: false,
+                prefer_symlinked_executables: Some(false),
+                hidden_modules_dir: None,
+            },
+        )
+        .unwrap();
+
+        let absolute_hop = dir.path().join("absolute-hop");
+        symlink(bin_dir.join("tool"), &absolute_hop).unwrap();
+        let path_dir = dir.path().join("local/bin");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let relative_hop = path_dir.join("tool");
+        symlink("../../absolute-hop", &relative_hop).unwrap();
+
+        let output = std::process::Command::new(&relative_hop).output().unwrap();
+        assert!(
+            output.status.success(),
+            "shim failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "shim-target\n");
     }
 
     #[cfg(unix)]

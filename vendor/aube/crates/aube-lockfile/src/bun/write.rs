@@ -86,7 +86,7 @@ pub fn write(
             all_roots.push(d.clone());
         }
     }
-    let tree = crate::npm::build_hoist_tree(&canonical, &all_roots);
+    let tree = crate::npm::build_hoist_tree(&canonical, &all_roots, None);
 
     // Non-root workspaces are read fresh from disk because the caller
     // doesn't thread them through — the root manifest is the only one

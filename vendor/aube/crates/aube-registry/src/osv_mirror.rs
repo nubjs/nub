@@ -330,11 +330,9 @@ impl OsvMirror {
     /// 60s budget the bulk dump needs — the live-OSV probe's 8s
     /// timeout would never let a fresh sync finish.
     pub fn build_client() -> Result<reqwest::Client, MirrorError> {
-        Ok(
-            aube_util::http::with_webpki_root_fallback(reqwest::Client::builder())
-                .timeout(FETCH_TIMEOUT)
-                .build()?,
-        )
+        Ok(crate::client::probe_client_builder()
+            .timeout(FETCH_TIMEOUT)
+            .build()?)
     }
 
     /// Load the on-disk index, falling back to an empty default

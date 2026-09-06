@@ -140,10 +140,15 @@
    the cream page — but on these always-dark surfaces those darkened accents
    lose contrast (green/blue/pink drop to ~3.1–3.7:1). Restore the bright
    dark-mode accent values inside these panels so accent text + bench bars clear
-   AA against the dark ground regardless of the page theme. */
+   AA against the dark ground regardless of the page theme.
+
+   `.ansi-player-overlay` is the play control of `<AnsiPlayer>`. It paints ON the
+   dark panel but is a SIBLING of the figure rather than a descendant, so it does
+   not inherit the restore from the selector beside it. */
 .nub-code-panel,
 .prose figure.shiki,
-.blog-prose figure.shiki {
+.blog-prose figure.shiki,
+.ansi-player-overlay {
   --color-ember: #ff5d3b;
   --color-acid: #4fe173;
   --color-sky: #7bb0ff;
@@ -301,14 +306,32 @@ h1, h2, h3, h4, .font-display {
 
 /* Tables: auto layout hands the first column most of the row when later
    columns wrap. Shrink the first two columns to their content (width:1% +
-   nowrap) so the prose-length last column gets the remaining space. */
+   nowrap) so the prose-length last column gets the remaining space.
+
+   `.tool-matrix` (the N-tool capability matrix) is the one table shaped the
+   other way round — prose in the FIRST column, glyphs in the rest — so it sizes
+   its own columns with a <colgroup> and opts out here. */
 .blog-prose table {
   width: 100%;
 }
-.blog-prose th:not(:last-child),
-.blog-prose td:not(:last-child) {
-  width: 1%;
-  white-space: nowrap;
+/* Below the `sm` breakpoint the nowrap columns alone can exceed the viewport
+   (three fixed columns plus a prose column), and a plain markdown table has no
+   scroll container — so let every column wrap there instead. */
+@media (min-width: 640px) {
+  .blog-prose table:not(.tool-matrix) th:not(:last-child),
+  .blog-prose table:not(.tool-matrix) td:not(:last-child) {
+    width: 1%;
+    white-space: nowrap;
+  }
+}
+
+/* The matrix's "us" column. One variable so the tint is a single knob: the
+   default is a faint lift of the foreground, neutral in both themes. */
+.tool-matrix {
+  --tm-us-bg: color-mix(in srgb, var(--color-fd-foreground) 5%, transparent);
+}
+.tool-matrix .tm-us {
+  background-color: var(--tm-us-bg);
 }
 
 /* Blockquotes as editorial asides — a hairline ember rule on a faint card,

@@ -54,7 +54,7 @@ impl ResolvedPatch {
 /// prefixes, NUL bytes, and any `..` component. Used as a read-side
 /// guard so a hostile manifest cannot point the patch loader at
 /// arbitrary files (e.g. `/etc/passwd` or `\\server\share\secret`).
-fn is_safe_patch_rel(rel: &str) -> bool {
+pub(crate) fn is_safe_patch_rel(rel: &str) -> bool {
     if rel.is_empty() || rel.contains('\0') {
         return false;
     }
@@ -195,18 +195,11 @@ fn map_patch_resolve_err(e: aube_lockfile::patch_groups::PatchResolveError) -> m
     }
 }
 
-#[cfg(test)]
-fn load_patches(cwd: &Path) -> Result<BTreeMap<String, ResolvedPatch>> {
-    load_patches_with_lockfile_entries(cwd, &BTreeMap::new())
-}
-
-fn load_patches_with_lockfile_entries(
-    cwd: &Path,
-    lockfile_patched_dependencies: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, ResolvedPatch>> {
-    let mut entries: BTreeMap<String, String> = BTreeMap::new();
-    entries.extend(lockfile_patched_dependencies.clone());
-
+/// Read patch declarations from the project manifest and workspace config
+/// without touching their files. Deploy filters this map to each selected
+/// importer's closure before validating paths and loading content.
+pub(crate) fn load_declared_patch_paths(cwd: &Path) -> Result<BTreeMap<String, String>> {
+    let mut entries = BTreeMap::new();
     let manifest_path = cwd.join("package.json");
     if manifest_path.exists() {
         let manifest = aube_manifest::PackageJson::from_path(&manifest_path)
@@ -220,7 +213,35 @@ fn load_patches_with_lockfile_entries(
         .map_err(miette::Report::new)
         .wrap_err("failed to read pnpm-workspace.yaml")?;
     entries.extend(ws_config.patched_dependencies);
+    Ok(entries)
+}
 
+pub(crate) fn resolve_declared_patches(
+    cwd: &Path,
+    entries: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ResolvedPatch>> {
+    resolve_patch_entries(cwd, entries)
+}
+
+#[cfg(test)]
+fn load_patches(cwd: &Path) -> Result<BTreeMap<String, ResolvedPatch>> {
+    load_patches_with_lockfile_entries(cwd, &BTreeMap::new())
+}
+
+fn load_patches_with_lockfile_entries(
+    cwd: &Path,
+    lockfile_patched_dependencies: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ResolvedPatch>> {
+    let mut entries = BTreeMap::new();
+    entries.extend(lockfile_patched_dependencies.clone());
+    entries.extend(load_declared_patch_paths(cwd)?);
+    resolve_patch_entries(cwd, entries)
+}
+
+fn resolve_patch_entries(
+    cwd: &Path,
+    entries: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ResolvedPatch>> {
     let mut out = BTreeMap::new();
     for (key, rel) in entries {
         validate_patch_key(&key)?;
@@ -513,6 +534,7 @@ fn upsert_manifest_patched_dependency(
     let raw = std::fs::read_to_string(&path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read {}: {e}", path.display()))?;
+    let style = aube_manifest::detect_json_style(&raw);
     let mut value =
         aube_manifest::parse_json::<serde_json::Value>(&path, raw).map_err(miette::Report::new)?;
     let mut obj = value
@@ -535,10 +557,9 @@ fn upsert_manifest_patched_dependency(
         key.to_string(),
         serde_json::Value::String(rel_patch_path.to_string()),
     );
-    let mut out = serde_json::to_string_pretty(&value)
+    let out = aube_manifest::serialize_json_with_style(&value, &style)
         .into_diagnostic()
         .map_err(|e| miette!("failed to serialize {}: {e}", path.display()))?;
-    out.push('\n');
     std::fs::write(&path, out)
         .into_diagnostic()
         .map_err(|e| miette!("failed to write {}: {e}", path.display()))?;
@@ -553,6 +574,7 @@ fn remove_bun_patched_dependency(cwd: &Path, key: &str) -> Result<bool> {
     let raw = std::fs::read_to_string(&path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read {}: {e}", path.display()))?;
+    let style = aube_manifest::detect_json_style(&raw);
     let mut value =
         aube_manifest::parse_json::<serde_json::Value>(&path, raw).map_err(miette::Report::new)?;
     let obj = value
@@ -580,10 +602,9 @@ fn remove_bun_patched_dependency(cwd: &Path, key: &str) -> Result<bool> {
         return Ok(removed);
     }
 
-    let mut out = serde_json::to_string_pretty(&value)
+    let out = aube_manifest::serialize_json_with_style(&value, &style)
         .into_diagnostic()
         .map_err(|e| miette!("failed to serialize {}: {e}", path.display()))?;
-    out.push('\n');
     std::fs::write(&path, out)
         .into_diagnostic()
         .map_err(|e| miette!("failed to write {}: {e}", path.display()))?;
@@ -815,6 +836,46 @@ mod tests {
                 .map(|p| p.path.strip_prefix(dir.path()).unwrap()),
             Some(Path::new("patches/is-number.patch"))
         );
+    }
+
+    #[test]
+    fn bun_patch_writers_preserve_the_manifest_style() {
+        // The `bun.lock` is what selects the two writers under test:
+        // `upsert_manifest_patched_dependency` and
+        // `remove_bun_patched_dependency`. Without a lockfile the upsert
+        // takes the `config_write_target` → `edit_setting_map` path instead,
+        // which `edits.rs` already covers.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bun.lock"), "{}").unwrap();
+        let manifest = dir.path().join("package.json");
+        std::fs::write(&manifest, "{\r\n\t\"name\": \"x\"\r\n}").unwrap();
+
+        upsert_patched_dependency(dir.path(), "a@1.0.0", "patches/a@1.0.0.patch").unwrap();
+        let raw = std::fs::read_to_string(&manifest).unwrap();
+        // The bun arm writes the un-branded top-level field — proof the
+        // routing reached the writer under test, not `edit_setting_map`.
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed["patchedDependencies"]["a@1.0.0"],
+            "patches/a@1.0.0.patch"
+        );
+        assert!(raw.starts_with("{\r\n\t\"name\""), "style lost:\n{raw:?}");
+        assert!(
+            !raw.contains("\n  \""),
+            "reindented to two spaces:\n{raw:?}"
+        );
+        assert!(raw.ends_with('}'), "trailing newline added:\n{raw:?}");
+
+        remove_patched_dependency(dir.path(), "a@1.0.0").unwrap();
+        let raw = std::fs::read_to_string(&manifest).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(parsed["patchedDependencies"].is_null());
+        assert!(raw.starts_with("{\r\n\t\"name\""), "style lost:\n{raw:?}");
+        assert!(
+            !raw.contains("\n  \""),
+            "reindented to two spaces:\n{raw:?}"
+        );
+        assert!(raw.ends_with('}'), "trailing newline added:\n{raw:?}");
     }
 
     #[test]

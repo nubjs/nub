@@ -33,13 +33,11 @@
 //! and mislabeling one `read` is the dangerous one. Commands that run
 //! user-supplied code have no fixed effect and are listed in [`UNCLASSIFIED`].
 
-use std::collections::HashMap;
-
-use clap_usage::usage;
-use clap_usage::usage::SpecCommandEffect::{self, Destructive, Read, Write};
+use Effect::{Destructive, Read, Write};
+use usage_rs::spec::{CommandOverlay, Effect};
 
 /// Commands whose effect is fixed, keyed by their full path under the binary.
-pub const EFFECTS: &[(&str, SpecCommandEffect)] = &[
+pub const EFFECTS: &[(&str, Effect)] = &[
     ("__node-gyp-bootstrap", Write),
     ("access", Read),
     ("access get", Read),
@@ -66,6 +64,7 @@ pub const EFFECTS: &[(&str, SpecCommandEffect)] = &[
     ("cache delete", Write),
     ("cache list", Read),
     ("cache list-registries", Read),
+    ("cache path", Read),
     ("cache prune", Write),
     ("cache view", Read),
     ("cat-file", Read),
@@ -176,7 +175,7 @@ pub const EFFECTS: &[(&str, SpecCommandEffect)] = &[
 ///
 /// `config tui` is deliberately *not* here: a `cfg(not(feature = "config-tui"))`
 /// stub keeps the subcommand present either way, it just errors when invoked.
-pub const FEATURE_EFFECTS: &[(&str, SpecCommandEffect)] = &[
+pub const FEATURE_EFFECTS: &[(&str, Effect)] = &[
     // Publishes to the registry. Creates rather than removes, so `write` by
     // the rules above — but a published version cannot be replaced, and every
     // consumer can see it immediately. Never auto-run this.
@@ -210,26 +209,13 @@ pub const UNCLASSIFIED: &[(&str, &str)] = &[
     ("test", "runs the package's test script"),
 ];
 
-/// Annotate every command in the spec that has a declared effect.
-pub fn apply(spec: &mut usage::Spec) {
-    let effects: HashMap<&str, SpecCommandEffect> =
-        EFFECTS.iter().chain(FEATURE_EFFECTS).copied().collect();
-    annotate(&mut spec.cmd, &mut vec![], &effects);
-}
-
-fn annotate(
-    cmd: &mut usage::SpecCommand,
-    path: &mut Vec<String>,
-    effects: &HashMap<&str, SpecCommandEffect>,
-) {
-    for (name, sub) in cmd.subcommands.iter_mut() {
-        path.push(name.clone());
-        if let Some(effect) = effects.get(path.join(" ").as_str()) {
-            sub.effect = Some(*effect);
-        }
-        annotate(sub, path, effects);
-        path.pop();
-    }
+/// Sparse metadata applied to the derived spec on cold paths.
+pub fn overlays() -> Vec<CommandOverlay<'static>> {
+    EFFECTS
+        .iter()
+        .chain(FEATURE_EFFECTS)
+        .map(|(path, effect)| CommandOverlay::effect(path, *effect))
+        .collect()
 }
 
 #[cfg(test)]
@@ -240,15 +226,18 @@ mod tests {
     /// Every command in the tree, hidden ones included: a hidden command is
     /// still runnable.
     fn all_commands() -> Vec<String> {
-        let spec: usage::Spec = crate::command().into();
         let mut out = vec![];
-        collect(&spec.cmd, &mut vec![], &mut out);
+        collect(crate::spec().root, &mut vec![], &mut out);
         out
     }
 
-    fn collect(cmd: &usage::SpecCommand, path: &mut Vec<String>, out: &mut Vec<String>) {
-        for (name, sub) in &cmd.subcommands {
-            path.push(name.clone());
+    fn collect(
+        cmd: &usage_rs::spec::CommandMeta<'_>,
+        path: &mut Vec<String>,
+        out: &mut Vec<String>,
+    ) {
+        for sub in cmd.subcommands {
+            path.push(sub.cmd.name.to_string());
             out.push(path.join(" "));
             collect(sub, path, out);
             path.pop();
@@ -311,28 +300,48 @@ mod tests {
         }
     }
 
-    /// The tables are only worth having if they reach the spec. Everything
-    /// else here checks the tables against the CLI; this checks that `apply`
-    /// actually transfers them.
+    /// The tables are only worth having if they reach emitted metadata.
+    /// A flag can raise what its command does, and this table cannot say so: it is keyed by
+    /// command. `aube completion` only reads, and `--install` writes three files — so the flags
+    /// carry the effect themselves, declared on the fields. Asserted here so a later edit cannot
+    /// quietly leave `--install` reading as safe.
     #[test]
-    fn apply_annotates_the_spec() {
-        let mut spec: usage::Spec = crate::command().into();
-        apply(&mut spec);
-
-        let cmd = |name: &str| {
-            spec.cmd
-                .subcommands
-                .get(name)
-                .unwrap_or_else(|| panic!("no `{name}`"))
+    fn installing_completion_scripts_is_a_write() {
+        let completion = crate::Cli::spec()
+            .root
+            .subcommands
+            .iter()
+            .find(|command| command.cmd.name == "completion")
+            .expect("completion");
+        let flag = |name: &str| {
+            completion
+                .flags
+                .iter()
+                .find(|f| f.flag.name == name)
+                .unwrap_or_else(|| panic!("`aube completion` has no --{name}"))
         };
-        assert_eq!(cmd("unpublish").effect, Some(Destructive));
-        assert_eq!(cmd("remove").effect, Some(Destructive));
-        assert_eq!(cmd("list").effect, Some(Read));
-        assert_eq!(cmd("install").effect, Some(Write));
-        // Nested commands are reached too.
-        assert_eq!(cmd("dist-tag").subcommands["rm"].effect, Some(Destructive));
-        // Anything in UNCLASSIFIED must be left unset, not defaulted.
-        assert_eq!(cmd("run").effect, None);
-        assert_eq!(cmd("dlx").effect, None);
+        assert_eq!(flag("install").effect, Some(usage_rs::spec::Effect::Write));
+        // `--force` only widens which file an install may replace, so it writes for that reason
+        // rather than one of its own.
+        assert_eq!(flag("force").effect, Some(usage_rs::spec::Effect::Write));
+    }
+
+    #[test]
+    fn overlays_annotate_the_spec() {
+        let kdl = crate::usage_kdl();
+        for (command, effect) in [
+            ("unpublish", "destructive"),
+            ("list", "read"),
+            ("install", "write"),
+            ("rm", "destructive"),
+        ] {
+            assert!(
+                kdl.lines().any(|line| {
+                    line.trim_start().starts_with(&format!("cmd {command} "))
+                        && line.contains(&format!("effect={effect}"))
+                }),
+                "{command} is missing effect={effect} from the emitted spec"
+            );
+        }
     }
 }

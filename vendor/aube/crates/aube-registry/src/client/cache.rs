@@ -189,6 +189,35 @@ pub(super) fn packument_full_cache_path(
     Some(cache_dir.join(origin).join(format!("{safe_name}.json")))
 }
 
+/// Disk-cached compact trust history ([`crate::PackumentTrustHistory`])
+/// for the lockfile trust-policy validator. Same revalidation envelope
+/// as the packument caches, but the payload keeps only the `time` map
+/// and per-version trust evidence — orders of magnitude smaller than
+/// the raw full packument the validator previously cached.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct CachedTrustHistory {
+    pub(super) etag: Option<String>,
+    pub(super) last_modified: Option<String>,
+    /// Unix epoch seconds when this entry was written
+    pub(super) fetched_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) max_age_secs: Option<u64>,
+    pub(super) history: crate::PackumentTrustHistory,
+}
+
+pub(super) fn read_cached_trust_history(path: &Path) -> Option<CachedTrustHistory> {
+    let content = std::fs::read(path).ok()?;
+    sonic_rs::from_slice(&content).ok()
+}
+
+pub(super) fn write_cached_trust_history(
+    path: &Path,
+    cached: &CachedTrustHistory,
+) -> std::io::Result<()> {
+    let json = sonic_rs::to_vec(cached).map_err(std::io::Error::other)?;
+    aube_util::fs_atomic::atomic_write(path, &json)
+}
+
 pub(super) fn read_cached_full_packument(path: &Path) -> Option<CachedFullPackument> {
     let content = std::fs::read(path).ok()?;
     sonic_rs::from_slice(&content).ok()

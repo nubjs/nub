@@ -3,7 +3,7 @@
 This page lists every security-relevant feature in aube, its default, and the
 one-line config to turn it on or off.
 
-To report a vulnerability, see the [security policy](https://github.com/jdx/aube/security/policy).
+To report a vulnerability, see the [security policy](https://github.com/aubepkg/aube/security/policy).
 
 ## The `paranoid` switch
 
@@ -145,6 +145,10 @@ structured metadata shapes npm emits after registry-side checks:
 
 This install-time policy validates the registry metadata shape; it does not
 cryptographically verify the attached attestation bundle.
+
+The policy runs when aube resolves a package version. Versions already present
+in the active lockfile are trusted, so frozen and repeat installs do not
+re-fetch publishing evidence for packages the project has already accepted.
 
 A trust downgrade may indicate a supply-chain incident: publisher account
 takeover, repository tampering, or a malicious co-maintainer publishing
@@ -447,7 +451,7 @@ allowBuilds:
   # ...whatever your project actually needs to build
 ```
 
-`trustPolicy=no-downgrade` and `minimumReleaseAge: 1440` (24h) are already
+`trustPolicy: no-downgrade` and `minimumReleaseAge: 1440` (24h) are already
 default-on; `paranoid: true` adds the rest of the bundle on top. Pair this
 with `aube audit` in CI so a newly disclosed CVE fails the build instead of
 silently shipping.

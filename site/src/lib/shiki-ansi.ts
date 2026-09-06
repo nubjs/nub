@@ -53,7 +53,10 @@ import type { ShikiTransformer } from '@shikijs/types';
    (4.5:1) except `black`, which is deliberately the dimmest thing on the panel
    at 3.25:1 — ANSI black's job is to recede, and it still beats the VS Code
    default's 1.06:1, where it was invisible. */
-const SITE_ANSI_PALETTE = {
+// Exported because the animated player (`src/lib/ansi-screen.ts`) resolves the
+// same 16 colors itself: a recorded session and a static fence of the same
+// output have to be indistinguishable, and a second copy of a palette drifts.
+export const SITE_ANSI_PALETTE = {
   black: '#65625b', //          3.25:1  foreground mixed 60% toward the panel
   red: '#ff5d3b', //            6.48:1  --color-ember
   green: '#4fe173', //         11.64:1  --color-acid

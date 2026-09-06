@@ -73,7 +73,7 @@ aube creates `aube-workspace.yaml`.
 ## What's different
 
 - **Separate install locations.** Installs go into `node_modules/.aube/` and
-  `$XDG_DATA_HOME/aube/store/` (defaulting to `~/.local/share/aube/store/`)
+  `$XDG_DATA_HOME/aube/store/v1/` (defaulting to `~/.local/share/aube/store/v1/`)
   instead of pnpm's `.pnpm/` and `~/.pnpm-store/`. If a project already has
   a pnpm-built `node_modules`, aube installs alongside — the two virtual
   stores live side by side.
@@ -96,9 +96,11 @@ aube creates `aube-workspace.yaml`.
 ## Supported pnpm lockfile versions
 
 aube reads and writes `pnpm-lock.yaml` at **lockfile version 9** — the
-format shipped by pnpm v9 and later. Older pnpm lockfiles (versions 5, 6,
-7, and 8, used by pnpm 7.x and 8.x) are not supported and will cause aube
-to refuse the install.
+format shipped by pnpm v9 and later. Older pnpm lockfiles (versions 5.x and
+6.0, used by pnpm 8.x and earlier) are not supported and will cause aube
+to refuse the install with
+[`ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION`](/error-codes) (exit code
+`16`).
 
 To upgrade an older pnpm lockfile, run a modern pnpm once to convert it:
 
@@ -122,7 +124,7 @@ aube equivalent — use `aube runtime set`.
 Unlike pnpm, aube also reads `.nvmrc` / `.node-version`, and it
 delegates runtime installs to [mise](https://mise.jdx.dev) when mise is
 installed so you don't keep two copies of Node (see the
-[`runtimeInstaller`](/settings/#runtimeinstaller) setting).
+[`runtimeInstaller`](/settings/#setting-runtimeinstaller) setting).
 
 aube also manages its own version the way pnpm does
 (`managePackageManagerVersions`, on by default): a

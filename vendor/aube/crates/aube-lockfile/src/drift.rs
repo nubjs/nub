@@ -301,7 +301,7 @@ impl LockfileGraph {
         // is hash-against-hash too. The path-against-path comparison below
         // is only meaningful for bun, whose reader stores a real path.
         if matches!(kind, LockfileKind::Pnpm | LockfileKind::Aube) {
-            return self.check_patched_dependency_hashes_drift(effective_hashes);
+            return self.check_patched_dependency_hashes_drift(effective_paths, effective_hashes);
         }
         // Both directions matter, exactly like pnpm: a lockfile entry
         // whose selector the project no longer declares is as stale as
@@ -349,18 +349,28 @@ impl LockfileGraph {
         DriftStatus::Fresh
     }
 
-    /// Hash-only patched-dependency drift, for pnpm lockfiles whose
+    /// Hash-first patched-dependency drift, for pnpm lockfiles whose
     /// `patchedDependencies` value is the patch's per-file hash. Fires in
     /// both directions: a selector the lockfile records but the project
     /// no longer declares, a declared selector the lockfile is missing,
     /// or a hash mismatch (the patch file's contents changed). Mirrors
     /// pnpm's `getOutdatedLockfileSetting` `patchedDependencies` check.
+    ///
+    /// The reader keeps an entry that carries no hash (the legacy
+    /// `{ path }` shape) in the path map only, so such a selector is judged
+    /// on its path instead: there is no hash to compare, and treating it
+    /// as unrecorded would re-resolve a lockfile that still names the patch.
     fn check_patched_dependency_hashes_drift(
         &self,
+        effective_paths: &BTreeMap<String, String>,
         effective_hashes: &BTreeMap<String, String>,
     ) -> DriftStatus {
-        for selector in self.patched_dependency_hashes.keys() {
-            if !effective_hashes.contains_key(selector) {
+        for selector in self
+            .patched_dependency_hashes
+            .keys()
+            .chain(self.patched_dependencies.keys())
+        {
+            if !effective_hashes.contains_key(selector) && !effective_paths.contains_key(selector) {
                 return DriftStatus::Stale {
                     reason: format!(
                         "patchedDependencies.{selector}: recorded in the lockfile but no longer declared in the project"
@@ -370,13 +380,26 @@ impl LockfileGraph {
         }
         for (selector, effective_hash) in effective_hashes {
             match self.patched_dependency_hashes.get(selector) {
-                None => {
-                    return DriftStatus::Stale {
-                        reason: format!(
-                            "patchedDependencies.{selector}: declared in the project but missing from the lockfile"
-                        ),
-                    };
-                }
+                None => match (
+                    self.patched_dependencies.get(selector),
+                    effective_paths.get(selector),
+                ) {
+                    (Some(locked_path), Some(path)) if locked_path == path => {}
+                    (Some(locked_path), Some(path)) => {
+                        return DriftStatus::Stale {
+                            reason: format!(
+                                "patchedDependencies.{selector}: project says {path}, lockfile says {locked_path}"
+                            ),
+                        };
+                    }
+                    _ => {
+                        return DriftStatus::Stale {
+                            reason: format!(
+                                "patchedDependencies.{selector}: declared in the project but missing from the lockfile"
+                            ),
+                        };
+                    }
+                },
                 Some(locked_hash) if locked_hash != effective_hash => {
                     return DriftStatus::Stale {
                         reason: format!(
@@ -562,7 +585,7 @@ impl LockfileGraph {
         // install. (Their *spec* is still verified separately by the
         // round-tripped `ignored_optional_dependencies` block below.)
         let ignored = &self.ignored_optional_dependencies;
-        let mut manifest_deps: Vec<(&String, &String, bool)> = manifest
+        let manifest_deps = manifest
             .dependencies
             .iter()
             .map(|(k, v)| (k, v, false))
@@ -574,19 +597,20 @@ impl LockfileGraph {
                     .filter(|(name, _)| !ignored.contains(name.as_str()))
                     .map(|(k, v)| (k, v, true)),
             )
-            .collect();
-        if self.settings.auto_install_peers {
-            manifest_deps.extend(
-                manifest
-                    .non_optional_peer_dependencies()
+            .chain(
+                self.settings
+                    .auto_install_peers
+                    .then_some(&manifest.peer_dependencies)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(name, _)| !manifest.peer_dependency_is_optional(name))
                     .filter(|(name, _)| {
-                        !manifest.dependencies.contains_key(name.as_str())
-                            && !manifest.dev_dependencies.contains_key(name.as_str())
-                            && !manifest.optional_dependencies.contains_key(name.as_str())
+                        !manifest.dependencies.contains_key(*name)
+                            && !manifest.dev_dependencies.contains_key(*name)
+                            && !manifest.optional_dependencies.contains_key(*name)
                     })
                     .map(|(k, v)| (k, v, false)),
             );
-        }
 
         for (name, spec, is_optional) in manifest_deps {
             match lockfile_specs.get(name.as_str()) {
@@ -615,6 +639,12 @@ impl LockfileGraph {
                     };
                 }
                 Some(locked_spec) if *locked_spec != spec => {
+                    let importer_peer_only = !manifest.dependencies.contains_key(name)
+                        && !manifest.dev_dependencies.contains_key(name)
+                        && !manifest.optional_dependencies.contains_key(name);
+                    if importer_peer_only && retained_peer_spec_is_compatible(spec, locked_spec) {
+                        continue;
+                    }
                     // pnpm rewrites the importer specifier to the
                     // override-applied value when an override fires on
                     // a direct dep, so a pnpm-generated lockfile shows
@@ -700,7 +730,8 @@ impl LockfileGraph {
             // `peerDependenciesMeta.optional` by `packages/vue`, present
             // as a root devDep) lands there too — so classify both as
             // Production for the dep-type drift check, or a valid pnpm 11
-            // lockfile reads stale on the optional-peer row.
+            // lockfile reads stale on the optional-peer row. Upstream
+            // classifies only the non-optional half.
             for name in manifest.peer_dependencies.keys() {
                 if manifest.dependencies.contains_key(name)
                     || manifest.dev_dependencies.contains_key(name)
@@ -729,27 +760,13 @@ impl LockfileGraph {
             }
         }
 
-        // Anything in the lockfile but missing from the manifest is stale
-        // — UNLESS it was auto-hoisted as a peer by the resolver. pnpm-style
-        // `auto-install-peers=true` puts peers into the importer's
-        // `dependencies` without the user having written them in
-        // `package.json`, so we have to recognize those as derived state
-        // rather than user intent.
-        //
-        // Critically, we identify an auto-hoisted entry by matching its
-        // *recorded specifier* against peer ranges declared in the graph,
-        // not just by name. A name-only check would silently exempt a
-        // user-pinned `react` that the user later removed (if any package
-        // anywhere in the graph peer-declares react, the name match would
-        // fire and we'd report Fresh forever — defeating the drift check).
-        //
-        // The rule: a lockfile entry whose (name, specifier) pair exactly
-        // matches some package's declared (peer_name, peer_range) is
-        // auto-hoisted. If the user had pinned react with a different
-        // specifier string and then removed it, the (name, specifier)
-        // pair no longer matches any peer range, and drift correctly
-        // fires so the resolver re-runs and rewrites the lockfile.
-        let mut manifest_names: std::collections::HashSet<&str> = manifest
+        // Anything in the lockfile but missing from the manifest's owned
+        // dependency sections is stale unless it is retained for an
+        // importer-owned peer. Required importer peers are included in
+        // `manifest_names` when autoInstallPeers is enabled; an optional
+        // one is not, and is instead accepted below only when its
+        // retained specifier still satisfies the declared peer range.
+        let manifest_names: std::collections::HashSet<&str> = manifest
             .dependencies
             .keys()
             .chain(manifest.dev_dependencies.keys())
@@ -759,50 +776,40 @@ impl LockfileGraph {
                     .keys()
                     .filter(|name| !ignored.contains(name.as_str())),
             )
+            .chain(
+                self.settings
+                    .auto_install_peers
+                    .then_some(&manifest.peer_dependencies)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(name, _)| !manifest.peer_dependency_is_optional(name))
+                    .map(|(name, _)| name),
+            )
             .map(|s| s.as_str())
-            .collect();
-        if self.settings.auto_install_peers {
-            // Exempt the importer's OWN declared peers — required and
-            // optional alike — from the "manifest removed" check. Under
-            // `auto-install-peers=true` pnpm auto-installs an importer's
-            // optional peer that resolves in scope (e.g. `typescript`
-            // declared `peerDependenciesMeta.optional` by `packages/vue`)
-            // and records it in the importer's lockfile `dependencies`;
-            // it is derived state, not a removed manifest dep. This is a
-            // pure by-NAME exemption keyed on the importer's OWN manifest
-            // — it short-circuits before the (name, spec) auto-hoisted
-            // gate below, and is safe precisely because pnpm RE-installs
-            // an own optional peer that still resolves in scope on the
-            // next install, so the lockfile row stays valid. A dep shared
-            // with some OTHER package's peer declaration is unaffected
-            // (it isn't in THIS importer's peer set) and stays gated by
-            // the (name, spec) match below.
-            manifest_names.extend(
-                manifest
-                    .peer_dependencies
-                    .keys()
-                    .filter(|name| {
-                        !manifest.dependencies.contains_key(name.as_str())
-                            && !manifest.dev_dependencies.contains_key(name.as_str())
-                            && !manifest.optional_dependencies.contains_key(name.as_str())
-                    })
-                    .map(|name| name.as_str()),
-            );
-        }
-        let auto_hoisted_peer_specs: std::collections::HashSet<(&str, &str)> = self
-            .packages
-            .values()
-            .flat_map(|p| {
-                p.peer_dependencies
-                    .iter()
-                    .map(|(name, range)| (name.as_str(), range.as_str()))
-            })
             .collect();
         for (locked_name, locked_spec) in &lockfile_specs {
             if manifest_names.contains(locked_name) {
                 continue;
             }
-            if auto_hoisted_peer_specs.contains(&(*locked_name, *locked_spec)) {
+            // pnpm retains importer entries when an owned dependency is
+            // removed but a peer declaration for the same package remains.
+            // It may preserve the old exact dependency specifier (for
+            // example `5.3.4` for a `^5` peer), so accept either an exact
+            // peer-spec match or an exact locked version satisfying the
+            // importer's declared peer range.
+            //
+            // Gated on `auto_install_peers`: with it off nothing puts a
+            // peer into the importer's `dependencies`, so a row the
+            // manifest doesn't otherwise declare is genuinely extraneous
+            // and must drift rather than be retained.
+            if self.settings.auto_install_peers
+                && manifest
+                    .peer_dependencies
+                    .get(*locked_name)
+                    .is_some_and(|peer_range| {
+                        retained_peer_spec_is_compatible(peer_range, locked_spec)
+                    })
+            {
                 continue;
             }
             let workspace_link = importer_path == "."
@@ -822,6 +829,21 @@ impl LockfileGraph {
 
         DriftStatus::Fresh
     }
+}
+
+fn retained_peer_spec_is_compatible(peer_range: &str, locked_spec: &str) -> bool {
+    if peer_range == locked_spec {
+        return true;
+    }
+    let normalized_range = if peer_range.trim().is_empty() {
+        "*"
+    } else {
+        peer_range
+    };
+    node_semver::Version::parse(locked_spec)
+        .ok()
+        .zip(node_semver::Range::parse(normalized_range).ok())
+        .is_some_and(|(version, range)| version.satisfies(&range))
 }
 
 /// Merge `pnpm-workspace.yaml` overrides on top of the manifest's
@@ -860,33 +882,15 @@ fn resolve_catalog_refs_in_overrides(
                 .strip_prefix("catalog:")
                 .map(|tail| if tail.is_empty() { "default" } else { tail })
                 .and_then(|cat_name| workspace_catalogs.get(cat_name))
-                .and_then(|cat| cat.get(override_key_package_name(k)))
+                .and_then(|cat| {
+                    override_match::target_package_name(k)
+                        .and_then(|package_name| cat.get(&package_name))
+                })
                 .cloned()
                 .unwrap_or_else(|| v.clone());
             (k.clone(), resolved)
         })
         .collect()
-}
-
-/// Extract the package name from an override selector key so the catalog
-/// can be looked up by pkg name. Handles bare (`lodash`), scoped
-/// (`@babel/core`), ranged (`lodash@<5`), ancestor-chained
-/// (`parent>lodash`), and combinations. Unparseable keys return the
-/// input unchanged; the catalog lookup will then miss and leave the
-/// value as-is.
-fn override_key_package_name(key: &str) -> &str {
-    let last = key.rsplit('>').next().unwrap_or(key);
-    if let Some(after_scope) = last.strip_prefix('@') {
-        match after_scope.find('@') {
-            Some(idx) => &last[..idx + 1],
-            None => last,
-        }
-    } else {
-        match last.find('@') {
-            Some(idx) => &last[..idx],
-            None => last,
-        }
-    }
 }
 
 /// Compare two override maps and return a human-readable reason
@@ -1327,12 +1331,11 @@ mod drift_tests {
         }
     }
 
-    // Regression guard for #42: the drift check must recognize
-    // auto-hoisted peers as derived state, not as "manifest removed X".
-    // Without this, every project that has any peer dep would trigger
-    // a full re-resolve on every install, defeating lockfile caching.
+    // Dependency peers belong to the package's peer context, not the
+    // importer. A legacy aube lockfile containing the synthetic importer
+    // row must re-resolve so it converges on pnpm's shape.
     #[test]
-    fn fresh_when_lockfile_has_auto_hoisted_peer() {
+    fn stale_when_dependency_peer_was_hoisted_into_importer() {
         let manifest = make_manifest(&[("use-sync-external-store", "1.2.0")]);
         let mut graph = make_graph(&[
             (
@@ -1340,12 +1343,10 @@ mod drift_tests {
                 "1.2.0",
                 "use-sync-external-store@1.2.0",
             ),
-            // Hoisted peer — in the lockfile importers but not in the
-            // user's package.json.
+            // Incorrectly hoisted peer — in the lockfile importer but not
+            // in the user's package.json.
             ("react", "^16.8.0 || ^17.0.0 || ^18.0.0", "react@18.3.1"),
         ]);
-        // The declaring package must list react as a peer for the
-        // drift check to recognize the hoist. We add that here.
         let mut declaring_pkg = LockedPackage {
             name: "use-sync-external-store".into(),
             version: "1.2.0".into(),
@@ -1359,10 +1360,86 @@ mod drift_tests {
             .packages
             .insert("use-sync-external-store@1.2.0".into(), declaring_pkg);
 
+        match graph.check_drift(&manifest, &BTreeMap::new(), &[], &BTreeMap::new()) {
+            DriftStatus::Stale { reason } => assert!(reason.contains("react")),
+            DriftStatus::Fresh => panic!("dependency peer must not remain in the importer"),
+        }
+    }
+
+    #[test]
+    fn fresh_when_importers_own_peer_is_auto_installed() {
+        let mut manifest = make_manifest(&[]);
+        manifest
+            .peer_dependencies
+            .insert("react".into(), "19.2.0".into());
+        let graph = make_graph(&[("react", "19.2.0", "react@19.2.0")]);
+
         assert_eq!(
             graph.check_drift(&manifest, &BTreeMap::new(), &[], &BTreeMap::new()),
             DriftStatus::Fresh
         );
+    }
+
+    #[test]
+    fn fresh_when_lockfile_retains_importer_peer_with_matching_range() {
+        let mut manifest = make_manifest(&[]);
+        manifest
+            .peer_dependencies
+            .insert("@tanstack/react-table".into(), "^8".into());
+        let graph = make_graph(&[(
+            "@tanstack/react-table",
+            "^8",
+            "@tanstack/react-table@8.21.3",
+        )]);
+
+        assert_eq!(
+            graph.check_drift(&manifest, &BTreeMap::new(), &[], &BTreeMap::new()),
+            DriftStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn fresh_when_lockfile_retains_importer_peer_with_satisfying_exact_version() {
+        let mut manifest = make_manifest(&[]);
+        manifest
+            .peer_dependencies
+            .insert("react-router-dom".into(), "^5".into());
+        let graph = make_graph(&[("react-router-dom", "5.3.4", "react-router-dom@5.3.4")]);
+
+        assert_eq!(
+            graph.check_drift(&manifest, &BTreeMap::new(), &[], &BTreeMap::new()),
+            DriftStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn fresh_when_retained_importer_peer_range_is_empty() {
+        for peer_range in ["", "  \t"] {
+            let mut manifest = make_manifest(&[]);
+            manifest
+                .peer_dependencies
+                .insert("react-router-dom".into(), peer_range.into());
+            let graph = make_graph(&[("react-router-dom", "5.3.4", "react-router-dom@5.3.4")]);
+
+            assert_eq!(
+                graph.check_drift(&manifest, &BTreeMap::new(), &[], &BTreeMap::new()),
+                DriftStatus::Fresh
+            );
+        }
+    }
+
+    #[test]
+    fn stale_when_retained_importer_peer_version_does_not_satisfy_range() {
+        let mut manifest = make_manifest(&[]);
+        manifest
+            .peer_dependencies
+            .insert("react-router-dom".into(), "^6".into());
+        let graph = make_graph(&[("react-router-dom", "5.3.4", "react-router-dom@5.3.4")]);
+
+        match graph.check_drift(&manifest, &BTreeMap::new(), &[], &BTreeMap::new()) {
+            DriftStatus::Stale { reason } => assert!(reason.contains("react-router-dom")),
+            DriftStatus::Fresh => panic!("an incompatible retained peer must be stale"),
+        }
     }
 
     // Regression: when a user explicitly pinned a dep that also happens
@@ -1747,6 +1824,54 @@ mod drift_tests {
         assert_eq!(
             graph.check_drift(&manifest, &ws_overrides, &[], &catalogs),
             DriftStatus::Fresh,
+        );
+    }
+
+    #[test]
+    fn fresh_when_yarn_ancestor_override_catalog_ref_matches_lockfile() {
+        let manifest = make_manifest(&[("lodash", "^4.17.0")]);
+        let mut graph = make_graph(&[("lodash", "^4.17.0", "lodash@4.17.21")]);
+        graph
+            .overrides
+            .insert("parent/lodash".into(), "4.17.21".into());
+        let ws_overrides = BTreeMap::from([("parent/lodash".to_string(), "catalog:".to_string())]);
+        let catalogs = BTreeMap::from([(
+            "default".to_string(),
+            BTreeMap::from([("lodash".to_string(), "4.17.21".to_string())]),
+        )]);
+
+        assert_eq!(
+            graph.check_drift(&manifest, &ws_overrides, &[], &catalogs),
+            DriftStatus::Fresh,
+        );
+    }
+
+    #[test]
+    fn catalog_overrides_resolve_slash_targets_with_comparators() {
+        let overrides = BTreeMap::from([
+            ("parent/lodash@>=4.0.0".to_string(), "catalog:".to_string()),
+            (
+                "parent/@scope/pkg@>1.0.0".to_string(),
+                "catalog:".to_string(),
+            ),
+            ("parent@^1>123numeric".to_string(), "catalog:".to_string()),
+        ]);
+        let catalogs = BTreeMap::from([(
+            "default".to_string(),
+            BTreeMap::from([
+                ("lodash".to_string(), "4.17.21".to_string()),
+                ("@scope/pkg".to_string(), "2.0.0".to_string()),
+                ("123numeric".to_string(), "1.0.0".to_string()),
+            ]),
+        )]);
+
+        assert_eq!(
+            resolve_catalog_refs_in_overrides(&overrides, &catalogs),
+            BTreeMap::from([
+                ("parent/lodash@>=4.0.0".to_string(), "4.17.21".to_string(),),
+                ("parent/@scope/pkg@>1.0.0".to_string(), "2.0.0".to_string(),),
+                ("parent@^1>123numeric".to_string(), "1.0.0".to_string()),
+            ])
         );
     }
 
@@ -2696,6 +2821,40 @@ mod drift_tests {
                 &effective_paths,
                 &effective_hashes
             ),
+            DriftStatus::Stale { .. }
+        ));
+    }
+
+    #[test]
+    fn pnpm_patched_dep_without_recorded_hash_is_judged_on_its_path() {
+        // The legacy `{ path }` entry carries no hash, and the reader keeps
+        // it in the path map only. A matching declared path is Fresh, a
+        // moved one is Stale, and neither reads as "missing from the
+        // lockfile".
+        let graph = LockfileGraph {
+            patched_dependencies: map(&[("ms@2.1.3", "patches/ms@2.1.3.patch")]),
+            ..Default::default()
+        };
+        let effective_hashes = map(&[("ms@2.1.3", "abc123")]);
+        assert_eq!(
+            graph.check_patched_dependencies_drift(
+                LockfileKind::Pnpm,
+                &map(&[("ms@2.1.3", "patches/ms@2.1.3.patch")]),
+                &effective_hashes
+            ),
+            DriftStatus::Fresh,
+        );
+        match graph.check_patched_dependencies_drift(
+            LockfileKind::Pnpm,
+            &map(&[("ms@2.1.3", "patches/moved.patch")]),
+            &effective_hashes,
+        ) {
+            DriftStatus::Stale { reason } => assert!(reason.contains("moved.patch"), "{reason}"),
+            other => panic!("expected stale on a moved path, got {other:?}"),
+        }
+        // A path-only entry the project no longer declares is stale too.
+        assert!(matches!(
+            graph.check_patched_dependencies_drift(LockfileKind::Pnpm, &map(&[]), &map(&[])),
             DriftStatus::Stale { .. }
         ));
     }

@@ -21,14 +21,26 @@ On install (and on `add`, `remove`, `update`, `dedupe`), aube picks the
 lockfile to write from whichever supported file already exists in the project
 directory. Precedence is: `aube-lock.yaml` → `pnpm-lock.yaml` → `bun.lock` →
 `yarn.lock` → `npm-shrinkwrap.json` → `package-lock.json`. When none of those
-exist yet, aube writes `aube-lock.yaml`.
+exist yet, aube writes `aube-lock.yaml` by default;
+`default-lockfile-format` can select `pnpm-lock.yaml`.
 
 The practical upshot:
 
 - A pnpm project keeps getting `pnpm-lock.yaml` updates.
 - An npm project keeps getting `package-lock.json` updates.
-- Only `aube import` (or manually removing the existing lockfile) switches a
-  project onto `aube-lock.yaml`.
+- `aube import` switches a project onto `aube-lock.yaml`; removing the
+  existing lockfile makes the next install follow the configured default.
+
+To create `pnpm-lock.yaml` when a project has no lockfile yet, set the
+creation default in `.npmrc`:
+
+```ini
+default-lockfile-format=pnpm
+```
+
+This also preserves the pnpm filename after `aube clean --lockfile` followed
+by `aube install`. The setting does not convert an existing lockfile; the
+existing supported file still wins.
 
 Keep the original lockfile while its package manager is still part of the
 workflow — aube and the original package manager both read from and write to

@@ -46,7 +46,10 @@ export function PostArticle({
             </span>
             <span className="text-fd-muted-foreground">{page.data.author}</span>
           </div>
-          <h1 className="mt-5 font-display text-4xl font-medium leading-[1.15] tracking-tight md:text-5xl">
+          {/* Leading is set above the display face's tight default: a two-line
+              title reads cramped otherwise, and an inline-code chip in the
+              title is taller than the text line box it sits on. */}
+          <h1 className="mt-5 font-display text-4xl font-medium leading-[1.2] tracking-tight md:text-5xl">
             {renderInlineCode(titleOverride ?? page.data.title)}
           </h1>
           {page.data.description ? (

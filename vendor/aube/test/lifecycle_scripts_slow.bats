@@ -11,6 +11,7 @@
 
 setup() {
 	load 'test_helper/common_setup'
+	HOST_NODE_BIN_DIR="$(dirname "$(mise which node)")"
 	_common_setup
 }
 
@@ -59,4 +60,31 @@ YAML
 	# regression guard. If prepare was silently skipped (the bug
 	# `dangerouslyAllowAllBuilds` is meant to fix), the file is absent.
 	assert_file_exists node_modules/test-git-fetch/dist/index.js
+}
+
+@test "dependency lifecycle replacement refreshes its bin shim" {
+	_require_network
+	export PATH="$HOST_NODE_BIN_DIR:$PATH"
+
+	cat >package.json <<'JSON'
+{
+  "name": "lifecycle-bin-replacement",
+  "version": "1.0.0",
+  "dependencies": {
+    "pnpm": "12.0.0"
+  },
+  "aube": {
+    "allowBuilds": {
+      "pnpm": true
+    }
+  }
+}
+JSON
+	echo "registry=https://registry.npmjs.org/" >.npmrc
+
+	run aube install
+	assert_success
+	run node_modules/.bin/pnpm --version
+	assert_success
+	assert_output "12.0.0"
 }

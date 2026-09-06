@@ -11,7 +11,6 @@ use build_flags::{
     apply_allow_build_flags, apply_deny_build_flags, parse_allow_build_value,
     parse_deny_build_value, reject_conflicting_build_flags,
 };
-use clap::Args;
 use manifest::{
     AddManifestOptions, update_manifest_for_add, workspace_protocol_override_from_flags,
 };
@@ -67,6 +66,21 @@ pub async fn add_to_project(
     packages: &[String],
     options: AddToProjectOptions,
 ) -> miette::Result<()> {
+    add_to_project_with_overrides(
+        project_dir,
+        packages,
+        options,
+        install::EmbedderInstallOverrides::default(),
+    )
+    .await
+}
+
+pub(crate) async fn add_to_project_with_overrides(
+    project_dir: &std::path::Path,
+    packages: &[String],
+    options: AddToProjectOptions,
+    overrides: install::EmbedderInstallOverrides,
+) -> miette::Result<()> {
     if packages.is_empty() {
         return Ok(());
     }
@@ -75,6 +89,8 @@ pub async fn add_to_project(
     // Serialize on the same root lock as the CLI add path.
     let lock = super::take_install_project_lock(project_dir)?;
     options.control.check_cancelled()?;
+    let mut setting_overrides = Vec::new();
+    overrides.append_to(&mut setting_overrides);
     let manifest_path = project_dir.join("package.json");
     let original_manifest = std::fs::read(&manifest_path)
         .into_diagnostic()
@@ -102,6 +118,7 @@ pub async fn add_to_project(
                         crate::commands::add_supply_chain::LowDownloadPrompt::Host(
                             options.control.clone(),
                         ),
+                        &setting_overrides,
                     )
                     .await?;
                 }
@@ -120,6 +137,7 @@ pub async fn add_to_project(
                         },
                         save_catalog: None,
                         workspace_protocol_override: None,
+                        setting_overrides: setting_overrides.clone(),
                     },
                     false,
                 )
@@ -134,6 +152,8 @@ pub async fn add_to_project(
             let mut install_options = install::InstallOptions::with_mode(install::FrozenMode::Fix);
             install_options.project_dir = Some(project_dir.to_path_buf());
             install_options.ignore_scripts = options.ignore_scripts;
+            install_options.run_dev_preinstall = true;
+            install_options.script_command = "add";
             install_options.force = options.force;
             install_options.dep_selection = options.dep_selection;
             install_options.osv_transitive_check = options.osv_transitive_check && !options.offline;
@@ -143,6 +163,7 @@ pub async fn add_to_project(
             );
             install_options.control = options.control;
             install_options.embedder_runtime = options.runtime;
+            install_options.cli_flags.extend(setting_overrides);
             if options.offline {
                 install_options.network_mode = aube_registry::NetworkMode::Offline;
             }
@@ -191,24 +212,24 @@ pub async fn add_to_project(
     Ok(())
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, usage_rs::Args)]
 pub struct AddArgs {
     /// Package(s) to add
     pub packages: Vec<String>,
-    /// Add as dev dependency
-    #[arg(short = 'D', long)]
+    /// Add as dev dependency.
+    #[usage(short = 'D', long)]
     pub save_dev: bool,
-    /// Pin the exact resolved version (no `^` prefix)
-    #[arg(short = 'E', long)]
+    /// Pin the exact resolved version (no `^` prefix).
+    #[usage(short = 'E', long)]
     pub save_exact: bool,
     /// Install the package globally.
     ///
     /// Installs into the aube/pnpm global directory and links its
     /// binaries into the global bin directory. Mirrors `pnpm add -g`.
-    #[arg(short = 'g', long)]
+    #[usage(short = 'g', long)]
     pub global: bool,
-    /// Add as optional dependency
-    #[arg(short = 'O', long)]
+    /// Add as optional dependency.
+    #[usage(short = 'O', long)]
     pub save_optional: bool,
     /// Pre-approve a dependency's lifecycle scripts as part of the add.
     ///
@@ -222,31 +243,32 @@ pub struct AddArgs {
     /// and the lockfile and would leave an orphaned approval in the
     /// workspace yaml on restore. Also conflicts with `--deny-build` for
     /// the same package name.
-    #[arg(
+    #[usage(
         long = "allow-build",
         value_name = "PKG",
-        conflicts_with = "no_save",
+        conflicts = "--no-save",
         require_equals = true,
-        value_parser = parse_allow_build_value,
+        validate = "value != ''",
+        validate_error = "The --allow-build flag is missing a package name. Please specify the package name(s) that are allowed to run installation scripts."
     )]
     pub allow_build: Vec<String>,
-    /// Bypass the similar-name, new-name, and [`lowDownloadThreshold`]
+    /// Bypass the similar-name, new-name, and `lowDownloadThreshold`
     /// confirm prompts / refusals for this invocation.
     ///
     /// `aube add` looks up each candidate's weekly download count and
     /// prompts (interactive) or fails (CI) when the count is below
-    /// [`lowDownloadThreshold`], resembles a top-100,000 npm package,
-    /// or is newer than [`minimumPackageAge`]. The flag is intended
+    /// `lowDownloadThreshold`, resembles a top-100,000 npm package,
+    /// or is newer than `minimumPackageAge`. The flag is intended
     /// for cases where you've already verified the package out-of-band.
     /// It does not affect the OSV malicious-package check, which remains
     /// a hard block.
-    #[arg(long)]
+    #[usage(long)]
     pub allow_low_downloads: bool,
     /// Allow every dependency's lifecycle scripts to run.
     ///
     /// Bypasses the `allowBuilds` allowlist for this invocation. Do not
     /// use in CI. Mirrors pnpm's `--dangerously-allow-all-builds`.
-    #[arg(long)]
+    #[usage(long)]
     pub dangerously_allow_all_builds: bool,
     /// Mark a dependency's lifecycle scripts as reviewed and denied.
     ///
@@ -260,12 +282,13 @@ pub struct AddArgs {
     /// and the lockfile and would leave an orphaned denial in the
     /// workspace yaml on restore. Also conflicts with `--allow-build` for
     /// the same package name and with `--dangerously-allow-all-builds`.
-    #[arg(
+    #[usage(
         long = "deny-build",
         value_name = "PKG",
-        conflicts_with_all = ["no_save", "dangerously_allow_all_builds"],
+        conflicts("--no-save", "--dangerously-allow-all-builds"),
         require_equals = true,
-        value_parser = parse_deny_build_value,
+        validate = "value != ''",
+        validate_error = "The --deny-build flag is missing a package name. Please specify the package name(s) that are denied from running installation scripts."
     )]
     pub deny_build: Vec<String>,
     /// Add a global pnpmfile that runs before the local one.
@@ -274,13 +297,13 @@ pub struct AddArgs {
     /// documents alongside `install`. `add` chains an install, and it is
     /// that install which runs the hooks, so these three exist to steer
     /// it rather than to do anything here.
-    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    #[usage(long, value_name = "PATH", conflicts = "--ignore-pnpmfile")]
     pub global_pnpmfile: Option<std::path::PathBuf>,
     /// Skip running `.pnpmfile.mjs` / `.pnpmfile.cjs` hooks for this add.
-    #[arg(long)]
+    #[usage(long)]
     pub ignore_pnpmfile: bool,
-    /// Skip lifecycle scripts (no-op; aube already skips by default).
-    #[arg(long, hide = true)]
+    /// Skip root and approved dependency lifecycle scripts.
+    #[usage(long, hide)]
     pub ignore_scripts: bool,
     /// Resolve and write the lockfile (and `package.json`), but skip
     /// linking `node_modules`.
@@ -292,7 +315,7 @@ pub struct AddArgs {
     // Declared here (between `--ignore-scripts` and `--no-save`) to keep
     // the default-heading long-only flags alphabetically ordered, which
     // `cli_ordering_tests::test_cli_ordering` enforces.
-    #[arg(long, conflicts_with = "no_save")]
+    #[usage(long, conflicts = "--no-save")]
     pub lockfile_only: bool,
     /// Install without persisting the dependency to `package.json`.
     ///
@@ -305,7 +328,7 @@ pub struct AddArgs {
     /// tool transiently. Mirrors `pnpm add --no-save`. Conflicts with
     /// `-g`/`--global`, which has to persist the install to its global
     /// manifest.
-    #[arg(long, conflicts_with = "global")]
+    #[usage(long, conflicts = "--global")]
     pub no_save: bool,
     /// Inverse of `--save-workspace-protocol`.
     ///
@@ -315,14 +338,14 @@ pub struct AddArgs {
     /// pipeline still prefers the local workspace copy at resolve
     /// time — this flag only controls what's written to
     /// `package.json`. Mirrors `pnpm add --no-save-workspace-protocol`.
-    #[arg(long, overrides_with = "save_workspace_protocol")]
+    #[usage(long, overrides = "--save-workspace-protocol")]
     pub no_save_workspace_protocol: bool,
     /// Run this pnpmfile instead of the project's own one.
     ///
     /// Mirrors pnpm's `--pnpmfile <path>`; relative paths resolve
     /// against the project root. Like the two flags above it, this
     /// steers the install `add` chains rather than acting here.
-    #[arg(long, value_name = "PATH", conflicts_with = "ignore_pnpmfile")]
+    #[usage(long, value_name = "PATH", conflicts = "--ignore-pnpmfile")]
     pub pnpmfile: Option<std::path::PathBuf>,
     /// Save the new dependency into the workspace's default catalog.
     ///
@@ -341,7 +364,7 @@ pub struct AddArgs {
     /// workspace yaml, which the `--no-save` restore path doesn't
     /// snapshot — combining the two would silently leave an orphaned
     /// catalog entry behind.
-    #[arg(long, conflicts_with_all = ["save_catalog_name", "no_save"])]
+    #[usage(long, conflicts("--save-catalog-name", "--no-save"))]
     pub save_catalog: bool,
     /// Save the new dependency into a *named* catalog.
     ///
@@ -349,7 +372,7 @@ pub struct AddArgs {
     /// `catalog:<name>` into `package.json`. Same workspace/alias
     /// exclusions and `--no-save` conflict as `--save-catalog`. Mirrors
     /// `pnpm add --save-catalog-name=<name>`.
-    #[arg(long, value_name = "NAME", conflicts_with = "no_save")]
+    #[usage(long, value_name = "NAME", conflicts = "--no-save")]
     pub save_catalog_name: Option<String>,
     /// Add as a peer dependency (written to `peerDependencies` in
     /// package.json).
@@ -357,7 +380,7 @@ pub struct AddArgs {
     /// By convention you usually pair this with `--save-dev` so the
     /// peer is also installed for local development; that's what pnpm
     /// does.
-    #[arg(long, conflicts_with = "save_optional")]
+    #[usage(long, conflicts = "--save-optional")]
     pub save_peer: bool,
     /// Force the manifest specifier into `workspace:` form for this
     /// invocation, overriding `saveWorkspaceProtocol` from the
@@ -368,7 +391,7 @@ pub struct AddArgs {
     /// the entry written to `package.json` is `workspace:^` (rolling)
     /// or `workspace:^<version>` (pinned), depending on the resolved
     /// `saveWorkspaceProtocol` value.
-    #[arg(long, overrides_with = "no_save_workspace_protocol")]
+    #[usage(long, overrides = "--no-save-workspace-protocol")]
     pub save_workspace_protocol: bool,
     /// Add the dependency to the workspace root's `package.json`.
     ///
@@ -376,7 +399,7 @@ pub struct AddArgs {
     /// from cwd looking for `aube-workspace.yaml`, `pnpm-workspace.yaml`,
     /// or a `package.json` with a `workspaces` field and runs the add
     /// against that directory.
-    #[arg(short = 'w', long, conflicts_with = "global")]
+    #[usage(short = 'w', long, conflicts = "--global")]
     pub workspace: bool,
     /// Allow `add` to run in a workspace root.
     ///
@@ -386,13 +409,13 @@ pub struct AddArgs {
     /// with a `workspaces` field) because deps added there end up
     /// shared by every package and usually reflect a mistake. Pass
     /// this flag to opt in. Mirrors `pnpm add -W`.
-    #[arg(short = 'W', long)]
+    #[usage(short = 'W', long)]
     pub ignore_workspace_root_check: bool,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub lockfile: crate::cli_args::LockfileArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub virtual_store: crate::cli_args::VirtualStoreArgs,
 }
 
@@ -420,7 +443,7 @@ pub async fn run(
         global_pnpmfile,
         ignore_pnpmfile,
         pnpmfile,
-        ignore_scripts: _,
+        ignore_scripts,
         no_save,
         ignore_workspace_root_check,
         lockfile_only,
@@ -434,6 +457,12 @@ pub async fn run(
         network,
         virtual_store,
     } = args;
+    for value in &allow_build {
+        parse_allow_build_value(value).map_err(|error| miette!("{error}"))?;
+    }
+    for value in &deny_build {
+        parse_deny_build_value(value).map_err(|error| miette!("{error}"))?;
+    }
     let save_catalog_target = save_catalog_name.or_else(|| {
         if save_catalog {
             Some("default".to_string())
@@ -572,13 +601,13 @@ pub async fn run(
     // project state stays exactly as they wrote it.
     //
     // The lockfile path matches whatever
-    // `write_lockfile_preserving_existing` will write to: detect the
-    // existing lockfile kind on disk (pnpm, npm, yarn, bun, …) so a
+    // the install pipeline will write to: detect the existing lockfile
+    // kind on disk (pnpm, npm, yarn, bun, …) so a
     // project using `pnpm-lock.yaml` doesn't end up with both a
     // restored aube-lock.yaml *and* a leftover modified pnpm-lock.yaml.
-    // When no lockfile exists yet the resolver falls back to aube's
-    // own format, so we target that path and the restore step deletes
-    // it (since `lockfile_bytes` is `None`).
+    // When no lockfile exists yet the resolver uses the configured
+    // creation default, so we target that path and the restore step
+    // deletes it (since `lockfile_bytes` is `None`).
     let lockfile_path = no_save::lockfile_path_for_project(&cwd)?;
     let no_save_snapshot = if no_save {
         Some(no_save::snapshot_manifest_and_lockfile(
@@ -612,6 +641,7 @@ pub async fn run(
         packages,
         allow_low_downloads,
         crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
+        &[],
     )
     .await?;
 
@@ -629,6 +659,7 @@ pub async fn run(
                 save_workspace_protocol,
                 no_save_workspace_protocol,
             ),
+            setting_overrides: Vec::new(),
         },
         !no_save,
     )
@@ -653,6 +684,9 @@ pub async fn run(
     let mut install_opts =
         install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Fix));
     apply_dangerously_allow_all_builds(&mut install_opts, dangerously_allow_all_builds);
+    install_opts.ignore_scripts = ignore_scripts;
+    install_opts.run_dev_preinstall = true;
+    install_opts.script_command = "add";
     install_opts.osv_transitive_check = true;
     // `--lockfile-only`: the resolver still runs and the lockfile +
     // manifest are written, but the linker never touches `node_modules`.

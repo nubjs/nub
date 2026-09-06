@@ -1,21 +1,9 @@
-//! Landlock filesystem confinement — the UNPRIVILEGED Linux build-jail mechanism.
+//! Landlock filesystem confinement for the unprivileged Linux sandbox engine.
 //!
-//! Bubblewrap cannot confine the build jail on a large share of real hosts: it passes
-//! `--unshare-user`, and an unprivileged user namespace is denied by default on Ubuntu
-//! 23.10–25.04 (`apparmor_restrict_unprivileged_userns=1`) and is impossible inside a
-//! container (no `CAP_SYS_ADMIN` — even root cannot create one). There the jail fails
-//! closed, so `nub install` breaks on any dependency carrying a lifecycle script.
-//! `landlock_restrict_self` needs no namespace and no privilege at all, which is the
-//! whole reason this backend exists.
-//!
-//! WHY THIS IS EXPRESSIBLE AT ALL: Landlock rules UNION — there is no deny primitive at
-//! any ABI, so "deny inside allow" cannot be written. The build jail is a PURE ALLOWLIST
-//! that emits zero deny rules (`preset::enforce_pure_allowlist`), so the objection that
-//! once disqualified Landlock does not bind here. It still binds `nub sandbox`, which is
-//! why that product keeps bubblewrap and its escalation path.
-//!
-//! The rule set is derived from the SAME [`compile_mount_plan`] the bubblewrap backend
-//! consumes, so the two mechanisms cannot drift on which paths a policy grants.
+//! `landlock_restrict_self` requires neither a namespace nor an elevated helper.
+//! Landlock grants union together: the policy compiler must lower filesystem rules
+//! to the allowlist consumed here. Both sandbox and build-jail profiles use
+//! [`compile_mount_plan`]; there is no Bubblewrap fallback.
 
 use super::linux_grants::{MountAccess, MountGrant, compile_mount_plan};
 use crate::policy::SandboxPolicy;
@@ -365,14 +353,10 @@ pub(crate) struct LandlockGrant {
 
 /// Derive the full grant list for `policy`.
 ///
-/// The policy's own rules come from [`compile_mount_plan`] — the identical derivation the
-/// bubblewrap backend uses, so glob reduction, absent-speculative tolerance, and
-/// deny-shadow dropping behave the same on both mechanisms. The system closure and device
-/// nodes are added because Landlock has no root view: bubblewrap starts from an empty
-/// mount namespace and BUILDS UP a minimal root, whereas a Landlock child still sees the
-/// whole host filesystem and is restricted only by what it may open. Everything the
-/// bubblewrap backend gets implicitly from `RootView::Minimal` must therefore be an
-/// explicit grant here.
+/// The policy's rules come from [`compile_mount_plan`], including glob reduction,
+/// absent-path tolerance and deny-shadow dropping. Landlock restricts access without
+/// replacing the filesystem view, so the runtime's system files and device nodes
+/// need explicit grants too.
 pub(crate) fn derive_grants(
     policy: &SandboxPolicy,
     tmp_dir: Option<&Path>,

@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/pnpm/plugin-trusted-deps",
+  "commit": "280d011f0b076467e7d69435fdd7fef53e2a8fea",
+  "path": "allow.json",
+  "license": "MIT"
+}

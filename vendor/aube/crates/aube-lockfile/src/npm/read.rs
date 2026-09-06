@@ -54,6 +54,25 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
         ..Default::default()
     };
 
+    // npm does not tag remote-tarball package entries separately from
+    // registry packages: both use an HTTP(S) `resolved` URL. The declared
+    // dependency specifier is the discriminator. Collect every URL spec so
+    // matching entries retain their non-registry identity instead of later
+    // being sent through packument validation.
+    let remote_tarball_specs: BTreeSet<&str> = raw
+        .packages
+        .values()
+        .flat_map(|entry| {
+            entry
+                .dependencies
+                .values()
+                .chain(entry.dev_dependencies.values())
+                .chain(entry.optional_dependencies.values())
+        })
+        .map(String::as_str)
+        .filter(|spec| LocalSource::looks_like_remote_tarball_url(spec))
+        .collect();
+
     // npm workspace links come in pairs:
     // - `node_modules/@scope/pkg: { resolved: "packages/pkg", link: true }`
     // - `packages/pkg: { name, version, dependencies, ... }`
@@ -138,6 +157,15 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
             let local_source = entry.resolved.as_deref().and_then(|r| {
                 crate::npm::source::local_git_source_from_resolved(r)
                     .or_else(|| crate::npm::source::local_file_source_from_resolved(r))
+                    .or_else(|| {
+                        remote_tarball_specs.contains(r).then(|| {
+                            LocalSource::RemoteTarball(crate::RemoteTarballSource {
+                                url: r.to_string(),
+                                integrity: entry.integrity.clone().unwrap_or_default(),
+                                git_hosted: false,
+                            })
+                        })
+                    })
             });
             let dep_path = local_source.as_ref().map_or_else(
                 || format!("{install_name}@{version}"),

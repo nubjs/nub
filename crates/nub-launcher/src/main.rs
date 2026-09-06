@@ -10,6 +10,8 @@
 //!      curl/wget and extracts it through nub-core's capped archive reader,
 //!   3. extracts the bundled app into the cache,
 //!   4. injects version-appropriate Node flags via nub-core's `compute_inject_flags`,
+//!      and hands over the compiled bootstrap — as a `--require` preload, or as a
+//!      path for the preamble to bootstrap from (`configure_compiled_bootstrap`),
 //!   5. spawns Node on the app entry, forwarding signals + the exit code
 //!      (nub-core's `status_forwarding_signals`, the same machinery as `nub run`).
 //!
@@ -47,6 +49,10 @@ const INTERNAL_MODE_ENV: &str = "__NUB_COMPILED_LAUNCHER_MODE";
 /// Private process-identity channel. The launcher always overwrites this on the
 /// child Command, so an inherited value can never spoof the compiled executable.
 const COMPILED_EXEC_PATH_ENV: &str = "__NUB_COMPILED_EXEC_PATH";
+/// The extracted bootstrap's path, for a payload the preamble bootstraps itself
+/// (`Manifest::standalone_preamble`). Consumed by `runtime/compile-record.mjs`
+/// before application code runs, so no child inherits it.
+const COMPILED_BOOTSTRAP_ENV: &str = "__NUB_COMPILED_BOOTSTRAP";
 
 /// The flags an INLINE artifact would have had in `process.execArgv`, as a JSON
 /// array. `-e` puts the script itself there instead, and the compiled bootstrap
@@ -383,10 +389,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
 
     let mut cmd = Command::new(node_path.as_os_str());
     if let Some((_, bootstrap)) = &extracted {
-        // Node runs CommonJS preloads before ESM `--import` hooks, including ones
-        // inherited through NODE_OPTIONS. Keep this absolute payload preload ahead
-        // of Nub's injected flags and the compiled entry on every supported Node.
-        cmd.arg(compiled_bootstrap_require_arg(bootstrap));
+        configure_compiled_bootstrap(&mut cmd, &view.manifest, bootstrap);
     }
     // argv0 fidelity: process.argv0 / process.title report "node", matching
     // nub-core's spawn path. The compile preamble separately restores execPath
@@ -631,6 +634,30 @@ fn compiled_bootstrap_require_arg(bootstrap: &Path) -> std::ffi::OsString {
     let mut arg = std::ffi::OsString::from("--require=");
     arg.push(bootstrap);
     arg
+}
+
+/// Hand the extracted bootstrap to Node.
+///
+/// As a `--require` preload by default: Node runs CommonJS preloads before ESM
+/// `--import` hooks, including ones inherited through NODE_OPTIONS, and the fork
+/// identity fix-up has to bind before the entry chunk hoists `node:cluster`. It goes
+/// FIRST, ahead of Nub's injected flags and the compiled entry, on every supported
+/// Node.
+///
+/// A `standalone_preamble` payload gets the bootstrap's PATH in the environment
+/// instead and publishes the record from inside the bundle
+/// (`runtime/compile-record.mjs`). The preload is the expensive half of the
+/// bootstrap: measured on darwin-arm64 in child CPU time, `--require` of an EMPTY
+/// file costs ~0.7 ms per start at any path depth (`--import` the same), and the
+/// bootstrap's own evaluation ~0.45 ms more, against a hello-world artifact's
+/// ~3.7 ms of total Node-side overhead. The compiler sets the flag only when the
+/// fix-up region is already stripped, so nothing is lost by not preloading.
+fn configure_compiled_bootstrap(cmd: &mut Command, manifest: &Manifest, bootstrap: &Path) {
+    if manifest.standalone_preamble {
+        cmd.env(COMPILED_BOOTSTRAP_ENV, bootstrap);
+    } else {
+        cmd.arg(compiled_bootstrap_require_arg(bootstrap));
+    }
 }
 
 /// Point Node's compile cache at a directory BESIDE the app extraction, never
@@ -904,7 +931,9 @@ fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
         }
         let extracted = match file.plain_size {
             Some(size) => Extracted::Size(size),
-            None => match app_bytes(&view.manifest, file) {
+            // Only a payload with no recorded size gets here, which is exactly
+            // the case a reused context could not size its output buffer for.
+            None => match app_bytes(&view.manifest, file, None) {
                 Ok(bytes) => Extracted::Bytes(bytes),
                 Err(_) => return false,
             },
@@ -2291,6 +2320,14 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
     cleanup_orphan_staging(base, &tmp, ".compile-app.");
     let _ = fs::remove_dir_all(&tmp);
     create_staging_dir(&tmp)?;
+    let mut split = ExtractSplit::default();
+    // One decompressor for the whole payload, and one pass per DIRECTORY rather
+    // than per file. Both exist because this loop runs per file and a payload is
+    // routinely thousands of them: an ejected `node_modules` reaches ~2700 files
+    // across ~500 directories nested seven deep, so the naive forms did ~19k
+    // redundant `create_dir` calls and built a fresh zstd context 2700 times.
+    let mut dirs = std::collections::HashSet::new();
+    let mut decoder = new_app_decoder(&view.manifest)?;
     for file in &view.app_files {
         let name = &file.name;
         // Refuse a payload file name that could escape the extraction dir — a
@@ -2305,10 +2342,21 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
             bail!("compiled payload uses reserved cache file name: {name:?}");
         }
         let dest = tmp.join(name);
-        if let Some(parent) = dest.parent() {
+        let mark = split.start();
+        // `create_staging_subdirs` creates and normalizes every ancestor, so a
+        // parent seen once needs no second pass. Nothing removes a directory
+        // inside this loop, which is what makes remembering it sound.
+        if let Some(parent) = dest.parent()
+            && !dirs.contains(parent)
+        {
             create_staging_subdirs(&tmp, parent)?;
+            dirs.insert(parent.to_path_buf());
         }
-        write_file(&dest, &app_bytes(&view.manifest, file)?)?;
+        let mark = split.lap(mark, |s| &mut s.mkdir);
+        let bytes = app_bytes(&view.manifest, file, decoder.as_mut())?;
+        let mark = split.lap(mark, |s| &mut s.decode);
+        write_file(&dest, &bytes)?;
+        split.lap(mark, |s| &mut s.write);
         if file.executable {
             // Mode only. `seal_cache_dir`'s sweep covers this file's data AND its
             // metadata before the publish rename, so syncing here would put the
@@ -2317,8 +2365,52 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
             set_app_file_executable(&dest)?;
         }
     }
+    split.report(view.app_files.len());
     publish_cache_dir(&tmp, &app_dir, |dir| app_cache_is_ready(view, dir))?;
     Ok(app_dir)
+}
+
+/// Where the extraction loop's wall clock goes, split three ways.
+///
+/// Only accumulated when `__NUB_LAUNCHER_TIMING` is set — a payload runs to
+/// thousands of files, so two unconditional `Instant::now()` calls per file would
+/// be a measurable tax on the path this exists to measure. Guessing which of the
+/// three dominates has been wrong more than once: the loop is per-file in all
+/// three, and which one owns the time depends on the payload's shape.
+#[derive(Default)]
+struct ExtractSplit {
+    mkdir: std::time::Duration,
+    decode: std::time::Duration,
+    write: std::time::Duration,
+}
+
+impl ExtractSplit {
+    fn start(&self) -> Option<std::time::Instant> {
+        timing_enabled().then(std::time::Instant::now)
+    }
+
+    fn lap(
+        &mut self,
+        mark: Option<std::time::Instant>,
+        field: fn(&mut Self) -> &mut std::time::Duration,
+    ) -> Option<std::time::Instant> {
+        let mark = mark?;
+        let now = std::time::Instant::now();
+        *field(self) += now - mark;
+        Some(now)
+    }
+
+    fn report(&self, files: usize) {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        phase_with(|| {
+            format!(
+                "  extract split: {files} files — mkdir {:.1} ms, decode {:.1} ms, write {:.1} ms",
+                ms(self.mkdir),
+                ms(self.decode),
+                ms(self.write)
+            )
+        });
+    }
 }
 
 // ---- helpers ------------------------------------------------------------------
@@ -2357,13 +2449,45 @@ fn print_embedded_node_license(view: &PayloadView<'_>) -> Result<()> {
 /// A payload file's real bytes, decompressing only if the payload stores them
 /// compressed. Borrowed on the uncompressed path, so an older payload stays
 /// zero-copy out of the mapped image.
-fn app_bytes<'a>(manifest: &Manifest, file: &AppFile<&'a [u8]>) -> Result<Cow<'a, [u8]>> {
+fn app_bytes<'a>(
+    manifest: &Manifest,
+    file: &AppFile<&'a [u8]>,
+    decoder: Option<&mut zstd::bulk::Decompressor<'_>>,
+) -> Result<Cow<'a, [u8]>> {
     if !manifest.app_compressed {
         return Ok(Cow::Borrowed(file.bytes));
+    }
+    // The one-shot decoder against a caller-owned context, when the caller has
+    // one and the payload records the plain size. `zstd::decode_all` is the
+    // STREAMING decoder: it builds a fresh `ZSTD_DCtx` plus input and output
+    // buffers on every call, and the build stores each file as its own level-19
+    // frame, so a payload of N files paid that setup N times. Reusing the context
+    // also lets the exact `plain_size` size the output buffer, so the decode does
+    // not grow a `Vec` as it goes.
+    if let Some(decoder) = decoder
+        && let Some(size) = file.plain_size
+    {
+        return decoder
+            .decompress(file.bytes, size as usize)
+            .map(Cow::Owned)
+            .with_context(|| format!("decompressing {} from the payload", file.name));
     }
     zstd::decode_all(file.bytes)
         .map(Cow::Owned)
         .with_context(|| format!("decompressing {} from the payload", file.name))
+}
+
+/// A decompression context to reuse across a payload, or `None` when the payload
+/// stores its files uncompressed and nothing will decode. Allocating one costs a
+/// few hundred kilobytes, so the uncompressed shapes — SEA assets, an inline
+/// brotli payload — do not pay for it.
+fn new_app_decoder(manifest: &Manifest) -> Result<Option<zstd::bulk::Decompressor<'static>>> {
+    if !manifest.app_compressed {
+        return Ok(None);
+    }
+    zstd::bulk::Decompressor::new()
+        .map(Some)
+        .context("creating the payload decompressor")
 }
 
 fn write_file(dest: &Path, data: &[u8]) -> Result<()> {
@@ -2473,10 +2597,85 @@ fn seal_cache_dir(tmp: &Path) -> Result<()> {
     create_private_file(&marker)
         .and_then(|file| file.sync_all())
         .with_context(|| format!("recording completion at {}", marker.display()))?;
-    sync_cache_tree(tmp)
+    phase("    seal: marker written");
+    let out = sync_cache_tree(tmp);
+    phase("    seal: tree synced");
+    out
 }
 
+/// Flush every file in a staged tree, then every directory in it.
+///
+/// The files go out CONCURRENTLY, and that is the whole point of this function's
+/// shape. `File::sync_all` is `fcntl(F_FULLFSYNC)` on macOS — a full device cache
+/// flush, not the `fsync(2)` it is on Linux — and this runs immediately after the
+/// extraction wrote the payload, so every one of those barriers waits on real
+/// dirty data. Serially, over a 2683-file payload, that measured **2661 ms**, and
+/// it was 64% of a cold start on an idle machine and 99% of one on a loaded one.
+/// Across eight threads the same barriers cost **161 ms**, because the device
+/// coalesces flushes that are in flight together.
+///
+/// Concurrency does not weaken anything: these are read-only handles on distinct
+/// paths, and every barrier still completes before the function returns. Dropping
+/// to plain `fsync(2)` would be faster still (46 ms) but would make macOS
+/// durability weaker than the code asks for, which is not a trade to make silently
+/// in a cache that a power loss should not be able to tear.
+///
+/// Directories are synced afterwards, on this thread and depth-first, so a child's
+/// entries are durable before the parent that names them.
 fn sync_cache_tree(dir: &Path) -> Result<()> {
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    collect_cache_tree(dir, &mut files, &mut dirs)?;
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
+        .min(files.len().max(1));
+    if workers > 1 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let files = &files;
+        let next = &next;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(move || -> Result<()> {
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(path) = files.get(i) else {
+                                return Ok(());
+                            };
+                            sync_file(path)?;
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                // A panicking sync thread is not something to swallow: the tree
+                // would publish unflushed, which is exactly what this guards.
+                match handle.join() {
+                    Ok(result) => result?,
+                    Err(_) => bail!("a cache sync thread panicked"),
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
+    } else {
+        for path in &files {
+            sync_file(path)?;
+        }
+    }
+
+    for path in dirs.iter().rev() {
+        sync_directory(path)?;
+    }
+    Ok(())
+}
+
+/// Every file and directory under `dir`, deepest directory last, so the caller can
+/// walk `dirs` in reverse and reach a child before its parent.
+fn collect_cache_tree(dir: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) -> Result<()> {
+    dirs.push(dir.to_path_buf());
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
         let path = entry.path();
@@ -2484,12 +2683,12 @@ fn sync_cache_tree(dir: &Path) -> Result<()> {
             .file_type()
             .with_context(|| format!("reading {}", path.display()))?;
         if ty.is_dir() {
-            sync_cache_tree(&path)?;
+            collect_cache_tree(&path, files, dirs)?;
         } else if ty.is_file() {
-            sync_file(&path)?;
+            files.push(path);
         }
     }
-    sync_directory(dir)
+    Ok(())
 }
 
 /// `File::open` can sync directories on Unix. Windows needs a directory handle
@@ -2523,6 +2722,7 @@ where
     F: Fn(&Path) -> bool,
 {
     seal_cache_dir(tmp)?;
+    phase("   publish: sealed");
     if !is_complete(tmp) {
         let _ = fs::remove_dir_all(tmp);
         bail!(
@@ -3234,6 +3434,39 @@ mod tests {
         );
     }
 
+    /// A standalone-preamble payload passes the bootstrap through the environment
+    /// and puts NOTHING on Node's argv for it; a legacy manifest (the field absent,
+    /// so `false`) keeps the preload exactly where it was.
+    #[test]
+    fn a_standalone_preamble_payload_gets_the_bootstrap_path_not_a_preload() {
+        let bootstrap =
+            Path::new("/absolute/cache/compile-app/key").join(compile::COMPILE_BOOTSTRAP_NAME);
+        let mut manifest = test_manifest();
+        manifest.standalone_preamble = true;
+        let mut cmd = Command::new("node");
+        configure_compiled_bootstrap(&mut cmd, &manifest, &bootstrap);
+        assert_eq!(cmd.get_args().count(), 0);
+        let handed: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+            .collect();
+        assert_eq!(
+            handed,
+            vec![(
+                std::ffi::OsString::from(COMPILED_BOOTSTRAP_ENV),
+                Some(bootstrap.clone().into_os_string())
+            )]
+        );
+
+        let mut legacy = Command::new("node");
+        configure_compiled_bootstrap(&mut legacy, &test_manifest(), &bootstrap);
+        assert_eq!(legacy.get_envs().count(), 0);
+        assert_eq!(
+            legacy.get_args().collect::<Vec<_>>(),
+            vec![compiled_bootstrap_require_arg(&bootstrap).as_os_str()]
+        );
+    }
+
     /// `cache::resolve` canonicalizes, so on Windows every cache path arrives in
     /// the verbatim `\\?\` spelling — and Node cannot resolve a module through
     /// one: its CJS loader's `fs.realpathSync` dies `EISDIR: … lstat 'C:'`. That
@@ -3366,6 +3599,7 @@ mod tests {
             sealed_module_graph: false,
             hide_console: false,
             inline_app: false,
+            standalone_preamble: false,
         }
     }
 
@@ -3908,6 +4142,57 @@ mod tests {
             "readiness must come from the recorded extracted lengths, not the payload bytes"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `sync_cache_tree` hands its files to a pool of threads, so the thing that
+    /// can now be wrong is coverage: a file skipped by an off-by-one in the work
+    /// queue would publish unflushed and nothing else would notice. Drive it over
+    /// a nested tree with more files than workers and assert every one was
+    /// reachable, plus that it still succeeds when there is nothing to do.
+    #[test]
+    fn syncing_a_staged_tree_reaches_every_file() {
+        let base = fresh_cache_dir("sync-tree");
+        let mut expected: Vec<PathBuf> = Vec::new();
+        for dir in ["", "a", "a/b", "a/b/c", "d"] {
+            let at = if dir.is_empty() {
+                base.clone()
+            } else {
+                let at = base.join(dir);
+                create_staging_subdirs(&base, &at).unwrap();
+                at
+            };
+            for i in 0..7 {
+                let file = at.join(format!("f{i}"));
+                fs::write(&file, format!("{dir}/{i}").as_bytes()).unwrap();
+                expected.push(file);
+            }
+        }
+        // The walk is what decides coverage: whatever it misses is never handed to
+        // a worker and publishes unflushed, silently. Assert on the collected set
+        // rather than on the files still existing, which syncing could not change.
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
+        collect_cache_tree(&base, &mut files, &mut dirs).expect("the tree walks");
+        files.sort();
+        expected.sort();
+        assert_eq!(files, expected, "every staged file must reach a worker");
+        assert_eq!(
+            dirs.len(),
+            5,
+            "every directory must be synced, got {dirs:?}"
+        );
+        assert_eq!(
+            dirs[0], base,
+            "the root must come first so reversing reaches a child before its parent"
+        );
+
+        sync_cache_tree(&base).expect("a staged tree syncs");
+
+        let empty = fresh_cache_dir("sync-tree-empty");
+        sync_cache_tree(&empty).expect("a tree with no files still syncs its directory");
+
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&empty);
     }
 
     #[cfg(unix)]

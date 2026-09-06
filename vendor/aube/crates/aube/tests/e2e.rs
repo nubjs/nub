@@ -122,6 +122,68 @@ fn help_flag_lists_install_command() {
         .stdout(predicates::str::contains("install"));
 }
 
+#[cfg(unix)]
+#[test]
+fn aubr_replaces_itself_with_the_final_script_shell() {
+    use std::os::unix::fs::symlink;
+    use std::process::Stdio;
+
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(r#"{"name":"exec-handoff","private":true,"scripts":{"pid":"echo $$"}}"#);
+    let aubr = sbx._root.path().join("aubr");
+    symlink(assert_cmd::cargo::cargo_bin!("aube"), &aubr).unwrap();
+
+    let child = std::process::Command::new(aubr)
+        .args(["--no-install", "pid"])
+        .current_dir(&sbx.project)
+        .env_remove("AUBE_CONFIG")
+        .env("HOME", &sbx.home)
+        .env("AUBE_STORE_DIR", &sbx.store)
+        .env("AUBE_CACHE_DIR", &sbx.cache)
+        .env("XDG_CACHE_HOME", &sbx.cache)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let child_pid = child.id();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        child_pid.to_string()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn aubr_keeps_control_when_a_post_script_must_run() {
+    use assert_cmd::assert::OutputAssertExt;
+    use std::os::unix::fs::symlink;
+
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(
+        r#"{"name":"exec-handoff","private":true,"scripts":{"build":"echo build","postbuild":"echo postbuild"}}"#,
+    );
+    let aubr = sbx._root.path().join("aubr");
+    symlink(assert_cmd::cargo::cargo_bin!("aube"), &aubr).unwrap();
+
+    std::process::Command::new(aubr)
+        .args(["--no-install", "build"])
+        .current_dir(&sbx.project)
+        .env_remove("AUBE_CONFIG")
+        .env("HOME", &sbx.home)
+        .env("AUBE_STORE_DIR", &sbx.store)
+        .env("AUBE_CACHE_DIR", &sbx.cache)
+        .env("XDG_CACHE_HOME", &sbx.cache)
+        .env("NO_COLOR", "1")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("build\npostbuild\n"));
+}
+
 #[test]
 fn dynamic_completion_keeps_stdout_when_use_stderr_is_configured() {
     let _guard = e2e_lock();
@@ -129,10 +191,18 @@ fn dynamic_completion_keeps_stdout_when_use_stderr_is_configured() {
     fs::write(sbx.project.join(".npmrc"), "use-stderr=true\n").unwrap();
 
     sbx.cmd()
-        .args(["completion", "_", "--complete", "setting"])
+        .args([
+            "__complete_word__",
+            "--shell",
+            "bash",
+            "--line",
+            "aube config get ",
+            "--cursor",
+            "16",
+        ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("auto-install-peers:"));
+        .stdout(predicates::str::contains("auto-install-peers"));
 }
 
 #[test]
@@ -142,7 +212,17 @@ fn dynamic_completion_rejects_an_invalid_dir() {
     sbx.write_manifest(r#"{"dependencies":{"react":"^19"}}"#);
 
     sbx.cmd()
-        .args(["-C", "missing", "completion", "_", "--complete", "package"])
+        .args([
+            "__complete_word__",
+            "--shell",
+            "bash",
+            "--line",
+            "aube -C missing add ",
+            "--cursor",
+            "20",
+            "--candidates",
+            "package",
+        ])
         .assert()
         .success()
         .stdout("");
@@ -336,6 +416,60 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .stdout(predicates::str::contains("No ignored builds"));
 }
 
+#[test]
+fn dependency_build_finishes_before_its_consumers_build_starts() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+
+    sbx.write_file(
+        "child/package.json",
+        r#"{
+            "name": "build-child",
+            "version": "1.0.0",
+            "scripts": {
+                "postinstall": "node -e \"setTimeout(() => require('fs').writeFileSync('READY', 'ok'), 300)\""
+            }
+        }"#,
+    );
+    sbx.write_file(
+        "parent/package.json",
+        r#"{
+            "name": "build-parent",
+            "version": "1.0.0",
+            "dependencies": { "build-child": "file:../child" },
+            "scripts": {
+                "postinstall": "node -e \"const fs=require('fs'), p=require('path').join(require('path').dirname(require.resolve('build-child/package.json')), 'READY'); if (!fs.existsSync(p)) process.exit(17); fs.writeFileSync('PARENT_READY', 'ok')\""
+            }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "dependency-build-order-e2e",
+            "version": "1.0.0",
+            "dependencies": { "build-parent": "file:./parent" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .success();
+    let node_modules = sbx.project.join("node_modules");
+    assert!(
+        marker_exists_under(&node_modules, "READY"),
+        "build-child's postinstall never wrote READY under {}",
+        node_modules.display()
+    );
+    // The parent's postinstall exits 17 when READY is missing, so reaching
+    // PARENT_READY is the ordering assertion: without phases the parent starts
+    // while the child is still inside its 300ms timer and the install fails.
+    assert!(
+        marker_exists_under(&node_modules, "PARENT_READY"),
+        "build-parent's postinstall never wrote PARENT_READY under {}",
+        node_modules.display()
+    );
+}
+
 // --- optional-dependency build failures are non-fatal ---------------------
 //
 // A package reachable only through `optionalDependencies` is one the project
@@ -472,4 +606,54 @@ fn an_optional_dependency_that_is_also_required_still_fails_the_install() {
             "lifecycle script postinstall failed",
         ))
         .stderr(predicates::str::contains("optional-dep@1.0.0"));
+}
+
+#[test]
+fn run_forwards_extra_args_verbatim() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    // A quote-free body takes the direct-exec path on Unix and the shell
+    // on Windows, so this pins the same argv contract on both: forwarded
+    // args reach the script as written, with nothing expanded or split.
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-run-args",
+            "version": "0.0.0",
+            "scripts": { "probe": "node probe.js" }
+        }"#,
+    );
+    fs::write(
+        sbx.project.join("probe.js"),
+        "console.log(JSON.stringify(process.argv.slice(2)))",
+    )
+    .unwrap();
+
+    sbx.cmd()
+        .args(["run", "--no-install", "probe", "--", "a b", "$HOME", "*"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(r#"["a b","$HOME","*"]"#));
+}
+
+#[test]
+fn run_reports_a_missing_command_like_a_shell() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-run-missing",
+            "version": "0.0.0",
+            "scripts": { "nope": "aube-definitely-not-a-real-binary" }
+        }"#,
+    );
+
+    // The body is shaped for direct exec, but the program does not
+    // resolve, so it must fall back to the shell rather than inventing an
+    // error — which is what keeps 127 (and the shell's own stderr) intact.
+    let assert = sbx.cmd().args(["run", "--no-install", "nope"]).assert();
+    if cfg!(unix) {
+        assert.code(127);
+    } else {
+        assert.failure();
+    }
 }

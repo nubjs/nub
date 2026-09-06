@@ -21,8 +21,10 @@ One rule: a release must be at least `SOAK_DAYS` old before this repo adopts it.
 - `pnpm run soak` — parity-check every surface (CI-gated in docs-links)
 - `pnpm run soak:fix` — rewrite drifted windows, prune expired exclusions
 - `pnpm run deps:update` — bump npm (taze) + cargo deps through the window
-- `pnpm run tools:check` / `tools:install` — validate / install the SRI-pinned external tools (`external-tools.json`)
+- `pnpm run tools:check` / `tools:fix` / `tools:install` — validate / prune-expired-bypasses / install the SRI-pinned external tools (`external-tools.json`)
 - `pnpm run test:scripts` — the scripts' own unit tests
+
+The gates fail closed on invalid states (missing, malformed, or wrong-arithmetic annotations) and WARN on expired ones — stale is not unsafe, and nobody has to watch for it: the scheduled `soak-autofix` workflow runs `soak:fix` + `tools:fix` daily and commits the pruning as a bot PR.
 
 A soak change is done when `pnpm run soak` and `pnpm run test:scripts` both exit 0 — the same gates CI runs. Re-run them after every fix.
 
@@ -39,17 +41,19 @@ A soak change is done when `pnpm run soak` and `pnpm run test:scripts` both exit
 Add to `minimumReleaseAgeExclude` in `tools/pnpm-workspace.yaml` with the annotation on the line above (block list only — flow `[..]` is rejected because a comment line can't attach to an inline entry):
 
 ```yaml
-# published: 2026-07-08 | removable: 2026-07-15
+# published: YYYY-MM-DD | removable: YYYY-MM-DD
 - 'name@1.2.3'
 ```
 
-`removable` = `published + SOAK_DAYS` (this example assumes a 7-day window). `published` must be the real registry publish date. Once `removable` passes, `pnpm run soak` fails until the pin is pruned (`soak:fix` does it). Bare names / `@scope/*` globs are standing trust and need no annotation. External tools use the same shape via a `soakBypass` object in `external-tools.json`.
+`removable` = `published + SOAK_DAYS`; `published` must be the real registry publish date (the placeholders above are schematic — copying them verbatim is rejected). Once `removable` passes, `pnpm run soak` warns until the pin is pruned (`soak:fix` or the soak-autofix workflow does it). Bare names / `@scope/*` globs are standing trust and need no annotation. External tools use the same shape via a `soakBypass` object in `external-tools.json`.
 
 ## The cargo soak needs nightly — the repo still must not pin one
 
 `min-publish-age` is an `[unstable]` cargo feature: a stable cargo ignores it silently. The repo deliberately ships **no** `rust-toolchain.toml`, because a repo-root toolchain file outranks `rustup default` and would silently redirect the version-pinned CI jobs (the MSRV `Check` legs) and build released binaries on nightly.
 
 The nightly is instead requested per-invocation, at the only step that picks versions: `scripts/soak/update-deps.mts` runs `cargo +nightly update`. Everything else — every CI job, every shipped binary — builds on stable. If you need the cargo soak somewhere new, call `cargo +nightly` there; do not add a toolchain file.
+
+**Keep the nightly current — a merely-old one silently disables the window.** Cargo treats an `[unstable]` key it does not implement as a warning and exits 0, so an old nightly resolves with NO window while looking successful. Measured both sides: nightly 2026-03-21 (cargo 1.96.0-nightly) has no such `-Z` and skips the window silently; nightly 2026-07-27 (cargo 1.99.0-nightly) supports `-Z min-publish-age` and visibly holds a too-fresh release back (`available: v0.2.189, published 7 days ago`). `deps:update` detects the warning and fails with the fix (`rustup update nightly`) — if you see it, the lockfile changes it just made are unsoaked.
 
 ## Maintaining this skill
 

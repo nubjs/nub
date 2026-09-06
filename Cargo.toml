@@ -111,7 +111,10 @@ criterion = "0.5"
 camino = "1"
 ctrlc = "3"
 libc = "0.2"
-clap = { version = "4", features = ["derive"] }
+# The CLI parser vendored aube moved to in v2 (jdx/usage); nub-cli shares it so the
+# engine verbs compose aube's own `usage_rs::Args` types statically and the binary
+# links one parser. Same major as vendor/aube/Cargo.toml.
+usage-rs = { version = "6" }
 dirs-next = "2"
 json5 = "0.4"
 # Reads (`serde`) + comment/order-preserving read-modify-write (`cst`) of JSONC —
