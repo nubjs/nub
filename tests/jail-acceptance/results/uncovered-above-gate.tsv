@@ -1,9 +1,16 @@
-# Install-script carriers ABOVE the population's download gate (ranks 1-25,500) that the sweep
-# does not cover. Measured 2026-09-05, ranking each package's versions by actual weekly
-# downloads. name<TAB>weekly<TAB>latest|older-version-only.
+# ⛔ CLOSED 2026-09-06. This is the RECORD of a gap, not a list of work. Every package below except
+# `@pulumi/azure-native` is in the population now, and that one is excluded correctly rather than
+# missed: its first script-carrying release ranks 27th by downloads and holds 0.77% of them, under
+# the inclusion floor at any window width. The file is kept because the SHAPE of the hole is what
+# discover-install-scripts.mjs now guards against, and because the three-platform sweep of these
+# packages (uncovered-above-gate-sweep-*.tsv) is evidence about exactly this set.
 #
-# These are NOT what the gate excludes. They sit inside the band the population claims to cover
-# completely, so each row is an unmet claim rather than a scoping decision.
+# Install-script carriers ABOVE the population's download gate (ranks 1-25,500) that the sweep did
+# not cover. Measured 2026-09-05, ranking each package's versions by actual weekly downloads.
+# name<TAB>weekly<TAB>latest|older-version-only.
+#
+# These were NOT what the gate excludes. They sat inside the band the population claimed to cover
+# completely, so each row was an unmet claim rather than a scoping decision.
 #
 # 309 of 25,421 packages were unresolved, so this list is a floor.
 sharp	83492081	older-version-only
