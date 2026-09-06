@@ -469,6 +469,42 @@ fn package_extensions_drift(
     }
 }
 
+/// The existing-graph hint handed to the resolver, or `None` to withhold it.
+///
+/// Withholding matters because resolver reuse is not merely an optimization:
+/// it accepts a locked package WITHOUT fetching its packument, and the
+/// packument is the only place a `packageExtensions` entry is ever applied.
+/// Discarding the lockfile on drift is therefore only half a fix — the
+/// re-resolve would load the new extensions and still hand back the locked
+/// dependency set, so the edit would rewrite the lockfile's checksum and
+/// change nothing else.
+///
+/// Pure, with the embedder posture passed in rather than read from the
+/// process-global engine context, so the wiring this guards is unit-testable
+/// without mutating global state.
+pub(super) fn existing_graph_hint<'a>(
+    lockfile_pre_parse: Option<&'a (LockfileGraph, LockfileKind)>,
+    revalidate_release_policy: bool,
+    enforce_package_extensions_checksum: bool,
+    effective_package_extensions_checksum: Option<&str>,
+) -> Option<&'a LockfileGraph> {
+    // Reuse can also accept a locked package without fetching its publish
+    // time, which would bypass an age gate being revalidated.
+    if revalidate_release_policy {
+        return None;
+    }
+    let (graph, _) = lockfile_pre_parse?;
+    if enforce_package_extensions_checksum
+        && matches!(
+            graph.check_package_extensions_drift(effective_package_extensions_checksum),
+            DriftStatus::Stale { .. }
+        )
+    {
+        return None;
+    }
+    Some(graph)
+}
+
 pub(super) fn select_lockfile_result(
     input: SelectLockfileInput<'_>,
 ) -> miette::Result<Result<(LockfileGraph, LockfileKind), aube_lockfile::Error>> {
@@ -773,5 +809,67 @@ pub(super) fn lockfile_source_label(kind: LockfileKind) -> &'static str {
         LockfileKind::Npm => "package-lock.json",
         LockfileKind::NpmShrinkwrap => "npm-shrinkwrap.json",
         LockfileKind::Bun => "bun.lock",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph_with_checksum(checksum: Option<&str>) -> (LockfileGraph, LockfileKind) {
+        let graph = LockfileGraph {
+            package_extensions_checksum: checksum.map(str::to_string),
+            ..Default::default()
+        };
+        (graph, LockfileKind::Aube)
+    }
+
+    /// A packageExtensions edit must withhold the resolver's reuse hint.
+    ///
+    /// Discarding the lockfile is not enough on its own: reuse resolves a
+    /// locked package without fetching its packument, which is the only place
+    /// an extension is applied. Before this wiring existed the re-resolve
+    /// loaded the new extensions and still returned the locked dependency set,
+    /// so `nub install` reported `Already up to date` and installed nothing.
+    #[test]
+    fn a_package_extensions_edit_withholds_the_resolver_reuse_hint() {
+        let locked = graph_with_checksum(Some("sha256-written-with-the-old-extensions"));
+        assert!(
+            existing_graph_hint(Some(&locked), false, true, Some("sha256-edited")).is_none(),
+            "a drifted checksum must withhold the hint, or the edit resolves to nothing"
+        );
+        // Adding a first extension to a project that had none drifts too: the
+        // lockfile records no checksum and the effective one is now `Some`.
+        let never_extended = graph_with_checksum(None);
+        assert!(
+            existing_graph_hint(Some(&never_extended), false, true, Some("sha256-edited"))
+                .is_none(),
+            "a first extension must withhold the hint"
+        );
+    }
+
+    /// Reuse survives everything that is not drift — the hint is the warm
+    /// path, so withholding it on a steady-state install would re-fetch every
+    /// packument in the tree on every run.
+    #[test]
+    fn an_unchanged_project_keeps_the_resolver_reuse_hint() {
+        let matching = graph_with_checksum(Some("sha256-same"));
+        assert!(
+            existing_graph_hint(Some(&matching), false, true, Some("sha256-same")).is_some(),
+            "an unchanged checksum must keep the hint"
+        );
+        let no_extensions = graph_with_checksum(None);
+        assert!(
+            existing_graph_hint(Some(&no_extensions), false, true, None).is_some(),
+            "a project with no extensions at all must keep the hint"
+        );
+        // Standalone aube does not enforce the checksum, so the whole layer is
+        // a no-op there even against a graph that would otherwise read as
+        // drifted — its lockfile never carries the field to begin with.
+        let drifted = graph_with_checksum(Some("sha256-written"));
+        assert!(
+            existing_graph_hint(Some(&drifted), false, false, Some("sha256-edited")).is_some(),
+            "a non-enforcing embedder must be unaffected by this layer"
+        );
     }
 }
