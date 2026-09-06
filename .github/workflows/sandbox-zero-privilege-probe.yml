@@ -59,6 +59,14 @@ jobs:
               --config 'profile.fast.package."*".opt-level=2'
             "$CARGO_TARGET_DIR/fast/$probe-probe" > "reports/$probe.log" 2>&1
           done
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 18.20.8
+      - name: Testing fetched lifecycle hooks on Node 18
+        run: node --test tests/build-jail-corpus/private-registry.mjs
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22.23.2
       - name: Measuring both package populations
         if: env.RUN_POPULATIONS == 'true'
         run: |
@@ -106,4 +114,9 @@ jobs:
         with:
           name: sandbox-macos-evidence
           path: reports
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-macos-binary
+          path: target/fast/nub
           retention-days: 14

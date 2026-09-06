@@ -17,7 +17,9 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
   const home = join(root, 'home');
   const tool = join(root, 'tool', 'package');
   const dep = join(root, 'dependency', 'package');
+  const outsideCredential = join(root, 'outside-checkout-credential');
   for (const dir of [project, home, tool, dep]) mkdirSync(dir, { recursive: true });
+  writeFileSync(outsideCredential, 'outside-checkout-secret');
   writeFileSync(join(tool, 'package.json'), JSON.stringify({ name: 'node-gyp', version: '12.0.0', bin: { 'node-gyp': 'bin/node-gyp.js' } }));
   mkdirSync(join(tool, 'bin'));
   writeFileSync(join(tool, 'bin', 'node-gyp.js'), '#!/usr/bin/env node\nconsole.log("private-node-gyp-ran");\n', { mode: 0o755 });
@@ -69,11 +71,26 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
       const nestedSource = `file:${archive.replaceAll('\\', '/')}`;
       nestedApproval = `nested-probe@${nestedSource}`;
       const manifest = JSON.parse(readFileSync(join(dep, 'package.json'), 'utf8'));
-      manifest.scripts['pnpm:devPreinstall'] = 'node early.cjs';
+      manifest.scripts['pnpm:devPreinstall'] = 'node root-hook.cjs pnpm:devPreinstall && node early.cjs';
+      manifest.scripts.preinstall = 'node root-hook.cjs preinstall';
+      manifest.scripts.install = 'node root-hook.cjs install';
+      manifest.scripts.postinstall = 'node root-hook.cjs postinstall';
+      manifest.scripts.prepare = 'node root-hook.cjs prepare && node probe.cjs';
       writeFileSync(join(dep, 'early.cjs'), `require('fs').writeFileSync('early-proof.json', JSON.stringify({ran:true, token:process.env.AWS_SECRET_ACCESS_KEY ?? null}));`);
       manifest.devDependencies = {'nested-probe':nestedSource};
-      manifest.allowScripts = {[nestedApproval]:'no-jail'};
+      manifest.allowScripts = {'private-bootstrap-probe':'no-jail', [nestedApproval]:'no-jail'};
       writeFileSync(join(dep, 'package.json'), JSON.stringify(manifest));
+      writeFileSync(join(dep, 'root-hook.cjs'), `
+        const fs = require('node:fs');
+        let outsideReadable = true;
+        try { fs.readFileSync(${JSON.stringify(outsideCredential)}, 'utf8'); } catch { outsideReadable = false; }
+        fs.mkdirSync('.root-hook-proofs', {recursive:true});
+        fs.writeFileSync('.root-hook-proofs/' + process.argv[2].replaceAll(':', '-') + '.json', JSON.stringify({
+          hook: process.argv[2],
+          token: process.env.AWS_SECRET_ACCESS_KEY ?? null,
+          outsideReadable,
+        }));
+      `);
       writeFileSync(join(dep, 'probe.cjs'), readFileSync(join(dep, 'probe.cjs'), 'utf8') + `\nconst nested = require('nested-probe/proof.json'); fs.writeFileSync('nested-proof.json', JSON.stringify(nested));`);
       writeFileSync(join(dep, '.npmrc'), readFileSync(join(project, '.npmrc')));
       writeFileSync(join(dep, 'nub.jsonc'), JSON.stringify({ install: { buildJail: false } }));
@@ -94,7 +111,8 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
       cwd: project, timeout: 60_000,
       env: { ...process.env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: join(home, 'config'),
         XDG_CACHE_HOME: join(home, 'cache'), XDG_DATA_HOME: join(home, 'data'),
-        NODE_EXECUTABLE: process.execPath, AWS_SECRET_ACCESS_KEY:'nested-fixture-token', CI: '1', NO_COLOR: '1' },
+        NODE_EXECUTABLE: process.execPath, AWS_SECRET_ACCESS_KEY:'nested-fixture-token',
+        CI: '1', NO_COLOR: '1' },
     });
     writeFileSync(join(root, 'install.log'), result.stdout + result.stderr);
     const proof = JSON.parse(readFileSync(join(project, 'node_modules', 'private-bootstrap-probe', 'proof.json'), 'utf8'));
@@ -102,6 +120,11 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
     if (sourceKind === 'git') {
       const early = JSON.parse(readFileSync(join(project, 'node_modules', 'private-bootstrap-probe', 'early-proof.json'), 'utf8'));
       assert.deepEqual(early, {ran:true, token:null}, 'fetched early hooks must run with confinement');
+      for (const hook of ['pnpm:devPreinstall', 'preinstall', 'install', 'postinstall', 'prepare']) {
+        const rootHook = JSON.parse(readFileSync(join(project, 'node_modules', 'private-bootstrap-probe', '.root-hook-proofs', `${hook.replaceAll(':', '-')}.json`), 'utf8'));
+        assert.deepEqual(rootHook, {hook, token:null, outsideReadable:false},
+          `fetched ${hook} must ignore its own opt-out and stay inside its checkout`);
+      }
       const nested = JSON.parse(readFileSync(join(project, 'node_modules', 'private-bootstrap-probe', 'nested-proof.json'), 'utf8'));
       assert.equal(nested.token, null, 'fetched manifests cannot opt their dependencies out of confinement');
     }

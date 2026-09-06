@@ -19,7 +19,8 @@ const results = [];
 function record(row) {
   results.push(row);
   writeFileSync(join(root, 'results.json'), JSON.stringify({ input, provenance, npm: process.env.NPM_CLI, expected: cases.length, results }, null, 2));
-  console.log(`${results.length}/${cases.length} ${row.name}@${row.version}: ${row.verdict ?? `npm ${row.status ?? row.error ?? row.signal}`}`);
+  const verdict = row.verdict ?? (row.timedOut ? 'npm TIMEOUT' : `npm ${row.status ?? row.error ?? row.signal}`);
+  console.log(`${results.length}/${cases.length} ${row.name}@${row.version}: ${verdict}`);
 }
 for (const { name, version } of cases) {
   const controlLog = readFileSync(join(dirname(input), 'logs', `${name.replaceAll('/', '-')}-control.log`), 'utf8');
