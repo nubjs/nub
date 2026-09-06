@@ -16,94 +16,123 @@
 //
 // Usage: node discover-install-scripts.mjs [--out <tsv>]   (prints `name<TAB>version` for the ones with a script)
 const CANDIDATES = [
-  // ⛔⛔ THIS LIST IS THE INPUT, AND THE RULE THAT READS IT IS SEPARATE — BOTH HAVE BEEN WRONG. A name
-  // missing here is a package the sweep never measures, reported as nothing rather than as a hole; and
-  // until 2026-09-05 the lookup judged every name by `latest`, so a name present here could still be
-  // missed. Measured that day against a version-aware scan of the whole band this list is drawn from
-  // (npm ranks 1-25,500, i.e. everything above 100,000 weekly downloads): 244 packages carry an install
-  // script on a version people install, and the list then held 107 of them. Of the 137 missed, 56 were
-  // invisible to any `latest` read and 81 were simply absent. Both halves are fixed — the lookup now
-  // ranks versions by download count, and this list is the union of the former hand-curated set with
-  // every carrier that scan found.
+  // ⛔⛔ THIS LIST IS THE INPUT, AND THE RULE THAT READS IT IS SEPARATE — BOTH HAVE BEEN WRONG, IN
+  // THAT ORDER. A name missing here is a package the sweep never measures, reported as nothing rather
+  // than as a hole. Until 2026-09-05 the lookup also judged every name by `latest`, so a name present
+  // here could still be missed; and until 2026-09-06 the scan that regenerated this list used a top-3
+  // window, which found 244 carriers over the band where a floor-only scan finds 403.
   //
-  // ⛔ THE COVERAGE FIGURE THAT PRODUCES IS SCOPED TO THAT BAND. The metric is measured against the set
-  // this list is drawn from, so it would read the same wherever the download gate sat. It says the band
-  // is covered, never that the ecosystem is. What lies below the gate is measured separately, by
+  // The list is now the union of the former hand-curated set with every carrier a floor-only scan
+  // found over npm ranks 1-25,500 — the band above 100,000 weekly downloads. `pickInstalledVersion`
+  // explains why that scan has no window.
+  //
+  // ⛔ THE COVERAGE FIGURE THIS PRODUCES IS SCOPED TO THAT BAND. The metric is measured against the
+  // set this list is drawn from, so it would read the same wherever the download gate sat. It says the
+  // band is covered, never that the ecosystem is. What lies below the gate is measured separately, by
   // scan-below-gate.mjs, and recorded in results/uncovered-carriers.tsv.
   //
   // Regenerate rather than hand-edit: a name added here without a measurement behind it is a claim
   // nothing rechecks.
   '@andrewstory18/is-real-odd', '@anthropic-ai/claude-code', '@apollo/protobufjs', '@apollo/rover',
-  '@ast-grep/cli', '@aws-amplify/cli', '@azure/mcp', '@azure/msal-node-extensions',
-  '@biomejs/biome', '@brave/n8n-nodes-brave-search', '@bufbuild/buf', '@carbon/feature-flags',
-  '@carbon/grid', '@carbon/icon-helpers', '@carbon/icons-react', '@carbon/layout',
-  '@carbon/motion', '@carbon/react', '@carbon/styles', '@carbon/themes', '@carbon/type',
+  '@ast-grep/cli', '@astryxdesign/core', '@aws-amplify/cli', '@azure/mcp',
+  '@azure/msal-node-extensions', '@badeball/cypress-cucumber-preprocessor', '@biomejs/biome',
+  '@brave/n8n-nodes-brave-search', '@bufbuild/buf', '@bundled-es-modules/glob', '@carbon/colors',
+  '@carbon/feature-flags', '@carbon/grid', '@carbon/icon-helpers', '@carbon/icons',
+  '@carbon/icons-react', '@carbon/layout', '@carbon/motion', '@carbon/react', '@carbon/styles',
+  '@carbon/themes', '@carbon/type', '@carbon/utilities', '@cdktf/node-pty-prebuilt-multiarch',
   '@central-icons-react/round-outlined-radius-3-stroke-2',
-  '@central-icons-react/square-outlined-radius-0-stroke-2', '@clerk/shared', '@compodoc/compodoc',
-  '@confluentinc/kafka-javascript', '@contrast/fn-inspect', '@coze/cli', '@datadog/native-appsec',
-  '@datadog/native-iast-taint-tracking', '@datadog/pprof', '@discordjs/opus',
-  '@evilmartians/lefthook', '@ffmpeg-installer/linux-x64', '@ffprobe-installer/linux-x64',
-  '@firebase/util', '@fortawesome/fontawesome-free', '@fortawesome/fontawesome-svg-core',
-  '@fortawesome/free-brands-svg-icons', '@fortawesome/free-regular-svg-icons',
-  '@fortawesome/free-solid-svg-icons', '@google/genai', '@googleworkspace/cli',
-  '@hatchet-dev/typescript-sdk', '@heroui/shared-utils', '@hyperjump/json-pointer', '@ibm/plex',
-  '@ibm/plex-sans', '@infisical/cli', '@journeyapps/wa-sqlite', '@launchql/protobufjs',
-  '@lavamoat/preinstall-always-fail', '@medusajs/telemetry', '@microsoft/m365agentstoolkit-cli',
-  '@modelcontextprotocol/ext-apps', '@modelcontextprotocol/inspector', '@mongodb-js/zstd',
-  '@mui/x-telemetry', '@newrelic/fn-inspect', '@newrelic/native-metrics',
-  '@openapitools/openapi-generator-cli', '@opencode-ai/cli', '@openrouter/sdk',
-  '@openuidev/lang-core', '@parcel/watcher', '@percy/core', '@playwright/browser-chromium',
-  '@playwright/browser-firefox', '@playwright/browser-webkit', '@pnpm/exe', '@posthog/cli',
-  '@prisma/engines', '@progress/kendo-licensing', '@pulumi/aws-native', '@pulumi/azure-native',
-  '@pulumi/command', '@pulumi/docker', '@pulumi/docker-build', '@pulumi/gcp', '@pulumi/kubernetes',
-  '@railway/cli', '@reown/appkit', '@salesforce/cli', '@sap/hana-client', '@scarf/scarf',
-  '@sentry-internal/node-cpu-profiler', '@sentry-internal/node-native-stacktrace', '@sentry/cli',
-  '@shopify/react-native-skia', '@stacksjs/ts-webp', '@stdlib/math-base-special-exp',
+  '@central-icons-react/square-outlined-radius-0-stroke-2', '@ckeditor/ckeditor5-react',
+  '@clerk/shared', '@compodoc/compodoc', '@confluentinc/kafka-javascript', '@contrast/fn-inspect',
+  '@coreui/coreui', '@coreui/react', '@coze/cli', '@datadog/mobile-react-native',
+  '@datadog/mobile-react-native-session-replay', '@datadog/native-appsec',
+  '@datadog/native-iast-taint-tracking', '@datadog/native-metrics', '@datadog/pprof',
+  '@deepseek-ai/dsh-subprocess-local', '@depot/cli', '@discordjs/opus', '@elastic/eui',
+  '@embedded-postgres/linux-x64', '@evilmartians/lefthook', '@ffmpeg-installer/linux-arm64',
+  '@ffmpeg-installer/linux-x64', '@ffprobe-installer/linux-x64', '@firebase/util',
+  '@fission-ai/openspec', '@fortawesome/fontawesome-common-types', '@fortawesome/fontawesome-free',
+  '@fortawesome/fontawesome-svg-core', '@fortawesome/free-brands-svg-icons',
+  '@fortawesome/free-regular-svg-icons', '@fortawesome/free-solid-svg-icons', '@github/keytar',
+  '@google/genai', '@googleworkspace/cli', '@hatchet-dev/typescript-sdk', '@heroui/shared-utils',
+  '@hyperjump/json-pointer', '@hyperjump/json-schema', '@hyperjump/json-schema-core', '@ibm/plex',
+  '@ibm/plex-sans', '@ibm/plex-sans-hebrew', '@ibm/plex-sans-thai', '@ibm/plex-sans-thai-looped',
+  '@ibm/plex-serif', '@infisical/cli', '@journeyapps/wa-sqlite', '@larksuite/cli',
+  '@launchql/protobufjs', '@lavamoat/preinstall-always-fail',
+  '@matrix-org/matrix-sdk-crypto-nodejs', '@maxmind/geoip2-node', '@medusajs/telemetry',
+  '@memlab/cli', '@microsoft/m365agentstoolkit-cli', '@modelcontextprotocol/ext-apps',
+  '@modelcontextprotocol/inspector', '@mongodb-js/zstd', '@moonrepo/cli', '@mui/x-telemetry',
+  '@napi-rs/simple-git-linux-x64-gnu', '@napi-rs/simple-git-linux-x64-musl', '@nestjs/core',
+  '@newrelic/fn-inspect', '@newrelic/native-metrics', '@openapitools/openapi-generator-cli',
+  '@opencode-ai/cli', '@openrouter/sdk', '@openuidev/lang-core', '@parcel/watcher', '@percy/core',
+  '@playwright/browser-chromium', '@playwright/browser-firefox', '@playwright/browser-webkit',
+  '@pnpm/exe', '@posthog/cli', '@prisma/client', '@prisma/engines', '@progress/kendo-licensing',
+  '@pulumi/aws', '@pulumi/aws-native', '@pulumi/awsx', '@pulumi/azure-native', '@pulumi/command',
+  '@pulumi/docker', '@pulumi/docker-build', '@pulumi/gcp', '@pulumi/kubernetes', '@railway/cli',
+  '@react-hookz/deep-equal', '@reown/appkit', '@salesforce/cli', '@sap/hana-client',
+  '@scarf/scarf', '@sentry-internal/node-cpu-profiler', '@sentry-internal/node-native-stacktrace',
+  '@sentry/cli', '@sentry/node-cpu-profiler', '@sentry/profiling-node',
+  '@shopify/react-native-skia', '@stacksjs/ts-webp', '@stdlib/math-base-assert-is-integer',
+  '@stdlib/math-base-special-exp', '@stdlib/math-base-special-kernel-cos',
+  '@stdlib/math-base-special-kernel-sin', '@stdlib/math-base-special-ldexp',
   '@stdlib/math-base-special-ln', '@stdlib/number-float64-base-exponent',
   '@stdlib/number-float64-base-normalize', '@stellar/stellar-sdk', '@stoprocent/noble',
-  '@strapi/strapi', '@swc/core', '@temporalio/core-bridge', '@tensorflow/tfjs-node',
-  '@tloncorp/tlon-skill', '@tree-sitter-grammars/tree-sitter-yaml', '@trufflesuite/bigint-buffer',
-  '@tsparticles/engine', '@turbodocx/html-to-docx', '@vaadin/vaadin-usage-statistics',
-  '@vscode/ripgrep', '@vscode/sqlite3', '@vscode/vsce-sign', '@whiskeysockets/baileys',
-  '@zowe/secrets-for-zowe-sdk', 'admin-lte', 'agent-browser', 'agentdb', 'ant-design-vue',
-  'appium', 'appium-chromedriver', 'appium-ios-tuntap', 'applicationinsights-native-metrics',
-  'appmetrics', 'argon2', 'aws-crt', 'aws-sdk', 'azure-functions-core-tools', 'backport',
-  'baileys', 'bcrypt', 'better-sqlite3', 'bigint-buffer', 'bignum', 'blake-hash', 'blake3',
-  'bluetooth-hci-socket', 'bootstrap-vue', 'braintrust', 'browser-tabs-lock', 'btch-downloader',
-  'bufferutil', 'bun', 'canvas', 'cbor-extract', 'ccxt', 'chrome-local-mcp', 'chromedriver',
-  'chromium', 'classic-level', 'cline', 'cloudflared', 'console-stamp', 'contentful', 'core-js',
-  'core-js-pure', 'cpu-features', 'cwebp-bin', 'cypress', 'dd-trace', 'deasync', 'deno', 'detox',
-  'dprint', 'dtrace-provider', 'duckdb', 'edgedriver', 'electron-winstaller', 'epoll', 'es5-ext',
-  'esbuild', 'faiss-node', 'farmhash', 'ffi-napi', 'ffmpeg-static', 'fs-xattr', 'fsevents',
-  'gatsby', 'gatsby-cli', 'gc-stats', 'geckodriver', 'gifsicle', 'grpc', 'grpc-tools', 'heapdump',
-  'hnswlib-node', 'hrtime', 'ibm_db', 'iconv', 'iframe-resizer', 'iltorb', 'inngest-cli', 'iohook',
-  'isolated-vm', 'javascript-obfuscator', 'jest-preview', 'jpegtran-bin', 'jss', 'keccak',
-  'kerberos', 'keytar', 'koffi', 'lefthook', 'less', 'leveldown', 'libpq', 'libxmljs', 'libxmljs2',
-  'llnode', 'lmdb', 'lz4', 'memlab', 'microtime', 'mongodb-client-encryption',
-  'mongodb-memory-server', 'mozjpeg', 'msgpackr-extract', 'msw', 'n8n-nodes-evolution-api',
-  'native-keymap', 'nestjs-pino', 'netlify', 'netlify-cli', 'ngrok', 'nice-napi', 'node',
-  'node-expat', 'node-hid', 'node-jq', 'node-libcurl', 'node-llama-cpp', 'node-pty', 'node-report',
-  'node-sass', 'nodejieba', 'nodent-runtime', 'nx', 'odbc', 'odiff-bin', 'onnxruntime-node',
-  'openclaw', 'opencode-ai', 'optipng-bin', 'oracledb', 'phantomjs-prebuilt',
-  'playwright-chromium', 'playwright-webkit', 'pngquant-bin', 'postinstall-postinstall',
-  'postman-code-generators', 'pprof', 'pre-commit', 'prisma', 'protobufjs', 'puppeteer', 're2',
-  'react-jsx-parser', 'react-native-inappbrowser-reborn', 'react-native-webrtc', 'realm',
-  'ref-napi', 'robotjs', 'rocksdb', 'scrypt', 'secp256k1', 'segfault-handler', 'serverless',
-  'sharp', 'simple-git-hooks', 'skia-canvas', 'sleep', 'snyk', 'sonar-scanner', 'spawn-sync',
-  'sqlite3', 'sse4_crc32', 'ssh2', 'storybook-addon-remix-react-router', 'stream-chat',
-  'style-dictionary', 'summernote', 'svelte-preprocess', 'tesseract.js', 'tiny-secp256k1', 'tldjs',
-  'tree-sitter', 'tree-sitter-bash', 'tree-sitter-c-sharp', 'tree-sitter-cli', 'tree-sitter-cpp',
-  'tree-sitter-go', 'tree-sitter-javascript', 'tree-sitter-json', 'tree-sitter-php',
-  'tree-sitter-python', 'tree-sitter-rust', 'tree-sitter-typescript', 'ttf2woff2', 'type-graphql',
-  'uglifyjs-webpack-plugin', 'union', 'unix-dgram', 'unrs-resolver', 'utf-8-validate',
-  'v8-profiler-next', 'vue-demi', 'vue-echarts', 'wd', 'web3-bzz', 'web3-shh', 'win-ca', 'workerd',
+  '@strapi/strapi', '@swc/core', '@tailwindcss/oxide', '@temporalio/core-bridge',
+  '@tensorflow/tfjs-node', '@tloncorp/tlon-skill', '@toruslabs/eccrypto',
+  '@tree-sitter-grammars/tree-sitter-yaml', '@trufflesuite/bigint-buffer', '@tsparticles/engine',
+  '@turbodocx/html-to-docx', '@uirouter/core', '@vaadin/vaadin-usage-statistics',
+  '@vercel/speed-insights', '@vscode/ripgrep', '@vscode/sqlite3', '@vscode/vsce-sign',
+  '@vscode/windows-registry', '@whiskeysockets/baileys', '@zowe/secrets-for-zowe-sdk', 'admin-lte',
+  'agent-browser', 'agentdb', 'altcha', 'ant-design-vue', 'appium', 'appium-chromedriver',
+  'appium-ios-tuntap', 'applicationinsights-native-metrics', 'appmetrics', 'argon2', 'autoevals',
+  'aws-crt', 'aws-sdk', 'azure-functions-core-tools', 'backport', 'baileys', 'bcrypt',
+  'better-sqlite3', 'bigint-buffer', 'bignum', 'blake-hash', 'blake3', 'bluetooth-hci-socket',
+  'bootstrap-vue', 'braintrust', 'browser-tabs-lock', 'btch-downloader', 'bufferutil', 'bun',
+  'canvas', 'cbor-extract', 'ccxt', 'chrome-local-mcp', 'chromedriver', 'chromium',
+  'classic-level', 'cline', 'cloudflared', 'comfyui-mcp', 'console-stamp', 'contentful', 'core-js',
+  'core-js-pure', 'cpu-features', 'cucumber-expressions', 'cwebp-bin', 'cy2', 'cypress',
+  'dd-trace', 'deasync', 'deno', 'detox', 'dprint', 'dtrace-provider', 'duckdb', 'edgedriver',
+  'ejs', 'electron', 'electron-winstaller', 'epoll', 'es5-ext', 'esbuild', 'exifreader',
+  'faiss-node', 'fallow', 'farmhash', 'fetch-mock', 'ffi-napi', 'ffmpeg-static', 'flag-icon-css',
+  'flow-bin', 'free-email-domains', 'fs-xattr', 'fsevents', 'full-icu', 'gatsby', 'gatsby-cli',
+  'gatsby-telemetry', 'gc-stats', 'geckodriver', 'gifsicle', 'graphql-shield', 'grpc',
+  'grpc-tools', 'heapdump', 'highlight.js', 'hnswlib-node', 'hrtime', 'hugo-extended', 'husky',
+  'ibm_db', 'iconv', 'iframe-resizer', 'iltorb', 'impit', 'inferno', 'inngest-cli', 'iohook',
+  'ip-num', 'isolated-vm', 'javascript-obfuscator', 'jest-preview', 'jpegtran-bin', 'jss',
+  'keccak', 'kerberos', 'keytar', 'koffi', 'lefthook', 'less', 'level', 'leveldown', 'libpg-query',
+  'libpq', 'libxmljs', 'libxmljs2', 'llnode', 'lmdb', 'lz4', 'lzo', 'maplibre-gl', 'memlab',
+  'microtime', 'mongodb-client-encryption', 'mongodb-memory-server', 'mozjpeg', 'msgpackr-extract',
+  'msw', 'n8n-nodes-evolution-api', 'native-keymap', 'nestjs-pino', 'netlify', 'netlify-cli',
+  'ngrok', 'ngx-infinite-scroll', 'nice-napi', 'node', 'node-expat', 'node-hid', 'node-jq',
+  'node-libcurl', 'node-liblzma', 'node-llama-cpp', 'node-pty', 'node-report', 'node-sass',
+  'nodejieba', 'nodemon', 'nodent-runtime', 'nuxt', 'nx', 'odbc', 'odiff-bin', 'onnxruntime-node',
+  'openclaw', 'opencode-ai', 'optipng-bin', 'oracledb', 'oxc-resolver', 'paper', 'parcel',
+  'parse-domain', 'phantomjs-prebuilt', 'playwright-chromium', 'playwright-webkit', 'pngquant-bin',
+  'pnpm', 'postinstall-postinstall', 'postman-code-generators', 'pprof', 'pre-commit', 'prisma',
+  'protobufjs', 'puppeteer', 'radium', 're2', 'react-final-form', 'react-grab', 'react-jsx-parser',
+  'react-native-confirmation-code-field', 'react-native-enriched-markdown',
+  'react-native-inappbrowser-reborn', 'react-native-mmkv', 'react-native-nitro-modules',
+  'react-native-webrtc', 'realm', 'redis-memory-server', 'ref-napi', 'robotjs', 'rocksdb',
+  'scrypt', 'secp256k1', 'segfault-handler', 'serialport', 'serverless', 'sharp',
+  'simple-git-hooks', 'sinon', 'skia-canvas', 'sleep', 'snappy', 'snyk', 'sodium-native',
+  'sonar-scanner', 'spawn-sync', 'sqlite3', 'squawk-cli', 'sse4_crc32', 'ssh2',
+  'storybook-addon-remix-react-router', 'stream-chat', 'stream-chat-react',
+  'stream-chat-react-native-core', 'style-dictionary', 'styled-components', 'summernote',
+  'supabase', 'svelte-preprocess', 'swagger-ui', 'swiper', 'tesseract.js', 'tiny-secp256k1',
+  'tldjs', 'tree-sitter', 'tree-sitter-bash', 'tree-sitter-c', 'tree-sitter-c-sharp',
+  'tree-sitter-cli', 'tree-sitter-cpp', 'tree-sitter-go', 'tree-sitter-java',
+  'tree-sitter-javascript', 'tree-sitter-json', 'tree-sitter-php', 'tree-sitter-python',
+  'tree-sitter-ruby', 'tree-sitter-rust', 'tree-sitter-typescript', 'tsparticles', 'ttf2woff2',
+  'type-graphql', 'typechecker', 'typesense-instantsearch-adapter', 'uglifyjs-webpack-plugin',
+  'unicode-animations', 'union', 'unix-dgram', 'unrs-resolver', 'usb', 'utf-8-validate',
+  'v8-profiler-next', 'vis-data', 'vis-network', 'vis-timeline', 'vnu-jar', 'vue-demi',
+  'vue-echarts', 'wd', 'web3-bzz', 'web3-shh', 'websocket', 'win-ca', 'wix-style-react', 'workerd',
   'wrtc', 'yarn', 'yo', 'yorkie', 'zeromq', 'zlib', 'zopflipng-bin', 'zstd-napi',
 ];
 
 const out = process.argv.includes('--out') ? process.argv[process.argv.indexOf('--out') + 1] : null;
+// No window by default — see pickInstalledVersion. The flag exists for sensitivity sweeps only.
 const TOP_VERSIONS = process.argv.includes('--top-versions')
   ? Number(process.argv[process.argv.indexOf('--top-versions') + 1])
-  : 5;
+  : Infinity;
 
 // A scoped name is one path segment, so the `/` must be escaped but the `@` must not.
 const enc = (name) => encodeURIComponent(name).replace('%40', '@');
@@ -173,40 +202,47 @@ function cmpSemver(a, b) {
  * downloads — a `latest`-only judgement scored it a clean negative, and it was one of 56 such
  * packages holding 286.7M weekly between them that the population could not see.
  *
- * The rule is the census's (scripts/npm-install-script-census.ts): rank a package's versions by
- * ACTUAL weekly downloads and ask whether any of the top N runs a script. That lands on terminal
- * versions empirically, with no semver modelling.
+ * ⛔⛔ THE RULE IS A DOWNLOAD-SHARE FLOOR, WITH NO TOP-N WINDOW, AND THAT IS A DELIBERATE DEPARTURE
+ * FROM scripts/npm-install-script-census.ts. The census ranks a package's versions and looks at the
+ * top 3; `topN` here exists only so a band can be re-measured under a window for a sensitivity check.
+ * The reason is that the window turned out to be doing far too much of the work to be chosen by hand.
+ * Measured over the same 25,421 packages above the download gate:
  *
- * The 1% floor exists because top-N by rank is meaningless for a package with few versions —
- * `environment` would otherwise qualify on a 0.0.1 release holding 14 weekly downloads against 36M
- * on its current one.
+ *     top 3 → 244 carriers      top 5 → 362 (+48%)      no window → 403 (+11%)
  *
- * ⛔ N IS 5 HERE AND 3 IN THE CENSUS, DELIBERATELY, BECAUSE THE TWO ASK DIFFERENT QUESTIONS. The
- * census classifies a package as install-relevant or not; this builds the population a safety net is
- * measured over, where missing a package costs a breakage nobody sees and including one costs a few
- * seconds of sweep. Measured 2026-09-05 at N=3, seven above-gate carriers holding 7.1M weekly fell
- * out with their script-carrying release sitting at rank 4 or 5 and still holding 5-10% of installs
- * -- `@fortawesome/fontawesome-svg-core` at 8.4%, `type-graphql` at 9.7%, `@pulumi/gcp` at 5.7%.
- * A jail that breaks a tenth of a package's users is broken. The 1% floor below, not N, is what
- * keeps noise out, so widening N is close to free.
+ * A count that moves 48% between two defensible window widths is a property of the instrument, not of
+ * npm. The floor is not: a version holding at least 1% of a package's downloads is installed by a real
+ * share of that package's users, whatever its rank, and a jail that breaks them is broken. So the
+ * floor decides inclusion and nothing else does. The curve converging by the limit — +48% then +11% —
+ * is what says the answer is stable rather than merely larger.
  *
- * ⛔ THE RANKING INPUT MOVES, so a package whose carrier sits at the N boundary flips between runs
- * on ordinary day-to-day download churn rather than on anything changing. Expect small membership
- * churn between regenerations and read it as that, not as packages gaining or losing scripts.
+ * The window was the census's COST bound, and it is not needed here: the abbreviated packument settles
+ * every package that has never carried a script in one request, so the expensive lookup only happens
+ * for packages that might qualify.
  *
- * Returns the most-downloaded script-carrying version among the top N, or null if none qualifies.
+ * Returns the most-downloaded version that carries a script, when carrying versions together
+ * clear the floor; otherwise null.
  * Exported so the ordering can be pinned by a test rather than trusted.
  */
-export function pickInstalledVersion(versions, downloads, topN = TOP_VERSIONS) {
+export function pickInstalledVersion(versions, downloads, topN = TOP_VERSIONS, minShare = 0.01) {
   const total = Object.values(downloads).reduce((a, b) => a + (b || 0), 0);
   if (!total) return null;
   const ranked = Object.keys(versions)
     .sort((a, b) => (downloads[b] || 0) - (downloads[a] || 0))
     .slice(0, topN);
-  for (const v of ranked) {
-    if (versions[v]?.hasInstallScript && (downloads[v] || 0) / total >= 0.01) return v;
-  }
-  return null;
+  const carriers = ranked.filter((v) => versions[v]?.hasInstallScript);
+  if (!carriers.length) return null;
+  // ⛔ THE SHARE IS SUMMED ACROSS EVERY CARRYING VERSION, NOT TAKEN FROM THE BEST ONE. The question is
+  // what fraction of a package's installs run an install script, and for a package with a long release
+  // history that fraction is spread thin rather than concentrated. Measured 2026-09-06:
+  // `@pulumi/azure-native` has 1,318 versions of which 719 carry a script, its best single one holds
+  // 0.77% of downloads, and they sum to 1.82% — so a per-version floor excluded a package where nearly
+  // one install in fifty runs a script. Summing subsumes the per-version test, since a single version
+  // over the floor puts the sum over it too.
+  const share = carriers.reduce((a, v) => a + (downloads[v] || 0), 0) / total;
+  if (share < minShare) return null;
+  // Sweep the most-installed carrying version — `ranked` is already in download order.
+  return carriers[0];
 }
 
 const isMain = process.argv[1]

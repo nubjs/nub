@@ -59,18 +59,30 @@ test('⛔ a version nobody installs cannot qualify a package, however it ranks',
   assert.equal(pickInstalledVersion(versions, { '1.1.0': 36_000_000, '1.0.0': 1_000, '0.0.1': 14 }), null);
 });
 
-test('the window is N versions deep, and N is 5 rather than the census\'s 3', () => {
-  // The carrier sits at rank 6 holding a healthy 10% of installs. It is outside the window, so the
-  // package does not qualify — but the default window must reach 5, because seven real above-gate
-  // carriers were lost at N=3 with their script-carrying release at rank 4 or 5.
+test('⛔⛔ RANK DOES NOT DECIDE INCLUSION — the download-share floor does, alone', () => {
+  // The carrier sits at rank 6, holding 10% of the package's installs. A jail that breaks it breaks
+  // a tenth of that package's users, so it belongs in the population however it ranks. Measured over
+  // the band above the download gate, a top-3 window found 244 carriers, a top-5 window 362 and no
+  // window 403 — a count that moves 48% between two defensible windows is a property of the window.
   const versions = vs({ a: false, b: false, c: false, d: false, e: false, f: true });
   const downloads = { a: 300, b: 200, c: 180, d: 120, e: 100, f: 100 };
-  assert.equal(pickInstalledVersion(versions, downloads), null, 'rank 6 is outside the window');
-  assert.equal(pickInstalledVersion(versions, downloads, 6), 'f', 'and inside it at N=6');
+  assert.equal(pickInstalledVersion(versions, downloads), 'f');
+  assert.equal(pickInstalledVersion(versions, downloads, 5), null,
+    'the window argument still works, because sensitivity sweeps depend on it');
+});
 
-  // A carrier at rank 5 IS caught by the default. This is the case N=3 dropped.
-  const atFive = vs({ a: false, b: false, c: false, d: false, e: true });
-  assert.equal(pickInstalledVersion(atFive, { a: 300, b: 200, c: 180, d: 120, e: 100 }), 'e');
-  assert.equal(pickInstalledVersion(atFive, { a: 300, b: 200, c: 180, d: 120, e: 100 }, 3), null,
-    'and dropped at the census default, which is the measured regression');
+test('the most-downloaded qualifying version wins, not the newest or the first found', () => {
+  const versions = vs({ '3.0.0': true, '2.0.0': true, '1.0.0': true });
+  assert.equal(pickInstalledVersion(versions, { '3.0.0': 100, '2.0.0': 800, '1.0.0': 100 }), '2.0.0');
+});
+
+test('⛔⛔ the share is SUMMED across carrying versions, not taken from the best one', () => {
+  // @pulumi/azure-native, measured 2026-09-06: 719 of its 1,318 versions carry an install script, the
+  // best single one holds 0.77% of downloads, and together they hold 1.82%. Judging by the best one
+  // alone excluded a package where nearly one install in fifty runs a script.
+  const spread = vs({ big: false, c1: true, c2: true, c3: true });
+  assert.equal(pickInstalledVersion(spread, { big: 9880, c1: 60, c2: 40, c3: 20 }), 'c1',
+    'best carrier holds 0.60%, under the floor; the three together hold 1.20%, over it');
+  assert.equal(pickInstalledVersion(spread, { big: 9940, c1: 30, c2: 20, c3: 10 }), null,
+    'and 0.60% summed is still under the floor');
 });
