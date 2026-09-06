@@ -25,7 +25,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify fix test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -170,6 +170,24 @@ verify:
 	tests/brand-lint/check-path-literals.sh
 	@tests/target-gc/run.sh
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" test
+
+# Apply clippy's machine-applicable autofixes across the root workspace AND the
+# nub-native workspace (the separate one `verify` lints from inside the crate).
+# Run on a dirty tree is intended (--allow-dirty --allow-staged); review the
+# diff before committing.
+fix:
+	@# `--all-features` activates `embed-runtime`, whose build.rs reads
+	@# runtime/addons/nub-native.node for integrity hashing and panics when
+	@# it is absent (it is gitignored, built by `make addon` / staged in CI).
+	@# Stage a placeholder — the same trick CI's lint job uses — so `make fix`
+	@# works on a fresh tree without a full addon build. clippy --fix never
+	@# runs the binary, so the placeholder is never loaded. The root lint
+	@# grants incomplete runtime staging just as `verify` and CI do.
+	@mkdir -p runtime/addons
+	@test -s runtime/addons/nub-native.node || printf 'placeholder-addon' > runtime/addons/nub-native.node
+	@set -e; \
+	NUB_ALLOW_INCOMPLETE_RUNTIME=1 NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --fix --workspace --all-targets --all-features --profile fast --allow-dirty --allow-staged -- -D warnings; \
+	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --fix --all-features --profile fast --allow-dirty --allow-staged -- -D warnings)
 
 # Run the integration suite across a Node version matrix (18.19 floor → 22.15
 # fast-path floor) — the local mirror of ci.yml's `test` job. Locates or
