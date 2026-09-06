@@ -961,6 +961,30 @@ fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
     matched && expected.is_empty()
 }
 
+/// Whether any file the payload still expects lives under `relative`, which is
+/// what decides that a directory on disk belongs to the extracted tree at all.
+///
+/// `expected` is sorted, and `Path`'s component-wise ordering keeps every key
+/// under a prefix contiguous and immediately after it: a key greater than
+/// `relative` that does NOT extend it differs at some component of `relative`
+/// itself, which puts it after every key that does. So the first key at or
+/// after `relative` settles the question, and the `starts_with` is what
+/// distinguishes "the next key is inside this directory" from "the next key is
+/// past it entirely".
+///
+/// Scanning `keys()` answers the same question, but as a full pass per
+/// directory — on a real extracted tree that is directories x files, 261 x 2431
+/// for a mid-size app, with every comparison walking path components.
+fn any_expected_under(
+    expected: &std::collections::BTreeMap<PathBuf, (Extracted<'_>, bool)>,
+    relative: &Path,
+) -> bool {
+    expected
+        .range(relative.to_path_buf()..)
+        .next()
+        .is_some_and(|(name, _)| name.starts_with(relative))
+}
+
 fn app_cache_tree_matches(
     root: &Path,
     dir: &Path,
@@ -980,7 +1004,7 @@ fn app_cache_tree_matches(
         };
 
         if metadata_is_trusted_real_directory(&path, &metadata) {
-            if !expected.keys().any(|name| name.starts_with(relative)) {
+            if !any_expected_under(expected, relative) {
                 phase_with(|| format!("    MISMATCH: unexpected directory {relative:?}"));
                 return false;
             }
@@ -4115,6 +4139,32 @@ mod tests {
             "even an empty unexpected directory makes the extracted tree stale"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Pins the prefix probe directly rather than through the tree walk, because
+    /// the walk cannot test it: `read_dir` order decides how much of the map is
+    /// still populated when a given directory is reached, so a stray directory
+    /// that happens to be visited last is rejected by an already-empty map no
+    /// matter what the probe does. Driving the probe itself is what makes each
+    /// case below deterministic.
+    #[test]
+    fn the_expected_under_probe_holds_only_for_directories_carrying_payload_files() {
+        let mut expected = std::collections::BTreeMap::new();
+        for name in ["main.js", "nested/data.json", "nested/deep/more.json"] {
+            expected.insert(PathBuf::from(name), (Extracted::Size(3), false));
+        }
+
+        assert!(any_expected_under(&expected, Path::new("nested")));
+        assert!(any_expected_under(&expected, Path::new("nested/deep")));
+        // Sorts before every key, so the probe lands on a key that does not
+        // extend it.
+        assert!(!any_expected_under(&expected, Path::new("alpha")));
+        // Sorts after every key, so the probe lands on nothing at all.
+        assert!(!any_expected_under(&expected, Path::new("zeta")));
+        // Lands on "nested/data.json", which starts with "neste" as a STRING
+        // and not as a path. Component-wise `starts_with` is what keeps a
+        // directory name that merely shares a prefix out of the tree.
+        assert!(!any_expected_under(&expected, Path::new("neste")));
     }
 
     /// A warm launch must not read the payload's file BODIES. Doing so cost a zstd
