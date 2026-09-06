@@ -3639,17 +3639,52 @@ fn same_filesystem(_a: &Path, _b: &Path) -> bool {
     true
 }
 
-fn publish_staged_with<F>(staged: &Path, destination: &Path, rename: F) -> Result<()>
+/// Backoff between publish attempts while the rename reports a transient
+/// Windows hold; about 1.6s in total before the failure is reported.
+const PUBLISH_RETRY_BACKOFF_MS: [u64; 7] = [25, 50, 100, 200, 400, 400, 400];
+
+/// `ERROR_SHARING_VIOLATION` (32) or `ERROR_LOCK_VIOLATION` (33): the hold an
+/// antivirus scan or the search indexer keeps on a freshly written executable
+/// for a moment after its last handle closes. The compile harness hit it on
+/// the win32 CI legs as "used by another process" against an artifact nothing
+/// of ours still held. graceful-fs retries a win32 rename on the same class of
+/// error for the same reason. A Unix rename never reports errno 32/33
+/// (`EPIPE`/`EDOM`), so the numeric match is inert there.
+fn is_transient_windows_hold(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(32 | 33))
+}
+
+fn publish_staged_with<F>(staged: &Path, destination: &Path, mut rename: F) -> Result<()>
 where
-    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
-    rename(staged, destination).with_context(|| {
-        format!(
-            "atomically replacing {} with staged output {}",
-            destination.display(),
-            staged.display()
-        )
-    })
+    let mut backoff = PUBLISH_RETRY_BACKOFF_MS.iter();
+    let mut attempts = 1usize;
+    loop {
+        let error = match rename(staged, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        match backoff.next() {
+            Some(ms) if is_transient_windows_hold(&error) => {
+                std::thread::sleep(std::time::Duration::from_millis(*ms));
+                attempts += 1;
+            }
+            _ => {
+                let mut error = anyhow::Error::new(error);
+                if attempts > 1 {
+                    error = error.context(format!(
+                        "another process kept the file open across {attempts} attempts"
+                    ));
+                }
+                return Err(error.context(format!(
+                    "atomically replacing {} with staged output {}",
+                    destination.display(),
+                    staged.display()
+                )));
+            }
+        }
+    }
 }
 
 impl Drop for StagedArtifact {
@@ -4154,11 +4189,62 @@ mod tests {
         let staged = StagedArtifact::new(&destination, "test").unwrap();
         fs::write(staged.path(), b"new-artifact").unwrap();
 
+        let mut attempts = 0;
         let error = publish_staged_with(staged.path(), &destination, |_staged, _destination| {
+            attempts += 1;
             Err(std::io::Error::other("injected late publish failure"))
         })
         .unwrap_err();
+        assert_eq!(attempts, 1, "a non-transient failure is reported at once");
         assert!(format!("{error:#}").contains("late publish failure"));
+        assert_eq!(fs::read(&destination).unwrap(), b"known-good");
+        drop(staged);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_publish_retries_a_transient_windows_hold() {
+        let dir = fresh_dir("atomic-publish-retry");
+        let destination = dir.join("app");
+        let staged = StagedArtifact::new(&destination, "test").unwrap();
+        fs::write(staged.path(), b"new-artifact").unwrap();
+
+        let mut attempts = 0;
+        publish_staged_with(staged.path(), &destination, |staged, destination| {
+            attempts += 1;
+            if attempts < 3 {
+                return Err(std::io::Error::from_raw_os_error(32));
+            }
+            fs::rename(staged, destination)
+        })
+        .unwrap();
+        assert_eq!(attempts, 3, "two sharing violations, then the rename lands");
+        assert_eq!(fs::read(&destination).unwrap(), b"new-artifact");
+        drop(staged);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_publish_gives_up_on_a_persistent_windows_hold() {
+        let dir = fresh_dir("atomic-publish-retry-exhausted");
+        let destination = dir.join("app");
+        fs::write(&destination, b"known-good").unwrap();
+        let staged = StagedArtifact::new(&destination, "test").unwrap();
+        fs::write(staged.path(), b"new-artifact").unwrap();
+
+        let mut attempts = 0;
+        let error = publish_staged_with(staged.path(), &destination, |_staged, _destination| {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(33))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, PUBLISH_RETRY_BACKOFF_MS.len() + 1);
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("atomically replacing"), "{rendered}");
+        assert!(
+            rendered.contains("kept the file open across 8 attempts"),
+            "{rendered}"
+        );
         assert_eq!(fs::read(&destination).unwrap(), b"known-good");
         drop(staged);
         let _ = fs::remove_dir_all(&dir);
