@@ -107,6 +107,15 @@ Patch a dependency's own manifest at resolve time, adding to its `dependencies`,
 Read the [full docs](https://pnpm.io/settings/dependency-resolution#packageextensions) on pnpm.io.
 </Callout>
 
+Nub applies a bundled database of these repairs, so most undeclared dependencies resolve with no configuration. It covers what Nub's phantom detector finds across the 10,000 most-downloaded packages on npm, and carries every rule from Yarn's curated database.
+
+```ini title=".npmrc"
+# resolve every manifest exactly as published, repairing nothing
+ignore-compatibility-db=true
+```
+
+The bundled database is larger than the one pnpm applies, so a dependency can resolve under Nub that pnpm leaves missing. It ships separately as [@nubjs/extensions](https://www.npmjs.com/package/@nubjs/extensions) for other tools to read.
+
 ### `patchedDependencies`
 
 Apply a patch file to a package's contents, keyed by name and version. Running `nub patch <pkg>` writes both the patch and this entry. A key matching no installed package fails the install, because the usual cause is a patch that silently stopped being applied.

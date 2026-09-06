@@ -181,3 +181,57 @@ fn the_bundled_compatibility_database_repairs_a_published_phantom() {
          undeclared import unresolved: {err_off}"
     );
 }
+
+/// The bundled database repairs a phantom that Yarn's curated catalog does not
+/// cover, which is the whole reason nub ships the larger set.
+///
+/// `@datadog/sketches-js` declares `protobufjs` only in `devDependencies`, so a
+/// consumer never gets it, while `dist/ddsketch/proto/compiled.js` does
+/// `require('protobufjs/minimal')` — reachable through a subpath, which is why
+/// the package's own main entry loads fine and hides the break. Yarn's database
+/// has no entry for it; the machine-derived one adds `protobufjs` as a real
+/// dependency, so it is materialized.
+///
+/// A hard `dependencies` edge is deliberately what this asserts. Most of the
+/// bundled set is optional peers, which install nothing on their own and only
+/// repair a strict layout, so an optional-peer entry would not prove the
+/// database reached the resolver at all.
+#[test]
+#[ignore = "network: resolves @datadog/sketches-js and the protobufjs the database adds"]
+fn the_bundled_database_repairs_a_phantom_yarns_catalog_misses() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let manifest =
+        r#"{"name":"bundled","version":"1.0.0","dependencies":{"@datadog/sketches-js":"2.1.1"}}"#;
+    let store = pm_tmpdir("bundled-store");
+    let cache = pm_tmpdir("bundled-cache");
+
+    let on = pm_tmpdir("bundled-on");
+    std::fs::write(on.join("package.json"), manifest).unwrap();
+    let (err_on, code_on) = run_install_in_store(&on, &store, &cache, &["install"]);
+    assert_eq!(code_on, 0, "install with the database failed: {err_on}");
+    assert!(
+        store_has(&on, "protobufjs"),
+        "the bundled database must add the protobufjs that @datadog/sketches-js \
+         requires but declares only as a devDependency: {err_on}"
+    );
+
+    // The control. Without it a pass proves only that protobufjs arrived, not
+    // that this database is what put it there — and it re-checks that the one
+    // escape hatch covers the bundled layer, not just the vendored catalogs.
+    let off = pm_tmpdir("bundled-off");
+    std::fs::write(off.join("package.json"), manifest).unwrap();
+    std::fs::write(off.join(".npmrc"), "ignore-compatibility-db=true\n").unwrap();
+    let (err_off, code_off) = run_install_in_store(&off, &store, &cache, &["install"]);
+    assert_eq!(
+        code_off, 0,
+        "install with the database off failed: {err_off}"
+    );
+    assert!(
+        !store_has(&off, "protobufjs"),
+        "ignore-compatibility-db must decline the bundled database too, leaving \
+         the undeclared import unresolved: {err_off}"
+    );
+}

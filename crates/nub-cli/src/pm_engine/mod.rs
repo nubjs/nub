@@ -52,6 +52,7 @@
 //! with honest per-verb messages in their family dispatchers.
 
 mod bun_config;
+mod compat_db;
 pub mod config_scope;
 mod duplicate_home;
 mod expo_compat;
@@ -2284,6 +2285,16 @@ pub(crate) fn engine_brand_preflight() {
         // carry no checksum (npm/yarn/bun locks), where stored and computed both
         // resolve to `None`. Standalone aube leaves the default `false`.
         c.enforce_package_extensions_checksum = true;
+        // The bundled compatibility database, on top of the vendored Yarn and
+        // pnpm catalogs the engine already applies. Lowest precedence and purely
+        // additive, so a curated upstream rule always wins on a key both carry —
+        // and since extensions merge per DEPENDENCY NAME rather than per
+        // selector, an entry this database extends beyond Yarn's still lands.
+        //
+        // Read only when resolving a package, never by the lockfile checksum, so
+        // refreshing the dataset cannot drift an existing lockfile. Gated with
+        // the vendored catalogs by the one `ignoreCompatibilityDb` escape hatch.
+        c.bundled_package_extensions = Some(compat_db::bundled_package_extensions().clone());
     });
     match surface {
         ConfigSurface::NubIdentity(dir) => {
