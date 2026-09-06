@@ -78,6 +78,7 @@ __pycache__/
 
 # === Build / IDE artifacts ===
 /target/
+/tests/*/target/
 # Staging dir for scripts/rust-build.sh's target-dir seeding, renamed into place
 # once the clone completes. A killed clone leaves one behind until the script
 # retires it; it must never be stageable in the meantime.

@@ -3,11 +3,9 @@
 // WHY THIS EXISTS. Coarse egress denial is free on Linux (a seccomp AF_INET ceiling) and on
 // macOS (Seatbelt denies network outright). NO PROXY is involved on any platform — the jail's
 // egress decision is a per-package boolean, so there is nothing to route and no host to
-// inspect; see the `There is deliberately NO host filtering` note below, which this line used
-// to contradict. On Windows there is no unprivileged OS
-// lever: withholding an AppContainer's `internetClient` capability is the only one, and being
-// an AppContainer is precisely what breaks filesystem reads (a fresh LowBox profile sid is in
-// no DACL). WFP is admin-gated. So on Windows the gate is USERLAND.
+// inspect. Windows AppContainer capability restrictions provide the OS ceiling for confined
+// launches. This userland gate supplements it; full-disk compatibility grants omit AppContainer
+// and therefore have no OS network boundary.
 //
 // WHAT IT IS AND IS NOT. This is NOT a security boundary. A native addon opening a raw socket
 // bypasses it, and a non-Node child process is never reached by it. What it buys is the shape

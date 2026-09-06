@@ -182,9 +182,8 @@ pub(crate) fn preflight(
                 landlock: Some(LandlockPreflight { abi }),
             });
         }
-        // FAIL CLOSED. A dependency's install script is the code the jail exists to contain,
-        // so an unconfinable host must refuse it rather than run it unconfined. The one
-        // escape is the internal differential pin, which deliberately routes to bubblewrap.
+        // Fail closed on unavailable confinement. The historical differential pin now
+        // selects the unprivileged supervisor, never the removed bubblewrap backend.
         Err(super::linux_landlock::LandlockUnavailable::PinnedToBubblewrap) => {}
         Err(super::linux_landlock::LandlockUnavailable::NotABuildJail) => {}
         // ⛔ DO NOT BLAME THE KERNEL FOR A POLICY BUG. `LandlockUnavailable` covers two very

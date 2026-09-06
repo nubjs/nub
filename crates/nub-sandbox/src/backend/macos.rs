@@ -1737,9 +1737,8 @@ mod tests {
     }
 
     /// True when the caller may proceed. Otherwise it has already announced the skip on the real
-    /// stderr, so a hollow run is legible to anyone skimming CI output — the same contract
-    /// `skip_without_bwrap_with` provides on Linux, including the env-var escape hatch that turns
-    /// the skip into a hard failure for a host that is supposed to be able to verify this.
+    /// stderr, so a hollow run is legible to anyone skimming CI output. The env-var escape hatch
+    /// turns the skip into a hard failure for a host that is supposed to verify this behavior.
     fn stdio_abort_precondition(test: &str) -> bool {
         if stdio_abort_is_observable() {
             return true;

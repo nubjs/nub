@@ -2541,7 +2541,7 @@ fn python_reads(probe_stdout: &str) -> Option<PythonToolchain> {
     // Collapse anything an outer grant already covers.
     let roots = reads.clone();
     reads.retain(|p| !roots.iter().any(|r| r != p && p.starts_with(r)));
-    // Outermost first, so each grant nests inside the one before it in bwrap's argv.
+    // Keep outer grants first for deterministic policy construction.
     reads.sort_by_key(|p| p.components().count());
     Some(PythonToolchain {
         executable: executable.to_string_lossy().into_owned(),

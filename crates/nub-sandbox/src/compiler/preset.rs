@@ -370,10 +370,8 @@ fn package_home_slug(package_dir: &Path) -> String {
 /// `compile_mount_plan` REFUSES a missing AUTHORED source, which would abort every
 /// confined script there.
 ///
-/// ORDER: outermost path first, so each later grant nests INSIDE the one before it in
-/// bwrap's argv. The project root heads the list as a NODE-only read ([`project_cwd_node`]),
-/// so bwrap binds it list-only instead of auto-creating writable scaffolding, and the
-/// `package.json` / `node_modules` grants nest inside it unchanged.
+/// ORDER: outermost path first. The project root heads the list as a NODE-only read
+/// ([`project_cwd_node`]); the `package.json` / `node_modules` grants follow it.
 ///
 /// Front-inserted so the surface's `package_dir` rw entry stays later and keeps winning.
 pub fn grant_build_jail_dependency_reads(
@@ -996,17 +994,10 @@ pub fn build_jail_net_allowed_for(
 /// what the package was seen fetching.
 ///
 /// PER-HOST EGRESS IS DELIBERATELY NOT ENFORCED HERE, AND `$downloads` IS DELIBERATELY NOT
-/// REFERENCED. Do not restore either as a missing feature. Two of the three backends cannot
-/// enforce a host list at all: Linux needs a network namespace to force the child through nub's
-/// proxy, which needs an unprivileged user namespace — denied by default on Ubuntu 24.04, and
-/// requiring it is the one thing this product cannot do; Windows' loopback exemption
-/// (`NetworkIsolationSetAppContainerConfig`) is admin-only. macOS alone COULD enforce it, via
-/// Seatbelt confining egress to the proxy port, and enforcing it there was withdrawn on purpose:
-/// macOS is the platform most developers use, so being stricter there means an incomplete host
-/// list throws errors that Linux and Windows users never see, and confidence in the list is low.
-/// A host list that gates one platform and is provenance on two is a compat liability, not a
-/// defense. `$downloads` still serves `nub sandbox`, a different mechanism where per-host DOES
-/// work — this jail simply no longer consults it.
+/// REFERENCED. This is a compatibility policy, not an engine limitation: the shared engine
+/// supports per-host egress on all three operating systems without privileged setup. The
+/// build jail grants coarse access so redirects and changing download hosts do not break
+/// admitted packages. Other sandbox profiles may use the engine's per-host rules.
 ///
 /// The catalog's per-package `hosts` arrays are retained for the same reason and enforce nothing
 /// either: a CHANGING host list is a detection signal, so a package that used to fetch from its

@@ -118,10 +118,6 @@ pub use compiler::{
 };
 pub use matcher::Homes;
 
-// `linux_admin` / `macos_admin` re-exported the dropped `linux_setup` / `macos_setup` host-setup
-// modules (the `nub setup-sandbox` surface for the privileged Linux helper tier; the macOS half
-// was a no-op readiness reporter). Removed with the curated zero-privilege import (epic row 0.3);
-// the zero-privilege enforcement tier defines its own readiness surface in a later phase.
 pub use policy::SandboxPolicy;
 pub use proxy::{Decision, EgressProxy, GrantDecider, Host, StaticDecider};
 
