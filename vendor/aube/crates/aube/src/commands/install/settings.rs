@@ -498,13 +498,6 @@ pub(crate) fn resolve_force_metadata_primer(ctx: &aube_settings::ResolveCtx<'_>)
     aube_settings::resolved::force_metadata_primer(ctx)
 }
 
-fn is_standalone_aube(embedder: &aube_util::Embedder) -> bool {
-    // `AUBE` is a `const`, so references to it are not guaranteed to have a
-    // single stable address. The command-safe program name is the canonical
-    // value-level distinction between standalone aube and another embedder.
-    embedder.name == aube_util::identity::AUBE.name
-}
-
 pub(crate) fn resolve_dependency_policy(
     manifest: &aube_manifest::PackageJson,
     ctx: &aube_settings::ResolveCtx<'_>,
@@ -524,11 +517,21 @@ pub(crate) fn resolve_dependency_policy(
     // and abort `--frozen-lockfile` under `enforce_package_extensions_checksum`.
     let mut extensions = parse_package_extensions(package_extensions)?;
     if !aube_settings::resolved::ignore_compatibility_db(ctx) {
-        if is_standalone_aube(aube_util::embedder()) {
-            // Catalog order is significant when semver selectors overlap: the
-            // first matching extension wins per dependency key.
-            extensions.extend(standalone_bundled_package_extensions());
-        }
+        // The vendored ecosystem catalogs apply to EVERY embedder, not only
+        // standalone aube. They are pnpm's own bundled data — Yarn's
+        // `packageExtensions` database plus pnpm's three additions — and pnpm
+        // merges it into every install unless `ignoreCompatibilityDb` is set. An
+        // embedder that skipped it resolves a strictly smaller dependency graph
+        // than the tool it mirrors, which is a compatibility difference users
+        // hit as a missing module rather than as a warning: `reactcss@1.2.3`
+        // requires `react` and declares it nowhere, so it installs and runs
+        // under pnpm (the catalog adds the peer, and `auto-install-peers`
+        // supplies it) and fails with `Cannot find module 'react'` without the
+        // catalog.
+        //
+        // Catalog order is significant when semver selectors overlap: the first
+        // matching extension wins per dependency key.
+        extensions.extend(standalone_bundled_package_extensions());
         if let Some(bundled) = aube_util::engine_context().bundled_package_extensions {
             // Bundled extensions are embedder-supplied data, not user config.
             // A malformed entry should warn and be skipped, not abort the install
@@ -1512,13 +1515,23 @@ mod bundled_compat_tests {
     use super::*;
 
     #[test]
-    fn standalone_detection_uses_embedder_value_not_const_address() {
-        assert!(is_standalone_aube(&aube_util::identity::AUBE));
-        let embedded = aube_util::Embedder {
-            name: "embedded-aube",
-            ..aube_util::identity::AUBE
-        };
-        assert!(!is_standalone_aube(&embedded));
+    fn the_catalog_carries_the_rule_an_embedder_gate_used_to_withhold() {
+        // Until this gate came off, the vendored catalogs applied only when the
+        // embedder was standalone aube, so every embedder resolved a smaller
+        // graph than pnpm for the same project. `reactcss` is the cheapest
+        // demonstration: it requires `react` and declares it nowhere, so without
+        // this rule the peer is never added, `auto-install-peers` has nothing to
+        // install, and the package fails at require time with `Cannot find
+        // module 'react'` — under a tool whose whole claim is pnpm parity.
+        let extensions = standalone_bundled_package_extensions();
+        let reactcss = extensions
+            .iter()
+            .find(|extension| extension.selector == "reactcss@*")
+            .expect("the bundled catalog must carry reactcss@*");
+        assert_eq!(
+            reactcss.peer_dependencies["react"], "*",
+            "reactcss must gain react as a peer for auto-install-peers to supply it"
+        );
     }
 
     #[test]

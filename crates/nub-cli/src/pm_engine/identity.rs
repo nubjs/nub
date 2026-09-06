@@ -353,14 +353,18 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
             "nub chooses its own output streams. Redirect the command's stdout or stderr \
              in your shell instead.",
         ),
-        // Parity no-ops in the engine ITSELF, not just under nub: accepted and
-        // wired to nothing. Both carry the standing note in settings.toml that
-        // the flag comes off once a caller starts gating on them.
+        // A parity no-op in the engine ITSELF, not just under nub: accepted and
+        // wired to nothing. It carries the standing note in settings.toml that
+        // the flag comes off once a caller starts gating on it.
+        //
+        // `ignoreCompatibilityDb` USED to sit here beside it, on the grounds that
+        // nub shipped no compatibility database. It ships one now — the same
+        // vendored Yarn + pnpm catalogs pnpm merges into every install — so the
+        // setting has a real reader and must stay settable. Leaving it listed
+        // would strip it from `meta::find`, make `config set` refuse it, and
+        // fall the accessor through to the default: a database applied to every
+        // install with no way to turn it off.
         ("useBetaCli", "nub has no beta-gated commands."),
-        (
-            "ignoreCompatibilityDb",
-            "nub ships no package-compatibility database, so there is nothing to disable.",
-        ),
         // `install::FrozenMode::default_for_env` asks `aube_util::env::is_ci()`,
         // which reads the `CI` ENVIRONMENT VARIABLE. No reader consults the
         // config key, so an `.npmrc` `ci=` line has never decided anything.
