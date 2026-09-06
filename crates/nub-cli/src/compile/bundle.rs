@@ -5818,9 +5818,11 @@ fn reject_unresolved(
         "\n\x20\x20A .node addon is a platform binary the bundler cannot inline, and packages\n\
          \x20\x20pick one at run time from a list of per-platform variants — so the specifier\n\
          \x20\x20above is not something you can make static in the package's own source.\n\
-         \x20\x20If the machine you ship to will have this package installed, --external\n\
-         \x20\x20<package> leaves it to be resolved there. A self-contained binary carrying\n\
-         \x20\x20its own copy of a native package is not supported yet."
+         \x20\x20--unbundled <package> ships a package's whole installed layout inside the\n\
+         \x20\x20binary, addon and all. nub does that on its own for a package its rules\n\
+         \x20\x20recognize, and the flag is how you name one they missed. --external\n\
+         \x20\x20<package> is the other answer: it leaves the package out of the binary, to\n\
+         \x20\x20be resolved on the machine you ship to."
     } else {
         ""
     };
@@ -5912,7 +5914,7 @@ fn reject_unresolved(
     // there: the package ships in its installed layout, so its own require() and
     // __dirname resolve against real files exactly as they did before compiling.
     //
-    // Withheld for a native addon, which has its own hint naming --external, and
+    // Withheld for a native addon, which has its own hint naming both flags, and
     // under the two whole-tree explanations whose fix comes first.
     let dependency_site_hint = if any_dependency_site && !any_native && !uninstalled && !pnp {
         "\n\n\x20\x20At least one site above is inside a dependency rather than your own source,\n\
@@ -10455,6 +10457,49 @@ const pkg = require("./package.json");
         assert!(
             !own_source.to_string().contains("--unbundled"),
             "the author's own site must not be sent to --unbundled: {own_source}"
+        );
+    }
+
+    /// An unresolved `.node` require is pointed at BOTH flags, and told nothing
+    /// false about what a compiled binary can carry.
+    ///
+    /// This text claimed for a long time that "a self-contained binary carrying
+    /// its own copy of a native package is not supported yet", which is not true
+    /// and never was: a package the unbundlable rules recognize is copied into the
+    /// binary in its own installed layout, addon and all — measured on `sharp`,
+    /// which ships a 7.2 MB island and runs with `node_modules` deleted. What the
+    /// message is really reporting is narrower, that the rules did not reach this
+    /// site, and `--unbundled` is exactly the flag for that case
+    /// ([`unbundlable::Reason::Forced`], whose own comment says no detector reaches
+    /// every package). Naming only `--external` sent someone with a shippable
+    /// payload to the one answer that requires the package to already be installed
+    /// on the machine they ship to.
+    #[test]
+    fn an_unresolved_native_addon_is_pointed_at_both_flags() {
+        let native = DynamicSite {
+            module: "/p/node_modules/some-native-pkg/index.js".into(),
+            kind: SiteKind::Indirect,
+            snippet: "require('./build/Release/binding.node')".into(),
+            ..dynamic_site()
+        };
+        let err = reject_unresolved(&[native], &[], &[], Path::new("/p"), false, false)
+            .expect_err("must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--unbundled") && msg.contains("--external"),
+            "both ways out must be named, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not supported yet"),
+            "a self-contained binary DOES carry native packages, so the message must not \
+             say otherwise: {msg}"
+        );
+        // The generic indirect-require advice is "depend on the package's ESM
+        // build", which for a per-platform `.node` names something that does not
+        // exist and lives in somebody else's package either way.
+        assert!(
+            !msg.contains("the package's ESM build"),
+            "the indirect-require hint must stay withheld for a native site: {msg}"
         );
     }
 
