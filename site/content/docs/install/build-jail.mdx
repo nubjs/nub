@@ -1,0 +1,94 @@
+---
+title: Build jail
+description: Permissions for dependency install scripts.
+unpublished: true
+---
+
+Nub runs approved dependency install scripts in a build jail. It is enabled by default on macOS, Linux, and Windows, with no setup command or administrator access.
+
+```sh
+nub install
+```
+
+## Build approval
+
+Approval decides which dependencies may run scripts. The build jail limits the access those scripts receive.
+
+```sh
+nub approve-builds
+```
+
+The command records approval and runs the approved scripts. To declare approval in the project's `package.json`:
+
+```json title="package.json"
+{
+  "allowScripts": {
+    "esbuild": true,
+    "sharp": true
+  }
+}
+```
+
+These entries approve scripts without disabling the build jail. See [lifecycle scripts](/docs/install#lifecycle-scripts) for approval rules and the default-trust floor.
+
+## Permissions
+
+Each script receives access to its package directory and the tools needed to build it. Nub's package catalog adds filesystem and network permissions for dependencies that need them.
+
+- Build scripts run on plain Node.
+- Credential variables such as `NPM_TOKEN` and `AWS_SECRET_ACCESS_KEY` are removed.
+- Scripts receive a build-specific home and temporary directory.
+- Root-project scripts, such as `prepare`, run with the project's ordinary permissions.
+
+The jail reduces exposure to malicious install scripts; it is not isolation for arbitrary untrusted code. On Windows, native-tool compatibility grants can remove filesystem and network isolation while retaining environment filtering and process cleanup.
+
+## Package exceptions
+
+To run one dependency without the jail, set its approval to `"no-jail"` in the root project's `package.json`:
+
+```json title="package.json"
+{
+  "allowScripts": {
+    "native-addon": "no-jail"
+  }
+}
+```
+
+The package's scripts run with ordinary user access. Nub prints a notice; other dependencies retain their permissions.
+
+For a local dependency, use its full specifier:
+
+```json title="package.json"
+{
+  "allowScripts": {
+    "native-addon@file:./native-addon": "no-jail"
+  }
+}
+```
+
+After changing an installed package's permissions, rerun its build scripts:
+
+```sh
+nub rebuild
+```
+
+## `install.buildJail`
+
+The project-wide switch belongs in `nub.jsonc`. It defaults to `true`.
+
+```json title="nub.jsonc"
+{
+  "install": {
+    "buildJail": false
+  }
+}
+```
+
+Setting it to `false` removes the jail from every dependency build in the project. It does not approve scripts that were otherwise blocked.
+
+User configuration supplies a default for all projects. Project configuration takes precedence.
+
+```sh
+nub config set install.buildJail false --global
+nub config delete install.buildJail --global
+```

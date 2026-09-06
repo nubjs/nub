@@ -45,7 +45,7 @@ jobs:
           node-version: 26
       - name: Preparing build tools
         run: |
-          npm ci --no-audit --no-fund
+          npm install --no-audit --no-fund --loglevel=error
           npm install --global node-gyp@12.4.0 --no-audit --no-fund
           mkdir -p reports
       - name: Building the application-test artifact

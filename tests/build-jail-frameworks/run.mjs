@@ -48,7 +48,7 @@ function launch(program, args, cwd, env, log) {
           const result = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { timeout: 10_000, encoding: 'utf8' });
           if (result.error || result.status !== 0) {
             child.kill('SIGKILL');
-            throw new Error(`process-tree cleanup failed: ${result.error?.message ?? result.stderr}`);
+            throw Object.assign(new Error(`process-tree cleanup failed: ${result.error?.message ?? result.stderr}`), { cleanupFailed: true });
           }
         }
       } else {
@@ -186,6 +186,7 @@ async function arm(fixture, confined) {
     result.stage = 'passed';
   } catch (error) {
     result.error = error.stack;
+    result.cleanupFailed = Boolean(error.cleanupFailed);
   } finally {
     for (const path of ['package.json', 'nub.jsonc', 'package-lock.json', 'pnpm-lock.yaml', 'bun.lock']) {
       if (existsSync(join(project, path))) copyFileSync(join(project, path), join(evidence, path));
@@ -200,11 +201,12 @@ const results = [];
 for (const fixture of fixtures) {
   console.log(`Starting ${fixture.name}`);
   const jailed = await arm(fixture, true);
-  const control = jailed.error || process.env.FRAMEWORK_CONTROLS === 'all' ? await arm(fixture, false) : null;
+  const control = !jailed.cleanupFailed && (jailed.error || process.env.FRAMEWORK_CONTROLS === 'all') ? await arm(fixture, false) : null;
   const outcome = verdict(jailed, control);
   results.push({ name: fixture.name, verdict: outcome, jailed, control });
   write(join(root, 'results.json'), results);
   console.log(`${results.length}/${fixtures.length} ${fixture.name}: ${outcome}${jailed.error ? ` (${jailed.stage})` : ''}`);
+  if (jailed.cleanupFailed || control?.cleanupFailed) break;
 }
 assert.equal(digest(binary), provenance.binarySha256, 'binary changed during the sweep');
 assert.equal(results.length, fixtures.length);
