@@ -282,9 +282,10 @@ pub fn apply(
 /// Build the [`super::SupervisedPlan`] a `confine_without_landlock` policy forks with. The net
 /// axis becomes an [`EgressPolicy`](super::linux_supervisor::EgressPolicy); the FS axis (allow-only)
 /// becomes a Landlock ruleset the child `restrict_self`s; the environment is the same `constructed`
-/// map `base_command` uses; argv0 is resolved to an absolute path for the bespoke `execve`. No
-/// seccomp deny-ceiling yet — the connect-notifier already denies io_uring; keyctl/xattr/metadata
-/// hardening for this path is a later 1.4 step.
+/// map `base_command` uses; argv0 is resolved to an absolute path for the bespoke `execve`. The
+/// socket-family seccomp ceiling (`build_seccomp`) is installed alongside the connect-notifier so
+/// non-IP families (AF_UNIX to host daemons, AF_VSOCK to the hypervisor, raw sockets) cannot
+/// bypass the per-host net policy the notifier enforces on AF_INET/AF_INET6.
 fn build_supervised_plan(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
@@ -401,7 +402,25 @@ fn build_supervised_plan(
         envp,
         cwd,
         ruleset,
-        seccomp_ceiling: None,
+        // The connect-notifier mediates only AF_INET/AF_INET6, so without a socket-family ceiling
+        // a confined child reaches host daemons over AF_UNIX (docker.sock, systemd), the
+        // hypervisor over AF_VSOCK, or a raw socket, bypassing the per-host net policy entirely.
+        // Install the SAME ceiling the Landlock build-jail path uses: it denies every non-IP
+        // family (lifting only AF_INET/AF_INET6 when the policy admits IP egress) and blocks all
+        // three io_uring entry points so a socket cannot be created off the filter. `deny_metadata`
+        // stays false here — `nub sandbox` runs user-chosen commands where a refused chown would
+        // surprise; the socket ceiling and the keyring deny are the egress-relevant halves.
+        seccomp_ceiling: build_seccomp(
+            net.enforce,
+            ip_egress_for(net),
+            protects_ambient_credentials(policy),
+            false,
+            false,
+        )
+        .map_err(|reason| Degradation {
+            lost: vec!["net".to_string()],
+            reason: Some(reason),
+        })?,
         setsid: true,
     })
 }
