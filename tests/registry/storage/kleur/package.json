@@ -1,0 +1,102 @@
+{
+  "name": "kleur",
+  "versions": {
+    "4.1.5": {
+      "name": "kleur",
+      "version": "4.1.5",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/lukeed/kleur.git"
+      },
+      "description": "The fastest Node.js library for formatting terminal text with ANSI colors~!",
+      "module": "index.mjs",
+      "types": "index.d.ts",
+      "main": "index.js",
+      "license": "MIT",
+      "exports": {
+        ".": {
+          "types": "./index.d.ts",
+          "import": "./index.mjs",
+          "require": "./index.js"
+        },
+        "./colors": {
+          "types": "./colors.d.ts",
+          "import": "./colors.mjs",
+          "require": "./colors.js"
+        }
+      },
+      "author": {
+        "name": "Luke Edwards",
+        "email": "luke.edwards05@gmail.com",
+        "url": "https://lukeed.com"
+      },
+      "scripts": {
+        "build": "node build",
+        "test": "uvu -r esm -i utils -i xyz"
+      },
+      "engines": {
+        "node": ">=6"
+      },
+      "keywords": [
+        "ansi",
+        "cli",
+        "color",
+        "colors",
+        "console",
+        "terminal"
+      ],
+      "devDependencies": {
+        "esm": "3.2.25",
+        "uvu": "0.3.3"
+      },
+      "gitHead": "fa3454483899ddab550d08c18c028e6db1aab0e5",
+      "bugs": {
+        "url": "https://github.com/lukeed/kleur/issues"
+      },
+      "homepage": "https://github.com/lukeed/kleur#readme",
+      "_id": "kleur@4.1.5",
+      "_nodeVersion": "18.3.0",
+      "_npmVersion": "8.11.0",
+      "dist": {
+        "integrity": "sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ==",
+        "shasum": "95106101795f7050c6c650f350c683febddb1780",
+        "tarball": "http://localhost:4874/kleur/-/kleur-4.1.5.tgz",
+        "fileCount": 9,
+        "unpackedSize": 20250,
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEQCIDPAZSN/0O920C++E5rrlzym6iGQU+IbdBC3o633vqFTAiAK0Bv3hVTtLI7OAkTMBCMp9gmLlzb744i/imOTn190rg=="
+          }
+        ],
+        "npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v4.10.10\r\nComment: https://openpgpjs.org\r\n\r\nwsFzBAEBCAAGBQJiuKpkACEJED1NWxICdlZqFiEECWMYAoorWMhJKdjhPU1b\r\nEgJ2Vmrj/g//e5m5iJ46HfrSfjCQ4XfSGH/LfB4/Yy1MpT9kzRvKwlHfmYQ6\r\nv+ojjMMH0asp77IQjgnarEd4w512K6C+y4Dy4nID6VsWKRqHEAvdAhIUOor1\r\nmkHk/K5SYc26AmQIq98mPfcY7MiIdWCYB8keDgUR/ZrnnZI3uezxD1FGHKC9\r\n9QBjCyudS+85zi/UK3Qk89p5Q99qI19Opz8+D+gxijvsUS5+6HdJkLfjACJb\r\nt+2JsAN37ZKn838bA4vkFZefIXp7Aggckn3czv9ImfviFzJM4h0nXkVrXG1p\r\nwAzsafbY8S/l6ZR6n3ydLCdrVgFczEUSVeBCNnpJsgnVe9Jwado3IFoF3nCf\r\nLCmrAF11eQy/H0G7dtf7N8UCnDQVz/EjvAZpqtS33AZ1DtBR1uxk3bZf8VAL\r\nZRrSgkvwCwo/WnYg5fsHLSKjU4CiQwdKXivquVaZL+PfEk6k0dfASDT6DSJ/\r\n7Tvx4dKjgdTK3GZjoraDjpGvvarSpXtApZXKJHKOXIS09JTeTr1xhMIm4hDP\r\n0PhQfHI80W3SrlqH1KfG2nGny1hBXQ7Z4uu/LnU0XQQNlsczMWsMoW6JHSua\r\njj4Ots4C0pSAeDKbB/ylfpOIbkmMixruPaeJjT1axB02YXvXMdUcN1IShM8b\r\nAo/EC66aITpTYKz+pCor0/39ZUzR9/v6YUI=\r\n=2FRA\r\n-----END PGP SIGNATURE-----\r\n"
+      },
+      "_npmUser": {
+        "name": "lukeed",
+        "email": "luke@lukeed.com"
+      },
+      "directories": {},
+      "maintainers": [
+        {
+          "name": "lukeed",
+          "email": "luke@lukeed.com"
+        }
+      ],
+      "_npmOperationalInternal": {
+        "host": "s3://npm-registry-packages",
+        "tmp": "tmp/kleur_4.1.5_1656269412367_0.9792781413391329"
+      },
+      "_hasShrinkwrap": false
+    }
+  },
+  "time": {
+    "created": "2018-07-08T19:42:17.649Z",
+    "modified": "2023-07-09T22:07:55.660Z",
+    "4.1.5": "2022-06-26T18:50:12.559Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "4.1.5"
+  }
+}

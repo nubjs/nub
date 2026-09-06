@@ -1,0 +1,76 @@
+{
+  "name": "@esbuild/linux-loong64",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/linux-loong64",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/linux-loong64@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "loong64"
+      ],
+      "dist": {
+        "shasum": "ed62e04238c57026aea831c5a130b73c0f9f26df",
+        "tarball": "http://localhost:4874/@esbuild/linux-loong64/-/@esbuild/linux-loong64-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-uHf1BmMG8qEvzdrzAqg2SIG/02+4/DHB6a9Kbya0XDvwDEKCoC8ZRWI5JJvNdUjtciBGFQ5PuBlpEOXQj+JQSg==",
+        "signatures": [
+          {
+            "sig": "MEYCIQD9GkkA+nY0pzhIXEFoGMphfjhsG5Fq07vNe6LsPvDT3QIhAIuacD9nN4anyJ+974yqow9FsEOYra4vu/mUmhCAj2qp",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 9503261
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The Linux LoongArch 64-bit binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/linux-loong64_0.21.5_1717967843013_0.8311157202018145",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-08-02T20:24:42.904Z",
+    "modified": "2026-08-08T19:58:21.300Z",
+    "0.21.5": "2024-06-09T21:17:23.246Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

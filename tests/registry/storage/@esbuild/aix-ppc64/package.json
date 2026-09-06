@@ -1,0 +1,76 @@
+{
+  "name": "@esbuild/aix-ppc64",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/aix-ppc64",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/aix-ppc64@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "aix"
+      ],
+      "cpu": [
+        "ppc64"
+      ],
+      "dist": {
+        "shasum": "c7184a326533fcdf1b8ee0733e21c713b975575f",
+        "tarball": "http://localhost:4874/@esbuild/aix-ppc64/-/@esbuild/aix-ppc64-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==",
+        "signatures": [
+          {
+            "sig": "MEYCIQDzLgtRka10t4//ku7JCTUKTFpUZp0lR4kf+0GmdeDO5gIhAOT39q4aIxSGnjN9tRx8BP/HJRprln3f+imudjvseKAo",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 10508177
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The IBM AIX PowerPC 64-bit binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/aix-ppc64_0.21.5_1717967852510_0.585908106507194",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2023-12-18T16:49:10.322Z",
+    "modified": "2026-08-08T19:58:21.314Z",
+    "0.21.5": "2024-06-09T21:17:32.742Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

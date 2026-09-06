@@ -25,7 +25,8 @@ use crate::local_source::{
 };
 use crate::locked_index::LockedIndex;
 use crate::package_ext::{
-    apply_package_extensions, apply_package_extensions_to_deps, pick_override_spec,
+    apply_package_extensions, apply_package_extensions_to_deps, package_selector_matches,
+    pick_override_spec,
 };
 use crate::semver_util::{
     AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
@@ -2802,6 +2803,26 @@ impl<'a> ResolveDriver<'a> {
         }
         let version = locked_pkg.version.clone();
         let dep_path = dep_path_for(&task.name, &version);
+
+        // When the lockfile's packageExtensions checksum drifted, an extension
+        // targeting this (name, version) can inject deps the locked entry
+        // doesn't carry. Reuse skips the packument fetch where extensions are
+        // applied (the apply_package_extensions call in the fresh-resolve
+        // path), so the injected dep would never be enqueued — a
+        // packageExtensions edit silently reports "Already up to date"
+        // without the new dep. Force a fresh fetch for extension-targeted
+        // packages only on drift; a fresh lockfile already reflects the
+        // extension, so reuse stays on the no-fetch path.
+        if self.resolver.dependency_policy.package_extensions_drifted
+            && self
+                .resolver
+                .dependency_policy
+                .package_extensions
+                .iter()
+                .any(|ext| package_selector_matches(&ext.selector, task.registry_name(), &version))
+        {
+            return false;
+        }
 
         if task.is_root
             && let Some(deps) = self.importers.get_mut(&task.importer)

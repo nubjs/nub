@@ -1,0 +1,76 @@
+{
+  "name": "@esbuild/linux-ia32",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/linux-ia32",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/linux-ia32@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "ia32"
+      ],
+      "dist": {
+        "shasum": "3271f53b3f93e3d093d518d1649d6d68d346ede2",
+        "tarball": "http://localhost:4874/@esbuild/linux-ia32/-/@esbuild/linux-ia32-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-YvjXDqLRqPDl2dvRODYmmhz4rPeVKYvppfGYKSNGdyZkA01046pLWyRKKI3ax8fbJoK5QbxblURkwK/MWY18Tg==",
+        "signatures": [
+          {
+            "sig": "MEUCIQDdMm2s6IG2JKo6EWeZtcdCSUVWcqR79eF/t1wPXMe7CQIgKZ+o/z7gPMvWCc5JasUd1v5XoBMjT+LnmuJAFIfIriw=",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 9249283
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The Linux 32-bit binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/linux-ia32_0.21.5_1717967834607_0.2687019633779184",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-12-05T23:47:50.533Z",
+    "modified": "2026-08-08T19:59:16.920Z",
+    "0.21.5": "2024-06-09T21:17:14.861Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

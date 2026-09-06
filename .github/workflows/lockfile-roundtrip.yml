@@ -28,9 +28,11 @@ name: Lockfile round-trip
 #             mutation differential, all PMs. The mutation leg is nightly-only
 #             (no per-PR gate) because it is heavier than a static round-trip.
 #
-# Real registry installs run, so these need network. Known-red scenarios live in
-# each harness's expected-failures.txt and must shrink (a stale entry fails the
-# run).
+# The per-PR tight set resolves from a pre-seeded offline Verdaccio registry
+# (tests/registry/) — zero registry.npmjs.org calls, fully hermetic. The nightly
+# full matrix (which includes git-dep + all conversion/mutation legs) still
+# needs network. Known-red scenarios live in each harness's expected-failures.txt
+# and must shrink (a stale entry fails the run).
 
 on:
   pull_request:
@@ -107,13 +109,41 @@ jobs:
           echo "bun:  $(bun --version)"
       - name: Build nub
         run: cargo build -p nub-cli
+      - name: Start offline Verdaccio test registry
+        # Start the pre-seeded offline registry so the tight set resolves every
+        # package from localhost with zero registry.npmjs.org calls. The storage
+        # dir is committed under tests/registry/storage/ with the full transitive
+        # graph of every tight-set fixture (seeded via tests/registry/seed.mts).
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tests/registry
+          npm ci
+          npm test
+          node_modules/.bin/verdaccio --config config.yaml --listen "0.0.0.0:4874" > /tmp/nub-verdaccio.log 2>&1 &
+          cd "$GITHUB_WORKSPACE"
+          for _ in $(seq 1 50); do
+            if curl --silent --fail http://localhost:4874/is-positive >/dev/null 2>&1; then break; fi
+            sleep 0.2
+          done
+          curl --silent --fail http://localhost:4874/is-positive >/dev/null
       - name: Drop-in round-trip (tight fixture set, no yarn)
         # The tight set: table-stakes (simple, scoped) + the feature fixtures
         # that exercise the bug-prone diverging fields. yarn is skipped here to
         # keep the PR gate fast; the nightly job runs it.
+        #
+        # git-dep is excluded from the per-PR tight set — it resolves from
+        # github.com (not the npm registry), so it can't be served by the offline
+        # Verdaccio registry. The nightly full-matrix job covers it.
+        #
+        # NUB_TEST_REGISTRY steers every PM (via .npmrc / bunfig.toml written by
+        # run.sh's configure_offline_registry) + nub itself to the offline
+        # Verdaccio, so the tight set is fully hermetic.
         env:
           SKIP_YARN: "1"
-        run: tests/conformance/run.sh target/debug/nub simple scoped peers overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped has-install-script injected-deps
+          NUB_TEST_REGISTRY: "http://localhost:4874"
+          NO_PROXY: "localhost,127.0.0.1"
+        run: tests/conformance/run.sh target/debug/nub simple scoped peers overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer platform-optional dist-tag-spec range-forms alias-scoped has-install-script injected-deps
 
   # ── Nightly: full conformance matrix + full conversion matrix ─────────────
   conformance-nightly:

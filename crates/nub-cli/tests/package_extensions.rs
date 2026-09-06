@@ -4,14 +4,12 @@
 //! dependency's manifest at resolve time — adding to its dependencies /
 //! optionalDependencies / peerDependencies / peerDependenciesMeta, add-only,
 //! never overriding a declared range — matching pnpm's `packageExtensions`.
-//! This proves two contracts end-to-end in one shared-store install loop: the
-//! field shapes the resolved graph, and EDITING it after an install invalidates
-//! freshness (the install shape digest folds `packageExtensions`, so the edit
-//! is not treated as cosmetic and the fast path re-resolves).
+//! The baseline test proves the field shapes the resolved graph end-to-end
+//! against the offline Verdaccio test registry.
 //!
-//! Network (`#[ignore]`, self-skips when the registry is unreachable), per the
-//! install-test convention — run via
-//! `cargo test -p nub-cli --test package_extensions -- --ignored`.
+//! Tests self-skip when `NUB_TEST_REGISTRY` is unset — run via
+//! `source tests/registry/start.bash` then
+//! `cargo test -p nub-cli --test package_extensions`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,17 +46,53 @@ fn registry_reachable() -> bool {
         })
 }
 
+/// The Verdaccio offline test registry URL (set by `tests/registry/start.bash`
+/// via the `NUB_TEST_REGISTRY` env var). When set, tests run against the
+/// pre-seeded offline registry instead of registry.npmjs.org.
+fn test_registry() -> Option<String> {
+    std::env::var("NUB_TEST_REGISTRY")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// Run `nub <args>` in `dir` against a CALLER-OWNED store/cache so the second
 /// install warm-hits the first's node_modules + freshness state. A fresh store
 /// per call would re-resolve unconditionally and mask the freshness contract.
+/// When `NUB_TEST_REGISTRY` is set, the install points at the offline Verdaccio
+/// registry (no network to npmjs.org).
 fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -> (String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", store)
         .env("XDG_CACHE_HOME", cache)
-        .output()
-        .expect("failed to spawn nub");
+        // CI=true (set by GitHub Actions) auto-defaults nub to Frozen mode,
+        // where a packageExtensions drift hard-fails with ERR_NUB_OUTDATED_LOCKFILE
+        // instead of re-resolving. This test asserts the re-resolve path, so
+        // force the default Fix mode regardless of the host CI env. is_ci()
+        // checks var presence, not value, so the var must be removed entirely.
+        .env_remove("CI");
+    if let Some(registry) = test_registry() {
+        // Merge the registry line into any existing .npmrc rather than
+        // overwriting it: a test may pre-write other settings that must
+        // survive alongside the registry redirect.
+        let npmrc = dir.join(".npmrc");
+        let existing = std::fs::read_to_string(&npmrc).unwrap_or_default();
+        if !existing
+            .lines()
+            .any(|l| l.trim_start().starts_with("registry="))
+        {
+            let prefix = if existing.is_empty() || existing.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            std::fs::write(&npmrc, format!("{existing}{prefix}registry={registry}\n")).unwrap();
+        }
+        cmd.env("NO_PROXY", "localhost,127.0.0.1")
+            .env("no_proxy", "localhost,127.0.0.1");
+    }
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stderr).to_string(),
         out.status.code().unwrap_or(-1),
@@ -77,22 +111,19 @@ fn store_has(dir: &Path, name: &str) -> bool {
         .any(|n| n.starts_with(&prefix))
 }
 
-/// A top-level `packageExtensions` entry injecting a dependency into a resolved
-/// package must shape the graph under Nub identity, and editing it after an
-/// install must invalidate the fast path so the injected dep lands.
+/// A nub-identity project installs a zero-dep dependency from the offline
+/// test registry and writes `nub.lock`. The graph holds the resolved package
+/// and nothing else (no extension has injected a transitive yet).
 #[test]
-#[ignore = "network: resolves is-positive@3.1.0 + the injected is-number@7.0.0 from the npm registry"]
-fn top_level_package_extensions_shapes_resolution_and_invalidates_freshness() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+fn top_level_install_shapes_graph_under_nub_identity() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("shape");
     let store = pm_tmpdir("store");
     let cache = pm_tmpdir("cache");
 
-    // Nub-identity project (no lockfile, no PM declaration): one zero-dep
-    // dependency, no packageExtensions yet.
     std::fs::write(
         dir.join("package.json"),
         r#"{"name":"pkgext","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
@@ -109,6 +140,28 @@ fn top_level_package_extensions_shapes_resolution_and_invalidates_freshness() {
         !store_has(&dir, "is-number"),
         "without the extension the graph must not contain is-number: {err1}"
     );
+}
+
+/// Adding a top-level `packageExtensions` entry that injects a dependency into
+/// a resolved package must invalidate the install fast path so the injected
+/// dep lands on re-install against the same store.
+#[test]
+fn package_extensions_edit_invalidates_freshness() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
+        return;
+    }
+    let dir = pm_tmpdir("ext");
+    let store = pm_tmpdir("store");
+    let cache = pm_tmpdir("cache");
+
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"pkgext","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
+    )
+    .unwrap();
+    let (err1, code1) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(code1, 0, "baseline install failed: {err1}");
 
     // Add a top-level packageExtensions entry injecting is-number into
     // is-positive. is-positive declares no deps, so the add-only merge adds it.

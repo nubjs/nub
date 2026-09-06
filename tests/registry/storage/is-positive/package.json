@@ -1,0 +1,77 @@
+{
+  "name": "is-positive",
+  "versions": {
+    "3.1.0": {
+      "name": "is-positive",
+      "version": "3.1.0",
+      "description": "Check if something is a positive number",
+      "license": "MIT",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/kevva/is-positive.git"
+      },
+      "author": {
+        "name": "Kevin Martensson",
+        "email": "kevinmartensson@gmail.com",
+        "url": "github.com/kevva"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "xo && ava"
+      },
+      "files": [
+        "index.js"
+      ],
+      "keywords": [
+        "number",
+        "positive",
+        "test",
+        "check"
+      ],
+      "devDependencies": {
+        "ava": "*",
+        "xo": "*"
+      },
+      "gitHead": "c9b30e71d704cd30fa71f2edd1ecc7dcc4985493",
+      "bugs": {
+        "url": "https://github.com/kevva/is-positive/issues"
+      },
+      "homepage": "https://github.com/kevva/is-positive#readme",
+      "_id": "is-positive@3.1.0",
+      "_shasum": "857db584a1ba5d1cb2980527fc3b6c435d37b0fd",
+      "_from": ".",
+      "_npmVersion": "3.3.10",
+      "_nodeVersion": "5.4.0",
+      "_npmUser": {
+        "name": "kevva",
+        "email": "kevinmartensson@gmail.com"
+      },
+      "dist": {
+        "shasum": "857db584a1ba5d1cb2980527fc3b6c435d37b0fd",
+        "tarball": "http://localhost:4874/is-positive/-/is-positive-3.1.0.tgz",
+        "integrity": "sha512-8ND1j3y9/HP94TOvGzr69/FgbkX2ruOldhLEsTWwcJVfo4oRjwemJmJxt7RJkKYH8tz7vYBP9JcKQY8CLuJ90Q==",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIHbjwraJQ1ltYq/oog0NS74HzUvFbm+/411fkI4kcgVZAiEA9uA5KhJpbUdq4rylXUC748INm8Y8aTgbNpjuf0PUOAg="
+          }
+        ]
+      },
+      "maintainers": [
+        {
+          "name": "kevva",
+          "email": "kevinmartensson@gmail.com"
+        }
+      ]
+    }
+  },
+  "time": {
+    "created": "2015-06-02T12:03:51.069Z",
+    "modified": "2022-06-19T02:48:25.175Z",
+    "3.1.0": "2016-01-11T14:34:31.892Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {}
+}

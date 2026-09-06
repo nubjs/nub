@@ -1218,7 +1218,44 @@ jobs:
       - name: Standalone loader package fixtures
         if: matrix.os == 'ubuntu-latest' && matrix.node == '22.15'
         run: tests/loader/run-matrix.sh
+      # Start the offline Verdaccio test registry (pre-seeded storage committed
+      # under tests/registry/storage/) so the converted integration tests run
+      # against it instead of self-skipping. Gated to the Linux node-24 leg:
+      # verdaccio 6.x requires node >=20, and the fixtures are OS-agnostic
+      # pure-JS packages, so one current-Node Linux leg is enough coverage.
+      # NUB_TEST_REGISTRY is NOT exported to GITHUB_ENV — the brand-boundary
+      # test (integration.rs) asserts no NUB_* env vars reach a child nub, so a
+      # global export would trip it. The var is set inline in the dedicated
+      # converted-tests step below, scoped to the 4 registry test files only.
+      - name: Start offline Verdaccio test registry
+        if: runner.os == 'Linux' && matrix.node == '24'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tests/registry
+          npm ci
+          npm test
+          node_modules/.bin/verdaccio --config config.yaml --listen "0.0.0.0:4874" > /tmp/nub-verdaccio.log 2>&1 &
+          cd "$GITHUB_WORKSPACE"
+          # Probe a seeded package, not the /-/verdaccio-1 health endpoint
+          # (which 404s under this config and wastes the whole readiness loop).
+          for _ in $(seq 1 50); do
+            if curl --silent --fail http://localhost:4874/is-positive >/dev/null 2>&1; then break; fi
+            sleep 0.2
+          done
+          curl --silent --fail http://localhost:4874/is-positive >/dev/null
       - run: cargo test
+      # Run the 4 Verdaccio-converted integration test files against the offline
+      # registry. NUB_TEST_REGISTRY + NO_PROXY are set inline (not via GITHUB_ENV)
+      # so they don't leak into the main `cargo test` above and trip the
+      # brand-boundary no-NUB_*-env assertion.
+      - name: Verdaccio integration tests
+        if: runner.os == 'Linux' && matrix.node == '24'
+        shell: bash
+        run: |
+          NUB_TEST_REGISTRY=http://localhost:4874 NO_PROXY=localhost,127.0.0.1 \
+            cargo test -p nub-cli --test package_extensions --test install_engine \
+                       --test info_engine --test pm_verbs
       # `compile` is not a default feature, so the bare `cargo test` above never
       # builds `src/compile/**` — including the bundler's emitted-chunk validity
       # gate, whose whole job is to stop `nub compile` reporting success on output

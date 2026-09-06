@@ -1,0 +1,133 @@
+{
+  "name": "@sindresorhus/is",
+  "versions": {
+    "7.2.0": {
+      "name": "@sindresorhus/is",
+      "version": "7.2.0",
+      "keywords": [
+        "type",
+        "types",
+        "is",
+        "check",
+        "checking",
+        "validate",
+        "validation",
+        "utility",
+        "util",
+        "typeof",
+        "instanceof",
+        "object",
+        "assert",
+        "assertion",
+        "test",
+        "kind",
+        "primitive",
+        "verify",
+        "compare",
+        "typescript",
+        "typeguards",
+        "types"
+      ],
+      "author": {
+        "url": "https://sindresorhus.com",
+        "name": "Sindre Sorhus",
+        "email": "sindresorhus@gmail.com"
+      },
+      "license": "MIT",
+      "_id": "@sindresorhus/is@7.2.0",
+      "maintainers": [
+        {
+          "name": "sindresorhus",
+          "email": "sindresorhus@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/sindresorhus/is#readme",
+      "bugs": {
+        "url": "https://github.com/sindresorhus/is/issues"
+      },
+      "ava": {
+        "extensions": {
+          "ts": "module"
+        },
+        "nodeArguments": [
+          "--import=tsimp/import"
+        ],
+        "environmentVariables": {
+          "TSIMP_DIAG": "error"
+        }
+      },
+      "dist": {
+        "shasum": "7c594e1a64336d2008d99d814056d459421504d4",
+        "tarball": "http://localhost:4874/@sindresorhus/is/-/@sindresorhus/is-7.2.0.tgz",
+        "fileCount": 9,
+        "integrity": "sha512-P1Cz1dWaFfR4IR+U13mqqiGsLFf1KbayybWwdd2vfctdV6hDpUkgCY0nKOLLTMSoRd/jJNjtbqzf13K8DCCXQw==",
+        "signatures": [
+          {
+            "sig": "MEYCIQCAlD66vR07UFLtWDVYWdX+YYoe9gw4J0U0qv0wYXC+QgIhANijV5cpWFmRQ2jI1kOq4q9LF4SWiDVuODu6UXh4OcpM",
+            "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+          }
+        ],
+        "unpackedSize": 106135
+      },
+      "type": "module",
+      "engines": {
+        "node": ">=18"
+      },
+      "exports": {
+        "types": "./distribution/index.d.ts",
+        "default": "./distribution/index.js"
+      },
+      "funding": "https://github.com/sindresorhus/is?sponsor=1",
+      "gitHead": "eff8e6b318d098317d5673b9d391f8e72cb15363",
+      "scripts": {
+        "test": "tsc --noEmit && xo && ava",
+        "build": "del distribution && tsc",
+        "prepare": "npm run build"
+      },
+      "_npmUser": {
+        "name": "sindresorhus",
+        "email": "sindresorhus@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/sindresorhus/is.git",
+        "type": "git"
+      },
+      "_npmVersion": "11.6.1",
+      "description": "Type check values",
+      "directories": {},
+      "sideEffects": false,
+      "_nodeVersion": "24.12.0",
+      "_hasShrinkwrap": false,
+      "devDependencies": {
+        "xo": "^0.58.0",
+        "ava": "^6.1.3",
+        "rxjs": "^7.8.1",
+        "jsdom": "^24.1.0",
+        "tempy": "^3.1.0",
+        "tsimp": "2.0.11",
+        "del-cli": "^5.1.0",
+        "typescript": "5.5.3",
+        "@types/node": "^20.14.10",
+        "expect-type": "^0.19.0",
+        "@types/jsdom": "^21.1.7",
+        "zen-observable": "^0.10.0",
+        "@types/zen-observable": "^0.8.7",
+        "@sindresorhus/tsconfig": "^6.0.0"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/is_7.2.0_1766832254637_0.7236881804537334",
+        "host": "s3://npm-registry-packages-npm-production"
+      }
+    }
+  },
+  "time": {
+    "created": "2017-09-21T17:54:29.643Z",
+    "modified": "2026-05-11T11:22:36.396Z",
+    "7.2.0": "2025-12-27T10:44:14.788Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "7.2.0"
+  }
+}

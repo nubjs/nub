@@ -1,0 +1,13 @@
+{
+  "name": "nub-test-registry",
+  "private": true,
+  "type": "module",
+  "description": "Scripts for the nub offline Verdaccio test registry — seeding, Socket malware safety checks, and re-scanning.",
+  "scripts": {
+    "test": "node --test *.test.mts"
+  },
+  "devDependencies": {
+    "@socketsecurity/sdk": "^4.1.4",
+    "verdaccio": "6.9.3"
+  }
+}

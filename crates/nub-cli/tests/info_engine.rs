@@ -34,16 +34,48 @@ fn pm_tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
+/// The Verdaccio offline test registry URL (set by `tests/registry/start.bash`
+/// via `NUB_TEST_REGISTRY`). When set, tests run against the pre-seeded
+/// offline registry instead of registry.npmjs.org.
+fn test_registry() -> Option<String> {
+    std::env::var("NUB_TEST_REGISTRY")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Point a `Command` at the offline Verdaccio registry when
+/// `NUB_TEST_REGISTRY` is set: writes a project `.npmrc` + bypasses any
+/// inherited HTTP_PROXY for localhost. No-op when the env var is unset.
+fn apply_test_registry(cmd: &mut Command, dir: &Path) {
+    if let Some(registry) = test_registry() {
+        let npmrc = dir.join(".npmrc");
+        let existing = std::fs::read_to_string(&npmrc).unwrap_or_default();
+        if !existing
+            .lines()
+            .any(|l| l.trim_start().starts_with("registry="))
+        {
+            let prefix = if existing.is_empty() || existing.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            std::fs::write(&npmrc, format!("{existing}{prefix}registry={registry}\n")).unwrap();
+        }
+        cmd.env("NO_PROXY", "localhost,127.0.0.1")
+            .env("no_proxy", "localhost,127.0.0.1");
+    }
+}
+
 /// Spawn `nub <args>` in `dir` with the engine store/cache isolated to fresh
 /// temp roots so tests never touch the dev box's real store.
 fn run_nub(dir: &Path, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", pm_tmpdir("xdg-data"))
-        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"))
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"));
+    apply_test_registry(&mut cmd, dir);
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -51,16 +83,10 @@ fn run_nub(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
-/// Offline guard for the `#[ignore]` network tests.
+/// Offline guard for the `#[ignore]` network tests: true when the offline
+/// Verdaccio test registry is available (`NUB_TEST_REGISTRY` set).
 fn registry_reachable() -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
-    "registry.npmjs.org:443"
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.next())
-        .is_some_and(|addr| {
-            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok()
-        })
+    test_registry().is_some()
 }
 
 /// The output brand boundary: no engine name on either stream, ever.
@@ -453,7 +479,6 @@ fn audit_fix_update_refuses_to_touch_yarn_lock() {
 /// manifest range reports drift and exits 1 (pnpm-compat). is-positive's
 /// latest has been 3.1.0 for years — stable fixture data.
 #[test]
-#[ignore = "network: fetches the is-positive packument from the npm registry"]
 fn outdated_reports_registry_drift_and_exits_one() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
