@@ -147,5 +147,11 @@ test('⛔ KNOWN-ANSWER CONTROL: the SHIPPED record parses and carries both reaso
   assert.ok(cov.size > 100, `shipped coverage record parsed to ${cov.size} rows — the parser is broken`);
   assert.ok(cov.has('node-pty'), 'node-pty is measured on all three platforms and must be covered');
   assert.ok(cov.has('@prisma/client'), '@prisma/client holds a v1 CuratedGrant and must be covered');
-  assert.ok(!cov.has('prisma'), 'prisma has never been measured — covering it would be a false all-clear');
+  assert.ok(cov.has('prisma'), 'prisma is measured on all three platforms since 852d073521');
+  // ⛔ THE NEGATIVE WITNESS IS SYNTHETIC ON PURPOSE. It used to be `prisma`, chosen because nothing
+  // had measured it — and then the sweep did, at 852d073521, which turned a control into a false
+  // failure that nobody saw until the file was next run. A name no record can ever contain proves
+  // the same thing (that `has` discriminates rather than answering true for everything) and cannot
+  // be invalidated by measuring more packages, which is the whole point of the record.
+  assert.ok(!cov.has('\u0000not-a-real-package'), 'an unmeasured package must not read as covered');
 });
