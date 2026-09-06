@@ -5,6 +5,7 @@ on:
     branches: [build-jail-productionization]
     paths:
       - tests/build-jail-frameworks/**
+      - tests/build-jail-corpus/**
       - .github/workflows/build-jail-frameworks.yml
       - crates/nub-sandbox/**
       - crates/nub-cli/src/pm_engine/**
@@ -71,4 +72,5 @@ jobs:
         with:
           name: build-jail-frameworks-${{ matrix.os }}
           path: reports
+          include-hidden-files: true
           retention-days: 14

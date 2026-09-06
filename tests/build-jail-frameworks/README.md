@@ -4,7 +4,7 @@ Application fixtures exercise dependency installation with the build jail enable
 
 ## Coverage
 
-The fixtures use exact direct dependency versions. Each run retains its generated lockfiles, installed versions, policy dumps, application-output hashes, and binary and harness hashes. Transitive versions resolve at install time; the retained lockfile records that run's graph.
+The fixtures use exact direct dependency versions. Each run retains its generated `nub.lock`, project configuration, installed versions, policy dumps, application-output hashes, and binary and harness hashes. Transitive versions resolve at install time; the retained lockfile records that run's graph. A frozen reinstall must preserve its hash.
 
 | Fixture | Application check |
 | --- | --- |
@@ -18,7 +18,7 @@ The fixtures use exact direct dependency versions. Each run retains its generate
 | SolidStart | Server rendering and Nitro production server |
 | Angular | Standalone component, signal, Angular compiler and production bundle |
 | Expo | React Native components and Metro web export |
-| Fastify, Hono, Nest | Bundled API server, live JSON response, Sharp image operation |
+| Express, Fastify, Hono, Nest | Bundled API server, live JSON response, Sharp image operation |
 
 The samples follow the upstream [Vite templates](https://github.com/vitejs/vite/tree/main/packages/create-vite), [React Router template](https://github.com/remix-run/react-router/tree/main/packages/create-react-router), and [SolidStart fixtures](https://github.com/solidjs/solid-start/tree/main/apps/fixtures), with application data and functional assertions added. Expo's React and React Native versions follow its SDK dependency map. These are maintained test applications, not unmodified generator output.
 

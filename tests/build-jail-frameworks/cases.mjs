@@ -105,10 +105,12 @@ export const cases = [
       'src/main.ts': `import {Component,signal} from '@angular/core'; import {bootstrapApplication} from '@angular/platform-browser'; @Component({selector:'app-root',standalone:true,template:'<h1>${marker}</h1><button (click)="count.set(count()+1)">Count {{count()}}</button>'}) class App{count=signal(0)} bootstrapApplication(App);`,
     },
   },
-  ...['fastify', 'hono', 'nest'].map(name => ({
-    name, dependencies: { esbuild: '0.28.2', sharp: '0.35.4', ...(name === 'fastify' ? { fastify: '5.12.3' } : name === 'hono' ? { hono: '4.13.7', '@hono/node-server': '2.1.1' } : { '@nestjs/core': '12.0.1', '@nestjs/common': '12.0.1', '@nestjs/platform-fastify': '12.0.1', 'reflect-metadata': '0.2.2', rxjs: '7.8.2' }) },
+  ...['express', 'fastify', 'hono', 'nest'].map(name => ({
+    name, dependencies: { esbuild: '0.28.2', sharp: '0.35.4', ...(name === 'express' ? { express: '5.2.1' } : name === 'fastify' ? { fastify: '5.12.3' } : name === 'hono' ? { hono: '4.13.7', '@hono/node-server': '2.1.1' } : { '@nestjs/core': '12.0.1', '@nestjs/common': '12.0.1', '@nestjs/platform-fastify': '12.0.1', 'reflect-metadata': '0.2.2', rxjs: '7.8.2' }) },
     build: 'esbuild server.mjs --platform=node --format=esm --packages=external --outfile=dist/server.mjs', start: 'node dist/server.mjs', output: 'dist', native: true,
-    files: { 'server.mjs': name === 'fastify'
+    files: { 'server.mjs': name === 'express'
+      ? `import express from 'express'; const app=express(); app.get('/',(_req,res)=>res.json({name:'${marker}'})); app.listen(Number(process.env.PORT),'127.0.0.1');`
+      : name === 'fastify'
       ? `import Fastify from 'fastify'; const app=Fastify(); app.get('/',()=>({name:'${marker}'})); await app.listen({port:Number(process.env.PORT),host:'127.0.0.1'});`
       : name === 'hono'
         ? `import {Hono} from 'hono'; import {serve} from '@hono/node-server'; const app=new Hono(); app.get('/',c=>c.json({name:'${marker}'})); serve({fetch:app.fetch,port:Number(process.env.PORT),hostname:'127.0.0.1'});`

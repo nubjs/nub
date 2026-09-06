@@ -24,7 +24,7 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
   mkdirSync(join(tool, 'bin'));
   writeFileSync(join(tool, 'bin', 'node-gyp.js'), '#!/usr/bin/env node\nconsole.log("private-node-gyp-ran");\n', { mode: 0o755 });
   const toolArchive = join(root, 'tool.tgz');
-  execFileSync('tar', ['-czf', toolArchive, '-C', join(root, 'tool'), 'package']);
+  execFileSync('tar', ['-czf', '../tool.tgz', 'package'], { cwd: join(root, 'tool') });
   const bytes = readFileSync(toolArchive);
   const requests = [];
   const server = createServer((req, res) => {
@@ -67,7 +67,7 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
       writeFileSync(join(nested, 'package.json'), JSON.stringify({name:'nested-probe', version:'0.0.0', scripts:{install:'node probe.cjs'}}));
       writeFileSync(join(nested, 'probe.cjs'), `require('fs').writeFileSync('proof.json', JSON.stringify({token:process.env.AWS_SECRET_ACCESS_KEY ?? null}));`);
       const archive = join(root, 'nested.tgz');
-      execFileSync('tar', ['-czf', archive, '-C', root, 'nested']);
+      execFileSync('tar', ['-czf', 'nested.tgz', 'nested'], { cwd: root });
       const nestedSource = `file:${archive.replaceAll('\\', '/')}`;
       nestedApproval = `nested-probe@${nestedSource}`;
       const manifest = JSON.parse(readFileSync(join(dep, 'package.json'), 'utf8'));
@@ -101,7 +101,7 @@ test(`${sourceKind} private registry bootstrap keeps credentials outside the jai
       source = `git+${pathToFileURL(dep).href}#${commit}`;
     } else {
       const archive = join(root, 'dep.tgz');
-      execFileSync('tar', ['-czf', archive, '-C', join(root, 'dependency'), 'package']);
+      execFileSync('tar', ['-czf', '../dep.tgz', 'package'], { cwd: join(root, 'dependency') });
       source = `file:${archive.replaceAll('\\', '/')}`;
     }
     writeFileSync(join(project, 'package.json'), JSON.stringify({ name: 'registry-consumer', private: true,

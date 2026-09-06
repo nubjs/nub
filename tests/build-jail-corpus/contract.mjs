@@ -71,7 +71,7 @@ for (const mode of ['confined', 'global-off', 'user-global-off', 'package-off', 
       if (process.platform === 'win32') require('child_process').spawn(process.execPath, ['-e', "require('fs').writeFileSync('descendant-options.json',JSON.stringify({length:(process.env.NODE_OPTIONS||'').length,preloads:['__nubJailRealpathShim','__nubJailStdioShim','__nubJailNetGate'].map(k=>Boolean(globalThis[k]))}))"], {stdio:'pipe'}).on('error', error => {throw error;});
     `);
     const archive = join(base, 'dep.tgz');
-    run('tar', ['-czf', archive, '-C', base, 'package']);
+    run('tar', ['-czf', 'dep.tgz', 'package'], { cwd: base });
     writeFileSync(join(project, 'package.json'), JSON.stringify({
       name: `consumer-${mode}`, private: true,
       dependencies: { [name]: `file:${archive.replaceAll('\\', '/')}` },

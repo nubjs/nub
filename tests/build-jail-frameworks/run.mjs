@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cases, marker } from './cases.mjs';
 import { verdict } from './verdict.mjs';
+import { retainInputs } from './evidence.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const binary = resolve(process.env.NUB_BIN);
@@ -21,6 +22,7 @@ const digest = path => createHash('sha256').update(readFileSync(path)).digest('h
 const provenance = { binary, binarySha256: digest(binary), node: process.execPath, nodeVersion: process.version,
   platform: process.platform, arch: process.arch, sourceRevision: process.env.SOURCE_REVISION ?? null,
   harnessSha256: digest(join(here, 'run.mjs')), casesSha256: digest(join(here, 'cases.mjs')), scorerSha256: digest(join(here, 'verdict.mjs')),
+  collectorSha256: digest(join(here, 'evidence.mjs')),
   linker: process.env.FRAMEWORK_LINKER ?? 'default',
   started: new Date().toISOString(), expected: fixtures.map(c => c.name) };
 writeFileSync(join(root, 'provenance.json'), JSON.stringify(provenance, null, 2));
@@ -106,7 +108,7 @@ async function arm(fixture, confined) {
   write(join(pkg, 'package.json'), { name, version: '1.0.0', scripts: { postinstall: 'node probe.cjs' } });
   write(join(pkg, 'probe.cjs'), `const fs=require('node:fs'); const out={ran:true,token:process.env.AWS_SECRET_ACCESS_KEY??null}; try{out.read=fs.readFileSync(${JSON.stringify(secret)},'utf8')}catch(e){out.read=e.code} try{fs.writeFileSync(${JSON.stringify(outside)},'outside');out.write=true}catch(e){out.write=e.code} fs.writeFileSync('proof.json',JSON.stringify(out));`);
   const archive = join(base, 'sentinel.tgz');
-  const packed = spawnSync('tar', ['-czf', archive, '-C', base, 'package'], { encoding: 'utf8' });
+  const packed = spawnSync('tar', ['-czf', 'sentinel.tgz', 'package'], { cwd: base, encoding: 'utf8' });
   assert.equal(packed.status, 0, packed.stderr);
   const specifier = `file:${archive.replaceAll('\\', '/')}`;
   const manifest = { name: `framework-${fixture.name}`, version: '1.0.0', private: true, type: 'module',
@@ -155,6 +157,7 @@ async function arm(fixture, confined) {
     if (existsSync(join(project, 'node_modules', '.modules.yaml'))) {
       result.layout = readFileSync(join(project, 'node_modules', '.modules.yaml'), 'utf8');
     }
+    result.lockfileSha256 = digest(join(project, 'nub.lock'));
     result.stage = 'build';
     await command(['run', '--node', 'build'], project, env, join(evidence, 'build.log'));
     const emitted = outputFiles(join(project, fixture.output));
@@ -183,14 +186,13 @@ async function arm(fixture, confined) {
     }
     result.stage = 'frozen';
     await command(['install', '--frozen-lockfile'], project, env, join(evidence, 'frozen.log'));
+    assert.equal(digest(join(project, 'nub.lock')), result.lockfileSha256, 'frozen install preserved the resolved graph');
     result.stage = 'passed';
   } catch (error) {
     result.error = error.stack;
     result.cleanupFailed = Boolean(error.cleanupFailed);
   } finally {
-    for (const path of ['package.json', 'nub.jsonc', 'package-lock.json', 'pnpm-lock.yaml', 'bun.lock']) {
-      if (existsSync(join(project, path))) copyFileSync(join(project, path), join(evidence, path));
-    }
+    result.retainedInputs = retainInputs(project, evidence);
     result.finished = new Date().toISOString();
     write(join(evidence, 'result.json'), result);
   }

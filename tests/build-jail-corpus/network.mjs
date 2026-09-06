@@ -31,7 +31,7 @@ for (const confined of [false, true]) {
       socket.setTimeout(10000, () => finish({timeout:true}));
     `);
     const archive = join(home, 'package.tgz');
-    const pack = spawnSync('tar', ['-czf', archive, '-C', home, 'package']);
+    const pack = spawnSync('tar', ['-czf', 'package.tgz', 'package'], { cwd: home });
     assert.equal(pack.status, 0);
     const source = `file:${archive.replaceAll('\\', '/')}`;
     writeFileSync(join(project, 'package.json'), JSON.stringify({ name:'network-consumer',private:true,

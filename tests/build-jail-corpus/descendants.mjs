@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 
@@ -32,7 +32,7 @@ for (const confined of [false, true]) {
         writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, version: '1.0.0', scripts: { install: 'node install.cjs' } }));
         writeFileSync(join(dir, 'install.cjs'), script);
         const archive = join(base, `${name}.tgz`);
-        execFileSync('tar', ['-czf', archive, '-C', dirname(dir), basename(dir)]);
+        execFileSync('tar', ['-czf', relative(dirname(dir), archive), basename(dir)], { cwd: dirname(dir) });
         const source = `file:${archive.replaceAll('\\', '/')}`;
         dependencies[name] = source;
         allowScripts[`${name}@${source}`] = true;

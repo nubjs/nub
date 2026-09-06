@@ -21,7 +21,7 @@ for (const firstConfined of [true, false]) {
       scripts: {postinstall: 'node build.cjs'}}));
     writeFileSync(join(pkg, 'build.cjs'), `require('fs').writeFileSync('built.json', JSON.stringify({token:process.env.AWS_SECRET_ACCESS_KEY ?? null, home:process.env.HOME}));`);
     const archive = join(base, 'dep.tgz');
-    const tar = spawnSync('tar', ['-czf', archive, '-C', base, 'package']);
+    const tar = spawnSync('tar', ['-czf', 'dep.tgz', 'package'], { cwd: base });
     assert.equal(tar.status, 0);
     const spec = `file:${archive.replaceAll('\\', '/')}`;
     writeFileSync(join(project, 'package.json'), JSON.stringify({name: 'cache-consumer', private: true,

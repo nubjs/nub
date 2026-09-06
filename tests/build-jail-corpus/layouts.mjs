@@ -20,7 +20,7 @@ for (const linker of linkers) {
         writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest));
         for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
         const archive = join(home, `${label}.tgz`);
-        execFileSync('tar', ['-czf', archive, '-C', home, label]);
+        execFileSync('tar', ['-czf', `${label}.tgz`, label], { cwd: home });
         return `file:${archive.replaceAll('\\', '/')}`;
       }
       const leaf = 'is-number';
