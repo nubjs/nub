@@ -541,6 +541,136 @@ try {
     }
 }
 
+/// A statically traced `new Worker(...)` runs inside the single-executable
+/// container, on both spellings that reach the constructor.
+///
+/// `Module.registerHooks` is per-thread, so a worker started on a payload URL
+/// cannot load it — the loader replaces `Worker` and starts such a worker on a
+/// generated bootstrap that reinstalls the hooks first. Two routes arrive there
+/// with different arguments and only one of them is the obvious one:
+/// `node:worker_threads` hands over the `ROOT` URL the chunk built, while the
+/// runtime's WHATWG `globalThis.Worker` converts that URL to a PATH before it
+/// delegates. A fix for one is not a fix for the other, so both are asserted.
+///
+/// The `a-worker` fixture in `tests/compile-augmentation` covers the augmentation
+/// half — that the worker's TypeScript was transpiled and its globals installed —
+/// across every platform CI builds. What it does not pin is the SHAPE, which is
+/// what makes this a separate case: the payload has to still be a
+/// single-executable for any of that to have exercised this container.
+#[cfg(feature = "compile")]
+#[test]
+fn a_single_executable_runs_a_worker_through_both_constructors() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.mjs");
+    let artifact = work.join(format!("worker-host{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    std::fs::write(
+        work.join("package.json"),
+        "{ \"name\": \"worker-host\", \"version\": \"1.0.0\", \"private\": true, \
+         \"type\": \"module\" }\n",
+    )
+    .expect("write the manifest");
+    // Answers with a value derived from `workerData`, so a worker that started but
+    // ran the WRONG module cannot satisfy the assertion by existing.
+    std::fs::write(
+        work.join("worker.mjs"),
+        r#"import { parentPort, workerData } from "node:worker_threads";
+parentPort.postMessage(`answer=${workerData + 22}`);
+"#,
+    )
+    .expect("write the worker");
+    std::fs::write(
+        &entry,
+        // The `new URL(...)` is written out at each constructor rather than hoisted
+        // into a variable: the compiler traces a worker root by the literal shape,
+        // and a hoisted target ships `worker.mjs` as a DATA asset instead — which
+        // leaves the graph unsealed and takes the whole payload back to the
+        // launcher, exactly as the premise check below then reports.
+        r#"import { Worker } from "node:worker_threads";
+
+const named = new Worker(new URL("./worker.mjs", import.meta.url), { workerData: 20 });
+named.on("error", (error) => {
+  console.log("NAMED-ERROR:", error.message);
+  process.exit(2);
+});
+named.on("message", (message) => {
+  console.log("NAMED:", message);
+  const global_ = new globalThis.Worker(new URL("./worker.mjs", import.meta.url), {
+    workerData: 20,
+  });
+  global_.onerror = (event) => {
+    console.log("GLOBAL-ERROR:", event.message);
+    process.exit(3);
+  };
+  global_.onmessage = (event) => {
+    console.log("GLOBAL:", event.data);
+    process.exit(0);
+  };
+});
+"#,
+    )
+    .expect("write entry");
+
+    let compiled = Command::new(nub_binary())
+        .args(["compile", "--target", &runtime.node_target, "--out"])
+        .arg(&artifact)
+        .arg(&entry)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    assert!(
+        compiled.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let summary = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    if !summary.contains("a single-executable application") {
+        // A target Node below the container's bands never gets one, whatever the
+        // payload looks like, and that is the host rather than the code. Anything
+        // else is the payload declining, which is this test's whole subject —
+        // failing there is what stops a silent revert of the decline from reading
+        // as a pass.
+        assert!(
+            !sea_container_is_available(&runtime.node_target),
+            "the payload declined the single-executable container, so the worker ran \
+             through the extracted tree and this case tested nothing. Compile \
+             summary:\n{summary}"
+        );
+        return;
+    }
+
+    let mut command = Command::new(&artifact);
+    command.current_dir(&work);
+    let ran =
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(20));
+    let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+    assert!(
+        ran.status.success(),
+        "the artifact exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        ran.status.code()
+    );
+    assert!(
+        stdout.contains("NAMED: answer=42"),
+        "the worker named through node:worker_threads did not answer\nstdout: {stdout}\n\
+         stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("GLOBAL: answer=42"),
+        "the worker named through the WHATWG global did not answer, so the path spelling \
+         the runtime polyfill produces is not reaching the payload\nstdout: {stdout}\n\
+         stderr: {stderr}"
+    );
+}
+
 #[cfg(feature = "compile")]
 #[test]
 fn compile_resolves_commonjs_requires_of_esm() {

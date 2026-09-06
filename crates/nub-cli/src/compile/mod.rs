@@ -290,6 +290,13 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         shim_plan.needed(),
         &layout.entry_prefix,
     )?;
+    // The payload names those wrappers land under, which is the only spelling a
+    // `new Worker(...)` inside the artifact can name. `assemble_app` applies the
+    // same `bundle_path`, so this reads the layout rather than predicting it.
+    let worker_entries: Vec<String> = worker_wrappers
+        .iter()
+        .map(|(name, _)| layout.bundle_path(name))
+        .collect();
     let mut entry_name = layout.bundle_path(&bundled.entry);
     let mut app_files = assemble_app(&bundled, &layout, &worker_wrappers, &target)?;
     if shim_plan.needed() {
@@ -612,6 +619,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let blob = sea::build_blob(&sea::Inputs {
             app_files: &app_files,
             entry: &manifest.entry,
+            workers: &worker_entries,
             app_sha: &manifest.app_sha256,
             node_license: &node.license,
             node_version: &node_version,

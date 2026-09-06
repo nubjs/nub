@@ -405,33 +405,62 @@ const ROOT_MANIFEST_NAME: &str = "package.json";
 pub fn payload(
     files: &[nub_core::compile::AppFile<Vec<u8>>],
     entry: &str,
+    workers: &[String],
     app_sha: &str,
     neutralize_localstorage: bool,
 ) -> Result<Payload> {
-    let mut main = None;
-    let mut assets = Vec::with_capacity(files.len());
+    let mut bootstrap = None;
+    let mut assets = Vec::with_capacity(files.len() + 1);
     for file in files {
         if file.name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
-            main = Some(file.bytes.clone());
+            bootstrap = Some(file.bytes.clone());
         } else if file.name != ROOT_MANIFEST_NAME {
             assets.push((file.name.clone(), file.bytes.clone()));
         }
     }
-    let Some(bootstrap) = main else {
+    let Some(bootstrap) = bootstrap else {
         bail!("the compiled payload carries no bootstrap, so it cannot become a single executable")
     };
+    let bootstrap =
+        std::str::from_utf8(&bootstrap).context("the compile bootstrap is not utf-8")?;
+    let bootstrap = neutralize_preload_arg(bootstrap)?;
+    // The bootstrap is the blob's main AND an asset. A worker realm has its own
+    // `process`, so it does not inherit the record this file publishes and has to
+    // run the file itself — which is what the generated worker wrapper's first
+    // import does. It is the NEUTRALIZED copy, never the original: `requireArg` is
+    // derived from `__filename`, which for a hook-served module is a payload URL
+    // and names nothing a child could preload.
+    //
+    // Kept unconditionally rather than only for a payload with a worker. It is
+    // ~8 KB beside an embedded Node, nothing else imports it, and re-running it on
+    // a thread that already has the record is a no-op by the bootstrap's own
+    // `validExisting` check.
+    assets.push((
+        nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+        bootstrap.as_bytes().to_vec(),
+    ));
     let names: Vec<String> = assets.iter().map(|(name, _)| name.clone()).collect();
     if !names.iter().any(|name| name == entry) {
         bail!("the compiled entry {entry:?} is not among the emitted chunks");
     }
+    if let Some(missing) = workers.iter().find(|name| !names.contains(name)) {
+        bail!("the compiled worker entry {missing:?} is not among the emitted chunks");
+    }
     Ok(Payload {
-        main: main_source(&bootstrap, entry, &names, app_sha, neutralize_localstorage)?,
+        main: main_source(
+            &bootstrap,
+            entry,
+            &names,
+            workers,
+            app_sha,
+            neutralize_localstorage,
+        )?,
         assets,
     })
 }
 
-/// The blob's `main`: the compile bootstrap with its preload argument neutralized,
-/// followed by the SEA loader.
+/// The blob's `main`: the already-neutralized compile bootstrap, followed by the
+/// SEA loader.
 ///
 /// Not wrapped in an IIFE the way the inline shape wraps the same pair. That
 /// wrapper exists because `-e` evaluates its script in a context where a top-level
@@ -442,15 +471,13 @@ pub fn payload(
 /// does under `--require` in the extracted shape. Same reason the inline shape's
 /// `EVAL_GLOBAL_CLEANUP` has no counterpart here: nothing was published to clean up.
 fn main_source(
-    bootstrap: &[u8],
+    bootstrap: &str,
     entry: &str,
     files: &[String],
+    workers: &[String],
     app_sha: &str,
     neutralize_localstorage: bool,
 ) -> Result<Vec<u8>> {
-    let bootstrap = std::str::from_utf8(bootstrap).context("the compile bootstrap is not utf-8")?;
-    let bootstrap = neutralize_preload_arg(bootstrap)?;
-
     let loader = bundle::compile_runtime_file("compile-sea-loader.cjs")?;
     let loader = String::from_utf8(loader).context("the compile SEA loader is not utf-8")?;
     // Payload names are validated against the target's path rules long before this,
@@ -466,6 +493,10 @@ fn main_source(
             &serde_json::to_string(files).expect("payload names serialize"),
         )
         .replace(
+            "__NUB_SEA_WORKERS__",
+            &serde_json::to_string(workers).expect("payload names serialize"),
+        )
+        .replace(
             "\"__NUB_SEA_COMPILE_CACHE__\"",
             &serde_json::to_string(&compile_cache_key(app_sha)).expect("a cache key serializes"),
         )
@@ -478,7 +509,7 @@ fn main_source(
             },
         );
 
-    let mut out = bootstrap.into_bytes();
+    let mut out = bootstrap.as_bytes().to_vec();
     out.push(b'\n');
     out.extend_from_slice(loader.as_bytes());
     Ok(out)
@@ -523,6 +554,11 @@ pub(super) const LICENSE_ASSET: &str = "__nub_node_license";
 pub struct Inputs<'a> {
     pub app_files: &'a [nub_core::compile::AppFile<Vec<u8>>],
     pub entry: &'a str,
+    /// The payload name of each generated worker wrapper. The loader replaces
+    /// `Worker` only for a payload that has one, and accepts only these names as a
+    /// worker target — reading `node:worker_threads` to install the replacement
+    /// costs 1.4 ms that a payload with no worker should not pay.
+    pub workers: &'a [String],
     pub app_sha: &'a str,
     pub node_license: &'a [u8],
     /// The EXACT Node this artifact embeds. Decides the blob's header layout and
@@ -537,6 +573,7 @@ pub fn build_blob(inputs: &Inputs<'_>) -> Result<Vec<u8>> {
     let payload = payload(
         inputs.app_files,
         inputs.entry,
+        inputs.workers,
         inputs.app_sha,
         nub_core::node::flags::should_inject_experimental_webstorage(
             inputs.node_version,
@@ -1025,15 +1062,21 @@ mod tests {
             file("package.json", b"{\"type\":\"module\"}"),
         ];
 
-        let split = payload(&files, "app.mjs", "0123456789abcdef0123", false).unwrap();
+        let split = payload(&files, "app.mjs", &[], "0123456789abcdef0123", false).unwrap();
         assert_eq!(
             split
                 .assets
                 .iter()
                 .map(|(n, _)| n.as_str())
                 .collect::<Vec<_>>(),
-            ["app.mjs"],
-            "the bootstrap is the main and package.json is dropped"
+            ["app.mjs", nub_core::compile::COMPILE_BOOTSTRAP_NAME],
+            "package.json is dropped, and the bootstrap is BOTH the main and an \
+             asset — a worker realm has to run it for itself"
+        );
+        assert_eq!(
+            std::str::from_utf8(&split.assets[1].1).unwrap(),
+            "const requireArg = undefined;\n",
+            "and the asset copy is the neutralized one, never the original"
         );
         let main = String::from_utf8(split.main).unwrap();
         assert!(main.contains("const requireArg = undefined;"));
@@ -1049,6 +1092,7 @@ mod tests {
         for placeholder in [
             "\"__NUB_SEA_ENTRY__\"",
             "__NUB_SEA_FILES__",
+            "__NUB_SEA_WORKERS__",
             "\"__NUB_SEA_COMPILE_CACHE__\"",
             "__NUB_SEA_NEUTRALIZE_LOCALSTORAGE__",
         ] {
@@ -1059,8 +1103,36 @@ mod tests {
         }
 
         assert!(
-            payload(&files, "missing.mjs", "0123456789abcdef0123", false).is_err(),
+            payload(&files, "missing.mjs", &[], "0123456789abcdef0123", false).is_err(),
             "an entry that is not among the chunks is a build failure"
+        );
+        // The loader accepts a `new Worker(...)` target ONLY from this list, so a
+        // name that never became an asset would silently hand the worker back to
+        // the constructor it was replaced for, as a path that cannot resolve.
+        assert!(
+            payload(
+                &files,
+                "app.mjs",
+                &["worker-a.mjs".to_string()],
+                "0123456789abcdef0123",
+                false
+            )
+            .is_err(),
+            "a worker entry that is not among the chunks is a build failure"
+        );
+        let with_worker = payload(
+            &files,
+            "app.mjs",
+            &["app.mjs".to_string()],
+            "0123456789abcdef0123",
+            false,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(with_worker.main)
+                .unwrap()
+                .contains("const WORKERS = [\"app.mjs\"];"),
+            "the loader is told which payload names a worker may name"
         );
     }
 
