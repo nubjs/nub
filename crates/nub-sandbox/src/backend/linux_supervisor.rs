@@ -1239,7 +1239,10 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
                 }
                 if fd_path(fd)
                     .map(|w| !write_allowed(&matcher, &w))
-                    .unwrap_or(false)
+                    // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
+                    // prove the open did not escape the allow-set through a final-component
+                    // symlink swap, so refuse the write rather than addfd an unverified fd.
+                    .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
                     err = libc::EPERM;
@@ -1279,7 +1282,10 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
                 }
                 if fd_path(fd)
                     .map(|w| !write_allowed(&matcher, &w))
-                    .unwrap_or(false)
+                    // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
+                    // prove the open did not escape the allow-set through a final-component
+                    // symlink swap, so refuse the write rather than addfd an unverified fd.
+                    .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
                     err = libc::EPERM;
@@ -1355,7 +1361,10 @@ fn handle_write_intent(nfd: RawFd, req: &SeccompNotif) {
                 }
                 if fd_path(fd)
                     .map(|w| !write_allowed(&matcher, &w))
-                    .unwrap_or(false)
+                    // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
+                    // prove the open did not escape the allow-set through a final-component
+                    // symlink swap, so refuse the write rather than addfd an unverified fd.
+                    .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
                     err = libc::EPERM;
