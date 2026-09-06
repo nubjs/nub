@@ -35,10 +35,16 @@
 // the whole scan stalls silently -- measured: a 44k run froze at 5,000 checked for 40+ minutes while
 // the registry answered an unrelated probe in 0.3s.
 //
+// ⛔ THE NAME IS NARROWER THAN THE SCRIPT. Nothing here knows where the gate sits: it scans whatever
+// ranking slice it is pointed at, so it is also the instrument for the band ABOVE the gate, and using
+// it for both is the point. When the two bands were measured by two different scripts they disagreed
+// with each other and with the population, which is the failure this file's own history records.
+//
 // Usage: node scan-below-gate.mjs --out <tsv> [--from-page 256] [--to-page 700] [--rank-cache <json>]
-//   Ranking comes from ecosyste.ms (a complete registry enumeration, not a relevance search);
-//   script presence comes from each package's own registry `latest` manifest. Pass --rank-cache to
-//   reuse a ranking between runs, which also pins the input so a re-run is comparable.
+//   Ranking comes from ecosyste.ms (a complete registry enumeration, not a relevance search); script
+//   presence comes from each package's abbreviated packument, judged by pickInstalledVersion. Pass
+//   --rank-cache to reuse a ranking between runs, which also pins the input so a re-run is comparable
+//   — and is how a band gets re-measured under a changed rule without re-paying the ranking sweep.
 
 import fs from 'node:fs';
 import { pickInstalledVersion } from './discover-install-scripts.mjs';
@@ -48,6 +54,10 @@ const arg = (n, d) => { const i = argv.indexOf(n); return i === -1 ? d : argv[i 
 const OUT = arg('--out');
 const FROM = +arg('--from-page', 256), TO = +arg('--to-page', 700), PER = 100, CONC = 4;
 const RANK_CACHE = arg('--rank-cache');
+// Exposed so the band can be re-measured under a different window without editing the rule. The
+// count turned out to be very sensitive to it -- above the gate, 244 carriers at 3 and 362 at 5 --
+// which is what a sensitivity sweep is for.
+const TOP_VERSIONS = arg('--top-versions') ? Number(arg('--top-versions')) : undefined;
 if (!OUT) { console.error('scan-below-gate: --out <tsv> is required'); process.exit(2); }
 
 // A scoped name is one path segment, so the `/` must be escaped but the `@` must not.
@@ -103,7 +113,7 @@ for (const [n, want] of CONTROL) {
   // than passing a control that asks an easier question than the scan does.
   const p = await get(`https://registry.npmjs.org/${enc(n)}`, CORGI);
   const d = await get(`https://api.npmjs.org/versions/${enc(n)}/last-week`);
-  const pick = p?.versions && d?.downloads ? pickInstalledVersion(p.versions, d.downloads) : null;
+  const pick = p?.versions && d?.downloads ? pickInstalledVersion(p.versions, d.downloads, TOP_VERSIONS) : null;
   const onLatest = !!p?.versions?.[p?.['dist-tags']?.latest]?.hasInstallScript;
   console.error(`  control ${n}: pick=${pick ?? 'none'} onLatest=${onLatest} (want carrier=${want})`);
   if (!!pick === want) ctlOk++;
@@ -140,7 +150,7 @@ const worker = async () => {
     const dl = await get(`https://api.npmjs.org/versions/${enc(s.name)}/last-week`);
     const downloads = dl && !dl.__404 ? (dl.downloads ?? null) : null;
     if (!downloads || !Object.keys(downloads).length) { unresolved++; continue; }
-    const pick = pickInstalledVersion(p.versions, downloads);
+    const pick = pickInstalledVersion(p.versions, downloads, TOP_VERSIONS);
     if (pick) {
       carriers++;
       const latest = p['dist-tags']?.latest;

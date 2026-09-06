@@ -54,7 +54,9 @@ Passing `--population` pins the package set; omitting it rediscovers one from th
 
 ## Coverage
 
-The population is **313 packages**, discovered from the registry and pinned to the version people actually install rather than to `latest`. It was 179 until 2026-09-06, and both halves of how it was built were wrong: the lookup judged every candidate by `latest`, and the candidate array it read had drifted. Measured against the band it is drawn from, that population held 107 of 244 install-script carriers. Regenerated, it holds 243 of them, and covers **98.5% of all install-script download weight** measured anywhere. Every rate below is over the current population.
+The population is **313 packages**, discovered from the registry and pinned to the version people actually install rather than to `latest`. It was 179 until 2026-09-06, and both halves of how it was built were wrong: the lookup judged every candidate by `latest`, and the candidate array it read had drifted.
+
+⛔⛔ **The coverage figure below is a function of the rule that measures it, and that rule is still moving.** A carrier is a package where some version people install runs an install script, so how many versions count as "people install" decides the answer — and the count is violently sensitive to it. Over the same 25,421 packages, looking at each package's top 3 releases by download finds 244 carriers; looking at the top 5 finds **362**. The population was built from the first number and so misses 77 of the second, holding 145.9M weekly between them: `ejs`, `husky`, `@prisma/client`, `@nestjs/core`, `electron`. Read every figure in this section as measured under a stated window, never as a property of the ecosystem.
 
 The adjudicated sweep files carry rows for three packages the current population no longer contains, and each left for a different reason worth keeping visible. `@whiskeysockets/baileys` was only ever discovered because the lookup judged it by a prerelease dist-tag; its stable release carries no install script. `netlify` and `union` left when versions became download-ranked: both carry an install script on `latest` and on almost nothing anyone installs - **484 of `union`'s 7.6M weekly downloads are on the release that runs one, against 99.2% on a release that does not**. All three rows record real measurements, so they stay; the packages are not swept again.
 
@@ -78,13 +80,14 @@ Two separate causes produced it, and only one was subtle. 56 of the 137 run thei
 
 Below the gate, over ranks ~25,500-70,000, the same version-aware scan finds 678 carriers holding 18.4M weekly, 103 of them visible only because it reads more than `latest`. 13 of those are in the population already, because its hand-curated half selects on "does this build native code" rather than on popularity, which leaves 665 uncovered. With the above-gate hole closed, that band is now essentially the whole remaining gap:
 
-| | packages | weekly | share of all install-script weight |
-| --- | ---: | ---: | ---: |
-| swept today | 313 | 1,210.9M | **98.53%** |
-| missed inside the claimed band | 1 | 0.2M | 0.01% |
-| missed below the gate | 665 | 17.9M | 1.46% |
+| | top-3 window | | top-5 window | |
+| --- | ---: | ---: | ---: | ---: |
+| | packages | share | packages | share |
+| swept today | 313 | 98.53% | 313 | **87.71%** |
+| missed above the gate | 1 | 0.01% | **77** | **10.57%** |
+| missed below the gate | 665 | 1.46% | 846 | 1.71% |
 
-The blind spot is **1.47%** of install-script download weight, against a bar whose margin is half a point - so it is now 2.9x that margin, where before the population was regenerated it was 49x. Nearly all of what is left is the second row, and the one above-gate package still outside is `@pulumi/azure-native`, whose first script-carrying release ranks 27th by downloads and holds 0.77% of them - below the inclusion floor under any window width, so it is excluded correctly rather than missed.
+**The right-hand column is the honest one, and the population has not caught up with it yet.** Widening the window from 3 to 5 does not change what the jail does; it changes what the harness can see, and it reveals 77 above-gate carriers the population was never told about. So the blind spot is **12.29%** rather than 1.47% - 24.6x the bar's half-point margin, not 2.9x. Regenerating the candidate list against the wider scan is what closes it, and the same question is open one level up: whether a window is the right instrument at all, or whether the 1% download floor should decide inclusion on its own, with no window and so no free parameter to pick.
 
 Measured below that gate on 2026-09-05, over ranks ~25,500 to ~70,000: 44,055 packages, 696 of them unresolved, and **678 of the rest carry an install script on a version people install, holding 18.4M weekly downloads** - about 2.0% of the weight this population covers (931M weekly, taken from the same source and the same monthly-to-weekly conversion, so the two sides of that ratio are comparable).
 
@@ -104,7 +107,7 @@ The population is not purely threshold-selected, and that matters for reading th
 
 The uncovered head is mostly native builders and prebuilt fetchers - `@vscode/windows-process-tree`, `@vscode/spdlog`, `iconv`, `lzma-native`, `couchbase`, `cld`, `webgpu`, `@ffmpeg-installer/linux-arm` - so the band is not a low-risk tail.
 
-**What the gap costs, measured against the bar the jail is actually held to.** Unmeasured weight is uncertainty in any measurement against the 99.5% userbase-weighted target, whose margin is half a point. The blind spot is now **1.47%**, or 2.9x that margin, and 665 below-gate carriers hold essentially all of it. Sweeping the top 200 by weight takes it to 0.58%, and it drops inside the margin at **233 packages** holding 11.9M weekly between them - roughly 0.7h on Linux, 0.9h on macOS and 1.4h on Windows of jailed-arm time. They are listed in [`uncovered-carriers.tsv`](uncovered-carriers.tsv), ordered by weight, so acting on this is a concatenation rather than another investigation. Before the population was regenerated the same calculation needed about 380 packages and still left the above-gate hole untouched, which is why fixing discovery came first.
+**What the gap costs, measured against the bar the jail is actually held to.** Unmeasured weight is uncertainty in any measurement against the 99.5% userbase-weighted target, whose margin is half a point. Under the top-5 window the blind spot is **12.29%**, and the above-gate row holds 10.57 of that against the below-gate row's 1.71 - so the priority is the same as it was before the first regeneration, and for the same reason: a package the population was never told about costs far more per row than one the gate deliberately excluded. The below-gate list, ordered by weight, is in [`uncovered-carriers.tsv`](uncovered-carriers.tsv), so acting on it is a concatenation rather than another investigation. What it takes to bring the residue inside the margin is not restated here, because that number moved by an order of magnitude when the window did and would only be restated wrongly again before the window is settled.
 
 **Going back further than rank 70,000 is measurably not worth it, and that was not obvious in advance.** The same scan run over ranks 70,000-150,000 finds *more* carriers, not fewer - 1,821 against 720, at a higher density of 2.31% - but they hold only 4.6M weekly between them against the nearer band's 19.9M. Both sides of that comparison are the latest-only read, which is the like-for-like pairing; the deep band has not been re-scanned version-aware, which is why the density gradient below stays withdrawn. Weight per carrier falls from about 27,600 to about 2,500. So the whole of that deeper band is worth 0.48 points of blind spot, roughly the bar's own margin, for 1,821 packages and something like 5.7h on Linux or 10.7h on Windows of jailed-arm time. The nearer band's top 380 buys three times as much for a fifth of the effort. Scanning deeper stays cheap and remains worth doing periodically; sweeping deeper does not pay.
 

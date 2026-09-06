@@ -1,9 +1,14 @@
-# ⛔ CLOSED 2026-09-06. This is the RECORD of a gap, not a list of work. Every package below except
-# `@pulumi/azure-native` is in the population now, and that one is excluded correctly rather than
-# missed: its first script-carrying release ranks 27th by downloads and holds 0.77% of them, under
-# the inclusion floor at any window width. The file is kept because the SHAPE of the hole is what
-# discover-install-scripts.mjs now guards against, and because the three-platform sweep of these
-# packages (uncovered-above-gate-sweep-*.tsv) is evidence about exactly this set.
+# ⛔ SUPERSEDED 2026-09-06, and the way it was superseded is the point. 136 of the 137 rows below are
+# in the population now; the exception, `@pulumi/azure-native`, is excluded correctly rather than
+# missed, its first script-carrying release ranking 27th by downloads at 0.77% of them. But this list
+# was built by looking at each package's top 3 releases, and looking at the top 5 over the same
+# 25,421 packages finds 362 carriers rather than 244 -- so closing these 137 did not close the band.
+# 77 carriers holding 145.9M weekly are still outside, `ejs`, `husky`, `@prisma/client`, `@nestjs/core`
+# and `electron` among them.
+#
+# The file is kept because the SHAPE of the hole is what discover-install-scripts.mjs now guards
+# against, and because the three-platform sweep of these packages (uncovered-above-gate-sweep-*.tsv)
+# is evidence about exactly this set.
 #
 # Install-script carriers ABOVE the population's download gate (ranks 1-25,500) that the sweep did
 # not cover. Measured 2026-09-05, ranking each package's versions by actual weekly downloads.
