@@ -44,6 +44,8 @@ node --test tests/build-jail-frameworks/harness.test.mjs
 node tests/build-jail-frameworks/run.mjs
 ```
 
+On Windows, place the architecture's vendored BusyBox executable beside `nub.exe` as `busybox.exe`, matching the shipped package. The workflow stages and verifies this sidecar; a bare Cargo binary cannot run project scripts without it.
+
 Positional arguments select fixtures. By default, a failed jailed arm gets a jail-off control; set `FRAMEWORK_CONTROLS=all` to run paired controls for every fixture.
 
 ```sh

@@ -9,6 +9,7 @@ on:
       - .github/workflows/build-jail-frameworks.yml
       - crates/nub-sandbox/**
       - crates/nub-cli/src/pm_engine/**
+      - vendor/busybox-w32/**
   workflow_dispatch:
 
 permissions:
@@ -38,6 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           shared-key: build-jail-frameworks
+          cache-on-failure: true
           workspaces: |
             .
             crates/nub-native
@@ -55,6 +57,9 @@ jobs:
           mkdir -p runtime/addons
           if [ "$RUNNER_OS" = Windows ]; then
             cp target/fast/nub_native.dll runtime/addons/nub-native.node
+            echo '07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075  vendor/busybox-w32/busybox64.exe' | sha256sum -c -
+            cp vendor/busybox-w32/busybox64.exe target/fast/busybox.exe
+            sha256sum target/fast/busybox.exe > reports/windows-shell.sha256
             echo "NUB_BIN=$GITHUB_WORKSPACE/target/fast/nub.exe" >> "$GITHUB_ENV"
           else
             cp target/fast/libnub_native.dylib runtime/addons/nub-native.node
