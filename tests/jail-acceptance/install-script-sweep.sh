@@ -140,8 +140,11 @@ PKGS="$(awk -F'\t' '$0 !~ /^[[:space:]]*(#|$)/ {print $1}' "$POPULATION" | tr '\
 POP_DELTA=""
 BASELINE_POP="$HERE/results/install-script-population.tsv"
 if [ -f "$BASELINE_POP" ]; then
-  _now="$(awk -F'\t' '{print $1}' "$POPULATION" | sort -u)"
-  _was="$(awk -F'\t' '{print $1}' "$BASELINE_POP" | sort -u)"
+  # Same comment-and-blank skip as the PKGS read above: a provenance header would otherwise show up
+  # as a package named `#` on one side of the comparison and be reported as drift.
+  _skip='$0 !~ /^[[:space:]]*(#|$)/ {print $1}'
+  _now="$(awk -F'\t' "$_skip" "$POPULATION" | sort -u)"
+  _was="$(awk -F'\t' "$_skip" "$BASELINE_POP" | sort -u)"
   _gone="$(comm -23 <(printf '%s\n' "$_was") <(printf '%s\n' "$_now") | tr '\n' ' ')"
   _new="$(comm -13 <(printf '%s\n' "$_was") <(printf '%s\n' "$_now") | tr '\n' ' ')"
   if [ -n "$(printf '%s' "$_gone$_new" | tr -d ' ')" ]; then

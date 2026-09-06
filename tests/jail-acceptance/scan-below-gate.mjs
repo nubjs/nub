@@ -7,8 +7,8 @@
 // package below it. This script is the instrument that looks below, so that limitation has a
 // measured size instead of being an unknown.
 //
-// Measured 2026-09-05 over ranks ~25,500-70,000: 720 carriers holding 19.9M weekly downloads, about
-// 3.5% of the weight the population covers. Two independent runs agreed on every count.
+// Measured 2026-09-05 over ranks ~25,500-70,000: 678 carriers holding 18.4M weekly downloads, about
+// 2.0% of the weight the population covers.
 //
 // ⛔ THE CONTROL IS NOT OPTIONAL. A registry sweep of this size fails by UNDER-REPORTING -- a
 // throttled or timed-out lookup looks exactly like "this package has no install script", so a broken
@@ -17,15 +17,19 @@
 // packages known to carry install scripts are all detected, and it counts unresolved lookups
 // separately rather than folding them into "no script".
 //
-// ⛔⛔ THE COUNT THIS PRODUCES IS A FLOOR, NOT A TOTAL, AND THE REASON IS STRUCTURAL. It reads each
-// package's `latest` manifest only, so a package whose current release dropped its install script is
-// counted as a non-carrier even while an older, still heavily used version runs one. `sharp` is the
-// worked example the census header uses and it still holds: latest carries no install script at all,
-// while 0.34.5 runs `install`. scripts/npm-install-script-census.ts avoids this by classifying up to
-// `--top-versions` releases per package. Doing the same here would multiply the request count by
-// that factor, which is why this stays latest-only -- but it means the honest reading of any number
-// below is "at least this many", and a package's ABSENCE from the output is not evidence it never
-// runs an install script.
+// ⛔⛔ IT JUDGES A PACKAGE BY THE VERSION PEOPLE INSTALL, NOT BY `latest`. Downloads pile up on the
+// TERMINAL release of each major line, because that is where lockfiles pin, so a package whose current
+// release dropped its install script can still run one for most of its users. This scan used to read
+// `latest` only and reported 720 carriers over this band; the version-aware rule reports 678. The
+// totals hide how far apart the two answers are: only 575 packages are in both. 103 run a script ONLY
+// on a non-latest version and were invisible before, and 145 that the latest-only run counted carry it
+// on a release almost nobody installs. So the old number was not merely low -- a fifth of it was
+// wrong in each direction. The rule itself is pickInstalledVersion in discover-install-scripts.mjs,
+// shared so both bands are measured by one instrument rather than two that disagree.
+//
+// ⛔ THE COUNT IS STILL A FLOOR. Unresolved lookups are counted separately rather than folded into
+// "no script", and 696 of 44,055 did not resolve on the recorded run, so a package's ABSENCE from the
+// output is not evidence it never runs an install script.
 //
 // ⛔ EVERY fetch carries a hard timeout. Without one a single hung socket parks a worker forever and
 // the whole scan stalls silently -- measured: a 44k run froze at 5,000 checked for 40+ minutes while
@@ -37,6 +41,7 @@
 //   reuse a ranking between runs, which also pins the input so a re-run is comparable.
 
 import fs from 'node:fs';
+import { pickInstalledVersion } from './discover-install-scripts.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(n); return i === -1 ? d : argv[i + 1]; };
@@ -45,14 +50,23 @@ const FROM = +arg('--from-page', 256), TO = +arg('--to-page', 700), PER = 100, C
 const RANK_CACHE = arg('--rank-cache');
 if (!OUT) { console.error('scan-below-gate: --out <tsv> is required'); process.exit(2); }
 
-const RUN_KEYS = ['preinstall', 'install', 'postinstall'];
-const hooks = (s) => !!s && RUN_KEYS.some((k) => typeof s[k] === 'string' && s[k].trim());
+// A scoped name is one path segment, so the `/` must be escaped but the `@` must not.
+const enc = (n) => encodeURIComponent(n).replace('%40', '@');
+const CORGI = 'application/vnd.npm.install-v1+json';
 
-const get = async (u) => {
+const get = async (u, accept) => {
   for (let a = 0; a < 4; a++) {
     try {
-      const r = await fetch(u, { signal: AbortSignal.timeout(12000) });
+      const r = await fetch(u, { headers: accept ? { accept } : undefined, signal: AbortSignal.timeout(12000) });
       if (r.status === 404) return { __404: true };
+      // A 429 body can be valid JSON, so status has to be checked BEFORE parsing — otherwise the
+      // throttle response is parsed as a manifest, `versions` is absent, and the package is silently
+      // counted as unresolved-or-clean depending on which field the caller reads first.
+      if (r.status === 429) {
+        const wait = Math.min(30000, (Number(r.headers.get('retry-after')) || 5) * 1000);
+        await new Promise((s) => setTimeout(s, wait));
+        continue;
+      }
       const t = await r.text();
       // An HTML body is a throttle or an error page, never a manifest. Back off; do not parse.
       if (t.trim().startsWith('<')) { await new Promise((s) => setTimeout(s, 400 * (a + 1))); continue; }
@@ -78,13 +92,27 @@ if (RANK_CACHE && fs.existsSync(RANK_CACHE)) {
   console.error(`ranking done: ${pkgs.length}`);
 }
 
-const CONTROL = ['esbuild', 'core-js', 'bufferutil', 'cpu-features', 'nodejieba'];
+// ⛔ THE CONTROL DOES TWO JOBS, AND THE SECOND IS THE NEW ONE. Four names prove the scan is not
+// throttled into silence. `sharp` proves it is VERSION-AWARE: it carries no install script on its
+// current release and one on 0.34.5, so a latest-only scan scores it a clean negative. If the sharp
+// row does not come back true, this instrument has silently reverted to the method it replaced.
+const CONTROL = [['esbuild', true], ['core-js', true], ['bufferutil', true], ['nodejieba', true], ['sharp', true]];
 let ctlOk = 0;
-for (const n of CONTROL) {
-  const d = await get(`https://registry.npmjs.org/${encodeURIComponent(n)}/latest`);
-  const hit = !!(d && hooks(d.scripts));
-  console.error(`  control ${n}: ${hit}`);
-  if (hit) ctlOk++;
+for (const [n, want] of CONTROL) {
+  // Exercise the SAME path the worker takes, so a revert to a latest-only read fails here rather
+  // than passing a control that asks an easier question than the scan does.
+  const p = await get(`https://registry.npmjs.org/${enc(n)}`, CORGI);
+  const d = await get(`https://api.npmjs.org/versions/${enc(n)}/last-week`);
+  const pick = p?.versions && d?.downloads ? pickInstalledVersion(p.versions, d.downloads) : null;
+  const onLatest = !!p?.versions?.[p?.['dist-tags']?.latest]?.hasInstallScript;
+  console.error(`  control ${n}: pick=${pick ?? 'none'} onLatest=${onLatest} (want carrier=${want})`);
+  if (!!pick === want) ctlOk++;
+  if (n === 'sharp' && onLatest) {
+    // The premise of the sharp control has changed rather than the scan being wrong. Say so instead
+    // of reporting a pass that no longer discriminates between the two methods.
+    console.error('  ⛔ sharp now carries an install script on `latest`, so it no longer proves version-awareness — pick a new witness');
+    process.exit(4);
+  }
 }
 if (ctlOk !== CONTROL.length) {
   console.error(`control ${ctlOk}/${CONTROL.length} — the scan would under-report; refusing to produce a result`);
@@ -92,16 +120,34 @@ if (ctlOk !== CONTROL.length) {
 }
 
 const out = fs.createWriteStream(OUT);
-let checked = 0, carriers = 0, unresolved = 0, gone = 0, i = 0;
+let checked = 0, carriers = 0, unresolved = 0, gone = 0, latestBlind = 0, i = 0;
 const worker = async () => {
   while (i < pkgs.length) {
     const s = pkgs[i++];
-    const d = await get(`https://registry.npmjs.org/${encodeURIComponent(s.name).replace('%40', '@')}/latest`);
-    if (d && d.__404) { gone++; continue; }
+    // The abbreviated packument carries `hasInstallScript` per version, so a package that has never
+    // carried a script settles in ONE request. Only the rest pay for the per-version download call,
+    // which is what keeps a version-aware scan of 44,000 packages the same order of cost as a
+    // latest-only one.
+    const p = await get(`https://registry.npmjs.org/${enc(s.name)}`, CORGI);
+    if (p && p.__404) { gone++; continue; }
     // Counted separately, never as "no script" — that conflation is how a throttled run reads clean.
-    if (!d || !d.version) { unresolved++; continue; }
+    if (!p || !p.versions) { unresolved++; continue; }
     checked++;
-    if (hooks(d.scripts)) { carriers++; out.write(`${s.name}\t${Math.round(s.monthly / 4.33)}\n`); }
+    if (!Object.values(p.versions).some((e) => e.hasInstallScript)) {
+      await new Promise((r) => setTimeout(r, 50));
+      continue;
+    }
+    const dl = await get(`https://api.npmjs.org/versions/${enc(s.name)}/last-week`);
+    const downloads = dl && !dl.__404 ? (dl.downloads ?? null) : null;
+    if (!downloads || !Object.keys(downloads).length) { unresolved++; continue; }
+    const pick = pickInstalledVersion(p.versions, downloads);
+    if (pick) {
+      carriers++;
+      const latest = p['dist-tags']?.latest;
+      const onLatest = !!(latest && p.versions[latest]?.hasInstallScript);
+      if (!onLatest) latestBlind++;
+      out.write(`${s.name}\t${Math.round(s.monthly / 4.33)}\t${onLatest ? 'latest' : 'older-version-only'}\n`);
+    }
     if (checked % 10000 === 0) console.error(`  checked ${checked}, carriers ${carriers}, unresolved ${unresolved}`);
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -109,3 +155,4 @@ const worker = async () => {
 await Promise.all(Array.from({ length: CONC }, worker));
 out.end();
 console.log(`checked ${checked} | unresolved ${unresolved} | 404 ${gone} | carriers ${carriers} -> ${OUT}`);
+console.log(`of those, ${latestBlind} run a script only on a non-latest version, so a latest-only scan misses them`);

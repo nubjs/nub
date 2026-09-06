@@ -3,7 +3,7 @@
 // measures, reported as nothing rather than as a hole.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { highestStable } from './discover-install-scripts.mjs';
+import { highestStable, pickInstalledVersion } from './discover-install-scripts.mjs';
 
 test('⛔ versions are ordered NUMERICALLY, so 10.0.0 beats 9.9.9', () => {
   // A lexical comparator answers `9.9.9` here and looks right on every single-digit fixture. It
@@ -30,4 +30,38 @@ test('a package with no stable release yields null rather than a prerelease', ()
 test('a malformed version key is skipped, not parsed as NaN and preferred', () => {
   assert.equal(highestStable(['not-a-version', '1.2.3']), '1.2.3');
   assert.equal(highestStable(['1.2', '1.2.3']), '1.2.3', 'a two-part key is not a semver version');
+});
+
+// Shorthand: a corgi packument's `versions` map, carrying only the field this rule reads.
+const vs = (spec) => Object.fromEntries(Object.entries(spec).map(([v, has]) => [v, { hasInstallScript: has }]));
+
+test('⛔⛔ the version people install wins, not `latest` — the defect this rule exists to fix', () => {
+  // sharp, as measured 2026-09-05: no install script on its current release, one on 0.34.5, which
+  // carries 30.7M weekly downloads. A latest-only read scored it a clean negative.
+  const versions = vs({ '0.35.4': false, '0.34.5': true, '0.33.5': true });
+  const downloads = { '0.35.4': 5_000_000, '0.34.5': 30_700_000, '0.33.5': 7_800_000 };
+  assert.equal(pickInstalledVersion(versions, downloads), '0.34.5');
+});
+
+test('⛔⛔ absent download data never ranks — it would take the OLDEST versions and invent a carrier', () => {
+  // With an empty map the comparator returns 0 for every pair, so the sort is a no-op and the top N
+  // is packument order, i.e. the oldest releases. Measured on bare-fs: 1.5.3-1.5.5 all carry install
+  // scripts while its real top three carry none. Returning null hands the caller the fallback path.
+  const versions = vs({ '1.5.3': true, '1.5.4': true, '4.8.1': false, '4.7.1': false });
+  assert.equal(pickInstalledVersion(versions, {}), null);
+  assert.equal(pickInstalledVersion(versions, { '1.5.3': 0, '4.8.1': 0 }), null);
+});
+
+test('⛔ a version nobody installs cannot qualify a package, however it ranks', () => {
+  // `environment` has few enough versions that top-3 reaches 0.0.1, which holds 14 weekly downloads
+  // against 36M on its current release. Rank alone would score it a carrier.
+  const versions = vs({ '1.1.0': false, '1.0.0': false, '0.0.1': true });
+  assert.equal(pickInstalledVersion(versions, { '1.1.0': 36_000_000, '1.0.0': 1_000, '0.0.1': 14 }), null);
+});
+
+test('a carrier outside the top N is not the population\'s problem to solve', () => {
+  const versions = vs({ '3.0.0': false, '2.0.0': false, '1.0.0': false, '0.1.0': true });
+  const downloads = { '3.0.0': 900, '2.0.0': 80, '1.0.0': 15, '0.1.0': 5 };
+  assert.equal(pickInstalledVersion(versions, downloads), null);
+  assert.equal(pickInstalledVersion(versions, downloads, 4), null, 'still below the 1% floor at N=4');
 });
