@@ -322,7 +322,11 @@ fn bundle_inner(
         // ONLY for `(Node, Cjs)` and leaves verbatim everywhere else — and under a
         // CJS format Rolldown already declares both globals, so the plugin is
         // redundant there and should simply be skipped.
-        format: Some(OutputFormat::Esm),
+        format: Some(if compile_emits_cjs() {
+            OutputFormat::Cjs
+        } else {
+            OutputFormat::Esm
+        }),
         platform: Some(Platform::Node),
         // An authored ESM module has no `require` binding. Rolldown's Node ESM
         // default installs `createRequire(import.meta.url)` for every unbound
@@ -343,8 +347,24 @@ fn bundle_inner(
         // Compiled chunks always execute as ESM, regardless of the source
         // package's `type` field. Keeping that fact in their extension lets Node
         // load extracted artifacts without a synthetic package boundary.
-        entry_filenames: Some("[name].mjs".to_string().into()),
-        chunk_filenames: Some("[name]-[hash].mjs".to_string().into()),
+        entry_filenames: Some(
+            if compile_emits_cjs() {
+                "[name].cjs"
+            } else {
+                "[name].mjs"
+            }
+            .to_string()
+            .into(),
+        ),
+        chunk_filenames: Some(
+            if compile_emits_cjs() {
+                "[name]-[hash].cjs"
+            } else {
+                "[name]-[hash].mjs"
+            }
+            .to_string()
+            .into(),
+        ),
         minify: Some(minify_options(opts)),
         // The ONLY keep-names switch we touch. Rolldown threads this single flag
         // into both the finalizer's `__name` helper and the minifier's
@@ -1622,7 +1642,22 @@ fn is_node_commonjs_module(module: &rolldown_common::ModuleInfo) -> bool {
 /// first statement, and reaching a property means calling into the loader
 /// earlier than the loader's own chunk starts.
 fn compile_commonjs_require_intro() -> String {
+    let intro = compile_commonjs_require_intro_esm();
+    if compile_emits_cjs() {
+        // `import.meta` is a syntax error in a CommonJS chunk. Rolldown polyfills
+        // it for (Node, Cjs) in USER code, but this intro is spliced in verbatim
+        // and never passes through that transform.
+        return intro.replace("import.meta.url", "__filename");
+    }
+    intro
+}
+
+fn compile_commonjs_require_intro_esm() -> String {
     let loader = COMPILE_COMMONJS_LOADER;
+    // `import.meta` is a syntax error in a CommonJS chunk. Rolldown polyfills it
+    // for (Node, Cjs) in USER code, but this intro is spliced in verbatim and
+    // never passes through that transform.
+
     format!(
         "{COMPILE_COMMONJS_REQUIRE_MARKER}\n\
          {loader}.resolve = (id, options) => __nubRequire().resolve(id, options);\n\
@@ -1694,6 +1729,20 @@ fn compile_commonjs_require_intro() -> String {
 /// one deliberate exception: it shadows exactly the name the module body means.
 const ROLLDOWN_MODULE_WRAPPERS: [&str; 4] = ["__commonJS", "__commonJSMin", "__esm", "__esmMin"];
 const ROLLDOWN_COMMONJS_WRAPPERS: [&str; 2] = ["__commonJS", "__commonJSMin"];
+
+/// Whether this build emits CommonJS chunks instead of ESM.
+///
+/// A V8 startup snapshot is the only mechanism that skips module EVALUATION
+/// rather than compilation, and Node runs a snapshot main through
+/// `minimalRunCjs` — an ESM entry is rejected outright. Bun has the identical
+/// constraint (`--format` "defaults to esm, or cjs with --bytecode"), so a
+/// CommonJS shape is the prerequisite for precompilation on either runtime.
+///
+/// Env-gated while the surface is settled; the intended trigger is a `--snapshot`
+/// flag with the format an implementation detail the user never names.
+fn compile_emits_cjs() -> bool {
+    std::env::var_os("__NUB_COMPILE_CJS").is_some()
+}
 
 /// The re-entrancy guard nub wraps every ASYNC module initializer in, and the
 /// reason it exists: Rolldown lowers each import edge into its own `await`, which
