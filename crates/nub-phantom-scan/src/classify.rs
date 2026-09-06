@@ -22,6 +22,10 @@ pub enum Verdict {
     /// Undeclared but only ever loaded under a try/catch — a soft/optional load,
     /// not a hard break.
     SoftPhantom,
+    /// Undeclared and reachable only from the declaration-file type surface.
+    /// Excluded from runtime compatibility targets even without a declared
+    /// `@types` twin; declared type fallbacks retain `Declared` instead.
+    TypeOnly,
     /// Declared as an OPTIONAL peer (`peerDependenciesMeta.<x>.optional`). NOT a
     /// phantom — the pick-your-plugin pattern. Tracked so the report can show how
     /// much a naive scan over-counts.
@@ -135,7 +139,15 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
             // `types_package_for`.
             let types_only =
                 agg.from_types && !agg.from_main && !agg.from_subpath && !agg.from_deep_path;
-            let verdict = verdict_for(manifest, &package, agg.all_soft, deep_path_only, types_only);
+            let base = verdict_for(manifest, &package, agg.all_soft, deep_path_only, types_only);
+            // Type-only references need no runtime package, even without a declared
+            // @types twin. A legacy deep-path reference still needs the runtime.
+            let verdict =
+                if types_only && matches!(base, Verdict::HardPhantom | Verdict::SoftPhantom) {
+                    Verdict::TypeOnly
+                } else {
+                    base
+                };
             Finding {
                 package,
                 verdict,
@@ -185,7 +197,7 @@ fn verdict_for(
     // downstream, so a `.d.ts` leaning on a dev-only types package really does
     // break for the consumer. Measured over the sampled false positives: 13
     // declare the types package in `dependencies`, 2 as a peer, and 2 dev-only
-    // (correctly still phantoms).
+    // (classified separately as TypeOnly).
     if types_only && {
         let t = types_package_for(package);
         manifest.deps.contains(&t)
@@ -319,14 +331,14 @@ mod tests {
         );
 
         // But a DEV-only types package does not: it is not installed downstream,
-        // so the consumer's type-check really does break.
+        // so it stays TypeOnly rather than Declared. Neither is a runtime target.
         let dev =
             Manifest::parse(br#"{"name":"p","devDependencies":{"@types/geojson":"*"}}"#).unwrap();
         let f = classify(&dev, &[type_ref("geojson", "geojson")]);
         assert_eq!(
             f[0].verdict,
-            Verdict::HardPhantom,
-            "a devDependency types package is not resolvable for a consumer"
+            Verdict::TypeOnly,
+            "a devDependency types package does not create a runtime requirement"
         );
 
         // THE CONTROL. A runtime reference is NOT satisfied by a types package —
@@ -348,10 +360,10 @@ mod tests {
             "a runtime occurrence is not satisfied by @types/geojson"
         );
 
-        // And with no types package declared it stays a phantom.
+        // With no types package declared, it still needs no runtime package.
         let bare = Manifest::parse(br#"{"name":"p"}"#).unwrap();
         let f = classify(&bare, &[type_ref("geojson", "geojson")]);
-        assert_eq!(f[0].verdict, Verdict::HardPhantom);
+        assert_eq!(f[0].verdict, Verdict::TypeOnly);
     }
 
     #[test]
@@ -417,6 +429,79 @@ mod tests {
         let f = classify(&m, &[deep("ava"), also_main]);
         assert_eq!(f[0].verdict, Verdict::HardPhantom);
         assert!(!f[0].is_deep_path_only());
+    }
+
+    #[test]
+    fn declared_type_surface_and_runtime_phantom_stay_distinct() {
+        // The current classifier recognizes a declared @types twin. Both
+        // Declared and TypeOnly stay out of runtime targets; runtime imports
+        // still require the actual package.
+        let m =
+            Manifest::parse(br#"{"name":"eslint","dependencies":{"@types/estree":"*"}}"#).unwrap();
+        let estree = Reference {
+            package: "estree".into(),
+            raw: "estree".into(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: true,
+            from_deep_path: false,
+        };
+        let ghost = Reference {
+            package: "ghost".into(),
+            raw: "ghost".into(),
+            soft: false,
+            from_main: true,
+            from_subpath: false,
+            from_types: false,
+            from_deep_path: false,
+        };
+        let f = classify(&m, &[estree, ghost]);
+        let estree_v = f.iter().find(|x| x.package == "estree").unwrap();
+        let ghost_v = f.iter().find(|x| x.package == "ghost").unwrap();
+        assert_eq!(estree_v.verdict, Verdict::Declared);
+        assert_eq!(ghost_v.verdict, Verdict::HardPhantom);
+    }
+
+    #[test]
+    fn type_surface_only_needs_no_types_twin_at_all() {
+        // pnpm#14128: `@typescript-eslint/types`'s only reference to `typescript`
+        // is `import type { Program } from 'typescript'` in a `.d.ts` file.
+        // Gating TypeOnly on a declared `@types/typescript` twin flagged this a
+        // HardPhantom, because typescript ships its own types — there is no
+        // separate `@types/typescript` package to find. A type-surface-only
+        // reference must be TypeOnly regardless of where (or whether) a types
+        // twin is declared, since it needs nothing at runtime either way.
+        let m = Manifest::parse(br#"{"name":"@typescript-eslint/types"}"#).unwrap();
+        let typescript = Reference {
+            package: "typescript".into(),
+            raw: "typescript".into(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: true,
+            from_deep_path: false,
+        };
+        let f = classify(&m, &[typescript]);
+        let v = f.iter().find(|x| x.package == "typescript").unwrap();
+        assert_eq!(v.verdict, Verdict::TypeOnly);
+
+        let mut deep_runtime = Reference {
+            package: "typescript".into(),
+            raw: "typescript".into(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: true,
+            from_deep_path: true,
+        };
+        assert_eq!(
+            classify(&m, &[deep_runtime.clone()])[0].verdict,
+            Verdict::HardPhantom
+        );
+        deep_runtime.from_deep_path = false;
+        deep_runtime.soft = true;
+        assert_eq!(classify(&m, &[deep_runtime])[0].verdict, Verdict::TypeOnly);
     }
 
     #[test]
