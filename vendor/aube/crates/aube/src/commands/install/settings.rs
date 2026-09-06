@@ -531,7 +531,7 @@ pub(crate) fn resolve_dependency_policy(
         //
         // Catalog order is significant when semver selectors overlap: the first
         // matching extension wins per dependency key.
-        extensions.extend(standalone_bundled_package_extensions());
+        extensions.extend(vendored_compat_extensions());
         if let Some(bundled) = aube_util::engine_context().bundled_package_extensions {
             // Bundled extensions are embedder-supplied data, not user config.
             // A malformed entry should warn and be skipped, not abort the install
@@ -1008,8 +1008,8 @@ fn parse_bundled_package_extensions(
         .collect()
 }
 
-fn standalone_bundled_package_extensions() -> Vec<aube_resolver::PackageExtension> {
-    STANDALONE_BUNDLED_PACKAGE_EXTENSIONS
+fn vendored_compat_extensions() -> Vec<aube_resolver::PackageExtension> {
+    VENDORED_COMPAT_EXTENSIONS
         .iter()
         .map(|extension| aube_resolver::PackageExtension {
             selector: bundled_string(extension.selector).to_owned(),
@@ -1523,7 +1523,7 @@ mod bundled_compat_tests {
         // this rule the peer is never added, `auto-install-peers` has nothing to
         // install, and the package fails at require time with `Cannot find
         // module 'react'` — under a tool whose whole claim is pnpm parity.
-        let extensions = standalone_bundled_package_extensions();
+        let extensions = vendored_compat_extensions();
         let reactcss = extensions
             .iter()
             .find(|extension| extension.selector == "reactcss@*")
@@ -1536,7 +1536,7 @@ mod bundled_compat_tests {
 
     #[test]
     fn catalog_matches_curated_upstreams_and_preserves_order() {
-        let extensions = standalone_bundled_package_extensions();
+        let extensions = vendored_compat_extensions();
 
         assert_eq!(extensions.len(), 161);
         let extension = |selector: &str| {
@@ -1569,7 +1569,7 @@ mod bundled_compat_tests {
         // These are the bare runtime targets the reverted scanner rules
         // injected. Their `@types/*` counterparts are legitimate packages and
         // intentionally remain allowed in curated repairs.
-        let extensions = standalone_bundled_package_extensions();
+        let extensions = vendored_compat_extensions();
         for target in ["estree", "typescript", "react", "eslint"] {
             for extension in &extensions {
                 assert!(
