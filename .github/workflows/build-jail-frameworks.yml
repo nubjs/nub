@@ -1,0 +1,74 @@
+name: Build-jail framework applications
+
+on:
+  push:
+    branches: [build-jail-productionization]
+    paths:
+      - tests/build-jail-frameworks/**
+      - .github/workflows/build-jail-frameworks.yml
+      - crates/nub-sandbox/**
+      - crates/nub-cli/src/pm_engine/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  applications:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      FRAMEWORK_REPORT: ${{ github.workspace }}/reports/frameworks
+      FRAMEWORK_CONTROLS: all
+      SOURCE_REVISION: ${{ github.sha }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: build-jail-frameworks
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 26
+      - name: Preparing build tools
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --global node-gyp@12.4.0 --no-audit --no-fund
+          mkdir -p reports
+      - name: Building the application-test artifact
+        run: |
+          (cd crates/nub-native && cargo build --profile fast)
+          mkdir -p runtime/addons
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp target/fast/nub_native.dll runtime/addons/nub-native.node
+            echo "NUB_BIN=$GITHUB_WORKSPACE/target/fast/nub.exe" >> "$GITHUB_ENV"
+          else
+            cp target/fast/libnub_native.dylib runtime/addons/nub-native.node
+            echo "NUB_BIN=$GITHUB_WORKSPACE/target/fast/nub" >> "$GITHUB_ENV"
+          fi
+          cargo build -p nub-cli --profile fast
+      - name: Checking the harness and confinement contracts
+        run: |
+          node --test tests/build-jail-frameworks/harness.test.mjs
+          node --test --test-concurrency=1 tests/build-jail-corpus/contract.mjs tests/build-jail-corpus/network.mjs > reports/contracts.log 2>&1
+      - name: Testing framework applications
+        run: node tests/build-jail-frameworks/run.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: build-jail-frameworks-${{ matrix.os }}
+          path: reports
+          retention-days: 14
