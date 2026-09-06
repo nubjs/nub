@@ -141,6 +141,25 @@
     }
    }
   },
+  "@brave/n8n-nodes-brave-search": {
+   "default": {
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "win": {
+     "write": "disk",
+     "network": true
+    }
+   }
+  },
   "@bufbuild/buf": {
    "default": {
     "write": {
@@ -2979,9 +2998,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -3087,9 +3104,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -3442,6 +3457,10 @@
     ],
     "linux": {
      "writePaths": null
+    },
+    "win": {
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -3729,15 +3748,18 @@
      "write": null
     },
     "win": {
-     "write": {
-      "deps": true
-     }
+     "write": "disk",
+     "network": true
     }
    }
   },
   "node-libcurl": {
    "default": {
-    "network": true
+    "network": true,
+    "win": {
+     "write": "disk",
+     "network": true
+    }
    }
   },
   "nodejieba": {
@@ -4353,7 +4375,9 @@
       "write": null
      },
      "win": {
-      "writePaths": null
+      "writePaths": null,
+      "write": "disk",
+      "network": true
      }
     }
    }
@@ -4515,6 +4539,10 @@
      },
      "linux": {
       "write": null
+     },
+     "win": {
+      "write": "disk",
+      "network": true
      }
     }
    }
@@ -4796,9 +4824,7 @@
      "network": true
     },
     "win": {
-     "write": {
-      "deps": true
-     },
+     "write": "disk",
      "network": true
     }
    }
@@ -4876,6 +4902,25 @@
     }
    }
   },
+  "sse4_crc32": {
+   "default": {
+    "writePaths": [
+     ".cache",
+     ".npm",
+     ".electron",
+     "AppData/Local",
+     "Library/Caches"
+    ],
+    "write": {
+     "deps": true
+    },
+    "network": true,
+    "win": {
+     "write": "disk",
+     "network": true
+    }
+   }
+  },
   "ssh2": {
    "default": {
     "writePaths": [
@@ -4925,6 +4970,10 @@
     },
     "linux": {
      "write": null
+    },
+    "win": {
+     "write": "disk",
+     "network": true
     }
    }
   },
@@ -5021,9 +5070,7 @@
       "network": true
      },
      "win": {
-      "write": {
-       "deps": true
-      },
+      "write": "disk",
       "network": true
      }
     }

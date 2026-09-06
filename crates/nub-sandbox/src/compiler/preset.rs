@@ -1964,6 +1964,8 @@ mod tests {
             ("es5-ext", "0.10.64"),
             ("lmdb", "2.5.2"),
             ("@parcel/watcher", "2.6.0"),
+            ("sse4_crc32", "6.0.1"),
+            ("@brave/n8n-nodes-brave-search", "1.0.24"),
         ] {
             let grant = crate::catalog_override::v2_grant_for(name, Some(version)).unwrap();
             for platform in [
@@ -3491,6 +3493,19 @@ mod tests {
             "gatsby-cli",
             "isolated-vm",
             "lmdb",
+            // Supplemental Windows native builds and npm/profile discovery.
+            "@brave/n8n-nodes-brave-search",
+            "hnswlib-node",
+            "iltorb",
+            "libxmljs",
+            "node-jq",
+            "node-libcurl",
+            "puppeteer",
+            "react-jsx-parser",
+            "sleep",
+            "sse4_crc32",
+            "storybook-addon-remix-react-router",
+            "tiny-secp256k1",
             "opencode-ai",
             "pizzip",
             "pngout-bin",
