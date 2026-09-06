@@ -16,10 +16,14 @@ assert.ok(cases.length, 'at least one failed control must be selected');
 const root = mkdtempSync(join(tmpdir(), 'nub-jail-reference-'));
 console.log(`Fixture root: ${root}`);
 const results = [];
+let stoppedForCleanupError = false;
+const windowsCleanup = process.platform === 'win32' || process.env.REFERENCE_CONTROLS_TEST_WINDOWS === '1';
 function record(row) {
   results.push(row);
   writeFileSync(join(root, 'results.json'), JSON.stringify({ input, provenance, npm: process.env.NPM_CLI, expected: cases.length, results }, null, 2));
-  const verdict = row.verdict ?? (row.timedOut ? 'npm TIMEOUT' : `npm ${row.status ?? row.error ?? row.signal}`);
+  const verdict = row.verdict ?? (row.timedOut
+    ? row.cleanupError ? `npm TIMEOUT (cleanup failed: ${row.cleanupError})` : 'npm TIMEOUT'
+    : `npm ${row.status ?? row.error ?? row.signal}`);
   console.log(`${results.length}/${cases.length} ${row.name}@${row.version}: ${verdict}`);
 }
 for (const { name, version } of cases) {
@@ -41,20 +45,55 @@ for (const { name, version } of cases) {
       CI: '1', NO_COLOR: '1' },
   });
   let timedOut = false;
+  let cleanupError;
   const killTree = () => {
     if (!child.pid) return;
-    if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-    else { try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+    if (!windowsCleanup) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      return;
+    }
+    const tree = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000 });
+    if (!tree.error && tree.status === 0) return;
+    // A root kill unblocks this runner, but cannot establish that descendants died.
+    // Keep that distinction in the result rather than hanging forever or reporting
+    // a censored reference as a clean timeout.
+    let rootKilled;
+    try { rootKilled = child.kill('SIGKILL'); } catch (error) { cleanupError = `taskkill failed (${tree.error?.message ?? `exit ${tree.status}`}); root fallback failed (${error.message})`; return false; }
+    if (!rootKilled) {
+      cleanupError = `taskkill failed (${tree.error?.message ?? `exit ${tree.status}`}); root fallback returned false`;
+      return false;
+    }
+    cleanupError = `taskkill failed (${tree.error?.message ?? `exit ${tree.status}`}); terminated only the root process`;
+    return true;
   };
-  const timer = setTimeout(() => { timedOut = true; killTree(); }, 300_000);
-  const result = await new Promise(resolve => {
+  let resolveResult;
+  const completion = new Promise(resolve => {
+    resolveResult = resolve;
     child.once('error', error => resolve({ status: null, error: error.message }));
     child.once('exit', (status, signal) => resolve({ status, signal }));
   });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    if (killTree() === false) {
+      // No exit event is a safe prerequisite here: the fallback could not
+      // terminate the root. Unref it, persist the censored result below, and
+      // fail closed rather than pinning the reference runner forever.
+      child.unref();
+      resolveResult({ status: null, error: cleanupError });
+    }
+  }, 300_000);
+  const result = await completion;
   clearTimeout(timer);
-  if (process.platform !== 'win32') killTree();
+  if (!windowsCleanup) killTree();
   closeSync(fd);
-  const row = { name, version, ...result, timedOut };
+  const row = { name, version, ...result, timedOut, ...(cleanupError ? { cleanupError } : {}) };
   record(row);
+  // We cannot safely claim tree cleanup when the OS rejected taskkill. Preserve
+  // the timeout result for the report, but make the reference run fail closed.
+  if (cleanupError) {
+    process.exitCode = 1;
+    stoppedForCleanupError = true;
+    break;
+  }
 }
-assert.equal(results.length, cases.length, 'every failed control gets a reference result');
+assert.ok(stoppedForCleanupError || results.length === cases.length, 'every failed control gets a reference result');
