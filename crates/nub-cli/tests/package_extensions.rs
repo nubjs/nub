@@ -77,6 +77,17 @@ fn store_has(dir: &Path, name: &str) -> bool {
         .any(|n| n.starts_with(&prefix))
 }
 
+/// Whether the virtual store holds the exact `name@version` entry.
+fn store_has_version(dir: &Path, name: &str, version: &str) -> bool {
+    let target = format!("{name}@{version}");
+    std::fs::read_dir(dir.join("node_modules/.store"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .any(|n| n == target)
+}
+
 /// A top-level `packageExtensions` entry injecting a dependency into a resolved
 /// package must shape the graph under Nub identity, and editing it after an
 /// install must invalidate the fast path so the injected dep lands.
@@ -128,6 +139,134 @@ fn top_level_package_extensions_shapes_resolution_and_invalidates_freshness() {
         store_has(&dir, "is-number"),
         "top-level packageExtensions must inject is-number into is-positive, and \
          the edit must invalidate the install fast path so it re-resolves: {err2}"
+    );
+}
+
+/// Read the `packageExtensionsChecksum` aube stamps onto `nub.lock` (pnpm-v9
+/// YAML format), or `None` when the lockfile carries no checksum.
+fn lockfile_checksum(dir: &Path) -> Option<String> {
+    let lock = std::fs::read_to_string(dir.join("nub.lock")).ok()?;
+    for line in lock.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("packageExtensionsChecksum:") {
+            let v = rest.trim().trim_matches('"');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// A bundled ecosystem default (Yarn ∪ pnpm ∪ nub-phantom, vendored at
+/// `vendor/package-extensions/unified.json`) must shape the resolved graph
+/// with NO user `packageExtensions` — and must NOT leak into the lockfile
+/// `packageExtensionsChecksum` (routing it there would drift every existing
+/// lockfile on each bundled-list bump and abort `--frozen-lockfile`).
+///
+/// `gatsby-core-utils@2.13.0` declares neither `got` nor `@babel/runtime`,
+/// and `2.13.0` satisfies the bundled selector
+/// `gatsby-core-utils@<2.14.0-next.1`, so the bundled extension injecting
+/// `got` is observable: without it, `got` is absent from the graph.
+///
+/// The checksum guard has two cases: (1) empty user `packageExtensions` →
+/// aube writes NO `packageExtensionsChecksum` field (the checksum fn returns
+/// `None` for an empty map), so a bundled-list bump cannot drift the
+/// lockfile — there is nothing to mismatch; (2) non-empty user
+/// `packageExtensions` with the bundled default ALSO shaping the graph → the
+/// checksum must equal `package_extensions_checksum(&user_pe_only)`, proving
+/// the bundled map is not folded into the checksum input.
+#[test]
+#[ignore = "network: resolves gatsby-core-utils@2.13.0 + the bundled got from the npm registry"]
+fn bundled_default_shapes_graph_and_stays_out_of_checksum() {
+    use aube_lockfile::pnpm::package_extensions_checksum;
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let store = pm_tmpdir("store");
+    let cache = pm_tmpdir("cache");
+
+    // (1) No user packageExtensions: the bundled default must still apply,
+    // and the lockfile must carry NO checksum (empty user PE → None → a
+    // bundled-list bump cannot drift this lockfile).
+    let dir_a = pm_tmpdir("bundled-a");
+    let pkg_a =
+        r#"{"name":"bundled-a","version":"1.0.0","dependencies":{"gatsby-core-utils":"2.13.0"}}"#;
+    std::fs::write(dir_a.join("package.json"), pkg_a).unwrap();
+    let (err_a, code_a) = run_install_in_store(&dir_a, &store, &cache, &["install"]);
+    assert_eq!(code_a, 0, "bundled-default install A failed: {err_a}");
+    assert!(
+        store_has(&dir_a, "got"),
+        "the bundled `gatsby-core-utils@<2.14.0-next.1` extension must inject `got` \
+         (undeclared by 2.13.0) into the graph with no user packageExtensions: {err_a}"
+    );
+    assert!(
+        dir_a.join("nub.lock").is_file(),
+        "A: nub-identity install writes nub.lock: {err_a}"
+    );
+    assert_eq!(
+        lockfile_checksum(&dir_a),
+        None,
+        "empty user packageExtensions must produce NO packageExtensionsChecksum \
+         (the checksum fn returns None for an empty map), so a bundled-list bump \
+         cannot drift the lockfile: {err_a}"
+    );
+
+    // (2) Non-empty user packageExtensions, with the bundled default ALSO
+    // shaping the graph: the checksum must reflect ONLY the user's
+    // packageExtensions, not the bundled map. Compare against
+    // `package_extensions_checksum` computed on the user-PE-only map.
+    let dir_b = pm_tmpdir("bundled-b");
+    let user_pe = r#"{"is-positive@3.1.0":{"dependencies":{"is-number":"7.0.0"}}}"#;
+    let pkg_b = format!(
+        r#"{{"name":"bundled-b","version":"1.0.0","dependencies":{{"gatsby-core-utils":"2.13.0","is-positive":"3.1.0"}},"packageExtensions":{user_pe}}}"#
+    );
+    std::fs::write(dir_b.join("package.json"), pkg_b).unwrap();
+    let (err_b, code_b) = run_install_in_store(&dir_b, &store, &cache, &["install"]);
+    assert_eq!(code_b, 0, "bundled-default install B failed: {err_b}");
+    assert!(
+        store_has(&dir_b, "got"),
+        "B: bundled default still applies alongside user packageExtensions: {err_b}"
+    );
+    let user_pe_map: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(user_pe).unwrap();
+    let expected =
+        package_extensions_checksum(&user_pe_map).expect("non-empty user PE yields a checksum");
+    assert_eq!(
+        lockfile_checksum(&dir_b).as_deref(),
+        Some(expected.as_str()),
+        "the lockfile packageExtensionsChecksum must equal the hash of the \
+         USER packageExtensions only — the bundled map (actively shaping this \
+         graph via `got`) must not be folded into the checksum input, or every \
+         bundled-list bump drifts existing lockfiles and aborts \
+         --frozen-lockfile: {err_b}"
+    );
+
+    // (3) User packageExtensions OVERRIDE the bundled default on a matching
+    // selector + dependency key. The bundled `gatsby-core-utils@<2.14.0-next.1`
+    // injects `got: 8.3.2`; a user entry for the SAME selector injecting
+    // `got: 8.3.0` must win (user-first Vec ordering + `extend_missing`
+    // first-write-wins), so the resolved `got` is the user's 8.3.0, not the
+    // bundled 8.3.2. This guards the precedence construction in
+    // `resolve_dependency_policy`, which the existing aube `extend_missing`
+    // unit tests do not cover.
+    let dir_c = pm_tmpdir("bundled-c");
+    let user_pe_c = r#"{"gatsby-core-utils@<2.14.0-next.1":{"dependencies":{"got":"8.3.0"}}}"#;
+    let pkg_c = format!(
+        r#"{{"name":"bundled-c","version":"1.0.0","dependencies":{{"gatsby-core-utils":"2.13.0"}},"packageExtensions":{user_pe_c}}}"#
+    );
+    std::fs::write(dir_c.join("package.json"), pkg_c).unwrap();
+    let (err_c, code_c) = run_install_in_store(&dir_c, &store, &cache, &["install"]);
+    assert_eq!(code_c, 0, "bundled-default install C failed: {err_c}");
+    assert!(
+        store_has_version(&dir_c, "got", "8.3.0"),
+        "user packageExtensions must override the bundled `got: 8.3.2` with the \
+         user's `got: 8.3.0` on the same selector: {err_c}"
+    );
+    assert!(
+        !store_has_version(&dir_c, "got", "8.3.2"),
+        "the bundled `got: 8.3.2` must NOT be resolved when the user overrides \
+         the same selector+key with 8.3.0: {err_c}"
     );
 }
 
