@@ -140,6 +140,7 @@ pub fn npm_env(
     lifecycle_event: &str,
     lifecycle_script: Option<&str>,
     node_execpath: &str,
+    node_version: &str,
     user_agent_product: &str,
 ) -> HashMap<String, String> {
     let mut env_vars = HashMap::new();
@@ -191,6 +192,17 @@ pub fn npm_env(
     // .nvmrc/.node-version pin that discovery honors.
     if !node_execpath.is_empty() {
         env_vars.insert("npm_node_execpath".to_string(), node_execpath.to_string());
+    }
+    // …and node-gyp compiles against that Node's own headers instead of
+    // downloading them (`crate::node::headers`); same as the engine's lifecycle
+    // overlay, so `nub run rebuild` and a dep postinstall agree.
+    if let Some(nodedir) =
+        crate::node::headers::node_gyp_nodedir(Path::new(node_execpath), node_version)
+    {
+        env_vars.insert(
+            "npm_config_nodedir".to_string(),
+            nodedir.to_string_lossy().into_owned(),
+        );
     }
 
     env_vars.insert("npm_command".to_string(), "run-script".to_string());
@@ -480,6 +492,7 @@ mod tests {
             "test",
             None,
             "/usr/bin/node",
+            "0.0.0",
             "nub/0 node/v0",
         );
 
@@ -507,7 +520,7 @@ mod tests {
         // matching pnpm. (npm normalizes the value to the unscoped package name;
         // nub matches pnpm, which keeps the verbatim path.)
         let manifest = serde_json::json!({ "name": "pkg", "bin": "./cli.js" });
-        let env = npm_env(&manifest, &std::env::temp_dir(), "test", None, "", "ua");
+        let env = npm_env(&manifest, &std::env::temp_dir(), "test", None, "", "", "ua");
         assert_eq!(
             env.get("npm_package_bin").map(String::as_str),
             Some("./cli.js")

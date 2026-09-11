@@ -4,6 +4,7 @@
 pub mod discovery;
 pub mod feature_matrix;
 pub mod flags;
+pub mod headers;
 pub mod shim;
 // Single-binary runtime extraction — only compiled in release builds that embed
 // the runtime blob (`embed-runtime`). The default dev build resolves `runtime/`

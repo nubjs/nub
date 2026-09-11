@@ -7147,6 +7147,79 @@ fn npm_run_threads_node_execpath() {
     );
 }
 
+/// `nub run` hands node-gyp the resolved Node's own headers: `npm_config_nodedir`
+/// names the install root whenever `<root>/include/node/node_version.h` matches
+/// the Node that runs the script, and stays unset otherwise (Windows, or a Node
+/// with no headers beside it). The expectation is derived from the very binary
+/// the script reports, so the assertion is a real one on every host — a Node
+/// from the official tarball (nub-provisioned, nvm, setup-node) takes the
+/// positive branch.
+#[test]
+fn npm_run_points_node_gyp_at_the_resolved_headers() {
+    if std::env::vars_os().any(|(k, _)| k.eq_ignore_ascii_case("npm_config_nodedir")) {
+        // A user pin wins by design, so there is nothing to assert under one.
+        return;
+    }
+    let fixture_path = fixtures_dir().join("env-test");
+    let output = Command::new(nub_binary())
+        .args(["run", "node-nodedir"])
+        .current_dir(&fixture_path)
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    let line = |prefix: &str| {
+        stdout
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    let execpath = line("execpath=").expect("script did not print npm_node_execpath");
+    let reported = line("nodedir=");
+
+    let version = Command::new(&execpath)
+        .arg("--version")
+        .output()
+        .expect("resolved node must run");
+    let version = String::from_utf8_lossy(&version.stdout)
+        .trim()
+        .trim_start_matches('v')
+        .to_string();
+    // node-gyp's own rule: the root is `<root>/bin/node`, and its headers count
+    // only when `node_version.h` names exactly the running version.
+    let headers_match = |exe: &Path| -> Option<String> {
+        let bin_dir = exe.parent()?;
+        (bin_dir.file_name()? == "bin").then_some(())?;
+        let root = bin_dir.parent()?;
+        let text = std::fs::read_to_string(root.join("include/node/node_version.h")).ok()?;
+        let field = |name: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(name))
+                .map(|v| v.trim().to_string())
+        };
+        let header = format!(
+            "{}.{}.{}",
+            field("#define NODE_MAJOR_VERSION ")?,
+            field("#define NODE_MINOR_VERSION ")?,
+            field("#define NODE_PATCH_VERSION ")?
+        );
+        (header == version).then(|| root.to_string_lossy().into_owned())
+    };
+    let exe = Path::new(&execpath);
+    let expected = if cfg!(windows) {
+        None
+    } else {
+        headers_match(exe).or_else(|| headers_match(&std::fs::canonicalize(exe).ok()?))
+    };
+    assert_eq!(
+        reported, expected,
+        "npm_config_nodedir must name the resolved Node's install root exactly when its headers match (execpath {execpath}, version {version})\n{stdout}"
+    );
+}
+
 /// `.env` loading under `nub run` is NODE-SCOPED, not process-scoped: nub no
 /// longer eager-injects `.env` into the whole script process. Differential
 /// behavior vs npm/pnpm (which never load `.env`) and the bug it fixes:

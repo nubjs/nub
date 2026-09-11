@@ -5921,6 +5921,7 @@ fn build_script_command(
         lifecycle_event,
         Some(cmd),
         node.path.as_str(),
+        &node.version.to_string(),
         &ua_product,
     );
 
