@@ -72,11 +72,10 @@ On Linux x64, direct Node launches use a 16 MiB V8 semi-space within the followi
 
 | Node release | Memory budget, inclusive |
 |---|---|
-| 22.23.2 | 512 MiB–2 GiB |
+| 22.23.2 | 512 MiB–1 GiB |
 | 24.20.0 | 512 MiB |
-| 26.8.1 | 512 MiB–1 GiB |
 
-Tuning stops once each release's own nursery reaches 16 MiB. Node 24.20.0 reaches that size immediately above 512 MiB, so it needs no override at larger budgets. Limits below 512 MiB are excluded because a larger nursery increased OOM kills in smaller-container pressure tests. Other releases and platforms keep Node's defaults.
+The ranges are benchmarked, not a universal larger-heap policy. Node 24.20.0 already chooses 16 MiB immediately above 512 MiB. Larger Node 22 budgets and Node 26 keep stock defaults because the larger nursery regressed production-mode SSR, despite improving some allocation-heavy fixtures. Budgets below 512 MiB are excluded because smaller-container pressure tests found additional OOM kills. Other releases and platforms also keep Node's defaults.
 
 Nub checks both the leaf cgroup limit that Node uses for sizing and tighter ancestor limits. A tighter ancestor cannot enable tuning for an oversized or unlimited leaf, and any effective budget below 512 MiB disables it. This changes the main heap only; Workers retain their own defaults and explicit `resourceLimits`.
 

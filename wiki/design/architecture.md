@@ -92,11 +92,10 @@ The policy in [[crates/nub-core/src/node/gc.rs#eligible]] requires at least 512 
 
 | Node release | Eligible leaf budget, inclusive | Default semi-space in that range |
 |---|---|---|
-| 22.23.2 | 512 MiB–2 GiB | 1–8 MiB |
+| 22.23.2 | 512 MiB–1 GiB | 1–4 MiB |
 | 24.20.0 | 512 MiB | 1 MiB |
-| 26.8.1 | 512 MiB–1 GiB | 4–8 MiB |
 
-Above each upper bound, Node's own nursery reaches 16 MiB or more, so tuning stops instead of shrinking it. Smaller budgets retain Node's defaults because the larger nursery can increase cgroup OOM kills under allocation pressure. Explicit startup options, PnP, environment-owner loaders, compatibility mode, and inherited augmented processes disable it. Watch and compiled launchers do not apply this policy.
+Node 24's own nursery reaches 16 MiB immediately above its upper bound. Node 22 above 1 GiB and Node 26 retain their defaults because production-mode SSR regressed with the larger nursery, despite gains in retained-object workloads. Smaller budgets retain Node's defaults because the larger nursery can increase cgroup OOM kills under allocation pressure. Explicit startup options, PnP, environment-owner loaders, compatibility mode, and inherited augmented processes disable it. Watch and compiled launchers do not apply this policy.
 
 The launcher supplies `--max-semi-space-size=16` for main-isolate initialization. Before any application preload or entry code runs, the fast CJS preload resets the process-global flag to zero. V8 has already stored main's limit, while later Worker isolates can still apply their own `resourceLimits`. Keeping the global override would silently replace explicit Worker young-generation limits, even with an empty `execArgv`.
 

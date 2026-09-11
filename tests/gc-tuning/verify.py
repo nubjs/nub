@@ -78,7 +78,7 @@ if (require('node:worker_threads').isMainThread) {
             # Package-script runners may print the script name before its JSON.
             data = json.loads(result.stdout.strip().splitlines()[-1])
             assert data["node"] == "v" + version, data
-            if label == "nub" and memory == 512 and data["mainHeap"] != 304:
+            if label == "nub" and memory in tuned and data["mainHeap"] != tuned[memory]:
                 diagnostic = subprocess.run(invocation + [node, "-e", r"""
 const fs = require('fs'), path = require('path');
 console.log(fs.readFileSync('/proc/self/cgroup','utf8'));
@@ -105,7 +105,7 @@ for(let dir='/sys/fs/cgroup'+group;dir.startsWith('/sys/fs/cgroup');dir=path.dir
 
         defaults = {}
         tuned = {}
-        ceiling = {"22.23.2": 2048, "24.20.0": 512, "26.8.1": 1024}[version]
+        ceiling = {"22.23.2": 1024, "24.20.0": 512, "26.8.1": 0}[version]
         for memory in [256, 384, 500, 511, 512, 513, 640, 768, 1024, 1025, 1536, 2048, 2049, 4096]:
             defaults[memory] = run("node", [node, "main.cjs"], memory)
             expected = defaults[memory]
@@ -117,9 +117,10 @@ for(let dir='/sys/fs/cgroup'+group;dir.startsWith('/sys/fs/cgroup');dir=path.dir
                 assert expected > defaults[memory], (version, memory, expected, defaults[memory])
                 tuned[memory] = expected
             assert run("nub", [nub, "--no-check", "main.cjs"], memory) == expected
+        startup_heap = tuned.get(512, defaults[512])
         for label, command, env, expected in [
-            ("application-args", ["main.cjs", "--port=3000"], (), 304),
-            ("node-bin", ["exec", "gc-probe"], (), 304),
+            ("application-args", ["main.cjs", "--port=3000"], (), startup_heap),
+            ("node-bin", ["exec", "gc-probe"], (), startup_heap),
             ("package-script", ["run", "probe"], (), defaults[512]),
             ("compat-argv", ["--node", "main.cjs"], (), defaults[512]),
             ("compat-env", ["main.cjs"], ("NODE_COMPAT=1",), defaults[512]),
@@ -133,7 +134,7 @@ for(let dir='/sys/fs/cgroup'+group;dir.startsWith('/sys/fs/cgroup');dir=path.dir
         (project / "nub.jsonc").write_text(json.dumps(config))
         (project / ".env").write_text("NODE_OPTIONS=--max-semi-space-size=4\n")
         # Runtime-control variables from .env are deliberately ignored by Nub.
-        assert run("ignored-heap-dotenv", [nub, "--no-check", "main.cjs"]) == 304
+        assert run("ignored-heap-dotenv", [nub, "--no-check", "main.cjs"]) == startup_heap
         (project / ".env").unlink()
         for label, settings in [
             ("user-conditions", {"conditions": ["development"]}),
@@ -143,7 +144,8 @@ for(let dir='/sys/fs/cgroup'+group;dir.startsWith('/sys/fs/cgroup');dir=path.dir
             (project / "nub.jsonc").write_text(json.dumps({**config, **settings}))
             assert run(label, [nub, "--no-check", "main.cjs"]) == defaults[512]
         (project / "nub.jsonc").write_text(json.dumps(config))
-        for memory, expected in tuned.items():
+        for memory in sorted({512, *tuned}):
+            expected = tuned.get(memory, defaults[memory])
             assert run("pressure-node", [node, "pressure.cjs", str(memory)], memory) == defaults[memory]
             assert run("pressure-nub", [nub, "--no-check", "pressure.cjs", str(memory)], memory) == expected
     print(f"GC_ACCEPTANCE_OK {cases} cases")

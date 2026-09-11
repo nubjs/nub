@@ -23,12 +23,12 @@ pub fn eligible(
     node_options: Option<&str>,
     memory: impl FnOnce() -> Option<MemoryBudget>,
 ) -> bool {
-    // Last budget at which each audited release chooses less than 16 MiB.
-    // Above these crossovers, an override is redundant or shrinks the nursery.
+    // Measured ranges, not a universal floor: Node 22 above 1 GiB and Node 26
+    // regressed production SSR with 16 MiB despite gains in retained JSON.
+    // Node 24 already chooses 16 MiB immediately above 512 MiB.
     let ceiling = match version.0.to_string().as_str() {
-        "22.23.2" => 2048 * MIB,
+        "22.23.2" => 1024 * MIB,
         "24.20.0" => 512 * MIB,
-        "26.8.1" => 1024 * MIB,
         _ => return false,
     };
     node_options.is_none_or(|options| options.trim().is_empty())
@@ -150,7 +150,7 @@ fn read_constraint(
     // the process without reducing Node's automatic nursery; overriding that
     // already-larger nursery would not be a floor.
     let node_limit = value(&read(&leaf.join(hard))?)?.min(value(&read(&leaf.join(soft))?)?);
-    if node_limit == 0 || node_limit > 2048 * MIB {
+    if node_limit == 0 || node_limit > 1024 * MIB {
         return None;
     }
     let mut limit = node_limit;
@@ -196,6 +196,7 @@ mod tests {
     #[test]
     fn ineligible_launches_do_not_read_memory_constraints() {
         for (version, args, options) in [
+            ("26.8.1", vec!["app.js".into()], None),
             ("24.20.1", vec!["app.js".into()], None),
             ("24.20.0", vec!["--inspect".into()], None),
             (
@@ -215,7 +216,7 @@ mod tests {
 
     #[test]
     fn policy_is_closed_and_explicit_options_win() {
-        for version in ["22.23.2", "24.20.0", "26.8.1"] {
+        for version in ["22.23.2", "24.20.0"] {
             let version = version.parse().unwrap();
             assert!(eligible(
                 &version,
@@ -240,7 +241,14 @@ mod tests {
                 ));
             }
         }
-        for version in ["22.23.1", "24.20.1", "26.8.2", "27.0.0", "24.20.0-custom"] {
+        for version in [
+            "22.23.1",
+            "24.20.1",
+            "26.8.1",
+            "26.8.2",
+            "27.0.0",
+            "24.20.0-custom",
+        ] {
             assert!(!eligible(
                 &version.parse().unwrap(),
                 &[],
@@ -251,8 +259,8 @@ mod tests {
     }
 
     #[test]
-    fn budget_range_stops_at_each_nodes_nursery_crossover() {
-        for (version, ceiling) in [("22.23.2", 2048), ("24.20.0", 512), ("26.8.1", 1024)] {
+    fn budget_range_stops_at_the_measured_ceiling() {
+        for (version, ceiling) in [("22.23.2", 1024), ("24.20.0", 512)] {
             let version = version.parse().unwrap();
             for memory in [512 * MIB, (512 + ceiling) * MIB / 2, ceiling * MIB] {
                 assert!(eligible(&version, &[], None, Some(memory)));
@@ -320,7 +328,7 @@ mod tests {
             );
             assert_eq!(budget.map(|b| b.node_limit), Some(1024 * MIB));
             assert_eq!(
-                super::eligible(&"26.8.1".parse().unwrap(), &[], None, || budget),
+                super::eligible(&"22.23.2".parse().unwrap(), &[], None, || budget),
                 expected
             );
             assert!(!super::eligible(
