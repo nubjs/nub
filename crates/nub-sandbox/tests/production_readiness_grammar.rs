@@ -37,6 +37,8 @@ fn ctx(caps: ScopeCapabilities) -> CompileCtx {
             ("PORT".to_string(), "3000".to_string()),
             ("MODE".to_string(), "production".to_string()),
             ("API_TOKEN".to_string(), "token-value".to_string()),
+            // Required by the README JSONC broker example.
+            ("REGISTRY_TOKEN".to_string(), "registry-token".to_string()),
             ("UV_CACHE_DIR".to_string(), "/ambient/cache".to_string()),
             // Required by README JSON example 9 (`vars.YARN_CACHE_FOLDER: true`).
             (
@@ -53,44 +55,71 @@ fn test_root() -> PathBuf {
     std::env::temp_dir().join("nub-sandbox-production-readiness-grammar")
 }
 
-fn readme_json_examples() -> Vec<String> {
+fn documented_policy_examples(source: &str) -> Vec<(&str, String)> {
     let mut examples = Vec::new();
     let mut lines = Vec::new();
-    let mut in_json_fence = false;
-    for line in include_str!("../README.md").lines() {
-        if line == "```json" {
-            assert!(!in_json_fence, "README JSON fences must not nest");
-            in_json_fence = true;
+    let mut format = None;
+    for line in source.lines() {
+        if matches!(line, "```json" | "```jsonc") {
+            assert!(format.is_none(), "documented policy fences must not nest");
+            format = Some(&line[3..]);
             lines.clear();
-        } else if line == "```" && in_json_fence {
-            examples.push(lines.join("\n"));
-            in_json_fence = false;
-        } else if in_json_fence {
+        } else if line == "```" && format.is_some() {
+            examples.push((format.take().unwrap(), lines.join("\n")));
+        } else if format.is_some() {
             lines.push(line);
         }
     }
-    assert!(!in_json_fence, "every README JSON fence must close");
+    assert!(format.is_none(), "every documented policy fence must close");
     examples
 }
 
 #[test]
-fn public_readme_json_examples_compile() {
-    let examples = readme_json_examples();
-    assert_eq!(examples.len(), 9, "README JSON grammar inventory changed");
-    for (index, example) in examples.iter().enumerate() {
+fn public_readme_policy_examples_compile() {
+    let examples = documented_policy_examples(include_str!("../README.md"));
+    assert_eq!(
+        examples.len(),
+        11,
+        "README policy grammar inventory changed"
+    );
+    assert_eq!(
+        examples
+            .iter()
+            .filter(|(format, _)| *format == "json")
+            .count(),
+        9,
+        "README JSON grammar inventory changed"
+    );
+    assert_eq!(
+        examples
+            .iter()
+            .filter(|(format, _)| *format == "jsonc")
+            .count(),
+        2,
+        "README JSONC grammar inventory changed"
+    );
+    for (index, (format, example)) in examples.iter().enumerate() {
         let surface = serde_json::from_str(example).unwrap_or_else(|error| {
             panic!(
-                "README JSON example {} must parse:\n{example}\n{error}",
-                index + 1
+                "README {format} example {} must parse:\n{example}\n{error}",
+                index + 1,
             )
         });
         compile(&surface, &ctx(ScopeCapabilities::approved())).unwrap_or_else(|error| {
             panic!(
-                "README JSON example {} must compile:\n{example}\n{error}",
-                index + 1
+                "README {format} example {} must compile:\n{example}\n{error}",
+                index + 1,
             )
         });
     }
+}
+
+#[test]
+fn documented_policy_fences_are_line_ending_independent() {
+    let lf = "```json\n{\"net\": false}\n```\n```jsonc\n{\"net\": true}\n```\n";
+    let expected = documented_policy_examples(lf);
+    let crlf = lf.replace('\n', "\r\n");
+    assert_eq!(documented_policy_examples(&crlf), expected);
 }
 
 #[test]
