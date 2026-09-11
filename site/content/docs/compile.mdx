@@ -913,9 +913,11 @@ SEA executables do not extract Node or the bundled application. A launcher with 
 
 Cache locations are tried in order:
 
-- `$XDG_CACHE_HOME/nub`
-- `$HOME/.cache/nub`
-- A private per-user directory under `$TMPDIR`
+- The `nub` subdirectory of `XDG_CACHE_HOME`, when set.
+- The user cache: `$HOME/.cache/nub` on Unix; the Windows user profile's `.cache\nub` for a normal profile, or `%LOCALAPPDATA%\nub` for a missing or system profile.
+- A private directory under the platform's temporary directory: `nub-<uid>` on Unix, or `nub` on Windows. The temp root is typically `$TMPDIR` or `/tmp` on Unix and `%LOCALAPPDATA%\Temp` on Windows.
+
+On Windows, the user-cache choice also honors `XDG_CACHE_HOME`. If that override is unusable, the next distinct location is the temporary directory.
 
 Each candidate is tried for real. A read-only cold cache is skipped rather than fatal, and a `noexec` cache is skipped only when that cache must supply Node. A `--smol` binary with a proven external Node can use it for app data. A binary on AWS Lambda or in a `readOnlyRootFilesystem` pod falls through to the temp directory when needed. When no candidate works, the error reports the directories it tried and why each was unsuitable.
 
@@ -972,7 +974,7 @@ The application sees the outer artifact as its executable while retaining Node's
 ```js
 process.execPath  // the outer compiled executable
 process.argv[0]   // the outer compiled executable
-process.argv[1]   // the bundled entry's extracted or virtual path
+process.argv[1]   // the extracted entry, or outer executable for SEA/inline
 process.argv0     // the underlying Node argv0
 process.title     // the underlying Node process title
 process.execArgv  // the actual underlying Node CLI flags
