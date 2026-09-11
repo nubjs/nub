@@ -86,9 +86,17 @@ Two details make the switch trustworthy. Compat mode does not merely skip augmen
 
 ## Main-heap memory tuning
 
-Direct Node launches on Linux use a small semi-space floor only in a measured, closed set of Node releases and cgroup budgets. File runs and Node-backed `exec`/`nubx` binaries share this launch path.
+Direct Node launches on Linux x64 use a small semi-space floor only in a measured, closed set of Node releases and cgroup budgets. File runs and Node-backed `exec`/`nubx` binaries share this launch path.
 
-The policy in [[crates/nub-core/src/node/gc.rs#eligible]] accepts Node 22.23.2, 24.20.0, and 26.8.1 with 512 MiB of constrained memory. Smaller budgets retain Node's defaults because the larger nursery can increase cgroup OOM kills under allocation pressure. Explicit startup options, PnP, environment-owner loaders, compatibility mode, and inherited augmented processes disable it. Watch and compiled launchers do not apply this policy.
+The policy in [[crates/nub-core/src/node/gc.rs#eligible]] requires at least 512 MiB after accounting for ancestors and physical memory. The leaf budget must also be within the release-specific range below; a tighter parent alone cannot enable an override of an already-large nursery.
+
+| Node release | Eligible leaf budget, inclusive | Default semi-space in that range |
+|---|---|---|
+| 22.23.2 | 512 MiB–2 GiB | 1–8 MiB |
+| 24.20.0 | 512 MiB | 1 MiB |
+| 26.8.1 | 512 MiB–1 GiB | 4–8 MiB |
+
+Above each upper bound, Node's own nursery reaches 16 MiB or more, so tuning stops instead of shrinking it. Smaller budgets retain Node's defaults because the larger nursery can increase cgroup OOM kills under allocation pressure. Explicit startup options, PnP, environment-owner loaders, compatibility mode, and inherited augmented processes disable it. Watch and compiled launchers do not apply this policy.
 
 The launcher supplies `--max-semi-space-size=16` for main-isolate initialization. Before any application preload or entry code runs, the fast CJS preload resets the process-global flag to zero. V8 has already stored main's limit, while later Worker isolates can still apply their own `resourceLimits`. Keeping the global override would silently replace explicit Worker young-generation limits, even with an empty `execArgv`.
 

@@ -7,6 +7,13 @@ pub const SEMI_SPACE_FLAG: &str = "--max-semi-space-size=16";
 pub const STARTUP_ENV: &str = "__NUB_GC_STARTUP";
 const MIB: u64 = 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryBudget {
+    // Node sizes its nursery from the leaf limit, not our ancestor minimum.
+    node_limit: u64,
+    effective_limit: u64,
+}
+
 /// A closed version list: changing a process-global V8 flag after main-isolate
 /// initialization requires checking that release's flag readers and startup order.
 /// Explicit Node options also exclude preloads, snapshots, and GC experiments.
@@ -14,24 +21,31 @@ pub fn eligible(
     version: &NodeVersion,
     user_args: &[String],
     node_options: Option<&str>,
-    memory: impl FnOnce() -> Option<u64>,
+    memory: impl FnOnce() -> Option<MemoryBudget>,
 ) -> bool {
-    matches!(
-        version.0.to_string().as_str(),
-        "22.23.2" | "24.20.0" | "26.8.1"
-    ) && node_options.is_none_or(|options| options.trim().is_empty())
+    // Last budget at which each audited release chooses less than 16 MiB.
+    // Above these crossovers, an override is redundant or shrinks the nursery.
+    let ceiling = match version.0.to_string().as_str() {
+        "22.23.2" => 2048 * MIB,
+        "24.20.0" => 512 * MIB,
+        "26.8.1" => 1024 * MIB,
+        _ => return false,
+    };
+    node_options.is_none_or(|options| options.trim().is_empty())
         // Everything after an entry path is application argv, not Node options.
         && !user_args.first().is_some_and(|arg| arg.starts_with('-'))
-        && memory() == Some(512 * MIB)
+        && memory().is_some_and(|budget| {
+            budget.effective_limit >= 512 * MIB && budget.node_limit <= ceiling
+        })
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn constrained_memory() -> Option<u64> {
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+pub fn constrained_memory() -> Option<MemoryBudget> {
     None
 }
 
-#[cfg(target_os = "linux")]
-pub fn constrained_memory() -> Option<u64> {
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn constrained_memory() -> Option<MemoryBudget> {
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
     let limit = read_constraint(&cgroup, &mounts, |path| std::fs::read_to_string(path).ok())?;
@@ -43,15 +57,18 @@ pub fn constrained_memory() -> Option<u64> {
     let physical = u64::try_from(pages)
         .ok()?
         .checked_mul(u64::try_from(page_size).ok()?)?;
-    (physical > 0).then_some(limit.min(physical))
+    (physical > 0).then_some(MemoryBudget {
+        node_limit: limit.node_limit,
+        effective_limit: limit.effective_limit.min(physical),
+    })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", test)))]
 fn read_constraint(
     cgroup: &str,
     mounts: &str,
     read: impl Fn(&std::path::Path) -> Option<String>,
-) -> Option<u64> {
+) -> Option<MemoryBudget> {
     use std::path::{Component, Path, PathBuf};
 
     fn mount_path(raw: &str) -> Option<PathBuf> {
@@ -132,10 +149,11 @@ fn read_constraint(
     // Require a leaf limit Node itself can see. A parent-only limit may constrain
     // the process without reducing Node's automatic nursery; overriding that
     // already-larger nursery would not be a floor.
-    let mut limit = value(&read(&leaf.join(hard))?)?.min(value(&read(&leaf.join(soft))?)?);
-    if limit != 512 * MIB {
+    let node_limit = value(&read(&leaf.join(hard))?)?.min(value(&read(&leaf.join(soft))?)?);
+    if node_limit == 0 || node_limit > 2048 * MIB {
         return None;
     }
+    let mut limit = node_limit;
     for parent in leaf.ancestors().skip(1) {
         if !parent.starts_with(mountpoint) {
             break;
@@ -149,7 +167,10 @@ fn read_constraint(
             }
         }
     }
-    Some(limit)
+    Some(MemoryBudget {
+        node_limit,
+        effective_limit: limit,
+    })
 }
 
 #[cfg(test)]
@@ -164,7 +185,12 @@ mod tests {
         options: Option<&str>,
         memory: Option<u64>,
     ) -> bool {
-        super::eligible(version, args, options, || memory)
+        super::eligible(version, args, options, || {
+            memory.map(|limit| MemoryBudget {
+                node_limit: limit,
+                effective_limit: limit,
+            })
+        })
     }
 
     #[test]
@@ -197,7 +223,7 @@ mod tests {
                 None,
                 Some(512 * MIB)
             ));
-            for limit in [None, Some(256 * MIB), Some(384 * MIB), Some(513 * MIB)] {
+            for limit in [None, Some(256 * MIB), Some(384 * MIB), Some(512 * MIB - 1)] {
                 assert!(!eligible(&version, &[], None, limit));
             }
             for options in [
@@ -224,8 +250,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn budget_range_stops_at_each_nodes_nursery_crossover() {
+        for (version, ceiling) in [("22.23.2", 2048), ("24.20.0", 512), ("26.8.1", 1024)] {
+            let version = version.parse().unwrap();
+            for memory in [512 * MIB, (512 + ceiling) * MIB / 2, ceiling * MIB] {
+                assert!(eligible(&version, &[], None, Some(memory)));
+            }
+            assert!(!eligible(&version, &[], None, Some(ceiling * MIB + 1)));
+            assert!(!super::eligible(&version, &[], None, || Some(
+                MemoryBudget {
+                    node_limit: ceiling * MIB + 1,
+                    effective_limit: 512 * MIB,
+                }
+            )));
+            assert!(!super::eligible(&version, &[], None, || Some(
+                MemoryBudget {
+                    node_limit: ceiling * MIB,
+                    effective_limit: 512 * MIB - 1,
+                }
+            )));
+        }
+    }
+
     #[cfg(target_os = "linux")]
-    fn detect(cgroup: &str, mounts: &str, files: &[(&str, &str)]) -> Option<u64> {
+    fn detect(cgroup: &str, mounts: &str, files: &[(&str, &str)]) -> Option<MemoryBudget> {
         let files: HashMap<_, _> = files.iter().copied().collect();
         read_constraint(cgroup, mounts, |path| {
             files.get(path.to_str()?).map(|s| s.to_string())
@@ -242,10 +291,45 @@ mod tests {
             ("/cg/memory.max", "268435456"),
             ("/cg/memory.high", "max"),
         ];
-        assert_eq!(detect("0::/host/group/job", mount, &files), Some(256 * MIB));
+        assert_eq!(
+            detect("0::/host/group/job", mount, &files),
+            Some(MemoryBudget {
+                node_limit: 512 * MIB,
+                effective_limit: 256 * MIB,
+            })
+        );
         assert_eq!(detect("0::/host/groupish/job", mount, &files), None);
         assert_eq!(detect("0::/host/group/../job", mount, &files), None);
         assert_eq!(detect("0::/host/group/job", mount, &files[..1]), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn ancestor_limits_restrict_headroom_without_hiding_nodes_leaf_budget() {
+        let mount = "1 0 0:1 / /cg rw - cgroup2 cgroup rw";
+        for (ancestor, expected) in [("805306368", true), ("535822336", false)] {
+            let budget = detect(
+                "0::/parent/job",
+                mount,
+                &[
+                    ("/cg/parent/job/memory.max", "1073741824"),
+                    ("/cg/parent/job/memory.high", "max"),
+                    ("/cg/parent/memory.max", "max"),
+                    ("/cg/parent/memory.high", ancestor),
+                ],
+            );
+            assert_eq!(budget.map(|b| b.node_limit), Some(1024 * MIB));
+            assert_eq!(
+                super::eligible(&"26.8.1".parse().unwrap(), &[], None, || budget),
+                expected
+            );
+            assert!(!super::eligible(
+                &"24.20.0".parse().unwrap(),
+                &[],
+                None,
+                || budget
+            ));
+        }
     }
 
     #[test]
@@ -261,7 +345,10 @@ mod tests {
         ];
         assert_eq!(
             detect("4:cpu:/ignored\n5:memory:/host/job", mount, &files),
-            Some(512 * MIB)
+            Some(MemoryBudget {
+                node_limit: 512 * MIB,
+                effective_limit: 512 * MIB
+            })
         );
         assert_eq!(detect("4:cpu:/host/job", mount, &files), None);
     }
@@ -270,7 +357,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn unknown_unlimited_and_parent_only_limits_do_not_tune() {
         let mount = "1 0 0:1 / /cg rw - cgroup2 cgroup rw";
-        for raw in ["max", "0", "garbage", "1073741824"] {
+        for raw in ["max", "0", "garbage", "4294967296"] {
             assert_eq!(
                 detect(
                     "0::/job",

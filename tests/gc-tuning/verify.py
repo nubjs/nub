@@ -95,6 +95,8 @@ for(let dir='/sys/fs/cgroup'+group;dir.startsWith('/sys/fs/cgroup');dir=path.dir
             if "checksum" in data:
                 checksums.add(data["checksum"])
                 assert len(checksums) == 1, data
+            if label == "nub":
+                assert data["fork"]["mainHeap"] == defaults[memory], data
             cases += 1
             print(json.dumps({"version": version, "case": label, "memory": memory,
                               "mainHeap": data["mainHeap"], "forkHeap": data.get("fork", {}).get("mainHeap"),
@@ -102,9 +104,18 @@ for(let dir='/sys/fs/cgroup'+group;dir.startsWith('/sys/fs/cgroup');dir=path.dir
             return data["mainHeap"]
 
         defaults = {}
-        for memory in [256, 512, 1024]:
+        tuned = {}
+        ceiling = {"22.23.2": 2048, "24.20.0": 512, "26.8.1": 1024}[version]
+        for memory in [256, 384, 500, 511, 512, 513, 640, 768, 1024, 1025, 1536, 2048, 2049, 4096]:
             defaults[memory] = run("node", [node, "main.cjs"], memory)
-            expected = 304 if memory == 512 else defaults[memory]
+            expected = defaults[memory]
+            if 512 <= memory <= ceiling:
+                # Query the stock Node flag directly, without the Worker fixture:
+                # the explicit global flag intentionally overrides Worker limits.
+                expected = run("semi16-oracle", [node, "--max-semi-space-size=16", "-e",
+                    "console.log(JSON.stringify({node:process.version,mainHeap:require('v8').getHeapStatistics().heap_size_limit/2**20}))"], memory)
+                assert expected > defaults[memory], (version, memory, expected, defaults[memory])
+                tuned[memory] = expected
             assert run("nub", [nub, "--no-check", "main.cjs"], memory) == expected
         for label, command, env, expected in [
             ("application-args", ["main.cjs", "--port=3000"], (), 304),
@@ -132,6 +143,7 @@ for(let dir='/sys/fs/cgroup'+group;dir.startsWith('/sys/fs/cgroup');dir=path.dir
             (project / "nub.jsonc").write_text(json.dumps({**config, **settings}))
             assert run(label, [nub, "--no-check", "main.cjs"]) == defaults[512]
         (project / "nub.jsonc").write_text(json.dumps(config))
-        assert run("pressure-node", [node, "pressure.cjs"]) == defaults[512]
-        assert run("pressure-nub", [nub, "--no-check", "pressure.cjs"]) == 304
+        for memory, expected in tuned.items():
+            assert run("pressure-node", [node, "pressure.cjs", str(memory)], memory) == defaults[memory]
+            assert run("pressure-nub", [nub, "--no-check", "pressure.cjs", str(memory)], memory) == expected
     print(f"GC_ACCEPTANCE_OK {cases} cases")

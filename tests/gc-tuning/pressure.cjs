@@ -23,7 +23,8 @@ async function main() {
   globalThis.retained = retained;
   const membership = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find(x => x.startsWith('0::')).slice(3);
   const directory = '/sys/fs/cgroup' + membership;
-  assert.equal(readFileSync(directory + '/memory.max', 'utf8').trim(), String(512 * 2 ** 20));
+  const budgetMiB = Number(process.argv[2] || 512);
+  assert.equal(readFileSync(directory + '/memory.max', 'utf8').trim(), String(budgetMiB * 2 ** 20));
   const events = Object.fromEntries(readFileSync(directory + '/memory.events', 'utf8').trim().split('\n').map(line => line.split(' ')));
   assert.equal(events.oom, '0');
   assert.equal(events.oom_kill, '0');
