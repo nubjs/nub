@@ -12,6 +12,11 @@ name: Native-dep floor
 #   floor-denied:  core-js (not on the allowlist). Asserts:
 #     WARN_NUB_IGNORED_BUILD_SCRIPTS names core-js — build is blocked.
 #
+# A second harness rides the same job: tests/node-gyp-headers asserts that a
+# node-gyp build finds its headers in the cache nub seeded from the provisioned
+# Node, with the download host unreachable so a build that reaches the network
+# fails instead of passing quietly.
+#
 # Why separate workflow: the harness does a real npm registry install of esbuild
 # and better-sqlite3 (which compiles a C++ addon via node-gyp). That makes the
 # job slow and network-dependent. A path filter fires it only when the PM engine
@@ -25,6 +30,7 @@ on:
       - "vendor/aube/**"
       - "vendor/libsui/**"
       - "tests/native-deps/**"
+      - "tests/node-gyp-headers/**"
       - ".github/workflows/native-deps.yml"
   pull_request:
     # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
@@ -35,6 +41,7 @@ on:
       - "vendor/aube/**"
       - "vendor/libsui/**"
       - "tests/native-deps/**"
+      - "tests/node-gyp-headers/**"
       - ".github/workflows/native-deps.yml"
 
 concurrency:
@@ -80,3 +87,5 @@ jobs:
           cp target/debug/libnub_native.so runtime/addons/nub-native.node
       - name: Run native-deps harness
         run: tests/native-deps/run.sh target/debug/nub
+      - name: Run node-gyp header-cache harness
+        run: tests/node-gyp-headers/run.sh target/debug/nub
