@@ -1899,8 +1899,15 @@ fn augmentation_to_lifecycle_overlay(
     // node-gyp downloads `node-v<ver>-headers.tar.gz` from nodejs.org for every
     // fresh version, which an offline install cannot do and a network-denied
     // build jail must not allow (`nub_core::node::headers`).
+    //
+    // No script text to pass: this overlay is built ONCE per install and
+    // applied to every dependency's scripts, so there is no single argv to
+    // inspect. The ambient-env half of the guard still runs, which is what
+    // covers the case that matters — an Electron/alternate-runtime rebuild
+    // selects its headers through `npm_config_target` + `npm_config_disturl`
+    // on the install's own environment, so nub stands down for the whole tree.
     if let Some(nodedir) =
-        nub_core::node::headers::node_gyp_nodedir(Path::new(node_execpath), node_version)
+        nub_core::node::headers::node_gyp_nodedir(Path::new(node_execpath), node_version, None)
     {
         overlay.push((
             OsString::from("npm_config_nodedir"),
@@ -5053,6 +5060,23 @@ mod tests {
         );
     }
 
+    /// Mirrors the guard in `nub_core::node::headers`: an env key naming a
+    /// node-gyp option that selects its own headers or target runtime. A test
+    /// asserting nub supplies the local headers has nothing to assert when the
+    /// ambient environment already made that choice.
+    fn selects_own_headers(key: &str) -> bool {
+        let lower = key.to_ascii_lowercase();
+        ["npm_config_", "npm_package_config_node_gyp_"]
+            .iter()
+            .find_map(|prefix| lower.strip_prefix(prefix))
+            .is_some_and(|name| {
+                matches!(
+                    name.replace('_', "-").as_str(),
+                    "nodedir" | "target" | "disturl" | "dist-url" | "runtime"
+                )
+            })
+    }
+
     /// The ABI pin's other half: node-gyp must compile against the pinned
     /// Node's OWN headers, not a copy downloaded from nodejs.org. The overlay
     /// exports `npm_config_nodedir` only when `<root>/include/node` names the
@@ -5062,8 +5086,9 @@ mod tests {
     fn lifecycle_overlay_points_node_gyp_at_the_pinned_headers() {
         use nub_core::node::spawn::AugmentationEnv;
         use std::ffi::OsString;
-        if std::env::vars_os().any(|(k, _)| k.eq_ignore_ascii_case("npm_config_nodedir")) {
-            // A user pin wins by design, so there is nothing to assert under one.
+        if std::env::vars_os().any(|(k, _)| selects_own_headers(&k.to_string_lossy())) {
+            // An ambient header/target selection wins by design, so there is
+            // nothing to assert under one.
             return;
         }
         let root = tempfile::tempdir().unwrap();

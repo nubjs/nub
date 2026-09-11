@@ -196,9 +196,11 @@ pub fn npm_env(
     // …and node-gyp compiles against that Node's own headers instead of
     // downloading them (`crate::node::headers`); same as the engine's lifecycle
     // overlay, so `nub run rebuild` and a dep postinstall agree.
-    if let Some(nodedir) =
-        crate::node::headers::node_gyp_nodedir(Path::new(node_execpath), node_version)
-    {
+    if let Some(nodedir) = crate::node::headers::node_gyp_nodedir(
+        Path::new(node_execpath),
+        node_version,
+        lifecycle_script,
+    ) {
         env_vars.insert(
             "npm_config_nodedir".to_string(),
             nodedir.to_string_lossy().into_owned(),

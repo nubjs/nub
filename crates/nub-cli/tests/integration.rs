@@ -7147,6 +7147,23 @@ fn npm_run_threads_node_execpath() {
     );
 }
 
+/// Mirrors the guard in `nub_core::node::headers`: an env key naming a
+/// node-gyp option that selects its own headers or target runtime. A test
+/// asserting nub supplies the local headers has nothing to assert when the
+/// ambient environment already made that choice.
+fn selects_own_headers(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    ["npm_config_", "npm_package_config_node_gyp_"]
+        .iter()
+        .find_map(|prefix| lower.strip_prefix(prefix))
+        .is_some_and(|name| {
+            matches!(
+                name.replace('_', "-").as_str(),
+                "nodedir" | "target" | "disturl" | "dist-url" | "runtime"
+            )
+        })
+}
+
 /// `nub run` hands node-gyp the resolved Node's own headers: `npm_config_nodedir`
 /// names the install root whenever `<root>/include/node/node_version.h` matches
 /// the Node that runs the script, and stays unset otherwise (Windows, or a Node
@@ -7156,8 +7173,9 @@ fn npm_run_threads_node_execpath() {
 /// positive branch.
 #[test]
 fn npm_run_points_node_gyp_at_the_resolved_headers() {
-    if std::env::vars_os().any(|(k, _)| k.eq_ignore_ascii_case("npm_config_nodedir")) {
-        // A user pin wins by design, so there is nothing to assert under one.
+    if std::env::vars_os().any(|(k, _)| selects_own_headers(&k.to_string_lossy())) {
+        // An ambient header/target selection wins by design, so there is
+        // nothing to assert under one.
         return;
     }
     let fixture_path = fixtures_dir().join("env-test");

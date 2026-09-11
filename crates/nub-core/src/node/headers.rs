@@ -17,6 +17,11 @@
 //! names a different release than the binary running the script — a distro
 //! `/usr/bin/node` beside a stale `libnode-dev` — must never be exported.
 //!
+//! The second guard is [`TARGET_SELECTING_OPTS`], and it is the one that keeps
+//! this correct rather than merely fast: a caller building for a DIFFERENT
+//! runtime has already chosen its headers, and because an `npm_config_*` value
+//! overrides node-gyp's own argv, answering on its behalf would silently win.
+//!
 //! Windows is excluded on purpose: the official zip ships neither headers nor
 //! `node.lib`, and `nodedir` there also moves node-gyp's `node.lib` lookup to
 //! `<nodedir>/$(Configuration)/`, so the download path stays the working one.
@@ -24,18 +29,94 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+/// node-gyp options that CHOOSE what to compile against. Any one of them means
+/// the caller has already answered the question, so nub must not answer it too.
+///
+/// WHY THIS GUARD IS NOT OPTIONAL. `npm_config_*` does not merely supply a
+/// default — node-gyp parses argv with nopt into `this.opts` and then loops the
+/// environment assigning `this.opts[name] = value` unconditionally
+/// (`lib/node-gyp.js`), so an env value OVERWRITES an explicit
+/// `node-gyp --nodedir=…` on the command line. And `configure` takes the
+/// nodedir branch the moment nodedir is populated, never reaching the `else`
+/// that downloads headers for `--target` (`lib/configure.js` `getNodeDir`).
+/// Set nodedir blindly and an Electron or alternate-runtime rebuild — which
+/// selects its headers through `npm_config_target` + `npm_config_disturl` —
+/// silently compiles against the running Node instead, producing exactly the
+/// wrong-ABI addon this module exists to avoid. Failing closed costs one header
+/// download; failing open costs a binary that loads and misbehaves.
+///
+/// Both spellings of the dist URL are listed because node-gyp itself tests both
+/// (`lib/create-config-gypi.js`: `gyp.opts.disturl || gyp.opts['dist-url']`).
+/// `runtime` is not read by node-gyp core, but `@electron/rebuild` and
+/// node-pre-gyp set it, so its presence marks a non-Node target.
+const TARGET_SELECTING_OPTS: &[&str] = &["nodedir", "target", "disturl", "dist-url", "runtime"];
+
+/// The two prefixes node-gyp folds into its options, in its own precedence
+/// order. A package's `config.node-gyp.<key>` arrives as the second one.
+const OPT_ENV_PREFIXES: &[&str] = &["npm_config_", "npm_package_config_node_gyp_"];
+
 /// The value to export as `npm_config_nodedir` for scripts that run under
 /// `node_execpath`, or `None` when node-gyp should keep its own header
-/// download. A user-set `npm_config_nodedir` (any letter case — node-gyp
-/// matches the prefix case-insensitively) always wins.
-pub fn node_gyp_nodedir(node_execpath: &Path, version: &str) -> Option<PathBuf> {
+/// handling. `script` is the script text when the caller has it, so a command
+/// that selects its own headers in argv is left alone too.
+pub fn node_gyp_nodedir(
+    node_execpath: &Path,
+    version: &str,
+    script: Option<&str>,
+) -> Option<PathBuf> {
+    let env_keys = std::env::vars_os()
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    nodedir_for(
+        node_execpath,
+        version,
+        env_keys.iter().map(String::as_str),
+        script,
+    )
+}
+
+/// The decision, with the environment passed in so it is testable without
+/// touching the ambient process state.
+fn nodedir_for<'a>(
+    node_execpath: &Path,
+    version: &str,
+    env_keys: impl Iterator<Item = &'a str>,
+    script: Option<&str>,
+) -> Option<PathBuf> {
     if cfg!(windows) || node_execpath.as_os_str().is_empty() || version.is_empty() {
         return None;
     }
-    if std::env::vars_os().any(|(key, _)| key.eq_ignore_ascii_case("npm_config_nodedir")) {
+    if env_keys.into_iter().any(selects_its_own_headers) {
+        return None;
+    }
+    // The env check above cannot see a flag the script passes on the command
+    // line, and the env would OVERRIDE that flag rather than yield to it. A
+    // substring match over the script text is coarse on purpose: a false
+    // positive only returns node-gyp to the behavior it had before this
+    // existed, while a miss is a wrong-ABI build.
+    if let Some(script) = script
+        && TARGET_SELECTING_OPTS
+            .iter()
+            .any(|opt| script.contains(&format!("--{opt}")))
+    {
         return None;
     }
     headers_root(node_execpath, version)
+}
+
+/// True for an env key naming one of [`TARGET_SELECTING_OPTS`] under either
+/// prefix. node-gyp lowercases and maps `_` to `-` before looking a key up, so
+/// `npm_config_DIST_URL` and `npm_config_dist-url` are the same option and both
+/// have to match here.
+fn selects_its_own_headers(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    OPT_ENV_PREFIXES
+        .iter()
+        .find_map(|prefix| lower.strip_prefix(prefix))
+        .is_some_and(|name| {
+            let name = name.replace('_', "-");
+            TARGET_SELECTING_OPTS.contains(&name.as_str())
+        })
 }
 
 /// The install root of `node_execpath` (`<root>/bin/node`) when
@@ -173,6 +254,87 @@ mod tests {
         let found = headers_root(&shim, "26.8.2");
         let _ = std::fs::remove_dir_all(&shim_root);
         assert_eq!(found, Some(std::fs::canonicalize(&real.root).unwrap()));
+    }
+
+    /// The baseline the guard tests vary from: nothing selected, headers match,
+    /// so the local root is used.
+    #[test]
+    fn a_plain_environment_gets_the_local_headers() {
+        let node = FakeNode::new("plain", Some("26.8.2"));
+        assert_eq!(
+            nodedir_for(&node.node(), "26.8.2", ["PATH", "HOME"].into_iter(), None),
+            if cfg!(windows) {
+                None
+            } else {
+                Some(node.root.clone())
+            }
+        );
+    }
+
+    /// An Electron rebuild selects its headers with `npm_config_target` plus
+    /// `npm_config_disturl`. node-gyp takes the nodedir branch before it ever
+    /// reads those, so nub answering here would compile an Electron addon
+    /// against the running Node — a wrong-ABI binary that still loads.
+    #[cfg(unix)]
+    #[test]
+    fn a_caller_that_selected_its_own_target_is_left_alone() {
+        let node = FakeNode::new("selected", Some("26.8.2"));
+        for key in [
+            "npm_config_nodedir",
+            "npm_config_target",
+            "npm_config_disturl",
+            "npm_config_dist_url",
+            "npm_config_runtime",
+            // node-gyp lowercases the key before looking it up.
+            "npm_config_TARGET",
+            // A package's own `config.node-gyp.target`, which outranks the above.
+            "npm_package_config_node_gyp_target",
+        ] {
+            assert_eq!(
+                nodedir_for(&node.node(), "26.8.2", ["PATH", key].into_iter(), None),
+                None,
+                "{key} selects the headers, so nub must not"
+            );
+        }
+    }
+
+    /// An unrelated `npm_config_*` must not disable the whole mechanism.
+    #[cfg(unix)]
+    #[test]
+    fn an_unrelated_npm_config_key_does_not_disable_it() {
+        let node = FakeNode::new("unrelated", Some("26.8.2"));
+        for key in [
+            "npm_config_registry",
+            "npm_config_devdir",
+            "npm_config_python",
+        ] {
+            assert_eq!(
+                nodedir_for(&node.node(), "26.8.2", ["PATH", key].into_iter(), None),
+                Some(node.root.clone()),
+                "{key} chooses no headers, so the local ones still apply"
+            );
+        }
+    }
+
+    /// The env overrides node-gyp's argv rather than yielding to it, so a
+    /// script passing its own flag has to be detected from the script text.
+    #[cfg(unix)]
+    #[test]
+    fn a_script_that_passes_its_own_flag_is_left_alone() {
+        let node = FakeNode::new("argv", Some("26.8.2"));
+        let decide =
+            |script: &str| nodedir_for(&node.node(), "26.8.2", ["PATH"].into_iter(), Some(script));
+        assert_eq!(decide("node-gyp rebuild --nodedir=/opt/headers"), None);
+        assert_eq!(decide("node-gyp rebuild --target=39.0.0"), None);
+        assert_eq!(
+            decide("node-gyp rebuild --dist-url=https://electronjs.org/headers"),
+            None
+        );
+        assert_eq!(
+            decide("node-gyp rebuild --verbose"),
+            Some(node.root.clone()),
+            "an ordinary rebuild still gets the local headers"
+        );
     }
 
     #[test]
