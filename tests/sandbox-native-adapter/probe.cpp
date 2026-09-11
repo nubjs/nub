@@ -25,6 +25,7 @@ struct Payload {
     BOOL mount_query_probe;
     BOOL relocation_tree_probe;
     BOOL section_dacl_probe;
+    BOOL sync_dacl_probe;
 };
 static Payload state = {};
 
@@ -113,6 +114,7 @@ int wmain(int argc, wchar_t** argv) {
     state.mount_query_probe = GetEnvironmentVariableW(L"NUB_NATIVE_MOUNT_QUERY_PROBE", nullptr, 0) != 0;
     state.relocation_tree_probe = GetEnvironmentVariableW(L"NUB_NATIVE_RELOCATION_TREE_PROBE", nullptr, 0) != 0;
     state.section_dacl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_SECTION_DACL_PROBE", nullptr, 0) != 0;
+    state.sync_dacl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_SYNC_DACL_PROBE", nullptr, 0) != 0;
     DWORD pid = wcstoul(argv[1], nullptr, 10);
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
                                  PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
@@ -385,6 +387,12 @@ using NtSection = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PL
 using NtOpenSectionFn = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
 static NtSection true_create_section = nullptr;
 static NtOpenSectionFn true_open_section = nullptr;
+using NtMutant = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, BOOLEAN);
+using NtEvent = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, ULONG, BOOLEAN);
+using NtSemaphore = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, LONG, LONG);
+static NtMutant true_create_mutant = nullptr;
+static NtEvent true_create_event = nullptr;
+static NtSemaphore true_create_semaphore = nullptr;
 
 static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
     if (!attrs || !attrs->RootDirectory || !attrs->ObjectName || !attrs->ObjectName->Buffer ||
@@ -473,6 +481,49 @@ static NTSTATUS NTAPI open_section(PHANDLE handle, ACCESS_MASK access, POBJECT_A
     if (msys_section_root(attrs, root)) diagnostic("ADAPTER_SECTION_OPEN pid=%lu root=%ls name=%.*ls access=%08lx status=%08lx\n",
         GetCurrentProcessId(), root, int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer,
         access, static_cast<ULONG>(status));
+    return status;
+}
+
+static bool private_sync_descriptor(POBJECT_ATTRIBUTES attrs, OBJECT_ATTRIBUTES& redirected) {
+    wchar_t root[1024] = {};
+    if (!state.sync_dacl_probe || !msys_section_root(attrs, root) || !attrs->SecurityDescriptor) return false;
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = nullptr;
+    if (!GetSecurityDescriptorDacl(attrs->SecurityDescriptor, &present, &dacl, &defaulted) || !present || dacl) return false;
+    redirected = *attrs;
+    redirected.SecurityDescriptor = &private_descriptor;
+    return true;
+}
+
+static void log_sync(const char* kind, POBJECT_ATTRIBUTES attrs, bool adapted, NTSTATUS status) {
+    if (attrs && attrs->ObjectName && attrs->ObjectName->Buffer)
+        diagnostic("ADAPTER_SYNC_CREATE kind=%s pid=%lu root=%p name=%.*ls adapted=%d status=%08lx\n",
+            kind, GetCurrentProcessId(), attrs->RootDirectory,
+            int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer,
+            adapted, static_cast<ULONG>(status));
+}
+
+static NTSTATUS NTAPI create_mutant(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs, BOOLEAN owner) {
+    OBJECT_ATTRIBUTES redirected = {};
+    bool adapted = private_sync_descriptor(attrs, redirected);
+    auto status = true_create_mutant(handle, access, adapted ? &redirected : attrs, owner);
+    log_sync("mutant", attrs, adapted, status);
+    return status;
+}
+
+static NTSTATUS NTAPI create_event(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs, ULONG kind, BOOLEAN initial) {
+    OBJECT_ATTRIBUTES redirected = {};
+    bool adapted = private_sync_descriptor(attrs, redirected);
+    auto status = true_create_event(handle, access, adapted ? &redirected : attrs, kind, initial);
+    log_sync("event", attrs, adapted, status);
+    return status;
+}
+
+static NTSTATUS NTAPI create_semaphore(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs, LONG initial, LONG maximum) {
+    OBJECT_ATTRIBUTES redirected = {};
+    bool adapted = private_sync_descriptor(attrs, redirected);
+    auto status = true_create_semaphore(handle, access, adapted ? &redirected : attrs, initial, maximum);
+    log_sync("semaphore", attrs, adapted, status);
     return status;
 }
 
@@ -919,6 +970,9 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_nt_create_file, "NtCreateFile") ||
         !resolve_nt(true_create_section, "NtCreateSection") ||
         !resolve_nt(true_open_section, "NtOpenSection") ||
+        !resolve_nt(true_create_mutant, "NtCreateMutant") ||
+        !resolve_nt(true_create_event, "NtCreateEvent") ||
+        !resolve_nt(true_create_semaphore, "NtCreateSemaphore") ||
         !resolve_nt(true_io_control, "NtDeviceIoControlFile") ||
         !resolve_nt(true_close, "NtClose") ||
         !resolve_nt(query_object, "NtQueryObject")) {
@@ -944,6 +998,9 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     DetourAttach(reinterpret_cast<PVOID*>(&true_nt_create_file), nt_create_file);
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_section), create_section);
     DetourAttach(reinterpret_cast<PVOID*>(&true_open_section), open_section);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_mutant), create_mutant);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_event), create_event);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_semaphore), create_semaphore);
     DetourAttach(reinterpret_cast<PVOID*>(&true_io_control), mount_io_control);
     DetourAttach(reinterpret_cast<PVOID*>(&true_close), mount_close);
     LONG result = DetourTransactionCommit();
