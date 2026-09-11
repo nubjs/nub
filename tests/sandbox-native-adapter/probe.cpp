@@ -394,13 +394,21 @@ static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
     }
     alignas(void*) BYTE info[4096];
     ULONG needed = 0;
-    if (query_object(attrs->RootDirectory, 1, info, sizeof(info), &needed) < 0) return false;
+    auto query_status = query_object(attrs->RootDirectory, 1, info, sizeof(info), &needed);
+    if (query_status < 0) {
+        diagnostic("ADAPTER_SECTION_ROOT_QUERY pid=%lu handle=%p status=%08lx needed=%lu\n",
+            GetCurrentProcessId(), attrs->RootDirectory, static_cast<ULONG>(query_status), needed);
+        return false;
+    }
     auto name = reinterpret_cast<UNICODE_STRING*>(info);
     if (name->Length % sizeof(wchar_t) || name->Length >= sizeof(root)) return false;
     memcpy(root, name->Buffer, name->Length);
     root[name->Length / sizeof(wchar_t)] = 0;
     wchar_t package[1024];
-    if (!GetAppContainerNamedObjectPath(nullptr, nullptr, 1024, package, &needed)) return false;
+    if (!GetAppContainerNamedObjectPath(nullptr, nullptr, 1024, package, &needed)) {
+        diagnostic("ADAPTER_SECTION_PACKAGE pid=%lu error=%lu\n", GetCurrentProcessId(), GetLastError());
+        return false;
+    }
     if (package[0] != L'\\') {
         wchar_t relative[1024];
         wcscpy_s(relative, package);
@@ -410,6 +418,7 @@ static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
     }
     size_t prefix = wcslen(package);
     if (prefix && package[prefix - 1] == L'\\') package[--prefix] = 0;
+    diagnostic("ADAPTER_SECTION_ROOT pid=%lu canonical=%ls package=%ls\n", GetCurrentProcessId(), root, package);
     if (wcslen(root) <= prefix || _wcsnicmp(root, package, prefix) || root[prefix] != L'\\') return false;
     auto leaf = root + prefix + 1;
     return (!wcsncmp(leaf, L"msys-", 5) || !wcsncmp(leaf, L"cygwin-", 7)) && !wcschr(leaf, L'\\');
@@ -429,7 +438,7 @@ static NTSTATUS NTAPI create_section(PHANDLE handle, ACCESS_MASK access, POBJECT
     if (adapted) { redirected = *attrs; redirected.SecurityDescriptor = &private_descriptor; }
     NTSTATUS status = true_create_section(handle, access, adapted ? &redirected : attrs,
         maximum_size, protection, attributes, file);
-    if (scoped) diagnostic("ADAPTER_SECTION_CREATE pid=%lu root=%ls name=%.*ls access=%08lx protection=%08lx attributes=%08lx null_dacl=%d adapted=%d status=%08lx\n",
+    if (attrs && attrs->ObjectName && attrs->ObjectName->Buffer) diagnostic("ADAPTER_SECTION_CREATE pid=%lu root=%ls name=%.*ls access=%08lx protection=%08lx attributes=%08lx null_dacl=%d adapted=%d status=%08lx\n",
         GetCurrentProcessId(), root, int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer,
         access, protection, attributes, null_dacl, adapted, static_cast<ULONG>(status));
     return status;
