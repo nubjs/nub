@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -304,6 +304,118 @@ fn probe(config: &Value) -> Value {
     })
 }
 
+fn token_privileges() -> Value {
+    use windows_sys::Win32::Security::{
+        LookupPrivilegeNameW, SE_PRIVILEGE_ENABLED, TOKEN_PRIVILEGES, TokenPrivileges,
+    };
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return json!({"error": std::io::Error::last_os_error().raw_os_error()});
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut buffer = [0usize; 256];
+    let mut length = 0;
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenPrivileges,
+            buffer.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buffer) as u32,
+            &mut length,
+        )
+    } == 0
+    {
+        return json!({"error": std::io::Error::last_os_error().raw_os_error()});
+    }
+    let info = buffer.as_ptr().cast::<TOKEN_PRIVILEGES>();
+    let count = unsafe { (*info).PrivilegeCount } as usize;
+    assert!(
+        std::mem::offset_of!(TOKEN_PRIVILEGES, Privileges)
+            + count * std::mem::size_of::<windows_sys::Win32::Security::LUID_AND_ATTRIBUTES>()
+            <= length as usize
+    );
+    let privileges = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!((*info).Privileges)
+                .cast::<windows_sys::Win32::Security::LUID_AND_ATTRIBUTES>(),
+            count,
+        )
+    };
+    Value::Array(privileges.iter().map(|privilege| {
+        let mut name = [0u16; 256];
+        let mut length = name.len() as u32;
+        let ok = unsafe { LookupPrivilegeNameW(std::ptr::null(), &privilege.Luid, name.as_mut_ptr(), &mut length) };
+        json!({"name": (ok != 0).then(|| String::from_utf16_lossy(&name[..length as usize])),
+            "luid_low": privilege.Luid.LowPart, "luid_high": privilege.Luid.HighPart,
+            "attributes": privilege.Attributes, "enabled": privilege.Attributes & SE_PRIVILEGE_ENABLED != 0})
+    }).collect())
+}
+
+fn create_symlink(link: &Path, target: &Path, flags: u32) -> Value {
+    use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+    use windows_sys::Win32::Storage::FileSystem::CreateSymbolicLinkW;
+    let link_wide: Vec<_> = link.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target_wide: Vec<_> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe { SetLastError(0) };
+    let success: bool =
+        unsafe { CreateSymbolicLinkW(link_wide.as_ptr(), target_wide.as_ptr(), flags) };
+    let error = unsafe { GetLastError() };
+    let result = json!({"success": success, "last_error": error, "flags": flags,
+        "link": link, "target": target, "read_link": std::fs::read_link(link).ok()});
+    eprintln!("WINDOWS_SYMLINK_API {result}");
+    result
+}
+
+fn symlink_probe(config: &Value) -> Value {
+    let privileges = token_privileges();
+    let root = Path::new(config["root"].as_str().unwrap());
+    let scratch = Path::new(config["scratch"].as_str().unwrap());
+    let target_file = scratch.join("file-target");
+    let target_dir = scratch.join("directory-target");
+    std::fs::write(&target_file, b"target").unwrap();
+    std::fs::create_dir(&target_dir).unwrap();
+    std::fs::write(target_dir.join("input"), b"directory-input").unwrap();
+    let file_link = scratch.join("file-link");
+    let dir_link = scratch.join("directory-link");
+    let file = create_symlink(&file_link, &target_file, 2);
+    if file["success"] == true {
+        assert!(
+            std::fs::symlink_metadata(&file_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&file_link).unwrap(), b"target");
+        std::fs::write(&file_link, b"file-through-link").unwrap();
+        assert_eq!(std::fs::read(&target_file).unwrap(), b"file-through-link");
+    }
+    let directory = create_symlink(&dir_link, &target_dir, 3);
+    if directory["success"] == true {
+        assert!(
+            std::fs::symlink_metadata(&dir_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(dir_link.join("input")).unwrap(),
+            b"directory-input"
+        );
+        std::fs::write(dir_link.join("output"), b"directory-through-link").unwrap();
+        assert_eq!(
+            std::fs::read(target_dir.join("output")).unwrap(),
+            b"directory-through-link"
+        );
+    }
+    let escape_link = scratch.join("outside-link");
+    let escape = create_symlink(&escape_link, &root.join("omitted/canary"), 2);
+    json!({"file": file, "directory": directory, "outside_link": escape,
+        "outside_link_read": File::open(&escape_link).is_ok(),
+        "outside_link_write": OpenOptions::new().write(true).open(&escape_link).is_ok(),
+        "user": sid(false), "privileges": privileges,
+        "developer_mode": config["developer_mode"], "probe": probe(config)})
+}
+
 #[test]
 fn production_windows_child() {
     let Ok(mode) = std::env::var(MODE) else {
@@ -312,6 +424,7 @@ fn production_windows_child() {
     let config: Value = serde_json::from_str(&std::env::var(CONFIG).unwrap()).unwrap();
     let result = match mode.as_str() {
         "report" => probe(&config),
+        "symlink" => symlink_probe(&config),
         "nested" => {
             let mut child = Owner(
                 Command::new(std::env::current_exe().unwrap())
@@ -427,6 +540,57 @@ fn production_windows_child() {
         _ => panic!("unknown fixture mode {mode}"),
     };
     println!("{MARKER}{result}");
+}
+
+#[test]
+#[ignore = "requires a dedicated non-administrative Windows user; symlink availability is diagnostic"]
+fn standard_user_symlink_creation_has_plain_raw_and_native_controls() {
+    let _serial = SERIAL.lock().unwrap();
+    let root = fixture();
+    let project = root.path().join("project");
+    let developer_mode = std::env::var("SANDBOX_SYMLINK_DEVELOPER_MODE")
+        .ok()
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+        .unwrap_or_else(|| json!({"state": "not-recorded"}));
+    let user = sid(false);
+    for mode in ["plain", "raw", "native"] {
+        let scratch = project.join(format!("symlinks-{mode}"));
+        std::fs::create_dir(&scratch).unwrap();
+        let mut config = config(root.path());
+        config["scratch"] = json!(scratch);
+        config["developer_mode"] = developer_mode.clone();
+        let policy = policy(root.path(), &project, "symlink", config);
+        let result = if mode == "plain" {
+            plain(&policy, &project)
+        } else {
+            output(&session(&policy, mode == "native"), &project)
+        };
+        eprintln!(
+            "WINDOWS_SYMLINK_PARITY {}",
+            json!({"mode": mode, "result": result})
+        );
+        assert_eq!(
+            result["user"],
+            json!(user),
+            "control user changed: {result}"
+        );
+        assert_eq!(!result["probe"]["adapter"].is_null(), mode == "native");
+        assert_eq!(
+            result["probe"]["sid"].is_null(),
+            mode == "plain",
+            "unexpected token or unconfined fallback: {result}"
+        );
+        assert_eq!(result["probe"]["outside_read"], mode == "plain");
+        assert_eq!(result["probe"]["outside_write"], mode == "plain");
+        if result["outside_link"]["success"] == true {
+            assert_eq!(result["outside_link_read"], mode == "plain", "{result}");
+            assert_eq!(result["outside_link_write"], mode == "plain", "{result}");
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("omitted/canary")).unwrap(),
+            b"outside-canary"
+        );
+    }
 }
 
 #[test]
@@ -630,10 +794,10 @@ fn ready(root: &Path, tag: &str) -> Value {
     let path = root.join("project").join(format!("ready-{tag}"));
     let start = Instant::now();
     loop {
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(value) = serde_json::from_slice(&bytes) {
-                return value;
-            }
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(value) = serde_json::from_slice(&bytes)
+        {
+            return value;
         }
         assert!(start.elapsed() < DEADLINE, "owner never published {path:?}");
         std::thread::sleep(Duration::from_millis(20));

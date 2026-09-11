@@ -16,7 +16,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022, windows-11-arm]
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            toolchain: stable
+          - os: macos-15
+            target: aarch64-apple-darwin
+            toolchain: stable
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            toolchain: stable-x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            toolchain: stable-x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
@@ -24,23 +36,28 @@ jobs:
         shell: bash
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      RUSTFLAGS: ${{ startsWith(matrix.os, 'windows') && '-C target-feature=+crt-static' || '' }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
+      - name: Selecting the Windows compiler host
+        if: runner.os == 'Windows'
+        run: echo 'RUSTUP_OVERRIDE_HOST_TRIPLE=x86_64-pc-windows-msvc' >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          shared-key: sandbox-reuse-release-costs
+          shared-key: sandbox-reuse-release-costs-${{ matrix.target }}
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 26
       - name: Recording the source and real tool tree
         run: |
           mkdir -p reports
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo 'RUSTFLAGS=-C target-feature=+crt-static' >> "$GITHUB_ENV"
-          fi
           { git rev-parse HEAD; rustc -Vv; uname -a; } > reports/environment.txt
           npm install --prefix .sandbox-cost-tool --ignore-scripts --no-audit --no-fund npm@11.6.2
           cp .sandbox-cost-tool/package-lock.json reports/tool-package-lock.json

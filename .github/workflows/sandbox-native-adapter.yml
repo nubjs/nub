@@ -158,13 +158,15 @@ jobs:
           foreach ($case in $cases) {
             $toolModes = $modes
             if ($case[0] -notin @('git', 'git-lfs')) { $toolModes += @('msys-plain', 'msys-embedded') }
-            if ($case[0] -eq 'bun132') { $toolModes += @('nodes-embedded', 'nodes-adapter') }
+            if ($case[0] -eq 'bun132') { $toolModes += @('nodes-embedded', 'nodes-adapter', 'directory-mask-adapter') }
             foreach ($mode in $toolModes) {
               Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_ANCESTOR_NODES -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_ADAPTER_PROBE_ENABLE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_EMBEDDED_ADAPTER -ErrorAction SilentlyContinue
-              if ($mode -in @('adapter', 'nodes-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
+              Remove-Item Env:NUB_NATIVE_DIRECTORY_MASK_PROBE -ErrorAction SilentlyContinue
+              if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
+              if ($mode -eq 'directory-mask-adapter') { $env:NUB_NATIVE_DIRECTORY_MASK_PROBE = '1' }
               if ($mode -in @('embedded', 'msys-embedded', 'nodes-embedded')) { $env:NUB_NATIVE_EMBEDDED_ADAPTER = '1' }
               if ($mode.StartsWith('nodes-')) { $env:NUB_NATIVE_ANCESTOR_NODES = '1' }
               if ($mode.StartsWith('msys-')) { $env:NUB_SANDBOX_TOOL_MSYS_ROOT = $msysRoot }
@@ -181,8 +183,10 @@ jobs:
           Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_ANCESTOR_NODES -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_EMBEDDED_ADAPTER -ErrorAction SilentlyContinue
+          Remove-Item Env:NUB_NATIVE_DIRECTORY_MASK_PROBE -ErrorAction SilentlyContinue
           $results | ConvertTo-Json > reports/tool-results.json
-          if ($results | Where-Object { $_.mode -ne 'raw' -and $_.exit -ne 0 }) { exit 1 }
+          # Diagnostic DLL/ancestor/mask alternatives remain results, not production verdicts.
+          if ($results | Where-Object { $_.mode -in @('plain', 'embedded', 'msys-plain', 'msys-embedded') -and $_.exit -ne 0 }) { exit 1 }
           exit 0
       - name: Checking archived Bun packages and real global entrypoints
         if: ${{ !cancelled() && steps.tools.outcome == 'success' }}

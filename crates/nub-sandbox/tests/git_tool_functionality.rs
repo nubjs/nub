@@ -698,6 +698,250 @@ fn run_lfs(control: Control) {
     run_lfs_with_runtime(control, git_runtime_paths());
 }
 
+#[cfg(windows)]
+fn lfs_hook_startup_ladder(root: &Path, clone: &Path, policy: &nub_sandbox::SandboxPolicy) {
+    use std::io::Read;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+    };
+
+    struct RestoreHook {
+        path: PathBuf,
+        original: Vec<u8>,
+    }
+    impl Drop for RestoreHook {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::write(&self.path, &self.original) {
+                eprintln!("LFS_HOOK_RESTORE_FAILED {}: {error}", self.path.display());
+            }
+        }
+    }
+    let hook = clone.join(".git/hooks/pre-push");
+    let restore = RestoreHook {
+        original: std::fs::read(&hook).expect("original LFS hook"),
+        path: hook,
+    };
+    let marker = clone.join(".git/sandbox-lfs-diagnostic-marker");
+    let trace = clone.join(".git/sandbox-lfs-diagnostic-trace.json");
+    let nested = clone.join(".git/sandbox-lfs-diagnostic-child");
+    std::fs::write(
+        &nested,
+        b"#!/bin/sh\nprintf 'nested-entered\\n' >> .git/sandbox-lfs-diagnostic-marker\nexit 37\n",
+    )
+    .expect("nested diagnostic script");
+    let stages = [
+        ("builtin", ""),
+        (
+            "lookup",
+            "command -v git-lfs\nprintf 'lookup=%s\\n' \"$?\" >> .git/sandbox-lfs-diagnostic-marker\n",
+        ),
+        (
+            "null-redirect",
+            ": >/dev/null\nprintf 'null=%s\\n' \"$?\" >> .git/sandbox-lfs-diagnostic-marker\n",
+        ),
+        (
+            "lfs-version",
+            "git-lfs version\nprintf 'lfs-version=%s\\n' \"$?\" >> .git/sandbox-lfs-diagnostic-marker\n",
+        ),
+        (
+            "nested-shell",
+            "sh .git/sandbox-lfs-diagnostic-child\nprintf 'nested-status=%s\\n' \"$?\" >> .git/sandbox-lfs-diagnostic-marker\n",
+        ),
+        (
+            "fork-wait",
+            "(printf 'fork-entered\\n' >> .git/sandbox-lfs-diagnostic-marker) &\nchild=$!\nwait \"$child\"\nprintf 'fork-status=%s\\n' \"$?\" >> .git/sandbox-lfs-diagnostic-marker\n",
+        ),
+        ("exec-shell", "exec sh .git/sandbox-lfs-diagnostic-child\n"),
+        (
+            "lfs-pre-push",
+            "git lfs pre-push \"$@\"\nprintf 'lfs-pre-push=%s\\n' \"$?\" >> .git/sandbox-lfs-diagnostic-marker\n",
+        ),
+    ];
+    for (stage, body) in stages {
+        // The sentinel makes hook execution observable; --dry-run protects refs even
+        // when a broken shell exits successfully without evaluating the script.
+        std::fs::write(&restore.path, format!("#!/bin/sh\nprintf 'entered\\n' > .git/sandbox-lfs-diagnostic-marker\n{body}exit 37\n"))
+            .expect("diagnostic hook");
+        for mode in ["plain", "embedded"] {
+            let _ = std::fs::remove_file(&marker);
+            let _ = std::fs::remove_file(&trace);
+            let extra = [("GIT_TRACE2_EVENT", trace.to_string_lossy().into_owned())];
+            let run = || -> Result<Output, String> {
+                if mode == "embedded" {
+                    let mut policy = policy.clone();
+                    policy.env.constructed.extend(
+                        extra
+                            .iter()
+                            .map(|(key, value)| ((*key).into(), value.clone())),
+                    );
+                    let sandbox = nub_sandbox::Sandbox::with_windows_native_compat(&policy)
+                        .map_err(|error| format!("acquire: {error:?}"))?;
+                    let prepared = sandbox
+                        .prepare(
+                            CommandSpec::new("git")
+                                .args(["push", "--dry-run", "origin", "HEAD:main"])
+                                .cwd(clone)
+                                .redact_stdout(true)
+                                .redact_stderr(true),
+                        )
+                        .map_err(|error| format!("prepare: {error:?}"))?;
+                    return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tool_output::output(prepared)
+                    }))
+                    .map_err(|_| {
+                        "embedded launch/output failed or exceeded its 30-second deadline".into()
+                    });
+                }
+
+                // Suspend before assignment so even an immediate shell descendant belongs
+                // to this control's kill-on-close job. This does not change its token.
+                let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+                if handle.is_null() {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+                let job = unsafe { OwnedHandle::from_raw_handle(handle) };
+                let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+                    unsafe { std::mem::zeroed() };
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if unsafe {
+                    SetInformationJobObject(
+                        job.as_raw_handle(),
+                        JobObjectExtendedLimitInformation,
+                        std::ptr::addr_of!(limits).cast(),
+                        std::mem::size_of_val(&limits) as u32,
+                    )
+                } == 0
+                {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+                let mut child = Command::new("git")
+                    .args(["push", "--dry-run", "origin", "HEAD:main"])
+                    .current_dir(clone)
+                    .env_clear()
+                    .envs(environment(root, &extra))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .creation_flags(CREATE_SUSPENDED)
+                    .spawn()
+                    .map_err(|error| error.to_string())?;
+                let activate = || -> Result<(), String> {
+                    if unsafe {
+                        AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle())
+                    } == 0
+                    {
+                        return Err(format!(
+                            "job assignment: {}",
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+                    if snapshot == INVALID_HANDLE_VALUE {
+                        return Err(std::io::Error::last_os_error().to_string());
+                    }
+                    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+                    let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+                    entry.dwSize = std::mem::size_of_val(&entry) as u32;
+                    let mut found = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) };
+                    while found != 0 {
+                        if entry.th32OwnerProcessID == child.id() {
+                            let thread =
+                                unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                            if thread.is_null() {
+                                return Err(std::io::Error::last_os_error().to_string());
+                            }
+                            let thread = unsafe { OwnedHandle::from_raw_handle(thread) };
+                            if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+                                return Err(std::io::Error::last_os_error().to_string());
+                            }
+                            return Ok(());
+                        }
+                        found = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) };
+                    }
+                    Err("suspended Git primary thread missing".into())
+                };
+                if let Err(error) = activate() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("plain control activation: {error}"));
+                }
+                let stdout = child.stdout.take().unwrap();
+                let stderr = child.stderr.take().unwrap();
+                std::thread::scope(|scope| {
+                    let stdout = scope.spawn(move || {
+                        let mut bytes = Vec::new();
+                        std::io::BufReader::new(stdout)
+                            .read_to_end(&mut bytes)
+                            .unwrap();
+                        bytes
+                    });
+                    let stderr = scope.spawn(move || {
+                        let mut bytes = Vec::new();
+                        std::io::BufReader::new(stderr)
+                            .read_to_end(&mut bytes)
+                            .unwrap();
+                        bytes
+                    });
+                    let start = Instant::now();
+                    let status = loop {
+                        match child.try_wait() {
+                            Ok(Some(status)) => break Ok(status),
+                            Ok(None) if start.elapsed() < Duration::from_secs(30) => {
+                                std::thread::sleep(Duration::from_millis(20))
+                            }
+                            Ok(None) => {
+                                break Err("plain control exceeded its 30-second deadline".into());
+                            }
+                            Err(error) => break Err(error.to_string()),
+                        }
+                    };
+                    drop(job);
+                    let _ = child.wait();
+                    let stdout = stdout.join().unwrap();
+                    let stderr = stderr.join().unwrap();
+                    let status = status.map_err(|error| {
+                        format!(
+                            "{error}; stdout={:?}; stderr={:?}",
+                            String::from_utf8_lossy(&stdout),
+                            String::from_utf8_lossy(&stderr)
+                        )
+                    })?;
+                    Ok(Output {
+                        status,
+                        stdout,
+                        stderr,
+                    })
+                })
+            };
+            let result = run().map(|output| json!({"status": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout), "stderr": String::from_utf8_lossy(&output.stderr)}));
+            eprintln!(
+                "LFS_HOOK_LADDER {}",
+                json!({"stage": stage, "mode": mode,
+                "result": result, "marker": std::fs::read_to_string(&marker).ok(),
+                "trace2": std::fs::read_to_string(&trace).ok()})
+            );
+        }
+    }
+    std::fs::write(&restore.path, &restore.original).expect("restore original LFS hook");
+    for path in [marker, trace, nested] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn run_lfs_with_runtime(control: Control, mut runtime: Vec<PathBuf>) {
     require_git();
     let lfs = git_lfs_program();
@@ -800,6 +1044,12 @@ fn run_lfs_with_runtime(control: Control, mut runtime: Vec<PathBuf>) {
         ] {
             let output = invoke(root.path(), &clone, &args, control, policy.as_ref(), &[]);
             eprintln!("LFS_HOOK_DIAGNOSTIC {args:?} {output:?}");
+        }
+        #[cfg(windows)]
+        if std::env::var_os("NUB_NATIVE_EMBEDDED_ADAPTER").is_some()
+            && let Some(policy) = policy.as_ref()
+        {
+            lfs_hook_startup_ladder(root.path(), &clone, policy);
         }
     }
     assert_success("push LFS object", pushed);

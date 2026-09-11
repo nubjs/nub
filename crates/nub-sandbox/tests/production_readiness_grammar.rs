@@ -30,11 +30,18 @@ fn ctx(caps: ScopeCapabilities) -> CompileCtx {
         PathBuf::from("/project"),
         caps,
         BTreeMap::from([
+            // Required by README JSON example 8 (`vars.HOME: true`).
+            ("HOME".to_string(), "/home/sandbox".to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("PORT".to_string(), "3000".to_string()),
             ("MODE".to_string(), "production".to_string()),
             ("API_TOKEN".to_string(), "token-value".to_string()),
             ("UV_CACHE_DIR".to_string(), "/ambient/cache".to_string()),
+            // Required by README JSON example 9 (`vars.YARN_CACHE_FOLDER: true`).
+            (
+                "YARN_CACHE_FOLDER".to_string(),
+                "/ambient/yarn-cache".to_string(),
+            ),
         ]),
     );
     ctx.runner = Box::new(FixedRunner);

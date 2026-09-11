@@ -19,6 +19,7 @@ struct Payload {
     DWORD user_sid[SECURITY_MAX_SID_SIZE / sizeof(DWORD)];
     DWORD package_sid[SECURITY_MAX_SID_SIZE / sizeof(DWORD)];
     BOOL identities_captured;
+    BOOL directory_read_probe;
 };
 static Payload state = {};
 
@@ -103,6 +104,7 @@ static BOOL inject(HANDLE process, const Payload& source) {
 #ifdef PROBE_INJECTOR
 int wmain(int argc, wchar_t** argv) {
     if (argc != 3) return 2;
+    state.directory_read_probe = GetEnvironmentVariableW(L"NUB_NATIVE_DIRECTORY_MASK_PROBE", nullptr, 0) != 0;
     DWORD pid = wcstoul(argv[1], nullptr, 10);
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
                                  PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
@@ -311,6 +313,13 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     wchar_t path[1024];
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
+    if (state.directory_read_probe && status == static_cast<NTSTATUS>(0xc0000022L) &&
+        (options & FILE_DIRECTORY_FILE) && access == 0x001200a9) {
+        // Diagnostic only: Bun 1.3 requests READ_CONTROL and FILE_READ_EA in
+        // addition to the listing/traverse rights available on ancestors.
+        status = true_open_file(handle, 0x001000a1, mapped ? &redirected : attrs, io, share, options);
+        fprintf(stderr, "ADAPTER_DIRECTORY_MASK original=%08lx reduced=001000a1 status=%08lx\n", access, static_cast<unsigned long>(status));
+    }
     if (mapped) fprintf(stderr, "ADAPTER_PIPE_OPEN path=%ls status=%08lx\n", path, static_cast<unsigned long>(status));
     if (status == static_cast<NTSTATUS>(0xc0000022L) && attrs && attrs->ObjectName)
         fprintf(stderr, "ADAPTER_FILE_DENIED pid=%lu access=%08lx root=%p path=%.*ls\n", GetCurrentProcessId(), access, attrs->RootDirectory, int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer);
@@ -326,6 +335,12 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_nt_create_file(handle, access, mapped ? &redirected : attrs, io, allocation,
         attributes, share, disposition, options, ea, ea_length);
+    if (state.directory_read_probe && status == static_cast<NTSTATUS>(0xc0000022L) &&
+        (options & FILE_DIRECTORY_FILE) && disposition == FILE_OPEN && access == 0x001200a9) {
+        status = true_nt_create_file(handle, 0x001000a1, mapped ? &redirected : attrs, io, allocation,
+            attributes, share, disposition, options, ea, ea_length);
+        fprintf(stderr, "ADAPTER_DIRECTORY_MASK original=%08lx reduced=001000a1 status=%08lx\n", access, static_cast<unsigned long>(status));
+    }
     if (mapped) fprintf(stderr, "ADAPTER_PIPE_CLIENT path=%ls status=%08lx\n", path, static_cast<unsigned long>(status));
     if (status == static_cast<NTSTATUS>(0xc0000022L) && attrs && attrs->ObjectName)
         fprintf(stderr, "ADAPTER_FILE_DENIED pid=%lu access=%08lx root=%p path=%.*ls\n", GetCurrentProcessId(), access, attrs->RootDirectory, int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer);
