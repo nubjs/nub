@@ -11,6 +11,8 @@ const CHILD: &str = "backend::windows_native_adapter_probe::native_adapter_child
 
 #[path = "windows_mount_query_probe.rs"]
 mod mount_query_probe;
+#[path = "windows_null_device_probe.rs"]
+mod null_device_probe;
 
 fn private_object_permissions() -> std::io::Result<()> {
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
@@ -217,6 +219,7 @@ fn native_adapter_child() {
     let canonical = std::fs::canonicalize(&file);
     let mount_query = mount_query_probe::query_for_file(Path::new(&file), false);
     let mount_create_query = mount_query_probe::query_for_file(Path::new(&file), true);
+    let native_null = null_device_probe::probe();
     let directory_read = mount_query_probe::read_directory_node(
         Path::new(&file).parent().unwrap().parent().unwrap(),
     );
@@ -261,6 +264,9 @@ fn native_adapter_child() {
             false
         }
     };
+    if std::env::var_os("NUB_ADAPTER_PROBE_REQUIRE").is_some() {
+        null_device_probe::assert_mode(&native_null, "embedded");
+    }
     println!(
         "ADAPTER_PRIMITIVES {}",
         json!({
@@ -270,6 +276,7 @@ fn native_adapter_child() {
             "canonical": canonical.is_ok(),
             "mount_query": mount_query,
             "mount_create_query": mount_create_query,
+            "native_null": native_null,
             "directory_read": directory_read,
             "canary_denied": denied.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
             "nested": nested,
@@ -347,6 +354,7 @@ fn native_adapter_primitives(probe: bool) {
         ScopeCapabilities::approved(),
         ambient,
     );
+    let mut raw_native_null = None;
     for mode in ["plain", "raw", if probe { "adapter" } else { "embedded" }] {
         let mut config = json!({
             "fs": {"./": "rw", "$tmp": "rw", binary.parent().unwrap().to_str().unwrap(): "r"},
@@ -475,6 +483,14 @@ fn native_adapter_primitives(probe: bool) {
             .next()
             .unwrap();
         let result: serde_json::Value = serde_json::from_str(marker).unwrap();
+        if mode == "raw" {
+            raw_native_null = Some(result["native_null"].clone());
+        } else if mode != "plain" {
+            null_device_probe::assert_unsupported_matches(
+                &result["native_null"],
+                raw_native_null.as_ref().unwrap(),
+            );
+        }
         assert_eq!(result["canary_denied"], mode != "plain");
         assert_eq!(result["canary_after_object_changes"], mode != "plain");
         assert_eq!(result["host_process_denied"], mode != "plain");
@@ -509,6 +525,7 @@ fn native_adapter_primitives(probe: bool) {
             assert_eq!(result["mount_query"]["open"], 0xc0000022u32 as i32);
             assert_eq!(result["mount_create_query"]["open"], 0xc0000022u32 as i32);
         }
+        null_device_probe::assert_mode(&result["native_null"], mode);
         if mode != "raw" {
             for property in [
                 "nul_read",

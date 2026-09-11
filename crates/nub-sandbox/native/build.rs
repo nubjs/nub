@@ -29,6 +29,7 @@ fn compiler(target: &str) -> cc::Build {
 
 pub fn build() {
     println!("cargo:rerun-if-changed=native");
+    println!("cargo:rerun-if-changed=native/null_device.h");
     let target = std::env::var("TARGET").expect("Cargo target");
     if !target.ends_with("-pc-windows-msvc") {
         return;

@@ -12,6 +12,7 @@
 #include <intrin.h>
 #include <initializer_list>
 #include "detours.h"
+#include "../../crates/nub-sandbox/native/null_device.h"
 
 static const GUID payload_id = {0x19c47458, 0xe2ad, 0x421d, {0x81, 0x37, 0x52, 0xa1, 0x85, 0xf7, 0xb8, 0x15}};
 struct Payload {
@@ -694,30 +695,10 @@ static NTSTATUS NTAPI create_pipe(PHANDLE handle, ACCESS_MASK access, POBJECT_AT
 }
 
 static bool native_null_open(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
-    PIO_STATUS_BLOCK io, ULONG options, NTSTATUS status) {
-    constexpr wchar_t expected[] = L"\\Device\\Null";
-    constexpr ULONG allowed_options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT;
-    constexpr ACCESS_MASK allowed_access = GENERIC_READ | GENERIC_WRITE | READ_CONTROL | SYNCHRONIZE | FILE_READ_ATTRIBUTES;
-    if (!state.nt_null_probe || status != static_cast<NTSTATUS>(0xc0000022L) ||
-        !(options & FILE_SYNCHRONOUS_IO_NONALERT) || (options & ~allowed_options) || (access & ~allowed_access)) return false;
-    HANDLE duplicate = nullptr;
-    __try {
-        if (!handle || !io || !attrs || attrs->RootDirectory || attrs->SecurityDescriptor || attrs->SecurityQualityOfService ||
-            (attrs->Attributes & ~(OBJ_CASE_INSENSITIVE | OBJ_INHERIT)) || !attrs->ObjectName || !attrs->ObjectName->Buffer ||
-            attrs->ObjectName->Length != sizeof(expected) - sizeof(wchar_t) ||
-            _wcsnicmp(attrs->ObjectName->Buffer, expected, _countof(expected) - 1)) return false;
-        if (!DuplicateHandle(GetCurrentProcess(), state.null_device, GetCurrentProcess(), &duplicate,
-            access, (attrs->Attributes & OBJ_INHERIT) != 0, 0)) {
-            diagnostic("ADAPTER_NT_NULL_DUPLICATE pid=%lu error=%lu\n", GetCurrentProcessId(), GetLastError());
-            return false;
-        }
-        *handle = duplicate;
-        io->Status = 0;
-        io->Information = FILE_OPENED;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (duplicate) true_close(duplicate);
-        return false;
-    }
+    PIO_STATUS_BLOCK io, ULONG share, ULONG options, NTSTATUS status) {
+    if (status != static_cast<NTSTATUS>(0xc0000022L) ||
+        !nub_sandbox::null_device::duplicate_after_access_denied(
+            state.null_device, handle, access, attrs, io, share, options)) return false;
     diagnostic("ADAPTER_NT_NULL pid=%lu access=%08lx options=%08lx status=00000000\n", GetCurrentProcessId(), access, options);
     return true;
 }
@@ -730,7 +711,7 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
     device_failure_trace(access, status, attrs);
-    if (native_null_open(handle, access, attrs, io, options, status)) return 0;
+    if (native_null_open(handle, access, attrs, io, share, options, status)) return 0;
     if (mount_query_open(handle, access, attrs, io, status)) return 0;
     if (state.directory_read_probe && status == static_cast<NTSTATUS>(0xc0000022L) &&
         (options & FILE_DIRECTORY_FILE) && access == 0x001200a9) {
@@ -756,7 +737,7 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
         attributes, share, disposition, options, ea, ea_length);
     device_failure_trace(access, status, attrs);
     if ((disposition == FILE_OPEN || disposition == FILE_OPEN_IF) && !allocation && !ea && !ea_length &&
-        (attributes == 0 || attributes == FILE_ATTRIBUTE_NORMAL) && native_null_open(handle, access, attrs, io, options, status)) return 0;
+        (attributes == 0 || attributes == FILE_ATTRIBUTE_NORMAL) && native_null_open(handle, access, attrs, io, share, options, status)) return 0;
     if (disposition == FILE_OPEN && mount_query_open(handle, access, attrs, io, status)) return 0;
     if (state.directory_read_probe && status == static_cast<NTSTATUS>(0xc0000022L) &&
         (options & FILE_DIRECTORY_FILE) && disposition == FILE_OPEN && access == 0x001200a9) {

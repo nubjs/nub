@@ -11,6 +11,7 @@
 #include <initializer_list>
 #include "detours.h"
 #include "mount_query.h"
+#include "null_device.h"
 
 static const GUID payload_id = {0x19c47458, 0xe2ad, 0x421d, {0x81, 0x37, 0x52, 0xa1, 0x85, 0xf7, 0xb8, 0x15}};
 struct Payload {
@@ -331,6 +332,9 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
+        nub_sandbox::null_device::duplicate_after_access_denied(
+            state.null_device, handle, access, attrs, io, share, options)) return 0;
+    if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         mount_query.matches_open_file(access, attrs, share, options))
         return mount_query.substitute_open(handle, io);
     // Older runtimes request directory ACL/EA reads when they only enumerate.
@@ -350,6 +354,11 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_nt_create_file(handle, access, mapped ? &redirected : attrs, io, allocation,
         attributes, share, disposition, options, ea, ea_length);
+    if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
+        (disposition == FILE_OPEN || disposition == FILE_OPEN_IF) && !allocation && !ea && !ea_length &&
+        (attributes == 0 || attributes == FILE_ATTRIBUTE_NORMAL) &&
+        nub_sandbox::null_device::duplicate_after_access_denied(
+            state.null_device, handle, access, attrs, io, share, options)) return 0;
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         mount_query.matches_create_file(access, attrs, allocation, attributes, share,
                                          disposition, options, ea, ea_length))
