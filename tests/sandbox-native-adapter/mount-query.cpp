@@ -372,7 +372,7 @@ int wmain() {
     wcscpy_s(devices[24], L"\\Device\\LanmanRedirector\\;Y:123\\server\\share");
     wcscpy_s(devices[25], L"\\Device\\Volume-Z");
     Bridge bridge;
-    Api api = {CreateEventExW, DuplicateHandle, CompareObjectHandles, close_adapter};
+    Api api = Api::system(close_adapter);
     CHECK(bridge.initialize(api, devices));
     if (test_open_matcher(bridge) || test_abi_and_malformed(bridge) ||
         test_raw_close_reuse_and_duplication(bridge) || test_concurrent_lifetimes(bridge) ||

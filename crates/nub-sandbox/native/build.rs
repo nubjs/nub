@@ -58,12 +58,7 @@ pub fn build() {
         // cc's include path is relative to the crate; the compiler runs in OUT_DIR.
         command.arg(format!("/I{}", root.join("native/detours").display()));
         command
-            .args([
-                "/link",
-                "/EXPORT:SandboxCompatMarker,@1",
-                "advapi32.lib",
-                "kernelbase.lib",
-            ])
+            .args(["/link", "/EXPORT:SandboxCompatMarker,@1", "advapi32.lib"])
             .arg(format!(
                 "/OUT:{}",
                 out.join(format!("compat-{arch}.dll")).display()

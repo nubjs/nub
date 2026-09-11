@@ -57,6 +57,16 @@ struct Api {
     BOOL(WINAPI* duplicate_handle)(HANDLE, HANDLE, HANDLE, LPHANDLE, DWORD, BOOL, DWORD) = nullptr;
     BOOL(WINAPI* compare_object_handles)(HANDLE, HANDLE) = nullptr;
     NtClose close = nullptr;
+
+    static Api system(NtClose close_function) {
+        Api api = {CreateEventExW, DuplicateHandle, nullptr, close_function};
+        // Some SDKs declare this API without shipping Kernelbase.lib.
+        auto module = GetModuleHandleW(L"kernelbase.dll");
+        auto address = module ? GetProcAddress(module, "CompareObjectHandles") : nullptr;
+        static_assert(sizeof(address) == sizeof(api.compare_object_handles));
+        memcpy(&api.compare_object_handles, &address, sizeof(address));
+        return api;
+    }
 };
 
 enum class IoctlDisposition {

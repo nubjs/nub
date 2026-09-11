@@ -541,9 +541,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_close, "NtClose") ||
         !resolve_nt(true_duplicate_object, "NtDuplicateObject") ||
         !resolve_nt(query_object, "NtQueryObject")) return FALSE;
-    nub_sandbox::mount_query::Api mount_api = {
-        CreateEventExW, DuplicateHandle, CompareObjectHandles, mount_real_close,
-    };
+    auto mount_api = nub_sandbox::mount_query::Api::system(mount_real_close);
     if (!mount_query.initialize(mount_api, state.devices)) return FALSE;
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
