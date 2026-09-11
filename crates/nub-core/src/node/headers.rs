@@ -1,127 +1,148 @@
-//! Pointing node-gyp at the headers the running Node already carries.
+//! Filling node-gyp's header cache from a Node nub provisioned.
 //!
 //! node-gyp compiles an addon against the headers of the Node it targets and,
-//! unless told otherwise, downloads `node-v<ver>-headers.tar.gz` from
-//! nodejs.org into `~/.cache/node-gyp/<ver>` on first use. Every Node nub
-//! provisions (and every nvm/fnm/volta/Homebrew one) already ships those
-//! headers under `<root>/include/node/`, but node-gyp reads them only when the
-//! binary was configured with `--use-prefix-to-find-headers` — a distro
-//! packager option the official tarballs do not set (`node-gyp/lib/configure.js`,
-//! `getNodeDir`). Exporting `npm_config_nodedir=<root>` makes node-gyp compile
-//! against the local copy and skip the download outright (`lib/install.js`:
-//! "--nodedir flag was passed; skipping install"), which is what lets a
-//! from-source build run offline and inside a network-denied build jail.
+//! on first use of each version, downloads `node-v<ver>-headers.tar.gz` from
+//! nodejs.org into `<devdir>/<ver>`. Every Node in nub's download store already
+//! carries those headers under `<root>/include/node/` — the same 2,810 files as
+//! the tarball, which differs only in a `config.gypi` describing the Linux build
+//! that produced it (node-gyp reads the running Node's `process.config`
+//! instead). So when node-gyp is about to run, nub writes the cache entry
+//! node-gyp would otherwise download, and node-gyp finds it and skips the
+//! download (`lib/install.js`: "version is good"). That is what lets a
+//! from-source build run offline.
 //!
-//! The version check mirrors node-gyp's own prefix branch. node-gyp does not
-//! re-validate a `nodedir` it was handed, so a root whose `node_version.h`
-//! names a different release than the binary running the script — a distro
-//! `/usr/bin/node` beside a stale `libnode-dev` — must never be exported.
+//! WHY THE CACHE AND NOT `npm_config_nodedir`. Exporting `npm_config_nodedir`
+//! also skips the download, but node-gyp folds `npm_config_*` OVER its parsed
+//! argv (`lib/node-gyp.js`) and the variable is inherited by every descendant.
+//! A build that targets a different runtime then compiles against the running
+//! Node's headers instead, and it usually picks that target in a child process
+//! nub cannot see: `@electron/rebuild` forks node-gyp with the ambient env and
+//! its own `--target`, and electron-builder spreads `process.env` under its
+//! `npm_config_target`. A cache entry cannot misfire that way. node-gyp keys it
+//! by the version it has ALREADY resolved from its own argv and env, so the
+//! entry for this Node is read only by a build for this Node.
 //!
-//! The second guard is [`TARGET_SELECTING_OPTS`], and it is the one that keeps
-//! this correct rather than merely fast: a caller building for a DIFFERENT
-//! runtime has already chosen its headers, and because an `npm_config_*` value
-//! overrides node-gyp's own argv, answering on its behalf would silently win.
-//!
-//! Windows is excluded on purpose: the official zip ships neither headers nor
-//! `node.lib`, and `nodedir` there also moves node-gyp's `node.lib` lookup to
-//! `<nodedir>/$(Configuration)/`, so the download path stays the working one.
+//! Windows is excluded: the official zip ships no headers, and node-gyp also
+//! requires `<arch>/node.lib` inside a Windows cache entry.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-/// node-gyp options that CHOOSE what to compile against. Any one of them means
-/// the caller has already answered the question, so nub must not answer it too.
-///
-/// WHY THIS GUARD IS NOT OPTIONAL. `npm_config_*` does not merely supply a
-/// default — node-gyp parses argv with nopt into `this.opts` and then loops the
-/// environment assigning `this.opts[name] = value` unconditionally
-/// (`lib/node-gyp.js`), so an env value OVERWRITES an explicit
-/// `node-gyp --nodedir=…` on the command line. And `configure` takes the
-/// nodedir branch the moment nodedir is populated, never reaching the `else`
-/// that downloads headers for `--target` (`lib/configure.js` `getNodeDir`).
-/// Set nodedir blindly and an Electron or alternate-runtime rebuild — which
-/// selects its headers through `npm_config_target` + `npm_config_disturl` —
-/// silently compiles against the running Node instead, producing exactly the
-/// wrong-ABI addon this module exists to avoid. Failing closed costs one header
-/// download; failing open costs a binary that loads and misbehaves.
-///
-/// Both spellings of the dist URL are listed because node-gyp itself tests both
-/// (`lib/create-config-gypi.js`: `gyp.opts.disturl || gyp.opts['dist-url']`).
-/// `runtime` is not read by node-gyp core, but `@electron/rebuild` and
-/// node-pre-gyp set it, so its presence marks a non-Node target.
-const TARGET_SELECTING_OPTS: &[&str] = &["nodedir", "target", "disturl", "dist-url", "runtime"];
+/// node-gyp's `installVersion` for the layout written here: `include/` plus
+/// this marker file, which is what extracting the headers tarball leaves
+/// (`lib/install.js`). A node-gyp that later bumps the number treats the entry
+/// as stale and downloads, exactly as it does without nub.
+const NODE_GYP_INSTALL_VERSION: u32 = 11;
 
-/// The two prefixes node-gyp folds into its options, in its own precedence
-/// order. A package's `config.node-gyp.<key>` arrives as the second one.
-const OPT_ENV_PREFIXES: &[&str] = &["npm_config_", "npm_package_config_node_gyp_"];
-
-/// The value to export as `npm_config_nodedir` for scripts that run under
-/// `node_execpath`, or `None` when node-gyp should keep its own header
-/// handling. `script` is the script text when the caller has it, so a command
-/// that selects its own headers in argv is left alone too.
-pub fn node_gyp_nodedir(
-    node_execpath: &Path,
-    version: &str,
-    script: Option<&str>,
-) -> Option<PathBuf> {
-    let env_keys = std::env::vars_os()
-        .map(|(key, _)| key.to_string_lossy().into_owned())
+/// Make sure node-gyp's header cache holds the headers of the Node at
+/// `node_execpath`, so a node-gyp run under it never downloads them. Returns
+/// the cache entry when it holds a complete set after the call, whether nub
+/// wrote it now or it was already there. Best effort throughout: on any failure
+/// node-gyp falls back to its own download.
+pub fn seed_node_gyp_cache(node_execpath: &Path, version: &str) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    let store = super::discovery::node_store_dir()?;
+    let home = dirs_next::home_dir()?;
+    let env = std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value)))
         .collect::<Vec<_>>();
-    nodedir_for(
+    seed_for(
         node_execpath,
         version,
-        env_keys.iter().map(String::as_str),
-        script,
+        &store,
+        &node_gyp_devdir(&env, &home),
     )
 }
 
-/// The decision, with the environment passed in so it is testable without
-/// touching the ambient process state.
-fn nodedir_for<'a>(
-    node_execpath: &Path,
-    version: &str,
-    env_keys: impl Iterator<Item = &'a str>,
-    script: Option<&str>,
-) -> Option<PathBuf> {
-    if cfg!(windows) || node_execpath.as_os_str().is_empty() || version.is_empty() {
+/// The decision, with nub's store and node-gyp's devdir passed in so it is
+/// testable without touching either real directory.
+fn seed_for(node_execpath: &Path, version: &str, store: &Path, devdir: &Path) -> Option<PathBuf> {
+    // Only a Node from nub's own store. node-gyp keys the entry by version
+    // alone and keeps it after this build, so every later build for that
+    // version reads it too; a distro or Homebrew build of the same version can
+    // bundle different library headers, and must not stand in for the release.
+    if !node_execpath.starts_with(store) {
         return None;
     }
-    if env_keys.into_iter().any(selects_its_own_headers) {
-        return None;
-    }
-    // The env check above cannot see a flag the script passes on the command
-    // line, and the env would OVERRIDE that flag rather than yield to it. A
-    // substring match over the script text is coarse on purpose: a false
-    // positive only returns node-gyp to the behavior it had before this
-    // existed, while a miss is a wrong-ABI build.
-    if script.is_some_and(argv_selects_headers) {
-        return None;
-    }
-    headers_root(node_execpath, version)
+    let root = headers_root(node_execpath, version)?;
+    seed_entry(&root, devdir, version.trim_start_matches('v'))
 }
 
-/// True when a command line names one of [`TARGET_SELECTING_OPTS`] itself.
-/// Coarse on purpose: a false positive only returns node-gyp to the behavior it
-/// had before any of this existed, while a miss is a wrong-ABI build.
-pub fn argv_selects_headers(text: &str) -> bool {
-    TARGET_SELECTING_OPTS
-        .iter()
-        .any(|opt| text.contains(&format!("--{opt}")))
-}
-
-/// True for an env key naming one of [`TARGET_SELECTING_OPTS`] under either
-/// prefix. node-gyp lowercases and maps `_` to `-` before looking a key up, so
-/// `npm_config_DIST_URL` and `npm_config_dist-url` are the same option and both
-/// have to match here.
-fn selects_its_own_headers(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    OPT_ENV_PREFIXES
-        .iter()
-        .find_map(|prefix| lower.strip_prefix(prefix))
-        .is_some_and(|name| {
-            let name = name.replace('_', "-");
-            TARGET_SELECTING_OPTS.contains(&name.as_str())
+/// Write `<devdir>/<version>` from `<root>/include`, staged beside it and
+/// renamed into place so a concurrent node-gyp or nub never sees half an
+/// entry. An entry that already exists belongs to node-gyp — its own download,
+/// a partial one it will redo, or an earlier seed — and is never touched.
+fn seed_entry(root: &Path, devdir: &Path, version: &str) -> Option<PathBuf> {
+    let entry = devdir.join(version);
+    let complete = |entry: &Path| entry.join("installVersion").is_file();
+    if entry.exists() {
+        return complete(&entry).then_some(entry);
+    }
+    std::fs::create_dir_all(devdir).ok()?;
+    let stage = devdir.join(format!(".{version}.nub-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    let staged = copy_tree(&root.join("include"), &stage.join("include"))
+        .and_then(|()| {
+            std::fs::write(
+                stage.join("installVersion"),
+                format!("{NODE_GYP_INSTALL_VERSION}\n"),
+            )
         })
+        .and_then(|()| std::fs::rename(&stage, &entry));
+    if staged.is_err() {
+        // Losing the rename to a concurrent writer lands here too; the entry
+        // it left is as good as ours.
+        let _ = std::fs::remove_dir_all(&stage);
+    }
+    complete(&entry).then_some(entry)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// node-gyp's cache root, resolved as node-gyp resolves it: a `devdir` option
+/// from the environment, where a package's own `config.node-gyp.devdir`
+/// outranks `npm_config_devdir` and a leading `~` means the home directory
+/// (`bin/node-gyp.js`), else env-paths' cache directory for `node-gyp`.
+fn node_gyp_devdir(env: &[(String, OsString)], home: &Path) -> PathBuf {
+    let option = |name: &str| {
+        env.iter()
+            .find(|(key, value)| key.eq_ignore_ascii_case(name) && !value.is_empty())
+            .map(|(_, value)| value.as_os_str())
+    };
+    if let Some(dir) =
+        option("npm_package_config_node_gyp_devdir").or_else(|| option("npm_config_devdir"))
+    {
+        return match dir.to_str().and_then(|dir| dir.strip_prefix('~')) {
+            Some(rest) => {
+                let mut expanded = home.as_os_str().to_owned();
+                expanded.push(rest);
+                PathBuf::from(expanded)
+            }
+            None => PathBuf::from(dir),
+        };
+    }
+    if cfg!(target_os = "macos") {
+        return home.join("Library").join("Caches").join("node-gyp");
+    }
+    env.iter()
+        .find(|(key, value)| key == "XDG_CACHE_HOME" && !value.is_empty())
+        .map(|(_, value)| PathBuf::from(value))
+        .unwrap_or_else(|| home.join(".cache"))
+        .join("node-gyp")
 }
 
 /// The install root of `node_execpath` (`<root>/bin/node`) when
@@ -172,14 +193,38 @@ fn header_version(text: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn scratch_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("nub-node-headers-{}-{name}", std::process::id()))
+    }
+
+    /// A directory removed on drop, holding a fake store and devdir side by side.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = scratch_path(name);
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     struct FakeNode {
         root: PathBuf,
     }
 
     impl FakeNode {
         fn new(name: &str, header_version: Option<&str>) -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("nub-node-headers-{}-{name}", std::process::id()));
+            Self::at(scratch_path(name), header_version)
+        }
+
+        fn at(root: PathBuf, header_version: Option<&str>) -> Self {
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(root.join("bin")).unwrap();
             std::fs::write(root.join("bin").join("node"), b"").unwrap();
@@ -261,85 +306,116 @@ mod tests {
         assert_eq!(found, Some(std::fs::canonicalize(&real.root).unwrap()));
     }
 
-    /// The baseline the guard tests vary from: nothing selected, headers match,
-    /// so the local root is used.
+    /// The entry node-gyp would have downloaded: the Node's `include/` tree plus
+    /// the `installVersion` marker node-gyp reads before skipping the download.
     #[test]
-    fn a_plain_environment_gets_the_local_headers() {
-        let node = FakeNode::new("plain", Some("26.8.2"));
+    fn seeding_writes_the_entry_node_gyp_checks_for() {
+        let scratch = Scratch::new("seed");
+        let store = scratch.0.join("store");
+        let node = FakeNode::at(store.join("26.8.2"), Some("26.8.2"));
+        let devdir = scratch.0.join("devdir");
+        let entry = devdir.join("26.8.2");
         assert_eq!(
-            nodedir_for(&node.node(), "26.8.2", ["PATH", "HOME"].into_iter(), None),
-            if cfg!(windows) {
-                None
-            } else {
-                Some(node.root.clone())
-            }
+            seed_for(&node.node(), "26.8.2", &store, &devdir),
+            Some(entry.clone())
         );
+        assert_eq!(
+            std::fs::read_to_string(entry.join("installVersion")).unwrap(),
+            "11\n"
+        );
+        assert_eq!(
+            std::fs::read(entry.join("include").join("node").join("node_version.h")).unwrap(),
+            std::fs::read(
+                node.root
+                    .join("include")
+                    .join("node")
+                    .join("node_version.h")
+            )
+            .unwrap(),
+        );
+        let left: Vec<_> = std::fs::read_dir(&devdir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["26.8.2"], "the staging directory must not survive");
     }
 
-    /// An Electron rebuild selects its headers with `npm_config_target` plus
-    /// `npm_config_disturl`. node-gyp takes the nodedir branch before it ever
-    /// reads those, so nub answering here would compile an Electron addon
-    /// against the running Node — a wrong-ABI binary that still loads.
-    #[cfg(unix)]
+    /// The entry outlives this build and is keyed by version alone, so a Node
+    /// nub did not provision never fills it.
     #[test]
-    fn a_caller_that_selected_its_own_target_is_left_alone() {
-        let node = FakeNode::new("selected", Some("26.8.2"));
-        for key in [
-            "npm_config_nodedir",
-            "npm_config_target",
-            "npm_config_disturl",
-            "npm_config_dist_url",
-            "npm_config_runtime",
-            // node-gyp lowercases the key before looking it up.
-            "npm_config_TARGET",
-            // A package's own `config.node-gyp.target`, which outranks the above.
-            "npm_package_config_node_gyp_target",
-        ] {
+    fn a_node_outside_the_store_never_fills_the_cache() {
+        let scratch = Scratch::new("outside");
+        let node = FakeNode::at(scratch.0.join("nvm").join("26.8.2"), Some("26.8.2"));
+        let devdir = scratch.0.join("devdir");
+        let store = scratch.0.join("store");
+        assert_eq!(seed_for(&node.node(), "26.8.2", &store, &devdir), None);
+        assert!(!devdir.exists());
+    }
+
+    /// Whatever node-gyp already has is left exactly as it is: a partial
+    /// download it will redo, or an entry from an older layout.
+    #[test]
+    fn an_existing_entry_is_left_to_node_gyp() {
+        let scratch = Scratch::new("existing");
+        let store = scratch.0.join("store");
+        let node = FakeNode::at(store.join("26.8.2"), Some("26.8.2"));
+        let devdir = scratch.0.join("devdir");
+        let entry = devdir.join("26.8.2");
+        std::fs::create_dir_all(&entry).unwrap();
+        assert_eq!(seed_for(&node.node(), "26.8.2", &store, &devdir), None);
+        assert!(
+            !entry.join("include").exists(),
+            "a partial entry is node-gyp's to redo"
+        );
+        std::fs::write(entry.join("installVersion"), "9\n").unwrap();
+        seed_for(&node.node(), "26.8.2", &store, &devdir);
+        assert_eq!(
+            std::fs::read_to_string(entry.join("installVersion")).unwrap(),
+            "9\n"
+        );
+        assert!(!entry.join("include").exists());
+    }
+
+    /// node-gyp's own precedence: a package's `config.node-gyp.devdir` over
+    /// `npm_config_devdir` in either case, `~` for the home directory, else the
+    /// platform cache directory.
+    #[test]
+    fn the_devdir_is_the_one_node_gyp_resolves() {
+        let home = Path::new("/home/u");
+        let env = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), OsString::from(value)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            node_gyp_devdir(&env(&[("npm_config_devdir", "~/gyp")]), home),
+            PathBuf::from("/home/u/gyp")
+        );
+        assert_eq!(
+            node_gyp_devdir(&env(&[("NPM_CONFIG_DEVDIR", "/abs")]), home),
+            PathBuf::from("/abs")
+        );
+        assert_eq!(
+            node_gyp_devdir(
+                &env(&[
+                    ("npm_config_devdir", "/user"),
+                    ("npm_package_config_node_gyp_devdir", "/pkg"),
+                ]),
+                home
+            ),
+            PathBuf::from("/pkg")
+        );
+        let default = node_gyp_devdir(&env(&[("XDG_CACHE_HOME", "/xdg")]), home);
+        if cfg!(target_os = "macos") {
+            assert_eq!(default, PathBuf::from("/home/u/Library/Caches/node-gyp"));
+        } else {
+            assert_eq!(default, PathBuf::from("/xdg/node-gyp"));
             assert_eq!(
-                nodedir_for(&node.node(), "26.8.2", ["PATH", key].into_iter(), None),
-                None,
-                "{key} selects the headers, so nub must not"
+                node_gyp_devdir(&[], home),
+                PathBuf::from("/home/u/.cache/node-gyp")
             );
         }
-    }
-
-    /// An unrelated `npm_config_*` must not disable the whole mechanism.
-    #[cfg(unix)]
-    #[test]
-    fn an_unrelated_npm_config_key_does_not_disable_it() {
-        let node = FakeNode::new("unrelated", Some("26.8.2"));
-        for key in [
-            "npm_config_registry",
-            "npm_config_devdir",
-            "npm_config_python",
-        ] {
-            assert_eq!(
-                nodedir_for(&node.node(), "26.8.2", ["PATH", key].into_iter(), None),
-                Some(node.root.clone()),
-                "{key} chooses no headers, so the local ones still apply"
-            );
-        }
-    }
-
-    /// The env overrides node-gyp's argv rather than yielding to it, so a
-    /// script passing its own flag has to be detected from the script text.
-    #[cfg(unix)]
-    #[test]
-    fn a_script_that_passes_its_own_flag_is_left_alone() {
-        let node = FakeNode::new("argv", Some("26.8.2"));
-        let decide =
-            |script: &str| nodedir_for(&node.node(), "26.8.2", ["PATH"].into_iter(), Some(script));
-        assert_eq!(decide("node-gyp rebuild --nodedir=/opt/headers"), None);
-        assert_eq!(decide("node-gyp rebuild --target=39.0.0"), None);
-        assert_eq!(
-            decide("node-gyp rebuild --dist-url=https://electronjs.org/headers"),
-            None
-        );
-        assert_eq!(
-            decide("node-gyp rebuild --verbose"),
-            Some(node.root.clone()),
-            "an ordinary rebuild still gets the local headers"
-        );
     }
 
     #[test]

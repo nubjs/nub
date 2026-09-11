@@ -5915,26 +5915,14 @@ fn build_script_command(
     // walks up from `cwd`; the version token is the run path's already-resolved
     // Node, threaded in so it isn't re-discovered.
     let ua_product = crate::pm_engine::run_lifecycle_ua_product(&cwd, &node.version.to_string());
-    let mut npm_env = nub_core::workspace::scripts::npm_env(
+    let npm_env = nub_core::workspace::scripts::npm_env(
         &project.manifest,
         &project.root,
         lifecycle_event,
         Some(cmd),
         node.path.as_str(),
-        &node.version.to_string(),
         &ua_product,
     );
-    // `npm_env` weighed the script BODY; the args appended below are the other
-    // half of the same command line. A `nub run rebuild -- --target=39` selects
-    // its own headers just as surely as a script that spells the flag inline,
-    // and node-gyp folds the environment over its argv, so a shared nodedir
-    // would win against the user's explicit choice.
-    if args
-        .iter()
-        .any(|arg| nub_core::node::headers::argv_selects_headers(arg))
-    {
-        npm_env.remove("npm_config_nodedir");
-    }
 
     // Shell precedence: an explicit `--script-shell <path>` flag wins, then a
     // `.npmrc` `script-shell=` setting, then the platform default. The default is

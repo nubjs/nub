@@ -579,6 +579,17 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     let project = std::path::Path::new(project_dir);
     match rt.block_on(aube::embed::bootstrap_node_gyp(project)) {
         Ok(binary) => {
+            // node-gyp runs next, under the project's Node, so put that Node's
+            // headers where node-gyp looks before it downloads them
+            // (`nub_core::node::headers`). Plain discovery, never provisioning:
+            // the version logic fires only where node-version-management puts
+            // it. Best effort, since node-gyp's own download stays the fallback.
+            if let Ok(node) = nub_core::node::discovery::discover_node(project) {
+                nub_core::node::headers::seed_node_gyp_cache(
+                    node.path.as_std_path(),
+                    &node.version.to_string(),
+                );
+            }
             println!("{}", binary.display());
             Ok(0)
         }
@@ -1836,7 +1847,6 @@ fn compose_lifecycle_ua(
 fn augmentation_to_lifecycle_overlay(
     aug: &nub_core::node::spawn::AugmentationEnv,
     node_execpath: &str,
-    node_version: &str,
     runtime_json: Option<&str>,
 ) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<PathBuf>) {
     use std::ffi::OsString;
@@ -1895,25 +1905,6 @@ fn augmentation_to_lifecycle_overlay(
         OsString::from("npm_node_execpath"),
         OsString::from(node_execpath),
     ));
-    // …and against that Node's own headers. Without `npm_config_nodedir`
-    // node-gyp downloads `node-v<ver>-headers.tar.gz` from nodejs.org for every
-    // fresh version, which an offline install cannot do and a network-denied
-    // build jail must not allow (`nub_core::node::headers`).
-    //
-    // No script text to pass: this overlay is built ONCE per install and
-    // applied to every dependency's scripts, so there is no single argv to
-    // inspect. The ambient-env half of the guard still runs, which is what
-    // covers the case that matters — an Electron/alternate-runtime rebuild
-    // selects its headers through `npm_config_target` + `npm_config_disturl`
-    // on the install's own environment, so nub stands down for the whole tree.
-    if let Some(nodedir) =
-        nub_core::node::headers::node_gyp_nodedir(Path::new(node_execpath), node_version, None)
-    {
-        overlay.push((
-            OsString::from("npm_config_nodedir"),
-            nodedir.into_os_string(),
-        ));
-    }
 
     let prepends = aug
         .shim_dir
@@ -2004,12 +1995,8 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     // resolves through nub's PATH shim and re-enters nub, which detects the owner
     // and puts the loader in front of that Node itself — so the environment
     // arrives by the same route as every other nub-launched process.
-    let (env_overlay, path_prepends) = augmentation_to_lifecycle_overlay(
-        &aug,
-        node.path.as_str(),
-        &node.version.to_string(),
-        Some(&runtime_json),
-    );
+    let (env_overlay, path_prepends) =
+        augmentation_to_lifecycle_overlay(&aug, node.path.as_str(), Some(&runtime_json));
     // The shim dir + provisioned node for the engine's runtime spawn helpers —
     // the boundary the transient bin-exec paths (dlx / create / `nubx <tool>`)
     // read but the lifecycle overlay above never reaches. `runtime_switching`
@@ -4963,12 +4950,8 @@ mod tests {
             threadpool_size: Some("8".to_string()),
         };
         let runtime_json = r#"{"nodeCompat":false}"#;
-        let (overlay, prepends) = augmentation_to_lifecycle_overlay(
-            &aug,
-            "/pinned/bin/node",
-            "26.8.2",
-            Some(runtime_json),
-        );
+        let (overlay, prepends) =
+            augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", Some(runtime_json));
 
         let find = |k: &str| {
             overlay
@@ -5041,8 +5024,7 @@ mod tests {
             neutralize_localstorage: false,
             threadpool_size: None,
         };
-        let (overlay, prepends) =
-            augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", "26.8.2", None);
+        let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None);
         assert!(prepends.is_empty());
         assert!(
             !overlay
@@ -5057,83 +5039,6 @@ mod tests {
                 .map(|(_, v)| v.to_string_lossy().into_owned())
                 .as_deref(),
             Some("/pinned/bin/node")
-        );
-    }
-
-    /// Mirrors the guard in `nub_core::node::headers`: an env key naming a
-    /// node-gyp option that selects its own headers or target runtime. A test
-    /// asserting nub supplies the local headers has nothing to assert when the
-    /// ambient environment already made that choice.
-    fn selects_own_headers(key: &str) -> bool {
-        let lower = key.to_ascii_lowercase();
-        ["npm_config_", "npm_package_config_node_gyp_"]
-            .iter()
-            .find_map(|prefix| lower.strip_prefix(prefix))
-            .is_some_and(|name| {
-                matches!(
-                    name.replace('_', "-").as_str(),
-                    "nodedir" | "target" | "disturl" | "dist-url" | "runtime"
-                )
-            })
-    }
-
-    /// The ABI pin's other half: node-gyp must compile against the pinned
-    /// Node's OWN headers, not a copy downloaded from nodejs.org. The overlay
-    /// exports `npm_config_nodedir` only when `<root>/include/node` names the
-    /// exact version that runs the script; a mismatch (a distro `/usr/bin/node`
-    /// beside a stale `libnode-dev`) leaves node-gyp on its download path.
-    #[test]
-    fn lifecycle_overlay_points_node_gyp_at_the_pinned_headers() {
-        use nub_core::node::spawn::AugmentationEnv;
-        use std::ffi::OsString;
-        if std::env::vars_os().any(|(k, _)| selects_own_headers(&k.to_string_lossy())) {
-            // An ambient header/target selection wins by design, so there is
-            // nothing to assert under one.
-            return;
-        }
-        let root = tempfile::tempdir().unwrap();
-        let include = root.path().join("include").join("node");
-        std::fs::create_dir_all(&include).unwrap();
-        std::fs::write(
-            include.join("node_version.h"),
-            "#define NODE_MAJOR_VERSION 26\n#define NODE_MINOR_VERSION 8\n#define NODE_PATCH_VERSION 2\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(root.path().join("bin")).unwrap();
-        let node = root.path().join("bin").join("node");
-        std::fs::write(&node, b"").unwrap();
-        let aug = AugmentationEnv {
-            node_options: None,
-            shim_dir: None,
-            node_path: None,
-            neutralize_localstorage: false,
-            threadpool_size: None,
-        };
-        let nodedir = |version: &str| {
-            let (overlay, _) =
-                augmentation_to_lifecycle_overlay(&aug, node.to_str().unwrap(), version, None);
-            overlay
-                .iter()
-                .find(|(k, _)| k == OsString::from("npm_config_nodedir").as_os_str())
-                .map(|(_, v)| v.clone())
-        };
-        if cfg!(windows) {
-            assert_eq!(
-                nodedir("26.8.2"),
-                None,
-                "Windows keeps node-gyp's download: the official zip ships no headers or node.lib"
-            );
-        } else {
-            assert_eq!(
-                nodedir("26.8.2"),
-                Some(root.path().as_os_str().to_os_string()),
-                "matching headers beside the pinned Node must be exported as npm_config_nodedir"
-            );
-        }
-        assert_eq!(
-            nodedir("26.8.1"),
-            None,
-            "a version mismatch must leave node-gyp on its own header download"
         );
     }
 
