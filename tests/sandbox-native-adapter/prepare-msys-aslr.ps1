@@ -7,7 +7,7 @@ $copyName = if ($IncludeExecutables) { 'git-dynamicbase-allimages' } else { 'git
 $target = Join-Path (Get-Location).Path ".native-adapter/$copyName"
 if (Test-Path $target) { throw "Refusing to modify an existing copy: $target" }
 $original = Join-Path $source 'usr/bin/msys-2.0.dll'
-$before = (Get-FileHash $original).Hash
+$before = (Get-FileHash -LiteralPath $original).Hash
 if ($before -ne 'E55BE2D89F2756F540A8F2ACF18CD14BF275D1187A32D5189946EE5C896BCF03') {
   throw "Unrecognized MSYS runtime: $before"
 }
@@ -24,9 +24,9 @@ if ($old -band 0x40) { throw 'Control already has DYNAMIC_BASE enabled' }
 $updated = [BitConverter]::GetBytes([uint16]($old -bor 0x40))
 [Array]::Copy($updated, 0, $bytes, $offset, 2)
 [IO.File]::WriteAllBytes($dll, $bytes)
-if ((Get-FileHash $original).Hash -ne $before) { throw 'Installed MSYS runtime changed' }
+if ((Get-FileHash -LiteralPath $original).Hash -ne $before) { throw 'Installed MSYS runtime changed' }
 @{ source = $original; copy = $dll; sourceSha256 = $before;
-   copySha256 = (Get-FileHash $dll).Hash; dllCharacteristicsBefore = $old;
+   copySha256 = (Get-FileHash -LiteralPath $dll).Hash; dllCharacteristicsBefore = $old;
    dllCharacteristicsAfter = ($old -bor 0x40); changedOffset = $offset;
    sourceSignature = (Get-AuthenticodeSignature $original).Status.ToString();
    copySignature = (Get-AuthenticodeSignature $dll).Status.ToString()
@@ -35,7 +35,7 @@ if ($IncludeExecutables) {
   $records = @()
   foreach ($file in Get-ChildItem (Join-Path $target 'usr/bin') -Filter '*.exe') {
     $originalExe = Join-Path $source "usr/bin/$($file.Name)"
-    $originalHash = (Get-FileHash $originalExe).Hash
+    $originalHash = (Get-FileHash -LiteralPath $originalExe).Hash
     $image = [IO.File]::ReadAllBytes($file.FullName)
     $imagePe = [BitConverter]::ToUInt32($image, 60)
     if ([BitConverter]::ToUInt32($image, $imagePe) -ne 0x4550 -or
@@ -47,8 +47,8 @@ if ($IncludeExecutables) {
       [Array]::Copy($replacement, 0, $image, $imageOffset, 2)
       [IO.File]::WriteAllBytes($file.FullName, $image)
     }
-    if ((Get-FileHash $originalExe).Hash -ne $originalHash) { throw "Installed executable changed: $originalExe" }
-    $records += @{ name = $file.Name; sourceSha256 = $originalHash; copySha256 = (Get-FileHash $file.FullName).Hash;
+    if ((Get-FileHash -LiteralPath $originalExe).Hash -ne $originalHash) { throw "Installed executable changed: $originalExe" }
+    $records += @{ name = $file.Name; sourceSha256 = $originalHash; copySha256 = (Get-FileHash -LiteralPath $file.FullName).Hash;
       characteristicsBefore = $flags; characteristicsAfter = ($flags -bor 0x40); changedOffset = $imageOffset }
   }
   $records | ConvertTo-Json > reports/msys-dynamicbase-executables.json

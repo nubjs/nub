@@ -939,11 +939,11 @@ fn windows_bun_link_primitives_and_global_sources(name: &str) {
                 );
                 assert_success(
                     tool,
-                    "reinstall archived global package",
+                    &format!("{mode} {source} reinstall after cache prune"),
                     &run(vec![
                         "install".into(),
                         "--global".into(),
-                        archive.to_string_lossy().into_owned(),
+                        input.to_string_lossy().into_owned(),
                     ]),
                 );
             }
