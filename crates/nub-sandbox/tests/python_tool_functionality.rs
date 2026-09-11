@@ -161,7 +161,7 @@ fn confined(
     policy: &nub_sandbox::SandboxPolicy,
 ) -> Output {
     eprintln!("CONFINED {} {args:?}", program.display());
-    let (program, args) = tool_msys::command(program, args.to_vec());
+    let (program, args) = tool_msys::command(program, args.to_vec(), &root.join("project"));
     let sandbox = tool_sandbox::acquire(policy).expect("Python sandbox acquires");
     let prepared = sandbox
         .prepare(
@@ -187,7 +187,7 @@ fn unconfined(
     env: &BTreeMap<String, String>,
 ) -> Output {
     eprintln!("UNCONFINED {} {args:?}", program.display());
-    let (program, args) = tool_msys::command(program, args.to_vec());
+    let (program, args) = tool_msys::command(program, args.to_vec(), &root.join("project"));
     let mut command = Command::new(program);
     command.args(args).current_dir(root.join("project"));
     command.env_clear();

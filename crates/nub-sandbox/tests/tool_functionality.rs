@@ -693,7 +693,11 @@ fn run_retained_tool_control(name: &str, tooldirs: bool, unconfined: bool, sampl
             if tooldirs { "$tooldirs" } else { "exact" }
         );
         let started = std::time::Instant::now();
-        let (program, arguments) = tool_msys::command(Path::new(&tool.program), argv.clone());
+        let (program, arguments) = tool_msys::command(
+            Path::new(&tool.program),
+            argv.clone(),
+            &root.path().join("project"),
+        );
         let output = if let Some(sandbox) = &sandbox {
             let prepared = sandbox
                 .prepare(

@@ -302,7 +302,7 @@ fn run(
     let (program, args) = if tool.shell {
         (tool.program.clone(), args)
     } else {
-        tool_msys::command(&tool.program, args)
+        tool_msys::command(&tool.program, args, &root.join("project"))
     };
     match policy {
         Some(policy) => {

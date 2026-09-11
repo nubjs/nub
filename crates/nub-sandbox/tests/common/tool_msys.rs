@@ -16,7 +16,7 @@ pub fn grant(fs: &mut Map<String, Value>) {
     }
 }
 
-pub fn command(program: &Path, args: Vec<String>) -> (PathBuf, Vec<String>) {
+pub fn command(program: &Path, args: Vec<String>, cwd: &Path) -> (PathBuf, Vec<String>) {
     let Some(root) = root() else {
         return (program.to_owned(), args);
     };
@@ -26,15 +26,27 @@ pub fn command(program: &Path, args: Vec<String>) -> (PathBuf, Vec<String>) {
         "MSYS shell is provisioned: {}",
         shell.display()
     );
-    let mut wrapped = vec![
-        "--noprofile".into(),
-        "--norc".into(),
-        "-c".into(),
-        // Keep Bash alive to wait for the tool; exec would omit that ownership path.
-        "\"$@\"".into(),
-        "sandbox-tools".into(),
-        program.to_string_lossy().replace('\\', "/"),
-    ];
-    wrapped.extend(args);
-    (shell, wrapped)
+    // Rust's Windows argv encoding and MSYS's -c decoding disagree on embedded
+    // quotes. Transfer the command as a script, not through that second parser.
+    let invocation = std::iter::once(program.to_string_lossy().replace('\\', "/"))
+        .chain(args)
+        .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = cwd.join(".sandbox-msys-command.sh");
+    std::fs::write(
+        &script,
+        // These are already native argv values, including embedded JS/Python.
+        // Keep Bash alive to wait rather than replacing it with exec.
+        format!("export MSYS2_ARG_CONV_EXCL='*'\n{invocation}\n"),
+    )
+    .expect("MSYS fixture script is written inside its granted project");
+    (
+        shell,
+        vec![
+            "--noprofile".into(),
+            "--norc".into(),
+            script.to_string_lossy().replace('\\', "/"),
+        ],
+    )
 }

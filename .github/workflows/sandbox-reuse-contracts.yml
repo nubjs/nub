@@ -2,9 +2,10 @@ name: Sandbox lifecycle contracts
 
 on:
   push:
-    branches: [sandbox-reuse-contracts]
+    branches: [sandbox-reuse-contracts, sandbox-production-readiness]
     paths:
       - crates/nub-sandbox/**
+      - tests/sandbox-native-adapter/run-standard-user.ps1
       - .github/workflows/sandbox-reuse-contracts.yml
 
 permissions:
@@ -15,9 +16,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022, windows-11-arm]
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            toolchain: stable
+          - os: macos-15
+            target: aarch64-apple-darwin
+            toolchain: stable
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            toolchain: stable-x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            toolchain: stable-x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     defaults:
       run:
         shell: bash
@@ -25,16 +38,21 @@ jobs:
       SANDBOX_PARENT_SECRET: synthetic-parent-canary
       WITHHELD_AMBIENT_SECRET: synthetic-procfs-canary
       RUST_BACKTRACE: '1'
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      RUSTFLAGS: ${{ startsWith(matrix.os, 'windows') && '-C target-feature=+crt-static' || '' }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target }}
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          shared-key: sandbox-reuse-native
+          shared-key: sandbox-production-${{ matrix.target }}
+          cache-on-failure: true
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.18.0'
@@ -43,14 +61,47 @@ jobs:
           mkdir -p reports
           { git rev-parse HEAD; rustc -Vv; uname -a; id; } > reports/environment.txt
       - name: Checking all sandbox targets
+        id: compile
         run: |
           set -o pipefail
           cargo clippy -p nub-sandbox --profile fast --all-targets --all-features -- -D warnings 2>&1 | tee reports/clippy.log
+          cargo test -p nub-sandbox --profile fast --tests --no-run --message-format=json-render-diagnostics > reports/test-artifacts.jsonl
       - name: Exercising lifecycle and enforcement contracts
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
           set -o pipefail
-          cargo test -p nub-sandbox --profile fast --no-fail-fast -- --nocapture 2>&1 | tee reports/contracts.log
+          cargo test -p nub-sandbox --profile fast --no-fail-fast -- --nocapture --test-threads=1 2>&1 | tee reports/contracts.log
+      - name: Exercising embedded Windows crash and ownership transitions
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' && runner.os == 'Windows' }}
+        env:
+          NUB_NATIVE_EMBEDDED_ADAPTER: '1'
+        run: |
+          set -o pipefail
+          cargo test -p nub-sandbox --profile fast --lib backend::windows::native_child_tests -- --nocapture --test-threads=1 2>&1 | tee reports/embedded-ownership.log
+          cargo test -p nub-sandbox --profile fast --lib backend::windows::windows_cleanup_tests -- --nocapture --test-threads=1 2>&1 | tee reports/embedded-cleanup.log
+          for report in reports/embedded-ownership.log reports/embedded-cleanup.log; do
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$report" || exit 1
+          done
+      - name: Exercising Windows as a standard user
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $artifacts = Get-Content reports/test-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
+          $test = @($artifacts | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'production_readiness_windows' -and $_.executable })
+          if ($test.Count -ne 1) { throw "Expected one exact Windows probe executable, got $($test.Count)" }
+          & ./tests/sandbox-native-adapter/run-standard-user.ps1 -TestBinary $test[0].executable -ReportDirectory reports
+          exit $LASTEXITCODE
+      - name: Checking MSYS argument and canary transport
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $gitExec = (& git --exec-path).Trim()
+          $env:NUB_SANDBOX_TOOL_MSYS_ROOT = Split-Path (Split-Path (Split-Path $gitExec))
+          & cargo test -p nub-sandbox --profile fast --test production_readiness_shell -- --ignored --nocapture --test-threads=1 *> reports/msys-arguments.log
+          $code = $LASTEXITCODE
+          Get-Content reports/msys-arguments.log
+          if (!(Select-String -Path reports/msys-arguments.log -Pattern 'test result: ok\. 1 passed')) { exit 1 }
+          exit $code
       - name: Preserving native evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
