@@ -197,8 +197,10 @@ pub(super) fn query_for_file(path: &Path, create: bool) -> serde_json::Value {
             let bytes = &output[offset..offset + usize::from(size)];
             assert_eq!(bytes.len() % 2, 0);
             let text: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
                 .collect();
             links.push(String::from_utf16(&text).unwrap());
         }
