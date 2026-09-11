@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include "detours.h"
+#include "mount_query.h"
 
 static const GUID payload_id = {0x19c47458, 0xe2ad, 0x421d, {0x81, 0x37, 0x52, 0xa1, 0x85, 0xf7, 0xb8, 0x15}};
 struct Payload {
@@ -101,7 +102,7 @@ extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory)
     }
     for (int i = 0; i < 26; ++i) {
         wchar_t drive[] = {wchar_t(L'A' + i), L':', 0};
-        QueryDosDeviceW(drive, state.devices[i], MAX_PATH);
+        if (!QueryDosDeviceW(drive, state.devices[i], MAX_PATH)) state.devices[i][0] = 0;
     }
     BOOL ok = inject(process, state);
     DWORD error = GetLastError();
@@ -234,6 +235,43 @@ static NtPipe true_create_pipe = nullptr;
 static NtOpen true_open_file = nullptr;
 static NtCreate true_nt_create_file = nullptr;
 static NtObject query_object = nullptr;
+using NtIoControl = NTSTATUS (NTAPI*)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK,
+    ULONG, PVOID, ULONG, PVOID, ULONG);
+using NtDuplicate = NTSTATUS (NTAPI*)(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
+static NtIoControl true_io_control = nullptr;
+static NtDuplicate true_duplicate_object = nullptr;
+static nub_sandbox::mount_query::NtClose true_close = nullptr;
+static nub_sandbox::mount_query::Bridge mount_query;
+
+static NTSTATUS NTAPI mount_real_close(HANDLE handle) {
+    // Detours replaces true_close with its trampoline when the transaction commits.
+    return true_close(handle);
+}
+
+static NTSTATUS NTAPI mount_io_control(HANDLE handle, HANDLE event, PVOID apc, PVOID context,
+    PIO_STATUS_BLOCK io, ULONG code, PVOID input, ULONG input_size, PVOID output, ULONG output_size) {
+    NTSTATUS result = 0;
+    if (mount_query.device_io(handle, event, apc, context, io, code, input, input_size,
+                              output, output_size, &result) ==
+        nub_sandbox::mount_query::IoctlDisposition::kHandled) return result;
+    return true_io_control(handle, event, apc, context, io, code, input, input_size, output, output_size);
+}
+
+static NTSTATUS NTAPI mount_close(HANDLE handle) {
+    auto ticket = mount_query.prepare_close(handle);
+    NTSTATUS status = true_close(handle);
+    mount_query.complete_close(ticket, status);
+    return status;
+}
+
+static NTSTATUS NTAPI mount_duplicate(HANDLE source_process, HANDLE source, HANDLE target_process,
+    PHANDLE target, ACCESS_MASK access, ULONG attributes, ULONG options) {
+    auto ticket = mount_query.prepare_duplicate(source_process, source);
+    NTSTATUS status = true_duplicate_object(source_process, source, target_process, target,
+                                             access, attributes, options);
+    mount_query.complete_duplicate(ticket, status);
+    return status;
+}
 
 static bool pipe_name(POBJECT_ATTRIBUTES original, OBJECT_ATTRIBUTES& redirected,
                       UNICODE_STRING& name, wchar_t (&path)[1024]) {
@@ -292,6 +330,14 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     wchar_t path[1024];
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
+    if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
+        mount_query.matches_open_file(access, attrs, share, options))
+        return mount_query.substitute_open(handle, io);
+    // Older runtimes request directory ACL/EA reads when they only enumerate.
+    // Retry with the existing node grant, never widen an ancestor's permissions.
+    if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
+        (options & FILE_DIRECTORY_FILE) && !(options & FILE_DELETE_ON_CLOSE) && access == 0x001200a9)
+        return true_open_file(handle, 0x001000a1, mapped ? &redirected : attrs, io, share, options);
     return status;
 }
 
@@ -304,6 +350,15 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_nt_create_file(handle, access, mapped ? &redirected : attrs, io, allocation,
         attributes, share, disposition, options, ea, ea_length);
+    if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
+        mount_query.matches_create_file(access, attrs, allocation, attributes, share,
+                                         disposition, options, ea, ea_length))
+        return mount_query.substitute_open(handle, io);
+    if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
+        (options & FILE_DIRECTORY_FILE) && !(options & FILE_DELETE_ON_CLOSE) &&
+        disposition == FILE_OPEN && !allocation && !ea && !ea_length && access == 0x001200a9)
+        return true_nt_create_file(handle, 0x001000a1, mapped ? &redirected : attrs, io, allocation,
+            attributes, share, disposition, options, ea, ea_length);
     return status;
 }
 
@@ -482,7 +537,14 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_create_pipe, "NtCreateNamedPipeFile") ||
         !resolve_nt(true_open_file, "NtOpenFile") ||
         !resolve_nt(true_nt_create_file, "NtCreateFile") ||
+        !resolve_nt(true_io_control, "NtDeviceIoControlFile") ||
+        !resolve_nt(true_close, "NtClose") ||
+        !resolve_nt(true_duplicate_object, "NtDuplicateObject") ||
         !resolve_nt(query_object, "NtQueryObject")) return FALSE;
+    nub_sandbox::mount_query::Api mount_api = {
+        CreateEventExW, DuplicateHandle, CompareObjectHandles, mount_real_close,
+    };
+    if (!mount_query.initialize(mount_api, state.devices)) return FALSE;
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(reinterpret_cast<PVOID*>(&true_set_token), set_token);
@@ -497,6 +559,9 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_pipe), create_pipe);
     DetourAttach(reinterpret_cast<PVOID*>(&true_open_file), open_file);
     DetourAttach(reinterpret_cast<PVOID*>(&true_nt_create_file), nt_create_file);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_io_control), mount_io_control);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_close), mount_close);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_duplicate_object), mount_duplicate);
     return DetourTransactionCommit() == NO_ERROR;
 }
 #endif

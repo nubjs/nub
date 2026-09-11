@@ -9,6 +9,9 @@ use std::process::Command;
 
 const CHILD: &str = "backend::windows_native_adapter_probe::native_adapter_child";
 
+#[path = "windows_mount_query_probe.rs"]
+mod mount_query_probe;
+
 fn private_object_permissions() -> std::io::Result<()> {
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
     use windows_sys::Win32::Foundation::GENERIC_ALL;
@@ -212,6 +215,11 @@ fn native_adapter_child() {
         .open("NUL")
         .and_then(|mut f| f.write(b"discarded"));
     let canonical = std::fs::canonicalize(&file);
+    let mount_query = mount_query_probe::query_for_file(Path::new(&file), false);
+    let mount_create_query = mount_query_probe::query_for_file(Path::new(&file), true);
+    let directory_read = mount_query_probe::read_directory_node(
+        Path::new(&file).parent().unwrap().parent().unwrap(),
+    );
     let absolute_nul = Path::new(&file).parent().unwrap().join("NUL");
     let absolute_nul = std::fs::OpenOptions::new()
         .write(true)
@@ -260,6 +268,9 @@ fn native_adapter_child() {
             "nul_write": nul_write.as_ref().is_ok_and(|n| *n == 9),
             "absolute_nul": absolute_nul.as_ref().is_ok_and(|n| *n == 9),
             "canonical": canonical.is_ok(),
+            "mount_query": mount_query,
+            "mount_create_query": mount_create_query,
+            "directory_read": directory_read,
             "canary_denied": denied.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
             "nested": nested,
             "assets_protected": assets,
@@ -470,8 +481,33 @@ fn native_adapter_primitives(probe: bool) {
         if mode == "embedded" {
             assert_eq!(result["assets_protected"], true);
         }
+        if matches!(mode, "plain" | "embedded") {
+            assert_eq!(result["directory_read"], 0, "{mode}: {result}");
+            assert_eq!(result["mount_query"]["matched"], true, "{mode}: {result}");
+            assert_eq!(
+                result["mount_create_query"]["matched"], true,
+                "{mode}: {result}"
+            );
+            for property in ["mount_query", "mount_create_query"] {
+                assert_eq!(
+                    result[property]["handles_balanced"], true,
+                    "{mode}: {result}"
+                );
+                for operation in ["duplicated_query", "original_after_duplicate"] {
+                    let status = result[property][operation].as_i64().unwrap();
+                    if mode == "plain" {
+                        assert_eq!(status, 0, "{mode}: {result}");
+                    } else {
+                        assert!(status < 0, "{mode}: {result}");
+                    }
+                }
+            }
+        }
         if mode == "raw" {
+            assert_eq!(result["directory_read"], 0xc0000022u32 as i32);
             assert_eq!(result["canonical"], false);
+            assert_eq!(result["mount_query"]["open"], 0xc0000022u32 as i32);
+            assert_eq!(result["mount_create_query"]["open"], 0xc0000022u32 as i32);
         }
         if mode != "raw" {
             for property in [

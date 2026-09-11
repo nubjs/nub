@@ -77,6 +77,10 @@ jobs:
           cd /d "$root\.native-adapter"
           cl /nologo /std:c++17 /W4 /WX /MT /EHsc /I"$root\.probe-detours\include" "$root\tests\sandbox-native-adapter\probe.cpp" /LD /link "$root\.probe-detours\lib.$lib\detours.lib" advapi32.lib /OUT:probe-$name.dll /EXPORT:ProbeMarker,@1
           if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /W4 /WX /MT /EHsc "$root\tests\sandbox-native-adapter\mount-query.cpp" /Fe:mount-query-$name.exe
+          if errorlevel 1 exit /b 1
+          mount-query-$name.exe
+          if errorlevel 1 exit /b 1
           if not "$name" == "x64" exit /b 0
           cl /nologo /std:c++17 /W4 /WX /MT /EHsc /DPROBE_INJECTOR /I"$root\.probe-detours\include" "$root\tests\sandbox-native-adapter\probe.cpp" /Fe:injector.exe /link "$root\.probe-detours\lib.$lib\detours.lib" advapi32.lib
           "@ | Set-Content ".native-adapter/build-$name.cmd"
@@ -265,6 +269,14 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p nub-sandbox --profile fast --lib js_tool_functionality_probe::windows_bun132_link_primitives_and_global_sources -- --exact --ignored --nocapture --test-threads=1 2>&1 | tee reports/bun132-global-entrypoint.log
+      - name: Checking Bun 1.3.2 archive entrypoints with the embedded adapter
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        shell: bash
+        env:
+          NUB_NATIVE_EMBEDDED_ADAPTER: '1'
+        run: |
+          set -o pipefail
+          cargo test -p nub-sandbox --profile fast --lib js_tool_functionality_probe::windows_bun132_link_primitives_and_global_sources -- --exact --ignored --nocapture --test-threads=1 2>&1 | tee reports/bun132-embedded-global-entrypoint.log
       - name: Preserving native evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
