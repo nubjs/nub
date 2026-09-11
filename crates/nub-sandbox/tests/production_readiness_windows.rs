@@ -10,7 +10,7 @@ use nub_sandbox::{
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -259,6 +259,89 @@ fn opens_process(pid: u32, access: u32) -> bool {
     true
 }
 
+fn reads_fixture_memory(target: &Value) -> Value {
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    let pid = target["pid"].as_u64().unwrap() as u32;
+    let address = target["address"].as_u64().unwrap() as usize;
+    let length = target["length"].as_u64().unwrap() as usize;
+    assert!(
+        (1..=128).contains(&length),
+        "only bounded fixture bytes may be read"
+    );
+    let handle = unsafe { OpenProcess(PROCESS_VM_READ, 0, pid) };
+    if handle.is_null() {
+        let error = std::io::Error::last_os_error();
+        return json!({"ok": false, "operation": "OpenProcess", "error": error.raw_os_error(), "message": error.to_string()});
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut bytes = vec![0u8; length];
+    let mut read = 0;
+    let ok = unsafe {
+        ReadProcessMemory(
+            handle.as_raw_handle(),
+            address as *const _,
+            bytes.as_mut_ptr().cast(),
+            length,
+            &mut read,
+        )
+    } != 0;
+    let error = (!ok).then(std::io::Error::last_os_error);
+    bytes.truncate(read);
+    json!({"ok": ok, "operation": "ReadProcessMemory", "bytes": bytes,
+        "error": error.as_ref().and_then(std::io::Error::raw_os_error), "message": error.map(|error| error.to_string())})
+}
+
+fn file_identity(handle: HANDLE) -> Value {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+    };
+    let mut info = FILE_ID_INFO::default();
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut info as *mut FILE_ID_INFO).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    } != 0;
+    if ok {
+        json!({"volume": info.VolumeSerialNumber, "file": info.FileId.Identifier})
+    } else {
+        let error = std::io::Error::last_os_error();
+        json!({"error": error.raw_os_error(), "message": error.to_string()})
+    }
+}
+
+fn install_user_only_process_dacl() -> Value {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, SetKernelObjectSecurity};
+    let sddl: Vec<u16> = format!("D:(A;;GA;;;{})", sid(false).unwrap())
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut descriptor = std::ptr::null_mut();
+    assert_ne!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        },
+        0,
+        "{}",
+        std::io::Error::last_os_error()
+    );
+    let ok = unsafe {
+        SetKernelObjectSecurity(GetCurrentProcess(), DACL_SECURITY_INFORMATION, descriptor)
+    } != 0;
+    let error = (!ok).then(std::io::Error::last_os_error);
+    unsafe { LocalFree(descriptor) };
+    json!({"ok": ok, "error": error.as_ref().and_then(std::io::Error::raw_os_error), "message": error.map(|error| error.to_string())})
+}
+
 fn loaded_adapter() -> Option<PathBuf> {
     use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
     for name in ["compat-x64.dll", "compat-arm64.dll"] {
@@ -425,6 +508,36 @@ fn production_windows_child() {
     let result = match mode.as_str() {
         "report" => probe(&config),
         "symlink" => symlink_probe(&config),
+        "peer-target" => {
+            let bytes = std::env::var("SANDBOX_COMMAND_VALUE")
+                .unwrap()
+                .into_bytes()
+                .into_boxed_slice();
+            let report = probe(&config);
+            let dacl = install_user_only_process_dacl();
+            let marker = std::env::temp_dir().join(format!("peer-private-{}", std::process::id()));
+            std::fs::write(&marker, &bytes).unwrap();
+            let root = Path::new(config["root"].as_str().unwrap());
+            std::fs::write(root.join("project").join(format!("ready-{}", config["tag"].as_str().unwrap())),
+                json!({"pid": std::process::id(), "address": bytes.as_ptr() as usize, "length": bytes.len(),
+                    "marker": marker, "probe": report, "dacl": dacl}).to_string()).unwrap();
+            // The owning PreparedChild kills this target on every exit path. This
+            // independent deadline also bounds it if an outer fixture malfunctions.
+            std::thread::sleep(Duration::from_secs(180));
+            std::hint::black_box(&bytes);
+            json!({"expired": true})
+        }
+        "peer-reader" => {
+            let marker = std::fs::read(config["target"]["marker"].as_str().unwrap());
+            let marker = match marker {
+                Ok(bytes) => json!({"ok": true, "bytes": bytes}),
+                Err(error) => {
+                    json!({"ok": false, "error": error.raw_os_error(), "message": error.to_string()})
+                }
+            };
+            json!({"target": reads_fixture_memory(&config["target"]),
+                "host": reads_fixture_memory(&config["host_memory"]), "marker": marker, "probe": probe(&config)})
+        }
         "nested" => {
             let mut child = Owner(
                 Command::new(std::env::current_exe().unwrap())
@@ -473,24 +586,18 @@ fn production_windows_child() {
             json!({"parent": probe(&config), "child": record(&output)})
         }
         "handle" => {
-            use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType, ReadFile};
-            let handle = config["handle"].as_u64().unwrap() as usize as HANDLE;
-            let mut buffer = [0u8; 64];
-            let mut length = 0;
-            let ok = if unsafe { GetFileType(handle) } == FILE_TYPE_DISK {
-                unsafe {
-                    ReadFile(
-                        handle,
-                        buffer.as_mut_ptr(),
-                        buffer.len() as u32,
-                        &mut length,
-                        std::ptr::null_mut(),
-                    )
-                }
-            } else {
-                0
-            };
-            json!({"ok": ok != 0, "bytes": &buffer[..length as usize]})
+            let control = (config["handle_control"] == true).then(|| {
+                File::open(Path::new(config["root"].as_str().unwrap()).join("omitted/canary"))
+                    .unwrap()
+            });
+            let handle = control.as_ref().map_or(
+                config["handle"].as_u64().unwrap() as usize as HANDLE,
+                |file| file.as_raw_handle(),
+            );
+            // A numerical handle may identify an unrelated child object. Never
+            // perform a stream read against it: compare the canary's file ID.
+            eprintln!("WINDOWS_HANDLE_QUERY handle={handle:?}");
+            json!({"handle": handle as usize, "identity": file_identity(handle)})
         }
         "network" => {
             let address: std::net::SocketAddr =
@@ -645,6 +752,7 @@ fn public_sessions_reuse_resolved_identity_without_reusing_command_environment()
         );
         assert_ne!(different["sid"], one["sid"]);
         assert_ne!(different["tmp"], one["tmp"]);
+        equivalent_policy_peer_access(root.path(), &project, native);
     }
     let mut owner = policy(
         root.path(),
@@ -663,6 +771,95 @@ fn public_sessions_reuse_resolved_identity_without_reusing_command_environment()
     let result = plain(&owner, &project);
     assert!(result["raw"]["ambient"].is_null(), "{result}");
     assert!(result["native"]["ambient"].is_null(), "{result}");
+}
+
+fn equivalent_policy_peer_access(root: &Path, project: &Path, native: bool) {
+    const TARGET_VALUE: &str = "peer-target-fixture-value";
+    let host_bytes = Box::new(*b"host-only-fixture-bytes");
+    let tag = format!("peer-{native}");
+    let mut target_config = config(root);
+    target_config["tag"] = json!(tag);
+    let mut target_policy = policy(root, project, "peer-target", target_config);
+    target_policy
+        .env
+        .constructed
+        .insert("SANDBOX_COMMAND_VALUE".into(), TARGET_VALUE.into());
+    let target_session = session(&target_policy, native);
+    let target_child = target_session
+        .prepare(command(project).redact_stdout(false).redact_stderr(false))
+        .unwrap()
+        .spawn()
+        .unwrap();
+    let target = ready(root, &tag);
+    assert_eq!(target["pid"], target_child.id());
+    let mut reader_config = config(root);
+    reader_config["target"] = target.clone();
+    reader_config["host_memory"] = json!({"pid": std::process::id(),
+        "address": host_bytes.as_ptr() as usize, "length": host_bytes.len()});
+    let mut reader_policy = policy(root, project, "peer-reader", reader_config.clone());
+    reader_policy.env.constructed.insert(
+        "SANDBOX_COMMAND_VALUE".into(),
+        "peer-reader-fixture-value".into(),
+    );
+    let plain_control = plain(&reader_policy, project);
+    eprintln!(
+        "WINDOWS_PEER_CONTROL {}",
+        json!({"native": native, "target": target, "reader": plain_control})
+    );
+    for (field, expected) in [
+        ("target", TARGET_VALUE.as_bytes()),
+        ("host", host_bytes.as_slice()),
+    ] {
+        assert_eq!(
+            plain_control[field]["ok"], true,
+            "plain memory control: {plain_control}"
+        );
+        assert_eq!(plain_control[field]["bytes"], json!(expected));
+    }
+    assert_eq!(
+        plain_control["marker"]["bytes"],
+        json!(TARGET_VALUE.as_bytes())
+    );
+
+    let same = output(&session(&reader_policy, native), project);
+    let other = root.join(format!("peer-other-{native}"));
+    std::fs::create_dir(&other).unwrap();
+    let different = output(
+        &session(&policy(root, &other, "peer-reader", reader_config), native),
+        &other,
+    );
+    eprintln!(
+        "WINDOWS_PEER_ACCESS {}",
+        json!({"native": native, "target": target, "same": same, "different": different})
+    );
+    assert_eq!(same["probe"]["sid"], target["probe"]["sid"]);
+    assert_eq!(same["probe"]["tmp"], target["probe"]["tmp"]);
+    assert_eq!(same["probe"]["value"], "peer-reader-fixture-value");
+    assert_eq!(same["marker"]["bytes"], json!(TARGET_VALUE.as_bytes()));
+    assert_ne!(different["probe"]["sid"], target["probe"]["sid"]);
+    assert_ne!(different["probe"]["tmp"], target["probe"]["tmp"]);
+    assert_eq!(different["marker"]["ok"], false, "{different}");
+    assert_eq!(different["marker"]["error"], 5, "{different}");
+    assert_eq!(different["target"]["ok"], false, "{different}");
+    assert_eq!(different["target"]["error"], 5, "{different}");
+    for reader in [&same, &different] {
+        assert_eq!(reader["host"]["ok"], false, "{reader}");
+        assert_eq!(reader["host"]["error"], 5, "{reader}");
+        assert_eq!(!reader["probe"]["adapter"].is_null(), native);
+    }
+    if native {
+        // The adapter preserves package access when a runtime installs its own
+        // process DACL. That principal is deliberately shared, not per command.
+        assert_eq!(target["dacl"]["ok"], true, "{target}");
+        assert_eq!(same["target"]["ok"], true, "{same}");
+    }
+    // Raw peer access depends on the process DACL; do not invent a raw promise.
+    if same["target"]["ok"] == true {
+        assert_eq!(same["target"]["bytes"], json!(TARGET_VALUE.as_bytes()));
+    }
+    drop(target_child);
+    std::fs::remove_file(target["marker"].as_str().unwrap()).unwrap();
+    std::hint::black_box(host_bytes);
 }
 
 #[test]
@@ -736,13 +933,24 @@ fn unrelated_inheritable_file_handle_never_crosses_a_public_launch() {
     assert_eq!(bytes, b"outside-canary");
     let mut config = config(root.path());
     config["handle"] = json!(file.as_raw_handle() as usize);
+    let expected = file_identity(file.as_raw_handle());
+    assert!(expected.get("file").is_some(), "{expected}");
+    config["handle_control"] = json!(true);
+    let control = plain(
+        &policy(root.path(), &project, "handle", config.clone()),
+        &project,
+    );
+    assert_eq!(control["identity"], expected, "{control}");
+    config["handle_control"] = json!(false);
     let policy = policy(root.path(), &project, "handle", config);
     for native in [false, true] {
-        file.seek(SeekFrom::Start(0)).unwrap();
         let result = output(&session(&policy, native), &project);
+        eprintln!(
+            "WINDOWS_HANDLE_IDENTITY {}",
+            json!({"native": native, "expected": expected, "result": result})
+        );
         assert_ne!(
-            result["bytes"],
-            json!(b"outside-canary".as_slice()),
+            result["identity"], expected,
             "inherited file capability bypassed the policy: {result}"
         );
     }

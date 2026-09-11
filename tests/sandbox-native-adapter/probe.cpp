@@ -22,6 +22,7 @@ struct Payload {
     DWORD package_sid[SECURITY_MAX_SID_SIZE / sizeof(DWORD)];
     BOOL identities_captured;
     BOOL directory_read_probe;
+    BOOL mount_query_probe;
 };
 static Payload state = {};
 
@@ -107,6 +108,7 @@ static BOOL inject(HANDLE process, const Payload& source) {
 int wmain(int argc, wchar_t** argv) {
     if (argc != 3) return 2;
     state.directory_read_probe = GetEnvironmentVariableW(L"NUB_NATIVE_DIRECTORY_MASK_PROBE", nullptr, 0) != 0;
+    state.mount_query_probe = GetEnvironmentVariableW(L"NUB_NATIVE_MOUNT_QUERY_PROBE", nullptr, 0) != 0;
     DWORD pid = wcstoul(argv[1], nullptr, 10);
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
                                  PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
@@ -150,6 +152,8 @@ static void diagnostic(const char* format, ...) {
     SetLastError(error);
 }
 
+#include "msys-mapping.cpp"
+
 static LONG CALLBACK startup_exception(EXCEPTION_POINTERS* fault) {
     DWORD error = GetLastError();
     static volatile LONG active = 0;
@@ -157,6 +161,7 @@ static LONG CALLBACK startup_exception(EXCEPTION_POINTERS* fault) {
     if (InterlockedCompareExchange(&active, 1, 0) != 0)
         return EXCEPTION_CONTINUE_SEARCH;
     if (InterlockedIncrement(&count) <= 16) {
+        msys_mapping::snapshot("exception");
         auto record = fault->ExceptionRecord;
         MEMORY_BASIC_INFORMATION region = {};
         VirtualQuery(record->ExceptionAddress, &region, sizeof(region));
@@ -183,6 +188,7 @@ static auto true_virtual_alloc = VirtualAlloc;
 
 static NTSTATUS NTAPI terminate_process(HANDLE process, NTSTATUS status) {
     DWORD error = GetLastError();
+    msys_mapping::snapshot("terminate");
     DWORD pid = GetProcessId(process);
     diagnostic("ADAPTER_TERMINATE pid=%lu target=%lu handle=%p status=%08lx caller=%p\n",
         GetCurrentProcessId(), pid, process, static_cast<ULONG>(status), _ReturnAddress());
@@ -212,6 +218,29 @@ static LPVOID WINAPI virtual_alloc(LPVOID address, SIZE_T size, DWORD kind, DWOR
             error, _ReturnAddress());
     SetLastError(error);
     return result;
+}
+
+static void device_failure_trace(ACCESS_MASK access, NTSTATUS status, POBJECT_ATTRIBUTES attrs) {
+    static constexpr wchar_t device[] = L"\\??\\MountPointManager";
+    if (access != SYNCHRONIZE || status != static_cast<NTSTATUS>(0xc0000022L) ||
+        !attrs || !attrs->ObjectName || !attrs->ObjectName->Buffer ||
+        attrs->ObjectName->Length != sizeof(device) - sizeof(wchar_t) ||
+        _wcsnicmp(attrs->ObjectName->Buffer, device, _countof(device) - 1)) return;
+    DWORD error = GetLastError();
+    void* frames[16] = {};
+    USHORT count = CaptureStackBackTrace(0, _countof(frames), frames, nullptr);
+    for (USHORT i = 0; i < count; ++i) {
+        MEMORY_BASIC_INFORMATION region = {};
+        VirtualQuery(frames[i], &region, sizeof(region));
+        char module[MAX_PATH] = {};
+        if (region.Type == MEM_IMAGE)
+            GetModuleFileNameA(static_cast<HMODULE>(region.AllocationBase), module, MAX_PATH);
+        diagnostic("ADAPTER_DEVICE_CALLER pid=%lu frame=%hu module=%s offset=%llx\n",
+            GetCurrentProcessId(), i, module,
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(frames[i]) -
+                                            reinterpret_cast<uintptr_t>(region.AllocationBase)));
+    }
+    SetLastError(error);
 }
 
 static auto true_create_file = CreateFileW;
@@ -349,6 +378,85 @@ static NtOpen true_open_file = nullptr;
 static NtCreate true_nt_create_file = nullptr;
 static NtObject query_object = nullptr;
 
+// Diagnostic only: no real device handle is lent to the child. Zig's direct
+// mount-point query can be answered from the drive map already in the payload.
+static HANDLE mount_probe_handle() { return reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-0x4e5542)); }
+struct MountPoint {
+    ULONG symbolic_offset;
+    USHORT symbolic_length, reserved1;
+    ULONG unique_offset;
+    USHORT unique_length, reserved2;
+    ULONG device_offset;
+    USHORT device_length, reserved3;
+};
+static_assert(sizeof(MountPoint) == 24);
+using NtIoControl = NTSTATUS (NTAPI*)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK,
+    ULONG, PVOID, ULONG, PVOID, ULONG);
+using NtCloseFn = NTSTATUS (NTAPI*)(HANDLE);
+static NtIoControl true_io_control = nullptr;
+static NtCloseFn true_close = nullptr;
+
+static bool mount_query_open(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
+                             PIO_STATUS_BLOCK io, NTSTATUS status) {
+    static constexpr wchar_t device[] = L"\\??\\MountPointManager";
+    if (!state.mount_query_probe || status != static_cast<NTSTATUS>(0xc0000022L) ||
+        access != SYNCHRONIZE || !handle || !io || !attrs || attrs->RootDirectory ||
+        !attrs->ObjectName || !attrs->ObjectName->Buffer ||
+        attrs->ObjectName->Length != sizeof(device) - sizeof(wchar_t) ||
+        _wcsnicmp(attrs->ObjectName->Buffer, device, _countof(device) - 1)) return false;
+    *handle = mount_probe_handle();
+    io->Status = 0;
+    io->Information = FILE_OPENED;
+    return true;
+}
+
+static NTSTATUS NTAPI mount_io_control(HANDLE handle, HANDLE event, PVOID apc, PVOID context,
+    PIO_STATUS_BLOCK io, ULONG code, PVOID input, ULONG input_size, PVOID output, ULONG output_size) {
+    if (!state.mount_query_probe || handle != mount_probe_handle())
+        return true_io_control(handle, event, apc, context, io, code, input, input_size, output, output_size);
+    auto finish = [&](NTSTATUS status, ULONG bytes = 0) {
+        if (io) { io->Status = status; io->Information = bytes; }
+        diagnostic("ADAPTER_MOUNT_QUERY pid=%lu code=%08lx status=%08lx bytes=%lu\n",
+            GetCurrentProcessId(), code, static_cast<ULONG>(status), bytes);
+        return status;
+    };
+    const NTSTATUS invalid = static_cast<NTSTATUS>(0xc000000dL);
+    if (!io || event || apc || context || code != 0x006d0008 || !input || input_size < sizeof(MountPoint))
+        return finish(invalid);
+    MountPoint point;
+    memcpy(&point, input, sizeof(point));
+    if (point.symbolic_length || point.unique_length || !point.device_length ||
+        point.device_length % sizeof(wchar_t) || point.device_offset < sizeof(point) ||
+        point.device_offset > input_size || point.device_length > input_size - point.device_offset ||
+        point.device_length >= MAX_PATH * sizeof(wchar_t)) return finish(invalid);
+    wchar_t device[MAX_PATH] = {};
+    memcpy(device, static_cast<BYTE*>(input) + point.device_offset, point.device_length);
+    int drive = -1;
+    for (int i = 0; i < 26; ++i)
+        if (!_wcsicmp(device, state.devices[i])) { drive = i; break; }
+    if (drive < 0) return finish(static_cast<NTSTATUS>(0xc0000034L));
+    wchar_t link[] = L"\\DosDevices\\C:";
+    link[_countof(link) - 3] = wchar_t(L'A' + drive);
+    constexpr ULONG link_bytes = sizeof(link) - sizeof(wchar_t);
+    const ULONG required = 8 + sizeof(MountPoint) + link_bytes + point.device_length;
+    if (!output || output_size < required) return finish(static_cast<NTSTATUS>(0xc0000023L));
+    MountPoint result = {};
+    result.symbolic_offset = 8 + sizeof(MountPoint);
+    result.symbolic_length = link_bytes;
+    result.device_offset = result.symbolic_offset + link_bytes;
+    result.device_length = point.device_length;
+    const ULONG header[] = {required, 1};
+    memcpy(output, header, sizeof(header));
+    memcpy(static_cast<BYTE*>(output) + sizeof(header), &result, sizeof(result));
+    memcpy(static_cast<BYTE*>(output) + result.symbolic_offset, link, link_bytes);
+    memcpy(static_cast<BYTE*>(output) + result.device_offset, device, result.device_length);
+    return finish(0, required);
+}
+
+static NTSTATUS NTAPI mount_close(HANDLE handle) {
+    return state.mount_query_probe && handle == mount_probe_handle() ? 0 : true_close(handle);
+}
+
 static bool pipe_name(POBJECT_ATTRIBUTES original, OBJECT_ATTRIBUTES& redirected,
                       UNICODE_STRING& name, wchar_t (&path)[1024]) {
     if (!original || !original->ObjectName) return false;
@@ -407,6 +515,8 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     wchar_t path[1024];
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
+    device_failure_trace(access, status, attrs);
+    if (mount_query_open(handle, access, attrs, io, status)) return 0;
     if (state.directory_read_probe && status == static_cast<NTSTATUS>(0xc0000022L) &&
         (options & FILE_DIRECTORY_FILE) && access == 0x001200a9) {
         // Diagnostic only: Bun 1.3 requests READ_CONTROL and FILE_READ_EA in
@@ -429,6 +539,8 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_nt_create_file(handle, access, mapped ? &redirected : attrs, io, allocation,
         attributes, share, disposition, options, ea, ea_length);
+    device_failure_trace(access, status, attrs);
+    if (disposition == FILE_OPEN && mount_query_open(handle, access, attrs, io, status)) return 0;
     if (state.directory_read_probe && status == static_cast<NTSTATUS>(0xc0000022L) &&
         (options & FILE_DIRECTORY_FILE) && disposition == FILE_OPEN && access == 0x001200a9) {
         status = true_nt_create_file(handle, 0x001000a1, mapped ? &redirected : attrs, io, allocation,
@@ -579,6 +691,7 @@ static BOOL WINAPI create_process(LPCWSTR application, LPWSTR command,
                                   DWORD flags, LPVOID environment, LPCWSTR cwd,
                                   LPSTARTUPINFOW startup, LPPROCESS_INFORMATION child) {
     diagnostic_state("create-process");
+    msys_mapping::snapshot("create-process");
     diagnostic("ADAPTER_CREATE_PROCESS pid=%lu application=%ls command=%ls flags=%08lx process_attrs=%p thread_attrs=%p inherit=%d reserved_size=%u\n",
         GetCurrentProcessId(), application ? application : L"(null)", command ? command : L"(null)",
         flags, process_attrs, thread_attrs, inherit, startup ? startup->cbReserved2 : 0);
@@ -614,16 +727,19 @@ template<typename T> static bool resolve_nt(T& function, const char* name) {
 }
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (DetourIsHelperProcess()) return TRUE;
+    if (reason == DLL_PROCESS_DETACH) msys_mapping::stop();
     if (reason == DLL_PROCESS_DETACH && exception_handler) {
         RemoveVectoredExceptionHandler(exception_handler);
         exception_handler = nullptr;
     }
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     diagnostic("ADAPTER_ATTACH_BEGIN pid=%lu\n", GetCurrentProcessId());
+    msys_mapping::start();
     exception_handler = AddVectoredExceptionHandler(1, startup_exception);
     if (!exception_handler)
         diagnostic("ADAPTER_DIAGNOSTIC_FAILED operation=exception-handler error=%lu\n", GetLastError());
     auto failed_attach = []() -> BOOL {
+        msys_mapping::stop();
         if (exception_handler) RemoveVectoredExceptionHandler(exception_handler);
         exception_handler = nullptr;
         return FALSE;
@@ -651,6 +767,8 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_create_pipe, "NtCreateNamedPipeFile") ||
         !resolve_nt(true_open_file, "NtOpenFile") ||
         !resolve_nt(true_nt_create_file, "NtCreateFile") ||
+        !resolve_nt(true_io_control, "NtDeviceIoControlFile") ||
+        !resolve_nt(true_close, "NtClose") ||
         !resolve_nt(query_object, "NtQueryObject")) {
         diagnostic("ADAPTER_ATTACH_FAILED resolve pid=%lu error=%lu\n", GetCurrentProcessId(), GetLastError());
         return failed_attach();
@@ -672,6 +790,8 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_pipe), create_pipe);
     DetourAttach(reinterpret_cast<PVOID*>(&true_open_file), open_file);
     DetourAttach(reinterpret_cast<PVOID*>(&true_nt_create_file), nt_create_file);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_io_control), mount_io_control);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_close), mount_close);
     LONG result = DetourTransactionCommit();
     diagnostic("ADAPTER_ATTACH_RESULT pid=%lu result=%ld\n", GetCurrentProcessId(), result);
     if (result == NO_ERROR) diagnostic_state("attached");

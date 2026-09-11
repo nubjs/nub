@@ -345,6 +345,8 @@ Landlock is a Linux Security Module. Seccomp means secure computing; its BPF (Be
 
 Windows automatically reuses equivalent resolved resource policies, including runtime grants and backend version. Different external paths produce different identities; managed temp is an identity-owned slot rather than a fresh hash input. Active leases are never evicted. The idle cache is bounded by 64 entries, 24 hours and 1 GiB of owned private data; caller project outputs and shared tool caches are not deletion targets. Explicit cleanup reports failures and retains their ownership records for recovery.
 
+Matching Windows policies share a security identity and private storage. Separate session handles are not isolation boundaries between mutually distrusting callers. Command environment values do not create a separate identity unless they change resolved resources. Environment filtering controls what each command inherits; it does not promise confidentiality from other commands sharing that identity. Per-command Jobs control lifetime, not isolation between commands with the same identity.
+
 On Unix, managed temp storage lives in a private per-user directory under the OS temp root. A file-lock lease distinguishes a live session from an abandoned one. Acquisition and explicit cleanup recover abandoned owned directories; normal close removes them immediately. Cleanup checks the recorded directory identity and does not follow payload symlinks. Legacy temporary directories without ownership records are not deletion targets.
 
 The CLI runs the same recovery operation without loading project configuration. A nonzero exit reports incomplete cleanup; its ownership records remain available for retry:

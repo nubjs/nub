@@ -175,20 +175,27 @@ jobs:
           $gitExec = (& git --exec-path).Trim()
           $msysRoot = Split-Path (Split-Path (Split-Path $gitExec))
           if (!(Test-Path "$msysRoot/usr/bin/bash.exe")) { throw "Git's MSYS shell is missing: $msysRoot" }
+          & git --version >> reports/environment.txt
+          & "$msysRoot/usr/bin/bash.exe" -lc 'uname -a' >> reports/environment.txt
+          Get-FileHash "$msysRoot/usr/bin/msys-2.0.dll", "$msysRoot/usr/bin/bash.exe", (Get-Command git).Source | ConvertTo-Json > reports/git-runtime-hashes.json
+          & "$msysRoot/usr/bin/bash.exe" -lc 'while IFS= read -r line; do case "$line" in *msys-2.0.dll*) printf "%s\n" "$line";; esac; done < /proc/self/maps' > reports/msys-plain-mapping.log
+          if ($LASTEXITCODE -ne 0) { throw 'Plain MSYS mapping control failed' }
           $modes = @('plain', 'raw', 'embedded')
           if ('${{ steps.probe.outcome }}' -eq 'success') { $modes += 'adapter' }
           foreach ($case in $cases) {
             $toolModes = $modes
             if ($case[0] -notin @('git', 'git-lfs')) { $toolModes += @('msys-plain', 'msys-embedded') }
-            if ($case[0] -eq 'bun132') { $toolModes += @('nodes-embedded', 'nodes-adapter', 'directory-mask-adapter') }
+            if ($case[0] -eq 'bun132') { $toolModes += @('nodes-embedded', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter') }
             foreach ($mode in $toolModes) {
               Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_ANCESTOR_NODES -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_ADAPTER_PROBE_ENABLE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_EMBEDDED_ADAPTER -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_DIRECTORY_MASK_PROBE -ErrorAction SilentlyContinue
-              if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
-              if ($mode -eq 'directory-mask-adapter') { $env:NUB_NATIVE_DIRECTORY_MASK_PROBE = '1' }
+              Remove-Item Env:NUB_NATIVE_MOUNT_QUERY_PROBE -ErrorAction SilentlyContinue
+              if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
+              if ($mode -in @('directory-mask-adapter', 'mount-query-adapter')) { $env:NUB_NATIVE_DIRECTORY_MASK_PROBE = '1' }
+              if ($mode -eq 'mount-query-adapter') { $env:NUB_NATIVE_MOUNT_QUERY_PROBE = '1' }
               if ($mode -in @('embedded', 'msys-embedded', 'nodes-embedded')) { $env:NUB_NATIVE_EMBEDDED_ADAPTER = '1' }
               if ($mode.StartsWith('nodes-')) { $env:NUB_NATIVE_ANCESTOR_NODES = '1' }
               if ($mode.StartsWith('msys-')) { $env:NUB_SANDBOX_TOOL_MSYS_ROOT = $msysRoot }
@@ -206,6 +213,7 @@ jobs:
           Remove-Item Env:NUB_NATIVE_ANCESTOR_NODES -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_EMBEDDED_ADAPTER -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_DIRECTORY_MASK_PROBE -ErrorAction SilentlyContinue
+          Remove-Item Env:NUB_NATIVE_MOUNT_QUERY_PROBE -ErrorAction SilentlyContinue
           $results | ConvertTo-Json > reports/tool-results.json
           # Diagnostic DLL/ancestor/mask alternatives remain results, not production verdicts.
           if ($results | Where-Object { $_.mode -in @('plain', 'embedded', 'msys-plain', 'msys-embedded') -and $_.exit -ne 0 }) { exit 1 }
