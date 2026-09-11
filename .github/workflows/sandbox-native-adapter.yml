@@ -145,12 +145,22 @@ jobs:
         run: |
           set -o pipefail
           rustup set default-host x86_64-pc-windows-msvc
-          node scripts/sandbox-native-tool-fixtures.mjs --tools=cargo,go,composer 2>&1 | tee reports/native-provision.log
-          node scripts/sandbox-python-fixtures.mjs 2>&1 | tee reports/python-provision.log
+          if [ -n "$NATIVE_FOCUSED_RUN" ]; then
+            node scripts/sandbox-native-tool-fixtures.mjs --tools=cargo 2>&1 | tee reports/native-provision.log
+          else
+            node scripts/sandbox-native-tool-fixtures.mjs --tools=cargo,go,composer 2>&1 | tee reports/native-provision.log
+            node scripts/sandbox-python-fixtures.mjs 2>&1 | tee reports/python-provision.log
+            cp .sandbox-python-fixtures/matrix.json reports/python-matrix.json
+          fi
           node scripts/sandbox-tool-fixtures.mjs 2>&1 | tee reports/js-provision.log
           cp .sandbox-native-tool-fixtures/matrix.json reports/native-matrix.json
-          cp .sandbox-python-fixtures/matrix.json reports/python-matrix.json
           cp .sandbox-tool-fixtures/matrix.json reports/js-matrix.json
+      - name: Preparing a disposable ASLR-enabled MSYS runtime
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $gitExec = (& git --exec-path).Trim()
+          & ./tests/sandbox-native-adapter/prepare-msys-aslr.ps1 -SourceRoot (Split-Path (Split-Path (Split-Path $gitExec)))
       - name: Comparing existing native tool sequences
         if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
         shell: pwsh
@@ -181,14 +191,24 @@ jobs:
           & "$msysRoot/usr/bin/bash.exe" -lc 'while IFS= read -r line; do case "$line" in *msys-2.0.dll*) printf "%s\n" "$line";; esac; done < /proc/self/maps' > reports/msys-plain-mapping.log
           if ($LASTEXITCODE -ne 0) { throw 'Plain MSYS mapping control failed' }
           $modes = @('plain', 'raw', 'embedded')
+          $originalPath = $env:PATH
           if ('${{ steps.probe.outcome }}' -eq 'success') { $modes += 'adapter' }
           foreach ($case in $cases) {
             $toolModes = $modes
             if ($case[0] -notin @('git', 'git-lfs')) { $toolModes += @('msys-plain', 'msys-embedded') }
             if ($case[0] -in @('git', 'git-lfs')) { $toolModes += @('relocation-root-adapter', 'relocation-tree-adapter') }
             if ($case[0] -eq 'cargo') { $toolModes += 'msys-relocation-tree-adapter' }
+            if ($case[0] -in @('git', 'git-lfs')) { $toolModes += @('dynamicbase-plain', 'dynamicbase-embedded', 'dynamicbase-adapter') }
+            if ($case[0] -eq 'cargo') { $toolModes += @('msys-dynamicbase-plain', 'msys-dynamicbase-adapter') }
             if ($case[0] -eq 'bun132') { $toolModes += @('nodes-embedded', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter') }
             foreach ($mode in $toolModes) {
+              $env:PATH = $originalPath
+              $selectedMsys = $msysRoot
+              if ($mode.Contains('dynamicbase-')) {
+                if (!$env:NUB_NATIVE_DYNAMICBASE_GIT) { throw 'ASLR runtime copy was not prepared' }
+                $selectedMsys = $env:NUB_NATIVE_DYNAMICBASE_GIT
+                $env:PATH = "$selectedMsys/cmd;$selectedMsys/mingw64/bin;$selectedMsys/usr/bin;$originalPath"
+              }
               Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_ANCESTOR_NODES -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_ADAPTER_PROBE_ENABLE -ErrorAction SilentlyContinue
@@ -197,15 +217,15 @@ jobs:
               Remove-Item Env:NUB_NATIVE_MOUNT_QUERY_PROBE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_RELOCATION_PROBE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_RELOCATION_TREE_PROBE -ErrorAction SilentlyContinue
-              if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter', 'relocation-root-adapter', 'relocation-tree-adapter', 'msys-relocation-tree-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
+              if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter', 'relocation-root-adapter', 'relocation-tree-adapter', 'msys-relocation-tree-adapter', 'dynamicbase-adapter', 'msys-dynamicbase-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
               if ($mode.Contains('relocation-')) { $env:NUB_NATIVE_RELOCATION_PROBE = '1' }
               if ($mode.Contains('relocation-tree-')) { $env:NUB_NATIVE_RELOCATION_TREE_PROBE = '1' }
               if ($mode -in @('directory-mask-adapter', 'mount-query-adapter')) { $env:NUB_NATIVE_DIRECTORY_MASK_PROBE = '1' }
               if ($mode -eq 'mount-query-adapter') { $env:NUB_NATIVE_MOUNT_QUERY_PROBE = '1' }
-              if ($mode -in @('embedded', 'msys-embedded', 'nodes-embedded')) { $env:NUB_NATIVE_EMBEDDED_ADAPTER = '1' }
+              if ($mode -in @('embedded', 'msys-embedded', 'nodes-embedded', 'dynamicbase-embedded')) { $env:NUB_NATIVE_EMBEDDED_ADAPTER = '1' }
               if ($mode.StartsWith('nodes-')) { $env:NUB_NATIVE_ANCESTOR_NODES = '1' }
-              if ($mode.StartsWith('msys-')) { $env:NUB_SANDBOX_TOOL_MSYS_ROOT = $msysRoot }
-              $test = if ($mode -in @('plain', 'msys-plain')) { $case[1] } else { $case[2] }
+              if ($mode.StartsWith('msys-')) { $env:NUB_SANDBOX_TOOL_MSYS_ROOT = $selectedMsys }
+              $test = if ($mode -in @('plain', 'msys-plain', 'dynamicbase-plain', 'msys-dynamicbase-plain')) { $case[1] } else { $case[2] }
               & cargo test -p nub-sandbox --profile fast --lib $test -- --exact --ignored --nocapture --test-threads=1 *> "reports/$($case[0])-$mode.log"
               $code = $LASTEXITCODE
               $results += @{ tool = $case[0]; mode = $mode; test = $test; exit = $code }
@@ -214,6 +234,7 @@ jobs:
               Get-Content "reports/$($case[0])-$mode.log" -Tail 20
             }
           }
+          $env:PATH = $originalPath
           Remove-Item Env:NUB_NATIVE_ADAPTER_PROBE_ENABLE -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_ANCESTOR_NODES -ErrorAction SilentlyContinue
