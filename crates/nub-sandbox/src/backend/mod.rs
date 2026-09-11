@@ -565,6 +565,8 @@ pub(crate) struct SessionResources {
     policy: SandboxPolicy,
     proxy: Option<EgressProxy>,
     private_tmp: Option<PrivateTemp>,
+    #[cfg(target_os = "linux")]
+    retained_grants: linux::RetainedLinuxGrants,
     #[cfg(windows)]
     windows_leases: std::sync::Mutex<std::collections::BTreeMap<String, windows::WindowsLease>>,
     #[cfg(windows)]
@@ -621,11 +623,15 @@ impl Sandbox {
         let runtime_brokers = capture_runtime_brokers(policy, &mut runtime_policy)?;
         let proxy = start_session_proxy(&runtime_policy, runtime_brokers)?;
         let private_tmp = make_private_tmp(&runtime_policy)?;
+        #[cfg(target_os = "linux")]
+        let retained_grants = linux::capture_retained_grants(&runtime_policy)?;
         Ok(Self {
             resources: Arc::new(SessionResources {
                 policy: runtime_policy,
                 proxy,
                 private_tmp,
+                #[cfg(target_os = "linux")]
+                retained_grants,
                 #[cfg(windows)]
                 windows_leases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 #[cfg(windows)]
@@ -1557,6 +1563,7 @@ fn prepare_with_resources(
         policy,
         spec,
         tmp_dir,
+        &resources.retained_grants,
         linux_preflight,
         proxy_port,
         proxy_token,

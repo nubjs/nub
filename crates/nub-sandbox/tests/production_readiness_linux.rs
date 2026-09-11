@@ -8,6 +8,7 @@
 #[path = "common/tool_output.rs"]
 mod tool_output;
 
+use nub_sandbox::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule};
 use nub_sandbox::{
     CommandSpec, CompileCtx, Homes, Sandbox, SandboxPolicy, ScopeCapabilities, compile,
 };
@@ -15,7 +16,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::os::fd::{FromRawFd, RawFd};
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::AtomicBool;
@@ -26,6 +27,8 @@ const ROOT: &str = "NUB_PRODUCTION_LINUX_ROOT";
 const PARENT_PID: &str = "NUB_PRODUCTION_LINUX_PARENT_PID";
 const INHERITED_FD: &str = "NUB_PRODUCTION_LINUX_INHERITED_FD";
 const COUNT_OWNER: &str = "NUB_PRODUCTION_LINUX_COUNT_OWNER";
+const EXECUTABLE: &str = "NUB_PRODUCTION_LINUX_EXECUTABLE";
+const DYNAMIC_FIRST: &str = "NUB_PRODUCTION_LINUX_DYNAMIC_FIRST";
 
 #[test]
 fn linux_production_child() {
@@ -39,6 +42,8 @@ fn linux_production_child() {
         "proc" => proc_child(),
         "sockets" => sockets_child(),
         "self-proc-race" => self_proc_race_child(),
+        "late-speculative" => assert_unavailable(root.join("late-speculative/secret")),
+        "dynamic-exec" => dynamic_exec_child(),
         "wait" => {
             std::fs::write(root.join("project/ready"), b"ready").unwrap();
             loop {
@@ -111,12 +116,20 @@ fn policy(root: &Path, self_stat: bool) -> SandboxPolicy {
     compile(&Value::Object(input), &ctx).expect("production policy compiles")
 }
 
-fn sandbox(root: &Path, case: &str, self_stat: bool, extra_env: &[(&str, String)]) -> Sandbox {
-    let mut policy = policy(root, self_stat);
+fn session(
+    mut policy: SandboxPolicy,
+    root: &Path,
+    case: &str,
+    extra_env: &[(&str, String)],
+) -> Sandbox {
     policy.env.constructed.extend([
         (CASE.into(), case.into()),
         (ROOT.into(), root.display().to_string()),
         (PARENT_PID.into(), std::process::id().to_string()),
+        (
+            EXECUTABLE.into(),
+            std::env::current_exe().unwrap().display().to_string(),
+        ),
     ]);
     policy.env.constructed.extend(
         extra_env
@@ -126,8 +139,16 @@ fn sandbox(root: &Path, case: &str, self_stat: bool, extra_env: &[(&str, String)
     Sandbox::new(&policy).expect("Linux Landlock/seccomp enforcement is available")
 }
 
+fn sandbox(root: &Path, case: &str, self_stat: bool, extra_env: &[(&str, String)]) -> Sandbox {
+    session(policy(root, self_stat), root, case, extra_env)
+}
+
 fn command(root: &Path) -> CommandSpec {
-    CommandSpec::new(std::env::current_exe().unwrap())
+    command_with_program(root, std::env::current_exe().unwrap())
+}
+
+fn command_with_program(root: &Path, program: impl Into<PathBuf>) -> CommandSpec {
+    CommandSpec::new(program.into())
         .args(["--exact", "linux_production_child", "--nocapture"])
         .cwd(root.join("project"))
         .redact_stdout(true)
@@ -170,9 +191,20 @@ fn assert_directory_unavailable(path: impl AsRef<Path>) {
 }
 
 fn filesystem_child(root: &Path) {
+    if root.join("project/renamed-original-ready").exists() {
+        assert_eq!(
+            std::fs::read_to_string(root.join("displaced/node")).unwrap(),
+            "GRANTED"
+        );
+        return;
+    }
     if root.join("project/replacement-ready").exists() {
         // The host replaced the pathname after acquisition.  The old O_PATH rule must not turn a
         // newly substituted hierarchy into a grant, even though its spelling is unchanged.
+        assert_eq!(
+            std::fs::read_to_string(root.join("displaced/node")).unwrap(),
+            "GRANTED"
+        );
         assert_unavailable(root.join("granted/secret"));
         return;
     }
@@ -208,11 +240,19 @@ fn proc_child() {
         stat.split_whitespace().next().unwrap(),
         std::process::id().to_string()
     );
+    // `/proc/self/exe` is a magic alias for this already read-granted test executable, not an
+    // independently injected procfs capability.  Confirm its identity rather than treating a
+    // read of a deliberately granted inode as a credential leak.
+    let expected = std::fs::metadata(std::env::var(EXECUTABLE).unwrap()).unwrap();
+    let proc_exe = std::fs::metadata("/proc/self/exe").expect("read-granted executable alias");
+    assert_eq!(
+        (proc_exe.dev(), proc_exe.ino()),
+        (expected.dev(), expected.ino())
+    );
     for path in [
         "/proc/self/environ",
         "/proc/self/maps",
         "/proc/self/mem",
-        "/proc/self/exe",
         "/proc/thread-self/stat",
     ] {
         assert_unavailable(path);
@@ -285,6 +325,18 @@ fn self_proc_race_child() {
     });
 }
 
+fn dynamic_exec_child() {
+    let first = PathBuf::from(std::env::var_os(DYNAMIC_FIRST).unwrap());
+    if std::fs::metadata(std::env::current_exe().unwrap())
+        .unwrap()
+        .ino()
+        == std::fs::metadata(&first).unwrap().ino()
+    {
+        return;
+    }
+    assert_unavailable(first);
+}
+
 fn owner_child(root: &Path) {
     let session = sandbox(root, "wait", false, &[]);
     let child = session
@@ -309,9 +361,73 @@ fn grants_cover_alias_node_and_subtree_without_following_replacements() {
     );
 
     std::fs::rename(root.path().join("granted"), root.path().join("displaced")).unwrap();
-    symlink(root.path().join("withheld"), root.path().join("granted")).unwrap();
+    std::fs::write(root.path().join("project/renamed-original-ready"), b"yes").unwrap();
+    output(&session, root.path());
+    std::fs::remove_file(root.path().join("project/renamed-original-ready")).unwrap();
+
+    std::fs::create_dir(root.path().join("granted")).unwrap();
+    std::fs::write(root.path().join("granted/secret"), "REPLACEMENT").unwrap();
     std::fs::write(root.path().join("project/replacement-ready"), b"yes").unwrap();
     output(&session, root.path());
+
+    std::fs::remove_dir_all(root.path().join("granted")).unwrap();
+    symlink(root.path().join("withheld"), root.path().join("granted")).unwrap();
+    output(&session, root.path());
+}
+
+#[test]
+fn absent_speculative_grant_stays_absent_until_reacquisition() {
+    let root = fixture();
+    let absent = root.path().join("late-speculative");
+    let mut policy = policy(root.path(), false);
+    policy.fs.rules.entries.push(FsRule {
+        matcher: CanonGlob(absent.display().to_string()),
+        effect: Effect::Allow,
+        access: FsAccess::Read,
+        origin: FsOrigin::Speculative,
+    });
+    let session = session(policy, root.path(), "late-speculative", &[]);
+    symlink(root.path().join("withheld"), &absent).unwrap();
+    output(&session, root.path());
+}
+
+#[test]
+fn command_executable_grants_do_not_cross_reused_session_commands() {
+    let root = fixture();
+    let executables = root.path().join("executables");
+    std::fs::create_dir(&executables).unwrap();
+    let first = executables.join("first");
+    let second = executables.join("second");
+    let source = std::env::current_exe().unwrap();
+    for destination in [&first, &second] {
+        std::fs::copy(&source, destination).unwrap();
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let session = sandbox(
+        root.path(),
+        "dynamic-exec",
+        false,
+        &[(DYNAMIC_FIRST, first.display().to_string())],
+    );
+    let first_output = tool_output::output(
+        session
+            .prepare(command_with_program(root.path(), &first))
+            .expect("prepares first dynamic executable"),
+    );
+    assert!(
+        first_output.status.success(),
+        "first dynamic executable failed"
+    );
+    let second_output = tool_output::output(
+        session
+            .prepare(command_with_program(root.path(), &second))
+            .expect("prepares second dynamic executable"),
+    );
+    assert!(
+        second_output.status.success(),
+        "second dynamic executable retained the first command's grant:\n{}",
+        String::from_utf8_lossy(&second_output.stderr)
+    );
 }
 
 #[test]

@@ -351,6 +351,45 @@ pub(crate) struct LandlockGrant {
     pub(crate) access: LandlockAccess,
 }
 
+/// Policy-controlled filesystem objects pinned for one reusable sandbox session.
+///
+/// Landlock attaches a rule to the object named by an fd, not to the spelling used
+/// to acquire that fd.  Keeping these `O_PATH` descriptors for the session therefore
+/// makes a later ruleset describe the inode that was granted at acquisition even if
+/// its old pathname is renamed, removed, or replaced by a symlink.  The descriptors
+/// are parent-only and `CLOEXEC`; a child receives only the ruleset built from them.
+#[derive(Debug)]
+pub(crate) struct RetainedPolicyGrants(Vec<RetainedPolicyGrant>);
+
+#[derive(Debug)]
+struct RetainedPolicyGrant {
+    grant: LandlockGrant,
+    fd: OwnedFd,
+}
+
+/// Snapshot every existing policy-controlled filesystem object.
+///
+/// An absent speculative source deliberately produces no retained grant.  Reusing
+/// the session must not turn a path created later (especially a replacement symlink)
+/// into a new authority; acquiring a new sandbox is the operation that observes it.
+/// `compile_mount_plan` still rejects an absent authored source, as it did before
+/// session reuse existed.
+pub(crate) fn capture_policy_grants(
+    policy: &SandboxPolicy,
+) -> Result<RetainedPolicyGrants, String> {
+    let mut retained = Vec::new();
+    for grant in policy_grants(policy)? {
+        let fd = open_path(&grant.path).ok_or_else(|| {
+            format!(
+                "filesystem grant disappeared while acquiring sandbox: {}",
+                grant.path.display()
+            )
+        })?;
+        retained.push(RetainedPolicyGrant { grant, fd });
+    }
+    Ok(RetainedPolicyGrants(retained))
+}
+
 /// Derive the full grant list for `policy`.
 ///
 /// The policy's rules come from [`compile_mount_plan`], including glob reduction,
@@ -372,26 +411,27 @@ pub(crate) fn derive_grants(
     // capability drop) is untouched because none of it rides the fs ruleset. Returned before
     // the system closure and device grants are added: they are all nested under `/`, so
     // appending them would emit rules that grant strictly less than the one above them.
+    let mut grants = fixed_grants(policy, tmp_dir, entry_program);
+    grants.extend(policy_grants(policy)?);
+    Ok(grants)
+}
+
+/// Grants owned by the runtime rather than the caller's policy.  These are rebuilt
+/// for every command: the executable is command-specific, while system leaves,
+/// procfs leaves, devices, and the managed tmp root are nub-controlled resources.
+fn fixed_grants(
+    policy: &SandboxPolicy,
+    tmp_dir: Option<&Path>,
+    entry_program: Option<&Path>,
+) -> Vec<LandlockGrant> {
     if !crate::backend::linux_grants::fs_confines(&policy.fs) {
-        return Ok(vec![LandlockGrant {
+        return vec![LandlockGrant {
             path: PathBuf::from("/"),
             access: LandlockAccess::FullDisk,
-        }]);
-    }
-    let plan = compile_mount_plan(policy)?;
-    // Authored positive grants union; a read allow is not a cap on an earlier write allow.
-    // Keep the conservative legacy check only for internal policies carrying real denies.
-    if policy
-        .fs
-        .rules
-        .entries
-        .iter()
-        .any(|rule| rule.effect == crate::policy::Effect::Deny)
-    {
-        reject_narrowing_grants(&plan)?;
+        }];
     }
 
-    let mut grants: Vec<LandlockGrant> = Vec::new();
+    let mut grants = Vec::new();
     for path in system_read_paths() {
         grants.push(LandlockGrant {
             path: PathBuf::from(path),
@@ -431,6 +471,30 @@ pub(crate) fn derive_grants(
             access: LandlockAccess::Device,
         });
     }
+    grants
+}
+
+/// Compile only policy-controlled positive grants.  This is intentionally separate
+/// from [`fixed_grants`]: a reused session consumes the captured fds below rather
+/// than re-resolving these spellings for each command.
+fn policy_grants(policy: &SandboxPolicy) -> Result<Vec<LandlockGrant>, String> {
+    if !crate::backend::linux_grants::fs_confines(&policy.fs) {
+        return Ok(Vec::new());
+    }
+    let plan = compile_mount_plan(policy)?;
+    // Authored positive grants union; a read allow is not a cap on an earlier write allow.
+    // Keep the conservative legacy check only for internal policies carrying real denies.
+    if policy
+        .fs
+        .rules
+        .entries
+        .iter()
+        .any(|rule| rule.effect == crate::policy::Effect::Deny)
+    {
+        reject_narrowing_grants(&plan)?;
+    }
+
+    let mut grants = Vec::with_capacity(plan.len());
     for grant in plan {
         grants.push(LandlockGrant {
             path: grant.path,
@@ -529,9 +593,10 @@ pub(crate) fn build(
     policy: &SandboxPolicy,
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
+    retained: &RetainedPolicyGrants,
 ) -> Result<LandlockRuleset, String> {
     let abi = probe_abi().ok_or_else(|| "landlock is not available on this kernel".to_string())?;
-    let grants = derive_grants(policy, tmp_dir, entry_program)?;
+    let grants = fixed_grants(policy, tmp_dir, entry_program);
 
     let attr = RulesetAttr {
         handled_access_fs: handled_access_fs(abi),
@@ -563,6 +628,16 @@ pub(crate) fn build(
             rules_added += 1;
         }
     }
+    for retained_grant in &retained.0 {
+        if add_rule_fd(
+            ruleset.as_raw_fd(),
+            &retained_grant.grant,
+            retained_grant.fd.as_raw_fd(),
+            abi,
+        )? {
+            rules_added += 1;
+        }
+    }
     Ok(LandlockRuleset {
         fd: ruleset,
         rules_added,
@@ -578,13 +653,25 @@ fn add_rule(ruleset_fd: RawFd, grant: &LandlockGrant, abi: u32) -> Result<bool, 
     let Some(fd) = open_path(&grant.path) else {
         return Ok(false);
     };
+    add_rule_fd(ruleset_fd, grant, fd.as_raw_fd(), abi)
+}
+
+/// Attach a grant to an already-resolved `O_PATH` descriptor.  The descriptor stays
+/// owned by the session; `landlock_add_rule` reads it synchronously and does not take
+/// ownership, so no fd crosses into the sandboxed child.
+fn add_rule_fd(
+    ruleset_fd: RawFd,
+    grant: &LandlockGrant,
+    parent_fd: RawFd,
+    abi: u32,
+) -> Result<bool, String> {
     let mut rights = grant.access.rights(abi) & handled_access_fs(abi);
-    if !is_directory(fd.as_raw_fd()) {
+    if !is_directory(parent_fd) {
         rights &= FILE_ONLY_RIGHTS;
     }
     let attr = PathBeneathAttr {
         allowed_access: rights,
-        parent_fd: fd.as_raw_fd(),
+        parent_fd,
     };
     let rc = unsafe {
         libc::syscall(
@@ -717,9 +804,6 @@ pub(crate) enum LandlockUnavailable {
     /// The policy carries a deny rule. Landlock unions rules and has no deny primitive at
     /// any ABI, so a deny is inexpressible — it would silently not restrict.
     PolicyHasDenyRules,
-    /// The grant shape itself is inexpressible (see [`reject_narrowing_grants`]), or the
-    /// mount plan refused.
-    PolicyNotExpressible(String),
     /// `NUB_SANDBOX_MECHANISM=bubblewrap` pinned the selector for a differential run.
     PinnedToBubblewrap,
     /// A `nub sandbox` scope rather than the build jail. Out of scope by design.
@@ -778,7 +862,9 @@ pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, Landl
     {
         return Err(LandlockUnavailable::PolicyHasDenyRules);
     }
-    derive_grants(policy, None, None).map_err(LandlockUnavailable::PolicyNotExpressible)?;
+    // `Sandbox::new` validates and pins policy grants at acquisition.  Recompiling the
+    // path plan here would consult mutable host pathnames on every prepared command and
+    // reject a session whose retained object was merely renamed or unlinked.
     Ok(abi)
 }
 
@@ -857,9 +943,16 @@ pub(crate) fn prepare_launch(
     seccomp: Option<Vec<seccompiler::sock_filter>>,
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
+    retained: &RetainedPolicyGrants,
 ) -> Result<(Command, LandlockRuleset), String> {
-    let ruleset =
-        install_landlock_confinement(&mut command, policy, seccomp, tmp_dir, entry_program)?;
+    let ruleset = install_landlock_confinement(
+        &mut command,
+        policy,
+        seccomp,
+        tmp_dir,
+        entry_program,
+        retained,
+    )?;
     Ok((command, ruleset))
 }
 
@@ -878,8 +971,9 @@ pub(crate) fn install_landlock_confinement<C: std::os::unix::process::CommandExt
     seccomp: Option<Vec<seccompiler::sock_filter>>,
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
+    retained: &RetainedPolicyGrants,
 ) -> Result<LandlockRuleset, String> {
-    let ruleset = build(policy, tmp_dir, entry_program)?;
+    let ruleset = build(policy, tmp_dir, entry_program, retained)?;
     let fd = ruleset.as_raw_fd();
     let terminal_filter =
         super::linux_lifetime::program(false).map_err(|error| error.to_string())?;

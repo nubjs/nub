@@ -167,6 +167,7 @@ The uv defaults use XDG locations on both Linux and macOS. Its executable fallba
 Operational limits:
 
 - Linux Landlock and Windows ACL grants need existing objects. Missing speculative set members are skipped, not created. Initialize the cache root before acquiring a sandbox, or place it under an already writable directory. macOS path rules can admit later creation.
+- Linux sessions retain handles to the granted filesystem objects. Renaming a granted directory preserves access to that directory; replacing its old pathname does not grant the replacement. A speculative path absent at acquisition stays ungranted until a new session is acquired. Files created beneath a retained writable directory remain accessible.
 - An exact writable file is not a writable parent directory. Git's default global-config update creates an adjacent `.gitconfig.lock` and renames it; granting the existing `.gitconfig` alone is insufficient on inode-based backends. A dedicated, writable Git config directory supports that protocol without granting all of home.
 - Removing or replacing a grant root may require write access to its parent. This affects commands such as `cargo clean` and cache deletion. Put disposable output below a writable directory, or explicitly grant its parent; the engine does not synthesize sibling exceptions.
 - Linked Git worktrees and relocated common directories may sit outside the project. Supply `GIT_DIR`/`GIT_COMMON_DIR` or explicit grants for those locations.

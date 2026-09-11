@@ -151,6 +151,28 @@ pub(crate) struct LinuxPreflight {
 struct LandlockPreflight {
     abi: u32,
 }
+
+/// Filesystem objects captured when a reusable sandbox is acquired.
+///
+/// This is deliberately opaque to the shared lifecycle layer: Linux needs the
+/// descriptors to retain object identity, while other backends retain their own
+/// native resources.  It contains policy grants only; every command receives a
+/// fresh rule for its executable.
+#[derive(Debug)]
+pub(crate) struct RetainedLinuxGrants(super::linux_landlock::RetainedPolicyGrants);
+
+/// Capture the policy-controlled filesystem identities for a sandbox session.
+pub(crate) fn capture_retained_grants(
+    policy: &SandboxPolicy,
+) -> Result<RetainedLinuxGrants, Degradation> {
+    super::linux_landlock::capture_policy_grants(policy)
+        .map(RetainedLinuxGrants)
+        .map_err(|reason| Degradation {
+            lost: vec!["fs".to_string()],
+            reason: Some(reason),
+        })
+}
+
 pub(crate) fn preflight(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
@@ -195,26 +217,6 @@ pub(crate) fn preflight(
         // selects the unprivileged supervisor, never the removed bubblewrap backend.
         Err(super::linux_landlock::LandlockUnavailable::PinnedToBubblewrap) => {}
         Err(super::linux_landlock::LandlockUnavailable::NotABuildJail) => {}
-        // ⛔ DO NOT BLAME THE KERNEL FOR A POLICY BUG. `LandlockUnavailable` covers two very
-        // different failures and this arm used to describe both as a missing kernel feature:
-        //
-        //   - the kernel genuinely lacks Landlock (pre-5.13, or a container that masks it), and
-        //   - `PolicyNotExpressible` — the kernel is fine and OUR policy will not compile.
-        //
-        // MEASURED: on a 6.17 kernel with Landlock ABI 4, an authored grant naming a path that
-        // did not exist produced `PolicyNotExpressible("filesystem mount source does not exist:
-        // node")` and this message told the user their kernel was too old. They would go check
-        // their kernel version, find it fine, and have nowhere else to look — while the real
-        // cause sat in the parenthetical they were being steered away from.
-        Err(reason @ super::linux_landlock::LandlockUnavailable::PolicyNotExpressible(_)) => {
-            return Err(Degradation {
-                lost: vec!["fs".to_string(), "net".to_string()],
-                reason: Some(format!(
-                    "the dependency build jail could not COMPILE its policy on this host — this \
-                     is a nub bug, not a missing kernel feature: {reason:?}"
-                )),
-            });
-        }
         Err(reason) => {
             return Err(Degradation {
                 lost: vec!["fs".to_string(), "net".to_string()],
@@ -240,6 +242,7 @@ pub fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     tmp_dir: Option<&Path>,
+    retained: &RetainedLinuxGrants,
     preflight: LinuxPreflight,
     // The loopback egress proxy's port + bearer, when one is running (a per-host net policy). The
     // Landlock build-jail arm ignores them — it has no supervisor to redirect and confines egress
@@ -248,7 +251,7 @@ pub fn apply(
     proxy_token: Option<&str>,
 ) -> Result<Prepared, Degradation> {
     if let Some(landlock) = preflight.landlock {
-        return apply_landlock(policy, spec, landlock, tmp_dir);
+        return apply_landlock(policy, spec, landlock, tmp_dir, retained);
     }
     if preflight.confine_without_landlock {
         // The supervised (seccomp USER_NOTIF) launch — epic 1.1d/1.4. This is the seam the removed
@@ -260,7 +263,8 @@ pub fn apply(
         // pointed at it; Deny tmp grants nothing, so the shared `/tmp` is simply never in the
         // allow-set. The managed tmp root is stable for one explicit session (Env is enforced
         // by construction — `base_command`/`envp` — always.)
-        let plan = build_supervised_plan(policy, &spec, tmp_dir, proxy_port, proxy_token)?;
+        let plan =
+            build_supervised_plan(policy, &spec, tmp_dir, retained, proxy_port, proxy_token)?;
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
@@ -302,6 +306,7 @@ fn build_supervised_plan(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
     tmp_dir: Option<&Path>,
+    retained: &RetainedLinuxGrants,
     proxy_port: Option<u16>,
     proxy_token: Option<&str>,
 ) -> Result<super::SupervisedPlan, Degradation> {
@@ -376,12 +381,11 @@ fn build_supervised_plan(
     // subtree (`.git/hooks`, `.git/config`, the policy file) is carried by the write broker below.
     let ruleset = if fs_confines(&policy.fs) {
         Some(
-            super::linux_landlock::build(policy, tmp_dir, Some(&program_abs)).map_err(
-                |reason| Degradation {
+            super::linux_landlock::build(policy, tmp_dir, Some(&program_abs), &retained.0)
+                .map_err(|reason| Degradation {
                     lost: vec!["fs".to_string()],
                     reason: Some(reason),
-                },
-            )?,
+                })?,
         )
     } else {
         None
@@ -841,6 +845,7 @@ fn apply_landlock(
     spec: CommandSpec,
     plan: LandlockPreflight,
     tmp_dir: Option<&Path>,
+    retained: &RetainedLinuxGrants,
 ) -> Result<Prepared, Degradation> {
     let seccomp = build_seccomp(
         policy.net.enforce,
@@ -878,6 +883,7 @@ fn apply_landlock(
         seccomp,
         tmp_dir,
         entry_program.as_deref(),
+        &retained.0,
     )
     .map_err(|reason| Degradation {
         lost: vec!["fs".to_string()],
