@@ -80,6 +80,16 @@ jobs:
       - name: Testing framework applications
         if: (success() || failure()) && steps.artifact.outcome == 'success'
         run: node tests/build-jail-frameworks/run.mjs
+      - name: Selecting the pinned native-package runtime
+        if: (success() || failure()) && steps.artifact.outcome == 'success' && matrix.source == 'current'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.2'
+      - name: Comparing native package builds with the jail-off control
+        if: (success() || failure()) && steps.artifact.outcome == 'success' && matrix.source == 'current'
+        env:
+          CORPUS_REPORT: ${{ github.workspace }}/reports/packages
+        run: node tests/build-jail-corpus/packages.mjs
       - name: Exercising sandbox cleanup through the CLI
         if: (success() || failure()) && steps.artifact.outcome == 'success' && matrix.source == 'current'
         run: '"$NUB_BIN" sandbox cleanup > reports/sandbox-cleanup.log 2>&1'
