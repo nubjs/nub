@@ -68,7 +68,7 @@ pub mod platform_flags;
 pub mod present;
 pub mod publish_family;
 mod remix_compat;
-mod resource_limits;
+use nub_core::resource_limits;
 pub mod store_config_family;
 pub mod unsupported_config;
 pub mod use_align;
@@ -98,6 +98,24 @@ use aube_lockfile::LockfileKind;
 /// is stable for the reader's duration. Cheap (`std::sync::Mutex`), test-only.
 #[cfg(test)]
 pub(crate) static ENGINE_GLOBAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Environment a frontend adds to every lifecycle-script spawn of this
+/// process's one install, on top of the runtime-augmentation overlay
+/// [`apply_lifecycle_augmentation`] builds. Set once, before the engine
+/// session opens; the npm-routing shim fills it with npm's
+/// `NODE_ENV=production` under an effective `omit=dev`. Per child, never the
+/// process environment (A19).
+static LIFECYCLE_ENV_EXTRA: std::sync::OnceLock<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
+    std::sync::OnceLock::new();
+
+pub fn set_lifecycle_env(pairs: Vec<(String, String)>) {
+    let _ = LIFECYCLE_ENV_EXTRA.set(
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect(),
+    );
+}
 
 /// The four engine verb families. One module per family; each family module
 /// owns the wiring (args parsing, options construction, output routing) for
@@ -890,6 +908,10 @@ fn engine_session_inner(
     // compiled against ambient Node instead of the project's. Default-empty
     // overlay when augmentation can't engage ⇒ behavior preserved.
     apply_lifecycle_augmentation(&cwd)?;
+    if let Some(extra) = LIFECYCLE_ENV_EXTRA.get() {
+        let extra = extra.clone();
+        aube_util::update_engine_context(move |c| c.env_overlay.extend(extra));
+    }
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
@@ -1861,6 +1883,9 @@ fn augmentation_to_lifecycle_overlay(
     aug.apply_localstorage_env(|k, v| {
         overlay.push((OsString::from(k), OsString::from(v)));
     });
+    aug.apply_threadpool_size(|k, v| {
+        overlay.push((OsString::from(k), v.to_os_string()));
+    });
     // Pin npm_node_execpath to the provisioned Node — the ABI fix. Independent
     // of the shim: it flows even on the no-shim path so node-gyp never falls
     // back to ambient. (npm_node_execpath stays the REAL binary, not the shim:
@@ -1925,7 +1950,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     };
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let mut runtime = crate::project_config::runtime_config()?;
-    let runtime_node_options = crate::cli::runtime_node_options(&mut runtime, &node)?;
+    let runtime_node_options = crate::cli::lifecycle_node_options(&mut runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
@@ -4911,6 +4936,7 @@ mod tests {
             shim_dir: Some("/shim".to_string()),
             node_path: Some(OsString::from("/rt/node_path")),
             neutralize_localstorage: true,
+            threadpool_size: Some("8".to_string()),
         };
         let runtime_json = r#"{"nodeCompat":false}"#;
         let (overlay, prepends) =
@@ -4961,6 +4987,16 @@ mod tests {
             Some("1"),
             "neutralize signal must flow to build-script node children when set"
         );
+        assert_eq!(
+            find("UV_THREADPOOL_SIZE").as_deref(),
+            Some("8"),
+            "the threadpool size must reach lifecycle node children"
+        );
+        assert_eq!(
+            find("__NUB_AUGMENTED_UV_THREADPOOL_SIZE").as_deref(),
+            Some("8"),
+            "a compat boundary may remove the pool size only while it still holds nub's value"
+        );
     }
 
     /// No shim set up (re-entrant / broken install) → no NODE override and no
@@ -4975,6 +5011,7 @@ mod tests {
             shim_dir: None,
             node_path: None,
             neutralize_localstorage: false,
+            threadpool_size: None,
         };
         let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None);
         assert!(prepends.is_empty());

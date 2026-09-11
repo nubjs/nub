@@ -78,6 +78,9 @@ common.restoreCompileCacheEnv();
 // Publish process.versions.nub (self-identification marker) before user code runs.
 // Tier-independent — same call in the compat entry (preload.mjs).
 common.installVersionMarker();
+// Strip nub's own UV_THREADPOOL_SIZE so children get Node's default, and demote
+// the workers beyond Node's four on Linux. Tier-independent, like the marker.
+common.installThreadpoolPolicy();
 
 // `--no-experimental-require-module` disables require(esm) globally, so the
 // transform-core require below (and the worker/locks ESM side-effect modules)

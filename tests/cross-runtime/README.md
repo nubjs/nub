@@ -23,7 +23,7 @@ This harness runs Node's own test suite — the whole `test/` tree of a Node rel
 
 The nub binary is a release build of `main` at `e78a6701dd` plus the `NODE_OPTIONS` coverage-exclude change committed beside this results file. This table and the results table below are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs).
 
-macOS arm64, 2026-08-22. The retry pass flipped 1 node, 1 nub, 4 bun, 2 deno and 0 node25 verdicts, which bounds the load effect. Bun's verdicts were re-measured 2026-08-30 with the `bun test` accommodation and `BUN_TEST_DRAIN_EVENT_LOOP=1` (see `buildPlainCommand` in `run.mjs`), one full bun pass over the same v26.7.0 checkout: 99 files flipped to pass and none flipped to fail.
+macOS arm64, 2026-08-22. The retry pass flipped 7 node, 1 nub, 4 bun, 2 deno and 0 node25 verdicts, which bounds the load effect. Bun's verdicts were re-measured 2026-08-30 with the `bun test` accommodation and `BUN_TEST_DRAIN_EVENT_LOOP=1` (see `buildPlainCommand` in `run.mjs`), one full bun pass over the same v26.7.0 checkout: 99 files flipped to pass and none flipped to fail. Node's verdicts were re-measured 2026-09-08, one full node pass over the same checkout, so that every verdict carries the `skipped` flag: 363 of Node's passes are its own skips (245 of them `quic/`; a `printSkipMessage()` for one subcase, after which the file runs on, does not count — see `skip.mjs`), and they now leave every node-relative denominator.
 
 ## Reproduce it yourself
 
@@ -57,7 +57,7 @@ Every lens is computed from one run over one fixed file list; a lens only change
 | `engineSpecificOnly` | 718 | The engine-specific class alone. |
 | `perDirectory` | — | `fullCorpus` broken out per top-level directory. |
 
-Each lens reports two numbers per runtime. **Node-relative** (`pass / nodePass`): of the tests real Node 26.7.0 passes on this machine, how many does the runtime pass — numerator and denominator from the same set, so tests Node itself fails here (no pty, no network, Linux-only) cancel out. **Raw** (`rawPass / files`): passes over every file in the lens, which is how bun.com's tracker and Deno's viewer count. Node-relative is the headline; raw is there so the other trackers' numbers can be compared like for like.
+Each lens reports two numbers per runtime. **Node-relative** (`pass / nodePass`): of the tests real Node 26.7.0 runs and passes on this machine, how many does the runtime pass — numerator and denominator from the same set, so tests Node itself fails here (no pty, no network, Linux-only) cancel out. A test Node itself SKIPS (`common.skip()` prints a zero-test TAP plan and exits 0: every `quic/` test on the official build, which has QUIC compiled out, plus the missing-crypto, missing-Intl and platform guards) is out of the set too, for every runtime — Node did not run it, so nobody is judged against Node on it, and a runtime that implements the feature is not charged for running a test the reference only skipped. The `skipped` flag on a verdict records it; each lens carries the count as `nodeSkipped`. **Raw** (`rawPass / files`): passes over every file in the lens, which is how bun.com's tracker and Deno's viewer count. Node-relative is the headline; raw is there so the other trackers' numbers can be compared like for like.
 
 ### The engine-specific class
 
@@ -73,19 +73,19 @@ Tests that exercise the V8 engine or Node's private internals rather than Node's
 
 Deliberately **not** excluded, because they are Node's public surface: the permission model, SEA, `node:sqlite`, WASI, QUIC, the VFS, `module.registerHooks`, `node:test`, the experimental CLI flags. A runtime that lacks them is less Node-compatible, and the lens says so.
 
-## Results (2026-08-28, Node 26.7.0 corpus)
+## Results (2026-09-08, Node 26.7.0 corpus)
 
 Node-relative pass rate (raw in parentheses). The rows are generated from `results.json` by [`readme-table.mjs`](./readme-table.mjs) (`--write` rewrites them, `--check` fails if they drifted); do not retype them.
 
 <!-- results-table -->
 | Lens | files / node passes | nub | deno 2.9.5 | bun 1.4.0 | node 25.9.0 |
 |------|---------------------|-----|------------|-----------|-------------|
-| `denoExclusions` | 5,078 / 5,046 | **98.45%** (97.87) | 74.16% (73.89) | 70.06% (69.75) | 90.15% (89.62) |
-| `bunUniverse` | 4,760 / 4,736 | **98.16%** (97.67) | 71.75% (71.49) | 71.79% (71.55) | 89.55% (89.12) |
-| `fullCorpus` | 5,664 / 5,616 | **97.40%** (96.61) | 68.07% (67.67) | 65.58% (65.22) | 89.96% (89.23) |
-| `fullCorpusNoEngine` | 4,946 / 4,904 | **97.37%** (96.58) | 71.66% (71.25) | 71.41% (71.03) | 90.03% (89.30) |
-| `bunUniverseNoEngine` | 4,111 / 4,091 | **98.22%** (97.74) | 76.04% (75.80) | 78.98% (78.74) | 89.54% (89.13) |
-| `engineSpecificOnly` | 718 / 712 | **97.61%** (96.80) | 43.40% (43.04) | 25.42% (25.21) | 89.47% (88.72) |
+| `denoExclusions` | 5,078 / 4,690 | **98.36%** (97.87) | 72.43% (73.89) | 68.53% (69.75) | 89.40% (89.62) |
+| `bunUniverse` | 4,760 / 4,385 | **98.06%** (97.67) | 69.83% (71.49) | 70.26% (71.55) | 88.71% (89.12) |
+| `fullCorpus` | 5,664 / 5,253 | **97.26%** (96.61) | 66.15% (67.67) | 63.89% (65.22) | 89.26% (89.23) |
+| `fullCorpusNoEngine` | 4,946 / 4,564 | **97.22%** (96.58) | 69.81% (71.25) | 69.94% (71.03) | 89.29% (89.30) |
+| `bunUniverseNoEngine` | 4,111 / 3,762 | **98.11%** (97.74) | 74.27% (75.80) | 77.83% (78.74) | 88.62% (89.13) |
+| `engineSpecificOnly` | 718 / 689 | **97.53%** (96.80) | 41.94% (43.04) | 23.80% (25.21) | 89.11% (88.72) |
 <!-- /results-table -->
 
 Per directory, the three that only run properly with the full checkout, the pty and the compiled fixture (node-relative passes / Node's passes): `pseudo-tty/` nub 28 / 31, deno 15, bun 12; `wpt/` nub 24 / 25, bun 6, deno 0 (see the caveat above); `ffi/` nub 11 / 13, bun 13, deno 13 (both skip every `ffi` test — `common.skip()` exits 0 — which counts as a pass under Node's own convention).
@@ -109,7 +109,7 @@ Stated so the numbers above can be compared with them, not to score them: Deno's
 - `scores` — every lens above, node-relative and raw.
 - `nubVsNode` — `nubRegressions` (node passes, nub fails) and `nubFixesVsNode` (the inverse).
 - `fails` — every runtime's failures by filename. Publishing our own failures by name is the anti-cherry-pick proof.
-- `results` — the per-file, per-runtime verdict, with the tail of the output for every failure.
+- `results` — the per-file, per-runtime verdict, with the tail of the output for every failure, and `skipped: true` on a pass that was the test's own `common.skip()` (recorded for every runtime; only node's is consulted by the scoring). A skip under a Deno expected-failure entry is scored the way Deno's runner scores it, as an unexpected pass and so a failure, and carries no flag; no file in the corpus does this today.
 
 The committed file is a `--merge` composite, not a single run: the bulk of the verdicts come from one full pass, and subsets were re-judged afterwards (the files a harness fix touched, the pairs whose recorded output needed re-scrubbing). `meta.generatedAt` names the last merge; every score is recomputed from the merged record, so the lenses are self-consistent, but a verdict pair may come from different moments of host load — and, for a test whose behaviour depends on absolute path length, from corpus checkouts at different depths (the Unix-socket test above flipped for three runtimes at once between generations for that reason). A passing verdict carries no generation marker; only a failing tail that embeds a `.tmp.<id>` path is auditable after the fact.
 

@@ -115,6 +115,8 @@ jobs:
             scripts:
               - 'scripts/**'
               - 'package.json'
+              # skip.test.mjs, the cross-runtime harness's skip classifier
+              - 'tests/cross-runtime/**'
               # ci-optin.test.mjs asserts the opt-in guard over every workflow FILE, so a
               # workflow-only change has to reach `test:scripts`. Without this the one edit
               # the lint exists to catch — a new job added without the `ci` label guard —

@@ -11,6 +11,7 @@ pub mod node;
 pub mod pm;
 pub mod pnp;
 pub mod quarantine;
+pub mod resource_limits;
 pub mod version_management;
 #[cfg(windows)]
 #[doc(hidden)]

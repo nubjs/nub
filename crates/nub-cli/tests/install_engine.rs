@@ -2151,3 +2151,35 @@ fn the_other_dropped_root_install_keys_are_announced_and_only_when_present() {
         "a manifest carrying none of the keys must say nothing, got: {stderr}"
     );
 }
+
+/// `nub install` in a project whose tsconfig `extends` a package that is not
+/// installed yet. The install is what makes that target exist (ava's
+/// `"extends": "@sindresorhus/tsconfig"` is a devDependency), so the run-path
+/// rule that an unreadable tsconfig is fatal (#731) cannot apply to the PM verbs
+/// — it left every fresh clone unable to install — and the config is not
+/// announced either: a warning about the user's own devDependency on every CI
+/// run is noise, not a finding.
+#[test]
+fn install_tolerates_a_tsconfig_whose_extends_target_is_not_installed_yet() {
+    let dir = pm_tmpdir("tsconfig-extends-uninstalled");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"extends-uninstalled","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tsconfig.json"),
+        r#"{"extends":"@sindresorhus/tsconfig","compilerOptions":{"strict":true}}"#,
+    )
+    .unwrap();
+
+    let (out, err, code) = run_install(&dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "an unreadable tsconfig must not stop an install: {out}\n{err}"
+    );
+    assert!(
+        !err.contains("tsconfig"),
+        "the install must not report the tsconfig it does not need: {err}"
+    );
+}

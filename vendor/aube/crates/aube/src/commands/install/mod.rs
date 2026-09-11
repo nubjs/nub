@@ -64,8 +64,8 @@ pub(crate) use lifecycle::{
     run_dep_lifecycle_scripts,
 };
 use lifecycle::{
-    resolve_link_strategy, run_import_on_blocking, run_root_lifecycle, run_root_lifecycle_script,
-    validate_required_scripts,
+    resolve_link_strategy, run_import_on_blocking, run_importer_lifecycle,
+    run_root_lifecycle_script, validate_required_scripts,
 };
 
 pub(crate) fn resolve_active_lockfile_dir(
@@ -887,8 +887,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         let phase_start = std::time::Instant::now();
         for (importer_path, importer_manifest) in &lifecycle_manifests {
             let project_dir = importer_project_dir(&cwd, importer_path);
-            run_root_lifecycle(
+            run_importer_lifecycle(
+                &cwd,
                 &project_dir,
+                importer_path,
                 &modules_dir_name,
                 importer_manifest,
                 aube_scripts::LifecycleHook::PreInstall,
@@ -3083,6 +3085,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         strict_dep_builds_setting,
         ignore_scripts: opts.ignore_scripts,
         skip_root_lifecycle: opts.skip_root_lifecycle,
+        npm_link_lifecycle: matches!(source_kind_before, Some(aube_lockfile::LockfileKind::Npm)),
         workspace_filter_empty: opts.workspace_filter.is_empty(),
         dep_selection: opts.dep_selection,
         cli_flags: &opts.cli_flags,

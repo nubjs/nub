@@ -1,18 +1,18 @@
 {
   "meta": {
-    "generatedAt": "2026-08-31T02:25:04.670Z",
+    "generatedAt": "2026-09-08T23:10:45.208Z",
     "platform": "darwin",
     "corpus": "<corpus>",
     "corpusNodeVersion": "26.7.0",
     "corpusCommit": "b4f23d3619c98bed09af93a21192f6080197a8c6",
     "binaries": {
-      "bun": {
-        "bin": "~/.cache/nub/cross-runtime/bun-1.4.0/bin/bun",
-        "version": "1.4.0"
-      },
       "node": {
         "bin": "node",
         "version": "v26.7.0"
+      },
+      "bun": {
+        "bin": "~/.cache/nub/cross-runtime/bun-1.4.0/bin/bun",
+        "version": "1.4.0"
       },
       "nub": {
         "bin": "<repo>/target/release/nub",
@@ -38,13 +38,13 @@
     "retryFailures": true,
     "mergeRetryFailures": true,
     "retried": {
+      "node": {
+        "retried": 55,
+        "flippedToPass": 7
+      },
       "bun": {
         "retried": 1974,
         "flippedToPass": 4
-      },
-      "node": {
-        "retried": 49,
-        "flippedToPass": 1
       },
       "nub": {
         "retried": 193,
@@ -62,18 +62,18 @@
   },
   "perRuntime": [
     {
-      "runtime": "bun",
-      "pass": 3694,
-      "fail": 1970,
-      "timeout": 123,
-      "pct": 65.22
-    },
-    {
       "runtime": "node",
       "pass": 5616,
       "fail": 48,
       "timeout": 5,
       "pct": 99.15
+    },
+    {
+      "runtime": "bun",
+      "pass": 3694,
+      "fail": 1970,
+      "timeout": 123,
+      "pct": 65.22
     },
     {
       "runtime": "nub",
@@ -100,40 +100,41 @@
   "scores": {
     "denoExclusions": {
       "files": 5078,
-      "nodePass": 5046,
+      "nodePass": 4690,
+      "nodeSkipped": 356,
       "runtimes": [
         {
-          "runtime": "bun",
-          "pass": 3535,
-          "pct": 70.06,
-          "rawPass": 3542,
-          "rawPct": 69.75
-        },
-        {
           "runtime": "node",
-          "pass": 5046,
+          "pass": 4690,
           "pct": 100,
           "rawPass": 5046,
           "rawPct": 99.37
         },
         {
+          "runtime": "bun",
+          "pass": 3214,
+          "pct": 68.53,
+          "rawPass": 3542,
+          "rawPct": 69.75
+        },
+        {
           "runtime": "nub",
-          "pass": 4968,
-          "pct": 98.45,
+          "pass": 4613,
+          "pct": 98.36,
           "rawPass": 4970,
           "rawPct": 97.87
         },
         {
           "runtime": "deno",
-          "pass": 3742,
-          "pct": 74.16,
+          "pass": 3397,
+          "pct": 72.43,
           "rawPass": 3752,
           "rawPct": 73.89
         },
         {
           "runtime": "node25",
-          "pass": 4549,
-          "pct": 90.15,
+          "pass": 4193,
+          "pct": 89.4,
           "rawPass": 4551,
           "rawPct": 89.62
         }
@@ -141,40 +142,41 @@
     },
     "bunUniverse": {
       "files": 4760,
-      "nodePass": 4736,
+      "nodePass": 4385,
+      "nodeSkipped": 351,
       "runtimes": [
         {
-          "runtime": "bun",
-          "pass": 3400,
-          "pct": 71.79,
-          "rawPass": 3406,
-          "rawPct": 71.55
-        },
-        {
           "runtime": "node",
-          "pass": 4736,
+          "pass": 4385,
           "pct": 100,
           "rawPass": 4736,
           "rawPct": 99.5
         },
         {
+          "runtime": "bun",
+          "pass": 3081,
+          "pct": 70.26,
+          "rawPass": 3406,
+          "rawPct": 71.55
+        },
+        {
           "runtime": "nub",
-          "pass": 4649,
-          "pct": 98.16,
+          "pass": 4300,
+          "pct": 98.06,
           "rawPass": 4649,
           "rawPct": 97.67
         },
         {
           "runtime": "deno",
-          "pass": 3398,
-          "pct": 71.75,
+          "pass": 3062,
+          "pct": 69.83,
           "rawPass": 3403,
           "rawPct": 71.49
         },
         {
           "runtime": "node25",
-          "pass": 4241,
-          "pct": 89.55,
+          "pass": 3890,
+          "pct": 88.71,
           "rawPass": 4242,
           "rawPct": 89.12
         }
@@ -182,40 +184,41 @@
     },
     "fullCorpus": {
       "files": 5664,
-      "nodePass": 5616,
+      "nodePass": 5253,
+      "nodeSkipped": 363,
       "runtimes": [
         {
-          "runtime": "bun",
-          "pass": 3683,
-          "pct": 65.58,
-          "rawPass": 3694,
-          "rawPct": 65.22
-        },
-        {
           "runtime": "node",
-          "pass": 5616,
+          "pass": 5253,
           "pct": 100,
           "rawPass": 5616,
           "rawPct": 99.15
         },
         {
+          "runtime": "bun",
+          "pass": 3356,
+          "pct": 63.89,
+          "rawPass": 3694,
+          "rawPct": 65.22
+        },
+        {
           "runtime": "nub",
-          "pass": 5470,
-          "pct": 97.4,
+          "pass": 5109,
+          "pct": 97.26,
           "rawPass": 5472,
           "rawPct": 96.61
         },
         {
           "runtime": "deno",
-          "pass": 3823,
-          "pct": 68.07,
+          "pass": 3475,
+          "pct": 66.15,
           "rawPass": 3833,
           "rawPct": 67.67
         },
         {
           "runtime": "node25",
-          "pass": 5052,
-          "pct": 89.96,
+          "pass": 4689,
+          "pct": 89.26,
           "rawPass": 5054,
           "rawPct": 89.23
         }
@@ -223,40 +226,41 @@
     },
     "fullCorpusNoEngine": {
       "files": 4946,
-      "nodePass": 4904,
+      "nodePass": 4564,
+      "nodeSkipped": 340,
       "runtimes": [
         {
-          "runtime": "bun",
-          "pass": 3502,
-          "pct": 71.41,
-          "rawPass": 3513,
-          "rawPct": 71.03
-        },
-        {
           "runtime": "node",
-          "pass": 4904,
+          "pass": 4564,
           "pct": 100,
           "rawPass": 4904,
           "rawPct": 99.15
         },
         {
+          "runtime": "bun",
+          "pass": 3192,
+          "pct": 69.94,
+          "rawPass": 3513,
+          "rawPct": 71.03
+        },
+        {
           "runtime": "nub",
-          "pass": 4775,
-          "pct": 97.37,
+          "pass": 4437,
+          "pct": 97.22,
           "rawPass": 4777,
           "rawPct": 96.58
         },
         {
           "runtime": "deno",
-          "pass": 3514,
-          "pct": 71.66,
+          "pass": 3186,
+          "pct": 69.81,
           "rawPass": 3524,
           "rawPct": 71.25
         },
         {
           "runtime": "node25",
-          "pass": 4415,
-          "pct": 90.03,
+          "pass": 4075,
+          "pct": 89.29,
           "rawPass": 4417,
           "rawPct": 89.3
         }
@@ -264,40 +268,41 @@
     },
     "bunUniverseNoEngine": {
       "files": 4111,
-      "nodePass": 4091,
+      "nodePass": 3762,
+      "nodeSkipped": 329,
       "runtimes": [
         {
-          "runtime": "bun",
-          "pass": 3231,
-          "pct": 78.98,
-          "rawPass": 3237,
-          "rawPct": 78.74
-        },
-        {
           "runtime": "node",
-          "pass": 4091,
+          "pass": 3762,
           "pct": 100,
           "rawPass": 4091,
           "rawPct": 99.51
         },
         {
+          "runtime": "bun",
+          "pass": 2928,
+          "pct": 77.83,
+          "rawPass": 3237,
+          "rawPct": 78.74
+        },
+        {
           "runtime": "nub",
-          "pass": 4018,
-          "pct": 98.22,
+          "pass": 3691,
+          "pct": 98.11,
           "rawPass": 4018,
           "rawPct": 97.74
         },
         {
           "runtime": "deno",
-          "pass": 3111,
-          "pct": 76.04,
+          "pass": 2794,
+          "pct": 74.27,
           "rawPass": 3116,
           "rawPct": 75.8
         },
         {
           "runtime": "node25",
-          "pass": 3663,
-          "pct": 89.54,
+          "pass": 3334,
+          "pct": 88.62,
           "rawPass": 3664,
           "rawPct": 89.13
         }
@@ -305,40 +310,41 @@
     },
     "engineSpecificOnly": {
       "files": 718,
-      "nodePass": 712,
+      "nodePass": 689,
+      "nodeSkipped": 23,
       "runtimes": [
         {
-          "runtime": "bun",
-          "pass": 181,
-          "pct": 25.42,
-          "rawPass": 181,
-          "rawPct": 25.21
-        },
-        {
           "runtime": "node",
-          "pass": 712,
+          "pass": 689,
           "pct": 100,
           "rawPass": 712,
           "rawPct": 99.16
         },
         {
+          "runtime": "bun",
+          "pass": 164,
+          "pct": 23.8,
+          "rawPass": 181,
+          "rawPct": 25.21
+        },
+        {
           "runtime": "nub",
-          "pass": 695,
-          "pct": 97.61,
+          "pass": 672,
+          "pct": 97.53,
           "rawPass": 695,
           "rawPct": 96.8
         },
         {
           "runtime": "deno",
-          "pass": 309,
-          "pct": 43.4,
+          "pass": 289,
+          "pct": 41.94,
           "rawPass": 309,
           "rawPct": 43.04
         },
         {
           "runtime": "node25",
-          "pass": 637,
-          "pct": 89.47,
+          "pass": 614,
+          "pct": 89.11,
           "rawPass": 637,
           "rawPct": 88.72
         }
@@ -346,40 +352,41 @@
     },
     "excludedOnly": {
       "files": 448,
-      "nodePass": 433,
+      "nodePass": 427,
+      "nodeSkipped": 6,
       "runtimes": [
         {
-          "runtime": "bun",
-          "pass": 118,
-          "pct": 27.25,
-          "rawPass": 122,
-          "rawPct": 27.23
-        },
-        {
           "runtime": "node",
-          "pass": 433,
+          "pass": 427,
           "pct": 100,
           "rawPass": 433,
           "rawPct": 96.65
         },
         {
+          "runtime": "bun",
+          "pass": 113,
+          "pct": 26.46,
+          "rawPass": 122,
+          "rawPct": 27.23
+        },
+        {
           "runtime": "nub",
-          "pass": 380,
-          "pct": 87.76,
+          "pass": 375,
+          "pct": 87.82,
           "rawPass": 380,
           "rawPct": 84.82
         },
         {
           "runtime": "deno",
-          "pass": 53,
-          "pct": 12.24,
+          "pass": 51,
+          "pct": 11.94,
           "rawPass": 53,
           "rawPct": 11.83
         },
         {
           "runtime": "node25",
-          "pass": 374,
-          "pct": 86.37,
+          "pass": 368,
+          "pct": 86.18,
           "rawPass": 374,
           "rawPct": 83.48
         }
@@ -388,39 +395,40 @@
     "perDirectory": {
       "abort": {
         "files": 10,
-        "nodePass": 10,
+        "nodePass": 8,
+        "nodeSkipped": 2,
         "runtimes": [
           {
-            "runtime": "bun",
-            "pass": 3,
-            "pct": 30,
-            "rawPass": 3,
-            "rawPct": 30
-          },
-          {
             "runtime": "node",
-            "pass": 10,
+            "pass": 8,
             "pct": 100,
             "rawPass": 10,
             "rawPct": 100
           },
           {
+            "runtime": "bun",
+            "pass": 2,
+            "pct": 25,
+            "rawPass": 3,
+            "rawPct": 30
+          },
+          {
             "runtime": "nub",
-            "pass": 10,
+            "pass": 8,
             "pct": 100,
             "rawPass": 10,
             "rawPct": 100
           },
           {
             "runtime": "deno",
-            "pass": 6,
-            "pct": 60,
+            "pass": 4,
+            "pct": 50,
             "rawPass": 6,
             "rawPct": 60
           },
           {
             "runtime": "node25",
-            "pass": 10,
+            "pass": 8,
             "pct": 100,
             "rawPass": 10,
             "rawPct": 100
@@ -429,39 +437,40 @@
       },
       "async-hooks": {
         "files": 94,
-        "nodePass": 93,
+        "nodePass": 92,
+        "nodeSkipped": 1,
         "runtimes": [
           {
-            "runtime": "bun",
-            "pass": 22,
-            "pct": 23.66,
-            "rawPass": 22,
-            "rawPct": 23.4
-          },
-          {
             "runtime": "node",
-            "pass": 93,
+            "pass": 92,
             "pct": 100,
             "rawPass": 93,
             "rawPct": 98.94
           },
           {
+            "runtime": "bun",
+            "pass": 21,
+            "pct": 22.83,
+            "rawPass": 22,
+            "rawPct": 23.4
+          },
+          {
             "runtime": "nub",
-            "pass": 93,
+            "pass": 92,
             "pct": 100,
             "rawPass": 93,
             "rawPct": 98.94
           },
           {
             "runtime": "deno",
-            "pass": 27,
-            "pct": 29.03,
+            "pass": 26,
+            "pct": 28.26,
             "rawPass": 27,
             "rawPct": 28.72
           },
           {
             "runtime": "node25",
-            "pass": 93,
+            "pass": 92,
             "pct": 100,
             "rawPass": 93,
             "rawPct": 98.94
@@ -471,20 +480,21 @@
       "client-proxy": {
         "files": 70,
         "nodePass": 70,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 46,
-            "pct": 65.71,
-            "rawPass": 46,
-            "rawPct": 65.71
-          },
           {
             "runtime": "node",
             "pass": 70,
             "pct": 100,
             "rawPass": 70,
             "rawPct": 100
+          },
+          {
+            "runtime": "bun",
+            "pass": 46,
+            "pct": 65.71,
+            "rawPass": 46,
+            "rawPct": 65.71
           },
           {
             "runtime": "nub",
@@ -511,40 +521,41 @@
       },
       "es-module": {
         "files": 242,
-        "nodePass": 240,
+        "nodePass": 239,
+        "nodeSkipped": 1,
         "runtimes": [
           {
-            "runtime": "bun",
-            "pass": 80,
-            "pct": 33.33,
-            "rawPass": 80,
-            "rawPct": 33.06
-          },
-          {
             "runtime": "node",
-            "pass": 240,
+            "pass": 239,
             "pct": 100,
             "rawPass": 240,
             "rawPct": 99.17
           },
           {
+            "runtime": "bun",
+            "pass": 79,
+            "pct": 33.05,
+            "rawPass": 80,
+            "rawPct": 33.06
+          },
+          {
             "runtime": "nub",
-            "pass": 225,
-            "pct": 93.75,
+            "pass": 224,
+            "pct": 93.72,
             "rawPass": 226,
             "rawPct": 93.39
           },
           {
             "runtime": "deno",
-            "pass": 103,
-            "pct": 42.92,
+            "pass": 102,
+            "pct": 42.68,
             "rawPass": 103,
             "rawPct": 42.56
           },
           {
             "runtime": "node25",
-            "pass": 214,
-            "pct": 89.17,
+            "pass": 213,
+            "pct": 89.12,
             "rawPass": 214,
             "rawPct": 88.43
           }
@@ -553,16 +564,17 @@
       "ffi": {
         "files": 13,
         "nodePass": 13,
+        "nodeSkipped": 0,
         "runtimes": [
           {
-            "runtime": "bun",
+            "runtime": "node",
             "pass": 13,
             "pct": 100,
             "rawPass": 13,
             "rawPct": 100
           },
           {
-            "runtime": "node",
+            "runtime": "bun",
             "pass": 13,
             "pct": 100,
             "rawPass": 13,
@@ -594,20 +606,21 @@
       "internet": {
         "files": 38,
         "nodePass": 34,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 18,
-            "pct": 52.94,
-            "rawPass": 18,
-            "rawPct": 47.37
-          },
           {
             "runtime": "node",
             "pass": 34,
             "pct": 100,
             "rawPass": 34,
             "rawPct": 89.47
+          },
+          {
+            "runtime": "bun",
+            "pass": 18,
+            "pct": 52.94,
+            "rawPass": 18,
+            "rawPct": 47.37
           },
           {
             "runtime": "nub",
@@ -635,16 +648,17 @@
       "message": {
         "files": 1,
         "nodePass": 0,
+        "nodeSkipped": 0,
         "runtimes": [
           {
-            "runtime": "bun",
+            "runtime": "node",
             "pass": 0,
             "pct": 0,
             "rawPass": 0,
             "rawPct": 0
           },
           {
-            "runtime": "node",
+            "runtime": "bun",
             "pass": 0,
             "pct": 0,
             "rawPass": 0,
@@ -676,20 +690,21 @@
       "module-hooks": {
         "files": 112,
         "nodePass": 112,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 1,
-            "pct": 0.89,
-            "rawPass": 1,
-            "rawPct": 0.89
-          },
           {
             "runtime": "node",
             "pass": 112,
             "pct": 100,
             "rawPass": 112,
             "rawPct": 100
+          },
+          {
+            "runtime": "bun",
+            "pass": 1,
+            "pct": 0.89,
+            "rawPass": 1,
+            "rawPct": 0.89
           },
           {
             "runtime": "nub",
@@ -716,40 +731,41 @@
       },
       "parallel": {
         "files": 4641,
-        "nodePass": 4618,
+        "nodePass": 4269,
+        "nodeSkipped": 349,
         "runtimes": [
           {
-            "runtime": "bun",
-            "pass": 3332,
-            "pct": 72.15,
-            "rawPass": 3338,
-            "rawPct": 71.92
-          },
-          {
             "runtime": "node",
-            "pass": 4618,
+            "pass": 4269,
             "pct": 100,
             "rawPass": 4618,
             "rawPct": 99.5
           },
           {
+            "runtime": "bun",
+            "pass": 3015,
+            "pct": 70.63,
+            "rawPass": 3338,
+            "rawPct": 71.92
+          },
+          {
             "runtime": "nub",
-            "pass": 4531,
-            "pct": 98.12,
+            "pass": 4184,
+            "pct": 98.01,
             "rawPass": 4531,
             "rawPct": 97.63
           },
           {
             "runtime": "deno",
-            "pass": 3339,
-            "pct": 72.3,
+            "pass": 3004,
+            "pct": 70.37,
             "rawPass": 3344,
             "rawPct": 72.05
           },
           {
             "runtime": "node25",
-            "pass": 4129,
-            "pct": 89.41,
+            "pass": 3780,
+            "pct": 88.55,
             "rawPass": 4130,
             "rawPct": 88.99
           }
@@ -758,20 +774,21 @@
       "pseudo-tty": {
         "files": 31,
         "nodePass": 31,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 12,
-            "pct": 38.71,
-            "rawPass": 12,
-            "rawPct": 38.71
-          },
           {
             "runtime": "node",
             "pass": 31,
             "pct": 100,
             "rawPass": 31,
             "rawPct": 100
+          },
+          {
+            "runtime": "bun",
+            "pass": 12,
+            "pct": 38.71,
+            "rawPass": 12,
+            "rawPct": 38.71
           },
           {
             "runtime": "nub",
@@ -798,40 +815,41 @@
       },
       "pummel": {
         "files": 66,
-        "nodePass": 66,
+        "nodePass": 63,
+        "nodeSkipped": 3,
         "runtimes": [
           {
-            "runtime": "bun",
-            "pass": 43,
-            "pct": 65.15,
-            "rawPass": 43,
-            "rawPct": 65.15
-          },
-          {
             "runtime": "node",
-            "pass": 66,
+            "pass": 63,
             "pct": 100,
             "rawPass": 66,
             "rawPct": 100
           },
           {
+            "runtime": "bun",
+            "pass": 40,
+            "pct": 63.49,
+            "rawPass": 43,
+            "rawPct": 65.15
+          },
+          {
             "runtime": "nub",
-            "pass": 66,
+            "pass": 63,
             "pct": 100,
             "rawPass": 66,
             "rawPct": 100
           },
           {
             "runtime": "deno",
-            "pass": 42,
-            "pct": 63.64,
+            "pass": 39,
+            "pct": 61.9,
             "rawPass": 42,
             "rawPct": 63.64
           },
           {
             "runtime": "node25",
-            "pass": 63,
-            "pct": 95.45,
+            "pass": 60,
+            "pct": 95.24,
             "rawPass": 63,
             "rawPct": 95.45
           }
@@ -840,20 +858,21 @@
       "report": {
         "files": 19,
         "nodePass": 19,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 2,
-            "pct": 10.53,
-            "rawPass": 2,
-            "rawPct": 10.53
-          },
           {
             "runtime": "node",
             "pass": 19,
             "pct": 100,
             "rawPass": 19,
             "rawPct": 100
+          },
+          {
+            "runtime": "bun",
+            "pass": 2,
+            "pct": 10.53,
+            "rawPass": 2,
+            "rawPct": 10.53
           },
           {
             "runtime": "nub",
@@ -881,20 +900,21 @@
       "sea": {
         "files": 36,
         "nodePass": 36,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 32,
-            "pct": 88.89,
-            "rawPass": 32,
-            "rawPct": 88.89
-          },
           {
             "runtime": "node",
             "pass": 36,
             "pct": 100,
             "rawPass": 36,
             "rawPct": 100
+          },
+          {
+            "runtime": "bun",
+            "pass": 32,
+            "pct": 88.89,
+            "rawPass": 32,
+            "rawPct": 88.89
           },
           {
             "runtime": "nub",
@@ -921,40 +941,41 @@
       },
       "sequential": {
         "files": 119,
-        "nodePass": 118,
+        "nodePass": 116,
+        "nodeSkipped": 2,
         "runtimes": [
           {
-            "runtime": "bun",
-            "pass": 68,
-            "pct": 57.63,
-            "rawPass": 68,
-            "rawPct": 57.14
-          },
-          {
             "runtime": "node",
-            "pass": 118,
+            "pass": 116,
             "pct": 100,
             "rawPass": 118,
             "rawPct": 99.16
           },
           {
+            "runtime": "bun",
+            "pass": 66,
+            "pct": 56.9,
+            "rawPass": 68,
+            "rawPct": 57.14
+          },
+          {
             "runtime": "nub",
-            "pass": 118,
+            "pass": 116,
             "pct": 100,
             "rawPass": 118,
             "rawPct": 99.16
           },
           {
             "runtime": "deno",
-            "pass": 59,
+            "pass": 58,
             "pct": 50,
             "rawPass": 59,
             "rawPct": 49.58
           },
           {
             "runtime": "node25",
-            "pass": 112,
-            "pct": 94.92,
+            "pass": 110,
+            "pct": 94.83,
             "rawPass": 112,
             "rawPct": 94.12
           }
@@ -962,39 +983,40 @@
       },
       "system-ca": {
         "files": 9,
-        "nodePass": 3,
+        "nodePass": 1,
+        "nodeSkipped": 2,
         "runtimes": [
           {
-            "runtime": "bun",
-            "pass": 3,
+            "runtime": "node",
+            "pass": 1,
             "pct": 100,
             "rawPass": 3,
             "rawPct": 33.33
           },
           {
-            "runtime": "node",
-            "pass": 3,
+            "runtime": "bun",
+            "pass": 1,
             "pct": 100,
             "rawPass": 3,
             "rawPct": 33.33
           },
           {
             "runtime": "nub",
-            "pass": 3,
+            "pass": 1,
             "pct": 100,
             "rawPass": 3,
             "rawPct": 33.33
           },
           {
             "runtime": "deno",
-            "pass": 3,
+            "pass": 1,
             "pct": 100,
             "rawPass": 3,
             "rawPct": 33.33
           },
           {
             "runtime": "node25",
-            "pass": 3,
+            "pass": 1,
             "pct": 100,
             "rawPass": 3,
             "rawPct": 33.33
@@ -1003,40 +1025,41 @@
       },
       "test-runner": {
         "files": 107,
-        "nodePass": 99,
+        "nodePass": 96,
+        "nodeSkipped": 3,
         "runtimes": [
           {
-            "runtime": "bun",
-            "pass": 2,
-            "pct": 2.02,
-            "rawPass": 7,
-            "rawPct": 6.54
-          },
-          {
             "runtime": "node",
-            "pass": 99,
+            "pass": 96,
             "pct": 100,
             "rawPass": 99,
             "rawPct": 92.52
           },
           {
+            "runtime": "bun",
+            "pass": 2,
+            "pct": 2.08,
+            "rawPass": 7,
+            "rawPct": 6.54
+          },
+          {
             "runtime": "nub",
-            "pass": 92,
-            "pct": 92.93,
+            "pass": 89,
+            "pct": 92.71,
             "rawPass": 93,
             "rawPct": 86.92
           },
           {
             "runtime": "deno",
-            "pass": 19,
-            "pct": 19.19,
+            "pass": 16,
+            "pct": 16.67,
             "rawPass": 24,
             "rawPct": 22.43
           },
           {
             "runtime": "node25",
-            "pass": 94,
-            "pct": 94.95,
+            "pass": 91,
+            "pct": 94.79,
             "rawPass": 95,
             "rawPct": 88.79
           }
@@ -1045,20 +1068,21 @@
       "test426": {
         "files": 1,
         "nodePass": 1,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 0,
-            "pct": 0,
-            "rawPass": 0,
-            "rawPct": 0
-          },
           {
             "runtime": "node",
             "pass": 1,
             "pct": 100,
             "rawPass": 1,
             "rawPct": 100
+          },
+          {
+            "runtime": "bun",
+            "pass": 0,
+            "pct": 0,
+            "rawPass": 0,
+            "rawPct": 0
           },
           {
             "runtime": "nub",
@@ -1086,20 +1110,21 @@
       "wasi": {
         "files": 26,
         "nodePass": 26,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 0,
-            "pct": 0,
-            "rawPass": 0,
-            "rawPct": 0
-          },
           {
             "runtime": "node",
             "pass": 26,
             "pct": 100,
             "rawPass": 26,
             "rawPct": 100
+          },
+          {
+            "runtime": "bun",
+            "pass": 0,
+            "pct": 0,
+            "rawPass": 0,
+            "rawPct": 0
           },
           {
             "runtime": "nub",
@@ -1127,20 +1152,21 @@
       "wasm-allocation": {
         "files": 4,
         "nodePass": 2,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 0,
-            "pct": 0,
-            "rawPass": 0,
-            "rawPct": 0
-          },
           {
             "runtime": "node",
             "pass": 2,
             "pct": 100,
             "rawPass": 2,
             "rawPct": 50
+          },
+          {
+            "runtime": "bun",
+            "pass": 0,
+            "pct": 0,
+            "rawPass": 0,
+            "rawPct": 0
           },
           {
             "runtime": "nub",
@@ -1168,20 +1194,21 @@
       "wpt": {
         "files": 25,
         "nodePass": 25,
+        "nodeSkipped": 0,
         "runtimes": [
-          {
-            "runtime": "bun",
-            "pass": 6,
-            "pct": 24,
-            "rawPass": 6,
-            "rawPct": 24
-          },
           {
             "runtime": "node",
             "pass": 25,
             "pct": 100,
             "rawPass": 25,
             "rawPct": 100
+          },
+          {
+            "runtime": "bun",
+            "pass": 6,
+            "pct": 24,
+            "rawPass": 6,
+            "rawPct": 24
           },
           {
             "runtime": "nub",
@@ -1364,6 +1391,56 @@
     ]
   },
   "fails": {
+    "node": [
+      "async-hooks/test-graph.signal.js",
+      "es-module/test-esm-detect-ambiguous.mjs",
+      "es-module/test-esm-import-meta-main-eval.mjs",
+      "internet/test-corepack-yarn-install.js",
+      "internet/test-dgram-multicast-ssmv6-multi-process.js",
+      "internet/test-net-autoselectfamily-events-failure.js",
+      "internet/test-net-autoselectfamily-timeout-close.js",
+      "message/test-testpy-env-var-via-comment.js",
+      "parallel/test-cli-options-as-flags.js",
+      "parallel/test-cluster-dgram-1.js",
+      "parallel/test-common.js",
+      "parallel/test-config-file.js",
+      "parallel/test-dns-channel-timeout.js",
+      "parallel/test-dotenv-node-options.js",
+      "parallel/test-node-output-console.mjs",
+      "parallel/test-node-run.js",
+      "parallel/test-parse-test-envs.js",
+      "parallel/test-parse-test-only-envs.js",
+      "parallel/test-permission-audit-child-process-inherit-flags.js",
+      "parallel/test-permission-child-process-inherit-flags-substring.js",
+      "parallel/test-permission-child-process-inherit-flags.js",
+      "parallel/test-process-getactiveresources-track-active-requests.js",
+      "parallel/test-process-getactiveresources.js",
+      "parallel/test-runner-execution-ordered-bypass.mjs",
+      "parallel/test-runner-reporters.js",
+      "parallel/test-shadow-realm-gc-module.js",
+      "parallel/test-shadow-realm-gc.js",
+      "parallel/test-snapshot-incompatible.js",
+      "parallel/test-sqlite-backup.mjs",
+      "parallel/test-testpy-env-var-via-comment.js",
+      "parallel/test-zlib-brotli-kmaxlength-rangeerror.js",
+      "sequential/test-util-debug.js",
+      "system-ca/test-native-intermediate-certs.mjs",
+      "system-ca/test-native-root-certs-env.mjs",
+      "system-ca/test-native-root-certs.mjs",
+      "system-ca/test-set-default-ca-certificates-append-system-ca.mjs",
+      "system-ca/test-use-system-ca-worker-disable.mjs",
+      "system-ca/test-use-system-ca-worker-enable.mjs",
+      "test-runner/test-output-arbitrary-output-colored.mjs",
+      "test-runner/test-output-coverage-with-mock.mjs",
+      "test-runner/test-output-junit-reporter.mjs",
+      "test-runner/test-output-lcov-reporter.mjs",
+      "test-runner/test-output-non-tty-forced-color-output.mjs",
+      "test-runner/test-output-output.mjs",
+      "test-runner/test-output-spec-reporter.mjs",
+      "test-runner/test-watch-create-isolation-none.mjs",
+      "wasm-allocation/test-wasm-allocation-memory64.js",
+      "wasm-allocation/test-wasm-allocation.js"
+    ],
     "bun": [
       "abort/test-abort-fatal-error.js",
       "abort/test-abort-uncaught-exception.js",
@@ -3335,56 +3412,6 @@
       "wpt/test-webcrypto.js",
       "wpt/test-webidl.js",
       "wpt/test-webstorage.js"
-    ],
-    "node": [
-      "async-hooks/test-graph.signal.js",
-      "es-module/test-esm-detect-ambiguous.mjs",
-      "es-module/test-esm-import-meta-main-eval.mjs",
-      "internet/test-corepack-yarn-install.js",
-      "internet/test-dgram-multicast-ssmv6-multi-process.js",
-      "internet/test-net-autoselectfamily-events-failure.js",
-      "internet/test-net-autoselectfamily-timeout-close.js",
-      "message/test-testpy-env-var-via-comment.js",
-      "parallel/test-cli-options-as-flags.js",
-      "parallel/test-cluster-dgram-1.js",
-      "parallel/test-common.js",
-      "parallel/test-config-file.js",
-      "parallel/test-dns-channel-timeout.js",
-      "parallel/test-dotenv-node-options.js",
-      "parallel/test-node-output-console.mjs",
-      "parallel/test-node-run.js",
-      "parallel/test-parse-test-envs.js",
-      "parallel/test-parse-test-only-envs.js",
-      "parallel/test-permission-audit-child-process-inherit-flags.js",
-      "parallel/test-permission-child-process-inherit-flags-substring.js",
-      "parallel/test-permission-child-process-inherit-flags.js",
-      "parallel/test-process-getactiveresources-track-active-requests.js",
-      "parallel/test-process-getactiveresources.js",
-      "parallel/test-runner-execution-ordered-bypass.mjs",
-      "parallel/test-runner-reporters.js",
-      "parallel/test-shadow-realm-gc-module.js",
-      "parallel/test-shadow-realm-gc.js",
-      "parallel/test-snapshot-incompatible.js",
-      "parallel/test-sqlite-backup.mjs",
-      "parallel/test-testpy-env-var-via-comment.js",
-      "parallel/test-zlib-brotli-kmaxlength-rangeerror.js",
-      "sequential/test-util-debug.js",
-      "system-ca/test-native-intermediate-certs.mjs",
-      "system-ca/test-native-root-certs-env.mjs",
-      "system-ca/test-native-root-certs.mjs",
-      "system-ca/test-set-default-ca-certificates-append-system-ca.mjs",
-      "system-ca/test-use-system-ca-worker-disable.mjs",
-      "system-ca/test-use-system-ca-worker-enable.mjs",
-      "test-runner/test-output-arbitrary-output-colored.mjs",
-      "test-runner/test-output-coverage-with-mock.mjs",
-      "test-runner/test-output-junit-reporter.mjs",
-      "test-runner/test-output-lcov-reporter.mjs",
-      "test-runner/test-output-non-tty-forced-color-output.mjs",
-      "test-runner/test-output-output.mjs",
-      "test-runner/test-output-spec-reporter.mjs",
-      "test-runner/test-watch-create-isolation-none.mjs",
-      "wasm-allocation/test-wasm-allocation-memory64.js",
-      "wasm-allocation/test-wasm-allocation.js"
     ],
     "nub": [
       "async-hooks/test-graph.signal.js",
@@ -7912,7 +7939,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -7941,7 +7969,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -10730,7 +10759,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -15786,7 +15816,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -27893,7 +27924,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -27920,7 +27952,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -30159,7 +30192,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -30300,7 +30334,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -31591,7 +31626,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -31701,7 +31737,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -32697,7 +32734,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -33635,7 +33673,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -33977,7 +34016,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -34714,7 +34754,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -35308,7 +35349,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -36754,7 +36796,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -37459,7 +37502,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -37571,7 +37615,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -37716,7 +37761,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -38392,7 +38438,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -39005,7 +39052,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -41448,7 +41496,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -45292,7 +45341,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -50855,7 +50905,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51470,7 +51521,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51497,7 +51549,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51524,7 +51577,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51551,7 +51605,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51578,7 +51633,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51605,7 +51661,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51632,7 +51689,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51659,7 +51717,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51686,7 +51745,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51713,7 +51773,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51740,7 +51801,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51767,7 +51829,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51794,7 +51857,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51821,7 +51885,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51848,7 +51913,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51875,7 +51941,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51902,7 +51969,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51929,7 +51997,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51956,7 +52025,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -51983,7 +52053,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52010,7 +52081,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52037,7 +52109,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52064,7 +52137,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52091,7 +52165,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52118,7 +52193,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52145,7 +52221,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52172,7 +52249,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52199,7 +52277,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52226,7 +52305,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52253,7 +52333,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -52280,7 +52361,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -54276,7 +54358,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -54608,7 +54691,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -57912,7 +57996,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -59617,7 +59702,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -60364,7 +60450,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -60505,7 +60592,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -60897,7 +60985,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -61167,7 +61256,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -62929,7 +63019,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -62956,7 +63047,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -63477,7 +63569,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -70829,7 +70922,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -78960,7 +79054,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -85001,7 +85096,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -85163,7 +85259,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -85945,7 +86042,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -87137,7 +87235,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -88375,7 +88474,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -90655,7 +90755,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -90823,7 +90924,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -93593,7 +93695,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -96813,7 +96916,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -98230,7 +98334,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -99162,7 +99267,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": false,
@@ -99581,7 +99687,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": false,
@@ -100000,7 +100107,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -100027,7 +100135,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -100809,7 +100918,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -100946,7 +101056,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -101562,7 +101673,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -102409,7 +102521,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104179,7 +104292,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104206,7 +104320,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104233,7 +104348,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104262,7 +104378,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104289,7 +104406,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104316,7 +104434,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104343,7 +104462,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104370,7 +104490,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104397,7 +104518,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104424,7 +104546,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104451,7 +104574,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104478,7 +104602,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104505,7 +104630,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104532,7 +104658,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104559,7 +104686,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104586,7 +104714,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104613,7 +104742,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104640,7 +104770,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104667,7 +104798,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104694,7 +104826,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104721,7 +104854,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104748,7 +104882,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104775,7 +104910,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104802,7 +104938,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104831,7 +104968,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104858,7 +104996,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104885,7 +105024,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104912,7 +105052,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104939,7 +105080,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104966,7 +105108,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -104993,7 +105136,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105020,7 +105164,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105047,7 +105192,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105074,7 +105220,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105101,7 +105248,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105128,7 +105276,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105155,7 +105304,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105182,7 +105332,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105209,7 +105360,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105236,7 +105388,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105263,7 +105416,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105290,7 +105444,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105317,7 +105472,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105344,7 +105500,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105371,7 +105528,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105400,7 +105558,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105427,7 +105586,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105454,7 +105614,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105481,7 +105642,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105508,7 +105670,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105535,7 +105698,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105562,7 +105726,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105589,7 +105754,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105616,7 +105782,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105643,7 +105810,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105670,7 +105838,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105697,7 +105866,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105724,7 +105894,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105751,7 +105922,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105778,7 +105950,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105805,7 +105978,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105832,7 +106006,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105859,7 +106034,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105888,7 +106064,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105915,7 +106092,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105942,7 +106120,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105969,7 +106148,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -105996,7 +106176,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106023,7 +106204,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106050,7 +106232,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106077,7 +106260,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106104,7 +106288,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106131,7 +106316,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106158,7 +106344,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106185,7 +106372,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106212,7 +106400,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106239,7 +106428,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106266,7 +106456,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106293,7 +106484,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106320,7 +106512,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106347,7 +106540,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106374,7 +106568,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106401,7 +106596,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106428,7 +106624,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106455,7 +106652,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106482,7 +106680,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106509,7 +106708,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106536,7 +106736,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106563,7 +106764,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106590,7 +106792,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106617,7 +106820,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106644,7 +106848,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106671,7 +106876,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106698,7 +106904,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106725,7 +106932,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106752,7 +106960,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106781,7 +106990,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106808,7 +107018,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106837,7 +107048,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106864,7 +107076,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106891,7 +107104,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106918,7 +107132,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106945,7 +107160,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106972,7 +107188,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -106999,7 +107216,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107026,7 +107244,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107053,7 +107272,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107080,7 +107300,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107109,7 +107330,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107140,7 +107362,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107167,7 +107390,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107194,7 +107418,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107221,7 +107446,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107250,7 +107476,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107277,7 +107504,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107304,7 +107532,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107331,7 +107560,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107360,7 +107590,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107387,7 +107618,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107414,7 +107646,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107441,7 +107674,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107468,7 +107702,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107497,7 +107732,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107524,7 +107760,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107551,7 +107788,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107578,7 +107816,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107605,7 +107844,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107632,7 +107872,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107659,7 +107900,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107686,7 +107928,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107713,7 +107956,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107742,7 +107986,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107769,7 +108014,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107796,7 +108042,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107823,7 +108070,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107850,7 +108098,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107877,7 +108126,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107904,7 +108154,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107931,7 +108182,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107958,7 +108210,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -107985,7 +108238,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108012,7 +108266,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108039,7 +108294,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108066,7 +108322,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108093,7 +108350,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108120,7 +108378,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108149,7 +108408,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108176,7 +108436,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108205,7 +108466,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108232,7 +108494,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108259,7 +108522,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108286,7 +108550,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108313,7 +108578,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108340,7 +108606,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108367,7 +108634,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108394,7 +108662,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108421,7 +108690,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108448,7 +108718,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108475,7 +108746,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108502,7 +108774,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108529,7 +108802,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108556,7 +108830,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108585,7 +108860,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108612,7 +108888,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108639,7 +108916,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108666,7 +108944,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108693,7 +108972,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108722,7 +109002,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108749,7 +109030,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108776,7 +109058,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108803,7 +109086,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108830,7 +109114,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108857,7 +109142,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108884,7 +109170,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108911,7 +109198,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108938,7 +109226,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108965,7 +109254,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -108992,7 +109282,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109019,7 +109310,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109046,7 +109338,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109075,7 +109368,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109102,7 +109396,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109129,7 +109424,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109156,7 +109452,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109183,7 +109480,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109212,7 +109510,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109239,7 +109538,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109266,7 +109566,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109293,7 +109594,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109320,7 +109622,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109347,7 +109650,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109374,7 +109678,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109401,7 +109706,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109428,7 +109734,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109455,7 +109762,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109482,7 +109790,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109509,7 +109818,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109536,7 +109846,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109563,7 +109874,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109590,7 +109902,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109617,7 +109930,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109646,7 +109960,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109673,7 +109988,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109700,7 +110016,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109727,7 +110044,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109754,7 +110072,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109781,7 +110100,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109808,7 +110128,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109835,7 +110156,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109862,7 +110184,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109889,7 +110212,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109918,7 +110242,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109945,7 +110270,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -109974,7 +110300,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110001,7 +110328,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110030,7 +110358,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110057,7 +110386,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110086,7 +110416,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110115,7 +110446,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110142,7 +110474,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110169,7 +110502,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110196,7 +110530,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110223,7 +110558,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110250,7 +110586,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110277,7 +110614,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110304,7 +110642,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110331,7 +110670,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110358,7 +110698,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110385,7 +110726,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110412,7 +110754,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110439,7 +110782,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110466,7 +110810,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110493,7 +110838,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110520,7 +110866,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110549,7 +110896,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110576,7 +110924,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110603,7 +110952,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110630,7 +110980,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110657,7 +111008,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110686,7 +111038,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110715,7 +111068,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110742,7 +111096,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110769,7 +111124,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110796,7 +111152,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -110823,7 +111180,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -113165,7 +113523,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -113789,7 +114148,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -115091,7 +115451,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -117005,7 +117366,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "de:98006) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\\n(Use `node --trace-warnings ...` to show where the warning was created)\\n\",\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\n(node:97707) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n(Use `node --trace-warnings ...` to show where the warning was created)",
+        "tail": "de:25572) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\\n(Use `node --trace-warnings ...` to show where the warning was created)\\n\",\n    expected: '',\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\n(node:24201) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n(Use `node --trace-warnings ...` to show where the warning was created)",
         "retried": true
       },
       "nub": {
@@ -118229,7 +118590,7 @@
         "pass": false,
         "timeout": false,
         "exit": null,
-        "tail": "tstrapping() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n44: 0x1046c248c node::Realm::RunBootstrapping() [~/.nvm/versions/node/v26.7.0/bin/node]\n45: 0x1046e4340 node::shadow_realm::ShadowRealm::New(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n46: 0x106b3d158 node::shadow_realm::HostCreateShadowRealmContextCallback(v8::Local<v8::Context>) [~/.nvm/versions/node/v26.7.0/bin/node]",
+        "tail": "0x102ee46d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x1054dafcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x1030240fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x102f9b334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x18f1984e4 start [/usr/lib/dyld]",
         "retried": true
       },
       "nub": {
@@ -118264,7 +118625,7 @@
         "pass": false,
         "timeout": false,
         "exit": null,
-        "tail": "0x1000a46d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x10269afcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x1001e40fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x10015b334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x18db0be00 start [/usr/lib/dyld]",
+        "tail": "0x104e906d0 node::SpinEventLoopInternal(node::Environment*) [~/.nvm/versions/node/v26.7.0/bin/node]\n12: 0x107486fcc node::NodeMainInstance::Run() (.cold.1) [~/.nvm/versions/node/v26.7.0/bin/node]\n13: 0x104fd00fc node::NodeMainInstance::Run() [~/.nvm/versions/node/v26.7.0/bin/node]\n14: 0x104f47334 node::Start(int, char**) [~/.nvm/versions/node/v26.7.0/bin/node]\n15: 0x18f1984e4 start [/usr/lib/dyld]",
         "retried": true
       },
       "nub": {
@@ -119769,7 +120130,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -121071,7 +121433,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -130480,7 +130843,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -130729,7 +131093,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -131402,7 +131767,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -132199,7 +132565,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -132230,7 +132597,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -132288,7 +132656,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -132315,7 +132684,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -132342,7 +132712,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -134048,7 +134419,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -134133,7 +134505,14 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "retried": true,
+        "firstAttempt": {
+          "pass": false,
+          "timeout": true,
+          "exit": null,
+          "tail": "Test timed out after 20000ms"
+        }
       },
       "nub": {
         "pass": true,
@@ -134558,7 +134937,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -134946,7 +135326,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -134973,7 +135354,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -137171,7 +137553,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -137256,7 +137639,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -139243,7 +139627,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -150835,7 +151220,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -150862,7 +151248,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -158160,7 +158547,14 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "retried": true,
+        "firstAttempt": {
+          "pass": false,
+          "timeout": true,
+          "exit": null,
+          "tail": "Test timed out after 20000ms"
+        }
       },
       "nub": {
         "pass": true,
@@ -158279,7 +158673,14 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "retried": true,
+        "firstAttempt": {
+          "pass": false,
+          "timeout": true,
+          "exit": null,
+          "tail": "Test timed out after 20000ms"
+        }
       },
       "nub": {
         "pass": true,
@@ -158306,7 +158707,14 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "retried": true,
+        "firstAttempt": {
+          "pass": false,
+          "timeout": true,
+          "exit": null,
+          "tail": "Test timed out after 20000ms"
+        }
       },
       "nub": {
         "pass": true,
@@ -158515,7 +158923,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -158916,7 +159325,14 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "retried": true,
+        "firstAttempt": {
+          "pass": false,
+          "timeout": true,
+          "exit": null,
+          "tail": "Test timed out after 20000ms"
+        }
       },
       "nub": {
         "pass": true,
@@ -158974,7 +159390,14 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "retried": true,
+        "firstAttempt": {
+          "pass": false,
+          "timeout": true,
+          "exit": null,
+          "tail": "Test timed out after 20000ms"
+        }
       },
       "nub": {
         "pass": true,
@@ -159148,7 +159571,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -159795,7 +160219,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -164332,7 +164757,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -164361,7 +164787,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -164389,7 +164816,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": "3\\x1B[39m: this { is: \\x1B[32m'a'\\x1B[39m } \\x1B[32m/\\x1B[39m\\x1B[33md\\x1B[39m\\x1B[33me\\x1B[39m\\x1B[33mb\\x1B[39m\\x1B[33mu\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[33mi\\x1B[39m\\x1B[33mn\\x1B[39m\\x1B[33mg\\x1B[39m\\x1B[32m/\\x1B[39m\\n\"\u001b[39m +\n    \u001b[32m'TUD \\x1B[33m56563\\x1B[39m: num=1 str=a obj={\"foo\":\"bar\"}\\n'\u001b[39m,\n  operator: \u001b[32m'strictEqual'\u001b[39m,\n  diff: \u001b[32m'simple'\u001b[39m\n}\n\nNode.js v26.7.0",
+        "tail": ":12)\u001b[39m {\n  generatedMessage: \u001b[33mtrue\u001b[39m,\n  code: \u001b[32m'ERR_ASSERTION'\u001b[39m,\n  actual: \u001b[32m\"(node:97186) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\\n\"\u001b[39m +\n    \u001b[32m'(Use `node --trace-warnings ...` to show where the warning was created)\\n'\u001b[39m,\n  expected: \u001b[32m''\u001b[39m,\n  operator: \u001b[32m'strictEqual'\u001b[39m,\n  diff: \u001b[32m'simple'\u001b[39m\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "nub": {
@@ -164905,7 +165332,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -165080,7 +165508,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -165400,7 +165829,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -165739,7 +166169,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -165768,7 +166199,8 @@
       "node": {
         "pass": true,
         "timeout": false,
-        "exit": 0
+        "exit": 0,
+        "skipped": true
       },
       "nub": {
         "pass": true,
@@ -168102,7 +168534,7 @@
         "pass": false,
         "timeout": false,
         "exit": 1,
-        "tail": " actual: '\\n' +\n    'Restarted at 8/28/2026, 6:47:47 PM\\n' +\n    '✔ new-test-file.test.js (0.4005ms)\\n' +\n    '✔ test has ran (0.074666ms)\\n' +\n    'ℹ tests 2\\n' +\n    'ℹ suites 0\\n' +\n    'ℹ pass 2\\n' +\n    'ℹ fail 0\\n' +\n    'ℹ cancelled 0\\n' +\n    'ℹ skipped 0\\n' +\n    'ℹ todo 0\\n' +\n    'ℹ duration_ms 72.358708\\n',\n  expected: /tests 1/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
+        "tail": " actual: '\\n' +\n    'Restarted at 9/8/2026, 3:39:40 PM\\n' +\n    '✔ new-test-file.test.js (0.428334ms)\\n' +\n    '✔ test has ran (0.06975ms)\\n' +\n    'ℹ tests 2\\n' +\n    'ℹ suites 0\\n' +\n    'ℹ pass 2\\n' +\n    'ℹ fail 0\\n' +\n    'ℹ cancelled 0\\n' +\n    'ℹ skipped 0\\n' +\n    'ℹ todo 0\\n' +\n    'ℹ duration_ms 80.565666\\n',\n  expected: /tests 1/,\n  operator: 'match',\n  diff: 'simple'\n}\n\nNode.js v26.7.0",
         "retried": true
       },
       "nub": {

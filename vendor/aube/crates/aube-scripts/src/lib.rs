@@ -1531,6 +1531,69 @@ pub async fn run_root_hook(
     run_root_script_by_name(project_dir, modules_dir_name, manifest, hook.script_name()).await
 }
 
+/// Run a lifecycle hook of a WORKSPACE MEMBER. Spawns in `member_dir` with
+/// the member's own manifest, and puts the `<modules_dir>/.bin` of the
+/// member and of every ancestor directory on `PATH`, closest first — the
+/// walk npm's run-script does for any script (`set-path.js` goes all the way
+/// to the filesystem root, so a bin provided above the workspace root
+/// counts too). A member's script routinely reaches for a bin that only the
+/// root declares: puppeteer's `tools/eslint` runs `wireit`, a root
+/// devDependency, from its `prepare`. With only the member's own `.bin` on
+/// `PATH` that was a 127 on every install. `run_script` appends the root's
+/// own `.bin` after the chain; that duplicate is inert.
+///
+/// `tool_dirs` go on `PATH` after the chain and before the root's `.bin`:
+/// the embedder's lazy `node-gyp` shim above all, which npm provides to
+/// every lifecycle script from its own bundled copy (`node-gyp-bin`). A
+/// root `preinstall` that runs `node-gyp install` (theia) runs before any
+/// dependency exists, so nothing but such a shim can satisfy it.
+///
+/// Returns `Ok(false)` if the script isn't defined. The caller gates on
+/// `--ignore-scripts`.
+pub async fn run_member_hook(
+    member_dir: &Path,
+    workspace_root: &Path,
+    modules_dir_name: &str,
+    manifest: &PackageJson,
+    hook: LifecycleHook,
+    tool_dirs: &[&Path],
+) -> Result<bool, Error> {
+    let name = hook.script_name();
+    let Some(script_cmd) = manifest.scripts.get(name) else {
+        return Ok(false);
+    };
+    let chain = member_bin_chain(member_dir, modules_dir_name);
+    let extra: Vec<&Path> = chain
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(tool_dirs.iter().copied())
+        .collect();
+    run_script(
+        member_dir,
+        workspace_root,
+        modules_dir_name,
+        manifest,
+        name,
+        script_cmd,
+        &extra,
+        None,
+    )
+    .await?;
+    Ok(true)
+}
+
+/// The `.bin` directories a workspace member's script sees:
+/// `<dir>/<modules_dir>/.bin` for the member's directory and every
+/// ancestor up to the filesystem root, closest first. Exactly npm's walk
+/// (`@npmcli/run-script` `set-path.js`), so a bin an enclosing project
+/// provides above the workspace root resolves here as it does there.
+fn member_bin_chain(member_dir: &Path, modules_dir_name: &str) -> Vec<PathBuf> {
+    member_dir
+        .ancestors()
+        .map(|dir| dir.join(modules_dir_name).join(".bin"))
+        .collect()
+}
+
 /// Run a named root-package script if it's defined. Used by commands
 /// (pack, publish, version) that need to run lifecycle hooks outside
 /// the install-focused [`LifecycleHook`] enum. Returns `Ok(false)` if
@@ -2643,6 +2706,28 @@ mod break_cas_hardlinks_tests {
             std::path::Path::new("real.txt")
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod member_bin_chain_tests {
+    use super::member_bin_chain;
+    use std::path::{Path, PathBuf};
+
+    /// A nested member (`test/installation`) sees its own `.bin`, then its
+    /// parent member's, then the root's, then anything above — closest
+    /// first, out to the filesystem root, as npm walks it.
+    #[test]
+    fn member_bin_chain_walks_every_ancestor_to_the_filesystem_root_closest_first() {
+        assert_eq!(
+            member_bin_chain(Path::new("/p/test/installation"), "node_modules"),
+            vec![
+                PathBuf::from("/p/test/installation/node_modules/.bin"),
+                PathBuf::from("/p/test/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.bin"),
+                PathBuf::from("/node_modules/.bin"),
+            ]
+        );
     }
 }
 

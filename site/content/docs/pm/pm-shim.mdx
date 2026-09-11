@@ -46,6 +46,27 @@ and node_modules.
 
 Runner commands fall through to the system tool whatever the pin — `npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs — so `npm create vite` works in a pnpm project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.
 
+## Running npm installs on Nub's engine
+
+The shims run the package manager the project pins. One opt-in changes that for the two npm verbs an install pipeline runs:
+
+```sh
+nub pm shim --route-installs
+```
+
+With the marker set, a bare `npm ci` in a project with a `package-lock.json` runs `nub ci`, and a bare `npm install` runs `nub install`, both on Nub's engine and from the same lockfile. The notice on stderr names the swap:
+
+```console
+$ npm ci
+npm ci → nub ci (via nub shim)
+```
+
+The rest of npm is untouched. Everything else runs the real npm with the argv as typed: `npm test`, `npm run`, `npx`, `npm publish`, a global install, an install that names a package, and an install with a flag Nub does not translate (`--legacy-peer-deps`, `--workspace`, `--prefix`, `--no-package-lock`). So does an `npm install` a lifecycle script spawns under a running install. Translated flags: `--ignore-scripts`, `--omit=dev` (also `--production` and `NODE_ENV=production`), `--omit=optional`, and `--include`, which wins over `--omit` in either order as it does for npm; `--no-audit`, `--no-fund`, `--prefer-offline`, and the log-level and progress flags are accepted and ignored.
+
+A routed install runs every lifecycle script, as npm does, and hands them `NODE_ENV=production` exactly when dev dependencies are omitted. An `ignore-scripts=true` in the project or user `.npmrc`, or `npm_config_ignore_scripts` in the environment, is honored, and `--ignore-scripts=false` on the command line outranks it. The default trust list still applies to `nub install` typed directly.
+
+`nub pm shim --no-route-installs` turns the routing off and keeps the shims; `nub pm unshim` removes both.
+
 ## Missing system manager
 
 An unpinned invocation falls through to the system manager. When there is none — a fresh machine, a minimal container — the shim runs a dynamic default instead of failing: the version family the committed lockfile implies, or the registry `latest` when there is no lockfile. It announces the choice on stderr and writes no pin. The `latest` resolution is remembered for 24 hours, so repeat invocations dispatch with no registry round-trip, and when the registry is unreachable the last resolved version keeps working.

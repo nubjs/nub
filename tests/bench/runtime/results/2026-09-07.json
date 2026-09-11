@@ -1,0 +1,25 @@
+{
+  "recorded": "2026-09-07",
+  "machine": "GCE c3-standard-8 spot VM (8 vCPU, Linux x64), idle, one benchmark at a time",
+  "node": "v22.23.2",
+  "notes": [
+    "async-context-frame: three rounds per cell, values listed per round; nub is the augmented run on the branch of nubjs/nub#912.",
+    "threadpool: pbkdf2 and dns from the two-round run; gzip, file and stat from the five-round interleaved rerun on the same VM shape. Values listed per round.",
+    "The load generator (autocannon) shared the VM with the server."
+  ],
+  "async-context-frame": {
+    "als-loop": { "unit": "ms", "node": [182, 193, 190], "node+flag": [94, 96, 96], "nub": [96, 96, 97], "nub--node": [191, 207, 197] },
+    "fastify-otel": { "unit": "req/s", "node": [16119, 16359, 16170], "node+flag": [17708, 17695, 17622], "nub": [17008, 17236, 17858], "nub--node": [16148, 16055, 16709] }
+  },
+  "threadpool": {
+    "cores": 8,
+    "routes": {
+      "unit": "req/s",
+      "/hash": { "label": "pbkdf2, 2000 iterations", "4": [10208, 10458], "8": [12900, 12608], "16": [12529, 12520] },
+      "/gzip": { "label": "gzip a 55 KB JSON", "4": [2454, 2560, 2550, 2509, 2525], "8": [2470, 2495, 2475, 2458, 2493] },
+      "/file": { "label": "read a 270 KB file", "4": [1607, 1598, 1607, 1585, 1612], "8": [1545, 1567, 1594, 1581, 1573] },
+      "/stat": { "label": "stat a file", "4": [31245, 30379, 30953, 30821, 30483], "8": [31015, 30499, 30548, 30841, 31216] }
+    },
+    "dns": { "unit": "ms", "label": "400 dns.lookup, concurrency 100", "4": [99, 71], "8": [55, 56] }
+  }
+}

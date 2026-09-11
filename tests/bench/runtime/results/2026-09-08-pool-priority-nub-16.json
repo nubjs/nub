@@ -1,0 +1,94 @@
+{
+  "date": "2026-09-08",
+  "machine": "c3d-standard-16 (GCE spot), 16 vCPU",
+  "node": "v26.8.1",
+  "nub": "branch threadpool-size at 76c946a0d6",
+  "bench": "tests/bench/runtime/pool-priority-nub.sh",
+  "load": "bcrypt cost 12 route, autocannon -c 64 -d 15, two rounds; hogs are 12 nice-0 busy-loop node processes; node (4 threads) vs nub (16 threads, workers 5..16 at nice 10)",
+  "conditions": {
+    "node/hogs=0": {
+      "label": "node",
+      "hogs": 0,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rps": [
+        17.7,
+        17.9
+      ],
+      "p50": [
+        3541,
+        3536
+      ],
+      "p99": [
+        3639,
+        3560
+      ],
+      "hogMloopsPerSec": [
+        0,
+        0
+      ]
+    },
+    "nub/hogs=0": {
+      "label": "nub",
+      "hogs": 0,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rps": [
+        66.2,
+        66.2
+      ],
+      "p50": [
+        953,
+        952
+      ],
+      "p99": [
+        1013,
+        1012
+      ],
+      "hogMloopsPerSec": [
+        0,
+        0
+      ]
+    },
+    "node/hogs=12": {
+      "label": "node",
+      "hogs": 12,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rps": [
+        17.1,
+        17
+      ],
+      "p50": [
+        3742,
+        3738
+      ],
+      "p99": [
+        3774,
+        3771
+      ],
+      "hogMloopsPerSec": [
+        1782,
+        1780
+      ]
+    },
+    "nub/hogs=12": {
+      "label": "nub",
+      "hogs": 12,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rps": [
+        20.1,
+        20
+      ],
+      "p50": [
+        2596,
+        2587
+      ],
+      "p99": [
+        5019,
+        5012
+      ],
+      "hogMloopsPerSec": [
+        1763,
+        1763
+      ]
+    }
+  }
+}

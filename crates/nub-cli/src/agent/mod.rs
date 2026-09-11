@@ -6,10 +6,8 @@
 //! user pastes into their own coding agent; these verbs are the OFFLINE FALLBACK
 //! for when that agent can't fetch the live docs over the web:
 //!
-//! - `docs`  — MIRRORS the published docs. With no args it prints the page TOC
-//!   at the top, then the `/docs` index page's markdown (the same content served
-//!   at https://nubjs.com/docs), then a one-line note that every slug — and every
-//!   markdown link target inside the pages — is a valid `--page` argument. The
+//! - `docs` — prints usage and the page TOC. Full markdown is opt-in through
+//!   `--page`; every slug and markdown link target is a valid argument. The
 //!   slugs ARE the in-doc link hrefs (`/docs/runtime/decorators`, …), so an agent
 //!   can take a markdown link target and plug it straight into `--page`. `--page
 //!   <path>` prints one page's full markdown; `--list`/`--toc` prints just the
@@ -46,7 +44,7 @@ mod baked {
 use baked::DOCS;
 
 /// The canonical slug for the docs index page (`site/content/docs/index.mdx`,
-/// served at `/docs`). Its body is printed verbatim by the no-args invocation.
+/// served at `/docs`).
 const INDEX_SLUG: &str = "/docs";
 
 /// Entry point for `nub agent …`, dispatched from `dispatch_subcommand`.
@@ -72,11 +70,9 @@ pub fn run(args: &[String]) -> Result<i32> {
     }
 }
 
-/// `nub agent docs [--page <path> | --list]`.
+/// `nub agent docs [--page <path> | --list | --toc]`.
 ///
-/// No args  → MIRRORS the docs: the page TOC at the top, then the `/docs` index
-///            page's markdown, then a note that every slug (and every in-doc
-///            link target) is a valid `--page` argument.
+/// No args → usage and the page TOC, without any page's markdown.
 /// `--list` / `--toc` → just the TOC.
 /// `--page <path>` → that page's full markdown (frontmatter stripped). The path
 ///            is the page's `/docs/...` URL — the same form the docs link to — so
@@ -102,7 +98,7 @@ fn run_docs(args: &[String]) -> Result<i32> {
             }
             other => bail!(
                 "nub agent docs: unexpected argument '{other}'. \
-                 Usage: nub agent docs [--page <path> | --list]."
+                 Usage: nub agent docs [--page <path> | --list | --toc]."
             ),
         }
     }
@@ -116,16 +112,17 @@ fn run_docs(args: &[String]) -> Result<i32> {
         return Ok(0);
     }
 
-    // Mirror the docs: TOC first, then the /docs index page, then fetch note.
-    print_toc();
-    println!();
-    if let Some((_, _, body)) = DOCS.iter().find(|(s, _, _)| *s == INDEX_SLUG) {
-        print!("{body}");
-        println!();
-    }
     println!(
-        "---\n\nFetch a page's full markdown, e.g.:\n\n    nub agent docs --page /docs/runtime/decorators"
+        "nub agent docs — browse the bundled docs offline\n\n\
+         Usage: nub agent docs [--page <path> | --list | --toc]\n\n\
+         Options:\n\
+         \x20 --page <path>  Print one page's full markdown\n\
+         \x20 --list, --toc  Print only the table of contents\n\
+         \x20 -h, --help     Show agent command help\n\n\
+         Example:\n\
+         \x20 nub agent docs --page /docs/runtime/decorators\n"
     );
+    print_toc();
     Ok(0)
 }
 
@@ -175,7 +172,7 @@ fn print_page(slug: &str) -> Result<i32> {
 /// is the page's `/docs/...` URL path — the same href the docs link to — so it
 /// doubles as a `--page` argument.
 fn print_toc() {
-    println!("## Docs pages — pass any path to `nub agent docs --page <path>`\n");
+    println!("Table of contents:");
     for (slug, title, _) in DOCS {
         println!("  {slug} — {title}");
     }
@@ -186,10 +183,10 @@ fn print_usage() {
         "nub agent — make AI coding agents reach for nub\n\n\
          Usage: nub agent <command>\n\n\
          Commands:\n\
-         \x20 docs     mirror the docs: a TOC of every page + the /docs index content\n\
+         \x20 docs     show docs usage and a table of contents\n\
          \x20          (offline fallback for https://nubjs.com/docs)\n\
          \x20          --page <path>  print one page's full markdown (e.g. /docs/runtime/jsx)\n\
-         \x20          --list         print just the page TOC\n\
+         \x20          --list, --toc  print just the page TOC\n\
          \x20 skill    print nub's evergreen agent skill to stdout (install it yourself)"
     );
 }
@@ -205,11 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn docs_verb_mirrors_the_docs_and_drops_start_md() {
-        // `nub agent docs` mirrors the docs and exits 0.
+    fn docs_verb_lists_the_baked_docs() {
         assert_eq!(run(&["docs".into()]).unwrap(), 0);
 
-        // The /docs index page is baked and non-empty — it's what no-args prints.
+        // The overview remains available through --page /docs.
         let index = DOCS
             .iter()
             .find(|(s, _, _)| *s == INDEX_SLUG)
@@ -219,9 +215,6 @@ mod tests {
             "index body must be the real /docs page content"
         );
 
-        // start.md is GONE: the embedded onboarding-doc const no longer exists.
-        // (Asserted structurally — the `START_MD` symbol was removed; if it were
-        // reintroduced this module wouldn't compile against the old reference.)
         let toc_out = DOCS.iter().map(|(s, _, _)| *s).collect::<Vec<_>>();
         assert!(
             toc_out.contains(&INDEX_SLUG),
@@ -410,8 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn docs_no_args_mirrors_toc_then_index() {
-        // No args is the mirror: TOC at top + the /docs index content + fetch note.
+    fn docs_help_and_list_variants_succeed() {
         assert_eq!(run_docs(&[]).unwrap(), 0);
         // `--list`/`--toc` is the TOC-only variant.
         assert_eq!(run_docs(&["--list".into()]).unwrap(), 0);

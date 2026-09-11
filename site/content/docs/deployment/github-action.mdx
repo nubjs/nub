@@ -41,6 +41,25 @@ That resolved Node's bin directory is added to the global PATH, so bare `node`/`
 
 Because the pin lives in the repository, `actions/checkout` must run before this action.
 
+## Beside setup-node
+
+The action also runs after `actions/setup-node` in a workflow that keeps it. The install line is what changes:
+
+```diff
+  - uses: actions/setup-node@v4
+    with:
+      node-version: 22
+-     cache: npm
++ - uses: nubjs/setup-nub@v0
++   with:
++     node-version: 22
+- - run: npm ci
++ - run: nub install --frozen-lockfile
+  - run: npm test
+```
+
+`nub install --frozen-lockfile` reads the existing `package-lock.json` unchanged, and `npm test` runs the real npm as before. Pass the same `node-version` to both actions: each fronts a Node on PATH, and without the input this action fronts the project's own pin. The `cache: npm` line goes because it restores npm's own cache, which Nub does not read; the action caches Nub's store by default.
+
 ## Inputs
 
 | Input | Default | Description |

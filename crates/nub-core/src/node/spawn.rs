@@ -1037,6 +1037,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // and re-entrant child shells skip it for free.
         cmd.env(VERSION_ENV, env!("CARGO_PKG_VERSION"));
 
+        // libuv threadpool sized to the cores (see THREADPOOL_SIZE_ENV). Only when the
+        // user has not set it; inherited by the augmented subtree like NODE_OPTIONS,
+        // and undone at a compat boundary through the restore markers.
+        if let Some(size) = threadpool_size_to_install() {
+            cmd.env(THREADPOOL_SIZE_ENV, &size);
+            mark_augmented(&mut cmd, THREADPOOL_SIZE_ENV, Some(OsStr::new(&size)));
+        }
+
         // Force the async loader-worker tier when this child hosts a foreign async
         // loader (tsx/ts-node/--import) on a Node whose sync/async hook composition
         // is broken — the sync fast tier would otherwise crash with
@@ -1272,6 +1280,12 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // Yarn PnP token BEFORE nub's preload token, mirroring the argv order
         // above so hardcoded-path `node` invocations inherit PnP-first ordering.
         // Quoted so a `.pnp.cjs` under a spacey path survives the tokenizer.
+        // The threadpool sidecar goes AHEAD of PnP: it loads nothing PnP resolves,
+        // and a consumer that keeps one `--require` per name (Next.js,
+        // vercel/next.js#96582, last wins) then keeps PnP's, losing only the demotion.
+        if let Some(token) = injection.as_ref().and_then(PreloadInjection::sidecar_token) {
+            node_opts_parts.push(token);
+        }
         if let Some(pnp) = config.pnp {
             node_opts_parts.push(format!(
                 "--require={}",
@@ -2269,6 +2283,10 @@ pub fn compute_augmentation_env(
     // Yarn PnP `--require <.pnp.cjs>` BEFORE nub's preload token so PnP's
     // resolver installs first in script-runner child shells too. Quoted: a
     // `.pnp.cjs` under a spacey project path would otherwise fragment.
+    // The threadpool sidecar ahead of PnP, as at the direct-spawn site.
+    if let Some(token) = injection.sidecar_token() {
+        node_opts_parts.push(token);
+    }
     if let Some(pnp) = pnp {
         node_opts_parts.push(format!(
             "--require={}",
@@ -2339,6 +2357,7 @@ pub fn compute_augmentation_env(
         shim_dir,
         node_path: vendored_node_path(Some(&preload)),
         neutralize_localstorage,
+        threadpool_size: threadpool_size_to_install(),
     })
 }
 
@@ -2357,9 +2376,26 @@ pub struct AugmentationEnv {
     /// apply it via [`AugmentationEnv::apply_localstorage_env`]. See
     /// `flags::should_neutralize_experimental_webstorage_localstorage`.
     pub neutralize_localstorage: bool,
+    /// The libuv threadpool size to install — `Some` unless the user already set
+    /// [`THREADPOOL_SIZE_ENV`]. Consumers apply it via
+    /// [`AugmentationEnv::apply_threadpool_size`].
+    pub threadpool_size: Option<String>,
 }
 
 impl AugmentationEnv {
+    /// Install the threadpool size (when nub owns it) together with its ownership
+    /// marker, so a compat boundary removes exactly what nub added.
+    pub fn apply_threadpool_size(&self, mut set_env: impl FnMut(&str, &OsStr)) {
+        if let Some(size) = &self.threadpool_size {
+            set_env(THREADPOOL_SIZE_ENV, OsStr::new(size));
+            apply_expected_augmentation_marker(
+                THREADPOOL_SIZE_ENV,
+                Some(OsStr::new(size)),
+                &mut set_env,
+            );
+        }
+    }
+
     /// Preserve the environment that a later compat-mode PATH-shim re-entry must
     /// restore before it launches plain Node. A separate presence bitmask keeps
     /// an explicitly empty value distinct from an absent variable.
@@ -2517,7 +2553,7 @@ impl RestorableVar {
 
 /// PATH is the odd one out: nub COMPOSES it (`shim:.bin:system`) rather than
 /// replacing it, so it gets its own restore rule ([`restored_path`]).
-static RESTORABLE_VARS: [RestorableVar; 5] = [
+static RESTORABLE_VARS: [RestorableVar; 6] = [
     RestorableVar {
         name: "NODE_OPTIONS",
         compat: "__NUB_COMPAT_NODE_OPTIONS",
@@ -2553,7 +2589,116 @@ static RESTORABLE_VARS: [RestorableVar; 5] = [
         augmented_present: "__NUB_AUGMENTED_PATH_PRESENT",
         bit: 1 << 4,
     },
+    RestorableVar {
+        name: THREADPOOL_SIZE_ENV,
+        compat: "__NUB_COMPAT_UV_THREADPOOL_SIZE",
+        augmented: "__NUB_AUGMENTED_UV_THREADPOOL_SIZE",
+        augmented_present: "__NUB_AUGMENTED_UV_THREADPOOL_SIZE_PRESENT",
+        // Read by the preload too (preload-common.cjs THREADPOOL_PRESENT_BIT): a
+        // value nub introduced, and only that, is stripped from `process.env`.
+        bit: 1 << 5,
+    },
 ];
+
+/// libuv's threadpool size, which Node reads ONCE at startup and never from
+/// `process.env` afterwards — so the spawn is the only place it can be set.
+///
+/// Node leaves libuv's default of 4 threads regardless of core count, and every
+/// `fs` call, `dns.lookup` (so every `fetch` to a new host), async `zlib` and async
+/// `crypto` (`pbkdf2`, `scrypt`, `randomBytes`) queues on those four. The Node
+/// performance team's open proposal (nodejs/performance#193) is exactly
+/// `max(4, cores)`; nub applies it. Measured on an 8-core box, Node 22.23.2, 4 → 8
+/// threads: pbkdf2 route +21–26% req/s, 400 concurrent `dns.lookup` 99 → 55 ms;
+/// main-thread-bound routes (gzip, file read) unchanged, 16 threads no better than
+/// 8. Cores come from `std::thread::available_parallelism`, which honors a cgroup
+/// CPU quota, so a container gets its quota, not the host's count.
+///
+/// A `UV_THREADPOOL_SIZE` the user set, in the shell or in an env file, is never
+/// overwritten. The shell case is the plain absence check below; the env-file
+/// case needs [`threadpool_size_is_nub_default`], because the launcher that
+/// installed nub's value never saw the file and a nested boundary (`nub run`'s
+/// script re-entering through the `node` shim, `nub watch` handing Node its
+/// `--env-file`) would otherwise read that value as the user's shell value. The
+/// variable is restorable, so a compat re-entry (`--node`, `NODE_COMPAT`) or a
+/// fresh nested nub sees the pre-augmentation environment.
+/// Every augmented launcher applies it: the direct spawn here, and `nub run`,
+/// `nubx`/`exec`, lifecycle scripts and `nub watch` through
+/// [`AugmentationEnv::apply_threadpool_size`] or its equivalent.
+///
+/// The value is for the process it is handed to. Node's own maintainers closed
+/// the same default (nodejs/node#61533) because the cores a host shows are not
+/// necessarily free, so the preload (`installThreadpoolPolicy`, preload-common.cjs)
+/// deletes nub's own value from `process.env` once Node has read it — a cluster or
+/// PM2 fork and any child spawn start with Node's default, a `nub` child is sized
+/// again — and on Linux runs the workers beyond Node's four at nice 10, so on a
+/// busy box they only take idle cycles. Windows is capped at
+/// [`WINDOWS_THREADPOOL_CAP`] threads.
+///
+/// libuv creates the WHOLE pool on first use and aborts the process if one
+/// thread fails (`uv_thread_create_ex` → `abort()` in threadpool.c), and
+/// `available_parallelism` knows nothing of a cgroup `pids.max` or
+/// `RLIMIT_NPROC`. So the value is clamped by [`crate::resource_limits::spawn_headroom`],
+/// the same detector that keeps the package manager's pools under a
+/// constrained box's ceiling.
+pub const THREADPOOL_SIZE_ENV: &str = "UV_THREADPOOL_SIZE";
+
+/// The pool nub asks for on this box — see [`THREADPOOL_SIZE_ENV`].
+pub fn threadpool_size() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    threadpool_size_from(cores, crate::resource_limits::spawn_headroom())
+}
+
+/// The most threads nub asks for on Windows. libuv gives every pool thread an 8 MB
+/// stack, and Windows passes that to `_beginthreadex` as the COMMIT size (Linux
+/// and macOS reserve it and touch it lazily), so a 32-core box would commit 256 MB
+/// the moment any fs, dns or crypto call starts the pool (nodejs/node#57911
+/// measured about 8 MB per thread). Eight threads is 64 MB.
+const WINDOWS_THREADPOOL_CAP: usize = 8;
+
+/// `max(4, cores)`, clamped to the detected thread headroom and never below
+/// libuv's own default of 4 (where plain Node would abort just the same).
+pub fn threadpool_size_from(cores: usize, headroom: Option<usize>) -> usize {
+    threadpool_size_from_on(cores, headroom, cfg!(windows))
+}
+
+/// [`threadpool_size_from`] with the platform explicit, for the cap test.
+fn threadpool_size_from_on(cores: usize, headroom: Option<usize>, windows: bool) -> usize {
+    let mut wanted = cores.max(4);
+    if windows {
+        wanted = wanted.min(WINDOWS_THREADPOOL_CAP);
+    }
+    match headroom {
+        Some(room) if room < wanted => room.max(4),
+        _ => wanted,
+    }
+}
+
+/// Whether the ambient [`THREADPOOL_SIZE_ENV`] is nub's own automatic value
+/// rather than the user's: present, and equal to the ownership marker the
+/// installing launcher stamped beside it. An env file may still set the pool
+/// size over such a value; over a shell value it may not. The preload
+/// (`installThreadpoolPolicy` in preload-common.cjs) decides what to strip from
+/// `process.env` with the same marker plus the compat presence bit, because the
+/// direct spawn records a passed-through shell value under the same marker.
+pub fn threadpool_size_is_nub_default() -> bool {
+    let Some(current) = env::var_os(THREADPOOL_SIZE_ENV) else {
+        return false;
+    };
+    let Some(var) = RestorableVar::lookup(THREADPOOL_SIZE_ENV) else {
+        return false;
+    };
+    matches!(expected_augmentation_value(var), Some(Some(expected)) if expected == current)
+}
+
+/// The threadpool value an augmented launcher installs: `Some` when the user
+/// has not set [`THREADPOOL_SIZE_ENV`], `None` to leave theirs alone.
+fn threadpool_size_to_install() -> Option<String> {
+    env::var_os(THREADPOOL_SIZE_ENV)
+        .is_none()
+        .then(|| threadpool_size().to_string())
+}
 
 /// Stamp the exact value a parent installed for one rewritten environment
 /// variable. A fresh child restores the captured ambient value only while the
@@ -3222,6 +3367,13 @@ pub struct PreloadInjection {
     pub flag: &'static str,
     /// The injected value: a raw path for `--require`, a `file://` URL for `--import`.
     pub value: String,
+    /// A `--require` sidecar that runs before the preload: the compat tier on Linux
+    /// carries `runtime/threadpool-snapshot.cjs`, because the `--import` preload is
+    /// read through the very threadpool the policy needs to build itself (see that
+    /// file). Its own NODE_OPTIONS token, ahead of PnP's and the preload's, and
+    /// never part of the re-entrancy key: a consumer that re-parses NODE_OPTIONS by
+    /// flag name may drop it, which costs the demotion and nothing else.
+    pub sidecar: Option<String>,
 }
 
 impl PreloadInjection {
@@ -3237,6 +3389,22 @@ impl PreloadInjection {
     /// still round-trips.
     pub fn node_options_token(&self) -> String {
         format!("{}={}", self.flag, node_options_token(&self.value))
+    }
+
+    /// The sidecar's own `--require` token, when there is one.
+    pub fn sidecar_token(&self) -> Option<String> {
+        self.sidecar
+            .as_deref()
+            .map(|path| format!("--require={}", node_options_token(path)))
+    }
+
+    /// Every token nub writes for this injection: the sidecar's `--require`, when
+    /// there is one, then [`Self::node_options_token`].
+    pub fn node_options_tokens(&self) -> Vec<String> {
+        self.sidecar_token()
+            .into_iter()
+            .chain(std::iter::once(self.node_options_token()))
+            .collect()
     }
 }
 
@@ -3298,7 +3466,7 @@ fn is_nub_preload_entry(value: &str) -> bool {
         return false;
     };
     match file {
-        "preload.mjs" | "preload.cjs" => {
+        "preload.mjs" | "preload.cjs" | THREADPOOL_SNAPSHOT_SIDECAR => {
             is_nub_runtime_dir(parent.rsplit('/').next().unwrap_or_default())
         }
         // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`.
@@ -3459,6 +3627,7 @@ fn preload_injection_for(
     preload_mjs: &str,
     version: &super::version::NodeVersion,
     windows: bool,
+    linux: bool,
 ) -> PreloadInjection {
     if version.supports_augmentation() {
         // Sibling .cjs in the same runtime dir. `--require` resolves a plain path
@@ -3471,21 +3640,38 @@ fn preload_injection_for(
         PreloadInjection {
             flag: "--require",
             value: cjs,
+            sidecar: None,
         }
     } else {
+        // The threadpool policy has to build the pool itself to know its threads,
+        // and the ESM loader builds it while reading this very preload; a `--require`
+        // runs first (`PreloadInjection::sidecar`). Only where the policy demotes: Linux.
+        let sidecar = linux
+            .then(|| preload_mjs.strip_suffix("preload.mjs"))
+            .flatten()
+            .map(|dir| format!("{dir}{THREADPOOL_SNAPSHOT_SIDECAR}"));
         PreloadInjection {
             flag: "--import",
             value: to_file_url(preload_mjs, windows),
+            sidecar,
         }
     }
 }
+
+/// The compat tier's `--require` sidecar, a sibling of the preload (see the file).
+const THREADPOOL_SNAPSHOT_SIDECAR: &str = "threadpool-snapshot.cjs";
 
 /// Public wrapper over [`preload_injection_for`] for the current platform.
 pub fn preload_injection(
     preload_mjs: &str,
     version: &super::version::NodeVersion,
 ) -> PreloadInjection {
-    preload_injection_for(preload_mjs, version, cfg!(windows))
+    preload_injection_for(
+        preload_mjs,
+        version,
+        cfg!(windows),
+        cfg!(target_os = "linux"),
+    )
 }
 
 /// SUPERSEDED — no longer on the spawn path. `nub.jsonc` `preload` entries are now
@@ -3577,6 +3763,7 @@ fn user_preload_injection_for(
         return PreloadInjection {
             flag: "--require",
             value: spec.to_string(),
+            sidecar: None,
         };
     }
     PreloadInjection {
@@ -3590,6 +3777,7 @@ fn user_preload_injection_for(
         } else {
             spec.to_string()
         },
+        sidecar: None,
     }
 }
 
@@ -3984,6 +4172,16 @@ mod tests {
         assert!(
             rest.contains("runtime/preload.cjs") && rest.contains("preload-chain.mjs"),
             "nub's own tokens must be forwarded verbatim: {rest}"
+        );
+        // The compat tier's threadpool sidecar is nub's own too.
+        let (rest, req, imp) = split_inherited_preloads(
+            "--require=/nub/runtime/threadpool-snapshot.cjs --import=file:///nub/runtime/preload.mjs --require /a.cjs",
+        );
+        assert_eq!(req, vec!["/a.cjs"]);
+        assert!(imp.is_empty());
+        assert!(
+            rest.contains("threadpool-snapshot.cjs") && rest.contains("runtime/preload.mjs"),
+            "the sidecar must be forwarded verbatim: {rest}"
         );
 
         // A value with a space survives the round-trip through the tokenizer.
@@ -6053,6 +6251,33 @@ mod tests {
     }
 
     #[test]
+    fn threadpool_size_is_cores_floored_at_four_and_clamped_to_headroom() {
+        // The rule nodejs/performance#193 proposes: max(4, cores). Pinned off
+        // Windows: the platform wrapper caps there, and this test runs on every OS.
+        let unix = |cores, headroom| threadpool_size_from_on(cores, headroom, false);
+        assert_eq!(unix(1, None), 4);
+        assert_eq!(unix(4, None), 4);
+        assert_eq!(unix(10, None), 10);
+        assert_eq!(unix(64, None), 64);
+        // A detected thread ceiling clamps it — libuv aborts if one pool thread
+        // cannot be created — but never below the default plain Node would ask for.
+        assert_eq!(unix(64, Some(16)), 16);
+        assert_eq!(unix(64, Some(2)), 4);
+        assert_eq!(unix(8, Some(100)), 8);
+        // Windows commits 8 MB per pool thread, so the pool stops at 8 there.
+        assert_eq!(threadpool_size_from_on(64, None, true), 8);
+        assert_eq!(threadpool_size_from_on(6, None, true), 6);
+        assert_eq!(threadpool_size_from_on(64, Some(6), true), 6);
+        // The platform wrapper picks the branch this host is on.
+        assert_eq!(
+            threadpool_size_from(64, None),
+            if cfg!(windows) { 8 } else { 64 }
+        );
+        // A restorable-var slot exists for it, so a compat boundary removes it.
+        assert!(RestorableVar::lookup(THREADPOOL_SIZE_ENV).is_some());
+    }
+
+    #[test]
     fn compat_presence_marker_distinguishes_empty_from_absent() {
         let node = RestorableVar::lookup("NODE").expect("NODE is restoration-controlled");
         assert!(
@@ -6181,7 +6406,7 @@ mod tests {
         // Fast tier (>= 22.15): `--require` the sibling CJS preload by raw PATH
         // (require does not accept a file:// URL). This is the channel that keeps
         // Node's synchronous CJS entry path (the R1 fix).
-        let fast = preload_injection_for(mjs, &NodeVersion::new(22, 15, 0), false);
+        let fast = preload_injection_for(mjs, &NodeVersion::new(22, 15, 0), false, false);
         assert_eq!(fast.flag, "--require");
         assert_eq!(fast.value, "/opt/nub/runtime/preload.cjs");
         assert_eq!(
@@ -6189,23 +6414,52 @@ mod tests {
             "--require=/opt/nub/runtime/preload.cjs"
         );
 
+        // On Linux the compat tier carries the threadpool sidecar as its own
+        // `--require` token ahead of the preload; the fast tier never does (its
+        // `--require` preload takes the snapshot itself), and the re-entrancy key
+        // stays the preload's token alone.
+        let compat_linux = preload_injection_for(mjs, &NodeVersion::new(20, 11, 0), false, true);
+        assert_eq!(
+            compat_linux.sidecar.as_deref(),
+            Some("/opt/nub/runtime/threadpool-snapshot.cjs")
+        );
+        assert_eq!(
+            compat_linux.node_options_tokens(),
+            vec![
+                "--require=/opt/nub/runtime/threadpool-snapshot.cjs",
+                "--import=file:///opt/nub/runtime/preload.mjs"
+            ]
+        );
+        assert_eq!(
+            compat_linux.node_options_token(),
+            "--import=file:///opt/nub/runtime/preload.mjs"
+        );
+        let fast_linux = preload_injection_for(mjs, &NodeVersion::new(22, 15, 0), false, true);
+        assert!(fast_linux.sidecar.is_none());
+        assert_eq!(
+            fast_linux.node_options_tokens(),
+            vec![fast_linux.node_options_token()]
+        );
+        assert!(fast.sidecar.is_none(), "no sidecar on the fast tier");
+
         // A clearly-fast version too (24.x).
-        let fast24 = preload_injection_for(mjs, &NodeVersion::new(24, 0, 0), false);
+        let fast24 = preload_injection_for(mjs, &NodeVersion::new(24, 0, 0), false, false);
         assert_eq!(fast24.flag, "--require");
         assert_eq!(fast24.value, "/opt/nub/runtime/preload.cjs");
 
         // Compat tier (< 22.15): `--import` the ESM preload by file:// URL — the
         // async path stays unchanged.
-        let compat = preload_injection_for(mjs, &NodeVersion::new(20, 11, 0), false);
+        let compat = preload_injection_for(mjs, &NodeVersion::new(20, 11, 0), false, false);
         assert_eq!(compat.flag, "--import");
         assert_eq!(compat.value, "file:///opt/nub/runtime/preload.mjs");
+        assert!(compat.sidecar.is_none(), "no sidecar off Linux");
         assert_eq!(
             compat.node_options_token(),
             "--import=file:///opt/nub/runtime/preload.mjs"
         );
 
         // The 22.14.x boundary stays on the compat (import) channel.
-        let boundary = preload_injection_for(mjs, &NodeVersion::new(22, 14, 99), false);
+        let boundary = preload_injection_for(mjs, &NodeVersion::new(22, 14, 99), false, false);
         assert_eq!(boundary.flag, "--import");
 
         // 23.0–23.4 sorts above 22.15 but predates `registerHooks` on the 23.x line
@@ -6217,7 +6471,7 @@ mod tests {
             NodeVersion::new(23, 4, 0),
             NodeVersion::new(23, 4, 99),
         ] {
-            let injection = preload_injection_for(mjs, &pre, false);
+            let injection = preload_injection_for(mjs, &pre, false, false);
             assert_eq!(
                 injection.flag, "--import",
                 "Node {pre} has no sync registerHooks and must use the compat preload"
@@ -6226,7 +6480,7 @@ mod tests {
         }
 
         // 23.5.0 is the 23.x line's fast floor — the release that added registerHooks.
-        let fast235 = preload_injection_for(mjs, &NodeVersion::new(23, 5, 0), false);
+        let fast235 = preload_injection_for(mjs, &NodeVersion::new(23, 5, 0), false, false);
         assert_eq!(fast235.flag, "--require");
         assert_eq!(fast235.value, "/opt/nub/runtime/preload.cjs");
     }

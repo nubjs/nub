@@ -74,6 +74,7 @@ const HASH_PRELOAD_MJS: &str = env!("NUB_RUNTIME_HASH_PRELOAD_MJS");
 const HASH_PRELOAD_CJS: &str = env!("NUB_RUNTIME_HASH_PRELOAD_CJS");
 const HASH_GC_STARTUP: &str = env!("NUB_RUNTIME_HASH_GC_STARTUP");
 const HASH_WATCH_ENV_GUARD: &str = env!("NUB_RUNTIME_HASH_WATCH_ENV_GUARD");
+const HASH_THREADPOOL_SNAPSHOT: &str = env!("NUB_RUNTIME_HASH_THREADPOOL_SNAPSHOT");
 const HASH_COMPILE_PREAMBLE: &str = env!("NUB_RUNTIME_HASH_COMPILE_PREAMBLE");
 const HASH_ADDON: &str = env!("NUB_RUNTIME_HASH_ADDON");
 const RUNTIME_TREE_BLAKE3: &str = env!("NUB_RUNTIME_TREE_BLAKE3");
@@ -84,11 +85,12 @@ const RUNTIME_TREE_BLAKE3: &str = env!("NUB_RUNTIME_TREE_BLAKE3");
 /// per-load hash (R1's 0700 owner-only base already closes their planted-file
 /// vector, and hashing the whole ~13 MB tree every run would be a real regression
 /// for a fast script runner — the entrypoints keep the cost ~1-2 ms).
-const VERIFIED_ENTRYPOINTS: [(&str, &str); 6] = [
+const VERIFIED_ENTRYPOINTS: [(&str, &str); 7] = [
     ("preload.mjs", HASH_PRELOAD_MJS),
     ("preload.cjs", HASH_PRELOAD_CJS),
     ("gc-startup.cjs", HASH_GC_STARTUP),
     ("watch-env-guard.cjs", HASH_WATCH_ENV_GUARD),
+    ("threadpool-snapshot.cjs", HASH_THREADPOOL_SNAPSHOT),
     // `nub compile` loads this executable JS straight from the extracted runtime.
     ("compile-preamble.mjs", HASH_COMPILE_PREAMBLE),
     ("addons/nub-native.node", HASH_ADDON),

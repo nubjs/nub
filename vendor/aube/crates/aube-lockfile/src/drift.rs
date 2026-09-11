@@ -3,6 +3,24 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Record that `name` is declared in `dep_type`'s section.
+///
+/// A name may appear in several sections at once — npm, pnpm and bun all accept
+/// that, and bun's lockfile then carries one row per section — so this collects
+/// every section rather than keeping only the highest-priority one. Collapsing
+/// to one made the other rows unmatchable and reported a faithful lockfile as
+/// drifted.
+fn declare_dep_type<'a>(
+    map: &mut BTreeMap<&'a str, Vec<DepType>>,
+    name: &'a str,
+    dep_type: DepType,
+) {
+    let entry = map.entry(name).or_default();
+    if !entry.contains(&dep_type) {
+        entry.push(dep_type);
+    }
+}
+
 impl LockfileGraph {
     /// Compare this lockfile's root importer against a single manifest.
     ///
@@ -557,6 +575,21 @@ impl LockfileGraph {
             .iter()
             .filter_map(|d| d.specifier.as_deref().map(|s| (d.name.as_str(), s)))
             .collect();
+        // Keyed by section as well, because a name declared in two sections has
+        // two rows and `lockfile_specs` keeps only whichever collected last. A
+        // faithful lockfile for `dependencies.foo = "^1"` plus
+        // `devDependencies.foo = "^2"` otherwise reads as a specifier mismatch.
+        // Only the specifier comparison consults this; the missing-dep and
+        // extraneous-row paths keep using the by-name map so their diagnostics
+        // are unchanged.
+        let lockfile_specs_by_section: BTreeMap<(&str, DepType), &str> = importer_deps
+            .iter()
+            .filter_map(|d| {
+                d.specifier
+                    .as_deref()
+                    .map(|s| ((d.name.as_str(), d.dep_type), s))
+            })
+            .collect();
 
         let override_rules = override_match::compile(effective_overrides);
 
@@ -588,14 +621,19 @@ impl LockfileGraph {
         let manifest_deps = manifest
             .dependencies
             .iter()
-            .map(|(k, v)| (k, v, false))
-            .chain(manifest.dev_dependencies.iter().map(|(k, v)| (k, v, false)))
+            .map(|(k, v)| (k, v, false, DepType::Production))
+            .chain(
+                manifest
+                    .dev_dependencies
+                    .iter()
+                    .map(|(k, v)| (k, v, false, DepType::Dev)),
+            )
             .chain(
                 manifest
                     .optional_dependencies
                     .iter()
                     .filter(|(name, _)| !ignored.contains(name.as_str()))
-                    .map(|(k, v)| (k, v, true)),
+                    .map(|(k, v)| (k, v, true, DepType::Optional)),
             )
             .chain(
                 self.settings
@@ -609,10 +647,18 @@ impl LockfileGraph {
                             && !manifest.dev_dependencies.contains_key(*name)
                             && !manifest.optional_dependencies.contains_key(*name)
                     })
-                    .map(|(k, v)| (k, v, false)),
+                    .map(|(k, v)| (k, v, false, DepType::Production)),
             );
 
-        for (name, spec, is_optional) in manifest_deps {
+        for (name, spec, is_optional, section) in manifest_deps {
+            // A name declared in several sections has a row per section; match
+            // this declaration against ITS row before falling back.
+            if lockfile_specs_by_section
+                .get(&(name.as_str(), section))
+                .is_some_and(|locked| *locked == spec)
+            {
+                continue;
+            }
             match lockfile_specs.get(name.as_str()) {
                 None => {
                     // A *missing* optional dep is only "fresh" if the
@@ -705,22 +751,24 @@ impl LockfileGraph {
         // rewriting the lockfile. The resolver's priority is
         // `dependencies` > `devDependencies` > `optionalDependencies`,
         // matching `seed_direct_deps` in aube-resolver.
-        let mut manifest_dep_types: BTreeMap<&str, DepType> = BTreeMap::new();
+        // A name may be declared in SEVERAL sections at once, and npm, pnpm and
+        // bun all accept that — bun records such a dep under every section it
+        // was declared in, so a lockfile with two rows for one name is correct
+        // rather than drifted. Collect every section the manifest declares, not
+        // just the highest-priority one: collapsing to one made the other rows
+        // unmatchable and reported a faithful lockfile as stale.
+        let mut manifest_dep_types: BTreeMap<&str, Vec<DepType>> = BTreeMap::new();
         for name in manifest.dependencies.keys() {
-            manifest_dep_types.insert(name.as_str(), DepType::Production);
+            declare_dep_type(&mut manifest_dep_types, name.as_str(), DepType::Production);
         }
         for name in manifest.dev_dependencies.keys() {
-            manifest_dep_types
-                .entry(name.as_str())
-                .or_insert(DepType::Dev);
+            declare_dep_type(&mut manifest_dep_types, name.as_str(), DepType::Dev);
         }
         for name in manifest.optional_dependencies.keys() {
             if ignored.contains(name.as_str()) {
                 continue;
             }
-            manifest_dep_types
-                .entry(name.as_str())
-                .or_insert(DepType::Optional);
+            declare_dep_type(&mut manifest_dep_types, name.as_str(), DepType::Optional);
         }
         if self.settings.auto_install_peers {
             // Both required AND optional peers can be auto-installed by
@@ -739,21 +787,24 @@ impl LockfileGraph {
                 {
                     continue;
                 }
-                manifest_dep_types
-                    .entry(name.as_str())
-                    .or_insert(DepType::Production);
+                declare_dep_type(&mut manifest_dep_types, name.as_str(), DepType::Production);
             }
         }
         for dep in importer_deps {
             let Some(expected) = manifest_dep_types.get(dep.name.as_str()) else {
                 continue;
             };
-            if *expected != dep.dep_type {
+            if !expected.contains(&dep.dep_type) {
+                let declared = expected
+                    .iter()
+                    .map(|t| dep_type_label(*t))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
                 return DriftStatus::Stale {
                     reason: format!(
                         "{label}{}: manifest section is {}, lockfile section is {}",
                         dep.name,
-                        dep_type_label(*expected),
+                        declared,
                         dep_type_label(dep.dep_type),
                     ),
                 };
@@ -2570,6 +2621,171 @@ mod drift_tests {
         let root = subset.skipped_optional_dependencies.get(".").unwrap();
         assert!(root.contains_key("fsevents"));
         assert!(!root.contains_key("ghost"));
+    }
+
+    #[test]
+    fn drift_fresh_when_two_sections_carry_different_specs() {
+        // The dual-section case with a DIFFERENT specifier per section. The
+        // by-name specifier map keeps only whichever row collected last, so
+        // one of the two declarations was always compared against the other's
+        // specifier and a faithful lockfile reported "manifest says ^1,
+        // lockfile says ^2".
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![
+                DirectDep {
+                    name: "foo".into(),
+                    dep_path: "foo@1.0.0".into(),
+                    dep_type: DepType::Production,
+                    specifier: Some("^1".into()),
+                },
+                DirectDep {
+                    name: "foo".into(),
+                    dep_path: "foo@2.0.0".into(),
+                    dep_type: DepType::Dev,
+                    specifier: Some("^2".into()),
+                },
+            ],
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages: BTreeMap::new(),
+            ..Default::default()
+        };
+        let mut manifest = make_manifest(&[("foo", "^1")]);
+        manifest.dev_dependencies.insert("foo".into(), "^2".into());
+
+        assert_eq!(
+            graph.check_drift_workspace(
+                &[(".".to_string(), manifest)],
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                true,
+            ),
+            DriftStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn drift_stale_when_a_sectioned_spec_really_does_differ() {
+        // Guards the lookup above from degenerating into "accept anything with
+        // the right section": the manifest's dev spec disagrees with the dev
+        // row, and that is still drift.
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "foo".into(),
+                dep_path: "foo@2.0.0".into(),
+                dep_type: DepType::Dev,
+                specifier: Some("^2".into()),
+            }],
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages: BTreeMap::new(),
+            ..Default::default()
+        };
+        let mut manifest = make_manifest(&[]);
+        manifest.dev_dependencies.insert("foo".into(), "^3".into());
+
+        assert!(matches!(
+            graph.check_drift_workspace(
+                &[(".".to_string(), manifest)],
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                true,
+            ),
+            DriftStatus::Stale { .. }
+        ));
+    }
+
+    #[test]
+    fn drift_fresh_when_a_dep_is_declared_in_two_sections() {
+        // npm, pnpm and bun all accept a name in several sections at once, and
+        // bun's lockfile then carries one row per section. Real case: opencode's
+        // packages/console/resource declares @cloudflare/workers-types in both
+        // dependencies and devDependencies, and bun.lock records it twice, which
+        // made `--frozen-lockfile` fail with ERR_NUB_OUTDATED_LOCKFILE on a
+        // lockfile that faithfully matched its manifest.
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![
+                DirectDep {
+                    name: "workers-types".into(),
+                    dep_path: "workers-types@4.0.0".into(),
+                    dep_type: DepType::Production,
+                    specifier: Some("^4.0.0".into()),
+                },
+                DirectDep {
+                    name: "workers-types".into(),
+                    dep_path: "workers-types@4.0.0".into(),
+                    dep_type: DepType::Dev,
+                    specifier: Some("^4.0.0".into()),
+                },
+            ],
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages: BTreeMap::new(),
+            ..Default::default()
+        };
+
+        let mut manifest = make_manifest(&[("workers-types", "^4.0.0")]);
+        manifest
+            .dev_dependencies
+            .insert("workers-types".into(), "^4.0.0".into());
+
+        assert_eq!(
+            graph.check_drift_workspace(
+                &[(".".to_string(), manifest)],
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                true,
+            ),
+            DriftStatus::Fresh
+        );
+    }
+
+    #[test]
+    fn drift_stale_when_a_lockfile_row_names_an_undeclared_section() {
+        // The counterpart, so the fix above cannot pass by accepting anything:
+        // a dep declared ONLY in dependencies, with an optionalDependencies row
+        // in the lockfile, is still drift.
+        let mut importers = BTreeMap::new();
+        importers.insert(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "workers-types".into(),
+                dep_path: "workers-types@4.0.0".into(),
+                dep_type: DepType::Optional,
+                specifier: Some("^4.0.0".into()),
+            }],
+        );
+        let graph = LockfileGraph {
+            importers,
+            packages: BTreeMap::new(),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            graph.check_drift_workspace(
+                &[(
+                    ".".to_string(),
+                    make_manifest(&[("workers-types", "^4.0.0")])
+                )],
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+                true,
+            ),
+            DriftStatus::Stale { .. }
+        ));
     }
 
     #[test]

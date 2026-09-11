@@ -359,8 +359,8 @@ unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG NUB_BUILD_TARGET_OUT
 # digest covers each file's RELATIVE path and its own digest, so a rename, a move
 # or an added empty page changes the key while an identical tree in another
 # worktree does not.
-NUB_DOCS_KEY=$(cd "$root" && find site/content/docs -type f -print0 2>/dev/null | sort -z \
+__NUB_DOCS_KEY=$(cd "$root" && find site/content/docs -type f -print0 2>/dev/null | sort -z \
   | xargs -0 "$digest" 2>/dev/null | "$digest" 2>/dev/null | cut -c1-12 || true)
-export NUB_DOCS_KEY
+export __NUB_DOCS_KEY
 
 exec env CARGO_TARGET_DIR="$target" $wrapper_off $qos cargo "$@"

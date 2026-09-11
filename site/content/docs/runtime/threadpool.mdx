@@ -1,0 +1,30 @@
+---
+title: Threadpool
+description: libuv's threadpool is sized to the cores available to the process instead of Node's fixed four, and on Linux the extra threads run at a lower priority.
+---
+
+Node hands async `fs`, `dns.lookup`, async `zlib` and async `crypto` calls, and native addons such as `bcrypt` and `sharp`, to libuv's threadpool. The pool has four threads whatever the machine, and its size is read from `UV_THREADPOOL_SIZE` the first time it is used, so only the environment can change it. Nub sets the variable when it starts Node.
+
+```sh
+nub server.ts                        # pool sized to the cores, 16 on a 16-vCPU box
+node server.ts                       # pool of 4
+UV_THREADPOOL_SIZE=6 nub server.ts   # your value, used as is
+```
+
+The size is the larger of four and the cores available to the process, so a container gets its cgroup quota rather than the host's core count. A container's thread limit caps it. Windows stops at eight.
+
+<Callout>
+Read the [full docs](https://docs.libuv.org/en/v1.x/threadpool.html) for the threadpool on docs.libuv.org.
+</Callout>
+
+## Priority
+
+On Linux the threads beyond the first four run at [nice](https://man7.org/linux/man-pages/man7/sched.7.html) 10, about a tenth of the scheduler weight of a normal thread. On an idle box they run at full speed. Under contention they yield most of the CPU to the other work on the machine.
+
+## Child processes
+
+A process your app spawns, including a `cluster` worker, starts with Node's default of four. A child that runs through `nub` is sized again. A `UV_THREADPOOL_SIZE` you set, in the shell or in an env file, is inherited as under Node.
+
+## Opting out
+
+A `UV_THREADPOOL_SIZE` of your own wins. [`--node`](/docs/runtime#--node) and [`NODE_COMPAT`](/docs/runtime#node_compat) leave the pool at Node's default.

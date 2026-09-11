@@ -304,7 +304,7 @@ pub struct DirectDep {
     pub specifier: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DepType {
     Production,
     Dev,
@@ -375,6 +375,32 @@ pub(crate) struct UnsupportedSpec {
     pub key: String,
     /// The unsupported protocol token (`git`, `jsr`, `exec`, …).
     pub protocol: String,
+}
+
+/// The `<token>:` protocol prefix of a version tail, if it carries one.
+///
+/// A registry pin is an exact semver version, which can never contain a
+/// `:`, so a protocol-shaped tail marks a NON-registry source —
+/// `github:owner/repo#sha`, `git+ssh://…`, `file:./vendor`,
+/// `https://…/pkg.tgz`, `workspace:*`. Every non-registry branch of the
+/// bun reader's `classify_bun_ident` records that whole tail verbatim as
+/// [`LockedPackage::version`], so the same predicate answers two
+/// questions: whether a lockfile ident is resolvable as a registry pin,
+/// and whether a `patchedDependencies` selector is a source identity
+/// rather than a malformed semver range.
+///
+/// Deliberately narrow — the token must start with a letter and hold
+/// only `[A-Za-z0-9+.-]` — so a typo like `^^1:2` is not read as a
+/// protocol and keeps erroring where it should.
+pub(crate) fn version_protocol(raw_version: &str) -> Option<&str> {
+    let token = &raw_version[..raw_version.find(':')?];
+    let mut chars = token.chars();
+    if !chars.next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    chars
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        .then_some(token)
 }
 
 /// Resolve a dependency `spec` against the lockfile's `spec → dep_path`

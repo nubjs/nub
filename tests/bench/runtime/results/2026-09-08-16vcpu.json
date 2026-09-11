@@ -1,0 +1,92 @@
+{
+  "date": "2026-09-08",
+  "machine": "c3d-standard-16 (GCE spot), 16 vCPU",
+  "node": "v26.8.1",
+  "bench": "tests/bench/runtime/threadpool.sh",
+  "load": "autocannon -c 50 -d 8, five interleaved rounds, load generator on the same box; plain node with UV_THREADPOOL_SIZE=4 vs 16",
+  "threadpool": {
+    "routes": {
+      "/hash": {
+        "4": [
+          13382,
+          13914,
+          13408,
+          13484,
+          13461
+        ],
+        "16": [
+          27092,
+          27170,
+          26958,
+          27160,
+          27142
+        ]
+      },
+      "/gzip": {
+        "4": [
+          4650,
+          4673,
+          4567,
+          4627,
+          4679
+        ],
+        "16": [
+          4237,
+          4457,
+          4292,
+          4275,
+          4397
+        ]
+      },
+      "/file": {
+        "4": [
+          4633,
+          3600,
+          5082,
+          4974,
+          4924
+        ],
+        "16": [
+          5692,
+          5143,
+          4427,
+          4567,
+          5435
+        ]
+      },
+      "/stat": {
+        "4": [
+          39312,
+          38632,
+          39372,
+          39640,
+          40225
+        ],
+        "16": [
+          41324,
+          40392,
+          40932,
+          40808,
+          41848
+        ]
+      }
+    },
+    "dns": {
+      "4": [
+        118,
+        75,
+        76,
+        74,
+        75
+      ],
+      "16": [
+        60,
+        63,
+        58,
+        59,
+        57
+      ]
+    }
+  },
+  "notes": "Direct test of the fs regression reported on nodejs/node#61533 (fs -15% at 16 threads on 16 vCPU): a 270 KB readFile route and a stat route do not regress here (file +9% with noisy rounds, stat +4%); the 55 KB gzip route reads -7% because the JSON is serialized on the event loop and the pool threads compete with it for the cores; pbkdf2 2.0x; dns burst 84 -> 59 ms."
+}

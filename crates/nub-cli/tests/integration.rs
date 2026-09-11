@@ -1965,6 +1965,19 @@ fn esm_source_reuse_preserves_loaded_bytes_and_module_identity() {
 }
 
 #[test]
+fn user_hooks_layered_above_nubs_keep_ownership_of_their_files() {
+    // tsx under `nub run` is the case in the wild. The fixture's hooks model it
+    // on whichever tier this Node runs: an outer load hook keys on the
+    // `responseURL` nub's transpiled result carries; an outer resolve hook that
+    // assigns a `.ts` file a bare `commonjs` format gets the raw source back to
+    // transform itself; and a `require.extensions` handler installed before nub's
+    // compat-tier preload stays in charge of its extension.
+    let (stdout, stderr, code) = run_nub("loader-outer-hook", "main.mjs");
+    assert_eq!(code, 0, "outer-hook contract failed: {stdout}\n{stderr}");
+    assert!(stdout.contains("outer-hook:ok"), "{stdout}\n{stderr}");
+}
+
+#[test]
 fn project_js_using_down_levels() {
     // `using` is a SyntaxError on every supported Node's V8; this project `.js`
     // must be down-leveled (the transformableSyntax verdict flags it) and run, just

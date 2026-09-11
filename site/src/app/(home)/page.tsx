@@ -952,10 +952,10 @@ function NubxBand() {
 
 /* Source: tests/cross-runtime/results.json `scores.denoExclusions`, using Node 26.7.0's own test tree (tests/node-suite at v26.7.0) with Deno's directory set and config skips applied. Rate = the share of the tests real Node passes that this runtime ALSO passes, so numerator and denominator come from the same set. Do NOT recompute it as runtime_pass / node_pass: that draws the numerator from a larger set than the denominator and reads high (98.8 vs 98.6 for nub on the same June data). */
 const COMPAT = [
-  { name: 'Node 26.7', rate: 100, tests: '5,046 / 5,046', us: false, dim: false },
-  { name: 'Nub', rate: 98.5, tests: '4,968 / 5,046', us: true, dim: false },
-  { name: 'Deno 2.9', rate: 74.2, tests: '3,742 / 5,046', us: false, dim: true },
-  { name: 'Bun 1.4', rate: 70.1, tests: '3,535 / 5,046', us: false, dim: true },
+  { name: 'Node 26.7', rate: 100, tests: '4,690 / 4,690', us: false, dim: false },
+  { name: 'Nub', rate: 98.4, tests: '4,613 / 4,690', us: true, dim: false },
+  { name: 'Deno 2.9', rate: 72.4, tests: '3,397 / 4,690', us: false, dim: true },
+  { name: 'Bun 1.4', rate: 68.5, tests: '3,214 / 4,690', us: false, dim: true },
 ];
 
 function Compatibility() {
@@ -1004,7 +1004,7 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Node 26.7&rsquo;s own test suite under Deno&rsquo;s compatibility lens, scored against stock Node. Most of Nub&rsquo;s 78 misses are tests that assert on machinery Nub installs itself &mdash; the permission model, module-loader hooks, the test runner, the compile cache &mdash; or on stack and output snapshots its preload changes.<br/>
+          Node 26.7&rsquo;s own test suite under Deno&rsquo;s compatibility lens, scored against stock Node. Most of Nub&rsquo;s 77 misses are tests that assert on machinery Nub installs itself &mdash; the permission model, module-loader hooks, the test runner, the compile cache &mdash; or on stack and output snapshots its preload changes.<br/>
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"

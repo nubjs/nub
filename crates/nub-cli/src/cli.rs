@@ -258,7 +258,7 @@ fn overlay_env_file_vars(env_map: &mut HashMap<String, String>) {
     }
     if let Some(vars) = ENV_FILE_VARS.get() {
         for (k, v) in vars {
-            if env::var_os(k).is_none() {
+            if nub_core::workspace::env::env_file_may_set(k) {
                 env_map.insert(k.clone(), v.clone());
             }
         }
@@ -300,7 +300,7 @@ fn merge_child_env(
     // Overlay the explicit vars: shell env still wins; `--env-file` overrides any
     // `.env` value that survives (only relevant when no flag was passed).
     for (k, v) in explicit_vars {
-        if env::var_os(k).is_none() {
+        if nub_core::workspace::env::env_file_may_set(k) {
             env_map.insert(k.clone(), v.clone());
         }
     }
@@ -572,11 +572,22 @@ fn apply_env_file_vars(cmd: &mut std::process::Command) {
     }
     if let Some(vars) = ENV_FILE_VARS.get() {
         for (k, v) in vars {
-            if env::var_os(k).is_none() {
+            if nub_core::workspace::env::env_file_may_set(k) {
                 cmd.env(k, v);
             }
         }
     }
+}
+
+/// Whether the explicit `--env-file` layer sets `key` for the child. A launcher
+/// that installs nub's threadpool default checks this first: the file's value is
+/// the user's, and the default must not land on top of it.
+fn env_file_sets(key: &str) -> bool {
+    !no_env_file()
+        && ENV_FILE_VARS.get().is_some_and(|vars| {
+            vars.keys()
+                .any(|k| nub_core::workspace::env::env_keys_equal(k, key))
+        })
 }
 
 /// Build the fetched tool's env overlay. The engine spawns the tool itself, so
@@ -601,7 +612,7 @@ pub(crate) fn dlx_child_env(compat_mode: bool) -> BTreeMap<String, String> {
         return values;
     }
     for (key, value) in ENV_FILE_VARS.get().into_iter().flatten() {
-        if env::var_os(key).is_none() {
+        if nub_core::workspace::env::env_file_may_set(key) {
             values.insert(key.clone(), value.clone());
         }
     }
@@ -3399,6 +3410,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 node_linker,
                 registry,
                 dir,
+                allow_all_builds: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3434,6 +3446,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 no_optional,
                 registry,
                 dir,
+                allow_all_builds: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3990,6 +4003,7 @@ fn prepare_preload_chain(
             } else {
                 path.to_string_lossy().into_owned()
             },
+            sidecar: None,
         }),
     )
 }
@@ -4192,7 +4206,32 @@ pub(crate) fn runtime_node_options(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
 ) -> Result<Vec<String>> {
-    runtime_node_options_with(runtime, node, FoldInherited::Yes)
+    runtime_node_options_with(runtime, node, FoldInherited::Yes, TsconfigGate::Required)
+}
+
+/// The options a PM verb hands its lifecycle scripts. Same set as a run, except a
+/// tsconfig that will not read is tolerated: the install is what makes the
+/// `extends` target exist (ava's `"extends": "@sindresorhus/tsconfig"` is a
+/// devDependency), so refusing here left every fresh clone unable to install.
+pub(crate) fn lifecycle_node_options(
+    runtime: &mut crate::project_config::RuntimeConfig,
+    node: &nub_core::node::discovery::ResolvedNode,
+) -> Result<Vec<String>> {
+    runtime_node_options_with(runtime, node, FoldInherited::Yes, TsconfigGate::BestEffort)
+}
+
+/// What an unreadable tsconfig does to the run whose options are being built.
+///
+/// `Required` is every path that executes the user's program (#731: running under
+/// options the author never wrote is the silent wrong answer). `BestEffort` is the
+/// lifecycle-script path of the PM verbs, where the config's `extends` target is
+/// routinely a package the verb is about to install: the run proceeds without the
+/// config-derived conditions and without a report — nothing is guessed at, and the
+/// child that re-enters nub to run a TypeScript file still applies the gate itself.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum TsconfigGate {
+    Required,
+    BestEffort,
 }
 
 /// Whether inherited `NODE_OPTIONS` preloads may be folded into nub's chainer.
@@ -4212,6 +4251,7 @@ pub(crate) fn runtime_node_options_with(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
     fold: FoldInherited,
+    tsconfig_gate: TsconfigGate,
 ) -> Result<Vec<String>> {
     let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let mut options = Vec::new();
@@ -4259,6 +4299,8 @@ pub(crate) fn runtime_node_options_with(
     // `extends`. Skipped entirely in compat mode by the caller, like every other
     // config-derived flag.
     if let Ok(cwd) = std::env::current_dir() {
+        let cwd = cwd.to_string_lossy();
+        let explicit = runtime.tsconfig.as_deref();
         // A tsconfig that will not parse is FATAL, not a warning (#731). Reporting it
         // and carrying on still runs the program under options its author never
         // wrote — the same silent-wrong-answer the issue reported, only quieter — and
@@ -4267,11 +4309,22 @@ pub(crate) fn runtime_node_options_with(
         // out `strict`, `target` and `paths`, so the base is usually where the load
         // lives. `--node` / `NODE_COMPAT` skip this whole function, so the escape
         // hatch for a config nub cannot read is the one that already turns off every
-        // other config-derived behavior.
-        ensure_tsconfig_parses(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())?;
-        for condition in
-            nub_tsconfig::custom_conditions(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())
-        {
+        // other config-derived behavior. The lifecycle path (`BestEffort`) is the one
+        // exception, and it takes the same "guess at nothing" line: no conditions at
+        // all from a config it cannot read.
+        let conditions = match tsconfig_gate {
+            TsconfigGate::Required => {
+                ensure_tsconfig_parses(&cwd, explicit)?;
+                nub_tsconfig::custom_conditions(&cwd, explicit)
+            }
+            TsconfigGate::BestEffort
+                if nub_tsconfig::probe_diagnostics(&cwd, explicit).is_empty() =>
+            {
+                nub_tsconfig::custom_conditions(&cwd, explicit)
+            }
+            TsconfigGate::BestEffort => Vec::new(),
+        };
+        for condition in conditions {
             // A condition name with whitespace is a user error in THEIR tsconfig that
             // `tsc` itself tolerates, so it cannot be fatal here the way a bad
             // nub.jsonc entry is: skip it and leave the rest of the set intact.
@@ -4387,7 +4440,7 @@ fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, Str
             )
         })?;
         for (key, value) in nub_core::workspace::env::parse_env(&content) {
-            if env::var_os(&key).is_some()
+            if !nub_core::workspace::env::env_file_may_set(&key)
                 || runtime_env_keys_equal(&key, "NODE_ENV", cfg!(windows))
             {
                 continue;
@@ -6065,6 +6118,13 @@ fn build_script_command(
         aug.apply_localstorage_env(|k, v| {
             command.env(k, v);
         });
+        // An explicit `--env-file` pool size (in `env_vars`, applied below) is
+        // the user's; nub's default and its ownership marker stand down.
+        if !env_file_sets(nub_core::node::spawn::THREADPOOL_SIZE_ENV) {
+            aug.apply_threadpool_size(|k, v| {
+                command.env(k, v);
+            });
+        }
     }
     if let Some(runtime_json) = runtime_json {
         command.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
@@ -7007,7 +7067,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
-    let runtime_node_options = runtime_node_options_with(&mut runtime, &node, FoldInherited::No)?;
+    let runtime_node_options = runtime_node_options_with(
+        &mut runtime,
+        &node,
+        FoldInherited::No,
+        TsconfigGate::Required,
+    )?;
     let runtime_v8_flags = runtime_v8_flags(&runtime)?;
     let runtime_json = runtime_config_json(&runtime)?;
 
@@ -7114,8 +7179,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // observable preload order — and BEFORE the project-config preloads, so
     // those load with nub's hooks already active. Both `NODE_OPTIONS` assemblies
     // below place the token accordingly, matching the non-watch spawn order.
+    // Every token the injection carries (the compat tier's threadpool sidecar rides
+    // ahead of the preload), joined as one part; the parts are space-joined below.
     let nub_preload_token = preload_path.as_deref().map(|preload| {
-        nub_core::node::spawn::preload_injection(preload, &node.version).node_options_token()
+        nub_core::node::spawn::preload_injection(preload, &node.version)
+            .node_options_tokens()
+            .join(" ")
     });
 
     let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
@@ -7308,6 +7377,44 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 launcher_owned_env_keys.push(key.to_string());
             },
         );
+        // libuv threadpool sizing, the same install every other augmented launcher
+        // makes (spawn.rs THREADPOOL_SIZE_ENV); watch's supervisor re-execs the
+        // child with this environment, so it survives every restart. An env-file
+        // value is the user's: a forwarded file reaches Node as `--env-file`,
+        // which never overrides a value already in the command environment, so
+        // the install stands down — and an inherited nub default (a `nub run`
+        // script running `nub watch`) is removed so the file's value can land.
+        {
+            use nub_core::node::spawn::THREADPOOL_SIZE_ENV;
+            let file_sets_pool = env_vars
+                .keys()
+                .any(|k| nub_core::workspace::env::env_keys_equal(k, THREADPOOL_SIZE_ENV));
+            let nub_default = nub_core::node::spawn::threadpool_size_is_nub_default();
+            let expected = if file_sets_pool {
+                if nub_default {
+                    cmd.env_remove(THREADPOOL_SIZE_ENV);
+                }
+                None
+            } else if env::var_os(THREADPOOL_SIZE_ENV).is_none() {
+                Some(nub_core::node::spawn::threadpool_size().to_string())
+            } else {
+                None
+            };
+            if let Some(size) = &expected {
+                cmd.env(THREADPOOL_SIZE_ENV, size);
+                launcher_owned_env_keys.push(THREADPOOL_SIZE_ENV.to_string());
+            }
+            if file_sets_pool || expected.is_some() {
+                nub_core::node::spawn::apply_expected_augmentation_marker(
+                    THREADPOOL_SIZE_ENV,
+                    expected.as_deref().map(std::ffi::OsStr::new),
+                    |key, value| {
+                        cmd.env(key, value);
+                        launcher_owned_env_keys.push(key.to_string());
+                    },
+                );
+            }
+        }
     }
     // Node's Windows watch supervisor first registers the long-spelled env-file
     // directory, then registers module paths reported by the watched child. If
@@ -7361,6 +7468,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let token = nub_core::node::spawn::PreloadInjection {
             flag: "--require",
             value: cleanup_preload.to_string(),
+            sidecar: None,
         }
         .node_options_token();
 
@@ -7770,6 +7878,14 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     aug.apply_localstorage_env(|k, v| {
         cmd.env(k, v);
     });
+    // `apply_env_file_vars` staged the explicit `--env-file` values before this
+    // augmentation, and a pool size among them is the user's: nub's default must
+    // not overwrite it (the other augmentation vars deliberately do, A19).
+    if !env_file_sets(nub_core::node::spawn::THREADPOOL_SIZE_ENV) {
+        aug.apply_threadpool_size(|k, v| {
+            cmd.env(k, v);
+        });
+    }
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
     // Stamp the env-owner markers wherever the adapter is injected — without them
     if let Some((k, val)) = force_async_tier {
@@ -9833,7 +9949,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20 pin [<version>]    lock this project to an exact nub version (default: the running nub)\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
-             \x20 shim               link npm/pnpm/yarn shims onto PATH (re-run after `nub upgrade`)\n\
+             \x20 shim               link npm/pnpm/yarn shims onto PATH (re-run after `nub upgrade`);\n\
+             \x20                    --route-installs runs `npm ci` / `npm install` on nub's engine\n\
+             \x20                    (--no-route-installs turns that back off)\n\
              \x20 unshim             remove the shims and their PATH block"
         );
         return Ok(0);
@@ -10048,7 +10166,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // `nub node pin <version>`.
         "pin" => run_pm_pin(args.get(1).map(String::as_str), &cwd),
         // Install / remove the PM shims (spec: `package-manager-shims` (no such document)).
-        "shim" => run_pm_shim_install(),
+        "shim" => run_pm_shim_install(&args[1..]),
         "unshim" => run_pm_unshim(),
         // `switch` (the old cross-PM, declaration-only verb) was replaced by
         // `use` (2026-06-10, identity-policy ratification) — name the successor
@@ -10657,8 +10775,22 @@ fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
 /// in `~/.nub/shims`, write the marked PATH block into the shell profile
 /// (install.sh's mechanism), and verify reachability. Idempotent — re-running
 /// re-links, which is also how shims are refreshed after `nub upgrade`.
-fn run_pm_shim_install() -> Result<i32> {
+fn run_pm_shim_install(args: &[String]) -> Result<i32> {
     use nub_core::pm::shim::{self, ProfileOutcome, ShimAction};
+
+    // `--route-installs` / `--no-route-installs` set or clear the marker; a
+    // re-run without either leaves the current choice alone, so re-linking
+    // after `nub upgrade` never silently switches routing off.
+    let mut route_installs: Option<bool> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--route-installs" => route_installs = Some(true),
+            "--no-route-installs" => route_installs = Some(false),
+            other => bail!(
+                "nub pm shim: unexpected argument {other:?} (accepted: --route-installs, --no-route-installs)"
+            ),
+        }
+    }
 
     // Canonicalized, so a symlinked `nub` on PATH links the real bytes (the
     // same posture as every other `current_nub_binary` call site).
@@ -10678,6 +10810,9 @@ fn run_pm_shim_install() -> Result<i32> {
     }
 
     let report = shim::install_shims(&nub_binary)?;
+    if let Some(on) = route_installs {
+        shim::set_route_installs(&dir, on)?;
+    }
 
     let count = |action: ShimAction| report.iter().filter(|s| s.action == action).count();
     let (created, relinked, current) = (
@@ -10706,6 +10841,11 @@ fn run_pm_shim_install() -> Result<i32> {
         dir.display(),
         parts.join(", ")
     );
+    if shim::route_installs_enabled(&dir) {
+        println!(
+            "  npm ci and npm install run on nub's engine (--no-route-installs turns this off)"
+        );
+    }
     if report.iter().any(|s| s.copied) {
         println!(
             "  note: {} is on a different filesystem than the nub binary — \
@@ -11022,6 +11162,15 @@ enum ShimPlan {
     },
     /// The strict agreement check refused: print `message` on stderr, exit 1.
     Refuse { message: String },
+    /// `npm ci` / `npm install` under `nub pm shim --route-installs`: run the
+    /// install on nub's engine, in this process (`nub ci` / `nub install
+    /// --no-frozen-lockfile` with npm's flags translated, every lifecycle
+    /// script allowed as npm allows them). `ignore_scripts` is npm's
+    /// effective value: the command line, else its config.
+    EngineInstall {
+        route: nub_core::pm::shim::NpmEngineInstall,
+        ignore_scripts: bool,
+    },
 }
 
 /// The corepack-style "which PM am I running" notice for the shim-dispatch
@@ -11058,6 +11207,54 @@ fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result
             Ok(1)
         }
         ShimPlan::Exec { program, args, env } => exec_program(&program, &args, &env),
+        ShimPlan::EngineInstall {
+            route,
+            ignore_scripts,
+        } => run_shim_engine_install(route, ignore_scripts),
+    }
+}
+
+/// The routed install: the corepack-style notice names what runs in place of
+/// npm, then the engine runs in-process exactly as `nub ci` / `nub install`
+/// would from this cwd.
+fn run_shim_engine_install(
+    route: nub_core::pm::shim::NpmEngineInstall,
+    ignore_scripts: bool,
+) -> Result<i32> {
+    use nub_core::pm::shim::NpmInstallVerb;
+    // npm hands every lifecycle script `NODE_ENV=production` exactly when
+    // dev dependencies are effectively omitted (`buildOmitList` in npm's
+    // config definitions). Per child through the engine's overlay, never the
+    // process environment (A19).
+    if route.prod {
+        crate::pm_engine::set_lifecycle_env(vec![("NODE_ENV".into(), "production".into())]);
+    }
+    let (from, to) = match route.verb {
+        NpmInstallVerb::Ci => ("npm ci", "nub ci"),
+        NpmInstallVerb::Install => ("npm install", "nub install"),
+    };
+    let line = format!("{from} → {to} (via nub shim)");
+    if crate::pm_engine::scope_warning_uses_dim() {
+        eprintln!("\x1b[2m{line}\x1b[0m");
+    } else {
+        eprintln!("{line}");
+    }
+    match route.verb {
+        NpmInstallVerb::Ci => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+            prod: route.prod,
+            ignore_scripts,
+            no_optional: route.no_optional,
+            allow_all_builds: true,
+            ..Default::default()
+        }),
+        NpmInstallVerb::Install => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
+            no_frozen_lockfile: true,
+            prod: route.prod,
+            ignore_scripts,
+            no_optional: route.no_optional,
+            allow_all_builds: true,
+            ..Default::default()
+        }),
     }
 }
 
@@ -11070,9 +11267,22 @@ fn shim_plan(
     args: &[String],
     cwd: &Path,
 ) -> Result<ShimPlan> {
+    let route_installs =
+        nub_core::pm::shim::route_installs_enabled(&nub_core::pm::shim::shim_dir()?);
+    shim_plan_with(invoked, args, cwd, route_installs)
+}
+
+/// [`shim_plan`] with the `--route-installs` opt-in passed in, so the routing
+/// branch is unit-testable without a real shim dir.
+fn shim_plan_with(
+    invoked: nub_core::pm::shim::ShimName,
+    args: &[String],
+    cwd: &Path,
+    route_installs: bool,
+) -> Result<ShimPlan> {
     use nub_core::pm::Pm;
     use nub_core::pm::resolve::{self, PmTarget};
-    use nub_core::pm::shim::{self, Nesting, ShimDecision};
+    use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
 
     let target = resolve::resolve_target(cwd);
     let pin_state = shim_pin_state(cwd, target.as_ref());
@@ -11091,13 +11301,46 @@ fn shim_plan(
     // cross-PM project-pin refusal does not apply — `decide` lets it fall through.
     let global = shim::is_global_invocation(invoked, args);
 
-    match shim::decide(
+    let decision = shim::decide(
         invoked,
         &pin_state,
         args.first().map(String::as_str),
         nesting,
         global,
-    ) {
+    );
+
+    // `nub pm shim --route-installs`: a top-level `npm ci` / bare `npm
+    // install` in a project whose lockfile is npm's runs on nub's engine. Only
+    // where npm itself would have run (the matrix did not refuse), only at top
+    // level (a lifecycle script's nested `npm install` keeps the real npm —
+    // the engine is already running one layer up), never for a global op, and
+    // only for an argv the engine honors verbatim ([`shim::npm_install_route`]).
+    // Without an npm lockfile there is nothing frozen to install from, so the
+    // real npm keeps that case too.
+    if route_installs
+        && invoked == ShimName::Npm
+        && nesting == Nesting::TopLevel
+        && !global
+        && matches!(
+            decision,
+            ShimDecision::RunPinned { pm: Pm::Npm, .. } | ShimDecision::FallThrough { .. }
+        )
+        && let Some(route) = shim::npm_install_route(args, node_env_is_production())
+    {
+        let root = shim_lockfile_root(cwd);
+        if root.join("package-lock.json").is_file() || root.join("npm-shrinkwrap.json").is_file() {
+            // The command line outranks npm's config, as it does for npm.
+            let ignore_scripts = route
+                .ignore_scripts
+                .unwrap_or_else(|| shim::npm_ignore_scripts_configured(&root));
+            return Ok(ShimPlan::EngineInstall {
+                route,
+                ignore_scripts,
+            });
+        }
+    }
+
+    match decision {
         ShimDecision::Refuse {
             pinned_pm,
             provenance,
@@ -11193,6 +11436,11 @@ fn shim_plan(
             exec_under_project_node(cwd, bin, args)
         }
     }
+}
+
+/// npm reads `NODE_ENV=production` as `--omit=dev`; the routed install does too.
+fn node_env_is_production() -> bool {
+    env::var("NODE_ENV").is_ok_and(|v| v == "production")
 }
 
 /// Derive the decision core's [`PinState`] from the resolved [`PmTarget`].
@@ -14267,6 +14515,91 @@ mod tests {
             ),
             other => panic!("pnpm in a yarnPath project must refuse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shim_plan_routes_npm_installs_only_when_opted_in_with_an_npm_lockfile() {
+        use nub_core::pm::shim::{NpmInstallVerb, ShimName};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let ci = vec!["ci".to_string()];
+        // No npm lockfile: nothing frozen to install from, so npm keeps it.
+        assert!(
+            !matches!(
+                shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+                ShimPlan::EngineInstall { .. }
+            ),
+            "without package-lock.json the real npm runs"
+        );
+        std::fs::write(
+            dir.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{}}"#,
+        )
+        .unwrap();
+        match shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap() {
+            ShimPlan::EngineInstall {
+                route,
+                ignore_scripts,
+            } => {
+                assert_eq!(route.verb, NpmInstallVerb::Ci);
+                assert!(!ignore_scripts, "no config and no flag: scripts run");
+            }
+            other => {
+                panic!("an opted-in npm ci with an npm lockfile runs on the engine, got {other:?}")
+            }
+        }
+        assert!(
+            !matches!(
+                shim_plan_with(ShimName::Npm, &ci, &dir, false).unwrap(),
+                ShimPlan::EngineInstall { .. }
+            ),
+            "without the opt-in the real npm runs"
+        );
+        // npm's config decides when the command line is silent, and the
+        // command line wins when it is not.
+        std::fs::write(dir.join(".npmrc"), "ignore-scripts=true\n").unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::EngineInstall {
+                ignore_scripts: true,
+                ..
+            }
+        ));
+        let explicit = vec!["ci".to_string(), "--ignore-scripts=false".to_string()];
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &explicit, &dir, true).unwrap(),
+            ShimPlan::EngineInstall {
+                ignore_scripts: false,
+                ..
+            }
+        ));
+        std::fs::remove_file(dir.join(".npmrc")).unwrap();
+        // A pinned npm still routes the install; the pin governs npm's other verbs.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0","packageManager":"npm@11.0.0"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::EngineInstall { .. }
+        ));
+        // A project pinned to another PM refuses as before — routing never
+        // overrides the matrix.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0","packageManager":"pnpm@9.0.0"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::Refuse { .. }
+        ));
     }
 
     #[test]

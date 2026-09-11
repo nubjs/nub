@@ -1,0 +1,84 @@
+---
+title: "De-phantoming the npm ecosystem"
+description: A daily scan of 10,000 high-download npm packages, published as a package extensions database for other tools to use.
+author: Colin
+date: 2026-09-09T12:00:00Z
+---
+
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+
+We've used Nub's built-in phantom detector to scan the 10,000 most downloaded packages on `npm` for undeclared dependencies. The resulting database covers 792 packages, including 650 missing from `@yarnpkg/extensions`, which undergirds the global virtual stores of pnpm v12 and Aube.
+
+The results are published as [`@nubjs/extensions`](https://www.npmjs.com/package/@nubjs/extensions).
+
+### What are package extensions?
+
+Many packages in the npm ecosystem fail to properly declare their dependencies in `package.json`, especially peer dependencies. Due to flat layout algorithms used by npm and Yarn, these unsound configurations often went undiscovered for years. As `pnpm`, Nub, and other package managers have moved towards more disk-efficient isolated `node_modules` layouts, these issues are manifesting in the form of `ERR_MODULE_NOT_FOUND` errors.
+
+Yarn encountered this problem with Plug'n'Play and worked around it with `@yarnpkg/extensions`—a hand-maintained list of packages and their associated undeclared dependencies. It was a game of whack-a-mole, but this list grew over time to include a range of widely used packages.
+
+They look like this:
+
+```js
+export const packageExtensions = [
+  [
+    '@nrwl/devkit@*',
+    {
+      dependencies: {
+        tslib: '*',
+      },
+    },
+  ],
+  // ...
+];
+```
+
+<Accordions type="single" collapsible>
+<Accordion title="What is a phantom dependency?">
+
+A package imports something its manifest never declares. Under a flat `node_modules`, that import can happen to work because an unrelated dependency installed the missing package higher up the tree.
+
+A global virtual store moves the importing package outside the project. Node follows its symlink to the real location, where the project's `node_modules` is no longer an ancestor. The undeclared import stops resolving. Yarn Plug'n'Play also rejects undeclared imports rather than relying on the flat-tree accident.
+
+</Accordion>
+</Accordions>
+
+More recently, this package has come to underpin the [Aube](https://github.com/aubepkg/aube/pull/1369) and [pnpm v12](https://github.com/pnpm/pnpm/pull/12372) global virtual stores.
+
+> Bun 1.4 shipped an opt-in [global virtual store](https://github.com/oven-sh/bun/pull/29489), but it ships without extension-based patching at all. Packages with undeclared dependencies can install successfully, only to fail with `MODULE_NOT_FOUND` at runtime.
+
+### The problem
+
+Here's the problem: it's woefully incomplete and minimally maintained. There have been just a handful of updates in the last three years. In our scan of the top 10,000 packages, we found **650 additional packages** with undeclared dependencies beyond the **142 already covered by Yarn's database**, bringing the total to **792 packages**.
+
+| Database | Packages |
+| --- | ---: |
+| `@yarnpkg/extensions@2.0.7` | 142 |
+| `@nubjs/extensions@1.0.3` | 792 |
+
+The new `@nubjs/extensions` package serves as a modern, 100%-compatible drop-in replacement.
+
+- **Every Yarn rule is preserved**, including its dependency ranges and peer metadata.
+- **The export format is unchanged:** `packageExtensions`, an array of `[selector, extension]` pairs.
+- **CommonJS and ESM are supported.**
+
+Other tools can adopt this with a one-line change:
+
+```diff
+import {
+  packageExtensions,
+- } from '@yarnpkg/extensions';
++ } from '@nubjs/extensions';
+```
+
+Nub itself has incorporated this list into its resolution engine. Nub also statically analyzes source code to identify phantom dependencies on the fly. This phantom dependency finder in Nub is exactly what we used to generate the `@nubjs/extensions` data set. Our approach is detailed in [Unblocking the global virtual store](/blog/unblocking-the-global-virtual-store).
+
+The package is updated autonomously via CI.
+
+- **Periodic refreshes of the npm download ranking** to identify new or rising packages.
+- **Daily scans** check current published package versions.
+- **Handwritten overrides** are hard-coded and can be updated via PR. Some packages contain phantom dependencies that are not identifiable via static analysis.
+
+```bash
+npm install @nubjs/extensions
+```

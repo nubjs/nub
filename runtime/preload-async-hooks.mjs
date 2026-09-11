@@ -30,7 +30,7 @@ import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, CLOBBER_MAP, dataExtsFor,
   extname, isFileUrl, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
-  noteRuntimeV8FlagSource,
+  noteRuntimeV8FlagSource, outerHookOwnsFormat,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -114,6 +114,11 @@ async function loadInner(url, context, nextLoad) {
   // fast-tier hook.
   if (context?.importAttributes?.type === "text" && isFileUrl(url)) return loadTextImport(url);
   const ext = extname(url);
+  // A user loader above nub's assigned this TypeScript file a bare module format
+  // and will transform it itself from the raw source (tsx's pattern; see
+  // `outerHookOwnsFormat`). This tier has no registration counter like the fast
+  // tier's and needs none: nothing but such a hook produces the bare form here.
+  if (outerHookOwnsFormat(context?.format, ext) && !isDependency(url)) return nextLoad(url, context);
   // node_modules deps are NEVER transpiled (the byte-parity boundary). This guard is
   // make-or-break now that TRANSPILE_EXTS includes `.js`/`.mjs`/`.cjs`: without it,
   // the compat tier would route every dependency `.js` through oxc. (loadTranspile's

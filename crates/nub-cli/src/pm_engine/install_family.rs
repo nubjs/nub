@@ -1221,6 +1221,12 @@ pub struct InstallFlags {
     pub node_linker: Option<String>,
     pub registry: Option<String>,
     pub dir: Option<std::path::PathBuf>,
+    /// Run every lifecycle script, as npm does. Not a CLI flag: set only by the
+    /// `npm` shim's install routing, where the user typed `npm ci` and npm's
+    /// contract is that scripts run. Composes with the default-trust floor
+    /// like `dangerouslyAllowAllBuilds` — an explicit `allowBuilds: false`
+    /// still denies.
+    pub allow_all_builds: bool,
     /// Workspace selectors (`--filter`/`-r`/…), routed through the same
     /// `EffectiveFilter` path the registry verbs (`add`/`remove`/`update`) use.
     pub filter: WorkspaceFilterFlags,
@@ -1240,6 +1246,8 @@ pub struct CiFlags {
     pub no_optional: bool,
     pub registry: Option<String>,
     pub dir: Option<std::path::PathBuf>,
+    /// See [`InstallFlags::allow_all_builds`].
+    pub allow_all_builds: bool,
     /// Workspace selectors (`--filter`/`-r`/…) — same path as `install`.
     pub filter: WorkspaceFilterFlags,
     /// Output-verbosity flags (`--reporter`/`--silent`/`--loglevel`).
@@ -1329,6 +1337,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     args.force = flags.force;
     args.node_linker = flags.node_linker.clone();
     args.network.registry = flags.registry.clone();
+    args.dangerously_allow_all_builds = flags.allow_all_builds;
     // Config-requested frozen seeds the strict mode unless the CLI explicitly
     // opted out (`--no-frozen-lockfile`).
     args.lockfile.frozen_lockfile =
@@ -1613,6 +1622,7 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
             dep.no_optional || flags.no_optional,
         ),
         ignore_scripts: flags.ignore_scripts,
+        dangerously_allow_all_builds: flags.allow_all_builds,
         build_policy_override: config
             .scripts_disabled
             .then(|| std::sync::Arc::new(aube_scripts::BuildPolicy::deny_all())),

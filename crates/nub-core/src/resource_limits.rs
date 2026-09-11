@@ -29,7 +29,7 @@
 /// live. It is intentionally conservative — under-counting headroom degrades to
 /// "a bit slower," over-counting risks the abort we are preventing.
 #[cfg(target_os = "linux")]
-pub(crate) fn spawn_headroom() -> Option<usize> {
+pub fn spawn_headroom() -> Option<usize> {
     let pids_max = cgroup_pids_max();
     let rlimit = rlimit_nproc_soft();
     let in_use = current_thread_count().unwrap_or(64) as u64;
@@ -86,7 +86,7 @@ fn headroom_from(pids_max: Option<u64>, rlimit: Option<u64>, in_use: u64) -> Opt
 /// (the install is IO-bound); the build-script fan-out spawns native
 /// grandchildren, budgeted conservatively. The three THREAD-pool shares
 /// (workers + blocking + rayon) are what must fit the PID headroom.
-pub(crate) fn split_budget(headroom: usize) -> (usize, usize, usize, usize) {
+pub fn split_budget(headroom: usize) -> (usize, usize, usize, usize) {
     // Proportional shares, each clamped to a working floor. For a tiny budget the
     // floors can sum above it — acceptable: a sub-10-PID-headroom box is already
     // past saving, and the per-spawn EAGAIN guards + retry are the backstop there
@@ -104,7 +104,7 @@ pub(crate) fn split_budget(headroom: usize) -> (usize, usize, usize, usize) {
 /// is generous by default; we treat non-Linux as unconstrained to avoid
 /// regressing normal-box behavior on platforms that never exhibited the bug.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn spawn_headroom() -> Option<usize> {
+pub fn spawn_headroom() -> Option<usize> {
     None
 }
 
@@ -125,7 +125,7 @@ pub(crate) fn spawn_headroom() -> Option<usize> {
 /// `kern.maxfilesperproc`), a direct raise to infinity is rejected, so we fall
 /// back to a generous finite target. No-op on platforms without the syscall.
 #[cfg(unix)]
-pub(crate) fn raise_nofile_limit() {
+pub fn raise_nofile_limit() {
     // SAFETY: get/setrlimit are sync syscalls reading/writing this process's own
     // resource table. The out-param pointer is valid for the call; failure is a
     // non-zero return, handled below.
@@ -154,7 +154,7 @@ pub(crate) fn raise_nofile_limit() {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn raise_nofile_limit() {}
+pub fn raise_nofile_limit() {}
 
 // ───────────────────────── CPU budget (cgroup CFS quota) ─────────────────────────
 //
@@ -211,7 +211,7 @@ pub(crate) fn raise_nofile_limit() {}
 /// read is a Linux-cgroup concept, and like `spawn_headroom` the over-report trap
 /// was only ever a Linux-container problem; on macOS/Windows nothing constrains, so
 /// the detector returns `None`.
-pub(crate) fn cpu_budget() -> Option<usize> {
+pub fn cpu_budget() -> Option<usize> {
     // A `#[cfg(test)]` injection seam forces a deterministic budget for the unit
     // tests; in a release build this is a no-op (compiles out entirely).
     if let Some(n) = test_cpu_budget_override() {
@@ -241,7 +241,7 @@ pub(crate) fn cpu_budget() -> Option<usize> {
 /// `cpu_budget_from(1, _)` return `None` — i.e. CPU-budget DETECTION quietly
 /// no-ops there. Harmless: the caller then uses `raw_cpu == 1` and sizes pools
 /// minimally anyway.
-pub(crate) fn available_cores() -> usize {
+pub fn available_cores() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)

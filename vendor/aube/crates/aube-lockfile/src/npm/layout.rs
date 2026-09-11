@@ -7,6 +7,15 @@ use super::raw::InstallPathInfo;
 /// `pkg_install_path` using npm's nested-resolution walk: look first inside
 /// the package's own `node_modules`, then walk up each ancestor's
 /// `node_modules`, finally falling back to the root `node_modules`.
+///
+/// A workspace member's target path (`test/installation`) walks its
+/// DIRECTORY ancestors, not just `node_modules` boundaries: Node's upward
+/// lookup from `test/installation/` checks `test/node_modules/` before the
+/// root, and npm places a dep there when `test` is itself a member with
+/// its own tree (puppeteer keeps `diff@9` at `test/node_modules/diff` for
+/// both `test` and `test/installation`). Jumping straight to the root
+/// missed it and made every frozen install of that lockfile read as
+/// `manifest adds diff@^9.0.0`.
 pub(super) fn resolve_nested(
     pkg_install_path: &str,
     dep_name: &str,
@@ -28,8 +37,13 @@ pub(super) fn resolve_nested(
         // Walk up one level: strip the trailing "/node_modules/<pkg>" segment.
         if let Some(idx) = base.rfind("/node_modules/") {
             base.truncate(idx);
+        } else if base.starts_with("node_modules/") {
+            // A top-level path like "node_modules/foo" — next step is root.
+            base.clear();
+        } else if let Some(idx) = base.rfind('/') {
+            // A member target directory: its parent directory is next.
+            base.truncate(idx);
         } else {
-            // We're at a top-level path like "node_modules/foo" — next step is root.
             base.clear();
         }
     }

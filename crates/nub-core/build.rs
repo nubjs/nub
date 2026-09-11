@@ -171,6 +171,10 @@ fn main() {
         ("preload.cjs", "NUB_RUNTIME_HASH_PRELOAD_CJS"),
         ("gc-startup.cjs", "NUB_RUNTIME_HASH_GC_STARTUP"),
         ("watch-env-guard.cjs", "NUB_RUNTIME_HASH_WATCH_ENV_GUARD"),
+        (
+            "threadpool-snapshot.cjs",
+            "NUB_RUNTIME_HASH_THREADPOOL_SNAPSHOT",
+        ),
         ("compile-preamble.mjs", "NUB_RUNTIME_HASH_COMPILE_PREAMBLE"),
         ("addons/nub-native.node", "NUB_RUNTIME_HASH_ADDON"),
     ] {

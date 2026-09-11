@@ -6,16 +6,244 @@ use super::side_effects_cache::{
     SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
 };
 
-/// Run a root-package lifecycle hook, announcing it to the user if defined
-/// and turning aube_scripts::Error into a miette::Report with context.
-/// Silent when the hook isn't defined in package.json.
-pub(super) async fn run_root_lifecycle(
-    project_dir: &std::path::Path,
+/// Run a lifecycle hook of one importer — the root or a workspace member —
+/// with the member's `.bin` chain up to the workspace root on `PATH`, plus
+/// the lazy `node-gyp` shim when neither the project nor the ambient `PATH`
+/// has one (see [`aube_scripts::run_member_hook`]; the shim is the same one
+/// dependency builds get, and stays out of the way when a real node-gyp
+/// resolves). Silent when the hook isn't defined; the failure names the
+/// importer, since "root" was what a member's failing `prepare` used to be
+/// reported as.
+pub(super) async fn run_importer_lifecycle(
+    workspace_root: &std::path::Path,
+    importer_dir: &std::path::Path,
+    importer_path: &str,
     modules_dir_name: &str,
     manifest: &aube_manifest::PackageJson,
     hook: aube_scripts::LifecycleHook,
 ) -> miette::Result<()> {
-    run_root_lifecycle_script(project_dir, modules_dir_name, manifest, hook.script_name()).await
+    let script_name = hook.script_name();
+    if !manifest.scripts.contains_key(script_name) {
+        return Ok(());
+    }
+    let label = if importer_path == "." {
+        "root"
+    } else {
+        importer_path
+    };
+    tracing::debug!("Running {label} {script_name} script...");
+    let project_bin_dir = workspace_root.join(modules_dir_name).join(".bin");
+    let node_gyp_bin_dir = node_gyp_bootstrap::lazy_shim_bin_dir(&project_bin_dir)?;
+    let tool_dirs: Vec<&std::path::Path> = node_gyp_bin_dir.iter().map(|d| d.as_path()).collect();
+    aube_scripts::run_member_hook(
+        importer_dir,
+        workspace_root,
+        modules_dir_name,
+        manifest,
+        hook,
+        &tool_dirs,
+    )
+    .await
+    .map_err(|e| miette!("{label} {script_name} script failed: {e}"))?;
+    Ok(())
+}
+
+/// npm's link build pass (`Arborist#build(linkNodes, { type: 'links' })`
+/// in `rebuild.js`): a `file:` directory dependency is a symlink to a
+/// directory the project owns, and npm runs its `preinstall` → `prepare` →
+/// `install` → `postinstall` there, one hook across every link before the
+/// next — the shape of a workspace member's own hooks rather than a
+/// dependency build, so no build policy, no jail, no side-effects cache.
+/// Two things npm's build set does for a link carry over: a target with a
+/// `binding.gyp` and no install hook gets the implicit `node-gyp rebuild`
+/// (`#addToBuildSet`, the same synthesis the dependency pass applies), and a
+/// link reachable only through `optionalDependencies` fails its own scripts
+/// without failing the install (`_handleOptionalFailure`, which trashes the
+/// node — the caller removes its links and keeps its bins out, so code that
+/// falls back on the module's absence gets the fallback rather than a
+/// half-built package). npm links bins between `prepare` and `install`;
+/// here the caller regenerates every bin once the pass has run, which is
+/// what makes a bin `prepare` generated resolve.
+///
+/// Only an npm lockfile links a `file:` directory (pnpm copies it into the
+/// store and builds the copy as a dependency; a `link:` is scriptless in
+/// every manager), so the caller gates on the incumbent. A directory whose
+/// hooks already run as an importer's — the root and each workspace member,
+/// `importers` here — is excluded; the graph's own importer set is not the
+/// test, because the npm reader keeps every link target as an importer when
+/// the manifest declares no `workspaces`. So is a directory with no
+/// `package.json` to name a script.
+pub(super) async fn run_link_lifecycle_scripts(
+    project_dir: &std::path::Path,
+    modules_dir_name: &str,
+    graph: &aube_lockfile::LockfileGraph,
+    importers: &[(String, aube_manifest::PackageJson)],
+) -> miette::Result<LinkLifecycleOutcome> {
+    struct LinkTarget {
+        spec: String,
+        dep_paths: Vec<String>,
+        manifest: aube_manifest::PackageJson,
+        optional: bool,
+    }
+    let optional_only = aube_resolver::platform::optional_only_packages(graph);
+    let mut links: std::collections::BTreeMap<std::path::PathBuf, LinkTarget> =
+        std::collections::BTreeMap::new();
+    for (dep_path, pkg) in &graph.packages {
+        let Some(aube_lockfile::LocalSource::Link(path)) = &pkg.local_source else {
+            continue;
+        };
+        if let Some(link) = links.get_mut(path) {
+            // The same directory linked under two names: one build, and
+            // every graph key it answers to when the build fails.
+            link.dep_paths.push(dep_path.clone());
+            link.optional &= optional_only.contains(dep_path);
+            continue;
+        }
+        if importers
+            .iter()
+            .any(|(importer, _)| std::path::Path::new(importer) == path.as_path())
+        {
+            continue;
+        }
+        let target = project_dir.join(path);
+        let manifest_path = target.join("package.json");
+        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let mut manifest = aube_manifest::PackageJson::parse(&manifest_path, content)
+            .map_err(miette::Report::new)
+            .wrap_err_with(|| format!("failed to parse {}", manifest_path.display()))?;
+        if let Some(script) = aube_scripts::default_install_script(&target, &manifest) {
+            manifest.scripts.insert(
+                aube_scripts::LifecycleHook::Install
+                    .script_name()
+                    .to_string(),
+                script.to_string(),
+            );
+        }
+        links.insert(
+            path.clone(),
+            LinkTarget {
+                spec: format!("{}@{}", pkg.name, pkg.version),
+                dep_paths: vec![dep_path.clone()],
+                manifest,
+                optional: optional_only.contains(dep_path),
+            },
+        );
+    }
+    const HOOKS: [aube_scripts::LifecycleHook; 4] = [
+        aube_scripts::LifecycleHook::PreInstall,
+        aube_scripts::LifecycleHook::Prepare,
+        aube_scripts::LifecycleHook::Install,
+        aube_scripts::LifecycleHook::PostInstall,
+    ];
+    let has_work = |link: &LinkTarget| {
+        HOOKS
+            .iter()
+            .any(|hook| link.manifest.scripts.contains_key(hook.script_name()))
+    };
+    if !links.values().any(has_work) {
+        return Ok(LinkLifecycleOutcome::default());
+    }
+    tracing::debug!("phase:link_lifecycle {} linked directories", links.len());
+    let mut failed: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+    for hook in HOOKS {
+        for (path, link) in &links {
+            if failed.contains(path) {
+                continue;
+            }
+            let label = path.to_string_lossy();
+            let result = run_importer_lifecycle(
+                project_dir,
+                &project_dir.join(path),
+                &label,
+                modules_dir_name,
+                &link.manifest,
+                hook,
+            )
+            .await;
+            match result {
+                Ok(()) => {}
+                Err(error) if link.optional => {
+                    tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
+                        "{} is an optional dependency and failed to build; continuing without it: {error}",
+                        link.spec
+                    );
+                    failed.insert(path.clone());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let failed_optional = failed
+        .iter()
+        .map(|path| {
+            let link = &links[path];
+            FailedOptionalLink {
+                spec: link.spec.clone(),
+                dep_paths: link.dep_paths.clone(),
+            }
+        })
+        .collect();
+    Ok(LinkLifecycleOutcome {
+        ran: true,
+        failed_optional,
+    })
+}
+
+/// What [`run_link_lifecycle_scripts`] did: whether any script ran (a bin
+/// relink is then due), and the optional-only links whose scripts failed.
+#[derive(Debug, Default)]
+pub(super) struct LinkLifecycleOutcome {
+    pub ran: bool,
+    pub failed_optional: Vec<FailedOptionalLink>,
+}
+
+#[derive(Debug)]
+pub(super) struct FailedOptionalLink {
+    /// `name@version`, the key the state file records so the next install
+    /// retries the build instead of sealing the tree.
+    pub spec: String,
+    /// Every graph key the directory was linked under.
+    pub dep_paths: Vec<String>,
+}
+
+/// npm's trash for an optional node whose build failed: unlink it from
+/// every importer that placed it, and take it out of `graph` so the bin
+/// relink that follows never shims it. A `file:` link is only ever an
+/// importer's direct dependency (a published package cannot name a local
+/// directory), so the importers' own `node_modules` are the whole set of
+/// placements. Only a link is removed — a symlink, or the NTFS junction
+/// `aube_linker::sys::create_dir_link` makes on Windows, which reports as a
+/// directory rather than a symlink — never a real directory at that name,
+/// and never the link's target.
+pub(super) fn trash_failed_optional_links(
+    project_dir: &std::path::Path,
+    modules_dir_name: &str,
+    graph: &mut aube_lockfile::LockfileGraph,
+    failed: &[FailedOptionalLink],
+) -> miette::Result<()> {
+    for link in failed {
+        for dep_path in &link.dep_paths {
+            for (importer_path, deps) in graph.importers.iter_mut() {
+                let importer_dir =
+                    super::workspace::importer_project_dir(project_dir, importer_path);
+                for dep in deps.iter().filter(|dep| &dep.dep_path == dep_path) {
+                    let placement = importer_dir.join(modules_dir_name).join(&dep.name);
+                    if let Ok(metadata) = std::fs::symlink_metadata(&placement)
+                        && crate::commands::fs_helpers::is_link_or_junction_metadata(&metadata)
+                    {
+                        crate::commands::fs_helpers::remove_existing(&placement)?;
+                    }
+                }
+                deps.retain(|dep| &dep.dep_path != dep_path);
+            }
+            graph.packages.remove(dep_path);
+        }
+    }
+    Ok(())
 }
 
 /// Run a named root-package lifecycle script.
@@ -480,6 +708,15 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         if let Some(selected) = selected_dep_paths
             && !selected.contains(dep_path)
         {
+            continue;
+        }
+        // A linked directory is a symlink to its source, never a store
+        // entry, so it is not a dependency build: the on-disk check below
+        // could only ever warn for it (and did, under an allow-all policy).
+        // Its scripts are its own — a workspace member's run as an
+        // importer's, and a `file:` link's run in
+        // [`run_link_lifecycle_scripts`], npm's link build pass.
+        if matches!(pkg.local_source, Some(aube_lockfile::LocalSource::Link(_))) {
             continue;
         }
         // True when this package runs only because the `defaultTrust`
@@ -1644,6 +1881,94 @@ pub(super) fn unreviewed_dep_builds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trash removes the link the linker itself makes — a symlink, or
+    /// the junction on Windows — from every importer that placed it, leaves
+    /// the link's target and a real directory of the same shape alone, and
+    /// prunes the graph the bin relink reads.
+    #[test]
+    fn trash_failed_optional_links_removes_the_placement_link_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        let target = project.join("opt-dep");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("package.json"), "{}").unwrap();
+        let modules = project.join("node_modules");
+        std::fs::create_dir_all(modules.join("real-dir")).unwrap();
+        aube_linker::sys::create_dir_link(&target, &modules.join("opt-dep")).unwrap();
+        // A member that placed the same link under its own node_modules.
+        let member_modules = project.join("packages/a/node_modules");
+        std::fs::create_dir_all(&member_modules).unwrap();
+        aube_linker::sys::create_dir_link(&target, &member_modules.join("opt-dep")).unwrap();
+
+        let dep = |name: &str, dep_path: &str| aube_lockfile::DirectDep {
+            name: name.to_string(),
+            dep_path: dep_path.to_string(),
+            dep_type: aube_lockfile::DepType::Optional,
+            specifier: None,
+        };
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![
+                dep("opt-dep", "opt-dep@link+opt-dep"),
+                dep("real-dir", "real-dir@1.0.0"),
+            ],
+        );
+        graph.importers.insert(
+            "packages/a".to_string(),
+            vec![dep("opt-dep", "opt-dep@link+opt-dep")],
+        );
+        for (dep_path, name) in [
+            ("opt-dep@link+opt-dep", "opt-dep"),
+            ("real-dir@1.0.0", "real-dir"),
+        ] {
+            graph.packages.insert(
+                dep_path.to_string(),
+                aube_lockfile::LockedPackage {
+                    name: name.to_string(),
+                    version: "1.0.0".to_string(),
+                    dep_path: dep_path.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        trash_failed_optional_links(
+            project,
+            "node_modules",
+            &mut graph,
+            &[FailedOptionalLink {
+                spec: "opt-dep@1.0.0".to_string(),
+                dep_paths: vec!["opt-dep@link+opt-dep".to_string()],
+            }],
+        )
+        .unwrap();
+
+        assert!(
+            modules.join("opt-dep").symlink_metadata().is_err()
+                && member_modules.join("opt-dep").symlink_metadata().is_err(),
+            "both placements of the failed link are gone"
+        );
+        assert!(
+            target.join("package.json").is_file(),
+            "the link's target directory is untouched"
+        );
+        assert!(
+            modules.join("real-dir").is_dir(),
+            "a real directory is not a link and stays"
+        );
+        assert!(!graph.packages.contains_key("opt-dep@link+opt-dep"));
+        assert!(graph.packages.contains_key("real-dir@1.0.0"));
+        assert!(
+            graph
+                .importers
+                .values()
+                .flatten()
+                .all(|dep| dep.name != "opt-dep"),
+            "every importer edge to the failed link is pruned"
+        );
+    }
 
     #[tokio::test]
     async fn global_virtual_store_lifecycle_uses_physical_package_dir() {

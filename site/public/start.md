@@ -81,7 +81,7 @@ Two facts to hold onto when proposing changes:
 Nub ships its full docs offline:
 
 ```sh
-nub agent docs                   # table of contents + the overview page
+nub agent docs                   # usage + table of contents
 nub agent docs --page /docs/run  # any page's full markdown
 nub agent docs --list            # just the page list
 ```
