@@ -1,6 +1,6 @@
 # Sandbox engine
 
-The engine compiles filesystem, network and environment permissions for native child processes. Its Rust interface accepts configuration and paths supplied by an embedder; these examples do not define a `nub.jsonc` field or a command-line policy format.
+The engine compiles filesystem, network and environment permissions for native child processes. Its raw Rust interface accepts configuration and paths supplied by an embedder; these examples do not define a `nub.jsonc` field or a command-line policy format.
 
 ## Filesystem permissions
 
@@ -187,6 +187,24 @@ Network filtering is independent of filesystem access:
 
 Network entries accept host patterns and CIDRs. Unlike filesystem grants, network rules retain ordered allow/deny matching. A host grant is not an HTTP-method restriction and does not prevent uploads to that host. The boolean `false` denies egress; `true` disables Nub's network filtering. Windows AppContainer capabilities still constrain networking even without a Nub host filter.
 
+### Network rules
+
+A network rule is a literal host, a CIDR, `*`, or `*.suffix`. The suffix wildcard excludes its apex, and the last matching entry wins.
+
+```jsonc
+{
+  "net": [
+    "registry.npmjs.org",
+    "198.51.100.0/24",
+    "*.packages.example.com",
+    "!admin.packages.example.com",
+    "<private>"
+  ]
+}
+```
+
+The `<private>` token, also spelled `<local>`, permits RFC 1918 and IPv6 ULA addresses. A bare `*` does not permit those ranges. `$trusted` and `$downloads` are array-only built-in host sets. A fine-grained allow starts the proxy; `net: true` and `net: false` do not. The object form accepts per-host booleans, but `proxy` is compiler-derived rather than a policy key.
+
 | OS | Host-filtered networking | Limits |
 | --- | --- | --- |
 | Linux | A seccomp notification supervisor redirects external TCP connections through the policy proxy. | No client proxy configuration is required. DNS uses the configured resolver; direct IPv4 loopback remains available. General UDP is denied. Host rules are not an all-channel data-loss boundary. |
@@ -195,7 +213,30 @@ Network entries accept host patterns and CIDRs. Unlike filesystem grants, networ
 
 Coarse `net: true` and `net: false` policies do not start a host-filtering proxy. The build jail uses coarse catalog network permissions rather than enforcing its recorded observed-host lists. On Windows, the coarse allow grants public outbound networking, not unrestricted host/LAN/loopback access.
 
-The environment example inherits named values from the supplied snapshot. A trailing `?` makes a missing value optional. Secret values are sensitive data supplied to the child, not values hidden from it; an allowed child can use them. Unlisted environment values are not implicitly inherited by this explicit policy.
+### Environment rules
+
+The supplied ambient map is the source for environment policy. Array entries select optional keys; object entries require exact keys unless `?` or `optional: true` marks them optional.
+
+```jsonc
+{
+  "net": ["registry.example.com"],
+  "vars": {
+    "PORT": "port",
+    "MODE": "enum:development|production",
+    "CACHE_DIR": "$(cache-location)"
+  },
+  "secrets": {
+    "REGISTRY_TOKEN": {
+      "format": "/[A-Za-z0-9_-]+/",
+      "brokerTo": ["registry.example.com"]
+    }
+  }
+}
+```
+
+This example requires `PORT`, `MODE`, and `REGISTRY_TOKEN` in the supplied ambient map. `cache-location` runs once only in an approved source; a dependency source cannot use a dynamic environment value or `brokerTo`. A brokered secret must be a required exact name and name an allowed literal DNS host in a fine-grained network policy. Type strings are `string`, `integer`, `number`, `port`, `/regex/`, and `enum:a|b`. `vars: true` and `vars: "*"` select all supplied variables, while secrets always name keys explicitly. The object form's options are `format`, `optional`, and `brokerTo`.
+
+The environment example inherits named values from the supplied snapshot. A trailing `?` makes a missing value optional. Ordinary secret grants supply sensitive data to the child; an allowed child can use it. A brokered secret instead stays out of the child environment and is injected by the proxy for its approved host. Unlisted environment values are not implicitly inherited by this explicit policy.
 
 Filtering the environment does not hide files granted through `fs`. Linux excludes procfs by default. The [explicit self-metadata permissions](#explicit-linux-process-metadata) grant only the requesting process's selected files; other processes' metadata and environment files remain excluded.
 

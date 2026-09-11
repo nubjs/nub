@@ -364,7 +364,7 @@ fn child_environment(_root: &Path) {
 }
 
 fn child_worker(root: &Path) {
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "production_macos_child_reentry", "--nocapture"])
         .env(CASE, "sleep")
         .spawn()
@@ -374,9 +374,8 @@ fn child_worker(root: &Path) {
         child.id().to_string(),
     )
     .unwrap();
-    loop {
-        std::thread::park();
-    }
+    child.wait().expect("normal descendant is reaped");
+    panic!("normal descendant exited before its owner was terminated");
 }
 
 fn child_owner_crash(root: &Path) {

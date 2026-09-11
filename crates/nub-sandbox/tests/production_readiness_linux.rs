@@ -52,7 +52,7 @@ fn linux_production_child() {
         }
         other => panic!("unknown Linux production probe {other}"),
     }
-    println!("LINUX_PRODUCTION_READY:{case}");
+    println!("LINUX_PRODUCTION_READY:{}", case.to_string_lossy());
 }
 
 fn fixture() -> tempfile::TempDir {

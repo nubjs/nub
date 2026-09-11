@@ -40,7 +40,7 @@ Each script receives access to its package directory and the tools needed to bui
 - Scripts receive a build-specific home and temporary directory.
 - Root-project scripts, such as `prepare`, run with the project's ordinary permissions.
 
-The jail reduces exposure to malicious install scripts; it is not isolation for arbitrary untrusted code. On Windows, native-tool compatibility grants can remove filesystem and network isolation while retaining environment filtering and process cleanup.
+The jail reduces exposure to malicious install scripts; it is not isolation for arbitrary untrusted code. On Windows, a full-disk catalog grant omits the AppContainer. That launch has no operating-system filesystem or network boundary, but environment filtering and process cleanup remain.
 
 ### Automatic filesystem grants
 

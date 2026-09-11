@@ -228,8 +228,8 @@ fn plain(policy: &SandboxPolicy, project: &Path) -> Value {
             pipe.read_to_end(&mut bytes).unwrap();
             bytes
         };
-        let stdout = scope.spawn(|| drain(Box::new(stdout)));
-        let stderr = scope.spawn(|| drain(Box::new(stderr)));
+        let stdout = scope.spawn(move || drain(Box::new(stdout)));
+        let stderr = scope.spawn(move || drain(Box::new(stderr)));
         let start = Instant::now();
         let status = loop {
             if let Some(status) = child.0.try_wait().unwrap() {

@@ -44,6 +44,9 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
+      - name: Selecting the Windows compiler host
+        if: runner.os == 'Windows'
+        run: echo 'RUSTUP_OVERRIDE_HOST_TRIPLE=x86_64-pc-windows-msvc' >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
           toolchain: ${{ matrix.toolchain }}
