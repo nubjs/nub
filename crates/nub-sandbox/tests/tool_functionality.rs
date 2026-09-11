@@ -815,8 +815,20 @@ fn windows_bun140_retained_bundle() {
 #[test]
 #[ignore = "requires pinned Bun; distinguishes link privileges from path grants"]
 fn windows_bun140_link_primitives_and_global_sources() {
+    windows_bun_link_primitives_and_global_sources("bun140");
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires pinned Bun; distinguishes link privileges from path grants"]
+fn windows_bun132_link_primitives_and_global_sources() {
+    windows_bun_link_primitives_and_global_sources("bun132");
+}
+
+#[cfg(windows)]
+fn windows_bun_link_primitives_and_global_sources(name: &str) {
     let tools = tools();
-    let tool = tools.iter().find(|tool| tool.name == "bun140").unwrap();
+    let tool = tools.iter().find(|tool| tool.name == name).unwrap();
     // This canary is outside even the broad fixture-only diagnostic grant.
     let withheld = fixture();
     let canary = withheld.path().join("secret");

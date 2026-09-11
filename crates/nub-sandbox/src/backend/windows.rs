@@ -2564,8 +2564,28 @@ pub(super) mod launch {
             let std_triple = stdio.triple;
             let inherit_handles = &stdio.child_handles;
             let n_attrs = 1 + u32::from(confined) + u32::from(!inherit_handles.is_empty());
+            #[cfg(test)]
+            let relocation_probe =
+                confined && std::env::var_os("NUB_NATIVE_RELOCATION_PROBE").is_some();
+            #[cfg(test)]
+            let n_attrs = n_attrs + u32::from(relocation_probe);
             let jobs = [job];
             let mut attr = ProcThreadAttrList::new(n_attrs)?;
+            #[cfg(test)]
+            let mut relocation_policy = 0x0000_0200_u64;
+            #[cfg(test)]
+            if relocation_probe {
+                // Test-only discriminator for MSYS's fixed-address shared state.
+                // SDK: PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_ALWAYS_OFF.
+                // This does not change release builds or the AppContainer token.
+                attr.update(
+                    windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY
+                        as usize,
+                    std::ptr::from_mut(&mut relocation_policy).cast(),
+                    std::mem::size_of_val(&relocation_policy),
+                )?;
+                eprintln!("MSYS_RELOCATION_PROBE root policy={relocation_policy:#x}");
+            }
             // The attribute list stores a POINTER to `sec_caps` rather than a copy, so it must
             // stay live until CreateProcessW returns.
             if confined {

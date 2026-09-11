@@ -291,25 +291,67 @@ fn reads_fixture_memory(target: &Value) -> Value {
         "error": error.as_ref().and_then(std::io::Error::raw_os_error), "message": error.map(|error| error.to_string())})
 }
 
-fn file_identity(handle: HANDLE) -> Value {
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+fn compare_child_handle(
+    process: HANDLE,
+    candidate: HANDLE,
+    expected: HANDLE,
+    close_source: bool,
+) -> Value {
+    use windows_sys::Win32::Foundation::{
+        CompareObjectHandles, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
     };
-    let mut info = FILE_ID_INFO::default();
+    let mut duplicate = std::ptr::null_mut();
+    let options = DUPLICATE_SAME_ACCESS
+        | if close_source {
+            DUPLICATE_CLOSE_SOURCE
+        } else {
+            0
+        };
     let ok = unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileIdInfo,
-            (&mut info as *mut FILE_ID_INFO).cast(),
-            std::mem::size_of_val(&info) as u32,
+        DuplicateHandle(
+            process,
+            candidate,
+            GetCurrentProcess(),
+            &mut duplicate,
+            0,
+            0,
+            options,
         )
     } != 0;
-    if ok {
-        json!({"volume": info.VolumeSerialNumber, "file": info.FileId.Identifier})
-    } else {
+    if !ok {
         let error = std::io::Error::last_os_error();
-        json!({"error": error.raw_os_error(), "message": error.to_string()})
+        return json!({"operation": "DuplicateHandle", "error": error.raw_os_error(), "message": error.to_string()});
     }
+    let duplicate = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+    // Comparing kernel objects does not submit file/pipe I/O against a reused
+    // numeric slot. A separately opened file is not an equivalent positive control.
+    let same = unsafe { CompareObjectHandles(duplicate.as_raw_handle(), expected) } != 0;
+    let error = (!same).then(std::io::Error::last_os_error);
+    json!({"operation": "CompareObjectHandles", "same": same,
+        "error": error.as_ref().and_then(std::io::Error::raw_os_error), "message": error.map(|error| error.to_string())})
+}
+
+fn child_handle_positive_control(process: HANDLE, expected: HANDLE) -> Value {
+    use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+    let mut remote = std::ptr::null_mut();
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            expected,
+            process,
+            &mut remote,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } != 0;
+    if !ok {
+        let error = std::io::Error::last_os_error();
+        return json!({"operation": "DuplicateHandleIntoChild", "error": error.raw_os_error(), "message": error.to_string()});
+    }
+    // This synthetic capability is injected only after the negative observation.
+    // Round-tripping closes the remote copy; the local copy is RAII-owned.
+    compare_child_handle(process, remote, expected, true)
 }
 
 fn install_user_only_process_dacl() -> Value {
@@ -586,18 +628,17 @@ fn production_windows_child() {
             json!({"parent": probe(&config), "child": record(&output)})
         }
         "handle" => {
-            let control = (config["handle_control"] == true).then(|| {
-                File::open(Path::new(config["root"].as_str().unwrap()).join("omitted/canary"))
-                    .unwrap()
-            });
-            let handle = control.as_ref().map_or(
-                config["handle"].as_u64().unwrap() as usize as HANDLE,
-                |file| file.as_raw_handle(),
-            );
-            // A numerical handle may identify an unrelated child object. Never
-            // perform a stream read against it: compare the canary's file ID.
-            eprintln!("WINDOWS_HANDLE_QUERY handle={handle:?}");
-            json!({"handle": handle as usize, "identity": file_identity(handle)})
+            let root = Path::new(config["root"].as_str().unwrap());
+            std::fs::write(
+                root.join("project")
+                    .join(format!("ready-{}", config["tag"].as_str().unwrap())),
+                json!({"pid": std::process::id(), "probe": probe(&config)}).to_string(),
+            )
+            .unwrap();
+            // The parent owns and reaps this child, including assertion failures.
+            // Never query the unrelated numeric handle from inside the child.
+            std::thread::sleep(Duration::from_secs(60));
+            json!({"expired": true})
         }
         "network" => {
             let address: std::net::SocketAddr =
@@ -931,28 +972,63 @@ fn unrelated_inheritable_file_handle_never_crosses_a_public_launch() {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"outside-canary");
-    let mut config = config(root.path());
-    config["handle"] = json!(file.as_raw_handle() as usize);
-    let expected = file_identity(file.as_raw_handle());
-    assert!(expected.get("file").is_some(), "{expected}");
-    config["handle_control"] = json!(true);
-    let control = plain(
-        &policy(root.path(), &project, "handle", config.clone()),
-        &project,
-    );
-    assert_eq!(control["identity"], expected, "{control}");
-    config["handle_control"] = json!(false);
-    let policy = policy(root.path(), &project, "handle", config);
-    for native in [false, true] {
-        let result = output(&session(&policy, native), &project);
+    for (native, redact) in [(false, false), (false, true), (true, false), (true, true)] {
+        let tag = format!("handle-{native}-{redact}");
+        let mut config = config(root.path());
+        config["tag"] = json!(tag);
+        let policy = policy(root.path(), &project, "handle", config);
+        let sandbox = session(&policy, native);
+        let prepared = sandbox
+            .prepare(
+                command(&project)
+                    .redact_stdout(redact)
+                    .redact_stderr(redact),
+            )
+            .unwrap();
+        assert!(prepared.degradation.is_full());
+        let child = prepared.spawn().unwrap();
+        let report = ready(root.path(), &tag);
+        assert_eq!(report["pid"], child.id());
+        assert!(
+            report["probe"]["sid"]
+                .as_str()
+                .unwrap()
+                .starts_with("S-1-15-2-")
+        );
+        assert_eq!(!report["probe"]["adapter"].is_null(), native);
+        let process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, child.id()) };
+        assert!(!process.is_null(), "{}", std::io::Error::last_os_error());
+        let process = unsafe { OwnedHandle::from_raw_handle(process) };
         eprintln!(
-            "WINDOWS_HANDLE_IDENTITY {}",
-            json!({"native": native, "expected": expected, "result": result})
+            "WINDOWS_HANDLE_COMPARE pid={} handle={:?}",
+            child.id(),
+            file.as_raw_handle()
         );
-        assert_ne!(
-            result["identity"], expected,
-            "inherited file capability bypassed the policy: {result}"
+        let result = compare_child_handle(
+            process.as_raw_handle(),
+            file.as_raw_handle(),
+            file.as_raw_handle(),
+            false,
         );
+        let control = child_handle_positive_control(process.as_raw_handle(), file.as_raw_handle());
+        eprintln!(
+            "WINDOWS_HANDLE_OBJECT {}",
+            json!({"native": native, "redact": redact, "pid": child.id(), "handle": file.as_raw_handle() as usize,
+                "result": result, "positive_control": control})
+        );
+        assert_eq!(
+            control["same"], true,
+            "invalid comparison control: {control}"
+        );
+        assert!(
+            (result["operation"] == "DuplicateHandle" && result["error"] == 6)
+                || (result["operation"] == "CompareObjectHandles"
+                    && result["same"] == false
+                    && result["error"] == 1656),
+            "inherited file capability or invalid negative oracle: {result}"
+        );
+        drop(process);
+        drop(child);
     }
 }
 

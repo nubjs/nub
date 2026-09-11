@@ -185,6 +185,8 @@ jobs:
           foreach ($case in $cases) {
             $toolModes = $modes
             if ($case[0] -notin @('git', 'git-lfs')) { $toolModes += @('msys-plain', 'msys-embedded') }
+            if ($case[0] -in @('git', 'git-lfs')) { $toolModes += @('relocation-root-adapter', 'relocation-tree-adapter') }
+            if ($case[0] -eq 'cargo') { $toolModes += 'msys-relocation-tree-adapter' }
             if ($case[0] -eq 'bun132') { $toolModes += @('nodes-embedded', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter') }
             foreach ($mode in $toolModes) {
               Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
@@ -193,7 +195,11 @@ jobs:
               Remove-Item Env:NUB_NATIVE_EMBEDDED_ADAPTER -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_DIRECTORY_MASK_PROBE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_MOUNT_QUERY_PROBE -ErrorAction SilentlyContinue
-              if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
+              Remove-Item Env:NUB_NATIVE_RELOCATION_PROBE -ErrorAction SilentlyContinue
+              Remove-Item Env:NUB_NATIVE_RELOCATION_TREE_PROBE -ErrorAction SilentlyContinue
+              if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter', 'relocation-root-adapter', 'relocation-tree-adapter', 'msys-relocation-tree-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
+              if ($mode.Contains('relocation-')) { $env:NUB_NATIVE_RELOCATION_PROBE = '1' }
+              if ($mode.Contains('relocation-tree-')) { $env:NUB_NATIVE_RELOCATION_TREE_PROBE = '1' }
               if ($mode -in @('directory-mask-adapter', 'mount-query-adapter')) { $env:NUB_NATIVE_DIRECTORY_MASK_PROBE = '1' }
               if ($mode -eq 'mount-query-adapter') { $env:NUB_NATIVE_MOUNT_QUERY_PROBE = '1' }
               if ($mode -in @('embedded', 'msys-embedded', 'nodes-embedded')) { $env:NUB_NATIVE_EMBEDDED_ADAPTER = '1' }
@@ -214,6 +220,8 @@ jobs:
           Remove-Item Env:NUB_NATIVE_EMBEDDED_ADAPTER -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_DIRECTORY_MASK_PROBE -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_MOUNT_QUERY_PROBE -ErrorAction SilentlyContinue
+          Remove-Item Env:NUB_NATIVE_RELOCATION_PROBE -ErrorAction SilentlyContinue
+          Remove-Item Env:NUB_NATIVE_RELOCATION_TREE_PROBE -ErrorAction SilentlyContinue
           $results | ConvertTo-Json > reports/tool-results.json
           # Diagnostic DLL/ancestor/mask alternatives remain results, not production verdicts.
           if ($results | Where-Object { $_.mode -in @('plain', 'embedded', 'msys-plain', 'msys-embedded') -and $_.exit -ne 0 }) { exit 1 }
@@ -226,6 +234,16 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p nub-sandbox --profile fast --lib js_tool_functionality_probe::windows_bun140_link_primitives_and_global_sources -- --exact --ignored --nocapture --test-threads=1 2>&1 | tee reports/bun-global-entrypoint.log
+      - name: Checking Bun 1.3.2 archive entrypoints with mount-query probe
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        shell: bash
+        env:
+          NUB_NATIVE_ADAPTER_PROBE_ENABLE: '1'
+          NUB_NATIVE_DIRECTORY_MASK_PROBE: '1'
+          NUB_NATIVE_MOUNT_QUERY_PROBE: '1'
+        run: |
+          set -o pipefail
+          cargo test -p nub-sandbox --profile fast --lib js_tool_functionality_probe::windows_bun132_link_primitives_and_global_sources -- --exact --ignored --nocapture --test-threads=1 2>&1 | tee reports/bun132-global-entrypoint.log
       - name: Preserving native evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

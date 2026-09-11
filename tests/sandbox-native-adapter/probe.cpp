@@ -23,6 +23,7 @@ struct Payload {
     BOOL identities_captured;
     BOOL directory_read_probe;
     BOOL mount_query_probe;
+    BOOL relocation_tree_probe;
 };
 static Payload state = {};
 
@@ -109,6 +110,7 @@ int wmain(int argc, wchar_t** argv) {
     if (argc != 3) return 2;
     state.directory_read_probe = GetEnvironmentVariableW(L"NUB_NATIVE_DIRECTORY_MASK_PROBE", nullptr, 0) != 0;
     state.mount_query_probe = GetEnvironmentVariableW(L"NUB_NATIVE_MOUNT_QUERY_PROBE", nullptr, 0) != 0;
+    state.relocation_tree_probe = GetEnvironmentVariableW(L"NUB_NATIVE_RELOCATION_TREE_PROBE", nullptr, 0) != 0;
     DWORD pid = wcstoul(argv[1], nullptr, 10);
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
                                  PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
@@ -695,8 +697,60 @@ static BOOL WINAPI create_process(LPCWSTR application, LPWSTR command,
     diagnostic("ADAPTER_CREATE_PROCESS pid=%lu application=%ls command=%ls flags=%08lx process_attrs=%p thread_attrs=%p inherit=%d reserved_size=%u\n",
         GetCurrentProcessId(), application ? application : L"(null)", command ? command : L"(null)",
         flags, process_attrs, thread_attrs, inherit, startup ? startup->cbReserved2 : 0);
-    if (!true_create_process(application, command, process_attrs, thread_attrs, inherit,
-                             flags | CREATE_SUSPENDED, environment, cwd, startup, child)) return FALSE;
+    STARTUPINFOEXW extended = {};
+    PPROC_THREAD_ATTRIBUTE_LIST attributes = nullptr;
+    // Existing caller lists may retain this pointer after CreateProcess returns.
+    static DWORD64 mitigation = PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_ALWAYS_OFF;
+    if (state.relocation_tree_probe) {
+        // Diagnostic only: never discard a caller's existing opaque attributes.
+        // Root-only and tree-wide modes separately measure mitigation inheritance.
+        if (!startup) {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        if (flags & EXTENDED_STARTUPINFO_PRESENT) {
+            // The public API either appends without replacing other attributes or
+            // fails for lack of capacity. A skipped request is logged, not a fix.
+            auto existing = reinterpret_cast<STARTUPINFOEXW*>(startup)->lpAttributeList;
+            BOOL applied = existing && UpdateProcThreadAttribute(existing, 0,
+                PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation, sizeof(mitigation), nullptr, nullptr);
+            diagnostic("MSYS_RELOCATION_PROBE existing applied=%d error=%lu\n", applied, GetLastError());
+        } else {
+            SIZE_T bytes = 0;
+            InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+            attributes = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, bytes));
+            if (!attributes) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
+            if (!InitializeProcThreadAttributeList(attributes, 1, 0, &bytes)) {
+                DWORD error = GetLastError();
+                HeapFree(GetProcessHeap(), 0, attributes);
+                SetLastError(error);
+                return FALSE;
+            }
+            if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+                                           &mitigation, sizeof(mitigation), nullptr, nullptr)) {
+                DWORD error = GetLastError();
+                DeleteProcThreadAttributeList(attributes);
+                HeapFree(GetProcessHeap(), 0, attributes);
+                SetLastError(error);
+                return FALSE;
+            }
+            extended.StartupInfo = *startup;
+            extended.StartupInfo.cb = sizeof(extended);
+            extended.lpAttributeList = attributes;
+            startup = &extended.StartupInfo;
+            flags |= EXTENDED_STARTUPINFO_PRESENT;
+            diagnostic("MSYS_RELOCATION_PROBE child policy=%llx\n", mitigation);
+        }
+    }
+    BOOL created = true_create_process(application, command, process_attrs, thread_attrs, inherit,
+                                      flags | CREATE_SUSPENDED, environment, cwd, startup, child);
+    DWORD creation_error = GetLastError();
+    if (attributes) {
+        DeleteProcThreadAttributeList(attributes);
+        HeapFree(GetProcessHeap(), 0, attributes);
+    }
+    SetLastError(creation_error);
+    if (!created) return FALSE;
     if (!inject(child->hProcess, state)) {
         DWORD error = GetLastError();
         TerminateProcess(child->hProcess, 127);
