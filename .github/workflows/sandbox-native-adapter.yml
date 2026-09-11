@@ -2,7 +2,7 @@ name: Sandbox native API adapter probe
 
 on:
   push:
-    branches: [sandbox-native-adapter]
+    branches: [sandbox-native-adapter, sandbox-native-startup]
     paths:
       - crates/nub-sandbox/**
       - tests/sandbox-native-adapter/**
@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 60
     env:
       RUSTUP_OVERRIDE_HOST_TRIPLE: x86_64-pc-windows-msvc
+      NATIVE_FOCUSED_RUN: ${{ github.ref_name == 'sandbox-native-startup' && '1' || '' }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -108,6 +109,23 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p nub-sandbox --profile fast --lib embedded_native_adapter_primitives_with_raw_and_plain_controls -- --nocapture --test-threads=1 2>&1 | tee reports/embedded-native-adapter.log
+      - name: Checking the public grammar
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p nub-sandbox --profile fast --test production_readiness_grammar -- --nocapture --test-threads=1 2>&1 | tee reports/grammar.log
+      - name: Checking public sessions as a standard user
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          & cargo test -p nub-sandbox --profile fast --test production_readiness_windows --no-run --message-format=json-render-diagnostics > reports/standard-user-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $artifacts = Get-Content reports/standard-user-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
+          $test = @($artifacts | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'production_readiness_windows' -and $_.executable })
+          if ($test.Count -ne 1) { throw "Expected one exact Windows probe executable, got $($test.Count)" }
+          & ./tests/sandbox-native-adapter/run-standard-user.ps1 -TestBinary $test[0].executable -ReportDirectory reports
+          exit $LASTEXITCODE
       - name: Checking native ownership and cleanup with the embedded adapter
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
@@ -148,6 +166,10 @@ jobs:
           )
           foreach ($tool in @('npm', 'pnpm9', 'pnpm10', 'pnpm11', 'yarn1', 'yarn2', 'yarn3', 'yarn4', 'bun132', 'bun140')) {
             $cases += ,@($tool, "js_tool_functionality_probe::windows_native_$($tool)_plain", "js_tool_functionality_probe::windows_native_$($tool)_tooldirs")
+          }
+          if ($env:NATIVE_FOCUSED_RUN) {
+            $cases = @($cases | Where-Object { $_[0] -in @('cargo', 'git', 'git-lfs', 'bun132', 'bun140') })
+            Write-Host 'Focused startup diagnostics; this is not the full compatibility matrix'
           }
           $results = @()
           $gitExec = (& git --exec-path).Trim()

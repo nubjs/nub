@@ -59,7 +59,15 @@ try {
 }
 $env:SANDBOX_SYMLINK_DEVELOPER_MODE = $developerMode | ConvertTo-Json -Compress
 Write-Host "WINDOWS_SYMLINK_CONTEXT=$env:SANDBOX_SYMLINK_DEVELOPER_MODE"
-Get-FileHash '.\probe.exe'
+$hash = [Security.Cryptography.SHA256]::Create()
+$binaryStream = [IO.File]::OpenRead((Join-Path $owned 'probe.exe'))
+try {
+    $digest = [BitConverter]::ToString($hash.ComputeHash($binaryStream)).Replace('-', '').ToLowerInvariant()
+    Write-Host "STANDARD_USER_BINARY_SHA256=$digest"
+} finally {
+    $binaryStream.Dispose()
+    $hash.Dispose()
+}
 & '.\probe.exe' --ignored --nocapture --test-threads=1
 $code = $LASTEXITCODE
 try {

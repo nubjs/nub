@@ -8,6 +8,8 @@
 #include <cwchar>
 #include <cstring>
 #include <cstdint>
+#include <cstdarg>
+#include <intrin.h>
 #include <initializer_list>
 #include "detours.h"
 
@@ -129,11 +131,103 @@ int wmain(int argc, wchar_t** argv) {
     return ok ? 0 : 6;
 }
 #else
+// Startup can fail before the CRT's stderr stream or MSYS is initialized.
+// One bounded raw write also avoids recursively entering the file hooks.
+static volatile LONG diagnostic_active = 0;
+static PVOID exception_handler = nullptr;
+static void diagnostic(const char* format, ...) {
+    DWORD error = GetLastError();
+    if (InterlockedCompareExchange(&diagnostic_active, 1, 0) == 0) {
+        char line[4096];
+        va_list args;
+        va_start(args, format);
+        _vsnprintf_s(line, sizeof(line), _TRUNCATE, format, args);
+        va_end(args);
+        DWORD written = 0;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, DWORD(strlen(line)), &written, nullptr);
+        InterlockedExchange(&diagnostic_active, 0);
+    }
+    SetLastError(error);
+}
+
+static LONG CALLBACK startup_exception(EXCEPTION_POINTERS* fault) {
+    DWORD error = GetLastError();
+    static volatile LONG active = 0;
+    static volatile LONG count = 0;
+    if (InterlockedCompareExchange(&active, 1, 0) != 0)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedIncrement(&count) <= 16) {
+        auto record = fault->ExceptionRecord;
+        MEMORY_BASIC_INFORMATION region = {};
+        VirtualQuery(record->ExceptionAddress, &region, sizeof(region));
+        char module[MAX_PATH] = {};
+        if (region.Type == MEM_IMAGE)
+            GetModuleFileNameA(static_cast<HMODULE>(region.AllocationBase), module, MAX_PATH);
+        diagnostic("ADAPTER_STARTUP_EXCEPTION pid=%lu code=%08lx address=%p module=%s base=%p offset=%llx info0=%llx info1=%llx\n",
+            GetCurrentProcessId(), record->ExceptionCode, record->ExceptionAddress, module,
+            region.AllocationBase,
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(record->ExceptionAddress) -
+                                            reinterpret_cast<uintptr_t>(region.AllocationBase)),
+            static_cast<unsigned long long>(record->NumberParameters > 0 ? record->ExceptionInformation[0] : 0),
+            static_cast<unsigned long long>(record->NumberParameters > 1 ? record->ExceptionInformation[1] : 0));
+    }
+    InterlockedExchange(&active, 0);
+    SetLastError(error);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+using NtTerminate = NTSTATUS (NTAPI*)(HANDLE, NTSTATUS);
+static NtTerminate true_terminate_process = nullptr;
+static auto true_exit_code = GetExitCodeProcess;
+static auto true_virtual_alloc = VirtualAlloc;
+
+static NTSTATUS NTAPI terminate_process(HANDLE process, NTSTATUS status) {
+    DWORD error = GetLastError();
+    DWORD pid = GetProcessId(process);
+    diagnostic("ADAPTER_TERMINATE pid=%lu target=%lu handle=%p status=%08lx caller=%p\n",
+        GetCurrentProcessId(), pid, process, static_cast<ULONG>(status), _ReturnAddress());
+    SetLastError(error);
+    return true_terminate_process(process, status);
+}
+
+static BOOL WINAPI exit_code(HANDLE process, LPDWORD code) {
+    BOOL ok = true_exit_code(process, code);
+    DWORD error = GetLastError();
+    if (ok && *code != STILL_ACTIVE)
+        diagnostic("ADAPTER_CHILD_EXIT pid=%lu child=%lu status=%08lx\n",
+            GetCurrentProcessId(), GetProcessId(process), *code);
+    SetLastError(error);
+    return ok;
+}
+
+static LPVOID WINAPI virtual_alloc(LPVOID address, SIZE_T size, DWORD kind, DWORD protection) {
+    LPVOID result = true_virtual_alloc(address, size, kind, protection);
+    DWORD error = GetLastError();
+    uintptr_t base = reinterpret_cast<uintptr_t>(address);
+    // MSYS/Cygwin reserve this fixed arena before their ordinary startup traces.
+    const uintptr_t low = 0x800000000ULL, high = 0xa00000000ULL;
+    if (!result && address && base < high && (base >= low || size > low - base))
+        diagnostic("ADAPTER_FIXED_ALLOCATION_FAILED pid=%lu address=%p size=%llx kind=%08lx protection=%08lx error=%lu caller=%p\n",
+            GetCurrentProcessId(), address, static_cast<unsigned long long>(size), kind, protection,
+            error, _ReturnAddress());
+    SetLastError(error);
+    return result;
+}
+
 static auto true_create_file = CreateFileW;
 static auto true_create_file_a = CreateFileA;
 static auto true_final_path = GetFinalPathNameByHandleW;
 static auto true_create_process = CreateProcessW;
 static auto true_anonymous_pipe = CreatePipe;
+static void diagnostic_state(const char* stage) {
+    DWORD error = GetLastError();
+    DWORD null_type = GetFileType(state.null_device);
+    DWORD null_error = GetLastError();
+    diagnostic("ADAPTER_PROCESS_STATE stage=%s pid=%lu state=%p null=%p null_type=%lu null_error=%lu create_process=%p create_file=%p\n",
+        stage, GetCurrentProcessId(), &state, state.null_device, null_type, null_error,
+        reinterpret_cast<void*>(true_create_process), reinterpret_cast<void*>(true_create_file));
+    SetLastError(error);
+}
 static SECURITY_DESCRIPTOR private_descriptor;
 alignas(ACL) static BYTE private_acl[512];
 
@@ -453,9 +547,15 @@ static HANDLE WINAPI create_file_a(LPCSTR path, DWORD access, DWORD share,
 
 static DWORD WINAPI final_path(HANDLE file, LPWSTR buffer, DWORD size, DWORD flags) {
     DWORD result = true_final_path(file, buffer, size, flags);
-    if (result || GetLastError() != ERROR_ACCESS_DENIED || (flags & 7) != VOLUME_NAME_DOS) return result;
+    DWORD error = GetLastError();
+    if (!result) fprintf(stderr, "ADAPTER_FINAL_PATH handle=%p flags=%08lx size=%lu error=%lu\n", file, flags, size, error);
+    SetLastError(error);
+    if (result || error != ERROR_ACCESS_DENIED || (flags & 7) != VOLUME_NAME_DOS) return result;
     wchar_t native[32768];
     DWORD length = true_final_path(file, native, 32768, flags | VOLUME_NAME_NT);
+    error = GetLastError();
+    fprintf(stderr, "ADAPTER_FINAL_PATH_NT handle=%p length=%lu error=%lu path=%.*ls\n", file, length, error, int(length < 32768 ? length : 0), native);
+    SetLastError(error);
     if (!length || length >= 32768) return 0;
     for (int i = 0; i < 26; ++i) {
         size_t prefix = wcslen(state.devices[i]);
@@ -478,7 +578,10 @@ static BOOL WINAPI create_process(LPCWSTR application, LPWSTR command,
                                   LPSECURITY_ATTRIBUTES thread_attrs, BOOL inherit,
                                   DWORD flags, LPVOID environment, LPCWSTR cwd,
                                   LPSTARTUPINFOW startup, LPPROCESS_INFORMATION child) {
-    fprintf(stderr, "ADAPTER_CREATE_PROCESS pid=%lu application=%ls command=%ls\n", GetCurrentProcessId(), application ? application : L"(null)", command ? command : L"(null)");
+    diagnostic_state("create-process");
+    diagnostic("ADAPTER_CREATE_PROCESS pid=%lu application=%ls command=%ls flags=%08lx process_attrs=%p thread_attrs=%p inherit=%d reserved_size=%u\n",
+        GetCurrentProcessId(), application ? application : L"(null)", command ? command : L"(null)",
+        flags, process_attrs, thread_attrs, inherit, startup ? startup->cbReserved2 : 0);
     if (!true_create_process(application, command, process_attrs, thread_attrs, inherit,
                              flags | CREATE_SUSPENDED, environment, cwd, startup, child)) return FALSE;
     if (!inject(child->hProcess, state)) {
@@ -511,27 +614,52 @@ template<typename T> static bool resolve_nt(T& function, const char* name) {
 }
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (DetourIsHelperProcess()) return TRUE;
+    if (reason == DLL_PROCESS_DETACH && exception_handler) {
+        RemoveVectoredExceptionHandler(exception_handler);
+        exception_handler = nullptr;
+    }
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
-    DetourRestoreAfterWith();
+    diagnostic("ADAPTER_ATTACH_BEGIN pid=%lu\n", GetCurrentProcessId());
+    exception_handler = AddVectoredExceptionHandler(1, startup_exception);
+    if (!exception_handler)
+        diagnostic("ADAPTER_DIAGNOSTIC_FAILED operation=exception-handler error=%lu\n", GetLastError());
+    auto failed_attach = []() -> BOOL {
+        if (exception_handler) RemoveVectoredExceptionHandler(exception_handler);
+        exception_handler = nullptr;
+        return FALSE;
+    };
+    BOOL restored = DetourRestoreAfterWith();
+    diagnostic("ADAPTER_RESTORE pid=%lu restored=%d error=%lu\n", GetCurrentProcessId(), restored, GetLastError());
     DWORD size = 0;
     auto payload = static_cast<Payload*>(DetourFindPayloadEx(payload_id, &size));
-    if (!payload || size != sizeof(Payload)) return FALSE;
+    if (!payload || size != sizeof(Payload)) {
+        diagnostic("ADAPTER_ATTACH_FAILED payload pid=%lu pointer=%p size=%lu expected=%zu error=%lu\n",
+            GetCurrentProcessId(), payload, size, sizeof(Payload), GetLastError());
+        return failed_attach();
+    }
     state = *payload;
     if (!initialize_private_security()) {
         DWORD error = GetLastError();
         fprintf(stderr, "ADAPTER_ATTACH_FAILED private-security pid=%lu error=%lu\n", GetCurrentProcessId(), error);
-        return FALSE;
+        return failed_attach();
     }
-    if (!resolve_nt(true_set_token, "NtSetInformationToken") ||
+    if (!resolve_nt(true_terminate_process, "NtTerminateProcess") ||
+        !resolve_nt(true_set_token, "NtSetInformationToken") ||
         !resolve_nt(true_set_security, "NtSetSecurityObject") ||
         !resolve_nt(true_create_directory, "NtCreateDirectoryObject") ||
         !resolve_nt(true_open_directory, "NtOpenDirectoryObject") ||
         !resolve_nt(true_create_pipe, "NtCreateNamedPipeFile") ||
         !resolve_nt(true_open_file, "NtOpenFile") ||
         !resolve_nt(true_nt_create_file, "NtCreateFile") ||
-        !resolve_nt(query_object, "NtQueryObject")) return FALSE;
+        !resolve_nt(query_object, "NtQueryObject")) {
+        diagnostic("ADAPTER_ATTACH_FAILED resolve pid=%lu error=%lu\n", GetCurrentProcessId(), GetLastError());
+        return failed_attach();
+    }
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
+    DetourAttach(reinterpret_cast<PVOID*>(&true_terminate_process), terminate_process);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_exit_code), exit_code);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_virtual_alloc), virtual_alloc);
     DetourAttach(reinterpret_cast<PVOID*>(&true_set_token), set_token);
     DetourAttach(reinterpret_cast<PVOID*>(&true_set_security), set_security);
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_file), create_file);
@@ -545,7 +673,8 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     DetourAttach(reinterpret_cast<PVOID*>(&true_open_file), open_file);
     DetourAttach(reinterpret_cast<PVOID*>(&true_nt_create_file), nt_create_file);
     LONG result = DetourTransactionCommit();
-    fprintf(stderr, "ADAPTER_ATTACH_RESULT pid=%lu result=%ld\n", GetCurrentProcessId(), result);
-    return result == NO_ERROR;
+    diagnostic("ADAPTER_ATTACH_RESULT pid=%lu result=%ld\n", GetCurrentProcessId(), result);
+    if (result == NO_ERROR) diagnostic_state("attached");
+    return result == NO_ERROR ? TRUE : failed_attach();
 }
 #endif

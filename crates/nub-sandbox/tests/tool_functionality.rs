@@ -480,6 +480,14 @@ fn grant_fs(tool: &Tool, root: &Path, cache: &Path, global: &Path, tooldirs: boo
 }
 
 fn assert_success(tool: &Tool, phase: &str, output: &Output) {
+    if std::env::var_os("NUB_NATIVE_ADAPTER_PROBE_ENABLE").is_some() {
+        eprintln!(
+            "NATIVE_DIAGNOSTIC {} {}:\n{}",
+            tool.name,
+            phase,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     assert!(
         output.status.success(),
         "{} {} failed:\nstdout:\n{}\nstderr:\n{}",

@@ -1,7 +1,7 @@
-use nub_sandbox::conformance::{Fixture, run_fixture};
+use nub_sandbox::conformance::{run_fixture, Fixture};
 use nub_sandbox::policy::{Effect, FsAccess, Inspection, ProxyMode};
 use nub_sandbox::{
-    CommandRunner, CompileCtx, Homes, ScopeCapabilities, compile, compile_build_jail,
+    compile, compile_build_jail, CommandRunner, CompileCtx, Homes, ScopeCapabilities,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -20,18 +20,19 @@ impl CommandRunner for FixedRunner {
 }
 
 fn ctx(caps: ScopeCapabilities) -> CompileCtx {
+    let root = test_root();
     let mut ctx = CompileCtx::new(
         Homes {
-            home: PathBuf::from("/home/sandbox"),
-            cache: PathBuf::from("/home/sandbox/.cache"),
-            tmp: PathBuf::from("/tmp/nub-private"),
-            project: PathBuf::from("/project"),
+            home: root.join("home"),
+            cache: root.join("home/cache"),
+            tmp: root.join("tmp"),
+            project: root.join("project"),
         },
-        PathBuf::from("/project"),
+        root.join("project"),
         caps,
         BTreeMap::from([
             // Required by README JSON example 8 (`vars.HOME: true`).
-            ("HOME".to_string(), "/home/sandbox".to_string()),
+            ("HOME".to_string(), root.join("home").display().to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("PORT".to_string(), "3000".to_string()),
             ("MODE".to_string(), "production".to_string()),
@@ -48,25 +49,53 @@ fn ctx(caps: ScopeCapabilities) -> CompileCtx {
     ctx
 }
 
+fn test_root() -> PathBuf {
+    std::env::temp_dir().join("nub-sandbox-production-readiness-grammar")
+}
+
+fn readme_json_examples() -> Vec<String> {
+    let mut examples = Vec::new();
+    let mut lines = Vec::new();
+    let mut in_json_fence = false;
+    for line in include_str!("../README.md").lines() {
+        if line == "```json" {
+            assert!(!in_json_fence, "README JSON fences must not nest");
+            in_json_fence = true;
+            lines.clear();
+        } else if line == "```" && in_json_fence {
+            examples.push(lines.join("\n"));
+            in_json_fence = false;
+        } else if in_json_fence {
+            lines.push(line);
+        }
+    }
+    assert!(!in_json_fence, "every README JSON fence must close");
+    examples
+}
+
 #[test]
 fn public_readme_json_examples_compile() {
-    let mut count = 0;
-    for block in include_str!("../README.md").split("```json\n").skip(1) {
-        let example = block.split("```").next().expect("every JSON fence closes");
-        let surface = serde_json::from_str(example)
-            .unwrap_or_else(|error| panic!("README JSON must parse:\n{example}\n{error}"));
-        compile(&surface, &ctx(ScopeCapabilities::approved()))
-            .unwrap_or_else(|error| panic!("README policy must compile:\n{example}\n{error}"));
-        count += 1;
+    let examples = readme_json_examples();
+    assert_eq!(examples.len(), 9, "README JSON grammar inventory changed");
+    for (index, example) in examples.iter().enumerate() {
+        let surface = serde_json::from_str(example).unwrap_or_else(|error| {
+            panic!(
+                "README JSON example {} must parse:\n{example}\n{error}",
+                index + 1
+            )
+        });
+        compile(&surface, &ctx(ScopeCapabilities::approved())).unwrap_or_else(|error| {
+            panic!(
+                "README JSON example {} must compile:\n{example}\n{error}",
+                index + 1
+            )
+        });
     }
-    assert!(
-        count >= 8,
-        "the README grammar examples must remain covered"
-    );
 }
 
 #[test]
 fn grammar_preserves_positive_fs_merging_net_order_and_env_provenance() {
+    let root = test_root();
     let surface = json!({
         "fs": {
             "./output": "rw",
@@ -90,9 +119,9 @@ fn grammar_preserves_positive_fs_merging_net_order_and_env_provenance() {
         "name": "documented public policy",
         "sandbox": surface,
         "fs": [
-            {"path": "/project/output/logs/build.log", "read": true, "write": true},
-            {"path": "/home/sandbox/.config/tool/config", "read": true, "write": false},
-            {"path": "/home/sandbox/.cache/tool/cache", "read": true, "write": true}
+            {"path": root.join("project/output/logs/build.log").display().to_string(), "read": true, "write": true},
+            {"path": root.join("home/.config/tool/config").display().to_string(), "read": true, "write": false},
+            {"path": root.join("home/cache/tool/cache").display().to_string(), "read": true, "write": true}
         ],
         "net": [
             {"host": "admin.example.com", "admit": true},
@@ -107,9 +136,14 @@ fn grammar_preserves_positive_fs_merging_net_order_and_env_provenance() {
         ]
     }))
     .expect("fixture is valid JSON");
-    assert!(run_fixture(&fixture, &ctx(ScopeCapabilities::approved())).is_empty());
+    let context = ctx(ScopeCapabilities::approved());
+    let mismatches = run_fixture(&fixture, &context);
+    assert!(
+        mismatches.is_empty(),
+        "documented public policy mismatches:\n{mismatches:#?}"
+    );
 
-    let policy = compile(&fixture.sandbox, &ctx(ScopeCapabilities::approved())).unwrap();
+    let policy = compile(&fixture.sandbox, &context).unwrap();
     assert_eq!(policy.net.mode, ProxyMode::Auto);
     assert_eq!(policy.net.inspection, Inspection::TlsInspect);
     assert_eq!(policy.net.brokers.len(), 1);
@@ -123,13 +157,12 @@ fn dependency_scope_rejects_dynamic_env_and_brokering_but_not_fs_resolution() {
     let dependency = ctx(ScopeCapabilities::dependency());
     let fs = compile(&json!({"fs": {"$(fs-location)": "r"}}), &dependency)
         .expect("filesystem substitution is inert data in every source scope");
-    assert!(
-        fs.fs
-            .rules
-            .entries
-            .iter()
-            .any(|rule| rule.matcher.as_str().contains("/resolved/fs"))
-    );
+    assert!(fs
+        .fs
+        .rules
+        .entries
+        .iter()
+        .any(|rule| rule.matcher.as_str().contains("/resolved/fs")));
 
     let substitution = compile(
         &json!({"vars": {"UV_CACHE_DIR": "$(cache-location)"}}),
@@ -226,14 +259,12 @@ fn generated_build_jail_policy_is_positive_only_and_marks_its_provenance() {
     .expect("generated build-jail policy compiles");
     assert!(policy.build_jail);
     assert_eq!(policy.fs.rules.default_effect, Effect::Deny);
-    assert!(
-        policy
-            .fs
-            .rules
-            .entries
-            .iter()
-            .all(|rule| rule.effect == Effect::Allow)
-    );
+    assert!(policy
+        .fs
+        .rules
+        .entries
+        .iter()
+        .all(|rule| rule.effect == Effect::Allow));
     assert!(policy.fs.rules.entries.iter().any(|rule| {
         rule.matcher
             .as_str()

@@ -15,7 +15,7 @@ use nub_sandbox::{
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -29,6 +29,7 @@ const INHERITED_FD: &str = "NUB_PRODUCTION_LINUX_INHERITED_FD";
 const COUNT_OWNER: &str = "NUB_PRODUCTION_LINUX_COUNT_OWNER";
 const EXECUTABLE: &str = "NUB_PRODUCTION_LINUX_EXECUTABLE";
 const DYNAMIC_FIRST: &str = "NUB_PRODUCTION_LINUX_DYNAMIC_FIRST";
+const PARENT_SECRET_FD: &str = "NUB_PRODUCTION_LINUX_PARENT_SECRET_FD";
 
 #[test]
 fn linux_production_child() {
@@ -249,6 +250,20 @@ fn proc_child() {
         (proc_exe.dev(), proc_exe.ino()),
         (expected.dev(), expected.ino())
     );
+    // `cwd` is another magic alias, but this one targets the explicitly granted project
+    // hierarchy.  Its visibility is therefore expected; what matters is that resolving
+    // through it cannot traverse to a withheld sibling or create a file there.
+    let project = std::fs::metadata(root_path("project")).unwrap();
+    let proc_cwd = std::fs::metadata("/proc/self/cwd").expect("granted cwd alias");
+    assert_eq!(
+        (proc_cwd.dev(), proc_cwd.ino()),
+        (project.dev(), project.ino())
+    );
+    assert_unavailable("/proc/self/cwd/../withheld/secret");
+    assert!(
+        std::fs::write("/proc/self/cwd/../withheld/proc-alias-write", b"denied").is_err(),
+        "sandbox wrote to withheld data through /proc/self/cwd"
+    );
     for path in [
         "/proc/self/environ",
         "/proc/self/maps",
@@ -257,12 +272,7 @@ fn proc_child() {
     ] {
         assert_unavailable(path);
     }
-    for path in [
-        "/proc/self/fd",
-        "/proc/self/fdinfo",
-        "/proc/self/root",
-        "/proc/self/cwd",
-    ] {
+    for path in ["/proc/self/fd", "/proc/self/fdinfo", "/proc/self/root"] {
         assert_directory_unavailable(path);
     }
     let parent = std::env::var(PARENT_PID).unwrap();
@@ -270,6 +280,12 @@ fn proc_child() {
         assert_unavailable(format!("/proc/{parent}/{leaf}"));
     }
     assert_directory_unavailable(format!("/proc/{parent}/fd"));
+    let secret_fd = std::env::var(PARENT_SECRET_FD).unwrap();
+    assert_unavailable(format!("/proc/{parent}/fd/{secret_fd}"));
+}
+
+fn root_path(leaf: &str) -> PathBuf {
+    PathBuf::from(std::env::var_os(ROOT).expect("child root")).join(leaf)
 }
 
 fn sockets_child() {
@@ -466,7 +482,13 @@ fn inherited_parent_descriptors_do_not_cross_exec() {
 #[test]
 fn procfs_injection_exposes_only_the_requested_self_file() {
     let root = fixture();
-    let session = sandbox(root.path(), "proc", true, &[]);
+    let secret = std::fs::File::open(root.path().join("withheld/secret")).unwrap();
+    let session = sandbox(
+        root.path(),
+        "proc",
+        true,
+        &[(PARENT_SECRET_FD, secret.as_raw_fd().to_string())],
+    );
     output(&session, root.path());
 }
 
