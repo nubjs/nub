@@ -236,7 +236,7 @@ pub(super) fn assert_mode(result: &serde_json::Value, mode: &str) {
     }
     for operation in ["open", "spare_terminator", "create", "create_open"] {
         let current = &result[operation];
-        if mode == "raw" {
+        if mode == "raw" && current["opened"] == false {
             assert_eq!(current["status"], ACCESS_DENIED, "{mode}: {result}");
         } else {
             assert_eq!(current["opened"], true, "{mode}: {result}");
@@ -255,11 +255,18 @@ pub(super) fn assert_mode(result: &serde_json::Value, mode: &str) {
             }
         }
     }
-    assert_eq!(
-        result["msys_access"]["opened"],
-        mode != "raw",
-        "{mode}: {result}"
-    );
+    // Windows 11 permits these harmless raw device opens; Server 2022 denies
+    // them. The adapter repairs denial, not an OS-independent Null policy.
+    if mode != "raw" || result["msys_access"]["opened"] == true {
+        assert_eq!(result["msys_access"]["opened"], true, "{mode}: {result}");
+        assert_eq!(result["msys_access"]["write"], true, "{mode}: {result}");
+        assert_eq!(result["msys_access"]["read"], false, "{mode}: {result}");
+    } else {
+        assert_eq!(
+            result["msys_access"]["status"], ACCESS_DENIED,
+            "{mode}: {result}"
+        );
+    }
 }
 
 pub(super) fn assert_unsupported_matches(result: &serde_json::Value, raw: &serde_json::Value) {

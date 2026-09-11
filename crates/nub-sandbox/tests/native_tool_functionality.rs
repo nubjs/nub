@@ -681,7 +681,69 @@ fn run_case(name: &str, tooldirs: Option<bool>) {
         assert!(!String::from_utf8_lossy(&output.stdout).contains("WITHHELD"));
         eprintln!("NATIVE_CANARY_DENIED {output:?}");
     }
+    #[cfg(windows)]
+    if name == "cargo" && std::env::var_os("NUB_SANDBOX_TOOL_MSYS_ROOT").is_some() {
+        msys_execution_count(root.path(), &env, tooldirs);
+    }
     operations(name, &tool, root.path(), &env, policy.as_ref());
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "child process for the MSYS execution-count control"]
+fn msys_execution_count_child() {
+    let root =
+        std::env::var_os("SANDBOX_MSYS_EXECUTION_COUNT").expect("execution-count child marker");
+    std::fs::write(
+        Path::new(&root).join(format!("{}.txt", std::process::id())),
+        "one native execution",
+    )
+    .unwrap();
+}
+
+#[cfg(windows)]
+fn msys_execution_count(root: &Path, env: &BTreeMap<String, String>, tooldirs: Option<bool>) {
+    let binary = std::env::current_exe().unwrap();
+    let tool = Tool {
+        name: "MSYS execution-count control".into(),
+        tool_root: binary.parent().unwrap().to_owned(),
+        program: binary,
+        prefix: vec![
+            "--exact".into(),
+            "native_tool_functionality_probe::msys_execution_count_child".into(),
+            "--ignored".into(),
+            "--nocapture".into(),
+        ],
+        version: "current test binary".into(),
+        runtime_roots: vec![],
+        tool_env: BTreeMap::new(),
+        shell: false,
+        maven_seed: None,
+    };
+    for sample in 0..3 {
+        let count_root = root.join(format!("project/exec-count-{sample}"));
+        std::fs::create_dir(&count_root).unwrap();
+        let mut env = env.clone();
+        env.insert(
+            "SANDBOX_MSYS_EXECUTION_COUNT".into(),
+            count_root.to_string_lossy().into_owned(),
+        );
+        let policy = tooldirs.map(|value| policy(root, &tool, env.clone(), value));
+        let output = run(&tool, &[], root, &env, policy.as_ref());
+        let executions: Vec<_> = std::fs::read_dir(&count_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        eprintln!(
+            "MSYS_EXECUTION_COUNT sample={sample} executions={executions:?} output={output:?}"
+        );
+        assert_ok(&tool, "single execution", output);
+        assert_eq!(
+            executions.len(),
+            1,
+            "MSYS executed a command more than once: {executions:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
