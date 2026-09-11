@@ -1,7 +1,7 @@
-use nub_sandbox::conformance::{run_fixture, Fixture};
+use nub_sandbox::conformance::{Fixture, run_fixture};
 use nub_sandbox::policy::{Effect, FsAccess, Inspection, ProxyMode};
 use nub_sandbox::{
-    compile, compile_build_jail, CommandRunner, CompileCtx, Homes, ScopeCapabilities,
+    CommandRunner, CompileCtx, Homes, ScopeCapabilities, compile, compile_build_jail,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -157,12 +157,13 @@ fn dependency_scope_rejects_dynamic_env_and_brokering_but_not_fs_resolution() {
     let dependency = ctx(ScopeCapabilities::dependency());
     let fs = compile(&json!({"fs": {"$(fs-location)": "r"}}), &dependency)
         .expect("filesystem substitution is inert data in every source scope");
-    assert!(fs
-        .fs
-        .rules
-        .entries
-        .iter()
-        .any(|rule| rule.matcher.as_str().contains("/resolved/fs")));
+    assert!(
+        fs.fs
+            .rules
+            .entries
+            .iter()
+            .any(|rule| rule.matcher.as_str().contains("/resolved/fs"))
+    );
 
     let substitution = compile(
         &json!({"vars": {"UV_CACHE_DIR": "$(cache-location)"}}),
@@ -259,12 +260,14 @@ fn generated_build_jail_policy_is_positive_only_and_marks_its_provenance() {
     .expect("generated build-jail policy compiles");
     assert!(policy.build_jail);
     assert_eq!(policy.fs.rules.default_effect, Effect::Deny);
-    assert!(policy
-        .fs
-        .rules
-        .entries
-        .iter()
-        .all(|rule| rule.effect == Effect::Allow));
+    assert!(
+        policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .all(|rule| rule.effect == Effect::Allow)
+    );
     assert!(policy.fs.rules.entries.iter().any(|rule| {
         rule.matcher
             .as_str()
