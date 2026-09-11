@@ -26,6 +26,7 @@ struct Payload {
     BOOL relocation_tree_probe;
     BOOL section_dacl_probe;
     BOOL sync_dacl_probe;
+    BOOL nt_null_probe;
 };
 static Payload state = {};
 
@@ -115,6 +116,7 @@ int wmain(int argc, wchar_t** argv) {
     state.relocation_tree_probe = GetEnvironmentVariableW(L"NUB_NATIVE_RELOCATION_TREE_PROBE", nullptr, 0) != 0;
     state.section_dacl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_SECTION_DACL_PROBE", nullptr, 0) != 0;
     state.sync_dacl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_SYNC_DACL_PROBE", nullptr, 0) != 0;
+    state.nt_null_probe = GetEnvironmentVariableW(L"NUB_NATIVE_NT_NULL_PROBE", nullptr, 0) != 0;
     DWORD pid = wcstoul(argv[1], nullptr, 10);
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
                                  PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
@@ -181,6 +183,21 @@ static LONG CALLBACK startup_exception(EXCEPTION_POINTERS* fault) {
                                             reinterpret_cast<uintptr_t>(region.AllocationBase)),
             static_cast<unsigned long long>(record->NumberParameters > 0 ? record->ExceptionInformation[0] : 0),
             static_cast<unsigned long long>(record->NumberParameters > 1 ? record->ExceptionInformation[1] : 0));
+#if defined(_M_X64)
+        auto context = fault->ContextRecord;
+        diagnostic("ADAPTER_EXCEPTION_REGISTERS pid=%lu rip=%llx rsp=%llx rbp=%llx rax=%llx rbx=%llx rcx=%llx rdx=%llx rsi=%llx rdi=%llx r8=%llx r9=%llx r10=%llx r11=%llx r12=%llx r13=%llx r14=%llx r15=%llx\n",
+            GetCurrentProcessId(), context->Rip, context->Rsp, context->Rbp, context->Rax, context->Rbx,
+            context->Rcx, context->Rdx, context->Rsi, context->Rdi, context->R8, context->R9,
+            context->R10, context->R11, context->R12, context->R13, context->R14, context->R15);
+        if (record->NumberParameters > 1) {
+            MEMORY_BASIC_INFORMATION target = {};
+            auto address = reinterpret_cast<void*>(record->ExceptionInformation[1]);
+            VirtualQuery(address, &target, sizeof(target));
+            diagnostic("ADAPTER_EXCEPTION_TARGET pid=%lu address=%p allocation=%p region=%p size=%llx state=%08lx type=%08lx protection=%08lx\n",
+                GetCurrentProcessId(), address, target.AllocationBase, target.BaseAddress,
+                static_cast<unsigned long long>(target.RegionSize), target.State, target.Type, target.Protect);
+        }
+#endif
     }
     InterlockedExchange(&active, 0);
     SetLastError(error);
@@ -657,6 +674,35 @@ static NTSTATUS NTAPI create_pipe(PHANDLE handle, ACCESS_MASK access, POBJECT_AT
     return status;
 }
 
+static bool native_null_open(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
+    PIO_STATUS_BLOCK io, ULONG options, NTSTATUS status) {
+    constexpr wchar_t expected[] = L"\\Device\\Null";
+    constexpr ULONG allowed_options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT;
+    constexpr ACCESS_MASK allowed_access = GENERIC_READ | GENERIC_WRITE | READ_CONTROL | SYNCHRONIZE | FILE_READ_ATTRIBUTES;
+    if (!state.nt_null_probe || status != static_cast<NTSTATUS>(0xc0000022L) ||
+        !(options & FILE_SYNCHRONOUS_IO_NONALERT) || (options & ~allowed_options) || (access & ~allowed_access)) return false;
+    HANDLE duplicate = nullptr;
+    __try {
+        if (!handle || !io || !attrs || attrs->RootDirectory || attrs->SecurityDescriptor || attrs->SecurityQualityOfService ||
+            (attrs->Attributes & ~(OBJ_CASE_INSENSITIVE | OBJ_INHERIT)) || !attrs->ObjectName || !attrs->ObjectName->Buffer ||
+            attrs->ObjectName->Length != sizeof(expected) - sizeof(wchar_t) ||
+            _wcsnicmp(attrs->ObjectName->Buffer, expected, _countof(expected) - 1)) return false;
+        if (!DuplicateHandle(GetCurrentProcess(), state.null_device, GetCurrentProcess(), &duplicate,
+            access, (attrs->Attributes & OBJ_INHERIT) != 0, 0)) {
+            diagnostic("ADAPTER_NT_NULL_DUPLICATE pid=%lu error=%lu\n", GetCurrentProcessId(), GetLastError());
+            return false;
+        }
+        *handle = duplicate;
+        io->Status = 0;
+        io->Information = FILE_OPENED;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (duplicate) true_close(duplicate);
+        return false;
+    }
+    diagnostic("ADAPTER_NT_NULL pid=%lu access=%08lx options=%08lx status=00000000\n", GetCurrentProcessId(), access, options);
+    return true;
+}
+
 static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
                                 PIO_STATUS_BLOCK io, ULONG share, ULONG options) {
     OBJECT_ATTRIBUTES redirected;
@@ -665,6 +711,7 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
     device_failure_trace(access, status, attrs);
+    if (native_null_open(handle, access, attrs, io, options, status)) return 0;
     if (mount_query_open(handle, access, attrs, io, status)) return 0;
     if (state.directory_read_probe && status == static_cast<NTSTATUS>(0xc0000022L) &&
         (options & FILE_DIRECTORY_FILE) && access == 0x001200a9) {
@@ -689,6 +736,8 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
     NTSTATUS status = true_nt_create_file(handle, access, mapped ? &redirected : attrs, io, allocation,
         attributes, share, disposition, options, ea, ea_length);
     device_failure_trace(access, status, attrs);
+    if ((disposition == FILE_OPEN || disposition == FILE_OPEN_IF) && !allocation && !ea && !ea_length &&
+        (attributes == 0 || attributes == FILE_ATTRIBUTE_NORMAL) && native_null_open(handle, access, attrs, io, options, status)) return 0;
     if (disposition == FILE_OPEN && mount_query_open(handle, access, attrs, io, status)) return 0;
     if (state.directory_read_probe && status == static_cast<NTSTATUS>(0xc0000022L) &&
         (options & FILE_DIRECTORY_FILE) && disposition == FILE_OPEN && access == 0x001200a9) {

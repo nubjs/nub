@@ -24,7 +24,7 @@ The [initial version matrix](https://github.com/nubjs/nub/actions/runs/343481653
 | pnpm 9.15.9 / 10.18.3 / 11.26.0 | Pass | Pass | Adapter | Adapter | Full retained sequence with Node stdio/path helpers. Raw commands fail on subprocess pipes or path canonicalization. |
 | Yarn 1.22.22 | Pass | Pass | Adapter | Adapter | Install, bin, global install, cache cleanup and reinstall. Linux uses own-process metadata; Windows uses the Node helpers. |
 | Yarn 2.4.2 / 3.8.7 / 4.17.0 | Pass | Pass | Pass | Pass | Install, reinstall and execution through the configured store. |
-| Bun 1.3.2 | Partial | Partial | Blocked | Blocked | Retained install/bin/global/reinstall passes with bundle directory listings. Pruning populated host `bunx` caches requires additional write grants. |
+| Bun 1.3.2 | Partial | Partial | Partial | Partial | Unix retained install/bin/global/reinstall passes with bundle directory listings; pruning populated host `bunx` caches requires additional writes. Windows archive/global-bin/cache-cleanup/reinstall passes with the native adapter; local-folder global installs require unsupported symlink creation. |
 | Bun 1.4.0 | Pass | Pass | Partial | Partial | Install, reinstall and installed-bin execution pass. Windows global archive install/cache-cleanup/reinstall passes; local-folder global installs require unsupported symlink creation. This version honors private `TMPDIR`. |
 | pip 26.2.1 | Pass | Pass | Adapter | Adapter | Local-wheel install, reinstall, import, user install and cache cleanup; Python 3.13.15 startup adapter preserves the package SID on private directories. |
 | uv 0.12.11 | Pass | Pass | Adapter | Adapter | Install, import, package and installed tool execution with native and Python private-directory adapters. Raw native subprocess/trampoline operations fail. |
@@ -43,6 +43,8 @@ The JavaScript fixtures use Node 22.18.0. Windows 11 runs Cargo, Go and the JVM 
 The [embedded-adapter run](https://github.com/nubjs/nub/actions/runs/34551785167), at `10c9e74c2c`, passes the complete Cargo, Go, Composer, uv, pip and Git sequences on Windows Server 2022 x64 and Windows 11 ARM64. Each has an unconfined control, a raw sandbox control, and a withheld-file canary. The Python sequences also use the Python private-directory helper. Cargo, Go, Composer and Python use x64 toolchains; Git and descendants may have another supported architecture.
 
 Select this adapter through [`Sandbox::with_windows_native_compat`](README.md#explicit-windows-native-compatibility), not through another filesystem sentinel. Granting more cache paths does not repair native device opens, pipe namespaces or drive-alias queries. The same run checks nested execution, anonymous pipe byte transfer, runtime-owned process permissions, DLL write denial and protected-registry read denial. Git LFS still fails its pre-push hook, so this is not an all-tools pass.
+
+Bun 1.3.2 archive installs and global executable launches also pass with the native adapter on both Windows hosts. The [volume-query run](https://github.com/nubjs/nub/actions/runs/34647381373), at `6dfe89c1ee`, verifies cache cleanup and reinstall, real native volume queries, directory enumeration and balanced handle counts after repeated opens and closes. Raw volume queries remain denied. The adapter answers a bounded local-drive query without granting access to the Mount Manager device; file and process canaries remain denied. Local-folder symbolic links and MSYS fork failures still prevent the full tool matrix from passing.
 
 ## Explicit Windows Node adapters
 
