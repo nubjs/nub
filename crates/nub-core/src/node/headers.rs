@@ -94,14 +94,19 @@ fn nodedir_for<'a>(
     // substring match over the script text is coarse on purpose: a false
     // positive only returns node-gyp to the behavior it had before this
     // existed, while a miss is a wrong-ABI build.
-    if let Some(script) = script
-        && TARGET_SELECTING_OPTS
-            .iter()
-            .any(|opt| script.contains(&format!("--{opt}")))
-    {
+    if script.is_some_and(argv_selects_headers) {
         return None;
     }
     headers_root(node_execpath, version)
+}
+
+/// True when a command line names one of [`TARGET_SELECTING_OPTS`] itself.
+/// Coarse on purpose: a false positive only returns node-gyp to the behavior it
+/// had before any of this existed, while a miss is a wrong-ABI build.
+pub fn argv_selects_headers(text: &str) -> bool {
+    TARGET_SELECTING_OPTS
+        .iter()
+        .any(|opt| text.contains(&format!("--{opt}")))
 }
 
 /// True for an env key naming one of [`TARGET_SELECTING_OPTS`] under either

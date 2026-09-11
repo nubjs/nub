@@ -960,6 +960,31 @@ fn compose_overlay_path(prepends: &[PathBuf], existing: &std::ffi::OsStr) -> std
 /// leak through on the unjailed path and break allowlist parity. On
 /// the jailed path the prior `env_clear` already dropped them, so the
 /// scrub is a harmless no-op there.
+/// node-gyp options that CHOOSE what an addon is compiled against.
+///
+/// node-gyp folds `npm_config_*` OVER its parsed argv rather than under it
+/// (`lib/node-gyp.js` assigns into `opts` after the nopt parse, unconditionally),
+/// and `configure` takes the nodedir branch before the one that downloads
+/// headers for `--target`. So an inherited, install-wide `npm_config_nodedir`
+/// beats whatever THIS package asked for, and the addon is built against the
+/// wrong runtime with nothing to attribute it to.
+const NODE_GYP_TARGET_OPTS: &[&str] = &["nodedir", "target", "disturl", "dist-url", "runtime"];
+
+/// True when this package selects its own node-gyp headers or target runtime,
+/// through its manifest `config.node-gyp` block (npm 11's preferred channel) or
+/// directly in the script body.
+fn selects_node_gyp_target(manifest: &PackageJson, lifecycle_script: &str) -> bool {
+    let from_manifest = manifest.npm_package_env().into_iter().any(|(key, _)| {
+        key.to_ascii_lowercase()
+            .strip_prefix("npm_package_config_node_gyp_")
+            .is_some_and(|name| NODE_GYP_TARGET_OPTS.contains(&name.replace('_', "-").as_str()))
+    });
+    from_manifest
+        || NODE_GYP_TARGET_OPTS
+            .iter()
+            .any(|opt| lifecycle_script.contains(&format!("--{opt}")))
+}
+
 pub fn apply_npm_manifest_env(
     cmd: &mut tokio::process::Command,
     manifest: &PackageJson,
@@ -975,6 +1000,15 @@ pub fn apply_npm_manifest_env(
     cmd.env("npm_package_json", script_dir.join("package.json"));
     for (key, value) in manifest.npm_package_env() {
         cmd.env(key, value);
+    }
+    // An embedder may have pointed node-gyp at the running runtime's headers
+    // for the whole install (`npm_config_nodedir`). That is a per-INSTALL
+    // answer, and this package may have its own — so withdraw it for this one
+    // spawn rather than let the env-over-argv precedence silently win. Placed
+    // here because this is the only point that holds both the package's own
+    // manifest and its script body, and it runs after the settings env.
+    if selects_node_gyp_target(manifest, lifecycle_script) {
+        cmd.env_remove("npm_config_nodedir");
     }
 }
 
@@ -2270,6 +2304,63 @@ mod jail_tests {
         assert_eq!(env("npm_lifecycle_event"), Some("postinstall"));
         assert_eq!(env("npm_package_name"), Some("pkg"));
         assert_eq!(env("npm_package_version"), Some("1.2.3"));
+    }
+
+    /// A package that picks its own node-gyp headers or target runtime must not
+    /// inherit an install-wide `npm_config_nodedir`: node-gyp folds the
+    /// environment OVER its argv, so the inherited value would win and the
+    /// addon would be compiled against the wrong runtime — silently, since a
+    /// wrong-ABI addon still links.
+    #[test]
+    fn a_package_selecting_its_own_node_gyp_target_drops_an_inherited_nodedir() {
+        let manifest_with = |config: serde_json::Value| {
+            let mut manifest = PackageJson {
+                name: Some("probe".to_string()),
+                ..Default::default()
+            };
+            manifest.extra.insert("config".to_string(), config);
+            manifest
+        };
+        let nodedir_after = |manifest: &PackageJson, script: &str| {
+            let mut cmd = tokio::process::Command::new("node");
+            cmd.env("npm_config_nodedir", "/install/wide/node");
+            apply_npm_manifest_env(&mut cmd, manifest, Path::new("/tmp/pkg"), script);
+            cmd.as_std()
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("npm_config_nodedir"))
+                .map(|(_, value)| value.is_some())
+        };
+
+        // npm 11's preferred channel: the package's own `config.node-gyp`.
+        for key in ["target", "nodedir", "disturl", "dist-url", "runtime"] {
+            let manifest = manifest_with(serde_json::json!({ "node-gyp": { key: "39.0.0" } }));
+            assert_eq!(
+                nodedir_after(&manifest, "node-gyp rebuild"),
+                Some(false),
+                "config.node-gyp.{key} selects the target, so the inherited nodedir must be withdrawn"
+            );
+        }
+
+        // The same choice made in the script body.
+        let plain = manifest_with(serde_json::json!({}));
+        assert_eq!(
+            nodedir_after(&plain, "node-gyp rebuild --target=39.0.0"),
+            Some(false),
+            "a script naming its own target must drop the inherited nodedir"
+        );
+
+        // The ordinary case keeps it, so the guard cannot pass by removing it always.
+        assert_eq!(
+            nodedir_after(&plain, "node-gyp rebuild"),
+            Some(true),
+            "an ordinary rebuild keeps the install-wide nodedir"
+        );
+        let unrelated = manifest_with(serde_json::json!({ "port": "8080" }));
+        assert_eq!(
+            nodedir_after(&unrelated, "node-gyp rebuild"),
+            Some(true),
+            "an unrelated config key must not disable the shared headers"
+        );
     }
 
     #[test]
