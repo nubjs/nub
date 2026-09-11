@@ -24,6 +24,7 @@ struct Payload {
     BOOL directory_read_probe;
     BOOL mount_query_probe;
     BOOL relocation_tree_probe;
+    BOOL section_dacl_probe;
 };
 static Payload state = {};
 
@@ -111,6 +112,7 @@ int wmain(int argc, wchar_t** argv) {
     state.directory_read_probe = GetEnvironmentVariableW(L"NUB_NATIVE_DIRECTORY_MASK_PROBE", nullptr, 0) != 0;
     state.mount_query_probe = GetEnvironmentVariableW(L"NUB_NATIVE_MOUNT_QUERY_PROBE", nullptr, 0) != 0;
     state.relocation_tree_probe = GetEnvironmentVariableW(L"NUB_NATIVE_RELOCATION_TREE_PROBE", nullptr, 0) != 0;
+    state.section_dacl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_SECTION_DACL_PROBE", nullptr, 0) != 0;
     DWORD pid = wcstoul(argv[1], nullptr, 10);
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
                                  PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
@@ -379,6 +381,68 @@ static NtPipe true_create_pipe = nullptr;
 static NtOpen true_open_file = nullptr;
 static NtCreate true_nt_create_file = nullptr;
 static NtObject query_object = nullptr;
+using NtSection = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER, ULONG, ULONG, HANDLE);
+using NtOpenSectionFn = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
+static NtSection true_create_section = nullptr;
+static NtOpenSectionFn true_open_section = nullptr;
+
+static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
+    if (!attrs || !attrs->RootDirectory || !attrs->ObjectName || !attrs->ObjectName->Buffer ||
+        !attrs->ObjectName->Length || attrs->ObjectName->Length % sizeof(wchar_t)) return false;
+    for (size_t i = 0; i < attrs->ObjectName->Length / sizeof(wchar_t); ++i) {
+        if (!attrs->ObjectName->Buffer[i] || attrs->ObjectName->Buffer[i] == L'\\') return false;
+    }
+    alignas(void*) BYTE info[4096];
+    ULONG needed = 0;
+    if (query_object(attrs->RootDirectory, 1, info, sizeof(info), &needed) < 0) return false;
+    auto name = reinterpret_cast<UNICODE_STRING*>(info);
+    if (name->Length % sizeof(wchar_t) || name->Length >= sizeof(root)) return false;
+    memcpy(root, name->Buffer, name->Length);
+    root[name->Length / sizeof(wchar_t)] = 0;
+    wchar_t package[1024];
+    if (!GetAppContainerNamedObjectPath(nullptr, nullptr, 1024, package, &needed)) return false;
+    if (package[0] != L'\\') {
+        wchar_t relative[1024];
+        wcscpy_s(relative, package);
+        DWORD session = 0;
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) ||
+            swprintf_s(package, L"\\Sessions\\%lu\\BaseNamedObjects\\%s", session, relative) < 0) return false;
+    }
+    size_t prefix = wcslen(package);
+    if (prefix && package[prefix - 1] == L'\\') package[--prefix] = 0;
+    if (wcslen(root) <= prefix || _wcsnicmp(root, package, prefix) || root[prefix] != L'\\') return false;
+    auto leaf = root + prefix + 1;
+    return (!wcsncmp(leaf, L"msys-", 5) || !wcsncmp(leaf, L"cygwin-", 7)) && !wcschr(leaf, L'\\');
+}
+
+static NTSTATUS NTAPI create_section(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
+    PLARGE_INTEGER maximum_size, ULONG protection, ULONG attributes, HANDLE file) {
+    wchar_t root[1024] = {};
+    bool scoped = msys_section_root(attrs, root);
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL dacl = nullptr;
+    bool null_dacl = scoped && attrs->SecurityDescriptor &&
+        GetSecurityDescriptorDacl(attrs->SecurityDescriptor, &present, &dacl, &defaulted) && present && !dacl;
+    bool adapted = state.section_dacl_probe && null_dacl && !file &&
+        protection == PAGE_READWRITE && attributes == SEC_COMMIT;
+    OBJECT_ATTRIBUTES redirected = {};
+    if (adapted) { redirected = *attrs; redirected.SecurityDescriptor = &private_descriptor; }
+    NTSTATUS status = true_create_section(handle, access, adapted ? &redirected : attrs,
+        maximum_size, protection, attributes, file);
+    if (scoped) diagnostic("ADAPTER_SECTION_CREATE pid=%lu root=%ls name=%.*ls access=%08lx protection=%08lx attributes=%08lx null_dacl=%d adapted=%d status=%08lx\n",
+        GetCurrentProcessId(), root, int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer,
+        access, protection, attributes, null_dacl, adapted, static_cast<ULONG>(status));
+    return status;
+}
+
+static NTSTATUS NTAPI open_section(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs) {
+    NTSTATUS status = true_open_section(handle, access, attrs);
+    wchar_t root[1024] = {};
+    if (msys_section_root(attrs, root)) diagnostic("ADAPTER_SECTION_OPEN pid=%lu root=%ls name=%.*ls access=%08lx status=%08lx\n",
+        GetCurrentProcessId(), root, int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer,
+        access, static_cast<ULONG>(status));
+    return status;
+}
 
 // Diagnostic only: no real device handle is lent to the child. Zig's direct
 // mount-point query can be answered from the drive map already in the payload.
@@ -821,6 +885,8 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_create_pipe, "NtCreateNamedPipeFile") ||
         !resolve_nt(true_open_file, "NtOpenFile") ||
         !resolve_nt(true_nt_create_file, "NtCreateFile") ||
+        !resolve_nt(true_create_section, "NtCreateSection") ||
+        !resolve_nt(true_open_section, "NtOpenSection") ||
         !resolve_nt(true_io_control, "NtDeviceIoControlFile") ||
         !resolve_nt(true_close, "NtClose") ||
         !resolve_nt(query_object, "NtQueryObject")) {
@@ -844,6 +910,8 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_pipe), create_pipe);
     DetourAttach(reinterpret_cast<PVOID*>(&true_open_file), open_file);
     DetourAttach(reinterpret_cast<PVOID*>(&true_nt_create_file), nt_create_file);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_section), create_section);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_open_section), open_section);
     DetourAttach(reinterpret_cast<PVOID*>(&true_io_control), mount_io_control);
     DetourAttach(reinterpret_cast<PVOID*>(&true_close), mount_close);
     LONG result = DetourTransactionCommit();

@@ -200,11 +200,11 @@ jobs:
           foreach ($case in $cases) {
             $toolModes = $modes
             if ($case[0] -notin @('git', 'git-lfs')) { $toolModes += @('msys-plain', 'msys-embedded') }
-            if ($case[0] -in @('git', 'git-lfs')) { $toolModes += @('relocation-root-adapter', 'relocation-tree-adapter') }
-            if ($case[0] -eq 'cargo') { $toolModes += 'msys-relocation-tree-adapter' }
             if ($case[0] -in @('git', 'git-lfs')) { $toolModes += @('dynamicbase-plain', 'dynamicbase-embedded', 'dynamicbase-adapter') }
             if ($case[0] -eq 'cargo') { $toolModes += @('msys-dynamicbase-plain', 'msys-dynamicbase-adapter') }
-            if ($case[0] -eq 'bun132') { $toolModes += @('nodes-embedded', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter') }
+            if ($case[0] -eq 'git-lfs') { $toolModes += 'dynamicbase-section-adapter' }
+            if ($case[0] -eq 'cargo') { $toolModes += 'msys-dynamicbase-section-adapter' }
+            if ($case[0] -eq 'bun132') { $toolModes += 'mount-query-adapter' }
             foreach ($mode in $toolModes) {
               $env:PATH = $originalPath
               $selectedMsys = $msysRoot
@@ -221,9 +221,14 @@ jobs:
               Remove-Item Env:NUB_NATIVE_MOUNT_QUERY_PROBE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_RELOCATION_PROBE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_RELOCATION_TREE_PROBE -ErrorAction SilentlyContinue
+              Remove-Item Env:NUB_NATIVE_SECTION_DACL_PROBE -ErrorAction SilentlyContinue
               if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter', 'relocation-root-adapter', 'relocation-tree-adapter', 'msys-relocation-tree-adapter', 'dynamicbase-adapter', 'msys-dynamicbase-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
               if ($mode.Contains('relocation-')) { $env:NUB_NATIVE_RELOCATION_PROBE = '1' }
               if ($mode.Contains('relocation-tree-')) { $env:NUB_NATIVE_RELOCATION_TREE_PROBE = '1' }
+              if ($mode.Contains('section-adapter')) {
+                $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1'
+                $env:NUB_NATIVE_SECTION_DACL_PROBE = '1'
+              }
               if ($mode -in @('directory-mask-adapter', 'mount-query-adapter')) { $env:NUB_NATIVE_DIRECTORY_MASK_PROBE = '1' }
               if ($mode -eq 'mount-query-adapter') { $env:NUB_NATIVE_MOUNT_QUERY_PROBE = '1' }
               if ($mode -in @('embedded', 'msys-embedded', 'nodes-embedded', 'dynamicbase-embedded')) { $env:NUB_NATIVE_EMBEDDED_ADAPTER = '1' }
@@ -247,6 +252,7 @@ jobs:
           Remove-Item Env:NUB_NATIVE_MOUNT_QUERY_PROBE -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_RELOCATION_PROBE -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_RELOCATION_TREE_PROBE -ErrorAction SilentlyContinue
+          Remove-Item Env:NUB_NATIVE_SECTION_DACL_PROBE -ErrorAction SilentlyContinue
           $results | ConvertTo-Json > reports/tool-results.json
           # Diagnostic DLL/ancestor/mask alternatives remain results, not production verdicts.
           if ($results | Where-Object { $_.mode -in @('plain', 'embedded', 'msys-plain', 'msys-embedded') -and $_.exit -ne 0 }) { exit 1 }
