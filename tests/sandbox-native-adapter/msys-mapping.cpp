@@ -78,6 +78,18 @@ static void CALLBACK loaded(ULONG reason, const Notification* data, void*) {
 
 static void snapshot(const char* stage) {
     DWORD error = GetLastError();
+    uintptr_t executable = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    IMAGE_DOS_HEADER executable_dos = {};
+    IMAGE_NT_HEADERS64 executable_nt = {};
+    NTSTATUS executable_status = 0;
+    bool executable_ok = read_memory && read(executable, &executable_dos, sizeof(executable_dos), executable_status) &&
+        executable_dos.e_magic == IMAGE_DOS_SIGNATURE && executable_dos.e_lfanew > 0 && executable_dos.e_lfanew < 4096 &&
+        read(executable + executable_dos.e_lfanew, &executable_nt, sizeof(executable_nt), executable_status) &&
+        executable_nt.Signature == IMAGE_NT_SIGNATURE;
+    diagnostic("MSYS_EXECUTABLE stage=%s pid=%lu base=%llx header_ok=%d preferred=%llx size=%lx characteristics=%04x status=%08lx\n",
+        stage, GetCurrentProcessId(), static_cast<unsigned long long>(executable), executable_ok,
+        executable_nt.OptionalHeader.ImageBase, executable_nt.OptionalHeader.SizeOfImage,
+        executable_nt.OptionalHeader.DllCharacteristics, static_cast<ULONG>(executable_status));
     uintptr_t base = static_cast<uintptr_t>(InterlockedCompareExchange64(&image, 0, 0));
     bool exact = InterlockedCompareExchange(&matched, 0, 0) != 0;
     uintptr_t caps = 0;

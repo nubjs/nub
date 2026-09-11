@@ -165,6 +165,7 @@ jobs:
         run: |
           $gitExec = (& git --exec-path).Trim()
           & ./tests/sandbox-native-adapter/prepare-msys-aslr.ps1 -SourceRoot (Split-Path (Split-Path (Split-Path $gitExec)))
+          & ./tests/sandbox-native-adapter/prepare-msys-aslr.ps1 -SourceRoot (Split-Path (Split-Path (Split-Path $gitExec))) -IncludeExecutables
       - name: Comparing existing native tool sequences
         if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
         shell: pwsh
@@ -207,6 +208,8 @@ jobs:
             if ($case[0] -eq 'git-lfs') { $toolModes += 'dynamicbase-sync-adapter' }
             if ($case[0] -eq 'cargo') { $toolModes += 'msys-dynamicbase-sync-adapter' }
             if ($case[0] -eq 'git-lfs') { $toolModes += 'dynamicbase-null-adapter' }
+            if ($case[0] -eq 'git-lfs') { $toolModes += @('dynamicbase-allimages-plain', 'dynamicbase-allimages-null-adapter') }
+            if ($case[0] -eq 'cargo') { $toolModes += @('msys-dynamicbase-allimages-plain', 'msys-dynamicbase-allimages-null-adapter') }
             if ($case[0] -eq 'bun132') { $toolModes += 'mount-query-adapter' }
             foreach ($mode in $toolModes) {
               $env:PATH = $originalPath
@@ -214,6 +217,10 @@ jobs:
               if ($mode.Contains('dynamicbase-')) {
                 if (!$env:NUB_NATIVE_DYNAMICBASE_GIT) { throw 'ASLR runtime copy was not prepared' }
                 $selectedMsys = $env:NUB_NATIVE_DYNAMICBASE_GIT
+                if ($mode.Contains('allimages-')) {
+                  if (!$env:NUB_NATIVE_DYNAMICBASE_ALLIMAGES_GIT) { throw 'ASLR executable copy was not prepared' }
+                  $selectedMsys = $env:NUB_NATIVE_DYNAMICBASE_ALLIMAGES_GIT
+                }
                 $env:PATH = "$selectedMsys/cmd;$selectedMsys/mingw64/bin;$selectedMsys/usr/bin;$originalPath"
               }
               Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
@@ -250,7 +257,7 @@ jobs:
               if ($mode -in @('embedded', 'msys-embedded', 'nodes-embedded', 'dynamicbase-embedded')) { $env:NUB_NATIVE_EMBEDDED_ADAPTER = '1' }
               if ($mode.StartsWith('nodes-')) { $env:NUB_NATIVE_ANCESTOR_NODES = '1' }
               if ($mode.StartsWith('msys-')) { $env:NUB_SANDBOX_TOOL_MSYS_ROOT = $selectedMsys }
-              $test = if ($mode -in @('plain', 'msys-plain', 'dynamicbase-plain', 'msys-dynamicbase-plain')) { $case[1] } else { $case[2] }
+              $test = if ($mode -eq 'plain' -or $mode.EndsWith('-plain')) { $case[1] } else { $case[2] }
               & cargo test -p nub-sandbox --profile fast --lib $test -- --exact --ignored --nocapture --test-threads=1 *> "reports/$($case[0])-$mode.log"
               $code = $LASTEXITCODE
               $results += @{ tool = $case[0]; mode = $mode; test = $test; exit = $code }

@@ -235,10 +235,29 @@ static LPVOID WINAPI virtual_alloc(LPVOID address, SIZE_T size, DWORD kind, DWOR
     uintptr_t base = reinterpret_cast<uintptr_t>(address);
     // MSYS/Cygwin reserve this fixed arena before their ordinary startup traces.
     const uintptr_t low = 0x800000000ULL, high = 0xa00000000ULL;
-    if (!result && address && base < high && (base >= low || size > low - base))
+    if (!result && address && base < high && (base >= low || size > low - base)) {
         diagnostic("ADAPTER_FIXED_ALLOCATION_FAILED pid=%lu address=%p size=%llx kind=%08lx protection=%08lx error=%lu caller=%p\n",
             GetCurrentProcessId(), address, static_cast<unsigned long long>(size), kind, protection,
             error, _ReturnAddress());
+        // Report actual occupied regions, not just a collision error. Bound the
+        // observer so a malformed request cannot turn tracing into a long walk.
+        uintptr_t cursor = base;
+        for (unsigned i = 0; i < 32 && cursor >= base && cursor - base < size; ++i) {
+            MEMORY_BASIC_INFORMATION region = {};
+            if (!VirtualQuery(reinterpret_cast<void*>(cursor), &region, sizeof(region))) break;
+            if (region.State != MEM_FREE) {
+                char module[MAX_PATH] = {};
+                if (region.Type == MEM_IMAGE)
+                    GetModuleFileNameA(static_cast<HMODULE>(region.AllocationBase), module, MAX_PATH);
+                diagnostic("ADAPTER_FIXED_OCCUPANT pid=%lu allocation=%p region=%p size=%llx state=%08lx type=%08lx protection=%08lx module=%s\n",
+                    GetCurrentProcessId(), region.AllocationBase, region.BaseAddress,
+                    static_cast<unsigned long long>(region.RegionSize), region.State, region.Type, region.Protect, module);
+            }
+            uintptr_t next = reinterpret_cast<uintptr_t>(region.BaseAddress) + region.RegionSize;
+            if (next <= cursor) break;
+            cursor = next;
+        }
+    }
     SetLastError(error);
     return result;
 }

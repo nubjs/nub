@@ -1,9 +1,10 @@
-param([Parameter(Mandatory=$true)][string]$SourceRoot)
+param([Parameter(Mandatory=$true)][string]$SourceRoot, [switch]$IncludeExecutables)
 $ErrorActionPreference = 'Stop'
 
 # Diagnostic copy only. Never patch the installed runtime or share its file inodes.
 $source = (Resolve-Path $SourceRoot).Path
-$target = Join-Path (Get-Location).Path '.native-adapter/git-dynamicbase'
+$copyName = if ($IncludeExecutables) { 'git-dynamicbase-allimages' } else { 'git-dynamicbase' }
+$target = Join-Path (Get-Location).Path ".native-adapter/$copyName"
 if (Test-Path $target) { throw "Refusing to modify an existing copy: $target" }
 $original = Join-Path $source 'usr/bin/msys-2.0.dll'
 $before = (Get-FileHash $original).Hash
@@ -29,8 +30,32 @@ if ((Get-FileHash $original).Hash -ne $before) { throw 'Installed MSYS runtime c
    dllCharacteristicsAfter = ($old -bor 0x40); changedOffset = $offset;
    sourceSignature = (Get-AuthenticodeSignature $original).Status.ToString();
    copySignature = (Get-AuthenticodeSignature $dll).Status.ToString()
-} | ConvertTo-Json > reports/msys-dynamicbase-copy.json
+} | ConvertTo-Json > "reports/$copyName-copy.json"
+if ($IncludeExecutables) {
+  $records = @()
+  foreach ($file in Get-ChildItem (Join-Path $target 'usr/bin') -Filter '*.exe') {
+    $originalExe = Join-Path $source "usr/bin/$($file.Name)"
+    $originalHash = (Get-FileHash $originalExe).Hash
+    $image = [IO.File]::ReadAllBytes($file.FullName)
+    $imagePe = [BitConverter]::ToUInt32($image, 60)
+    if ([BitConverter]::ToUInt32($image, $imagePe) -ne 0x4550 -or
+        [BitConverter]::ToUInt16($image, $imagePe + 4) -ne 0x8664) { throw "Expected AMD64 executable: $file" }
+    $imageOffset = $imagePe + 24 + 70
+    $flags = [BitConverter]::ToUInt16($image, $imageOffset)
+    if (!($flags -band 0x40)) {
+      $replacement = [BitConverter]::GetBytes([uint16]($flags -bor 0x40))
+      [Array]::Copy($replacement, 0, $image, $imageOffset, 2)
+      [IO.File]::WriteAllBytes($file.FullName, $image)
+    }
+    if ((Get-FileHash $originalExe).Hash -ne $originalHash) { throw "Installed executable changed: $originalExe" }
+    $records += @{ name = $file.Name; sourceSha256 = $originalHash; copySha256 = (Get-FileHash $file.FullName).Hash;
+      characteristicsBefore = $flags; characteristicsAfter = ($flags -bor 0x40); changedOffset = $imageOffset }
+  }
+  $records | ConvertTo-Json > reports/msys-dynamicbase-executables.json
+  "NUB_NATIVE_DYNAMICBASE_ALLIMAGES_GIT=$target" >> $env:GITHUB_ENV
+} else {
+  "NUB_NATIVE_DYNAMICBASE_GIT=$target" >> $env:GITHUB_ENV
+}
 # The runtime's source enables ASLR; MSYS packaging reverts it for Docker fork
 # failures. This one-bit copy tests that distinction without relaxing ASLR.
-"NUB_NATIVE_DYNAMICBASE_GIT=$target" >> $env:GITHUB_ENV
 exit 0
