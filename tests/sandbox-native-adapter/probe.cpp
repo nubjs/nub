@@ -404,6 +404,8 @@ static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
     if (name->Length % sizeof(wchar_t) || name->Length >= sizeof(root)) return false;
     memcpy(root, name->Buffer, name->Length);
     root[name->Length / sizeof(wchar_t)] = 0;
+    auto leaf = wcsrchr(root, L'\\');
+    if (!leaf || (wcsncmp(leaf + 1, L"msys-", 5) && wcsncmp(leaf + 1, L"cygwin-", 7))) return false;
     wchar_t package[1024];
     if (!GetAppContainerNamedObjectPath(nullptr, nullptr, 1024, package, &needed)) {
         diagnostic("ADAPTER_SECTION_PACKAGE pid=%lu error=%lu\n", GetCurrentProcessId(), GetLastError());
@@ -416,11 +418,32 @@ static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
         if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) ||
             swprintf_s(package, L"\\Sessions\\%lu\\BaseNamedObjects\\%s", session, relative) < 0) return false;
     }
+    // The Win32 path contains a BaseNamedObjects alias; compare kernel-resolved
+    // names instead of assuming that alias survives NtQueryObject.
+    UNICODE_STRING package_name = {};
+    package_name.Buffer = package;
+    package_name.Length = USHORT(wcslen(package) * sizeof(wchar_t));
+    package_name.MaximumLength = USHORT(package_name.Length + sizeof(wchar_t));
+    OBJECT_ATTRIBUTES package_attrs = {};
+    package_attrs.Length = sizeof(package_attrs);
+    package_attrs.ObjectName = &package_name;
+    HANDLE package_handle = nullptr;
+    auto package_status = true_open_directory(&package_handle, 1, &package_attrs);
+    if (package_status < 0) {
+        diagnostic("ADAPTER_SECTION_PACKAGE_OPEN pid=%lu status=%08lx\n", GetCurrentProcessId(), static_cast<ULONG>(package_status));
+        return false;
+    }
+    package_status = query_object(package_handle, 1, info, sizeof(info), &needed);
+    CloseHandle(package_handle);
+    name = reinterpret_cast<UNICODE_STRING*>(info);
+    if (package_status < 0 || name->Length % sizeof(wchar_t) || name->Length >= sizeof(package)) return false;
+    memcpy(package, name->Buffer, name->Length);
+    package[name->Length / sizeof(wchar_t)] = 0;
     size_t prefix = wcslen(package);
     if (prefix && package[prefix - 1] == L'\\') package[--prefix] = 0;
     diagnostic("ADAPTER_SECTION_ROOT pid=%lu canonical=%ls package=%ls\n", GetCurrentProcessId(), root, package);
     if (wcslen(root) <= prefix || _wcsnicmp(root, package, prefix) || root[prefix] != L'\\') return false;
-    auto leaf = root + prefix + 1;
+    leaf = root + prefix + 1;
     return (!wcsncmp(leaf, L"msys-", 5) || !wcsncmp(leaf, L"cygwin-", 7)) && !wcschr(leaf, L'\\');
 }
 
