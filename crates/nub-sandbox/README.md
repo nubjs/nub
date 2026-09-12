@@ -92,6 +92,20 @@ This option requires Linux 5.14 or newer with seccomp user notifications and ato
 
 The notification path has a measurable cost. In the [Linux release control](https://github.com/nubjs/nub/actions/runs/34522013136), 2,000 small-file opens took a median 62.2 ms with the bundle versus 13.9 ms on the preceding engine's directory-only bundle. An empty command took 2.58 ms versus 2.28 ms. Exact-path policies without metadata notifications remained near their preceding-engine timings. These are microbenchmarks, not package-install timings.
 
+## Operating-system support
+
+The engine probes the facilities required by each policy at acquisition.
+
+| Platform | Required facilities | Runtime coverage |
+| --- | --- | --- |
+| Linux | Filesystem confinement requires [Landlock ABI 1](https://docs.kernel.org/userspace-api/landlock.html) (Linux 5.13+). Per-host networking additionally requires seccomp user notifications, pidfd access, and `SECCOMP_IOCTL_NOTIF_ADDFD` (Linux 5.9+). Self-process metadata requires atomic `SECCOMP_ADDFD_FLAG_SEND` injection (Linux 5.14+). | Debian 12 x86-64, kernel `6.1.0-53-cloud-amd64`, Landlock ABI 2 passed the Linux readiness contract. |
+| macOS | Seatbelt through the system `sandbox-exec` interface. | macOS 14.8.9 arm64 passed the macOS readiness contract. |
+| Windows | AppContainer and extended process startup, including [`PROC_THREAD_ATTRIBUTE_JOB_LIST`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute#proc_thread_attribute_job_list). | Windows Server 2022 x64 and Windows 11 arm64 run the documented compatibility sequences. An older Windows floor is not established. |
+
+Runtime coverage does not set a general distribution, architecture, or OS-version floor. It also does not set the loader or runtime-library floor for a distributed Nub binary. That floor requires inspection and execution of the exact artifact on each claimed baseline.
+
+Linux capability depends on the running kernel configuration and Landlock ABI. macOS owner-loss cleanup reaps descendants that remain in the command's process group; a descendant that deliberately leaves the group can survive while remaining Seatbelt-confined. Windows limitations for AppContainer ACLs, devices, IPC, and runtime adapters are documented in [the compatibility matrix](COMPATIBILITY.md). A full-disk Windows catalog grant explicitly omits AppContainer. The API has no detached-command operation.
+
 ## Tool directories
 
 The set includes package caches, stores, global installations and user-level tool state. Its members cover Nub, npm, pnpm, Yarn, Bun, pip, uv, Cargo/rustup, Go, Gradle, Maven, NuGet, Composer and Git.

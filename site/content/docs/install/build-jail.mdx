@@ -10,6 +10,16 @@ Nub runs approved dependency install scripts in a build jail. It is enabled by d
 nub install
 ```
 
+## Operating-system support
+
+Nub checks the facilities required by a policy when it acquires the jail. Linux filesystem confinement requires [Landlock](https://docs.kernel.org/userspace-api/landlock.html); per-host networking and self-process metadata require additional seccomp facilities. macOS uses Seatbelt. Windows uses AppContainer and extended process startup.
+
+Linux coverage includes Debian 12 x86-64 on kernel `6.1.0-53-cloud-amd64` with Landlock ABI 2. macOS coverage includes macOS 14.8.9 arm64. Windows compatibility sequences run on Windows Server 2022 x64 and Windows 11 arm64; an older Windows floor is not established.
+
+An unavailable confinement facility reports a failed confined launch. The explicit Windows full-disk catalog grant is different: it intentionally omits AppContainer, as described in [Permissions](#permissions). Runtime coverage does not establish the loader floor for a released Nub binary.
+
+macOS reaps descendants that remain in the command's process group. A descendant that deliberately leaves the group can survive while remaining Seatbelt-confined. The build jail has no detached-command operation.
+
 ## Build approval
 
 Approval decides which dependencies may run scripts. The build jail limits the access those scripts receive.
