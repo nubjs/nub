@@ -268,8 +268,12 @@ fn windows_cleanup_fixture() {
             panic!("acquisition did not reach the requested crash transition");
         }
         "fault-cleanup" => {
-            cleanup_resources().unwrap();
-            panic!("cleanup did not reach the requested crash transition");
+            if std::env::var(FAULT).as_deref() == Ok("cleanup-window-object-witness-checked") {
+                witness_before_intent_fault(&root);
+            } else {
+                cleanup_resources().unwrap();
+                panic!("cleanup did not reach the requested crash transition");
+            }
         }
         "station-recovery" => crate::backend::windows_ace::test_revoke_from_noncurrent_station()
             .expect("station-specific ACE recovery"),
@@ -590,7 +594,7 @@ fn window_witness_crash_does_not_retire_a_replacement(root: &Path) {
     let _cleanup = CleanupAfterTest;
     let (profile, _) = crash_owner(
         root,
-        "window-witness-replacement-fault",
+        "fault-cleanup",
         "cleanup-window-object-witness-checked",
     );
     let entry = windows_registry::test_entry(&profile)

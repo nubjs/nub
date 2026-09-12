@@ -3592,7 +3592,7 @@ pub(super) mod launch {
     pub(crate) fn test_crash_transition(stage: &str, profile: &str, private_root: &Path) {
         if !matches!(
             std::env::var("__NUB_WINDOWS_CLEANUP_FIXTURE").as_deref(),
-            Ok("fault-acquire" | "fault-cleanup" | "window-witness-replacement-fault")
+            Ok("fault-acquire" | "fault-cleanup")
         ) || std::env::var("__NUB_WINDOWS_CLEANUP_FAULT").as_deref() != Ok(stage)
         {
             return;
