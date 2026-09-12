@@ -316,6 +316,36 @@ fn top_level_await_settles_before_detection() {
     assert_eq!(get(&s, "/").body, "ready after await");
 }
 
+/// A preload on its own `--import` token may still be pending when the detection
+/// pass first runs, so the entry cannot be imported then; and a preload that holds a
+/// timer keeps the loop from ever draining, so waiting for idleness would never
+/// serve. The listener binds anyway, on the load hook's word that Node has started
+/// the entry — for an ES module entry, for a CommonJS one the ESM loader owns once an
+/// `--import` is present, and when it is the entry's own body holding the loop.
+#[test]
+fn a_foreign_preload_holding_the_loop_does_not_block_binding() {
+    let holds_loop = "data:text/javascript,setInterval(()=>{},1000);";
+    let quiet = "data:text/javascript,globalThis.quiet=1;";
+    for (preload, name, body) in [
+        (holds_loop, "server.mjs", "hello from /?"),
+        (holds_loop, "server.cjs", "hello from commonjs"),
+        (quiet, "holds-loop.mjs", "holds the loop"),
+    ] {
+        let f = fixture(name);
+        let s = launch(
+            f.parent().unwrap(),
+            &["--import", preload, f.to_str().unwrap()],
+            &[],
+            name,
+        );
+        assert_eq!(
+            get(&s, "/").body,
+            body,
+            "{name} behind `--import {preload}`"
+        );
+    }
+}
+
 // ── The request and response bridge ──────────────────────────────────
 
 /// Method, headers and a request body reach the handler, and the handler's status,

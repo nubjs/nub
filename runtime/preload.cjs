@@ -81,6 +81,10 @@ common.installVersionMarker();
 // Strip nub's own UV_THREADPOOL_SIZE so children get Node's default, and demote
 // the workers beyond Node's four on Linux. Tier-independent, like the marker.
 common.installThreadpoolPolicy();
+// Consume the launcher's fetch-handler marker BEFORE any user code — the configured
+// preload chain below included — and note which entry it names. Arming the pass
+// itself waits for the end of this file (`installServeEntry`).
+common.claimServeEntry();
 
 // `--no-experimental-require-module` disables require(esm) globally, so the
 // transform-core require below (and the worker/locks ESM side-effect modules)
@@ -216,7 +220,11 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   // not leaked onto the user's stderr — on every entry above nub is forced onto
   // module.register (require(esm) off, foreign-loader composition, or registerHooks
   // absent outright), so the user has no action to take. See registerLoaderWorker.
-  common.registerLoaderWorker("./preload-async-hooks.mjs", pathToFileURL(__filename).href);
+  common.registerLoaderWorker(
+    "./preload-async-hooks.mjs",
+    pathToFileURL(__filename).href,
+    common.loaderWorkerOptions(),
+  );
 
   // Entry 3 only. `module.register` is ESM-loader-only, so without this a
   // `require('./x.ts')` on 23.0–23.4 reaches Node raw and dies on the first type
@@ -273,9 +281,10 @@ if (core && core.sweepDue()) {
 // ── Default-export `fetch` handler (BOTH branches above) ────────────
 // Arms the deferred pass that serves an entry whose default export is a `fetch`
 // handler. Tier-independent — the same call sits in preload.mjs — and a no-op
-// unless the launcher marked this process a top-level file run. Placed after the
-// tier branches so the shape check runs on either, and after the eviction block for
-// the same reason it is: nothing here may touch the bootstrap module list.
+// unless `claimServeEntry` above found this process marked as a top-level file
+// run. Placed after the tier branches so the shape check runs on either, and after
+// the eviction block for the same reason it is: nothing here may touch the
+// bootstrap module list.
 common.installServeEntry();
 
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────

@@ -717,6 +717,8 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
   // `noteRuntimeV8FlagSource`. A no-op (one null check) unless the spawn layer armed
   // a flag for this Node.
   function load(url, context, nextLoad) {
+    // The fetch-handler pass may be waiting for Node to start loading the entry.
+    noteEntryLoad(url);
     return core.noteRuntimeV8FlagSource(loadInner(url, context, nextLoad));
   }
 
@@ -1884,57 +1886,154 @@ function installThreadpoolPolicy() {
 const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
 const SERVE_ENTRY_SEPARATOR = "\x1f";
 
+// The entry this process was marked to serve, from `claimServeEntry` on: the file as
+// Node resolved it, the URLs a load hook may see it under, whether a preload may
+// still follow nub's own, and the state the late pass waits on — whether a hook has
+// seen Node start loading the entry, and what to run when one does. Null in every
+// process that is not the marked application.
+let serveEntry = null;
+
+// FIRST in each preload entry, before any user code — the configured preload chain
+// included: consume the marker, so nothing the user wrote ever sees it, and resolve
+// the entry, so the hooks know which URL announces it. Arming the pass itself waits
+// for `installServeEntry`, at the very end of the preload.
+function claimServeEntry() {
+  const marker = process.env[SERVE_ENTRY_ENV];
+  if (marker === undefined) return;
+  if (!markedEntryIsThisProcess(marker)) return;
+  delete process.env[SERVE_ENTRY_ENV];
+  const file = mainEntryPath();
+  if (!file) return;
+  serveEntry = {
+    file,
+    urls: entryUrls(file),
+    mayFollow: anotherPreloadMayFollow(),
+    taken: false,
+    loadSeen: false,
+    onLoad: null,
+    channel: null,
+  };
+}
+
 // NEVER START THE ENTRY OURSELVES BEFORE NODE WOULD HAVE. The inspection below can
 // reach the entry through `import()`, and an `import()` that lands while a preload is
 // still pending EVALUATES THE ENTRY EARLY — ahead of the very preloads that exist to
 // set its realm up. That is not theoretical: a single `setImmediate` here put the
 // entry between two chained preload entries on Node 18.19 and 20.11, which is exactly
-// the additivity guarantee this feature is supposed to preserve. So the pass is armed
-// on two triggers, neither of which can get there first:
+// the additivity guarantee this feature is supposed to preserve. So the pass runs on
+// three triggers, none of which can get there first:
 //
 //   1. A `setImmediate`, which reads a CommonJS entry straight off `process.mainModule`
 //      and imports NOTHING. `Module.runMain` is synchronous, so a CommonJS entry has
 //      finished by the check phase. It may only `import()` when no preload can still
-//      follow nub's own — see `anotherPreloadMayFollow`.
-//   2. `beforeExit`, which fires when the loop drains, and therefore strictly after
-//      every preload AND the entry have run. Importing is unconditionally safe here
-//      because there is nothing left to front-run, and a `beforeExit` listener may do
-//      async work, which is what keeps the process alive once a listener binds.
+//      follow nub's own (`anotherPreloadMayFollow`), or when a hook has already seen
+//      Node start loading the entry.
+//   2. The load hook seeing the entry (`noteEntryLoad`): Node imports the entry only
+//      after awaiting the last `--import`, so by then every preload has run and an
+//      `import()` can only join the job Node already made. This fires whatever the
+//      loop is doing, which is what serves a handler whose preload or module body
+//      holds a timer, a socket or a Worker for good.
+//   3. `beforeExit`, for the hook configuration in which nub's hooks never see the
+//      entry at all. It fires only once the loop drains, so it is the last resort
+//      and never the only one.
 //
-// Between them the only entry that goes unserved is one reached through `import()`
-// whose module body keeps the loop busy forever WHILE a foreign preload token exists.
-// Declining to serve is the right side to fail on: reordering a user's preloads is a
-// correctness break, and not binding a port is not.
+// Declining to serve remains the right side to fail on where none of the three can
+// fire: reordering a user's preloads is a correctness break, and not binding a port
+// is not.
 function installServeEntry() {
-  const marker = process.env[SERVE_ENTRY_ENV];
-  if (marker === undefined) return;
-  if (!markedEntryIsThisProcess(marker)) return;
-  delete process.env[SERVE_ENTRY_ENV];
+  const entry = serveEntry;
+  if (entry === null) return;
   const report = (err) => {
     // A throwing entry is handled inside, so nothing here is expected to reject and
     // anything that does is nub's own defect, named as such. Leaving the promise
     // unhandled instead would change the process's exit path.
     process.stderr.write(`nub: could not inspect the entry for a fetch handler: ${err}\n`);
   };
-  const claim = { taken: false };
+  // Whichever late trigger fires, the other is withdrawn with it, so the process
+  // carries neither once the entry has been inspected.
+  const late = () => {
+    process.removeListener("beforeExit", late);
+    return serveEntryIfHandler(entry, true).then(() => closeEntryChannel(entry)).catch(report);
+  };
   // Not `.unref()`d: a synchronous script must still reach this pass, or a server
   // whose module body does nothing asynchronous would exit before binding.
   setImmediate(() => {
-    serveEntryIfHandler(claim, !anotherPreloadMayFollow())
+    serveEntryIfHandler(entry, entry.loadSeen || !entry.mayFollow)
       .then((deferred) => {
-        // The `beforeExit` trigger is registered ONLY when the pass above declined
-        // for want of permission to import — never on an ordinary run. A listener
-        // added up front is observable to the user's own code
-        // (`process.listenerCount("beforeExit")` reads 1 where plain Node reads 0),
-        // and an unconditional one made every `nub <file>` run carry it.
-        if (deferred) {
-          process.once("beforeExit", () => {
-            serveEntryIfHandler(claim, true).catch(report);
-          });
+        if (!deferred) {
+          closeEntryChannel(entry);
+          return;
         }
+        // Registered ONLY when the pass above declined for want of permission to
+        // import — never on an ordinary run. A `beforeExit` listener added up front
+        // is observable to the user's own code (`process.listenerCount("beforeExit")`
+        // reads 1 where plain Node reads 0), and an unconditional one made every
+        // `nub <file>` run carry it.
+        entry.onLoad = late;
+        if (entry.loadSeen) fireEntryLoad(entry);
+        // The worker's signal has to reach a live loop, so the port holds the process
+        // open until it does; `closeEntryChannel` lets go afterwards.
+        if (entry.channel !== null) entry.channel.port1.ref();
+        process.once("beforeExit", late);
       })
       .catch(report);
   });
+}
+
+// The URLs a load hook may see the entry under. Node's ESM resolver hands the hook
+// the realpath unless symlinks are preserved, and `_findPath` has usually resolved it
+// already — so both spellings are watched rather than guessing which one applies.
+function entryUrls(file) {
+  const urls = new Set([pathToFileURL(file).href]);
+  try {
+    urls.add(pathToFileURL(getBuiltin("node:fs").realpathSync(file)).href);
+  } catch { /* unreadable — the unresolved spelling still matches Node's own */ }
+  return urls;
+}
+
+// A load hook saw Node start loading `url`. Called from the fast tier's synchronous
+// hook for every load, and from the compat tier's loader worker over the channel
+// `loaderWorkerOptions` hands it. Free in every process but the marked application.
+function noteEntryLoad(url) {
+  const entry = serveEntry;
+  if (entry === null || entry.loadSeen || !entry.urls.has(url)) return;
+  entry.loadSeen = true;
+  fireEntryLoad(entry);
+}
+
+function fireEntryLoad(entry) {
+  const onLoad = entry.onLoad;
+  if (onLoad === null) return;
+  entry.onLoad = null;
+  // Out of the hook's own stack: the sync hook runs INSIDE Node's load of the entry,
+  // and an `import()` issued from there would re-enter the loader.
+  setImmediate(onLoad);
+}
+
+// For `registerLoaderWorker`, on the tiers whose hooks run in a loader worker: the
+// port that worker announces the entry's load on, or nothing. Created only when the
+// pass will have to wait for that announcement, because the port is a handle the
+// process carries until the entry loads and an ordinary run should carry nothing.
+function loaderWorkerOptions() {
+  const entry = serveEntry;
+  if (entry === null || !entry.mayFollow) return undefined;
+  const { MessageChannel } = getBuiltin("node:worker_threads");
+  const channel = new MessageChannel();
+  channel.port1.on("message", noteEntryLoad);
+  // Referenced only once the pass is actually waiting — see `installServeEntry`.
+  channel.port1.unref();
+  entry.channel = channel;
+  return {
+    data: { entryLoad: { port: channel.port2, urls: [...entry.urls] } },
+    transferList: [channel.port2],
+  };
+}
+
+function closeEntryChannel(entry) {
+  const channel = entry.channel;
+  if (channel === null) return;
+  entry.channel = null;
+  channel.port1.close();
 }
 
 // Is this process the application the launcher marked, or a wrapper it put in
@@ -1989,26 +2088,33 @@ function anotherPreloadMayFollow() {
 
 // Serve the entry if its default export is a handler. Resolves TRUE when it declined
 // only because it may not import yet, which is the caller's signal to arm the late
-// trigger. `claim` is shared by both triggers: whichever gets a usable namespace takes
-// it SYNCHRONOUSLY, before any await, so the two can never both bind a listener.
-async function serveEntryIfHandler(claim, mayImport) {
-  if (claim.taken) return false;
-  const file = mainEntryPath();
-  if (!file) {
-    claim.taken = true;
-    return false;
-  }
+// triggers. `entry.taken` is shared by every trigger: whichever gets a usable
+// namespace takes it SYNCHRONOUSLY, before any await, so no two can bind a listener.
+//
+// A CommonJS entry is already on `process.mainModule`, fully evaluated, so its
+// exports need no module-loader round trip. Anything else — an ES module entry, or a
+// CommonJS one the ESM loader owns on the `--import` compat tier — is reached through
+// `import()`, which returns the job Node already created for that URL. So the entry
+// evaluates exactly once whichever of us gets there first, and the promise settles
+// only after the entry's own top-level await does. Getting there first would cost the
+// entry its `isEntryPoint` flag, and with it `import.meta.main`; on the fast tier the
+// `--require` preload is synchronous, so Node's own import runs in the same macrotask
+// that scheduled the pass, and the compat tier is Node ≤ 22.14, which has no
+// `import.meta.main` to lose. Measured `true` on the fast tier and `undefined` on
+// 20.19 and 22.14, which is what plain Node reports on each.
+async function serveEntryIfHandler(entry, mayImport) {
+  if (entry.taken) return false;
   const main = process.mainModule;
-  if (main && main.loaded && main.filename === file) {
-    claim.taken = true;
+  if (main && main.loaded && main.filename === entry.file) {
+    entry.taken = true;
     serveIfHandler(main.exports);
     return false;
   }
   if (!mayImport) return true;
-  claim.taken = true;
+  entry.taken = true;
   let ns;
   try {
-    ns = await import(pathToFileURL(file).href);
+    ns = await import(pathToFileURL(entry.file).href);
   } catch {
     // The entry threw. Node has already reported that as an uncaught error, and this
     // is the same failure observed a second time, so it is dropped rather than
@@ -2042,26 +2148,6 @@ function mainEntryPath() {
   } catch {
     return null;
   }
-}
-
-// A CommonJS entry is already on `process.mainModule`, fully evaluated, so its
-// exports need no module-loader round trip. Anything else — an ES module entry, or a
-// CommonJS one the ESM loader owns on the `--import` compat tier — is reached through
-// `import()`, which returns the job Node already created for that URL. So the entry
-// evaluates exactly once whichever of us gets there first, and the promise settles
-// only after the entry's own top-level await does.
-//
-// Getting there first would cost the entry its `isEntryPoint` flag, and with it
-// `import.meta.main`. It cannot happen on the fast tier, where the `--require` preload
-// is synchronous, so Node's own entry import runs in the same macrotask that scheduled
-// this callback and the check phase cannot interleave. The compat tier's `--import`
-// preload does await, but that tier is Node ≤ 22.14, which has no `import.meta.main`
-// to lose. Measured `true` on the fast tier and `undefined` on 20.19 and 22.14, which
-// is what plain Node reports on each.
-async function entryDefaultExport(file) {
-  const main = process.mainModule;
-  if (main && main.loaded && main.filename === file) return main.exports;
-  return (await import(pathToFileURL(file).href)).default;
 }
 
 // The handler object, or null when the default export is not one. A `.ts` or `.js`
@@ -2130,6 +2216,8 @@ module.exports = {
   restoreCompileCacheEnv,
   installCompiledChildProcess,
   reenableUserCompileCache,
+  claimServeEntry,
+  loaderWorkerOptions,
   installServeEntry,
   // Exported for the unit test that asserts which default-export shapes are served.
   fetchHandler,

@@ -71,9 +71,23 @@ const __pnp = (() => {
 // reads — without the clear here, `import "@js-temporal/polyfill"` on the
 // compat tier resolved to a synthetic re-export of a global the loader never
 // installs, silently binding `undefined` (verified on Node 20.19). The nub CLI
-// registers this worker with no data, keeping its clobbers intact.
+// registers this worker with no data, keeping its clobbers intact — except for the
+// fetch-handler case below, which carries no clobber flag.
+//
+// `{ entryLoad: { port, urls } }` is the main thread waiting to learn that Node has
+// started loading the program entry (preload-common.cjs `noteEntryLoad`): its
+// fetch-handler pass may not `import()` the entry while a preload could still be
+// pending, and this worker is the only place that tier can see the entry go by.
+// Sent only when that wait is actually needed, and answered exactly once.
+let entryLoad = null;
+
 export async function initialize(data) {
   if (data && data.standaloneLoader) CLOBBER_MAP.clear();
+  if (data && data.entryLoad) {
+    entryLoad = { port: data.entryLoad.port, urls: new Set(data.entryLoad.urls) };
+    // Its liveness is the main thread's concern; the worker must not stay up for it.
+    entryLoad.port.unref();
+  }
 }
 
 // ── Resolve hook ────────────────────────────────────────────────────
@@ -97,6 +111,11 @@ export async function resolve(specifier, context, nextResolve) {
 // see transform-core `noteRuntimeV8FlagSource`. Awaited here because the
 // `nextLoad` branch of loadInner hands back a promise on this tier.
 export async function load(url, context, nextLoad) {
+  if (entryLoad !== null && entryLoad.urls.has(url)) {
+    const { port } = entryLoad;
+    entryLoad = null;
+    port.postMessage(url);
+  }
   return noteRuntimeV8FlagSource(await loadInner(url, context, nextLoad));
 }
 
