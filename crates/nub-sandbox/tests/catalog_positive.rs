@@ -1,7 +1,81 @@
 use nub_sandbox::policy::{Effect, FsAccess};
-use nub_sandbox::{Homes, compile_build_jail};
+use nub_sandbox::{
+    CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile, compile_build_jail,
+};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+const ENV_PROBE: &str = "SANDBOX_CATALOG_ENV_PROBE";
+const BASELINE: [(&str, &str); 3] = [
+    ("PYTHONDONTWRITEBYTECODE", "1"),
+    ("npm_config_logs_max", "0"),
+    ("npm_config_update_notifier", "false"),
+];
+
+#[test]
+fn catalog_environment_child() {
+    let Ok(mode) = std::env::var(ENV_PROBE) else {
+        return;
+    };
+    assert!(matches!(mode.as_str(), "jail" | "ordinary"));
+    for (name, baseline) in BASELINE {
+        let expected = if mode == "jail" {
+            baseline
+        } else {
+            "caller-value"
+        };
+        assert_eq!(std::env::var(name).as_deref(), Ok(expected), "{name}");
+    }
+    println!("CATALOG_ENV_OK:{mode}");
+}
+
+#[test]
+fn baked_environment_reaches_real_children_without_changing_ordinary_policies() {
+    let (_root, _policy, homes) = policy_for("__catalog_env_fixture__", "1.0.0");
+    let executable = std::env::current_exe().unwrap();
+    let mut ambient: BTreeMap<String, String> = std::env::vars().collect();
+    for (name, _) in BASELINE {
+        ambient.insert(name.into(), "caller-value".into());
+    }
+    let jail = compile_build_jail(
+        homes.clone(),
+        &homes.project.join("node_modules/fixture"),
+        Some("__catalog_env_fixture__"),
+        Some("1.0.0"),
+        vec![executable.clone()],
+        Vec::new(),
+        ambient.clone(),
+    )
+    .unwrap();
+    let context = CompileCtx::new(
+        homes.clone(),
+        homes.project.clone(),
+        ScopeCapabilities::approved(),
+        ambient,
+    );
+    let ordinary = compile(&json!({"fs": true, "net": false, "vars": true}), &context).unwrap();
+    for (mode, mut policy) in [("jail", jail), ("ordinary", ordinary)] {
+        policy.env.constructed.insert(ENV_PROBE.into(), mode.into());
+        let sandbox = Sandbox::new(&policy).unwrap();
+        let prepared = sandbox
+            .prepare(
+                CommandSpec::new(&executable)
+                    .args(["--exact", "catalog_environment_child", "--nocapture"])
+                    .cwd(&homes.project),
+            )
+            .unwrap();
+        assert!(prepared.degradation.lost.is_empty());
+        let output = prepared.output().unwrap();
+        sandbox.close();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains(&format!("CATALOG_ENV_OK:{mode}"))
+        );
+    }
+}
 
 fn policy_for(
     package: &str,
