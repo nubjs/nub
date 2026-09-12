@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const binary = resolve(process.env.NUB_BIN);
 const root = mkdtempSync(join(tmpdir(), 'nub-jail-packages-'));
+const linkedProject = process.env.CORPUS_LINKED_PROJECT === '1';
 const reportRoot = process.env.CORPUS_REPORT ? resolve(process.env.CORPUS_REPORT) : null;
 if (reportRoot) mkdirSync(reportRoot, { recursive: true });
 const report = (source, destination) => {
@@ -59,12 +60,19 @@ report(provenance, 'provenance.json');
 
 for (const [name, version, probe, source = false] of selected) {
   for (const confined of [false, true]) {
-    const label = `${name.replaceAll('/', '-')}-${source ? 'source' : 'default'}-${confined ? 'jailed' : 'control'}`;
+    const label = `${name.replaceAll('/', '-')}-${source ? 'source' : 'default'}${linkedProject ? '-junction' : ''}-${confined ? 'jailed' : 'control'}`;
     const base = join(root, label);
     const project = join(base, 'project');
+    const projectTarget = join(base, 'project-target');
     const home = join(base, 'home');
     const temp = join(home, 'tmp');
-    mkdirSync(project, { recursive: true });
+    mkdirSync(projectTarget, { recursive: true });
+    if (linkedProject) {
+      symlinkSync(projectTarget, project, 'junction');
+      assert.ok(lstatSync(project).isSymbolicLink(), 'project is a junction');
+      assert.equal(realpathSync(project), realpathSync(projectTarget), 'junction resolves to project target');
+    }
+    else mkdirSync(project, { recursive: true });
     mkdirSync(temp, { recursive: true });
     writeFileSync(join(project, 'package.json'), JSON.stringify({
       name: 'jail-corpus-consumer', private: true, dependencies: { [name]: version },

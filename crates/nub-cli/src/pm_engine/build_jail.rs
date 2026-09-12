@@ -379,17 +379,14 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             // `cpu-features@0.0.10` invokes BuildCheck before node-gyp. BuildCheck repeats VS
             // discovery through a COM-hosted PowerShell helper which an AppContainer may not
             // activate; reuse only the toolchain Nub just resolved and validated for node-gyp.
-            // Raw and unconfined scripts never enter this path, and withholding this stamp is
-            // covered by the native control arm in the catalog workflow.
+            // Raw and unconfined scripts never enter this path.
             if is_buildcheck_compat_package(
                 spawn.package_name.as_deref(),
                 spawn.package_version.as_deref(),
-            ) && std::env::var_os("NUB_SANDBOX_WIN_NO_BUILDCHECK_INJECT").is_none()
-                && let (Some(options), Some(existing)) = (
-                    msvc.buildcheck_node_options(),
-                    ambient.get_mut("NODE_OPTIONS"),
-                )
-            {
+            ) && let (Some(options), Some(existing)) = (
+                msvc.buildcheck_node_options(),
+                ambient.get_mut("NODE_OPTIONS"),
+            ) {
                 existing.push(' ');
                 existing.push_str(&options);
             }

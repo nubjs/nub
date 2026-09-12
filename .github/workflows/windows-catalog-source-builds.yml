@@ -54,8 +54,41 @@ jobs:
           echo '07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075  vendor/busybox-w32/busybox64.exe' | sha256sum -c -
           cp vendor/busybox-w32/busybox64.exe target/fast/busybox.exe
           cargo build -p nub-cli --profile fast --features build-jail-catalog-override
-          echo "NUB_BIN=$GITHUB_WORKSPACE/target/fast/nub.exe" >> "$GITHUB_ENV"
-          sha256sum target/fast/nub.exe > reports/nub.sha256
+          cp target/fast/nub.exe target/fast/nub-buildcheck-adapter.exe
+          sha256sum target/fast/nub-buildcheck-adapter.exe > reports/nub-buildcheck-adapter.sha256
+          source=crates/nub-cli/src/pm_engine/build_jail.rs
+          cp "$source" "$RUNNER_TEMP/build_jail.rs.adapter"
+          restore_buildcheck_source() {
+            cp "$RUNNER_TEMP/build_jail.rs.adapter" "$source"
+            cmp "$RUNNER_TEMP/build_jail.rs.adapter" "$source"
+          }
+          trap restore_buildcheck_source EXIT
+          sha256sum "$source" > reports/build_jail.adapter.sha256
+          python - "$source" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          source = path.read_text()
+          needle = '''fn is_buildcheck_compat_package(name: Option<&str>, version: Option<&str>) -> bool {
+              name == Some("cpu-features") && version == Some("0.0.10")
+          }
+          '''
+          replacement = '''fn is_buildcheck_compat_package(_name: Option<&str>, _version: Option<&str>) -> bool {
+              false
+          }
+          '''
+          assert source.count(needle) == 1, 'expected exactly one BuildCheck package predicate'
+          path.write_text(source.replace(needle, replacement))
+          PY
+          git diff -- "$source" > reports/buildcheck-withheld-adapter.patch
+          test -s reports/buildcheck-withheld-adapter.patch
+          sha256sum "$source" > reports/build_jail.withheld-adapter.sha256
+          cargo build -p nub-cli --profile fast --features build-jail-catalog-override
+          cp target/fast/nub.exe target/fast/nub-buildcheck-withheld-adapter.exe
+          sha256sum target/fast/nub-buildcheck-withheld-adapter.exe > reports/nub-buildcheck-withheld-adapter.sha256
+          restore_buildcheck_source
+          trap - EXIT
       - name: Comparing short-root source builds with controls
         env:
           CORPUS_TEMP_ROOT: C:/p
@@ -64,15 +97,17 @@ jobs:
           NUB_JAIL_DUMP_POLICY: '1'
         run: |
           set +e
-          CORPUS_CASE=better-sqlite3 CORPUS_REPORT="$GITHUB_WORKSPACE/reports/better-sqlite3" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/better-sqlite3.log
+          adapter="$GITHUB_WORKSPACE/target/fast/nub-buildcheck-adapter.exe"
+          withheld="$GITHUB_WORKSPACE/target/fast/nub-buildcheck-withheld-adapter.exe"
+          NUB_BIN="$adapter" CORPUS_CASE=better-sqlite3 CORPUS_REPORT="$GITHUB_WORKSPACE/reports/better-sqlite3" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/better-sqlite3.log
           better_sqlite3=${PIPESTATUS[0]}
-          CORPUS_LINKED_PROJECT=1 CORPUS_CASE=better-sqlite3 CORPUS_REPORT="$GITHUB_WORKSPACE/reports/better-sqlite3-linked" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/better-sqlite3-linked.log
+          NUB_BIN="$adapter" CORPUS_LINKED_PROJECT=1 CORPUS_CASE=better-sqlite3 CORPUS_REPORT="$GITHUB_WORKSPACE/reports/better-sqlite3-linked" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/better-sqlite3-linked.log
           better_sqlite3_linked=${PIPESTATUS[0]}
-          CORPUS_CASE=esbuild CORPUS_REPORT="$GITHUB_WORKSPACE/reports/esbuild" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/esbuild.log
+          NUB_BIN="$adapter" CORPUS_CASE=esbuild CORPUS_REPORT="$GITHUB_WORKSPACE/reports/esbuild" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/esbuild.log
           esbuild=${PIPESTATUS[0]}
-          CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features.log
+          NUB_BIN="$adapter" CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features.log
           cpu_features=${PIPESTATUS[0]}
-          NUB_SANDBOX_WIN_NO_BUILDCHECK_INJECT=1 CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features-withheld-adapter" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features-withheld-adapter.log
+          NUB_BIN="$withheld" CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features-withheld-adapter" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features-withheld-adapter.log
           cpu_features_without_adapter=${PIPESTATUS[0]}
           test "$better_sqlite3" -eq 0 && test "$better_sqlite3_linked" -eq 0 && test "$esbuild" -eq 0 && test "$cpu_features" -eq 0 && test "$cpu_features_without_adapter" -ne 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
