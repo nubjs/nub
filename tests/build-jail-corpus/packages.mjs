@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -12,6 +12,8 @@ const root = mkdtempSync(join(requestedTempRoot, 'nub-jail-packages-'));
 assert.equal(resolve(dirname(root)), requestedTempRoot, 'fixture root uses CORPUS_TEMP_ROOT');
 const linkedProject = process.env.CORPUS_LINKED_PROJECT === '1';
 const reportRoot = process.env.CORPUS_REPORT ? resolve(process.env.CORPUS_REPORT) : null;
+const screen = process.env.CORPUS_OSV_SCREEN ? resolve(process.env.CORPUS_OSV_SCREEN) : null;
+const screenRoot = reportRoot ?? join(root, 'security');
 if (reportRoot) mkdirSync(reportRoot, { recursive: true });
 const report = (source, destination) => {
   if (!reportRoot) return;
@@ -99,7 +101,26 @@ for (const [name, version, probe, source = false] of selected) {
     if (source && !confined && process.env.CORPUS_CONTROL_PYTHON) {
       env.npm_config_python = process.env.CORPUS_CONTROL_PYTHON;
     }
-    const install = spawnSync(binary, ['install'], { cwd: project, env, encoding: 'utf8', timeout: 300_000 });
+    let preparedDigest = null;
+    if (screen) {
+      // Resolve this exact arm without scripts, screen its complete closure, then remove only the
+      // materialized tree. The resolver's lockfile remains and binds the cold lifecycle install.
+      const prepared = spawnSync(binary, ['install', '--ignore-scripts'], { cwd: project, env, encoding: 'utf8', timeout: 300_000 });
+      writeFileSync(join(base, 'prepare.log'), `${prepared.stdout}\n${prepared.stderr}`);
+      report(join(base, 'prepare.log'), join('cases', label, 'prepare.log'));
+      assert.ifError(prepared.error);
+      assert.equal(prepared.status, 0, 'script-free closure resolved');
+      const cleared = spawnSync(process.execPath, [screen, '--tree', project, '--kind', `catalog-sanity-${label}-prepared`, '--cache-dir', join(screenRoot, 'clearances'), '--out', join(base, 'prepared-screen.json')], { env, encoding: 'utf8', timeout: 300_000 });
+      writeFileSync(join(base, 'prepared-screen.log'), `${cleared.stdout}\n${cleared.stderr}`);
+      report(join(base, 'prepared-screen.json'), join('cases', label, 'prepared-screen.json'));
+      report(join(base, 'prepared-screen.log'), join('cases', label, 'prepared-screen.log'));
+      assert.ifError(cleared.error);
+      assert.equal(cleared.status, 0, 'resolved closure passed fail-closed screen');
+      preparedDigest = JSON.parse(readFileSync(join(base, 'prepared-screen.json'), 'utf8')).digest;
+      assert.ok(preparedDigest, 'prepared screen has an exact closure digest');
+      rmSync(join(project, 'node_modules'), { recursive: true, force: true });
+    }
+    const install = spawnSync(binary, screen ? ['install', '--frozen-lockfile'] : ['install'], { cwd: project, env, encoding: 'utf8', timeout: 300_000 });
     const log = `${install.stdout}\n${install.stderr}`;
     const installLog = join(base, 'install.log');
     writeFileSync(installLog, log);
@@ -115,6 +136,15 @@ for (const [name, version, probe, source = false] of selected) {
     try {
       assert.ifError(install.error);
       assert.equal(install.status, 0, 'install succeeded');
+      if (screen) {
+        const bound = spawnSync(process.execPath, [screen, '--tree', project, '--kind', `catalog-sanity-${label}-bound`, '--cache-dir', join(screenRoot, 'clearances'), '--out', join(base, 'bound-screen.json')], { env, encoding: 'utf8', timeout: 300_000 });
+        writeFileSync(join(base, 'bound-screen.log'), `${bound.stdout}\n${bound.stderr}`);
+        report(join(base, 'bound-screen.json'), join('cases', label, 'bound-screen.json'));
+        report(join(base, 'bound-screen.log'), join('cases', label, 'bound-screen.log'));
+        assert.ifError(bound.error);
+        assert.equal(bound.status, 0, 'installed closure remained screenable');
+        assert.equal(JSON.parse(readFileSync(join(base, 'bound-screen.json'), 'utf8')).digest, preparedDigest, 'lifecycle used the screened frozen closure');
+      }
       if (confined) assert.ok(log.includes(`JAILDUMP pkg=Some("${name}")`), 'target lifecycle entered the jail');
       else assert.match(log, /running without the build sandbox/, 'control opt-out engaged');
       if (source) assert.match(log, /gyp info using node-gyp@/, 'native compilation actually ran');
