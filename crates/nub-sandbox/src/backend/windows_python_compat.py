@@ -28,7 +28,15 @@ def _install_realpath_compat(os):
         if path not in dot_paths + byte_dot_paths:
             return result
         suffix = b"\\." if isinstance(result, bytes) else "\\."
-        return result[:-len(suffix)] if result.endswith(suffix) else result
+        if not result.endswith(suffix):
+            return result
+        trimmed = result[:-len(suffix)]
+        # Keep a drive root absolute: trimming `C:\\.` must produce `C:\\`, not
+        # drive-relative `C:`. Other paths retain their original components exactly.
+        colon = b":" if isinstance(trimmed, bytes) else ":"
+        if len(trimmed) == 2 and trimmed[1:2] == colon:
+            return trimmed + suffix[:1]
+        return trimmed
 
     realpath._appcontainer_compatible = True
     os.path.realpath = realpath

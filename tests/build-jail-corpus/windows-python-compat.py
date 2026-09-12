@@ -105,7 +105,17 @@ def gyp_empty_current_directory_base_is_canonicalized():
     assert gyp_relative_path(r"deps\cpu_features", "", realpath) == r"deps\cpu_features"
 
 
+def drive_root_fallback_retains_its_separator():
+    def fallback_realpath(path):
+        return b"C:\\." if isinstance(path, bytes) else r"C:\."
+
+    realpath = install_realpath(fallback_realpath)
+    assert realpath("") == "C:\\"
+    assert realpath(b"") == b"C:\\"
+
+
 old_python_and_pathlike_call_once()
 strict_and_bytes_contract()
 audit_is_optional_on_pre_38_python()
 gyp_empty_current_directory_base_is_canonicalized()
+drive_root_fallback_retains_its_separator()
