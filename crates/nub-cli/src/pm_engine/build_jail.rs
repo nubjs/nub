@@ -261,7 +261,9 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             npm_builtin_config_deny_root = npm_builtin_config_deny_root_for(&layout.global_modules);
             extra_reads.push(layout.headers.clone());
             extra_reads.push(layout.global_modules.clone());
-            if !ambient.contains_key("npm_config_nodedir") {
+            let node_gyp_headers =
+                super::build_prefetch::staged_node_gyp_header_selection(&ambient, &probe);
+            if node_gyp_headers.synthesize {
                 // WHERE THE HEADERS COME FROM is a property of the distribution, asked of
                 // the disk rather than of the platform. A POSIX distribution ships them in
                 // its own root, so nodedir names that root and nothing is fetched. The
@@ -272,10 +274,10 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                 //
                 // ⛔ CONSEQUENCE FOR THE CATALOG: a node-gyp DEVDIR promotion target
                 // (`Library/Caches/node-gyp`, `.cache/node-gyp`) is INERT under nub, and a
-                // catalog entry must not be widened to name one. nodedir is set on every
-                // confined spawn here, and node-gyp skips its devdir entirely whenever
-                // nodedir is set — so the header cache the entry would promote is never
-                // written. Measured cold on macOS 2026-08-18 across the 22 catalogued entries
+                // catalog entry must not be widened to name one. For the default (no custom
+                // node-gyp runtime selector) confined spawn, nodedir is set here and node-gyp
+                // skips its devdir entirely — so the header cache the entry would promote is
+                // never written. Measured cold on macOS 2026-08-18 across the 22 catalogued entries
                 // whose lower bands name `Library/Caches/node-gyp`: better-sqlite3@13.0.3 and
                 // tree-sitter-kotlin@0.3.8 both ran a real compile (`gyp info ok`,
                 // `-Dnode_root_dir=<distribution root>`) and left 0 bytes in their private
@@ -291,6 +293,17 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                         "npm_config_nodedir".to_string(),
                         nodedir.to_string_lossy().into_owned(),
                     );
+                    // `nodedir` makes node-gyp choose the downloaded headers' config.gypi;
+                    // ordinary lifecycle builds instead clone the selected runtime's
+                    // process.config. Preserve that ordinary compile configuration while still
+                    // supplying the offline header/lib tree. A direct or package-level user
+                    // force-process-config setting remains authoritative.
+                    if !node_gyp_headers.force_process_config_explicit {
+                        ambient.insert(
+                            "npm_config_force_process_config".to_string(),
+                            "true".to_string(),
+                        );
+                    }
                 }
             }
         }

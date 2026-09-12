@@ -325,19 +325,14 @@ fn node_pre_gyp_libc(platform: &str, ambient: &BTreeMap<String, String>) -> Stri
 /// confined build finds a local tree. The Windows jail STAYS deny-all — nothing here
 /// widens a net axis.
 ///
-/// The result is cached under nub's cache dir keyed on the Node version, so an install of
-/// N native packages fetches once and later installs fetch not at all.
+/// The result is cached under nub's cache dir keyed on the Node version and architecture, so an
+/// install of N native packages fetches once and later installs fetch not at all. The architecture
+/// is load-bearing: Windows publishes a distinct `node.lib` for each architecture.
 pub(super) fn node_headers(
     ambient: &BTreeMap<String, String>,
     probe: &ProbeScope,
 ) -> Option<PathBuf> {
-    // A user who named their own dist URL is building against a Node that is not
-    // nodejs.org's, so upstream headers would answer a question they did not ask. Decline
-    // and leave them the behavior they had.
-    if ["npm_config_disturl", "npm_config_dist_url"]
-        .iter()
-        .any(|key| ambient.get(*key).is_some_and(|v| !v.is_empty()))
-    {
+    if !node_gyp_header_selection(ambient, node_facts(ambient, probe)).synthesize {
         return None;
     }
     let facts = node_facts(ambient, probe)?;
@@ -345,11 +340,117 @@ pub(super) fn node_headers(
     // `cfg!(windows)`. The import library is a property of the Node being compiled
     // against, and that is what `node_facts` reports.
     let want_lib = facts.platform == "win32";
-    let dir = cache_root()?.join("node-headers").join(&facts.version);
+    let dir = cache_root()
+        .join("node-headers")
+        .join(node_headers_cache_key(facts));
     if headers_ready(&dir, want_lib) {
         return Some(dir);
     }
     materialize_headers(&dir, facts, want_lib)
+}
+
+/// Whether Nub may point node-gyp at headers selected from the staged Node runtime, and whether
+/// its generated `config.gypi` should be forced back to that runtime's `process.config`.
+///
+/// node-gyp accepts both npm config and `package.json`'s `config.node_gyp` namespace, with the
+/// latter taking precedence. Header-selection options from either source therefore have to be
+/// interpreted before Nub's installed-header shortcut, not only in the Windows prefetch branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NodeGypHeaderSelection {
+    pub(super) synthesize: bool,
+    pub(super) force_process_config_explicit: bool,
+}
+
+const NPM_CONFIG_PREFIX: &str = "npm_config_";
+const NPM_PACKAGE_NODE_GYP_PREFIX: &str = "npm_package_config_node_gyp_";
+
+/// Select a node-gyp option with node-gyp's own source precedence and underscore/dash spelling
+/// rule. `Some("")` is distinct from absent: it overrides a lower-precedence source but does not
+/// name a header selector.
+fn node_gyp_option<'a>(ambient: &'a BTreeMap<String, String>, option: &str) -> Option<&'a str> {
+    let mut npm = None;
+    let mut package = None;
+    for (key, value) in ambient {
+        if let Some(suffix) = strip_prefix_ci(key, NPM_CONFIG_PREFIX) {
+            if node_gyp_option_name_eq(suffix, option) {
+                npm = Some(value.as_str());
+            }
+        } else if let Some(suffix) = strip_prefix_ci(key, NPM_PACKAGE_NODE_GYP_PREFIX)
+            && node_gyp_option_name_eq(suffix, option)
+        {
+            package = Some(value.as_str());
+        }
+    }
+    package.or(npm)
+}
+
+fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+fn node_gyp_option_name_eq(candidate: &str, option: &str) -> bool {
+    // node-gyp reads both `opts.disturl` and `opts['dist-url']` for legacy npm config.
+    if option == "dist-url" && candidate.eq_ignore_ascii_case("disturl") {
+        return true;
+    }
+    candidate.len() == option.len()
+        && candidate
+            .bytes()
+            .zip(option.bytes())
+            .all(|(candidate, option)| {
+                (candidate == b'_' && option == b'-') || candidate.eq_ignore_ascii_case(&option)
+            })
+}
+
+/// Refuse a synthetic header tree only when an effective user setting selects a different
+/// runtime. An explicit host-equivalent `target`/`arch` remains compatible with the staged
+/// runtime, so it keeps the offline path instead of breaking an ordinary explicit invocation.
+fn node_gyp_header_selection(
+    ambient: &BTreeMap<String, String>,
+    facts: Option<&NodeFacts>,
+) -> NodeGypHeaderSelection {
+    let nonempty = |option| node_gyp_option(ambient, option).filter(|value| !value.is_empty());
+    let explicit_header_root = nonempty("nodedir").is_some();
+    let custom_dist = nonempty("dist-url").is_some();
+    let custom_runtime =
+        nonempty("runtime").is_some_and(|runtime| !runtime.eq_ignore_ascii_case("node"));
+    let target_matches = nonempty("target").is_none_or(|target| {
+        facts.is_some_and(|facts| target.trim_start_matches('v') == facts.version.as_str())
+    });
+    let arch_matches = ["arch", "target-arch"].into_iter().all(|option| {
+        nonempty(option).is_none_or(|arch| facts.is_some_and(|facts| arch == facts.arch.as_str()))
+    });
+
+    NodeGypHeaderSelection {
+        synthesize: !explicit_header_root
+            && !custom_dist
+            && !custom_runtime
+            && target_matches
+            && arch_matches,
+        force_process_config_explicit: node_gyp_option(ambient, "force-process-config").is_some(),
+    }
+}
+
+/// Resolve the staged Node facts only when a user asked for a version or architecture that must
+/// be compared. The normal no-option path remains a filesystem-only installed-header shortcut.
+pub(super) fn staged_node_gyp_header_selection(
+    ambient: &BTreeMap<String, String>,
+    probe: &ProbeScope,
+) -> NodeGypHeaderSelection {
+    let needs_facts = ["target", "arch", "target-arch"]
+        .into_iter()
+        .any(|option| node_gyp_option(ambient, option).is_some_and(|value| !value.is_empty()));
+    node_gyp_header_selection(
+        ambient,
+        needs_facts.then(|| node_facts(ambient, probe)).flatten(),
+    )
+}
+
+fn node_headers_cache_key(facts: &NodeFacts) -> String {
+    format!("{}-{}", facts.version, facts.arch)
 }
 
 /// The two files whose presence means a later install can skip the fetch. Existence-only,
@@ -1456,6 +1557,110 @@ mod tests {
             platform: "darwin".into(),
             arch: "arm64".into(),
         }
+    }
+
+    #[test]
+    fn node_gyp_default_headers_use_the_runtime_config() {
+        let selection = node_gyp_header_selection(&BTreeMap::new(), None);
+        assert_eq!(
+            selection,
+            NodeGypHeaderSelection {
+                synthesize: true,
+                force_process_config_explicit: false,
+            }
+        );
+    }
+
+    #[test]
+    fn node_gyp_host_equivalent_target_and_arch_keep_synthetic_headers() {
+        let facts = node26();
+        let ambient = BTreeMap::from([
+            ("npm_config_target".to_string(), "v26.0.0".to_string()),
+            ("npm_config_arch".to_string(), "arm64".to_string()),
+            ("npm_config_target_arch".to_string(), "arm64".to_string()),
+        ]);
+        assert!(node_gyp_header_selection(&ambient, Some(&facts)).synthesize);
+    }
+
+    #[test]
+    fn node_gyp_nonhost_target_or_arch_declines_synthetic_headers() {
+        let facts = node26();
+        for (key, value) in [
+            ("npm_config_target", "25.0.0"),
+            ("npm_config_arch", "x64"),
+            ("npm_config_target_arch", "x64"),
+        ] {
+            let ambient = BTreeMap::from([(key.to_string(), value.to_string())]);
+            assert!(
+                !node_gyp_header_selection(&ambient, Some(&facts)).synthesize,
+                "{key}={value} must not select host headers"
+            );
+        }
+    }
+
+    #[test]
+    fn node_gyp_custom_header_selectors_and_package_config_decline_synthesis() {
+        for (key, value) in [
+            ("npm_config_nodedir", "/custom/node"),
+            ("npm_config_disturl", "https://custom.example"),
+            ("npm_config_dist_url", "https://custom.example"),
+            ("npm_package_config_node_gyp_nodedir", "/custom/node"),
+            (
+                "npm_package_config_node_gyp_dist-url",
+                "https://custom.example",
+            ),
+            ("npm_package_config_node_gyp_runtime", "electron"),
+        ] {
+            let ambient = BTreeMap::from([(key.to_string(), value.to_string())]);
+            assert!(
+                !node_gyp_header_selection(&ambient, None).synthesize,
+                "{key}={value} must preserve the custom runtime/header request"
+            );
+        }
+
+        let package_empty_overrides_direct = BTreeMap::from([
+            ("npm_config_nodedir".to_string(), "/custom/node".to_string()),
+            (
+                "npm_package_config_node_gyp_nodedir".to_string(),
+                String::new(),
+            ),
+        ]);
+        assert!(node_gyp_header_selection(&package_empty_overrides_direct, None).synthesize);
+    }
+
+    #[test]
+    fn node_gyp_explicit_force_process_config_is_never_overwritten() {
+        for key in [
+            "npm_config_force_process_config",
+            "npm_package_config_node_gyp_force-process-config",
+        ] {
+            let ambient = BTreeMap::from([(key.to_string(), "false".to_string())]);
+            let selection = node_gyp_header_selection(&ambient, None);
+            assert!(selection.synthesize);
+            assert!(selection.force_process_config_explicit, "{key}");
+        }
+    }
+
+    #[test]
+    fn node_gyp_windows_capitalization_and_dashes_are_recognized() {
+        let facts = node26();
+        let ambient = BTreeMap::from([
+            ("NPM_CONFIG_TARGET".to_string(), "v26.0.0".to_string()),
+            (
+                "NPM_PACKAGE_CONFIG_NODE_GYP_TARGET-ARCH".to_string(),
+                "x64".to_string(),
+            ),
+        ]);
+        assert!(!node_gyp_header_selection(&ambient, Some(&facts)).synthesize);
+    }
+
+    #[test]
+    fn node_header_cache_key_is_architecture_scoped() {
+        let mut x64 = node26();
+        x64.arch = "x64".to_string();
+        let arm64 = node26();
+        assert_ne!(node_headers_cache_key(&x64), node_headers_cache_key(&arm64));
+        assert_eq!(node_headers_cache_key(&x64), "26.0.0-x64");
     }
 
     #[test]
