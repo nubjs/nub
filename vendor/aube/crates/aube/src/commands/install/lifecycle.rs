@@ -920,6 +920,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     for job in jobs {
         let sem = semaphore.clone();
         let project_dir = project_dir.clone();
+        let global_virtual_store_dir = global_virtual_store_dir.to_path_buf();
         let modules_dir_name = modules_dir_name.clone();
         let node_gyp_bin_dir = node_gyp_bin_dir.clone();
         let jail_policy = jail_policy.clone();
@@ -1023,7 +1024,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             let scope = aube_scripts::SandboxScope {
                 package_dir: &job.package_dir,
                 project_root: &project_dir,
-                global_virtual_store_dir: Some(global_virtual_store_dir),
+                global_virtual_store_dir: Some(&global_virtual_store_dir),
                 package_name: Some(job.registry_name.as_str()),
                 package_version: Some(job.version.as_str()),
                 root_is_user_authored,

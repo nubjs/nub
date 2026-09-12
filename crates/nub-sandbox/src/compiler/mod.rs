@@ -44,7 +44,8 @@ pub use package_network::{
 };
 pub use preset::build_jail_net_allowed_for;
 pub use preset::{
-    PROJECT_VIRTUAL_STORE_LEAF, compile_build_jail, jail_private_home, relax_fs_read_to_disk,
+    PROJECT_VIRTUAL_STORE_LEAF, compile_build_jail, compile_build_jail_with_global_virtual_store,
+    jail_private_home, relax_fs_read_to_disk,
 };
 pub use resolve::{CommandRunner, ShellRunner};
 
