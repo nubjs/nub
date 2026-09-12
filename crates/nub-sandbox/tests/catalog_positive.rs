@@ -54,7 +54,11 @@ fn baked_environment_reaches_real_children_without_changing_ordinary_policies() 
         ScopeCapabilities::approved(),
         ambient,
     );
-    let ordinary = compile(&json!({"fs": true, "net": false, "vars": true}), &context).unwrap();
+    let ordinary = compile(
+        &json!({"fs": ["./", "$tmp"], "net": false, "vars": true}),
+        &context,
+    )
+    .unwrap();
     for (mode, mut policy) in [("jail", jail), ("ordinary", ordinary)] {
         policy.env.constructed.insert(ENV_PROBE.into(), mode.into());
         let sandbox = Sandbox::new(&policy).unwrap();
@@ -65,7 +69,11 @@ fn baked_environment_reaches_real_children_without_changing_ordinary_policies() 
                     .cwd(&homes.project),
             )
             .unwrap();
-        assert!(prepared.degradation.lost.is_empty());
+        assert!(
+            prepared.degradation.lost.is_empty(),
+            "{mode}: {:?}",
+            prepared.degradation
+        );
         let output = prepared.output().unwrap();
         sandbox.close();
         assert!(output.status.success(), "{mode}: {output:?}");
