@@ -112,10 +112,14 @@ except OSError as error:
     print(f"port={port} raw_os_error={error.errno}")
     sys.exit(1)
 print(f"port={port} connected")"#;
-    let output = match sandbox
-        .prepare(CommandSpec::new("python3").args(["-c", script]))
-        .and_then(|prepared| prepared.output())
-    {
+    let prepared = match sandbox.prepare(CommandSpec::new("python3").args(["-c", script])) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!("retained proxy confined socket: preparation failed: {error}");
+            return false;
+        }
+    };
+    let output = match prepared.output() {
         Ok(output) => output,
         Err(error) => {
             eprintln!(
