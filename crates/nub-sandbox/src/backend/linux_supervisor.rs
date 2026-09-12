@@ -904,6 +904,14 @@ fn is_egress_proxy_endpoint(fam: i32, addr: &[u8], port: u16, proxy_port: u16) -
     fam == libc::AF_INET && addr == [127, 0, 0, 1] && port == proxy_port
 }
 
+/// A fine-policy child normally receives a supervisor-created socket. The egress proxy's own
+/// authenticated listener is the sole exception: it has already been selected by its exact
+/// address and port, so let a proxy-aware client reach it directly. A hostname observation is
+/// neither available nor relevant for that transport hop.
+fn direct_dial_allowed(proxy_endpoint: bool, observed_name_allowed: bool) -> bool {
+    proxy_endpoint || observed_name_allowed
+}
+
 fn upstream_resolver() -> u32 {
     std::fs::read_to_string("/etc/resolv.conf")
         .ok()
@@ -1838,7 +1846,7 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                     let st = &state;
                     st.allowed(name.as_deref())
                 };
-                if allow {
+                if direct_dial_allowed(proxy_endpoint, allow) {
                     s = unsafe { libc::socket(fam, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
                     if unsafe {
                         connect_interruptible(
@@ -2623,6 +2631,13 @@ mod lifecycle_tests {
                 "{address:?}:{port} must remain proxy-routed"
             );
         }
+    }
+
+    #[test]
+    fn proxy_listener_direct_dial_needs_no_observed_dns_name() {
+        assert!(direct_dial_allowed(true, false));
+        assert!(direct_dial_allowed(false, true));
+        assert!(!direct_dial_allowed(false, false));
     }
 
     #[test]
