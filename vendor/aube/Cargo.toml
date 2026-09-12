@@ -66,10 +66,16 @@ yaml_serde = "0.10"
 # aube to surgically rewrite user-authored workspace YAML files
 # (catalogs, allowBuilds, patchedDependencies) without stripping
 # comments — yaml_serde's round-trip would otherwise destroy them.
-yamlpatch = ">=1.25, <1.28"
-# yamlpath 1.28 does not declare the Rust 1.97 requirement it inherits
-# from tree-sitter-iter 1.28, so resolver 3 cannot avoid it.
-yamlpath = ">=1.25, <1.28"
+yamlpatch = ">=1.25"
+# The <1.28 ceiling that used to sit here existed only to keep the 1.95
+# workspace floor: yamlpath 1.28 does not declare the Rust 1.97 requirement
+# it inherits from tree-sitter-iter 1.28, so resolver 3 could not avoid it.
+# The floor is 1.97 now, and the ceiling actively breaks the build — the pnpm
+# engine resolves yamlpath to 1.29, where QueryError::InvalidInput carries
+# (line, column), and pinning the shared resolution back to 1.25 makes pnpm's
+# own source fail to compile. aube touches only Component/Document/Route, so
+# it is indifferent to that change. Goes away with vendor/aube.
+yamlpath = ">=1.25"
 sonic-rs = "0.5"
 serde_path_to_error = "0.1"
 toml = "1.1"

@@ -8987,9 +8987,9 @@ dependencies = [
 
 [[package]]
 name = "subfeature"
-version = "1.25.2"
+version = "1.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7a12b8bd1c18886edb6412ca26de28cf3e44be4ba5aeb41d14fb911ef2dab63"
+checksum = "d17bf55e69a49b140d9298be68c319c283c5479c391c8393b70e14d32b907f82"
 dependencies = [
  "memchr",
  "regex",
@@ -9610,9 +9610,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-iter"
-version = "1.25.2"
+version = "1.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9199d1d8f51defb45b2a55af0545460e0a0265dfde45bdf412b33d13e09b923"
+checksum = "8ec40618be69571d6487d2ef96a84a2749c98a279a12346375cbf19b871420eb"
 dependencies = [
  "tree-sitter",
 ]
@@ -10842,13 +10842,12 @@ dependencies = [
 
 [[package]]
 name = "yamlpatch"
-version = "1.25.2"
+version = "1.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5c7aa995e374499b0decb17a2fa138430d6cd4683705e905e1e6619635d5fbd"
+checksum = "7aec7b59ab1c3b70872ab54a84b3bbd91ab743ea8e59fc02f6f0c45c04426392"
 dependencies = [
  "indexmap 2.14.0",
  "line-index",
- "serde",
  "serde_json",
  "subfeature",
  "thiserror 2.0.18",
@@ -10858,9 +10857,9 @@ dependencies = [
 
 [[package]]
 name = "yamlpath"
-version = "1.25.2"
+version = "1.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "582de007205c6ff9e4c1e57bf23955922e8020dd9fd479146ab2bb45138b44b4"
+checksum = "0a2ea2334936adb60c891686760016e723e220caee5c5b581a16b575ba85b2f0"
 dependencies = [
  "line-index",
  "self_cell",
