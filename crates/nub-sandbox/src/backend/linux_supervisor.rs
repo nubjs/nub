@@ -1911,15 +1911,14 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             if !notification_is_live(nfd, req.id) {
                 continue;
             }
-            let snapshots = if nr == libc::SYS_sendto {
-                snapshot_sendto(mem.as_raw_fd(), &req).map(|snapshot| vec![snapshot])
+            let snapshot = if nr == libc::SYS_sendto {
+                snapshot_sendto(mem.as_raw_fd(), &req)
             } else {
                 child_struct::<libc::msghdr>(mem.as_raw_fd(), req.data.args[1])
                     .and_then(|hdr| snapshot_msghdr(mem.as_raw_fd(), hdr))
-                    .map(|snapshot| vec![snapshot])
             };
-            let snapshots = match snapshots {
-                Ok(snapshots) => snapshots,
+            let snapshot = match snapshot {
+                Ok(snapshot) => snapshot,
                 Err(libc::EPERM) => {
                     suplog!(
                         "SUP DENY send*: named IP destination or unreplayable credentials -> EPERM"
@@ -1944,34 +1943,20 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             } else {
                 req.data.args[2] as i32
             };
-            let mut first_error = None;
-            let mut abandoned = false;
-            for snapshot in &snapshots {
-                match send_snapshot(&control, nfd, req.id, socket.as_raw_fd(), snapshot, flags) {
-                    Ok(sent) => {
-                        // This check cannot close the final cancellation/send race, but it avoids
-                        // a stale response when cancellation happened during the replay itself.
-                        if notification_is_live(nfd, req.id) {
-                            reply_value(nfd, req.id, sent as i64);
-                        }
-                        break;
-                    }
-                    Err(SendReplayError::Errno(error)) => {
-                        first_error = Some(error);
-                        break;
-                    }
-                    Err(SendReplayError::Abandoned) => {
-                        abandoned = true;
-                        break;
+            match send_snapshot(&control, nfd, req.id, socket.as_raw_fd(), &snapshot, flags) {
+                Ok(sent) => {
+                    // This check cannot close the final cancellation/send race, but it avoids a
+                    // stale response when cancellation happened during the replay itself.
+                    if notification_is_live(nfd, req.id) {
+                        reply_value(nfd, req.id, sent as i64);
                     }
                 }
-            }
-            if !abandoned {
-                if let Some(error) = first_error {
+                Err(SendReplayError::Errno(error)) => {
                     if notification_is_live(nfd, req.id) {
                         reply(nfd, req.id, -error);
                     }
                 }
+                Err(SendReplayError::Abandoned) => {}
             }
             continue;
         }
@@ -3070,7 +3055,7 @@ mod lifecycle_tests {
             msg_namelen: 0,
             msg_iov: std::ptr::null_mut(),
             msg_iovlen: 0,
-            msg_control: 1usize as *mut libc::c_void,
+            msg_control: std::ptr::NonNull::<libc::c_void>::dangling().as_ptr(),
             msg_controllen: 64 * 1024,
             msg_flags: 0,
         };
@@ -3237,7 +3222,7 @@ mod lifecycle_tests {
             let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
             hdr.msg_iov = &mut iov;
             hdr.msg_iovlen = 1;
-            let result = unsafe { libc::sendmsg(fd, &mut hdr, 0) };
+            let result = unsafe { libc::sendmsg(fd, &hdr, 0) };
             let error = errno();
             wake.join().unwrap();
             unsafe { libc::close(fd) };
@@ -3317,7 +3302,7 @@ mod lifecycle_tests {
                     std::process::exit(88);
                 }
             }
-            let sent = unsafe { libc::sendmsg(fd, &mut hdr, 0) };
+            let sent = unsafe { libc::sendmsg(fd, &hdr, 0) };
             unsafe { libc::close(fd) };
             std::process::exit(if sent == query.len() as isize { 0 } else { 93 });
         }
@@ -3334,7 +3319,7 @@ mod lifecycle_tests {
             message.msg_hdr = hdr;
             (unsafe { libc::sendmmsg(fd, &mut message, 1, 0) }) == -1 && errno() == libc::ENOSYS
         } else {
-            (unsafe { libc::sendmsg(fd, &mut hdr, 0) }) == bytes.len() as isize
+            (unsafe { libc::sendmsg(fd, &hdr, 0) }) == bytes.len() as isize
         };
         std::process::exit(if correct { 0 } else { 91 });
     }
