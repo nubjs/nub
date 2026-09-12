@@ -559,7 +559,7 @@ fn slot_entry_is_ours(link: &Path, pkg_dir: &Path) -> bool {
             // ownership. Let the version-aware decoder reproduce the POSIX
             // wrapper's basedir semantics, then prove the decoded target is
             // inside this global package root below.
-            let Ok(Some(shim)) = aube_linker::resolve_bin_shim(link) else {
+            let Ok(Some(shim)) = aube_linker::sys::resolve_bin_shim(link) else {
                 return false;
             };
             shim.target
@@ -745,7 +745,7 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bins: &[OwnedBin]) {
                     // resolves from its physical basedir. Keep this removal
                     // check aligned with execution rather than re-deriving
                     // either form from the global bin-dir spelling.
-                    let Ok(Some(shim)) = aube_linker::resolve_bin_shim(&link) else {
+                    let Ok(Some(shim)) = aube_linker::sys::resolve_bin_shim(&link) else {
                         continue;
                     };
                     let resolved = shim.target;
