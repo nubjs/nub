@@ -20,6 +20,20 @@ const report = (source, destination) => {
   mkdirSync(dirname(target), { recursive: true });
   copyFileSync(source, target);
 };
+const gypRealpathTrace = String.raw`import json
+import os
+import sys
+
+if os.name == 'nt' and sys.argv and sys.argv[0].lower().endswith('gyp_main.py'):
+    cwd = os.path.realpath('.')
+    dependency = os.path.realpath(r'deps/sqlite3.gyp')
+    print('NUB_GYP_REALPATH ' + json.dumps({
+        'cwd': cwd,
+        'binding': os.path.realpath('binding.gyp'),
+        'dependency': dependency,
+        'relative_dependency': os.path.relpath(dependency, cwd),
+    }, sort_keys=True), file=sys.stderr, flush=True)
+`;
 const isolatedEnvKeys = new Set([
   'npm_config_nodedir',
   'npm_config_python',
@@ -78,6 +92,11 @@ for (const [name, version, probe, source = false] of selected) {
       allowScripts: { '*': true },
     }));
     writeFileSync(join(project, 'nub.jsonc'), JSON.stringify({ install: { buildJail: confined } }));
+    if (source && name === 'better-sqlite3' && process.env.CORPUS_GYP_REALPATH_TRACE) {
+      const traceDir = join(project, '.nub-gyp-realpath-trace');
+      mkdirSync(traceDir, { recursive: true });
+      writeFileSync(join(traceDir, 'sitecustomize.py'), gypRealpathTrace);
+    }
     const env = { ...process.env, HOME: home, USERPROFILE: home,
       APPDATA: join(home, 'AppData', 'Roaming'), LOCALAPPDATA: join(home, 'AppData', 'Local'),
       XDG_CONFIG_HOME: join(home, 'config'), XDG_CACHE_HOME: join(home, 'cache'),
@@ -89,6 +108,9 @@ for (const [name, version, probe, source = false] of selected) {
       if (isolatedEnvKeys.has(key.toLowerCase())) delete env[key];
     }
     if (source) env.npm_config_build_from_source = 'true';
+    if (source && name === 'better-sqlite3' && process.env.CORPUS_GYP_REALPATH_TRACE && !confined) {
+      env.PYTHONPATH = join(project, '.nub-gyp-realpath-trace');
+    }
     // Keep the source-build control on the exact interpreter the jail selected.
     // A passed control therefore rules out interpreter-version drift rather than merely
     // showing that an unrelated host Python can build the addon.
@@ -106,6 +128,9 @@ for (const [name, version, probe, source = false] of selected) {
       if (confined) assert.ok(log.includes(`JAILDUMP pkg=Some("${name}")`), 'target lifecycle entered the jail');
       else assert.match(log, /running without the build sandbox/, 'control opt-out engaged');
       if (source) assert.match(log, /gyp info using node-gyp@/, 'native compilation actually ran');
+      if (source && name === 'better-sqlite3' && process.env.CORPUS_GYP_REALPATH_TRACE) {
+        assert.match(log, /NUB_GYP_REALPATH /, 'GYP realpath trace captured');
+      }
       const check = spawnSync(process.execPath, ['-e', `const assert=require('node:assert/strict'); (async()=>{${probe}})().catch(e=>{console.error(e);process.exitCode=1})`],
         { cwd: project, env, encoding: 'utf8', timeout: 30_000 });
       const probeLog = join(base, 'probe.log');

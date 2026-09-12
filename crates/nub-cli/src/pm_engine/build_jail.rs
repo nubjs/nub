@@ -97,6 +97,12 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // ambient-env capture; a build script never needs a non-UTF-8 var.
         let mut ambient = reconstruct_child_env(&spawn.env_delta);
 
+        // A dependency must never supply Python startup code to its own lifecycle. The
+        // compiler admits `PYTHONPATH` only for the bounded Windows GYP trace below, so
+        // remove every ambient spelling before any package-specific handling can restore
+        // Nub's own diagnostic path.
+        ambient.retain(|key, _| !key.eq_ignore_ascii_case("PYTHONPATH"));
+
         // A dependency's lifecycle script runs on VANILLA Node — nub's augmentation is a
         // developer-facing feature for the user's own code, and a published postinstall
         // neither asked for it nor can rely on it. Unconditional, not set-if-absent: this
@@ -345,6 +351,30 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         }
 
         let jail_cache = sandbox_homes(&spawn.project_root).cache;
+
+        // This is a diagnostic, not a compatibility repair. `better-sqlite3`'s confined
+        // source build reports a malformed GYP dependency path; capture the exact Python
+        // realpath values from the same GYP process before changing path semantics. The
+        // marker is read by Nub's parent process only, and the startup module is fixed under
+        // the consumer project (which the lifecycle can read but not write). Normal and raw
+        // execution do not receive a `PYTHONPATH` at all.
+        #[cfg(windows)]
+        if spawn.package_name.as_deref() == Some("better-sqlite3")
+            && spawn.package_version.as_deref() == Some("11.8.1")
+            && ambient
+                .get("npm_config_build_from_source")
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+            && std::env::var_os("NUB_JAIL_GYP_REALPATH_TRACE").is_some()
+        {
+            let trace_dir = spawn.project_root.join(".nub-gyp-realpath-trace");
+            if trace_dir.is_dir() {
+                ambient.insert(
+                    "PYTHONPATH".to_string(),
+                    trace_dir.to_string_lossy().into_owned(),
+                );
+                extra_reads.push(trace_dir);
+            }
+        }
         redirect_npm_prefix(&mut ambient, &jail_cache);
         redirect_electron_cache(&mut ambient, &jail_cache);
         redirect_playwright_browsers(&mut ambient, &jail_cache);
