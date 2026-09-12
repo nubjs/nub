@@ -1,0 +1,122 @@
+---
+title: Fetch handler
+description: A default-exported object with a fetch method is served over HTTP. It is the same handler Cloudflare Workers, Bun, Deno and Vercel accept, so one file runs on all of them and on Nub.
+unpublished: true
+---
+
+Export an object with a `fetch` method and Nub serves it:
+
+```ts
+// server.ts
+export default {
+  fetch(request: Request): Response {
+    return new Response(`hello from ${new URL(request.url).pathname}`);
+  },
+};
+```
+
+```console
+$ nub server.ts
+Listening on http://localhost:3000
+```
+
+The handler takes a WHATWG [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) and returns a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response), or a promise for one. Nub binds a port, converts each inbound request, and writes the response back.
+
+## Portability
+
+Cloudflare Workers, Bun, Deno and Vercel all read this shape, so the file above runs unmodified on any of them:
+
+```sh
+nub server.ts          # Nub
+bun server.ts          # Bun
+deno serve server.ts   # Deno
+wrangler deploy        # Cloudflare Workers
+```
+
+Each of those runtimes passes a second argument of its own — bindings on Workers, the server on Bun, connection info on Deno. Nub passes one argument, so a handler that reads only the request is the portable form.
+
+## What Nub serves
+
+The shape of the default export is the whole trigger. A file whose default export is an object with a callable `fetch` becomes a server; every other file runs and exits the way `node` runs it.
+
+```ts
+export default { fetch() { … } };        // served
+export default { name: "config" };       // ordinary script
+export function handler() { … }          // ordinary script
+```
+
+CommonJS works through the same check, so a `.ts` file in a package without `"type": "module"` is served too:
+
+```js
+// server.cjs
+module.exports = {
+  fetch() {
+    return new Response("hello");
+  },
+};
+```
+
+## `port`
+
+Nub reads the port from the first of these that is set:
+
+- `PORT` in the environment
+- `port` on the default export
+- 3000
+
+```ts
+export default {
+  port: 8080,
+  fetch() {
+    return new Response("hello");
+  },
+};
+```
+
+```console
+$ PORT=4000 nub server.ts
+Listening on http://localhost:4000
+```
+
+Setting `PORT=0` picks any free port, which is what a test harness wants. A port already in use is fatal.
+
+## `hostname`
+
+The bind address comes from the first of these that is set:
+
+- `HOST` in the environment
+- `hostname` on the default export
+- every interface
+
+```console
+$ HOST=127.0.0.1 nub server.ts
+Listening on http://127.0.0.1:3000
+```
+
+## Watch mode
+
+Running the file under [`nub watch`](/docs/watch) restarts the server on every edit:
+
+```console
+$ nub watch server.ts
+Listening on http://localhost:3000
+```
+
+## Compiled executables
+
+[`nub compile`](/docs/compile) carries the handler into the executable it builds, so the compiled server binds a port on launch the way the source file does:
+
+```console
+$ ./server
+Listening on http://localhost:3000
+```
+
+## Plain Node
+
+Passing [`--node`](/docs/node) runs the file on stock Node, where a default-exported `fetch` means nothing and the process exits once the module has evaluated.
+
+To serve the same file without Nub, install an adapter that reads the export and binds the listener. [`srvx`](https://www.npmjs.com/package/srvx) and [`@hono/node-server`](https://www.npmjs.com/package/@hono/node-server) both do, and neither asks you to change the handler.
+
+```sh
+npx srvx ./server.ts
+```
