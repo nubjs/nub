@@ -1459,6 +1459,7 @@ fn strip_pythonpath(ambient: &mut BTreeMap<String, String>) {
 
 /// The one measured BuildCheck compatibility target. Keep this narrower than source-builds:
 /// unrelated packages retain their ordinary module resolution and VS discovery.
+#[cfg(any(windows, test))]
 fn is_buildcheck_compat_package(name: Option<&str>, version: Option<&str>) -> bool {
     name == Some("cpu-features") && version == Some("0.0.10")
 }

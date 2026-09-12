@@ -110,6 +110,20 @@ jobs:
           NUB_BIN="$withheld" CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features-withheld-adapter" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features-withheld-adapter.log
           cpu_features_without_adapter=${PIPESTATUS[0]}
           test "$better_sqlite3" -eq 0 && test "$better_sqlite3_linked" -eq 0 && test "$esbuild" -eq 0 && test "$cpu_features" -eq 0 && test "$cpu_features_without_adapter" -ne 0
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = Path('reports/cpu-features-withheld-adapter')
+          results = json.loads((report / 'results.json').read_text())
+          assert [(item['label'], item['pass']) for item in results] == [
+              ('cpu-features-source-control', True),
+              ('cpu-features-source-jailed', False),
+          ], results
+          log = (report / 'cases' / 'cpu-features-source-jailed' / 'install.log').read_text()
+          assert 'JAILDUMP pkg=Some("cpu-features")' in log, log
+          assert 'Unable to detect compiler type' in log, log
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
