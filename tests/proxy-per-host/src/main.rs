@@ -56,6 +56,7 @@ fn policy(surface: Value) -> SandboxPolicy {
 
 /// Run `curl` under `policy`, return its exit code. `noproxy` adds `--noproxy '*'` so curl dials
 /// the destination DIRECTLY, ignoring any proxy env — the non-cooperative case.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn curl(label: &str, policy: &SandboxPolicy, noproxy: bool, curl_args: &str) -> i32 {
     let np = if noproxy { "--noproxy '*'" } else { "" };
     let script =
@@ -171,7 +172,7 @@ fn run() -> bool {
     // Keep the filesystem axis relaxed so a failed curl cannot be misattributed to an absent file
     // grant. The network axis is still an AppContainer funnel: the command has no Internet
     // capability and can reach egress only through the same-SID helper's injected proxy.
-    let allow = policy(json!({ "fs": false, "net": ["example.com"] }));
+    let allow = policy(json!({ "fs": true, "net": ["example.com"] }));
     let coop_allow = windows_curl("coop-allow  ", &allow, false, "https://example.com/");
     let coop_deny = windows_curl("coop-deny   ", &allow, false, "https://www.google.com/");
     // These deliberately ignore the helper-injected proxy environment. An allowlisted hostname
