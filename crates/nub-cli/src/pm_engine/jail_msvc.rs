@@ -96,6 +96,7 @@ impl MsvcToolchain {
 
     /// BuildCheck's discovery shape for the one package that uses it. It consumes the
     /// already accepted `vcvarsall` result rather than attempting its forbidden COM probe.
+    #[cfg(windows)]
     pub(super) fn buildcheck_node_options(&self) -> Option<String> {
         let sdk_root = self.sdk_root.as_deref()?;
         Some(nub_sandbox::windows_buildcheck_msvc_node_options(
