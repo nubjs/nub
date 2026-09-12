@@ -1879,12 +1879,15 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             }
 
             let mem = match open_child_mem(req.pid) {
-                Ok(mem) if notification_is_live(nfd, req.id) => mem,
-                _ => {
+                Ok(mem) => mem,
+                Err(_) => {
                     reply(nfd, req.id, -libc::EPERM);
                     continue;
                 }
             };
+            if !notification_is_live(nfd, req.id) {
+                continue;
+            }
             let snapshots = if nr == libc::SYS_sendto {
                 snapshot_sendto(mem.as_raw_fd(), &req).map(|snapshot| vec![snapshot])
             } else {
@@ -1898,16 +1901,19 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                     suplog!(
                         "SUP DENY send*: named IP destination or unreplayable credentials -> EPERM"
                     );
-                    reply(nfd, req.id, -libc::EPERM);
+                    if notification_is_live(nfd, req.id) {
+                        reply(nfd, req.id, -libc::EPERM);
+                    }
                     continue;
                 }
                 Err(error) => {
-                    reply(nfd, req.id, -error);
+                    if notification_is_live(nfd, req.id) {
+                        reply(nfd, req.id, -error);
+                    }
                     continue;
                 }
             };
             if !notification_is_live(nfd, req.id) {
-                reply(nfd, req.id, -libc::EPERM);
                 continue;
             }
             let flags = if nr == libc::SYS_sendto {
@@ -1937,8 +1943,12 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                     }
                 }
             }
-            if !abandoned && first_error.is_some() {
-                reply(nfd, req.id, -first_error.unwrap());
+            if !abandoned {
+                if let Some(error) = first_error {
+                    if notification_is_live(nfd, req.id) {
+                        reply(nfd, req.id, -error);
+                    }
+                }
             }
             continue;
         }
