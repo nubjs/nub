@@ -42,6 +42,9 @@ const isolatedEnvKeys = new Set([
   'prefix',
   'npm_config_globalconfig',
   'npm_config_builtin_config',
+  ...['npm_config_', 'npm_package_config_node_gyp_'].flatMap(prefix =>
+    ['nodedir', 'disturl', 'dist_url', 'target', 'arch', 'target_arch', 'runtime', 'force_process_config']
+      .map(key => `${prefix}${key}`)),
 ]);
 const cases = [
   ['esbuild', '0.24.0', "assert.match(require('esbuild').transformSync('const x: number = 1', {loader:'ts'}).code, /const x = 1/)"] ,
@@ -92,7 +95,7 @@ for (const [name, version, probe, source = false] of selected) {
       CI: '1', NO_COLOR: '1', NUB_JAIL_DUMP_POLICY: '1',
     };
     for (const key of Object.keys(env)) {
-      if (isolatedEnvKeys.has(key.toLowerCase())) delete env[key];
+      if (isolatedEnvKeys.has(key.toLowerCase().replaceAll('-', '_'))) delete env[key];
     }
     if (source) env.npm_config_build_from_source = 'true';
     // Keep the source-build control on the exact interpreter the jail selected.
@@ -147,7 +150,19 @@ for (const [name, version, probe, source = false] of selected) {
       }
       if (confined) assert.ok(log.includes(`JAILDUMP pkg=Some("${name}")`), 'target lifecycle entered the jail');
       else assert.match(log, /running without the build sandbox/, 'control opt-out engaged');
-      if (source) assert.match(log, /gyp info using node-gyp@/, 'native compilation actually ran');
+      if (source) {
+        assert.match(log, /gyp info using node-gyp@/, 'native compilation actually ran');
+        const configFile = join(project, 'node_modules', name, 'build', 'config.gypi');
+        const config = JSON.parse(readFileSync(configFile, 'utf8').replace(/^#.*$/gm, ''));
+        // Offline headers must not silently replace the running Node's compiler/ABI settings.
+        // In particular, header-distribution config can disable Windows LTCG even when the
+        // ordinary build enables it. Artifact loading alone does not detect that difference.
+        for (const key of ['node_with_ltcg', 'node_module_version', 'v8_enable_pointer_compression', 'v8_enable_sandbox']) {
+          if (Object.hasOwn(process.config.variables, key)) {
+            assert.equal(config.variables[key], process.config.variables[key], `native build preserves runtime ${key}`);
+          }
+        }
+      }
       const check = spawnSync(process.execPath, ['-e', `const assert=require('node:assert/strict'); (async()=>{${probe}})().catch(e=>{console.error(e);process.exitCode=1})`],
         { cwd: project, env, encoding: 'utf8', timeout: 30_000 });
       const probeLog = join(base, 'probe.log');
