@@ -272,7 +272,7 @@ fn walk_exports(
         Value::String(s) => push(s, kind, out, seen),
         Value::Object(map) => {
             for (k, child) in map {
-                if k == "types" || k == "typings" {
+                if k == "types" || k == "typings" || !is_runtime_condition(k) {
                     continue;
                 }
                 walk_exports(child, kind, out, seen, push);
@@ -285,6 +285,22 @@ fn walk_exports(
         }
         _ => {}
     }
+}
+
+/// Whether an `exports` condition name is one a runtime could select. Node's
+/// packages doc restricts a condition to alphanumerics separated by `:`, `-` or
+/// `=`; a name outside that charset is a build tool's private source condition
+/// (`@tanstack/custom-condition`, `@nx/nx-source`) pointing at unbuilt
+/// `src/*.ts` whose imports the shipped bundle inlines. Walking it charged
+/// `@tanstack/query-devtools` with eleven Solid phantoms it never loads and
+/// ejected it from the global virtual store in every TanStack Query project.
+/// `_` is admitted beyond Node's list so an unusual-but-selectable name errs
+/// toward being walked.
+fn is_runtime_condition(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'=' | b'_'))
 }
 
 /// Strip a leading `./` and collapse a leading `/`; entry paths are relative to
@@ -561,6 +577,38 @@ mod tests {
             super::EntryKind::Types
         );
         assert!(!m.entry_points.iter().any(|e| e.path == "index.d.ts"));
+    }
+
+    #[test]
+    fn vendor_source_conditions_do_not_seed_the_walk() {
+        // `@tanstack/query-devtools` exports its unbuilt `src/index.ts` under
+        // `@tanstack/custom-condition`, and the built entries inline every import
+        // that file makes. A condition outside Node's `[A-Za-z0-9:-=]` charset is
+        // a build tool's private surface, so it must not seed — while a real
+        // community condition (`react-native`, `development`) still does.
+        let raw = br#"{
+            "name": "pkg",
+            "exports": {
+                ".": {
+                    "@tanstack/custom-condition": "./src/index.ts",
+                    "react-native": "./build/index.native.js",
+                    "development": { "import": "./build/dev.js" },
+                    "import": "./build/index.js"
+                }
+            }
+        }"#;
+        let m = Manifest::parse(raw).unwrap();
+        let paths: Vec<&str> = m.entry_points.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            !paths.contains(&"src/index.ts"),
+            "vendor condition seeded the walk: {paths:?}"
+        );
+        for p in ["build/index.native.js", "build/dev.js", "build/index.js"] {
+            assert!(
+                paths.contains(&p),
+                "runtime condition {p} missing: {paths:?}"
+            );
+        }
     }
 
     #[test]

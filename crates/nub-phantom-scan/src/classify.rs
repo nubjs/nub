@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::graph::Reference;
 use crate::manifest::Manifest;
-use nub_phantom_core::builtins::is_builtin;
+use nub_phantom_core::builtins::{is_builtin, is_host_provided};
 
 /// The verdict for one referenced package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -32,6 +32,10 @@ pub enum Verdict {
     Declared,
     /// A Node builtin.
     Builtin,
+    /// A module the host process injects at runtime (`electron`, `vscode`; see
+    /// `nub_phantom_core::builtins::is_host_provided`). Not a phantom: no install
+    /// can supply it and no layout can break it.
+    HostProvided,
     /// A self reference (the package's own name / subpath).
     SelfRef,
     /// Undeclared as a runtime dep, but present in `devDependencies` AND reachable
@@ -194,6 +198,9 @@ fn verdict_for(
     if is_builtin(package) {
         return Verdict::Builtin;
     }
+    if is_host_provided(package) {
+        return Verdict::HostProvided;
+    }
     if manifest.deps.contains(package) || manifest.bundled.contains(package) {
         return Verdict::Declared;
     }
@@ -286,6 +293,25 @@ mod tests {
                 from_deep_path: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn host_provided_modules_are_not_phantoms() {
+        // electron-log requires `electron` at the top of its main entry and
+        // declares it nowhere; Electron injects it, so nothing is missing.
+        let m = Manifest::parse(br#"{"name":"electron-log"}"#).unwrap();
+        let f = classify(
+            &m,
+            &refs(&[
+                ("electron", "electron/main", false),
+                ("chalk", "chalk", false),
+            ]),
+        );
+        let v = |p: &str| f.iter().find(|x| x.package == p).map(|x| x.verdict);
+        assert_eq!(v("electron"), Some(Verdict::HostProvided));
+        // THE CONTROL: an ordinary undeclared require in the same file stays a
+        // phantom, so the class is narrow rather than a blanket exemption.
+        assert_eq!(v("chalk"), Some(Verdict::HardPhantom));
     }
 
     #[test]

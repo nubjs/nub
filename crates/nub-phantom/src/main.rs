@@ -392,6 +392,7 @@ fn print_report_human(r: &PackageReport) {
             Verdict::DeclaredPeer => "peer     ",
             Verdict::Declared => "ok       ",
             Verdict::Builtin => "builtin  ",
+            Verdict::HostProvided => "host     ",
             Verdict::SelfRef => "self     ",
             Verdict::DevOnlyDeepPath => "dev-deep ",
         };
