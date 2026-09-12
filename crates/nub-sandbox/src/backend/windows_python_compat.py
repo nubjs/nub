@@ -40,17 +40,19 @@ def _audit_mkdir(sys, path, mode):
         audit("os.mkdir", path, mode, -1)
 
 
-def _trace_gyp_realpaths(os):
+def _trace_gyp_realpaths(os, sys_module=None, gyp_common=None):
     # Diagnostic-only: the jail deliberately strips ambient variables before this
     # interpreter starts, so an outer-process opt-in cannot reach this point.
     # Restrict the hook to the GYP entry point and the measured cpu-features path;
     # this function is removed with the diagnostic rather than shipped.
     import json
-    import sys
-    if not sys.argv or not sys.argv[0].lower().endswith("gyp_main.py"):
+    if sys_module is None:
+        import sys as sys_module
+    if not sys_module.argv or not sys_module.argv[0].lower().endswith("gyp_main.py"):
         return
-    import gyp.common
-    original_relative_path = gyp.common.RelativePath
+    if gyp_common is None:
+        from gyp import common as gyp_common
+    original_relative_path = gyp_common.RelativePath
 
     def relative_path(path, relative_to, follow_path_symlink=True):
         result = original_relative_path(path, relative_to, follow_path_symlink)
@@ -63,12 +65,12 @@ def _trace_gyp_realpaths(os):
                     "relative_to_realpath": os.path.realpath(relative_to),
                     "result": result,
                 }, sort_keys=True),
-                file=sys.stderr,
+                file=sys_module.stderr,
                 flush=True,
             )
         return result
 
-    gyp.common.RelativePath = relative_path
+    gyp_common.RelativePath = relative_path
 
 
 def _install():

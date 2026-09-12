@@ -5,6 +5,8 @@ legacy (one-argument) and modern realpath signatures without requiring a mutable
 installed Python or an AppContainer token.
 """
 
+import io
+import json
 import os
 from pathlib import Path
 import runpy
@@ -105,7 +107,39 @@ def gyp_current_directory_base_is_canonicalized():
     assert gyp_relative_path("deps\cpu_features", ".", realpath) == r"deps\cpu_features"
 
 
+def gyp_trace_is_unconditional_for_the_entrypoint():
+    output = io.StringIO()
+    calls = []
+
+    def original_relative_path(path, relative_to, follow_path_symlink=True):
+        calls.append((path, relative_to, follow_path_symlink))
+        return r"..\.."
+
+    gyp_common = SimpleNamespace(RelativePath=original_relative_path)
+    fake_os = SimpleNamespace(path=SimpleNamespace(realpath=lambda path: path))
+    fake_sys = SimpleNamespace(
+        argv=[r"C:\node-gyp\gyp_main.py"], stderr=output,
+    )
+
+    ADAPTER["_trace_gyp_realpaths"](fake_os, fake_sys, gyp_common)
+    assert gyp_common.RelativePath(
+        r"C:\project\cpu_features", r"C:\project\build\."
+    ) == r"..\.."
+    assert calls == [
+        (r"C:\project\cpu_features", r"C:\project\build\.", True),
+    ]
+    trace = json.loads(output.getvalue().removeprefix("NUB_GYP_REALPATH "))
+    assert trace == {
+        "path": r"C:\project\cpu_features",
+        "path_realpath": r"C:\project\cpu_features",
+        "relative_to": r"C:\project\build\.",
+        "relative_to_realpath": r"C:\project\build\.",
+        "result": r"..\..",
+    }
+
+
 old_python_and_pathlike_call_once()
 strict_and_bytes_contract()
 audit_is_optional_on_pre_38_python()
 gyp_current_directory_base_is_canonicalized()
+gyp_trace_is_unconditional_for_the_entrypoint()
