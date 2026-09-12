@@ -133,7 +133,7 @@ static bool initialize_private_security() {
 class PackageAcl {
     PACL value_ = nullptr;
 public:
-    explicit PackageAcl(PACL original) {
+    explicit PackageAcl(PACL original, DWORD access = GENERIC_ALL) {
         ACL_SIZE_INFORMATION info = {};
         if (!original || !GetAclInformation(original, &info, sizeof(info), AclSizeInformation)) return;
         DWORD bytes = info.AclBytesInUse + DWORD(sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) +
@@ -143,7 +143,7 @@ public:
         if (!acl) return;
         memcpy(acl, original, info.AclBytesInUse);
         acl->AclSize = static_cast<WORD>(bytes);
-        if (!AddAccessAllowedAce(acl, acl->AclRevision, GENERIC_ALL, state.package_sid)) {
+        if (!AddAccessAllowedAce(acl, acl->AclRevision, access, state.package_sid)) {
             LocalFree(acl);
             return;
         }
@@ -154,6 +154,42 @@ public:
     PackageAcl& operator=(const PackageAcl&) = delete;
     PACL get() const { return value_; }
 };
+class PackageDescriptor {
+    static PACL original_acl(PSECURITY_DESCRIPTOR descriptor) {
+        PACL acl = nullptr, sacl = nullptr;
+        BOOL present = FALSE, defaulted = FALSE, sacl_present = FALSE;
+        if (!descriptor || !GetSecurityDescriptorSacl(descriptor, &sacl_present, &sacl, &defaulted) ||
+            sacl_present || !GetSecurityDescriptorDacl(descriptor, &present, &acl, &defaulted) || !present)
+            return nullptr;
+        return acl;
+    }
+    PackageAcl acl_;
+    SECURITY_DESCRIPTOR descriptor_ = {};
+    bool valid_ = false;
+public:
+    explicit PackageDescriptor(PSECURITY_DESCRIPTOR original, DWORD access = GENERIC_ALL)
+        : acl_(original_acl(original), access) {
+        PSID owner = nullptr, group = nullptr;
+        BOOL owner_default = FALSE, group_default = FALSE, present = FALSE, defaulted = FALSE;
+        PACL dacl = nullptr;
+        SECURITY_DESCRIPTOR_CONTROL control = 0;
+        DWORD revision = 0;
+        const SECURITY_DESCRIPTOR_CONTROL flags =
+            SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED;
+        valid_ = acl_.get() && GetSecurityDescriptorOwner(original, &owner, &owner_default) &&
+            GetSecurityDescriptorGroup(original, &group, &group_default) &&
+            GetSecurityDescriptorDacl(original, &present, &dacl, &defaulted) &&
+            GetSecurityDescriptorControl(original, &control, &revision) &&
+            InitializeSecurityDescriptor(&descriptor_, SECURITY_DESCRIPTOR_REVISION) &&
+            SetSecurityDescriptorOwner(&descriptor_, owner, owner_default) &&
+            SetSecurityDescriptorGroup(&descriptor_, group, group_default) &&
+            SetSecurityDescriptorDacl(&descriptor_, TRUE, acl_.get(), defaulted) &&
+            SetSecurityDescriptorControl(&descriptor_, flags,
+                static_cast<SECURITY_DESCRIPTOR_CONTROL>(control & flags));
+    }
+    PSECURITY_DESCRIPTOR get() { return valid_ ? &descriptor_ : nullptr; }
+};
+static bool private_msys_object(HANDLE handle);
 using NtToken = NTSTATUS (NTAPI*)(HANDLE, TOKEN_INFORMATION_CLASS, PVOID, ULONG);
 using NtSecurity = NTSTATUS (NTAPI*)(HANDLE, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR);
 static NtToken true_set_token = nullptr;
@@ -179,7 +215,11 @@ static NTSTATUS NTAPI set_token(HANDLE token, TOKEN_INFORMATION_CLASS kind, PVOI
 }
 
 static NTSTATUS NTAPI set_security(HANDLE handle, SECURITY_INFORMATION kind, PSECURITY_DESCRIPTOR descriptor) {
-    if (kind != DACL_SECURITY_INFORMATION || GetProcessId(handle) != GetCurrentProcessId())
+    if (kind != DACL_SECURITY_INFORMATION)
+        return true_set_security(handle, kind, descriptor);
+    DWORD process = GetProcessId(handle);
+    bool scoped = process != GetCurrentProcessId() && private_msys_object(handle);
+    if (!scoped && process != GetCurrentProcessId())
         return true_set_security(handle, kind, descriptor);
     PACL original = nullptr;
     BOOL present = FALSE, defaulted = FALSE;
@@ -231,10 +271,21 @@ using NtPipe = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_S
 using NtOpen = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG, ULONG);
 using NtCreate = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
     PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+using NtSection = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER,
+                                    ULONG, ULONG, HANDLE);
+using NtMutant = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, BOOLEAN);
+using NtEvent = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, ULONG, BOOLEAN);
+using NtSemaphore = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, LONG, LONG);
+using NtLinkCreate = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PUNICODE_STRING);
 using NtObject = NTSTATUS (NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 static NtPipe true_create_pipe = nullptr;
 static NtOpen true_open_file = nullptr;
 static NtCreate true_nt_create_file = nullptr;
+static NtSection true_create_section = nullptr;
+static NtMutant true_create_mutant = nullptr;
+static NtEvent true_create_event = nullptr;
+static NtSemaphore true_create_semaphore = nullptr;
+static NtLinkCreate true_create_link = nullptr;
 static NtObject query_object = nullptr;
 using NtIoControl = NTSTATUS (NTAPI*)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK,
     ULONG, PVOID, ULONG, PVOID, ULONG);
@@ -430,6 +481,157 @@ static NTSTATUS NTAPI open_directory(PHANDLE handle, ACCESS_MASK access, POBJECT
                                msys_directory(attrs, redirected, name, path) ? &redirected : attrs);
 }
 
+static bool private_msys_root(POBJECT_ATTRIBUTES attrs) {
+    if (!attrs || !attrs->RootDirectory || !attrs->ObjectName || !attrs->ObjectName->Buffer ||
+        !attrs->ObjectName->Length || attrs->ObjectName->Length % sizeof(wchar_t)) return false;
+    for (size_t i = 0; i < attrs->ObjectName->Length / sizeof(wchar_t); ++i) {
+        if (!attrs->ObjectName->Buffer[i] || attrs->ObjectName->Buffer[i] == L'\\') return false;
+    }
+    alignas(void*) BYTE info[4096];
+    ULONG needed = 0;
+    if (query_object(attrs->RootDirectory, 1, info, sizeof(info), &needed) < 0) return false;
+    auto name = reinterpret_cast<UNICODE_STRING*>(info);
+    if (!name->Buffer || name->Length % sizeof(wchar_t) || name->Length >= 1024 * sizeof(wchar_t)) return false;
+    wchar_t root[1024];
+    memcpy(root, name->Buffer, name->Length);
+    root[name->Length / sizeof(wchar_t)] = 0;
+    auto leaf = wcsrchr(root, L'\\');
+    if (!leaf || (wcsncmp(leaf + 1, L"msys-", 5) && wcsncmp(leaf + 1, L"cygwin-", 7))) return false;
+
+    wchar_t package[1024];
+    if (!GetAppContainerNamedObjectPath(nullptr, nullptr, _countof(package), package, &needed)) return false;
+    if (package[0] != L'\\') {
+        wchar_t relative[1024];
+        wcscpy_s(relative, package);
+        DWORD session = 0;
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) ||
+            swprintf_s(package, L"\\Sessions\\%lu\\BaseNamedObjects\\%s", session, relative) < 0) return false;
+    }
+    // Compare resolved names: BaseNamedObjects can be an alias in the Win32 spelling.
+    UNICODE_STRING package_name = {};
+    package_name.Buffer = package;
+    package_name.Length = USHORT(wcslen(package) * sizeof(wchar_t));
+    package_name.MaximumLength = USHORT(package_name.Length + sizeof(wchar_t));
+    OBJECT_ATTRIBUTES package_attrs = {};
+    package_attrs.Length = sizeof(package_attrs);
+    package_attrs.ObjectName = &package_name;
+    HANDLE package_handle = nullptr;
+    if (true_open_directory(&package_handle, 1, &package_attrs) < 0) return false;
+    NTSTATUS status = query_object(package_handle, 1, info, sizeof(info), &needed);
+    CloseHandle(package_handle);
+    name = reinterpret_cast<UNICODE_STRING*>(info);
+    if (status < 0 || !name->Buffer || name->Length % sizeof(wchar_t) ||
+        name->Length >= sizeof(package)) return false;
+    memcpy(package, name->Buffer, name->Length);
+    package[name->Length / sizeof(wchar_t)] = 0;
+    size_t prefix = wcslen(package);
+    if (prefix && package[prefix - 1] == L'\\') package[--prefix] = 0;
+    if (wcslen(root) <= prefix || _wcsnicmp(root, package, prefix) || root[prefix] != L'\\') return false;
+    leaf = root + prefix + 1;
+    return (!wcsncmp(leaf, L"msys-", 5) || !wcsncmp(leaf, L"cygwin-", 7)) && !wcschr(leaf, L'\\');
+}
+
+static bool private_msys_object(HANDLE handle) {
+    alignas(void*) BYTE info[4096];
+    ULONG needed = 0;
+    if (query_object(handle, 1, info, sizeof(info), &needed) < 0) return false;
+    auto name = reinterpret_cast<UNICODE_STRING*>(info);
+    if (!name->Buffer || !name->Length || name->Length % sizeof(wchar_t)) return false;
+    size_t split = name->Length / sizeof(wchar_t);
+    while (split && name->Buffer[split - 1] != L'\\') --split;
+    if (!split || split == name->Length / sizeof(wchar_t)) return false;
+    UNICODE_STRING parent = *name, leaf = *name;
+    parent.Length = USHORT((split - 1) * sizeof(wchar_t));
+    parent.MaximumLength = parent.Length;
+    leaf.Buffer += split;
+    leaf.Length -= USHORT(split * sizeof(wchar_t));
+    leaf.MaximumLength = leaf.Length;
+    OBJECT_ATTRIBUTES attrs = {};
+    attrs.Length = sizeof(attrs);
+    attrs.ObjectName = &parent;
+    HANDLE directory = nullptr;
+    if (true_open_directory(&directory, 1, &attrs) < 0) return false;
+    attrs.RootDirectory = directory;
+    attrs.ObjectName = &leaf;
+    bool scoped = private_msys_root(&attrs);
+    CloseHandle(directory);
+    return scoped;
+}
+
+static bool null_dacl(PSECURITY_DESCRIPTOR descriptor) {
+    PACL dacl = nullptr;
+    BOOL present = FALSE, defaulted = FALSE;
+    return descriptor && GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted) &&
+           present && !dacl;
+}
+
+static bool decimal_name(PUNICODE_STRING name, const wchar_t* prefix) {
+    if (!name || !name->Buffer || name->Length % sizeof(wchar_t) ||
+        name->MaximumLength < name->Length) return false;
+    size_t size = name->Length / sizeof(wchar_t), start = wcslen(prefix);
+    if (size <= start || size > start + 10 || wcsncmp(name->Buffer, prefix, start)) return false;
+    for (size_t i = start; i < size; ++i)
+        if (name->Buffer[i] < L'0' || name->Buffer[i] > L'9') return false;
+    return true;
+}
+
+static NTSTATUS NTAPI create_link(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
+                                  PUNICODE_STRING target) {
+    bool scoped = private_msys_root(attrs) && decimal_name(attrs->ObjectName, L"winpid.") &&
+        decimal_name(target, L"") && attrs->SecurityDescriptor;
+    PackageDescriptor descriptor(scoped ? attrs->SecurityDescriptor : nullptr, 1 /* SYMBOLIC_LINK_QUERY */);
+    OBJECT_ATTRIBUTES redirected = {};
+    if (descriptor.get()) {
+        redirected = *attrs;
+        redirected.SecurityDescriptor = descriptor.get();
+    }
+    return true_create_link(handle, access, descriptor.get() ? &redirected : attrs, target);
+}
+
+static NTSTATUS NTAPI create_section(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
+    PLARGE_INTEGER maximum_size, ULONG protection, ULONG attributes, HANDLE file) {
+    bool scoped = !file && protection == PAGE_READWRITE && attributes == SEC_COMMIT && private_msys_root(attrs);
+    PackageDescriptor descriptor(scoped ? attrs->SecurityDescriptor : nullptr);
+    PSECURITY_DESCRIPTOR security = descriptor.get();
+    if (!security && scoped && null_dacl(attrs->SecurityDescriptor)) security = &private_descriptor;
+    OBJECT_ATTRIBUTES redirected = {};
+    if (security) {
+        redirected = *attrs;
+        redirected.SecurityDescriptor = security;
+    }
+    return true_create_section(handle, access, security ? &redirected : attrs, maximum_size,
+        protection, attributes, file);
+}
+
+template <typename Create, typename... Args>
+static NTSTATUS create_sync(Create create, PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
+                            Args... args) {
+    bool scoped = private_msys_root(attrs);
+    PackageDescriptor descriptor(scoped ? attrs->SecurityDescriptor : nullptr);
+    PSECURITY_DESCRIPTOR security = descriptor.get();
+    if (!security && scoped && null_dacl(attrs->SecurityDescriptor)) security = &private_descriptor;
+    OBJECT_ATTRIBUTES redirected = {};
+    if (security) {
+        redirected = *attrs;
+        redirected.SecurityDescriptor = security;
+    }
+    return create(handle, access, security ? &redirected : attrs, args...);
+}
+
+static NTSTATUS NTAPI create_mutant(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs, BOOLEAN owner) {
+    return create_sync(true_create_mutant, handle, access, attrs, owner);
+}
+
+static NTSTATUS NTAPI create_event(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs, ULONG kind,
+                                   BOOLEAN initial) {
+    return create_sync(true_create_event, handle, access, attrs, kind, initial);
+}
+
+static NTSTATUS NTAPI create_semaphore(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
+                                       LONG initial, LONG maximum) {
+    return create_sync(true_create_semaphore, handle, access, attrs, initial, maximum);
+}
+
 static bool is_null(LPCWSTR path) {
     if (!path) return false;
     if (!_wcsicmp(path, L"\\\\.\\NUL") || !_wcsicmp(path, L"\\\\?\\NUL")) return true;
@@ -546,6 +748,11 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_create_pipe, "NtCreateNamedPipeFile") ||
         !resolve_nt(true_open_file, "NtOpenFile") ||
         !resolve_nt(true_nt_create_file, "NtCreateFile") ||
+        !resolve_nt(true_create_section, "NtCreateSection") ||
+        !resolve_nt(true_create_mutant, "NtCreateMutant") ||
+        !resolve_nt(true_create_event, "NtCreateEvent") ||
+        !resolve_nt(true_create_semaphore, "NtCreateSemaphore") ||
+        !resolve_nt(true_create_link, "NtCreateSymbolicLinkObject") ||
         !resolve_nt(true_io_control, "NtDeviceIoControlFile") ||
         !resolve_nt(true_close, "NtClose") ||
         !resolve_nt(true_duplicate_object, "NtDuplicateObject") ||
@@ -566,6 +773,11 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_pipe), create_pipe);
     DetourAttach(reinterpret_cast<PVOID*>(&true_open_file), open_file);
     DetourAttach(reinterpret_cast<PVOID*>(&true_nt_create_file), nt_create_file);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_section), create_section);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_mutant), create_mutant);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_event), create_event);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_semaphore), create_semaphore);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_link), create_link);
     DetourAttach(reinterpret_cast<PVOID*>(&true_io_control), mount_io_control);
     DetourAttach(reinterpret_cast<PVOID*>(&true_close), mount_close);
     DetourAttach(reinterpret_cast<PVOID*>(&true_duplicate_object), mount_duplicate);
