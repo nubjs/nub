@@ -1180,6 +1180,9 @@ pub struct SandboxScope<'a> {
     /// What the jail's project read grant expands against. For a dependency build this
     /// is the user's project; for a fetched checkout it is the checkout itself.
     pub project_root: &'a std::path::Path,
+    /// The installer-resolved global virtual-store root for this dependency
+    /// lifecycle. `None` for roots that do not run through an install store.
+    pub global_virtual_store_dir: Option<&'a std::path::Path>,
     /// The INSTALLER-RESOLVED name of the package whose script this is — the same
     /// identity `BuildPolicy` decides on, not the manifest's self-declared `name`.
     ///
@@ -1709,6 +1712,7 @@ fn lifecycle_sandbox_spawn(
         },
         cwd: script_dir.to_path_buf(),
         project_root: scope.project_root.to_path_buf(),
+        global_virtual_store_dir: scope.global_virtual_store_dir.map(Path::to_path_buf),
         package_dir: scope.package_dir.to_path_buf(),
         package_name: scope.package_name.map(str::to_string),
         package_version: scope.package_version.map(str::to_string),
@@ -1808,6 +1812,7 @@ pub async fn run_root_script_by_name(
         RootProvenance::Fetched { checkout_root } => Some(SandboxScope {
             package_dir: checkout_root,
             project_root: checkout_root,
+            global_virtual_store_dir: None,
             package_name: None,
             package_version: None,
             root_is_user_authored: false,

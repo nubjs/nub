@@ -50,6 +50,10 @@ pub struct LifecycleSandboxSpawn {
     pub cwd: PathBuf,
     /// The project root, for the embedder's project-read grant + `./` anchor.
     pub project_root: PathBuf,
+    /// The global virtual-store root selected by this install, when this is a
+    /// dependency lifecycle spawn. The installer carries its resolved value so
+    /// an embedder can grant the same root without rediscovering config.
+    pub global_virtual_store_dir: Option<PathBuf>,
     /// The dependency's own package dir — the one subtree the build may WRITE.
     pub package_dir: PathBuf,
     /// The installer-resolved package identity for catalog selection, including nested

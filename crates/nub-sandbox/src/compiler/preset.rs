@@ -413,19 +413,60 @@ pub fn grant_build_jail_dependency_reads(
     // caches, which a backend may satisfy with one persistent machine-wide read rather than an ACE
     // written and revoked every launch. `roots` holds project and user paths, which must never be
     // marked that way — see [`FsOrigin::NubOwnedPublic`].
-    let mut nub_owned: Vec<PathBuf> = Vec::new();
+    let mut cache_roots: Vec<(PathBuf, FsOrigin)> = Vec::new();
     for pattern in NUB_PM_CACHE_PATTERNS {
-        let expanded = PathBuf::from(crate::matcher::path::expand_symbolic(pattern, &ctx.homes));
+        // `$cache` remains the public sandbox-language anchor. The engine's
+        // `cacheDir` instead names its complete cache directory, and an explicit
+        // `globalVirtualStoreDir` may be outside it, so a lifecycle compile takes
+        // the install-resolved root when it is available rather than reinterpreting
+        // either setting as `$cache`.
+        let (expanded, origin) = if *pattern == NUB_GLOBAL_VIRTUAL_STORE_PATTERN {
+            match ctx.global_virtual_store.clone() {
+                // A configured store can be any user path. It must stay a
+                // normal speculative grant so backends neither retain a
+                // missing external path nor tag it as nub-owned. The default
+                // store (and descendants) retains its persistent origin.
+                Some(root) => {
+                    let default_root =
+                        PathBuf::from(crate::matcher::path::expand_symbolic(pattern, &ctx.homes));
+                    // `push_read_path` canonicalizes the grant before a backend
+                    // sees it. Classify that same canonical path: a lexical
+                    // `starts_with` accepts `$default/../private`, and a link
+                    // below `$default` can resolve outside it, either of which
+                    // would falsely license a persistent machine-wide read.
+                    let resolved_root =
+                        crate::matcher::path::canonicalize_including_nonexistent(&root);
+                    let resolved_default =
+                        crate::matcher::path::canonicalize_including_nonexistent(&default_root);
+                    let origin = if resolved_root.starts_with(&resolved_default) {
+                        FsOrigin::NubOwnedPublic
+                    } else {
+                        FsOrigin::Speculative
+                    };
+                    (root, origin)
+                }
+                None => (
+                    PathBuf::from(crate::matcher::path::expand_symbolic(pattern, &ctx.homes)),
+                    FsOrigin::NubOwnedPublic,
+                ),
+            }
+        } else {
+            (
+                PathBuf::from(crate::matcher::path::expand_symbolic(pattern, &ctx.homes)),
+                FsOrigin::NubOwnedPublic,
+            )
+        };
         if narrowed
             && *pattern == NUB_GLOBAL_VIRTUAL_STORE_PATTERN
             && let Some(dir) = package_dir
             && let Some(cells) = dependency_closure_store_cells(dir, &expanded)
         {
-            // Narrowed cells stay nub-owned — same bytes, same ownership, fewer of them.
-            nub_owned.extend(cells);
+            // The narrowed cells preserve their root's ownership origin; a
+            // configured external store must not acquire nub's persistent tag.
+            cache_roots.extend(cells.into_iter().map(|cell| (cell, origin)));
             continue;
         }
-        nub_owned.push(expanded);
+        cache_roots.push((expanded, origin));
     }
     // The `node_modules` the package ACTUALLY sits in, which is not always the project's.
     // aube's hoisted planner is per-IMPORTER, so a workspace member's dependency
@@ -445,8 +486,8 @@ pub fn grant_build_jail_dependency_reads(
     for root in roots {
         push_read_path(&mut grants, &root, FsOrigin::Speculative);
     }
-    for root in nub_owned {
-        push_read_path(&mut grants, &root, FsOrigin::NubOwnedPublic);
+    for (root, origin) in cache_roots {
+        push_read_path(&mut grants, &root, origin);
     }
     // ⛔ THE npm PREFIX NEEDS **WRITE**, AND EVERYTHING ABOVE IS READ-ONLY. `redirect_npm_prefix`
     // points `npm_config_prefix` at `$cache/nub/pm/tools/npm-prefix` precisely because `tools` is
@@ -710,14 +751,23 @@ fn enclosing_node_modules(package_dir: &Path) -> Option<PathBuf> {
 /// KNOWN RESIDUAL: a SCOPED package under a hoisted linker escapes into
 /// `node_modules/@scope/`, which this correctly declines and deliberately does not fix —
 /// granting the scope dir would hand a build write access to its sibling packages.
-fn store_entry_write_root(homes: &Homes, package_dir: &Path) -> Option<PathBuf> {
+fn store_entry_write_root(
+    homes: &Homes,
+    package_dir: &Path,
+    global_virtual_store: Option<&Path>,
+) -> Option<PathBuf> {
     let resolved = crate::matcher::path::canonicalize_including_nonexistent(package_dir);
     let candidate = enclosing_node_modules(&resolved)?.parent()?.to_path_buf();
     let parent = crate::matcher::path::canonicalize_including_nonexistent(candidate.parent()?);
-    let global = PathBuf::from(crate::matcher::path::expand_symbolic(
-        NUB_GLOBAL_VIRTUAL_STORE_PATTERN,
-        homes,
-    ));
+    let global = global_virtual_store.map_or_else(
+        || {
+            PathBuf::from(crate::matcher::path::expand_symbolic(
+                NUB_GLOBAL_VIRTUAL_STORE_PATTERN,
+                homes,
+            ))
+        },
+        Path::to_path_buf,
+    );
     let project_local = homes
         .project
         .join("node_modules")
@@ -1066,8 +1116,40 @@ pub fn compile_build_jail(
     extra_reads: Vec<PathBuf>,
     ambient_env: BTreeMap<String, String>,
 ) -> Result<SandboxPolicy, CompileError> {
+    compile_build_jail_with_global_virtual_store(
+        homes,
+        package_dir,
+        package_name,
+        package_version,
+        interpreter,
+        extra_reads,
+        ambient_env,
+        None,
+    )
+}
+
+/// Compile the lifecycle build jail with the global virtual-store root the
+/// installer already selected for this install. The existing
+/// [`compile_build_jail`] convenience API deliberately retains the static
+/// `$cache/nub/pm/store` preset for callers outside a live install.
+///
+/// The explicit arguments intentionally mirror [`compile_build_jail`]; making
+/// the resolved root part of a catch-all options object would make a caller
+/// constructing the legacy profile silently choose a lifecycle-only grant.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_build_jail_with_global_virtual_store(
+    homes: Homes,
+    package_dir: &Path,
+    package_name: Option<&str>,
+    package_version: Option<&str>,
+    interpreter: Vec<PathBuf>,
+    extra_reads: Vec<PathBuf>,
+    ambient_env: BTreeMap<String, String>,
+    global_virtual_store: Option<PathBuf>,
+) -> Result<SandboxPolicy, CompileError> {
     let private_home = private_home_dir(&homes, package_dir);
-    let store_entry_root = store_entry_write_root(&homes, package_dir);
+    let store_entry_root =
+        store_entry_write_root(&homes, package_dir, global_virtual_store.as_deref());
     // Captured before `homes` is moved into the ctx below. `<cache>/nub` rather than `<cache>`:
     // the publishable mark must cover only trees NUB owns, and the ambient cache root is shared
     // with every other tool on the machine.
@@ -1089,7 +1171,8 @@ pub fn compile_build_jail(
         ScopeCapabilities::approved(),
         ambient_env.clone(),
     )
-    .with_interpreter(interpreter);
+    .with_interpreter(interpreter)
+    .with_global_virtual_store(global_virtual_store);
     // The object surface routes through `compile` (not the string-preset arm), so the
     // interpreter grant + secret-floor reassert are applied here rather than in
     // `compile_scope`'s preset branch.
@@ -2699,6 +2782,137 @@ mod tests {
         }
     }
 
+    /// A configured GVS may live outside nub's cache, so the lifecycle seam
+    /// must grant it for this spawn without turning a user-selected directory
+    /// into a persistent machine-wide read grant.
+    #[test]
+    fn an_external_resolved_global_store_is_not_publishable() {
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
+        };
+        let external_store = PathBuf::from(fx!("/mounted/user-selected-store/v1"));
+        let policy = compile_build_jail_with_global_virtual_store(
+            homes,
+            Path::new(fx!(
+                "/mounted/user-selected-store/v1/pkg@1/node_modules/pkg"
+            )),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+            Some(external_store.clone()),
+        )
+        .expect("build-jail policy compiles");
+        let external_prefix =
+            crate::matcher::path::normalize_slashes(&external_store.to_string_lossy());
+        let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+        let escape = external_store.join("pkg@1/Makefile");
+        assert_eq!(
+            (
+                matcher.decide(&escape).effect,
+                matcher.decide(&escape).access
+            ),
+            (Effect::Allow, FsAccess::ReadWrite),
+            "a package in the resolved external GVS retains its scoped store-entry write root"
+        );
+        assert!(
+            policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .filter(|rule| rule.origin == FsOrigin::NubOwnedPublic)
+                .all(|rule| !rule.matcher.as_str().starts_with(&external_prefix)),
+            "an external configured store must not receive nub's publishable origin"
+        );
+    }
+
+    /// The origin is checked after the same canonicalization that lowering
+    /// applies. A lexical prefix test would publish either path as a
+    /// machine-wide readable Nub cache even though the eventual grant escapes
+    /// it.
+    #[test]
+    fn resolved_store_traversal_never_becomes_publishable() {
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
+        };
+        let traversal = homes.cache.join("nub/pm/store/../private-store/v1");
+        let policy = compile_build_jail_with_global_virtual_store(
+            homes,
+            Path::new(fx!(
+                "/testhome/.cache/nub/pm/private-store/v1/pkg@1/node_modules/pkg"
+            )),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+            Some(traversal),
+        )
+        .expect("build-jail policy compiles");
+        let private_prefix = fx!("/testhome/.cache/nub/pm/private-store");
+        assert!(
+            policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .filter(|rule| rule.origin == FsOrigin::NubOwnedPublic)
+                .all(|rule| !rule.matcher.as_str().starts_with(private_prefix)),
+            "a traversal below the default store must not be published"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_store_symlink_escape_never_becomes_publishable() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temp root");
+        let cache = root.path().join("cache");
+        let default_store = cache.join("nub/pm/store");
+        let external_store = root.path().join("external-store/v1");
+        std::fs::create_dir_all(&default_store).expect("default store parent");
+        std::fs::create_dir_all(&external_store).expect("external store");
+        symlink(&external_store, default_store.join("redirect")).expect("store symlink");
+        let package_dir = external_store.join("pkg@1/node_modules/pkg");
+        let policy = compile_build_jail_with_global_virtual_store(
+            Homes {
+                home: root.path().join("home"),
+                tmp: root.path().join("tmp"),
+                cache,
+                project: root.path().join("project"),
+            },
+            &package_dir,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            BTreeMap::new(),
+            Some(default_store.join("redirect")),
+        )
+        .expect("build-jail policy compiles");
+        let external_prefix =
+            crate::matcher::path::normalize_slashes(&external_store.to_string_lossy());
+        assert!(
+            policy
+                .fs
+                .rules
+                .entries
+                .iter()
+                .filter(|rule| rule.origin == FsOrigin::NubOwnedPublic)
+                .all(|rule| !rule.matcher.as_str().starts_with(&external_prefix)),
+            "a symlink escaping the default store must not be published"
+        );
+    }
+
     /// General policies use the same positive-only filesystem grammar. A granted
     /// project includes its dotfiles; omitted home credentials remain ungranted.
     #[test]
@@ -2839,6 +3053,62 @@ mod tests {
             "a git dependency's clone config records its fetch URL — a private HTTPS dep's \
              token — and must not be reachable from another package's lifecycle script"
         );
+    }
+
+    /// An engine's cache setting names a complete cache directory, while the
+    /// sandbox's `$cache` names the platform cache base. The lifecycle seam
+    /// therefore carries the install-resolved GVS rather than making either
+    /// source masquerade as the other. Both source forms below must replace the
+    /// static store grant: allowing both would quietly retain a stale default
+    /// cache read after a relocation.
+    #[test]
+    fn resolved_global_virtual_store_replaces_the_static_cache_grant() {
+        let homes = Homes {
+            home: PathBuf::from(fx!("/testhome")),
+            tmp: PathBuf::from(fx!("/testtmp")),
+            cache: PathBuf::from(fx!("/testhome/.cache")),
+            project: PathBuf::from(fx!("/proj")),
+        };
+        let package_dir = Path::new(fx!("/relocated/gvs/pkg@1/node_modules/pkg"));
+        for (source, global_virtual_store) in [
+            (
+                "NUB_CACHE_DIR",
+                PathBuf::from(fx!("/other-volume/nubcache/store/v1")),
+            ),
+            (
+                ".npmrc globalVirtualStoreDir",
+                PathBuf::from(fx!("/project-store/shared/v1")),
+            ),
+        ] {
+            let policy = compile_build_jail_with_global_virtual_store(
+                homes.clone(),
+                package_dir,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+                Some(global_virtual_store.clone()),
+            )
+            .expect("build-jail compiles with an install-resolved store");
+            let matcher = crate::matcher::PathMatcher::new(&policy.fs.rules);
+            assert_eq!(
+                matcher
+                    .decide(&global_virtual_store.join("pkg@1/node_modules/pkg/index.js"))
+                    .effect,
+                Effect::Allow,
+                "{source} relocation must grant the exact materialized package root"
+            );
+            assert_eq!(
+                matcher
+                    .decide(Path::new(fx!(
+                        "/testhome/.cache/nub/pm/store/pkg@1/node_modules/pkg/index.js"
+                    )))
+                    .effect,
+                Effect::Deny,
+                "{source} relocation must replace, not retain, the static cache-store grant"
+            );
+        }
     }
 
     /// The three `$cache/nub/pm/tools` redirect targets, as the paths a backend would install a

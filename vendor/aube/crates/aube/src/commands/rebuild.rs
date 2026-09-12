@@ -196,10 +196,15 @@ pub async fn run(
                 managed: &mut managed_bin_links,
                 preserved: None,
             })?;
+            // Carry the same engine-resolved root through the lifecycle seam;
+            // the embedder must not re-parse cache/store configuration per child.
+            let lifecycle_store = super::open_store(&cwd)?;
+            let lifecycle_global_virtual_store_dir = lifecycle_store.virtual_store_dir();
             super::install::run_dep_lifecycle_scripts(
                 &cwd,
                 &modules_dir_name,
                 &aube_dir,
+                &lifecycle_global_virtual_store_dir,
                 &graph,
                 &policy,
                 // No defaultTrust floor on rebuild: no advisory gate

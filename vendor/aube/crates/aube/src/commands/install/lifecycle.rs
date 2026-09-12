@@ -524,6 +524,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     project_dir: &std::path::Path,
     modules_dir_name: &str,
     aube_dir: &std::path::Path,
+    global_virtual_store_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
     policy: &aube_scripts::BuildPolicy,
     // The `defaultTrust` floor, consulted only when `policy` leaves a
@@ -1022,6 +1023,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             let scope = aube_scripts::SandboxScope {
                 package_dir: &job.package_dir,
                 project_root: &project_dir,
+                global_virtual_store_dir: Some(global_virtual_store_dir),
                 package_name: Some(job.registry_name.as_str()),
                 package_version: Some(job.version.as_str()),
                 root_is_user_authored,

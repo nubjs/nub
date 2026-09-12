@@ -378,7 +378,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // per-package opt-out on, and for the same reason: a dependency cannot rename
         // itself into it, and aube withholds it entirely once its root is a checkout it
         // fetched. It selects a curated exception only; it can never widen the baseline.
-        let policy = nub_sandbox::compile_build_jail(
+        let policy = nub_sandbox::compile_build_jail_with_global_virtual_store(
             homes,
             &spawn.package_dir,
             spawn.package_name.as_deref(),
@@ -386,6 +386,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             interpreter,
             extra_reads,
             ambient,
+            spawn.global_virtual_store_dir,
         )
         .map_err(|e| {
             std::io::Error::other(format!("compiling build-jail for lifecycle script: {e}"))

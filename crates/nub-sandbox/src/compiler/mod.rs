@@ -161,6 +161,12 @@ pub struct CompileCtx {
     /// grant (`--sandbox <file>`, the static `build-jail` preset). Set per-spawn by the
     /// lifecycle interposition via [`CompileCtx::with_interpreter`].
     pub interpreter: Vec<std::path::PathBuf>,
+    /// The install's already-resolved global virtual-store root, when the host is
+    /// compiling a lifecycle policy. This stays separate from [`Homes::cache`]:
+    /// `cacheDir` is a complete engine cache directory rather than the public
+    /// `$cache` symbolic base, and `globalVirtualStoreDir` may point elsewhere.
+    /// `None` retains the static build-jail preset's `$cache/nub/pm/store` root.
+    pub global_virtual_store: Option<std::path::PathBuf>,
     /// The `$(…)` command runner (production shells out; tests inject a stub).
     pub runner: Box<dyn CommandRunner>,
 }
@@ -193,6 +199,7 @@ impl CompileCtx {
             ambient_env,
             document: Value::Null,
             interpreter: Vec::new(),
+            global_virtual_store: None,
             runner: Box::new(ShellRunner),
         }
     }
@@ -221,6 +228,17 @@ impl CompileCtx {
     /// See [`CompileCtx::interpreter`].
     pub fn with_interpreter(mut self, interpreter: Vec<std::path::PathBuf>) -> Self {
         self.interpreter = interpreter;
+        self
+    }
+
+    /// Attach the actual global virtual-store root selected for this install.
+    /// The engine resolves it once and passes it through the lifecycle spawn;
+    /// recompiling configuration here would risk granting a different root.
+    pub fn with_global_virtual_store(
+        mut self,
+        global_virtual_store: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.global_virtual_store = global_virtual_store;
         self
     }
 }

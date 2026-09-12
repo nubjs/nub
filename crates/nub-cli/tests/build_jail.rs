@@ -59,6 +59,10 @@ fn dependency_lifecycle_contract() {
             env!("CARGO_MANIFEST_DIR"),
             "/../../tests/build-jail-corpus/fetched-native.mjs"
         ))
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/build-jail-corpus/relocated-store.mjs"
+        ))
         .output()
         .expect("run the lifecycle contract with Node");
     assert!(

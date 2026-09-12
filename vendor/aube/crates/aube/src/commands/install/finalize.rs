@@ -376,10 +376,12 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
                 }
             })
             .unwrap_or(SideEffectsCacheConfig::Disabled);
+        let global_virtual_store_dir = store.virtual_store_dir();
         let lifecycle_outcome = run_dep_lifecycle_scripts(
             cwd,
             modules_dir_name,
             aube_dir,
+            &global_virtual_store_dir,
             graph_for_link,
             build_policy,
             default_trust_floor,
