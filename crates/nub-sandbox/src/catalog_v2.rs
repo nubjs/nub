@@ -315,41 +315,15 @@ pub const BASELINE_WRITE_PATHS: &[&str] = &[
     "Library/Caches",
 ];
 
-/// What a package with NO catalog entry may do — the HOT-SWAPPABLE baseline.
+/// Additional permissions for a package with no catalog entry. This uses the same
+/// `apply_v2_grant` lowering as explicit catalog grants.
 ///
-/// ⛔⛔ THIS FUNCTION IS THE ENTIRE UNCATALOGUED POLICY. It exists as ONE named profile, expressed in
-/// the same [`Caps`] vocabulary a catalog entry uses, so that widening or narrowing the baseline is
-/// an edit here plus a test update — never a hunt through backend conditionals. It deliberately goes
-/// through the same `apply_v2_grant` lowering as a catalog grant: a baseline with its own code path
-/// is a second policy engine, and the two would drift.
-///
-/// WHY A BASELINE AT ALL, rather than denying everything an entry does not name. npm publishes
-/// continuously and the catalog is compiled into the binary, so a package published after a release
-/// is uncatalogued BY CONSTRUCTION and no amount of corpus growth closes that. Denying by default
-/// therefore does not mean "secure", it means "install scripts break for a growing tail forever".
-/// Measured over 2,028 packages with a known minimum grant: denying everything satisfies 54.2%,
-/// while this baseline satisfies 96.4%.
-///
-/// WHAT IT DELIBERATELY WITHHOLDS, and why each is not a compatibility problem worth its risk:
-/// - **No `read` beyond the base profile.** This is the load-bearing one. Credential FILES stay
-///   unreadable, which is what breaks the read-then-exfiltrate pair: verified on linux, win32 and
-///   macOS that a package granted `network` reads 0 of 5 planted credential decoys and receives 0 of
-///   3 credential env vars while its socket still connects.
-/// - **No `write` on the real `$HOME`.** See [`BASELINE_WRITE_PATHS`] — promotion covers the real
-///   need (143 of 2,028 packages want any home write, and only 63 of those want it broadly) without
-///   handing out a live handle.
-/// - **No `write` on the project.** Granting it would let an unknown package rewrite the consuming
-///   project's source and lockfile, which is how a supply-chain worm propagates. Costs ~0.4%.
-/// - **No whole-disk anything.** On Windows a full-disk grant makes the backend decline the LowBox
-///   token, and egress is an AppContainer capability, so OS-enforced fs AND network confinement are
-///   lost together. What is left there is the env axis and the userland `NODE_OPTIONS` net gate,
-///   neither of which needs the token and neither of which binds a native addon — so a whole-disk
-///   baseline would leave that platform with no OS confinement at all.
-///
-/// Egress IS granted, and that is a real concession rather than an oversight: 90.1% of packages need
-/// it and nothing narrower is expressible today (the proxy enforces per-host policy, but the grant
-/// vocabulary's network axis is a boolean). The filesystem denials above are what keep it from being
-/// an exfiltration channel.
+/// The baseline allows outbound networking, dependency writes and the conventional
+/// cache paths in [`BASELINE_WRITE_PATHS`]. It adds no broad home, project or disk
+/// access beyond the base profile. These are positive grants, not exclusions around
+/// credential locations; granted cache contents are not guaranteed to be secret-free.
+/// A present catalog entry replaces this baseline, so omitted networking in that
+/// entry denies egress rather than inheriting the baseline's allow.
 pub fn baseline_caps() -> Caps {
     Caps {
         read: Reach::None,

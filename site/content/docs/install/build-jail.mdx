@@ -43,12 +43,14 @@ These entries approve scripts without disabling the build jail. See [lifecycle s
 
 ## Permissions
 
-Each script receives access to its package directory and the tools needed to build it. Nub's package catalog adds filesystem and network permissions for dependencies that need them.
+Each script receives access to its package directory and the tools needed to build it. Nub's package catalog selects additional filesystem permissions and whether the script may use the network.
 
 - Build scripts run on plain Node.
 - Credential variables such as `NPM_TOKEN` and `AWS_SECRET_ACCESS_KEY` are removed.
 - Scripts receive a build-specific home and temporary directory.
 - Root-project scripts, such as `prepare`, run with the project's ordinary permissions.
+
+Catalog networking is an allow/deny switch, not a hostname allowlist. Recorded download hosts do not restrict a script's connections. Packages without a matching catalog entry receive the baseline policy, which allows outbound networking; a catalog entry can deny it. On Windows, the coarse network allow covers public outbound connections, not unrestricted LAN or loopback access.
 
 The jail reduces exposure to malicious install scripts; it is not isolation for arbitrary untrusted code. On Windows, a full-disk catalog grant omits the AppContainer. That launch has no operating-system filesystem or network boundary, but environment filtering and process cleanup remain.
 

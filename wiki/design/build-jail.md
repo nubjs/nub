@@ -6,6 +6,8 @@ Nub runs approved dependency lifecycle scripts through a shared unprivileged san
 
 Build approval and confinement are separate decisions. Approval permits a lifecycle script to run; the catalog supplies its filesystem, environment and network policy.
 
+Catalog network permission is a boolean, not a hostname filter. An uncatalogued package receives the baseline's outbound-network allow; a matching entry can deny networking. Recorded download hosts do not constrain the script's connections.
+
 The catalog's fixed baseline environment applies to jailed dependency scripts after ambient credentials are removed. It disables Python bytecode writes, npm log files and npm update notifications. Credential-shaped names and Nub's internal control variables are rejected; these entries do not grant access to the caller's environment.
 
 The install configuration can disable confinement without changing approval:

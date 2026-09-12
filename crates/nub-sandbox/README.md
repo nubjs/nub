@@ -222,6 +222,22 @@ A network rule is a literal host, a CIDR, `*`, or `*.suffix`. The suffix wildcar
 
 The `<private>` token, also spelled `<local>`, permits RFC 1918 and IPv6 ULA addresses. A bare `*` does not permit those ranges. `$trusted` and `$downloads` are array-only built-in host sets. A fine-grained allow starts the proxy; `net: true` and `net: false` do not. The object form accepts per-host booleans, but `proxy` is compiler-derived rather than a policy key.
 
+The proxy also checks resolved IP addresses after the hostname rule. These destination checks apply to both literal addresses and DNS results:
+
+| Destination | Proxy behavior |
+| --- | --- |
+| RFC 1918 or IPv6 ULA | Requires the `<private>` opt-in, even when a literal host or CIDR rule matches. |
+| IPv4 or IPv6 link-local, including cloud metadata addresses | Always blocked. The AWS IPv6 metadata endpoint `fd00:ec2::254` is also blocked. |
+| Loopback | Not part of `<private>`. A matching IP, CIDR, or requested hostname can permit it; an allowed hostname may resolve to loopback. |
+
+For example, a hostname on a private network requires both grants:
+
+```jsonc
+{ "net": ["packages.corp.example", "<private>"] }
+```
+
+The private token also admits direct connections to private addresses. It is not scoped only to the accompanying hostname. Host filtering is not a blanket prohibition on local services: allowed hostnames can resolve to loopback, and permitted endpoints can relay traffic.
+
 | OS | Host-filtered networking | Limits |
 | --- | --- | --- |
 | Linux | A seccomp notification supervisor redirects TCP connections through the policy proxy, including loopback destinations other than the proxy's own listener. | No client proxy configuration is required. DNS uses the configured resolver. Local services require an explicit matching hostname, IP or CIDR grant. General UDP is denied. Host rules are not an all-channel data-loss boundary. |

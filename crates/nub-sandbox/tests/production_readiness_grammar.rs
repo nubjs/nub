@@ -79,7 +79,7 @@ fn public_readme_policy_examples_compile() {
     let examples = documented_policy_examples(include_str!("../README.md"));
     assert_eq!(
         examples.len(),
-        11,
+        12,
         "README policy grammar inventory changed"
     );
     assert_eq!(
@@ -95,7 +95,7 @@ fn public_readme_policy_examples_compile() {
             .iter()
             .filter(|(format, _)| *format == "jsonc")
             .count(),
-        2,
+        3,
         "README JSONC grammar inventory changed"
     );
     for (index, (format, example)) in examples.iter().enumerate() {
