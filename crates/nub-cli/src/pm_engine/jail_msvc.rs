@@ -70,6 +70,8 @@ pub(super) struct MsvcToolchain {
     vscmd_ver: String,
     /// `WindowsSDKVersion` — the only thing `getSDK` can derive an SDK from.
     sdk_version: String,
+    /// `WindowsSdkDir`, retained for the one BuildCheck package which repeats discovery.
+    sdk_root: Option<String>,
     /// Read grants: the VS root and the Windows SDK root. Both are commonly REDUNDANT — the
     /// backend skips a grant a path already publishes to `ALL APPLICATION PACKAGES`
     /// inheritably, which every default `%ProgramFiles%` install does — so the cost is paid
@@ -90,6 +92,18 @@ impl MsvcToolchain {
         {
             ambient.insert((*key).to_string(), value.clone());
         }
+    }
+
+    /// BuildCheck's discovery shape for the one package that uses it. It consumes the
+    /// already accepted `vcvarsall` result rather than attempting its forbidden COM probe.
+    pub(super) fn buildcheck_node_options(&self) -> Option<String> {
+        let sdk_root = self.sdk_root.as_deref()?;
+        Some(nub_sandbox::windows_buildcheck_msvc_node_options(
+            &windows_parent(&self.vc_install_dir)?,
+            &self.vscmd_ver,
+            sdk_root,
+            &self.sdk_version,
+        ))
     }
 }
 
@@ -349,15 +363,18 @@ fn accept(
     let mut reads = vec![PathBuf::from(&root)];
     // The SDK lives OUTSIDE the Visual Studio installation, so its root is a second grant.
     // `vcvarsall` reports it, which is the only reason this needs no registry read.
-    if let Some(sdk_dir) = lookup(vars, "WindowsSdkDir").map(|d| d.trim_end_matches(['\\', '/']))
-        && !sdk_dir.is_empty()
-    {
-        reads.push(PathBuf::from(sdk_dir));
+    let sdk_root = lookup(vars, "WindowsSdkDir")
+        .map(|d| d.trim_end_matches(['\\', '/']))
+        .filter(|dir| !dir.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(sdk_root) = &sdk_root {
+        reads.push(PathBuf::from(sdk_root));
     }
     Some(MsvcToolchain {
         vc_install_dir,
         vscmd_ver,
         sdk_version,
+        sdk_root,
         reads,
     })
 }

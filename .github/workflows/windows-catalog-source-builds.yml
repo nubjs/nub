@@ -1,0 +1,81 @@
+name: Windows catalog source builds
+
+on:
+  push:
+    branches: [windows-catalog-source-builds]
+    paths:
+      - crates/nub-cli/src/pm_engine/**
+      - crates/nub-sandbox/**
+      - tests/build-jail-corpus/packages.mjs
+      - .github/workflows/windows-catalog-source-builds.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source-builds:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          repository: nubjs/build-jail-corpus
+          ref: a542fb86065cf1296f50fa52239ecf5a94039b61
+          path: corpus-input
+          persist-credentials: false
+          sparse-checkout: catalog-v2.json
+          sparse-checkout-cone-mode: false
+      - name: Verifying the external catalog
+        run: |
+          echo '3499bc20eaa37126a4ea8b8ac10c2102675077bc3cd5ad3de9ebbf481beeefef  corpus-input/catalog-v2.json' | sha256sum -c -
+          sha256sum corpus-input/catalog-v2.json > reports-catalog.sha256
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.23.2
+      - name: Preparing the native build environment
+        run: |
+          npm install --no-audit --no-fund --loglevel=error
+          npm install --global node-gyp@12.4.0 --no-audit --no-fund
+          mkdir -p reports C:/p runtime/addons
+      - name: Building the catalog-override artifact
+        run: |
+          (cd crates/nub-native && cargo build --profile fast)
+          cp target/fast/nub_native.dll runtime/addons/nub-native.node
+          echo '07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075  vendor/busybox-w32/busybox64.exe' | sha256sum -c -
+          cp vendor/busybox-w32/busybox64.exe target/fast/busybox.exe
+          cargo build -p nub-cli --profile fast --features build-jail-catalog-override
+          echo "NUB_BIN=$GITHUB_WORKSPACE/target/fast/nub.exe" >> "$GITHUB_ENV"
+          sha256sum target/fast/nub.exe > reports/nub.sha256
+      - name: Comparing short-root source builds with controls
+        env:
+          CORPUS_TEMP_ROOT: C:/p
+          CORPUS_CONTROL_PYTHON: C:/hostedtoolcache/windows/Python/3.12.10/x64/python.exe
+          CORPUS_GYP_REALPATH_TRACE: '1'
+          NUB_BUILD_JAIL_CATALOG: ${{ github.workspace }}/corpus-input/catalog-v2.json
+          NUB_JAIL_DUMP_POLICY: '1'
+          NUB_JAIL_GYP_REALPATH_TRACE: '1'
+        run: |
+          set +e
+          CORPUS_CASE=better-sqlite3 CORPUS_REPORT="$GITHUB_WORKSPACE/reports/better-sqlite3" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/better-sqlite3.log
+          better_sqlite3=${PIPESTATUS[0]}
+          CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features.log
+          cpu_features=${PIPESTATUS[0]}
+          NUB_SANDBOX_WIN_NO_BUILDCHECK_INJECT=1 CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features-withheld-adapter" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features-withheld-adapter.log
+          cpu_features_without_adapter=${PIPESTATUS[0]}
+          test "$better_sqlite3" -eq 0 && test "$cpu_features" -eq 0 && test "$cpu_features_without_adapter" -ne 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-catalog-source-builds
+          path: |
+            reports
+            reports-catalog.sha256
+          include-hidden-files: true
+          retention-days: 14
