@@ -2093,6 +2093,36 @@ pub async fn run_dep_hook(
     jail: Option<&ScriptJail>,
     sandbox: Option<SandboxScope<'_>>,
 ) -> Result<bool, Error> {
+    run_dep_hook_with_bin_dir(
+        package_dir,
+        package_dir,
+        project_root,
+        modules_dir_name,
+        manifest,
+        hook,
+        tool_bin_dirs,
+        jail,
+        sandbox,
+    )
+    .await
+}
+
+/// Run a lifecycle hook with a distinct package directory for dependency-bin
+/// lookup. Installers with a shared physical store can execute in the physical
+/// package directory while preserving the materialized namespace in which
+/// relative Windows `.cmd` shims were authored.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_dep_hook_with_bin_dir(
+    package_dir: &Path,
+    bin_package_dir: &Path,
+    project_root: &Path,
+    modules_dir_name: &str,
+    manifest: &PackageJson,
+    hook: LifecycleHook,
+    tool_bin_dirs: &[&Path],
+    jail: Option<&ScriptJail>,
+    sandbox: Option<SandboxScope<'_>>,
+) -> Result<bool, Error> {
     let name = hook.script_name();
     let script_cmd: &str = match manifest.scripts.get(name) {
         Some(s) => s.as_str(),
@@ -2104,7 +2134,7 @@ pub async fn run_dep_hook(
             _ => return Ok(false),
         },
     };
-    let chain = dep_bin_chain(package_dir, project_root, modules_dir_name);
+    let chain = dep_bin_chain(bin_package_dir, project_root, modules_dir_name);
     let mut bin_dirs: Vec<&Path> = Vec::with_capacity(chain.len() + tool_bin_dirs.len());
     bin_dirs.extend(chain.iter().map(PathBuf::as_path));
     bin_dirs.extend(tool_bin_dirs.iter().copied());

@@ -565,6 +565,10 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         source_key: Option<String>,
         git_repository_key: Option<String>,
         package_dir: std::path::PathBuf,
+        /// Package directory in the project's materialized namespace. The
+        /// physical GVS directory remains the lifecycle cwd on Windows, but
+        /// its `.bin` shims were authored relative to this surface path.
+        logical_package_dir: std::path::PathBuf,
         manifest: aube_manifest::PackageJson,
         cache_entry: Option<SideEffectsCacheEntry>,
         /// Graph key, kept so the optional-only classification and the
@@ -659,21 +663,24 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         // but interpret that path relative to the unhashed local `.aube/`
         // namespace, leaving an apparently missing `node_api.gyp`. POSIX
         // `getcwd` resolves the outer symlink and masks the same mismatch.
-        // Enter the physical shared-store directory explicitly so the script
-        // cwd and every nested dependency use the same namespace.
+        // Enter the physical shared-store directory explicitly so native-build
+        // cwd discovery uses the same namespace as resolved GVS dependencies.
+        // Keep the surface path too: per-dependency Windows `.cmd` shims are
+        // authored relative to that local projection and must stay on PATH.
+        let logical_package_dir = package_dir;
         let package_dir = if canonicalize_package_dir {
-            lifecycle_package_dir(&package_dir, true)
+            lifecycle_package_dir(&logical_package_dir, true)
                 .await
                 .into_diagnostic()
                 .wrap_err_with(|| {
                     format!(
                         "failed to resolve isolated package directory for {} at {}",
                         pkg.name,
-                        package_dir.display()
+                        logical_package_dir.display()
                     )
                 })?
         } else {
-            package_dir
+            logical_package_dir.clone()
         };
         // Read the dep's `package.json` directly from its materialized
         // location. Previously we looked it up via `package_indices`,
@@ -747,6 +754,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             source_key: pkg.source_approval_key(),
             git_repository_key: pkg.git_repository_approval_key(),
             package_dir,
+            logical_package_dir,
             manifest: dep_manifest,
             cache_entry,
             dep_path: dep_path.clone(),
@@ -1031,8 +1039,9 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             };
             let mut ran_here = 0usize;
             for hook in aube_scripts::DEP_LIFECYCLE_HOOKS {
-                let did_run = aube_scripts::run_dep_hook(
+                let did_run = aube_scripts::run_dep_hook_with_bin_dir(
                     &job.package_dir,
+                    &job.logical_package_dir,
                     &project_dir,
                     &modules_dir_name,
                     &job.manifest,
@@ -1851,6 +1860,140 @@ mod tests {
                 .await
                 .unwrap(),
             logical_package
+        );
+    }
+
+    /// Windows lifecycle scripts keep their native-build cwd in the physical
+    /// GVS leaf, but dependency `.cmd` shims were authored from the local
+    /// unkeyed `.aube` projection. Executing the shim via a physical PATH
+    /// therefore resolves its `%~dp0` target against an absent unkeyed GVS
+    /// sibling. This uses real junctions, the generated shim, and cmd.exe;
+    /// it is deliberately not a path-calculation-only assertion.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn global_virtual_store_lifecycle_uses_logical_bin_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let aube_dir = project.join("node_modules/.aube");
+        let gvs = temp.path().join("gvs");
+        let physical_better = gvs.join("better-sqlite3@11.8.1-hash-a/node_modules/better-sqlite3");
+        let physical_prebuild =
+            gvs.join("prebuild-install@7.1.3-hash-b/node_modules/prebuild-install");
+        std::fs::create_dir_all(&physical_better).unwrap();
+        std::fs::create_dir_all(&physical_prebuild).unwrap();
+        std::fs::create_dir_all(&aube_dir).unwrap();
+
+        for (name, physical) in [
+            ("better-sqlite3@11.8.1", &physical_better),
+            ("prebuild-install@7.1.3", &physical_prebuild),
+        ] {
+            aube_linker::create_dir_link(
+                physical.parent().and_then(std::path::Path::parent).unwrap(),
+                &aube_dir.join(name),
+            )
+            .unwrap();
+        }
+
+        let logical_better = aube_dir.join("better-sqlite3@11.8.1/node_modules/better-sqlite3");
+        let logical_prebuild =
+            aube_dir.join("prebuild-install@7.1.3/node_modules/prebuild-install");
+        let target = logical_prebuild.join("bin.js");
+        std::fs::write(
+            &target,
+            "require('node:fs').writeFileSync(process.argv[2], process.cwd());\n",
+        )
+        .unwrap();
+        let logical_bin = logical_better.join("node_modules/.bin");
+        aube_linker::create_bin_shim(
+            &logical_bin,
+            "prebuild-install",
+            &target,
+            aube_linker::BinShimOptions::default(),
+        )
+        .unwrap();
+
+        let marker = temp.path().join("lifecycle-cwd.txt");
+        let marker_arg = marker.to_string_lossy().replace('\\', "\\\\");
+        let package_json = format!(
+            r#"{{"name":"better-sqlite3","scripts":{{"install":"prebuild-install \"{}\""}}}}"#,
+            marker_arg
+        );
+        let package_json_path = physical_better.join("package.json");
+        std::fs::write(&package_json_path, &package_json).unwrap();
+        let manifest = aube_manifest::PackageJson::parse(&package_json_path, package_json).unwrap();
+
+        // The historical single-path API derives PATH from physical GVS. The
+        // surface-generated `.cmd` then looks for the unkeyed global sibling,
+        // which this fixture intentionally does not create.
+        assert!(
+            aube_scripts::run_dep_hook(
+                &physical_better,
+                &project,
+                "node_modules",
+                &manifest,
+                aube_scripts::LifecycleHook::Install,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .is_err()
+        );
+        assert!(!marker.exists());
+
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.packages.insert(
+            "better-sqlite3@11.8.1".to_string(),
+            aube_lockfile::LockedPackage {
+                name: "better-sqlite3".to_string(),
+                version: "11.8.1".to_string(),
+                dep_path: "better-sqlite3@11.8.1".to_string(),
+                ..Default::default()
+            },
+        );
+        let (policy, warnings) = aube_scripts::BuildPolicy::from_config(
+            &std::collections::BTreeMap::new(),
+            &[],
+            &[],
+            false,
+        );
+        assert!(
+            warnings.is_empty(),
+            "unexpected build-policy warnings: {warnings:?}"
+        );
+        let jail_policy = JailBuildPolicy {
+            enabled: false,
+            denylist: policy.clone(),
+            grants: Vec::new(),
+        };
+        let selected = std::collections::HashSet::from(["better-sqlite3".to_string()]);
+        let outcome = run_dep_lifecycle_scripts(
+            &project,
+            "node_modules",
+            &aube_dir,
+            &gvs,
+            &graph,
+            &policy,
+            &super::default_trust::DefaultTrustFloor::disabled(),
+            120,
+            true,
+            1,
+            None,
+            super::side_effects_cache::SideEffectsCacheConfig::Disabled,
+            &jail_policy,
+            None,
+            Some(&selected),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.ran, 1);
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            crate::dirs::canonicalize(&physical_better)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
         );
     }
 
