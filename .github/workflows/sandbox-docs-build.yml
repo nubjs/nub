@@ -1,0 +1,50 @@
+name: Sandbox documentation build
+
+on:
+  push:
+    branches: [sandbox-artifact-candidate]
+    paths:
+      - site/**
+      - .github/workflows/sandbox-docs-build.yml
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 10
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+      - name: Record source and tool versions
+        run: |
+          mkdir -p reports
+          { git rev-parse HEAD; node --version; pnpm --version; } > reports/environment.txt
+          git ls-files -s site > reports/site-files.txt
+      - name: Install site dependencies
+        working-directory: site
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee ../reports/install.log
+      - name: Build the documentation site
+        working-directory: site
+        run: |
+          set -o pipefail
+          pnpm run build 2>&1 | tee ../reports/build.log
+      - name: Retain build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-docs-build
+          path: reports
+          retention-days: 14
