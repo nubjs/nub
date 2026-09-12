@@ -84,7 +84,11 @@ let entryLoad = null;
 export async function initialize(data) {
   if (data && data.standaloneLoader) CLOBBER_MAP.clear();
   if (data && data.entryLoad) {
-    entryLoad = { port: data.entryLoad.port, urls: new Set(data.entryLoad.urls) };
+    entryLoad = {
+      port: data.entryLoad.port,
+      urls: new Set(data.entryLoad.urls),
+      mainResolved: false,
+    };
     // Its liveness is the main thread's concern; the worker must not stay up for it.
     entryLoad.port.unref();
   }
@@ -99,6 +103,17 @@ function withoutQuery(url) {
 
 // ── Resolve hook ────────────────────────────────────────────────────
 export async function resolve(specifier, context, nextResolve) {
+  // Node resolves its main entry with no parent and nothing else that way, so only
+  // a load after this can be the entry's own — not a preload's import of the same
+  // file under another query (preload-common.cjs `noteEntryResolve`).
+  if (
+    entryLoad !== null &&
+    !entryLoad.mainResolved &&
+    context.parentURL === undefined &&
+    entryLoad.urls.has(withoutQuery(String(specifier)))
+  ) {
+    entryLoad.mainResolved = true;
+  }
   const r = resolveSpec(specifier, context.parentURL);
   if (r) return r;
   // Yarn PnP: resolve deps through PnP's own resolver — identical to the fast tier,
@@ -118,7 +133,7 @@ export async function resolve(specifier, context, nextResolve) {
 // see transform-core `noteRuntimeV8FlagSource`. Awaited here because the
 // `nextLoad` branch of loadInner hands back a promise on this tier.
 export async function load(url, context, nextLoad) {
-  if (entryLoad !== null && entryLoad.urls.has(withoutQuery(url))) {
+  if (entryLoad !== null && entryLoad.mainResolved && entryLoad.urls.has(withoutQuery(url))) {
     const { port } = entryLoad;
     entryLoad = null;
     port.postMessage(url);

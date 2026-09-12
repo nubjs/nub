@@ -173,15 +173,17 @@ fn run_nub_args_against_node(
 }
 
 /// Like `run_nub_args_against_node` for a process that is not expected to exit — a
-/// server. Waits for a stderr line containing `needle` (or the deadline), kills the
-/// process, and hands back whether the line came and everything stdout said.
-fn run_nub_args_until(
+/// server. Waits for a stderr line containing `needle` (or the deadline), hands that
+/// line to `ready` while the process is still up, kills it, and returns what `ready`
+/// made of it (`None` when the line never came) beside everything stdout said.
+fn run_nub_args_until<T>(
     want: (u32, u32, u32),
     fixture: &str,
     args: &[&str],
     needle: &str,
     deadline: Duration,
-) -> Option<(bool, String)> {
+    ready: impl FnOnce(&str) -> T,
+) -> Option<(Option<T>, String)> {
     let bin_dir = find_node_bin_dir(want)?;
     let fixture_path = fixtures_dir().join(fixture);
     let existing = std::env::var_os("PATH").unwrap_or_default();
@@ -217,14 +219,40 @@ fn run_nub_args_until(
     let seen = loop {
         let left = deadline.saturating_sub(started.elapsed());
         match rx.recv_timeout(left) {
-            Ok(line) if line.contains(needle) => break true,
+            Ok(line) if line.contains(needle) => break Some(ready(&line)),
             Ok(_) => continue,
-            Err(_) => break false,
+            Err(_) => break None,
         }
     };
     let _ = child.kill();
     let _ = child.wait();
     Some((seen, stdout.join().unwrap()))
+}
+
+/// One `GET /` against the server a `Listening on http://<host>:<port>` line
+/// announced, as a body. Raw sockets, like the fetch-handler suite: no client crate.
+fn get_root(listening: &str) -> String {
+    use std::io::{Read as _, Write as _};
+    let authority = listening
+        .trim()
+        .strip_prefix("Listening on http://")
+        .unwrap_or_else(|| panic!("not a listening line: {listening:?}"));
+    let (host, port) = authority.rsplit_once(':').unwrap();
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    let mut stream = std::net::TcpStream::connect((host, port.parse::<u16>().unwrap())).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    let (_, body) = raw.split_once("\r\n\r\n").unwrap();
+    // A short body arrives chunked from node:http; strip the one chunk's framing.
+    let body = body.trim_end_matches("0\r\n\r\n").trim_end();
+    match body.split_once("\r\n") {
+        Some((size, rest)) if usize::from_str_radix(size, 16).is_ok() => rest.to_string(),
+        _ => body.to_string(),
+    }
 }
 
 fn slurp<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<String> {
@@ -1166,6 +1194,7 @@ fn a_rewritten_entry_that_holds_the_loop_is_still_served_once() {
             &["--import", "./rewrite.mjs", "holds.mjs"],
             "Listening on",
             Duration::from_secs(60),
+            |_| (),
         ) else {
             eprintln!(
                 "skipping: Node {maj}.{min}.{pat} not installed \
@@ -1174,12 +1203,53 @@ fn a_rewritten_entry_that_holds_the_loop_is_still_served_once() {
             continue;
         };
         assert!(
-            listening,
+            listening.is_some(),
             "Node {maj}.{min}.{pat}: a handler behind a URL-rewriting hook must still bind: stdout={stdout:?}"
         );
         assert_eq!(
             stdout, "holds:?v=1\n",
             "Node {maj}.{min}.{pat}: the entry must evaluate exactly once, under the rewritten URL"
+        );
+    }
+}
+
+/// A preload that imports the entry ahead of the program under a query of its own
+/// is a second module, not the entry: the load hooks may only take Node's own load
+/// of the entry for it — the one after Node resolved it as the main, with no parent.
+/// Matched on pathname alone, the preload's import was taken for the entry and its
+/// handler served while Node went on to evaluate the real one.
+#[test]
+fn a_preload_import_of_the_entry_is_not_served_in_its_place() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((body, stdout)) = run_nub_args_until(
+            want,
+            "entry-url-rewrite",
+            &[
+                "--import",
+                "./rewrite.mjs",
+                "--import",
+                "./warm.mjs",
+                "holds.mjs",
+            ],
+            "Listening on",
+            Duration::from_secs(60),
+            get_root,
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+        assert_eq!(
+            body.as_deref(),
+            Some("held:?v=1"),
+            "Node {maj}.{min}.{pat}: the served handler must be the entry Node loaded, not the preload's copy: stdout={stdout:?}"
+        );
+        assert_eq!(
+            stdout, "holds:?warm\nholds:?v=1\n",
+            "Node {maj}.{min}.{pat}: the preload's copy first, the entry once, and nothing more"
         );
     }
 }

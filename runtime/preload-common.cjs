@@ -648,6 +648,9 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
   installUserAsyncLoaderDetector();
 
   function resolve(specifier, context, nextResolve) {
+    // The fetch-handler pass tells the entry's own load from a preload's import of
+    // the same file by Node resolving it first as the main, with no parent.
+    noteEntryResolve(specifier, context);
     const r = core.resolveSpec(specifier, context.parentURL);
     if (r) return r;
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
@@ -1888,8 +1891,9 @@ const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
 // The entry this process was marked to serve, from `claimServeEntry` on: the file as
 // Node resolved it, the URLs a load hook may see it under, whether a preload may
 // still follow nub's own, and the state the late pass waits on — whether a hook has
-// seen Node start loading the entry, the URL it saw it under, and what to run when
-// one does. Null in every process that is not the marked application.
+// seen Node resolve the entry as its main and then start loading it, the URL it saw
+// it loaded under, and what to run when one does. Null in every process that is not
+// the marked application.
 let serveEntry = null;
 
 // FIRST in each preload entry, before any user code — the configured preload chain
@@ -1908,6 +1912,7 @@ function claimServeEntry() {
     urls: entryUrls(file),
     mayFollow: anotherPreloadMayFollow(),
     taken: false,
+    mainResolved: false,
     loadSeen: false,
     loadUrl: null,
     onLoad: null,
@@ -1999,12 +2004,26 @@ function entryUrls(file) {
   return urls;
 }
 
+// A resolve hook saw Node resolve `specifier` with no parent, which is how Node
+// imports its main entry and nothing else — a preload's `import()` of the same file
+// carries the preload as its parent. Only a load AFTER this can be the entry's own:
+// a preload that imports `./entry.mjs?warm` ahead of the program would otherwise
+// be taken for it, and the pass would serve that module's handler while Node went
+// on to evaluate the real entry as a second one. Called from the fast tier's
+// synchronous hook; the compat tier's loader worker keeps the same note itself.
+function noteEntryResolve(specifier, context) {
+  const entry = serveEntry;
+  if (entry === null || entry.mainResolved || context.parentURL !== undefined) return;
+  if (entry.urls.has(withoutQuery(String(specifier)))) entry.mainResolved = true;
+}
+
 // A load hook saw Node start loading `url`. Called from the fast tier's synchronous
 // hook for every load, and from the compat tier's loader worker over the channel
 // `loaderWorkerOptions` hands it. Free in every process but the marked application.
 function noteEntryLoad(url) {
   const entry = serveEntry;
-  if (entry === null || entry.loadSeen || !entry.urls.has(withoutQuery(url))) return;
+  if (entry === null || !entry.mainResolved || entry.loadSeen) return;
+  if (!entry.urls.has(withoutQuery(url))) return;
   entry.loadSeen = true;
   entry.loadUrl = url;
   fireEntryLoad(entry);
@@ -2033,7 +2052,12 @@ function loaderWorkerOptions() {
   if (entry === null || !entry.mayFollow) return undefined;
   const { MessageChannel } = getBuiltin("node:worker_threads");
   const channel = new MessageChannel();
-  channel.port1.on("message", noteEntryLoad);
+  // The worker keeps the main-resolve note itself and announces only a load after
+  // it (preload-async-hooks.mjs), so its word stands in for `noteEntryResolve` here.
+  channel.port1.on("message", (url) => {
+    entry.mainResolved = true;
+    noteEntryLoad(url);
+  });
   // Never referenced, so an announcement that never comes cannot hold the process
   // open — see the triggers above `installServeEntry`.
   channel.port1.unref();

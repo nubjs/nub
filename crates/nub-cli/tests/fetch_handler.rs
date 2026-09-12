@@ -17,7 +17,7 @@
 //! cannot fail on its own. Their positive control is the rest of this file: each one
 //! runs a fixture that another test proves does get served, so a green absence means
 //! the exclusion held rather than that the feature was never wired. Measured with the
-//! installer stubbed out: nineteen of these go red, and exactly those three stay green.
+//! installer stubbed out: twenty of these go red, and exactly those three stay green.
 //!
 //! One invariant this file deliberately does NOT test: that the detection pass never
 //! evaluates the entry ahead of the user's preloads. It cannot be tested here, because
@@ -344,6 +344,39 @@ fn a_foreign_preload_holding_the_loop_does_not_block_binding() {
             "{name} behind `--import {preload}`"
         );
     }
+}
+
+/// A preload that imports the entry ahead of the program under a query of its own is
+/// a second module, and a foreign hook may give Node's own import of the entry a
+/// query too. Only the load Node makes after resolving the entry as its main — with
+/// no parent — is the entry's; matched on pathname alone, the preload's copy was
+/// served in its place. `version_tiers` runs the same shape on the loader-worker
+/// tiers.
+#[test]
+fn a_preload_import_of_the_entry_is_not_served_in_its_place() {
+    let dir = fixture("../entry-url-rewrite");
+    let s = launch(
+        &dir,
+        &[
+            "--import",
+            "./rewrite.mjs",
+            "--import",
+            "./warm.mjs",
+            "holds.mjs",
+        ],
+        &[],
+        "entry beside a preload's copy of it",
+    );
+    assert_eq!(get(&s, "/").body, "held:?v=1");
+    let mut lines = Vec::new();
+    while let Ok(line) = s.stdout.recv_timeout(Duration::from_millis(500)) {
+        lines.push(line);
+    }
+    assert_eq!(
+        lines,
+        ["holds:?warm", "holds:?v=1"],
+        "the preload's copy first, the entry once"
+    );
 }
 
 // ── The request and response bridge ──────────────────────────────────
