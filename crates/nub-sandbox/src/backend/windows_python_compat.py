@@ -55,6 +55,26 @@ def _install():
     finally:
         kernel.CloseHandle(token)
 
+    original_realpath = os.path.realpath
+
+    def realpath(path, *, strict=False):
+        result = original_realpath(path, strict=strict)
+        # Under an AppContainer, CPython's non-strict fallback can reach the final
+        # NT name but cannot translate it to a DOS name. For a CURRENT-DIRECTORY
+        # spelling it consequently returns the lexical `...\\.` rather than the
+        # canonical directory. Repair only those two equivalent dot spellings;
+        # paths containing links, a parent component, or a missing leaf retain
+        # CPython's own fallback unchanged. `strict=True` keeps its original error.
+        dot_paths = (".", ".\\", ".\\.", "./", "./.")
+        byte_dot_paths = tuple(os.fsencode(value) for value in dot_paths)
+        if strict or path not in dot_paths + byte_dot_paths:
+            return result
+        suffix = b"\\." if isinstance(result, bytes) else "\\."
+        return result[:-len(suffix)] if result.endswith(suffix) else result
+
+    realpath._appcontainer_compatible = True
+    os.path.realpath = realpath
+
     class SecurityAttributes(ctypes.Structure):
         _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p),
                     ("inherit", wintypes.BOOL)]

@@ -97,10 +97,9 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // ambient-env capture; a build script never needs a non-UTF-8 var.
         let mut ambient = reconstruct_child_env(&spawn.env_delta);
 
-        // A dependency must never supply Python startup code to its own lifecycle. The
-        // compiler admits `PYTHONPATH` only for the bounded Windows GYP trace below, so
-        // remove every ambient spelling before any package-specific handling can restore
-        // Nub's own diagnostic path.
+        // A dependency must never supply Python startup code to its own lifecycle. Windows
+        // GYP compatibility below may restore Nub's read-only startup directory, but an
+        // ambient spelling must never become lifecycle code.
         ambient.retain(|key, _| !key.eq_ignore_ascii_case("PYTHONPATH"));
 
         // A dependency's lifecycle script runs on VANILLA Node — nub's augmentation is a
@@ -348,33 +347,21 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                 }
                 extra_reads.push(dir);
             }
+            // CPython's non-strict `realpath('.')` falls back to a lexical trailing dot
+            // when an AppContainer cannot ask the mount manager for a DOS final path. GYP
+            // then derives an invalid parent dependency path. The startup file is Nub-owned
+            // and read-only to the child; raw and unconfined Python do not receive it.
+            #[cfg(windows)]
+            if let Some(startup) = windows_python_compat_dir(&spawn.project_root) {
+                ambient.insert(
+                    "PYTHONPATH".to_string(),
+                    startup.to_string_lossy().into_owned(),
+                );
+                extra_reads.push(startup);
+            }
         }
 
         let jail_cache = sandbox_homes(&spawn.project_root).cache;
-
-        // This is a diagnostic, not a compatibility repair. `better-sqlite3`'s confined
-        // source build reports a malformed GYP dependency path; capture the exact Python
-        // realpath values from the same GYP process before changing path semantics. The
-        // marker is read by Nub's parent process only, and the startup module is fixed under
-        // the consumer project (which the lifecycle can read but not write). Normal and raw
-        // execution do not receive a `PYTHONPATH` at all.
-        #[cfg(windows)]
-        if spawn.package_name.as_deref() == Some("better-sqlite3")
-            && spawn.package_version.as_deref() == Some("11.8.1")
-            && ambient
-                .get("npm_config_build_from_source")
-                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-            && std::env::var_os("NUB_JAIL_GYP_REALPATH_TRACE").is_some()
-        {
-            let trace_dir = spawn.project_root.join(".nub-gyp-realpath-trace");
-            if trace_dir.is_dir() {
-                ambient.insert(
-                    "PYTHONPATH".to_string(),
-                    trace_dir.to_string_lossy().into_owned(),
-                );
-                extra_reads.push(trace_dir);
-            }
-        }
         redirect_npm_prefix(&mut ambient, &jail_cache);
         redirect_electron_cache(&mut ambient, &jail_cache);
         redirect_playwright_browsers(&mut ambient, &jail_cache);
@@ -2127,6 +2114,27 @@ fn python_path_front_dir(executable: &str, project_root: &std::path::Path) -> Op
 #[cfg(not(unix))]
 fn python_path_front_dir(_executable: &str, _project_root: &std::path::Path) -> Option<PathBuf> {
     None
+}
+
+/// A Nub-owned Python startup directory for the Windows GYP realpath compatibility adapter.
+///
+/// The lifecycle may read this cache entry but is never granted write access, so one dependency
+/// cannot replace startup code consumed by the next. It is deliberately absent from raw and
+/// unconfined execution; only a resolved node-gyp Python receives the explicit adapter.
+#[cfg(windows)]
+fn windows_python_compat_dir(project_root: &std::path::Path) -> Option<PathBuf> {
+    let dir = sandbox_homes(project_root)
+        .cache
+        .join("nub")
+        .join("pm")
+        .join("jail-python-compat");
+    std::fs::create_dir_all(&dir).ok()?;
+    let startup = dir.join("sitecustomize.py");
+    let source = nub_sandbox::windows_python_compat_source();
+    if std::fs::read_to_string(&startup).ok().as_deref() != Some(source) {
+        std::fs::write(&startup, source).ok()?;
+    }
+    startup.is_file().then_some(dir)
 }
 
 /// The spelling of the resolved interpreter to name in `npm_config_python`.
