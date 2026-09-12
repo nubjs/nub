@@ -37,7 +37,6 @@ jobs:
         with:
           persist-credentials: false
           # This checkout supplies the current harness to both source arms.
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
@@ -51,6 +50,7 @@ jobs:
           fi
           source_dir="$RUNNER_TEMP/build-jail-frameworks-${{ matrix.source }}-source"
           target_dir="$RUNNER_TEMP/build-jail-frameworks-${{ matrix.source }}-target"
+          git fetch --no-tags origin "$revision"
           git worktree add --detach "$source_dir" "$revision"
           test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
           git diff --quiet "$FRAMEWORK_CANDIDATE_REVISION" -- tests/build-jail-frameworks
@@ -104,16 +104,34 @@ jobs:
             echo '07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075  vendor/busybox-w32/busybox64.exe' | sha256sum -c -
             cp vendor/busybox-w32/busybox64.exe "$CARGO_TARGET_DIR/fast/busybox.exe"
             sha256sum "$CARGO_TARGET_DIR/fast/busybox.exe" > "$GITHUB_WORKSPACE/reports/windows-shell.sha256"
-            echo "NUB_BIN=$CARGO_TARGET_DIR/fast/nub.exe" >> "$GITHUB_ENV"
+            binary="$CARGO_TARGET_DIR/fast/nub.exe"
+            busybox="$CARGO_TARGET_DIR/fast/busybox.exe"
           else
             if [ "$RUNNER_OS" = Linux ]; then
               cp "$CARGO_TARGET_DIR/fast/libnub_native.so" runtime/addons/nub-native.node
             else
               cp "$CARGO_TARGET_DIR/fast/libnub_native.dylib" runtime/addons/nub-native.node
             fi
-            echo "NUB_BIN=$CARGO_TARGET_DIR/fast/nub" >> "$GITHUB_ENV"
+            binary="$CARGO_TARGET_DIR/fast/nub"
+            busybox=
           fi
           cargo build -p nub-cli --profile fast
+          node - "$GITHUB_WORKSPACE/reports/artifact-binding.json" "$binary" runtime/addons/nub-native.node "$busybox" <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { readFileSync, writeFileSync } = require('node:fs');
+          const { resolve } = require('node:path');
+          const [output, binary, addon, busybox] = process.argv.slice(2);
+          const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+          const record = path => ({ path: resolve(path), sha256: digest(path) });
+          writeFileSync(output, JSON.stringify({
+            source: process.env.MATRIX_SOURCE,
+            sourceRevision: process.env.SOURCE_REVISION,
+            binary: record(binary),
+            nativeAddon: record(addon),
+            busybox: busybox ? record(busybox) : null,
+          }, null, 2));
+          NODE
+          echo "NUB_BIN=$binary" >> "$GITHUB_ENV"
       - name: Checking the harness and confinement contracts
         run: |
           node --test tests/build-jail-frameworks/harness.test.mjs
