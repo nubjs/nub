@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -20,9 +20,62 @@ const report = (source, destination) => {
   mkdirSync(dirname(target), { recursive: true });
   copyFileSync(source, target);
 };
-const gypRealpathTrace = String.raw`import json
+const gypRealpathTrace = String.raw`import ctypes
+import json
+import nt
 import os
 import sys
+
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+FILE_SHARE_DELETE = 0x00000004
+OPEN_EXISTING = 3
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+VOLUME_NAME_DOS = 0
+VOLUME_NAME_GUID = 1
+VOLUME_NAME_NT = 2
+FILE_NAME_OPENED = 8
+
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                  ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                  ctypes.c_void_p]
+kernel32.CreateFileW.restype = ctypes.c_void_p
+kernel32.GetFinalPathNameByHandleW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                                ctypes.c_uint32, ctypes.c_uint32]
+kernel32.GetFinalPathNameByHandleW.restype = ctypes.c_uint32
+kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+def final_path(path, flags):
+    handle = kernel32.CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None)
+    if handle == ctypes.c_void_p(-1).value:
+        return {'error': ctypes.get_last_error()}
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = kernel32.GetFinalPathNameByHandleW(handle, buffer, len(buffer), flags)
+        if not length or length >= len(buffer):
+            return {'error': ctypes.get_last_error(), 'length': length}
+        return {'path': buffer.value}
+    finally:
+        kernel32.CloseHandle(handle)
+
+def python_final(path):
+    try:
+        return {'path': nt._getfinalpathname(path)}
+    except OSError as error:
+        return {'error': error.winerror}
+
+def inspect(path):
+    return {
+        'python': python_final(path),
+        'realpath': os.path.realpath(path),
+        'dos_normalized': final_path(path, VOLUME_NAME_DOS),
+        'dos_opened': final_path(path, VOLUME_NAME_DOS | FILE_NAME_OPENED),
+        'guid_normalized': final_path(path, VOLUME_NAME_GUID),
+        'nt_normalized': final_path(path, VOLUME_NAME_NT),
+        'nt_opened': final_path(path, VOLUME_NAME_NT | FILE_NAME_OPENED),
+    }
 
 if os.name == 'nt' and sys.argv and sys.argv[0].lower().endswith('gyp_main.py'):
     cwd = os.path.realpath('.')
@@ -32,6 +85,7 @@ if os.name == 'nt' and sys.argv and sys.argv[0].lower().endswith('gyp_main.py'):
         'binding': os.path.realpath('binding.gyp'),
         'dependency': dependency,
         'relative_dependency': os.path.relpath(dependency, cwd),
+        'final_paths': {path: inspect(path) for path in ('.', r'.\\.', '..')},
     }, sort_keys=True), file=sys.stderr, flush=True)
 `;
 const isolatedEnvKeys = new Set([
@@ -83,9 +137,11 @@ for (const [name, version, probe, source = false] of selected) {
     const label = `${name.replaceAll('/', '-')}-${source ? 'source' : 'default'}-${confined ? 'jailed' : 'control'}`;
     const base = join(root, label);
     const project = join(base, 'project');
+    const backingProject = process.env.CORPUS_LINKED_PROJECT ? join(base, 'project-backing') : project;
     const home = join(base, 'home');
     const temp = join(home, 'tmp');
-    mkdirSync(project, { recursive: true });
+    mkdirSync(backingProject, { recursive: true });
+    if (backingProject !== project) symlinkSync(backingProject, project, 'junction');
     mkdirSync(temp, { recursive: true });
     writeFileSync(join(project, 'package.json'), JSON.stringify({
       name: 'jail-corpus-consumer', private: true, dependencies: { [name]: version },

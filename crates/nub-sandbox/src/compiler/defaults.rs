@@ -320,10 +320,6 @@ const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
     "MAKE",
     "MAKEFLAGS",
     "PYTHON",
-    // `build_jail.rs` first removes every ambient spelling, then restores this only for
-    // its opt-in, package-scoped Windows GYP diagnostic. Keeping the allowlist entry next
-    // to that overwrite avoids turning an ambient `PYTHONPATH` into lifecycle code.
-    "PYTHONPATH",
     "GYP_DEFINES",
     // macOS SDK / deployment-target overrides a real native build sets (non-secret;
     // absent → the toolchain's default SDK/min-OS, so a package pinning either needs them).
@@ -371,6 +367,13 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
         // the stdio shim (`windows_build_jail_node_options`). No other platform stamps it, and
         // none may admit it.
         if key.eq_ignore_ascii_case("NODE_OPTIONS") {
+            return true;
+        }
+        // `build_jail.rs` first removes every ambient spelling, then restores this only for
+        // its opt-in, package-scoped Windows GYP diagnostic. The exception stays in this
+        // Windows-only arm: a generic compiler caller must not turn `PYTHONPATH` into
+        // lifecycle code on another backend.
+        if key.eq_ignore_ascii_case("PYTHONPATH") {
             return true;
         }
         BUILD_JAIL_EXTRA_EXACT
