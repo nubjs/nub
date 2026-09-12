@@ -131,7 +131,8 @@ jobs:
             $log = "reports/msys-contract-$($case.name).log"
             $unconfined = (Select-String -Path $log -SimpleMatch 'MSYS_CONTRACT mode=unconfined executions=').Count -eq 1
             $embedded = (Select-String -Path $log -SimpleMatch 'MSYS_CONTRACT mode=embedded-native-adapter executions=').Count -eq 1
-            $passed = (Select-String -Path $log -Pattern 'test result: ok\. 1 passed').Count -eq 1
+            $summaries = @(Select-String -Path $log -Pattern '^test result:')
+            $passed = $summaries.Count -gt 0 -and $summaries[-1].Line -match '^test result: ok\. 1 passed'
             $results += @{ mode = $case.name; root = $case.root; exit = $exit;
               unconfined = $unconfined; embeddedNativeAdapter = $embedded; assertionsPassed = $passed }
             Get-Content $log
@@ -162,7 +163,8 @@ jobs:
               $log = "reports/msys-$($toolCase.tool)-$($image.name)-$($toolCase.mode).log"
               & cargo test -p nub-sandbox --profile fast --lib $toolCase.test -- --exact --ignored --nocapture --test-threads=1 *> $log
               $exit = $LASTEXITCODE
-              $passed = (Select-String -Path $log -Pattern 'test result: ok\. 1 passed').Count -eq 1
+              $summaries = @(Select-String -Path $log -Pattern '^test result:')
+              $passed = $summaries.Count -gt 0 -and $summaries[-1].Line -match '^test result: ok\. 1 passed'
               $toolResults += @{ image = $image.name; root = $image.root; tool = $toolCase.tool; mode = $toolCase.mode;
                 test = $toolCase.test; executable = $libraryTests[0].executable; executableSha256 = $libraryBinary.Hash;
                 exit = $exit; assertionsPassed = $passed; log = $log }
