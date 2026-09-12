@@ -2,7 +2,9 @@ name: Windows native MSYS reconciliation
 
 on:
   push:
-    branches: [windows-native-reconcile]
+    branches:
+      - windows-native-reconcile
+      - git-lfs-transfer-eof
     paths:
       - crates/nub-sandbox/**
       - tests/sandbox-native-adapter/prepare-msys-aslr.ps1
