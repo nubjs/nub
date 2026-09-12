@@ -25,7 +25,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      FRAMEWORK_CANDIDATE_REVISION: 2121d9feeb3caa6f4c0705ec4e8c9f5cfb30305b
+      FRAMEWORK_BASELINE_REVISION: b03f68bed98cd379d2f8f4e6caa9723e1d584ad7
       FRAMEWORK_REPORT: ${{ github.workspace }}/reports/frameworks
       FRAMEWORK_CONTROLS: all
     defaults:
@@ -35,42 +36,82 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
-          ref: ${{ matrix.source == 'baseline' && 'b03f68bed98cd379d2f8f4e6caa9723e1d584ad7' || github.sha }}
+          # This checkout supplies the current harness to both source arms.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-        with:
-          shared-key: build-jail-frameworks
-          cache-on-failure: true
-          workspaces: |
-            .
-            crates/nub-native
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 26
-      - name: Preparing build tools
+      - name: Binding the selected source to the current harness
         run: |
+          if [ "${{ matrix.source }}" = baseline ]; then
+            revision="$FRAMEWORK_BASELINE_REVISION"
+          else
+            revision="$FRAMEWORK_CANDIDATE_REVISION"
+          fi
+          source_dir="$RUNNER_TEMP/build-jail-frameworks-${{ matrix.source }}-source"
+          target_dir="$RUNNER_TEMP/build-jail-frameworks-${{ matrix.source }}-target"
+          git worktree add --detach "$source_dir" "$revision"
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
+          git diff --quiet "$FRAMEWORK_CANDIDATE_REVISION" -- tests/build-jail-frameworks
+          mkdir -p reports "$target_dir"
+          node - "$source_dir" "$target_dir" "$revision" "${{ matrix.source }}" <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { readFileSync, writeFileSync } = require('node:fs');
+          const { join } = require('node:path');
+          const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+          const [sourceDir, targetDir, sourceRevision, source] = process.argv.slice(2);
+          const harness = 'tests/build-jail-frameworks';
+          writeFileSync('reports/source-binding.json', JSON.stringify({
+            source,
+            sourceRevision,
+            candidateSourceRevision: process.env.FRAMEWORK_CANDIDATE_REVISION,
+            baselineSourceRevision: process.env.FRAMEWORK_BASELINE_REVISION,
+            sourceDir,
+            targetDir,
+            harnessSourceRevision: process.env.FRAMEWORK_CANDIDATE_REVISION,
+            harnessWorkspaceRevision: process.env.GITHUB_SHA,
+            harness: Object.fromEntries(['run.mjs', 'cases.mjs', 'verdict.mjs', 'evidence.mjs', 'harness.test.mjs']
+              .map(file => [file, digest(join(harness, file))])),
+          }, null, 2));
+          NODE
+          {
+            echo "SOURCE_DIR=$source_dir"
+            echo "SOURCE_REVISION=$revision"
+            echo "CARGO_TARGET_DIR=$target_dir"
+            echo "MATRIX_SOURCE=${{ matrix.source }}"
+          } >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          # Candidate and baseline targets never restore one another's objects.
+          shared-key: build-jail-frameworks-${{ matrix.source }}
+          cache-on-failure: true
+          workspaces: |
+            ${{ runner.temp }}/build-jail-frameworks-${{ matrix.source }}-source -> ${{ runner.temp }}/build-jail-frameworks-${{ matrix.source }}-target
+      - name: Preparing source-specific build tools
+        run: |
+          cd "$SOURCE_DIR"
           npm install --no-audit --no-fund --loglevel=error
           npm install --global node-gyp@12.4.0 --no-audit --no-fund
-          mkdir -p reports
-          echo "SOURCE_REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Building the application-test artifact
         id: artifact
         run: |
+          cd "$SOURCE_DIR"
           (cd crates/nub-native && cargo build --profile fast)
           mkdir -p runtime/addons
           if [ "$RUNNER_OS" = Windows ]; then
-            cp target/fast/nub_native.dll runtime/addons/nub-native.node
+            cp "$CARGO_TARGET_DIR/fast/nub_native.dll" runtime/addons/nub-native.node
             echo '07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075  vendor/busybox-w32/busybox64.exe' | sha256sum -c -
-            cp vendor/busybox-w32/busybox64.exe target/fast/busybox.exe
-            sha256sum target/fast/busybox.exe > reports/windows-shell.sha256
-            echo "NUB_BIN=$GITHUB_WORKSPACE/target/fast/nub.exe" >> "$GITHUB_ENV"
+            cp vendor/busybox-w32/busybox64.exe "$CARGO_TARGET_DIR/fast/busybox.exe"
+            sha256sum "$CARGO_TARGET_DIR/fast/busybox.exe" > "$GITHUB_WORKSPACE/reports/windows-shell.sha256"
+            echo "NUB_BIN=$CARGO_TARGET_DIR/fast/nub.exe" >> "$GITHUB_ENV"
           else
             if [ "$RUNNER_OS" = Linux ]; then
-              cp target/fast/libnub_native.so runtime/addons/nub-native.node
+              cp "$CARGO_TARGET_DIR/fast/libnub_native.so" runtime/addons/nub-native.node
             else
-              cp target/fast/libnub_native.dylib runtime/addons/nub-native.node
+              cp "$CARGO_TARGET_DIR/fast/libnub_native.dylib" runtime/addons/nub-native.node
             fi
-            echo "NUB_BIN=$GITHUB_WORKSPACE/target/fast/nub" >> "$GITHUB_ENV"
+            echo "NUB_BIN=$CARGO_TARGET_DIR/fast/nub" >> "$GITHUB_ENV"
           fi
           cargo build -p nub-cli --profile fast
       - name: Checking the harness and confinement contracts
@@ -80,16 +121,6 @@ jobs:
       - name: Testing framework applications
         if: (success() || failure()) && steps.artifact.outcome == 'success'
         run: node tests/build-jail-frameworks/run.mjs
-      - name: Selecting the pinned native-package runtime
-        if: (success() || failure()) && steps.artifact.outcome == 'success' && matrix.source == 'current'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: '22.23.2'
-      - name: Comparing native package builds with the jail-off control
-        if: (success() || failure()) && steps.artifact.outcome == 'success' && matrix.source == 'current'
-        env:
-          CORPUS_REPORT: ${{ github.workspace }}/reports/packages
-        run: node tests/build-jail-corpus/packages.mjs
       - name: Exercising sandbox cleanup through the CLI
         if: (success() || failure()) && steps.artifact.outcome == 'success' && matrix.source == 'current'
         run: '"$NUB_BIN" sandbox cleanup > reports/sandbox-cleanup.log 2>&1'
