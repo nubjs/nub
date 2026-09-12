@@ -543,8 +543,9 @@ fn relative_bin_target(base_dir: &Path, target: &Path) -> String {
 ///
 /// Which directory to anchor on is not free, because the kernel resolves
 /// a symlink's `..` against the link's PHYSICAL parent, not the path it
-/// was reached through — a distinction the sibling shim branch never
-/// faces, since a shim resolves `$basedir/<rel>` lexically from `argv[0]`.
+/// was reached through. Shell wrappers need the same physical anchor
+/// when launched from a canonicalized package directory; see
+/// [`shim_bin_target`].
 ///
 /// - Anchoring on the SURFACE `link_parent` is right whenever `.bin/`
 ///   sits where it appears to: every root `.bin/`, and per-dep `.bin/`
