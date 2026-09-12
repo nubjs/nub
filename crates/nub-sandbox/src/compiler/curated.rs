@@ -831,6 +831,7 @@ pub fn apply_v2_grant(
     policy: &mut SandboxPolicy,
     homes: &Homes,
     package_dir: &Path,
+    global_virtual_store: Option<&Path>,
     grant: &crate::catalog_v2::Caps,
 ) -> V2Outcome {
     use crate::catalog_v2::{Reach, Scope};
@@ -865,7 +866,9 @@ pub fn apply_v2_grant(
                         // clamp dropped every path and `deps` compiled to NOTHING — measured
                         // end-to-end: a real jailed script writing to a declared dependency
                         // got EPERM with `write: {deps: true}` in force.
-                        if let Some(path) = resolve_declared_dep(homes, package_dir, &dep) {
+                        if let Some(path) =
+                            resolve_declared_dep(homes, package_dir, &dep, global_virtual_store)
+                        {
                             push_rw(&mut rules, &path);
                         }
                     }
@@ -930,10 +933,8 @@ pub struct V2Outcome {
 /// consumer's install by definition.
 /// Resolve one DECLARED dependency name to the directory `deps` may write.
 ///
-/// The name is LOOKED UP the way Node would ([`resolve_package_from`]), never joined onto a
-/// directory, so the reachable set is exactly what the package can already `require` — that
-/// bound is the security argument for `deps` being narrower than "the store", and a separator
-/// in a name cannot escape because no name is ever joined.
+/// The name is validated and looked up through Node's dependency search locations
+/// ([`resolve_package_from`]). Relative paths and grant patterns cannot name extra write roots.
 ///
 /// WHERE THE RESULT MAY LAND, and why this is not [`resolve_dependency_dir`]'s clamp. That one
 /// requires the resolved path to be inside the PROJECT, which under the default global virtual
@@ -955,11 +956,24 @@ pub struct V2Outcome {
 /// the entry's own `node_modules` holds symlinks to ITS dependencies, and a write THROUGH one
 /// resolves outside the granted root, where the backends match on the canonical path and refuse
 /// it. So the reachable set is still what the package could already `require`, one hop.
-fn resolve_declared_dep(homes: &Homes, package_dir: &Path, name: &str) -> Option<PathBuf> {
+fn resolve_declared_dep(
+    homes: &Homes,
+    package_dir: &Path,
+    name: &str,
+    global_virtual_store: Option<&Path>,
+) -> Option<PathBuf> {
     let resolved = resolve_package_from(package_dir, name)?;
     if resolved.file_name().is_some_and(|n| n == "node_modules") {
         return None;
     }
+    let global_store = global_virtual_store.map_or_else(
+        || homes.cache.join("nub").join("pm").join("store"),
+        Path::to_path_buf,
+    );
+    let project_store = homes
+        .project
+        .join("node_modules")
+        .join(super::preset::PROJECT_VIRTUAL_STORE_LEAF);
     // `<store>/<dep>@<hash>/node_modules/<dep>` -> `<store>/<dep>@<hash>`. Only when the result
     // really is a store entry: `enclosing_node_modules(..).parent()` is the entry root, and it
     // is accepted below only if it sits directly under a virtual store.
@@ -969,30 +983,19 @@ fn resolve_declared_dep(homes: &Homes, package_dir: &Path, name: &str) -> Option
             let parent = entry
                 .parent()
                 .map(crate::matcher::path::canonicalize_including_nonexistent);
-            let is_store_root = |root: PathBuf| {
+            let is_store_root = |root: &Path| {
                 parent.as_deref()
                     == Some(
-                        crate::matcher::path::canonicalize_including_nonexistent(&root).as_path(),
+                        crate::matcher::path::canonicalize_including_nonexistent(root).as_path(),
                     )
             };
-            is_store_root(homes.cache.join("nub").join("pm").join("store"))
-                || is_store_root(
-                    homes
-                        .project
-                        .join("node_modules")
-                        .join(super::preset::PROJECT_VIRTUAL_STORE_LEAF),
-                )
+            is_store_root(&global_store) || is_store_root(&project_store)
         })
         .unwrap_or(resolved);
     let under = |root: PathBuf| {
         let root = crate::matcher::path::canonicalize_including_nonexistent(&root);
         resolved != root && resolved.starts_with(&root)
     };
-    let global_store = homes.cache.join("nub").join("pm").join("store");
-    let project_store = homes
-        .project
-        .join("node_modules")
-        .join(super::preset::PROJECT_VIRTUAL_STORE_LEAF);
     (inside_project(&homes.project, &resolved) || under(global_store) || under(project_store))
         .then_some(resolved)
 }
@@ -1108,6 +1111,17 @@ fn resolve_dependency_dir(
 /// itself a `node_modules` (Node skips those, and so must this or a chain could name a
 /// directory no `require` could reach). The first hit wins, resolved through its symlink.
 fn resolve_package_from(from: &Path, name: &str) -> Option<PathBuf> {
+    // Manifest keys are package names, not relative paths or grant patterns.
+    let component = |part: &str| !part.is_empty() && !part.starts_with('.');
+    let parts: Vec<_> = name.split('/').collect();
+    let package_name = match parts.as_slice() {
+        [package] => component(package) && !package.starts_with('@'),
+        [scope, package] => scope.starts_with('@') && component(&scope[1..]) && component(package),
+        _ => false,
+    };
+    if !package_name || name.contains(['\\', ':', '*', '?', '[', ']', '\0']) {
+        return None;
+    }
     from.ancestors()
         .filter(|a| a.file_name().is_some_and(|n| n != "node_modules"))
         .map(|a| a.join("node_modules").join(name))
@@ -1281,6 +1295,48 @@ mod tests {
 
     fn project() -> PathBuf {
         PathBuf::from(if cfg!(windows) { "C:/proj" } else { "/proj" })
+    }
+
+    #[test]
+    fn dependency_names_cannot_be_paths_or_grant_patterns() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("node_modules/package");
+        let declared = root.path().join("node_modules/declared");
+        let scoped = root.path().join("node_modules/@scope/declared");
+        for path in [&package, &declared, &scoped, &root.path().join("withheld")] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        assert_eq!(
+            resolve_package_from(&package, "declared"),
+            Some(crate::matcher::path::canonicalize_including_nonexistent(
+                &declared
+            ))
+        );
+        assert_eq!(
+            resolve_package_from(&package, "@scope/declared"),
+            Some(crate::matcher::path::canonicalize_including_nonexistent(
+                &scoped
+            ))
+        );
+        for name in [
+            "../withheld",
+            "../../withheld",
+            "/withheld",
+            "C:/withheld",
+            "C:withheld",
+            "..\\withheld",
+            ".bin",
+            "@scope/../withheld",
+            "@scope/.bin",
+            "@scope/declared/child",
+            "",
+            "@scope/",
+            "declared*",
+            "declared?",
+            "[declared]",
+        ] {
+            assert!(resolve_package_from(&package, name).is_none(), "{name}");
+        }
     }
 
     fn policy_for(package_dir: &Path, name: Option<&str>) -> SandboxPolicy {
@@ -1706,6 +1762,7 @@ mod tests {
                 &mut policy,
                 &homes_for(&project()),
                 package_dir,
+                None,
                 &catalog.packages["p"]
                     .default
                     .on(crate::catalog_v2::Platform::current()),
@@ -1817,6 +1874,7 @@ mod tests {
                 &mut policy,
                 &homes,
                 &me,
+                None,
                 &catalog.packages["p"]
                     .default
                     .on(crate::catalog_v2::Platform::current()),
@@ -1894,6 +1952,7 @@ mod tests {
                 &mut policy,
                 &homes,
                 &me,
+                None,
                 &catalog.packages["p"]
                     .default
                     .on(crate::catalog_v2::Platform::current()),

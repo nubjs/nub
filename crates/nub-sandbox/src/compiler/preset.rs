@@ -1226,7 +1226,13 @@ pub fn compile_build_jail_with_global_virtual_store(
             .unwrap_or_else(|| std::borrow::Cow::Owned(crate::catalog_v2::baseline_caps()));
         {
             let caps = resolved;
-            let out = super::curated::apply_v2_grant(&mut policy, &ctx.homes, package_dir, &caps);
+            let out = super::curated::apply_v2_grant(
+                &mut policy,
+                &ctx.homes,
+                package_dir,
+                ctx.global_virtual_store.as_deref(),
+                &caps,
+            );
             if out.write_disk {
                 // DEFERRED, not applied here. `relax_fs_to_full_disk` clears the rules and flips
                 // `default_effect`, and the v1 pass below now also runs in a shipped build — so

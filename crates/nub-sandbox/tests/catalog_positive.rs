@@ -1,17 +1,134 @@
 use nub_sandbox::policy::{Effect, FsAccess};
 use nub_sandbox::{
     CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile, compile_build_jail,
+    compile_build_jail_with_global_virtual_store,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const ENV_PROBE: &str = "SANDBOX_CATALOG_ENV_PROBE";
+const DEPS_PROBE: &str = "SANDBOX_CATALOG_DEPS_PROBE";
 const BASELINE: [(&str, &str); 3] = [
     ("PYTHONDONTWRITEBYTECODE", "1"),
     ("npm_config_logs_max", "0"),
     ("npm_config_update_notifier", "false"),
 ];
+
+#[test]
+fn catalog_dependency_write_child() {
+    let Ok(mode) = std::env::var(DEPS_PROBE) else {
+        return;
+    };
+    let declared = PathBuf::from(std::env::var_os("SANDBOX_DECLARED_PATH").unwrap());
+    let denied = PathBuf::from(std::env::var_os("SANDBOX_WITHHELD_PATH").unwrap());
+    let result = std::fs::create_dir(declared.join(mode.as_str()));
+    if mode == "allow" {
+        result.expect("write.deps permits creating a declared dependency's binary directory");
+    } else {
+        assert!(
+            result.is_err(),
+            "withholding write.deps must deny the same write"
+        );
+    }
+    assert!(std::fs::write(denied.join("modified"), b"forbidden").is_err());
+    println!("CATALOG_DEPS_OK:{mode}");
+}
+
+#[test]
+fn declared_dependency_writes_follow_the_resolved_store_without_granting_siblings() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let cache = root.path().join("cache");
+    let project = root.path().join("project");
+    let store = root.path().join("external-store/v1");
+    let package = store.join("package-cell/node_modules/fixture");
+    let declared = store.join("declared-cell/node_modules/declared");
+    let withheld = store.join("withheld-cell/node_modules/withheld");
+    for path in [&home, &cache, &project, &package, &declared, &withheld] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(
+        package.join("package.json"),
+        br#"{"dependencies":{"declared":"1.0.0"}}"#,
+    )
+    .unwrap();
+    let link = package.parent().unwrap().join("declared");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&declared, &link).unwrap();
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&declared)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "junction fixture: {output:?}");
+    }
+    let homes = Homes {
+        home,
+        cache,
+        tmp: root.path().join("tmp"),
+        project,
+    };
+    let executable = std::env::current_exe().unwrap();
+    // These controls confirm the fixture directories are writable before confinement.
+    for path in [&declared, &withheld] {
+        std::fs::write(path.join("plain-control"), b"writable").unwrap();
+    }
+    // Both baked entries allow networking; only wordpos grants dependency writes.
+    for (mode, identity) in [("allow", "wordpos"), ("deny", "base62")] {
+        let mut policy = compile_build_jail_with_global_virtual_store(
+            homes.clone(),
+            &package,
+            Some(identity),
+            Some("1.0.0"),
+            vec![executable.clone()],
+            Vec::new(),
+            std::env::vars().collect(),
+            Some(store.clone()),
+        )
+        .unwrap();
+        for (key, value) in [
+            (DEPS_PROBE, mode.to_string()),
+            (
+                "SANDBOX_DECLARED_PATH",
+                declared.to_string_lossy().into_owned(),
+            ),
+            (
+                "SANDBOX_WITHHELD_PATH",
+                withheld.to_string_lossy().into_owned(),
+            ),
+        ] {
+            policy.env.constructed.insert(key.into(), value);
+        }
+        let sandbox = Sandbox::new(&policy).unwrap();
+        let command = sandbox
+            .prepare(
+                CommandSpec::new(&executable)
+                    .args(["--exact", "catalog_dependency_write_child", "--nocapture"])
+                    .cwd(&package),
+            )
+            .unwrap();
+        assert!(
+            command.degradation.lost.is_empty(),
+            "{mode}: {:?}",
+            command.degradation
+        );
+        let output = command.output().unwrap();
+        sandbox.close();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains(&format!("CATALOG_DEPS_OK:{mode}"))
+        );
+    }
+    assert!(declared.join("allow").is_dir());
+    assert!(!declared.join("deny").exists());
+    assert!(!withheld.join("modified").exists());
+}
 
 #[test]
 fn catalog_environment_child() {
