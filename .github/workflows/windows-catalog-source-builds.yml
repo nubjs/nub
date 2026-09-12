@@ -7,6 +7,7 @@ on:
       - crates/nub-cli/src/pm_engine/**
       - crates/nub-sandbox/**
       - tests/build-jail-corpus/packages.mjs
+      - tests/build-jail-corpus/windows-python-compat.py
       - .github/workflows/windows-catalog-source-builds.yml
 
 permissions:

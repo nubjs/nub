@@ -369,6 +369,13 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
         if key.eq_ignore_ascii_case("NODE_OPTIONS") {
             return true;
         }
+        // `build_jail.rs` first removes every ambient spelling, then restores this only for
+        // the normal confined node-gyp compatibility adapter. The exception stays in this
+        // Windows-only arm: a generic compiler caller must not turn `PYTHONPATH` into
+        // lifecycle code on another backend.
+        if key.eq_ignore_ascii_case("PYTHONPATH") {
+            return true;
+        }
         BUILD_JAIL_EXTRA_EXACT
             .iter()
             .any(|e| e.eq_ignore_ascii_case(key))
@@ -636,7 +643,9 @@ pub fn windows_buildcheck_msvc_node_options(
     data_url_import(&js)
 }
 
+#[cfg(windows)]
 const WINDOWS_BUILDCHECK_MSVC: &str = include_str!("windows_buildcheck_msvc.js");
+#[cfg(windows)]
 const BUILDCHECK_MSVC_PLACEHOLDER: &str = "__NUB_BUILDCHECK_MSVC_JSON__";
 
 /// Explicit Node compatibility preloads for a Windows sandbox session.
@@ -1741,6 +1750,15 @@ mod tests {
                 "{key} must reach node-gyp or the Visual Studio pre-resolution is inert"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_python_adapter_reaches_the_jailed_child() {
+        assert!(
+            build_jail_env_allowed("PYTHONPATH"),
+            "the Nub-owned Python startup directory must reach confined node-gyp"
+        );
     }
 
     /// `NODE_EXECUTABLE` fails the same silent way, and its symptom is worse than inertness:

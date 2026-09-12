@@ -7,7 +7,7 @@ not the security boundary; omitting it leaves the OS policy in force.
 
 def _install_realpath_compat(os):
     original_realpath = os.path.realpath
-    dot_paths = (".", ".\\", ".\\.", "./", "./.")
+    dot_paths = ("", ".", ".\\", ".\\.", "./", "./.")
     byte_dot_paths = tuple(os.fsencode(value) for value in dot_paths)
 
     def realpath(path, *args, **kwargs):
@@ -18,7 +18,7 @@ def _install_realpath_compat(os):
         # Under an AppContainer, CPython's non-strict fallback can reach the final
         # NT name but cannot translate it to a DOS name. For a CURRENT-DIRECTORY
         # spelling it consequently returns the lexical `...\\.` rather than the
-        # canonical directory. Repair only those five equivalent dot spellings;
+        # canonical directory. Repair only empty and five equivalent dot spellings;
         # paths containing links, a parent component, or a missing leaf retain
         # CPython's own fallback unchanged. Do not introduce `strict` for Python
         # 3.6-3.9: only the caller's arguments are forwarded. Explicit False is
