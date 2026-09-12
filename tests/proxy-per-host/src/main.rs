@@ -14,15 +14,19 @@
 //! compatibility cost of having no transparent redirect on macOS). Arms 3+4 both fail ⇒
 //! non-cooperative egress is blocked regardless of host = never leaked (A1).
 
+#[cfg(target_os = "macos")]
+use nub_sandbox::Sandbox;
 use nub_sandbox::{
-    CommandSpec, CompileCtx, Homes, SandboxPolicy, ScopeCapabilities, apply, compile,
+    apply, compile, CommandSpec, CompileCtx, Homes, SandboxPolicy, ScopeCapabilities,
 };
-use serde_json::Value;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use serde_json::json;
+use serde_json::Value;
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "macos")]
+use std::net::TcpStream;
 #[cfg(target_os = "linux")]
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 #[cfg(target_os = "linux")]
@@ -88,6 +92,91 @@ fn curl_family(
         .expect("apply policy")
         .status()
         .expect("run confined child")
+        .code()
+        .unwrap_or(-1);
+    eprintln!("<<< {label}: exited {code}");
+    code
+}
+
+/// Separate listener availability from Seatbelt authorization. The parent is unconfined, while
+/// the first socket is a child submitted through the same retained public [`Sandbox`] session.
+/// That child reports only the port and `raw_os_error`; then the parent makes the liveness control.
+/// Neither path prints a proxy URL or bearer token.
+#[cfg(target_os = "macos")]
+fn retained_proxy_socket_probe(sandbox: &Sandbox) -> bool {
+    let script = r#"import os, socket, sys, urllib.parse
+port = urllib.parse.urlsplit(os.environ["HTTPS_PROXY"]).port
+try:
+    socket.create_connection(("127.0.0.1", port), timeout=2).close()
+except OSError as error:
+    print(f"port={port} raw_os_error={error.errno}")
+    sys.exit(1)
+print(f"port={port} connected")"#;
+    let output = match sandbox
+        .prepare(CommandSpec::new("python3").args(["-c", script]))
+        .and_then(|prepared| prepared.output())
+    {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!(
+                "retained proxy confined socket: launch failed raw_os_error={:?}",
+                error.raw_os_error()
+            );
+            return false;
+        }
+    };
+    let detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    eprintln!(
+        "retained proxy first confined socket: exited {} {}",
+        output.status,
+        if detail.is_empty() {
+            "(no output)"
+        } else {
+            &detail
+        }
+    );
+    let Some(port) = detail
+        .split_whitespace()
+        .next()
+        .and_then(|part| part.strip_prefix("port="))
+        .and_then(|port| port.parse::<u16>().ok())
+    else {
+        eprintln!("retained proxy parent socket: no diagnostic port");
+        return false;
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let parent_connected =
+        match TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)) {
+            Ok(_) => {
+                eprintln!("retained proxy parent socket: connected");
+                true
+            }
+            Err(error) => {
+                eprintln!(
+                    "retained proxy parent socket: failed raw_os_error={:?}",
+                    error.raw_os_error()
+                );
+                false
+            }
+        };
+    output.status.success() && detail.ends_with(" connected") && parent_connected
+}
+
+#[cfg(target_os = "macos")]
+fn curl_in_session(label: &str, sandbox: &Sandbox, noproxy: bool, curl_args: &str) -> i32 {
+    let curl = if noproxy {
+        "env -u https_proxy -u HTTPS_PROXY -u http_proxy -u HTTP_PROXY -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY curl --noproxy '*'"
+    } else {
+        "curl"
+    };
+    let script =
+        format!("{curl} -4 -sS -o /dev/null --connect-timeout 8 --max-time 20 {curl_args}");
+    eprintln!(">>> {label}: retained sh -c {script:?}");
+    let code = sandbox
+        .prepare(CommandSpec::new("/bin/sh").arg("-c").arg(&script))
+        .expect("prepare retained confined child")
+        .status()
+        .expect("run retained confined child")
         .code()
         .unwrap_or(-1);
     eprintln!("<<< {label}: exited {code}");
@@ -265,24 +354,43 @@ fn run() -> bool {
 #[cfg(target_os = "macos")]
 fn run() -> bool {
     let allow = policy(json!({ "fs": true, "net": ["example.com"] }));
+    // Preserve the original one-shot public path. Its proxy begins on this first curl, so a
+    // retained session below cannot pre-warm or hide a startup/lifetime failure here.
+    let fresh_allow = curl("fresh-allow ", &allow, false, "https://example.com/");
+    let fresh_deny = curl("fresh-deny  ", &allow, false, "https://www.google.com/");
+    // A reusable session starts one egress proxy. Keep it alive through a parent socket control,
+    // a first confined socket control, and the allow/deny curls; a one-shot `apply` per curl
+    // cannot distinguish a listener-lifetime fault from a distinct-session failure.
+    let sandbox = Sandbox::new(&allow).expect("acquire retained host-filter session");
+    let retained_proxy = retained_proxy_socket_probe(&sandbox);
     // Cooperative (honors the injected https_proxy) — the proxy's per-host gate decides.
-    let coop_allow = curl("coop-allow  ", &allow, false, "https://example.com/");
-    let coop_deny = curl("coop-deny   ", &allow, false, "https://www.google.com/");
+    let coop_allow = curl_in_session("coop-allow  ", &sandbox, false, "https://example.com/");
+    let coop_deny = curl_in_session("coop-deny   ", &sandbox, false, "https://www.google.com/");
     // Non-cooperative (dials direct) — Seatbelt denies ALL direct egress, allowed or not. Names
     // fail at DNS (the resolver is off-limits too); the hardcoded-IP arm proves the block is at
     // connect, not merely resolution — a client that needs no DNS still cannot leave.
-    let noncoop_deny = curl("noncoop-deny", &allow, true, "https://www.google.com/");
-    let noncoop_allow = curl("noncoop-allw", &allow, true, "https://example.com/");
-    let noncoop_ip = curl("noncoop-ip  ", &allow, true, "https://1.1.1.1/");
+    let noncoop_deny = curl_in_session("noncoop-deny", &sandbox, true, "https://www.google.com/");
+    let noncoop_allow = curl_in_session("noncoop-allw", &sandbox, true, "https://example.com/");
+    let noncoop_ip = curl_in_session("noncoop-ip  ", &sandbox, true, "https://1.1.1.1/");
     println!();
-    println!("1 coop-allow   (proxy env, GET example.com)   -> exit={coop_allow}   [want 0]");
-    println!("2 coop-deny    (proxy env, GET google)        -> exit={coop_deny}   [want != 0]");
-    println!("3 noncoop-deny (--noproxy, GET google)        -> exit={noncoop_deny}   [want != 0]");
-    println!("4 noncoop-allw (--noproxy, GET example.com)   -> exit={noncoop_allow}   [want != 0]");
-    println!("5 noncoop-ip   (--noproxy, GET 1.1.1.1)       -> exit={noncoop_ip}   [want != 0]");
-    // 1 vs 2: the proxy's per-host gate works for a cooperative client. 3/4/5 all blocked:
+    println!("0 retained proxy listener + Seatbelt socket -> passed={retained_proxy} [want true]");
+    println!("1 fresh-allow  (one-shot proxy, GET example)  -> exit={fresh_allow}  [want 0]");
+    println!("2 fresh-deny   (one-shot proxy, GET google)   -> exit={fresh_deny}   [want != 0]");
+    println!("3 coop-allow   (retained proxy, GET example)  -> exit={coop_allow}   [want 0]");
+    println!("4 coop-deny    (retained proxy, GET google)   -> exit={coop_deny}   [want != 0]");
+    println!("5 noncoop-deny (--noproxy, GET google)        -> exit={noncoop_deny}   [want != 0]");
+    println!("6 noncoop-allw (--noproxy, GET example.com)   -> exit={noncoop_allow}   [want != 0]");
+    println!("7 noncoop-ip   (--noproxy, GET 1.1.1.1)       -> exit={noncoop_ip}   [want != 0]");
+    // 1/3 vs 2/4: the proxy's per-host gate works on both public lifecycles. 5/6/7 all blocked:
     // non-cooperative egress is denied regardless of host or DNS — never leaked.
-    coop_allow == 0 && coop_deny != 0 && noncoop_deny != 0 && noncoop_allow != 0 && noncoop_ip != 0
+    retained_proxy
+        && fresh_allow == 0
+        && fresh_deny != 0
+        && coop_allow == 0
+        && coop_deny != 0
+        && noncoop_deny != 0
+        && noncoop_allow != 0
+        && noncoop_ip != 0
 }
 
 #[cfg(target_os = "windows")]
