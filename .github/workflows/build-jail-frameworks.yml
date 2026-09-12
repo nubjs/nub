@@ -50,7 +50,9 @@ jobs:
           fi
           source_dir="$RUNNER_TEMP/build-jail-frameworks-${{ matrix.source }}-source"
           target_dir="$RUNNER_TEMP/build-jail-frameworks-${{ matrix.source }}-target"
-          git fetch --no-tags origin "$revision"
+          git fetch --no-tags origin "$FRAMEWORK_CANDIDATE_REVISION" "$revision"
+          git cat-file -e "$FRAMEWORK_CANDIDATE_REVISION^{commit}"
+          git cat-file -e "$revision^{commit}"
           git worktree add --detach "$source_dir" "$revision"
           test "$(git -C "$source_dir" rev-parse HEAD)" = "$revision"
           git diff --quiet "$FRAMEWORK_CANDIDATE_REVISION" -- tests/build-jail-frameworks
