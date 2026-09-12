@@ -579,18 +579,27 @@ fn slot_entry_is_ours(link: &Path, pkg_dir: &Path) -> bool {
             };
             aube_linker::normalize_path(&bin_dir.join(rel.replace('\\', "/")))
         };
-        resolved.starts_with(&pkg_lex)
-            || resolved.starts_with(&pkg_canon)
-            // An isolated global install may point `node_modules/<alias>`
-            // into an external content store. A v3 wrapper correctly embeds
-            // that physical target, so containment alone no longer identifies
-            // it; match the target evidence read from this global package's
-            // own installed manifests, as the symlink branch above does.
-            || scan_packages(pkg_dir).iter().any(|info| {
+        if resolved.starts_with(&pkg_lex) || resolved.starts_with(&pkg_canon) {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            // A v3 wrapper can target an external store. Match the install's
+            // captured target, just as the symlink branch above does.
+            scan_packages(pkg_dir).iter().any(|info| {
                 owned_bins(&info.install_dir, &info.aliases)
                     .iter()
-                    .any(|bin| bin.target.as_ref().is_some_and(|target| *target == resolved))
+                    .any(|bin| {
+                        bin.target
+                            .as_ref()
+                            .is_some_and(|target| *target == resolved)
+                    })
             })
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 }
 
@@ -1212,7 +1221,11 @@ mod tests {
             "an external target absent from this install's manifests stays foreign"
         );
 
-        let bins = owned_bins(&install_dir, &["pkg".to_string()]);
+        let mut bins = owned_bins(&install_dir, &["pkg".to_string()]);
+        bins.push(OwnedBin {
+            name: "foreign".to_string(),
+            target: bins[0].target.clone(),
+        });
         unlink_bins(&install_dir, &surface_bin, &bins);
         assert!(
             shim.symlink_metadata().is_err(),
