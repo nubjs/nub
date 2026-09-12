@@ -872,21 +872,37 @@ fn duplicate_child_socket(tgid: u32, fd: RawFd) -> Result<(OwnedFd, i32, i32), i
     }
 }
 
-/// Run one replayed connected send without allowing a blocked target to strand shutdown.  A
-/// blocking target socket is retried with per-call `MSG_DONTWAIT` and a cancellable poll; a
-/// target-created nonblocking socket keeps its normal immediate EAGAIN behavior.
+enum SendReplayError {
+    Errno(i32),
+    Abandoned,
+}
+
+/// A finite cadence matters: a notification can be cancelled while the duplicated socket is
+/// never writable. USER_NOTIF supplies no per-request wakeup, so revalidate the ID at this
+/// interval and emit no response when it is gone. The final pre-send check is best-effort only;
+/// cancellation and `send` cannot be made atomic through this ABI.
+const SEND_REPLAY_POLL_CADENCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Run one replayed connected send without allowing an abandoned target request to strand the
+/// worker. A blocking target socket is retried with per-call `MSG_DONTWAIT`; target-created
+/// nonblocking sockets keep their normal immediate EAGAIN behavior.
 fn send_snapshot(
     control: &WorkerControl,
+    listener: RawFd,
+    notification_id: u64,
     fd: RawFd,
     snapshot: &SendSnapshot,
     flags: i32,
-) -> Result<isize, i32> {
+) -> Result<isize, SendReplayError> {
     let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if status < 0 {
-        return Err(errno());
+        return Err(SendReplayError::Errno(errno()));
     }
     let target_nonblocking = status & libc::O_NONBLOCK != 0;
     loop {
+        if !notification_is_live(listener, notification_id) {
+            return Err(SendReplayError::Abandoned);
+        }
         let call_flags = replay_send_flags(flags, target_nonblocking);
         // The replay runs in Nub's parent, not the target.  Always suppress SIGPIPE here so an
         // EPIPE is returned to the target instead of signalling the host process.  This cannot
@@ -905,10 +921,19 @@ fn send_snapshot(
         }
         let error = errno();
         if target_nonblocking || (error != libc::EAGAIN && error != libc::EWOULDBLOCK) {
-            return Err(error);
+            return Err(SendReplayError::Errno(error));
         }
-        if !control.wait(fd, libc::POLLOUT, None).unwrap_or(false) {
-            return Err(libc::ECANCELED);
+        let ready = control
+            .wait(fd, libc::POLLOUT, Some(SEND_REPLAY_POLL_CADENCE))
+            .map_err(|error| SendReplayError::Errno(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        if control.cancelled() {
+            return Err(SendReplayError::Errno(libc::ECANCELED));
+        }
+        if !notification_is_live(listener, notification_id) {
+            return Err(SendReplayError::Abandoned);
+        }
+        if !ready {
+            continue;
         }
     }
 }
@@ -1635,6 +1660,15 @@ impl WorkerControl {
         };
     }
 
+    fn cancelled(&self) -> bool {
+        let mut fd = libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        (unsafe { libc::poll(&mut fd, 1, 0) }) > 0 && fd.revents != 0
+    }
+
     fn wait(
         &self,
         fd: RawFd,
@@ -1882,19 +1916,28 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                 req.data.args[2] as i32
             };
             let mut first_error = None;
+            let mut abandoned = false;
             for snapshot in &snapshots {
-                match send_snapshot(&control, socket.as_raw_fd(), snapshot, flags) {
+                match send_snapshot(&control, nfd, req.id, socket.as_raw_fd(), snapshot, flags) {
                     Ok(sent) => {
-                        reply_value(nfd, req.id, sent as i64);
+                        // This check cannot close the final cancellation/send race, but it avoids
+                        // a stale response when cancellation happened during the replay itself.
+                        if notification_is_live(nfd, req.id) {
+                            reply_value(nfd, req.id, sent as i64);
+                        }
                         break;
                     }
-                    Err(error) => {
+                    Err(SendReplayError::Errno(error)) => {
                         first_error = Some(error);
+                        break;
+                    }
+                    Err(SendReplayError::Abandoned) => {
+                        abandoned = true;
                         break;
                     }
                 }
             }
-            if first_error.is_some() {
+            if !abandoned && first_error.is_some() {
                 reply(nfd, req.id, -first_error.unwrap());
             }
             continue;
@@ -3037,6 +3080,73 @@ mod lifecycle_tests {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(0);
+        if mode == "cancel" {
+            unsafe extern "C" fn signal_noop(_: libc::c_int) {}
+            let address = make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), second_port);
+            let fd =
+                unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+            if fd < 0
+                || unsafe {
+                    libc::connect(
+                        fd,
+                        &address as *const _ as *const libc::sockaddr,
+                        size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                } < 0
+            {
+                std::process::exit(94);
+            }
+            let small = 4096i32;
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &small as *const _ as *const libc::c_void,
+                    size_of::<i32>() as libc::socklen_t,
+                );
+            }
+            let original = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            unsafe { libc::fcntl(fd, libc::F_SETFL, original | libc::O_NONBLOCK) };
+            let fill = [0u8; 4096];
+            while unsafe { libc::send(fd, fill.as_ptr() as *const libc::c_void, fill.len(), 0) }
+                >= 0
+            {}
+            if errno() != libc::EAGAIN && errno() != libc::EWOULDBLOCK {
+                std::process::exit(95);
+            }
+            unsafe { libc::fcntl(fd, libc::F_SETFL, original) };
+            let action = libc::sigaction {
+                sa_sigaction: signal_noop as usize,
+                sa_mask: unsafe { std::mem::zeroed() },
+                sa_flags: 0,
+                sa_restorer: None,
+            };
+            unsafe { libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()) };
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t };
+            let pid = unsafe { libc::getpid() };
+            let wake = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                unsafe { libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGUSR1) };
+            });
+            let bytes = b"must-not-send-after-cancel";
+            let mut iov = libc::iovec {
+                iov_base: bytes.as_ptr() as *mut libc::c_void,
+                iov_len: bytes.len(),
+            };
+            let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_iov = &mut iov;
+            hdr.msg_iovlen = 1;
+            let result = unsafe { libc::sendmsg(fd, &mut hdr, 0) };
+            let error = errno();
+            wake.join().unwrap();
+            unsafe { libc::close(fd) };
+            std::process::exit(if result == -1 && error == libc::EINTR {
+                0
+            } else {
+                96
+            });
+        }
         if mode == "tcp" || mode == "dns" {
             let address = if mode == "tcp" {
                 make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), second_port)
@@ -3229,6 +3339,49 @@ mod lifecycle_tests {
         assert_eq!(&tcp[..len], b"supervised-tcp");
         assert_eq!(child.wait().unwrap().code(), Some(0));
 
+        // Fill a fresh stream while this listener deliberately does not read it, then interrupt
+        // the target's blocked sendmsg. The child must leave with EINTR within the finite
+        // revalidation cadence; a stale supervisor must neither answer nor wait for writability.
+        let cancel_env = [
+            CString::new("NUB_SUP_SENDMMSG_MODE=cancel").unwrap(),
+            CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
+            CString::new(format!(
+                "NUB_SUP_SENDMMSG_SECOND_PORT={}",
+                listener.local_addr().unwrap().port()
+            ))
+            .unwrap(),
+        ];
+        let mut child = spawn_supervised(
+            policy("not-permitted.example"),
+            SupervisedLaunch {
+                argv: &argv,
+                envp: &cancel_env,
+                cwd: None,
+                ruleset_fd: -1,
+                seccomp_ceiling: None,
+                stdin: SupervisedStdio::Null,
+                stdout: SupervisedStdio::Null,
+                stderr: SupervisedStdio::Null,
+                inherited_fds: &[],
+            },
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (_blocked_peer, _) = loop {
+            match listener.accept() {
+                Ok(value) => break value,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "cancel child did not connect"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("cancel listener failed: {error}"),
+            }
+        };
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+
         let dns_env = [
             CString::new("NUB_SUP_SENDMMSG_MODE=dns").unwrap(),
             CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
@@ -3260,6 +3413,7 @@ mod lifecycle_tests {
         let worker =
             std::thread::spawn(move || worker_control.wait(read.as_raw_fd(), libc::POLLIN, None));
         control.cancel();
+        assert!(control.cancelled());
         assert!(!worker.join().unwrap().unwrap());
         let (read, _write) = pipe_owned().unwrap();
         assert!(
