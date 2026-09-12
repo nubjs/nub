@@ -1934,8 +1934,15 @@ function claimServeEntry() {
 //      loop is doing, which is what serves a handler whose preload or module body
 //      holds a timer, a socket or a Worker for good.
 //   3. `beforeExit`, for the hook configuration in which nub's hooks never see the
-//      entry at all. It fires only once the loop drains, so it is the last resort
-//      and never the only one.
+//      entry at all — a foreign resolve hook that rewrites the entry's URL, say. It
+//      fires only once the loop drains, so it is the last resort and never the only
+//      one.
+//
+// Nothing here holds the loop open to wait for trigger 2. The loader worker's channel
+// stays unreferenced: a loop the entry or a preload keeps alive delivers its message
+// regardless, and a loop that drains reaches trigger 3, which inspects the entry
+// without it. Referencing the port instead held EVERY process whose hooks never saw
+// the entry's URL open for good, a finished plain script included.
 //
 // Declining to serve remains the right side to fail on where none of the three can
 // fire: reordering a user's preloads is a correctness break, and not binding a port
@@ -1971,9 +1978,6 @@ function installServeEntry() {
         // `nub <file>` run carry it.
         entry.onLoad = late;
         if (entry.loadSeen) fireEntryLoad(entry);
-        // The worker's signal has to reach a live loop, so the port holds the process
-        // open until it does; `closeEntryChannel` lets go afterwards.
-        if (entry.channel !== null) entry.channel.port1.ref();
         process.once("beforeExit", late);
       })
       .catch(report);
@@ -2020,7 +2024,8 @@ function loaderWorkerOptions() {
   const { MessageChannel } = getBuiltin("node:worker_threads");
   const channel = new MessageChannel();
   channel.port1.on("message", noteEntryLoad);
-  // Referenced only once the pass is actually waiting — see `installServeEntry`.
+  // Never referenced, so an announcement that never comes cannot hold the process
+  // open — see the triggers above `installServeEntry`.
   channel.port1.unref();
   entry.channel = channel;
   return {

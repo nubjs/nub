@@ -15,8 +15,10 @@
 //! `actions/setup-node`, so the gating only hides them on developer
 //! machines that don't have the full nvm matrix.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -123,6 +125,59 @@ fn run_nub_against_node(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let code = output.status.code().unwrap_or(-1);
     Some((stdout, stderr, code))
+}
+
+/// `run_nub_against_node` for an invocation with Node flags ahead of the file, and
+/// bounded by a deadline: the failure this exists to catch is a process that never
+/// exits, which `Output` alone would wait on forever. The exit code is `None` when
+/// the deadline killed it.
+fn run_nub_args_against_node(
+    want: (u32, u32, u32),
+    fixture: &str,
+    args: &[&str],
+    deadline: Duration,
+) -> Option<(String, String, Option<i32>)> {
+    let bin_dir = find_node_bin_dir(want)?;
+    let fixture_path = fixtures_dir().join(fixture);
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing));
+    let new_path = std::env::join_paths(paths).expect("join PATH");
+
+    let mut child = Command::new(nub_binary())
+        .args(args)
+        .current_dir(&fixture_path)
+        .env("PATH", new_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn nub");
+    // Both pipes drain on their own threads, so a chatty child can neither block
+    // nor be blocked by the wait below.
+    let stdout = slurp(child.stdout.take().unwrap());
+    let stderr = slurp(child.stderr.take().unwrap());
+    let started = Instant::now();
+    let code = loop {
+        if let Some(status) = child.try_wait().expect("wait on nub") {
+            break status.code();
+        }
+        if started.elapsed() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Some((stdout.join().unwrap(), stderr.join().unwrap(), code))
+}
+
+fn slurp<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    })
 }
 
 /// Node 22.13.0 is the compat-tier representative: above the 18.19 floor,
@@ -997,6 +1052,44 @@ fn esm_preload_awaits_a_macrotask_before_the_entry_on_both_tiers() {
         assert_eq!(
             stdout, "preload:start\npreload:done\nmain:done\n",
             "Node {maj}.{min}.{pat}: the entry must not start until the preload's await settles"
+        );
+    }
+}
+
+/// A foreign resolve hook that rewrites the entry's URL — a cache-busting query, the
+/// shape a hot-reload loader adds — means nub's own hooks never see the entry under
+/// a URL they track, so the fetch-handler pass falls through to `beforeExit`. The
+/// channel the loader worker would have announced the entry on must not hold the
+/// process open meanwhile: a plain script under such a hook has to exit, on the
+/// tiers whose hooks run in that worker. It did not, once — a referenced port kept
+/// every such process alive for good.
+#[test]
+fn a_foreign_hook_rewriting_the_entry_url_does_not_hold_the_process() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) = run_nub_args_against_node(
+            want,
+            "entry-url-rewrite",
+            &["--import", "./rewrite.mjs", "plain.mjs"],
+            Duration::from_secs(60),
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code,
+            Some(0),
+            "Node {maj}.{min}.{pat}: a plain script behind a URL-rewriting hook must exit \
+             rather than hang: stdout={stdout:?} stderr={stderr:?}"
+        );
+        // The rewrite has to have taken, or the run proved nothing about it.
+        assert_eq!(
+            stdout, "plain:?v=1\n",
+            "Node {maj}.{min}.{pat}: the hook must have rewritten the entry's URL"
         );
     }
 }
