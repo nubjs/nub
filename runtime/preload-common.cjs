@@ -1891,10 +1891,11 @@ function installServeEntry() {
   // this pass, or a server whose module body does nothing asynchronous would exit
   // before it could bind.
   setImmediate(() => {
-    serveEntryIfHandler().catch(() => {
-      // An entry that threw has already been reported by Node as an uncaught
-      // error; re-surfacing our own view of it would double the report, and
-      // leaving this promise unhandled would itself change the exit path.
+    // Nothing below is expected to reject — a throwing entry is handled inside — so
+    // anything arriving here is nub's own defect and is named as such. Leaving the
+    // promise unhandled instead would change the process's exit path.
+    serveEntryIfHandler().catch((err) => {
+      process.stderr.write(`nub: could not inspect the entry for a fetch handler: ${err}\n`);
     });
   });
 }
@@ -1902,7 +1903,16 @@ function installServeEntry() {
 async function serveEntryIfHandler() {
   const file = mainEntryPath();
   if (!file) return;
-  const handler = fetchHandler(await entryDefaultExport(file));
+  let exported;
+  try {
+    exported = await entryDefaultExport(file);
+  } catch {
+    // The entry threw. Node has already reported that as an uncaught error, and this
+    // is the same failure observed a second time, so it is dropped rather than
+    // doubling the report.
+    return;
+  }
+  const handler = fetchHandler(exported);
   if (!handler) return;
   // Required only now, so an ordinary file run never loads node:http at all.
   require("./fetch-serve.cjs").serve(handler);
