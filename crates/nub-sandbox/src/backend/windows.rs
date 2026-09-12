@@ -2296,17 +2296,47 @@ pub(super) mod launch {
                     )?;
                 }
             }
-            // Window objects are session-local, whereas profiles are user-global.
-            // Journal each session's station/desktop before changing either DACL.
+            // Window objects are session-local, whereas profiles are user-global. Only a newly
+            // absent witness is Nub-owned: a pre-existing grant may belong to another process,
+            // and a NULL DACL permits access without any mutation to revoke later.
             for object in &window_objects {
-                acquisition_step(
-                    "window-journal",
-                    resource.record_window_object(object.clone()),
-                )?;
-                acquisition_step(
-                    "window-grant",
-                    crate::backend::windows_ace::grant_persistent(object, ac_sid),
-                )?;
+                let journaled = resource.entry.window_objects.contains(object);
+                match crate::backend::windows_ace::persistent_grant_state(object, ac_sid)? {
+                    crate::backend::windows_ace::PersistentGrantState::NoMutation => {
+                        if journaled {
+                            return Err(io::Error::other(format!(
+                                "sandbox journaled window-object grant is absent for {object:?}"
+                            )));
+                        }
+                    }
+                    crate::backend::windows_ace::PersistentGrantState::Existing => {
+                        // Retain only an entry that already established ownership. A full
+                        // same-SID grant discovered for the first time is not evidence Nub made
+                        // it and must never become a cleanup target.
+                    }
+                    crate::backend::windows_ace::PersistentGrantState::Missing => {
+                        if journaled {
+                            return Err(io::Error::other(format!(
+                                "sandbox journaled window-object grant is absent for {object:?}"
+                            )));
+                        }
+                        acquisition_step(
+                            "window-journal",
+                            resource.record_window_object(object.clone()),
+                        )?;
+                        match acquisition_step(
+                            "window-grant",
+                            crate::backend::windows_ace::grant_persistent(object, ac_sid),
+                        )? {
+                            crate::backend::windows_ace::PersistentGrant::Added => {}
+                            outcome => {
+                                return Err(io::Error::other(format!(
+                                    "sandbox window-object grant changed to {outcome:?} after journaling"
+                                )));
+                            }
+                        }
+                    }
+                }
             }
 
             if resource.fresh {
@@ -3497,7 +3527,7 @@ pub(super) mod launch {
     /// Derive the stable SID for an already-created policy-named profile.  This is
     /// the documented AppContainer reopen path (and Chromium uses the same split);
     /// profile existence itself remains backed by the durable ownership journal.
-    fn derive_appcontainer(name: &str) -> io::Result<PSID> {
+    pub(super) fn derive_appcontainer(name: &str) -> io::Result<PSID> {
         let name = to_wide(name);
         let mut sid: PSID = std::ptr::null_mut();
         let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
@@ -3570,7 +3600,7 @@ pub(super) mod launch {
     /// A profile SID returned by create/derive is separately allocated from the
     /// persistent profile registration.  Closing this guard therefore cannot remove
     /// an identity another nub process is actively using.
-    struct SidGuard(PSID);
+    pub(super) struct SidGuard(pub(super) PSID);
     // SAFETY: the SID allocation is immutable until its sole owner's Drop.
     unsafe impl Send for SidGuard {}
     unsafe impl Sync for SidGuard {}
@@ -3612,6 +3642,15 @@ pub(super) mod launch {
     }
 
     #[cfg(test)]
+    pub(super) fn test_profile_has_window_grant(
+        profile: &str,
+        object: &super::windows_registry::WindowObject,
+    ) -> io::Result<bool> {
+        let sid = SidGuard(derive_appcontainer(profile)?);
+        crate::backend::windows_ace::test_has_persistent_grant(object, sid.0)
+    }
+
+    #[cfg(test)]
     pub(super) fn test_set_profile_ace(profile: &str, path: &Path, grant: bool) -> io::Result<()> {
         let sid = SidGuard(derive_appcontainer(profile)?);
         if grant {
@@ -3644,11 +3683,6 @@ pub(super) mod launch {
             let result = (|| {
                 let sid = derive_appcontainer(&entry.profile_name)?;
                 let _sid = SidGuard(sid);
-                for object in &entry.window_objects {
-                    crate::backend::windows_ace::revoke_persistent(object, sid).map_err(
-                        |error| acl_error(format!("revoke window object {object:?}"), error),
-                    )?;
-                }
                 for mutation in &entry.mutations {
                     revoke_recorded_ace(&entry, mutation, sid).map_err(|error| {
                         acl_error(
@@ -3678,6 +3712,53 @@ pub(super) mod launch {
                             Path::new(path),
                         );
                     }
+                }
+                // Keep the name-only window-object grants until every recoverable private-path
+                // step has completed. An interrupted private deletion then retries with its
+                // ownership witness still present instead of confusing a prior partial cleanup
+                // with a same-name replacement object.
+                for object in &entry.window_objects {
+                    let witnessed = crate::backend::windows_ace::has_persistent_grant(object, sid)?;
+                    #[cfg(test)]
+                    test_crash_transition(
+                        "cleanup-window-object-witness-checked",
+                        &entry.profile_name,
+                        Path::new("."),
+                    );
+                    if !witnessed {
+                        if entry.window_object_revoke.as_ref() == Some(object) {
+                            // A durable intent predates this attempt. A missing witness now means
+                            // the previous process completed the revoke before it died, or the
+                            // object was replaced without Nub's grant; neither permits a DACL
+                            // edit, so retire only this already-in-progress journal operation.
+                            super::windows_registry::finish_window_object_revoke(&entry, object)?;
+                            continue;
+                        }
+                        return Err(io::Error::other(format!(
+                            "sandbox window-object cleanup ownership witness is absent for {object:?}"
+                        )));
+                    }
+                    // Persist progress only after establishing the ownership witness. If the
+                    // process dies before this point, retry must treat a now-missing or
+                    // same-name replacement object as fresh ambiguity, never as a completed
+                    // revoke.
+                    super::windows_registry::begin_window_object_revoke(&entry, object)?;
+                    crate::backend::windows_ace::revoke_persistent(object, sid).map_err(
+                        |error| acl_error(format!("revoke window object {object:?}"), error),
+                    )?;
+                    #[cfg(test)]
+                    test_crash_transition(
+                        "cleanup-window-object-revoked",
+                        &entry.profile_name,
+                        Path::new("."),
+                    );
+                    super::windows_registry::finish_window_object_revoke(&entry, object)?;
+                    #[cfg(test)]
+                    test_crash_transition(
+                        "cleanup-window-object-removed",
+                        &entry.profile_name,
+                        Path::new("."),
+                    );
                 }
                 let name = to_wide(&entry.profile_name);
                 let hr = unsafe { DeleteAppContainerProfile(name.as_ptr()) };

@@ -175,6 +175,11 @@ pub(crate) struct Entry {
     pub(crate) mutations: Vec<AclMutation>,
     pub(crate) leases: BTreeSet<String>,
     pub(crate) recovery_error: Option<String>,
+    /// A window-object DACL revoke that reached the native mutation boundary but has not yet
+    /// durably removed its object from `window_objects`. This is progress, not an error: ordinary
+    /// recovery errors must not erase it before a retry can consume the operation safely.
+    #[serde(default)]
+    pub(crate) window_object_revoke: Option<WindowObject>,
     pub(crate) window_objects: Vec<WindowObject>,
     pub(crate) object_ids: BTreeMap<String, String>,
 }
@@ -663,6 +668,7 @@ fn acquire_at(root: PathBuf, identity: PolicyIdentity) -> io::Result<Acquired> {
                 mutations: Vec::new(),
                 leases: BTreeSet::from([lease.name.clone()]),
                 recovery_error: None,
+                window_object_revoke: None,
                 window_objects: Vec::new(),
                 object_ids: identity
                     .objects
@@ -792,6 +798,55 @@ pub(crate) fn finish_recovery(entry: &Entry, result: io::Result<()>) -> io::Resu
             current.state = EntryState::RecoveryNeeded;
             current.recovery_error = Some(error.to_string());
         }
+    }
+    save(&root, &file)
+}
+
+/// Durably record that cleanup is about to revoke one window-object grant. If the owner dies
+/// after the native DACL write but before the journal update, retry can distinguish that completed
+/// removal from a fresh, name-only lookup with no ownership witness.
+pub(crate) fn begin_window_object_revoke(entry: &Entry, object: &WindowObject) -> io::Result<bool> {
+    let root = registry_root()?;
+    let _lock = MutationLock::acquire(&root)?;
+    let mut file = load(&root)?;
+    let current = file
+        .entries
+        .get_mut(&entry.identity)
+        .ok_or_else(|| io::Error::other("sandbox registry lost a recovering entry"))?;
+    let retrying = current.window_object_revoke.as_ref() == Some(object);
+    if let Some(in_progress) = &current.window_object_revoke
+        && in_progress != object
+    {
+        return Err(io::Error::other(format!(
+            "sandbox window-object cleanup has unfinished revoke progress for {in_progress:?}"
+        )));
+    }
+    current.window_object_revoke = Some(object.clone());
+    save(&root, &file)?;
+    Ok(retrying)
+}
+
+/// Remove a durably completed window-object revoke from the journal before the next object is
+/// attempted. A later failure therefore cannot make retry replay a known-completed mutation.
+pub(crate) fn finish_window_object_revoke(entry: &Entry, object: &WindowObject) -> io::Result<()> {
+    let root = registry_root()?;
+    let _lock = MutationLock::acquire(&root)?;
+    let mut file = load(&root)?;
+    let current = file
+        .entries
+        .get_mut(&entry.identity)
+        .ok_or_else(|| io::Error::other("sandbox registry lost a recovering entry"))?;
+    current.window_objects.retain(|recorded| recorded != object);
+    if current.window_object_revoke.as_ref() == Some(object) {
+        current.window_object_revoke = None;
+    }
+    #[cfg(test)]
+    if std::env::var("__NUB_WINDOWS_CLEANUP_FAULT").as_deref()
+        == Ok("cleanup-window-object-journal-save")
+    {
+        return Err(io::Error::other(
+            "injected window-object cleanup journal save failure",
+        ));
     }
     save(&root, &file)
 }
@@ -1293,6 +1348,47 @@ pub(crate) fn test_entry(profile: &str) -> io::Result<Option<Entry>> {
         .find(|entry| entry.profile_name == profile))
 }
 
+#[cfg(all(test, windows))]
+pub(crate) fn test_insert_window_object_recovery(
+    profile_name: &str,
+    object: WindowObject,
+) -> io::Result<()> {
+    let root = registry_root()?;
+    let _lock = MutationLock::acquire(&root)?;
+    let mut file = load(&root)?;
+    let now = now_secs();
+    file.entries.insert(
+        profile_name.to_string(),
+        Entry {
+            identity: profile_name.to_string(),
+            policy_identity: None,
+            canonical_policy: "test window-object recovery".to_string(),
+            profile_name: profile_name.to_string(),
+            state: EntryState::Closing,
+            created_at: now,
+            last_used_at: now,
+            private_paths: Vec::new(),
+            owned_bytes: 0,
+            mutations: Vec::new(),
+            leases: BTreeSet::new(),
+            recovery_error: None,
+            window_object_revoke: None,
+            window_objects: vec![object],
+            object_ids: BTreeMap::new(),
+        },
+    );
+    save(&root, &file)
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn test_remove_entry(profile_name: &str) -> io::Result<()> {
+    let root = registry_root()?;
+    let _lock = MutationLock::acquire(&root)?;
+    let mut file = load(&root)?;
+    file.entries.remove(profile_name);
+    save(&root, &file)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1421,6 +1517,7 @@ mod tests {
                 mutations: Vec::new(),
                 leases: BTreeSet::from(["live".to_string(), "dead".to_string()]),
                 recovery_error: None,
+                window_object_revoke: None,
                 window_objects: Vec::new(),
                 object_ids: BTreeMap::new(),
             },
@@ -1623,6 +1720,7 @@ mod tests {
             mutations: Vec::new(),
             leases: BTreeSet::new(),
             recovery_error: None,
+            window_object_revoke: None,
             window_objects: Vec::new(),
             object_ids: BTreeMap::new(),
         }

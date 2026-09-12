@@ -8,11 +8,112 @@ use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::System::StationsAndDesktops::{
+    CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW,
+    GetProcessWindowStation, SetProcessWindowStation,
+};
 
 const FIXTURE: &str = "backend::windows::windows_cleanup_tests::windows_cleanup_fixture";
 const MODE: &str = "__NUB_WINDOWS_CLEANUP_FIXTURE";
 const ROOT: &str = "__NUB_WINDOWS_CLEANUP_ROOT";
 const FAULT: &str = "__NUB_WINDOWS_CLEANUP_FAULT";
+
+const WINSTA_ALL_ACCESS: u32 = 0x000F_037F;
+const DESKTOP_ALL_ACCESS: u32 = 0x000F_01FF;
+
+struct TestWindowObjects {
+    station: HANDLE,
+    desktop: HANDLE,
+    object: windows_registry::WindowObject,
+}
+
+impl TestWindowObjects {
+    fn journal_objects(&self) -> [windows_registry::WindowObject; 2] {
+        [
+            windows_registry::WindowObject {
+                desktop: None,
+                ..self.object.clone()
+            },
+            self.object.clone(),
+        ]
+    }
+}
+
+impl Drop for TestWindowObjects {
+    fn drop(&mut self) {
+        unsafe {
+            CloseDesktop(self.desktop);
+            CloseWindowStation(self.station);
+        }
+    }
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Build an independently named station/desktop pair so a child can leave a journaled object
+/// behind and its parent can recreate precisely those names. The explicit handles keep each
+/// generation alive only for the test that owns it.
+fn create_test_window_objects(
+    station_name: &str,
+    desktop_name: &str,
+) -> std::io::Result<TestWindowObjects> {
+    let session = crate::backend::windows_ace::current_objects()?[0].session;
+    let previous = unsafe { GetProcessWindowStation() };
+    if previous.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let station_wide = wide(station_name);
+    let station = unsafe {
+        CreateWindowStationW(
+            station_wide.as_ptr(),
+            0,
+            WINSTA_ALL_ACCESS,
+            std::ptr::null_mut(),
+        )
+    };
+    if station.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { SetProcessWindowStation(station) } == 0 {
+        unsafe { CloseWindowStation(station) };
+        return Err(std::io::Error::last_os_error());
+    }
+    let desktop_wide = wide(desktop_name);
+    let desktop = unsafe {
+        CreateDesktopW(
+            desktop_wide.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            DESKTOP_ALL_ACCESS,
+            std::ptr::null_mut(),
+        )
+    };
+    let restored = unsafe { SetProcessWindowStation(previous) };
+    if desktop.is_null() {
+        unsafe { CloseWindowStation(station) };
+        return Err(std::io::Error::last_os_error());
+    }
+    if restored == 0 {
+        unsafe {
+            CloseDesktop(desktop);
+            CloseWindowStation(station);
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(TestWindowObjects {
+        station,
+        desktop,
+        object: windows_registry::WindowObject {
+            session,
+            station: station_name.to_string(),
+            desktop: Some(desktop_name.to_string()),
+        },
+    })
+}
 
 fn plan(root: &Path, mode: &str) -> AppContainerLaunch {
     let program = std::env::current_exe().unwrap();
@@ -179,13 +280,29 @@ fn windows_cleanup_fixture() {
             panic!("acquisition did not reach the requested crash transition");
         }
         "fault-cleanup" => {
-            cleanup_resources().unwrap();
-            panic!("cleanup did not reach the requested crash transition");
+            if std::env::var(FAULT).as_deref() == Ok("cleanup-window-object-witness-checked") {
+                witness_before_intent_fault(&root);
+            } else {
+                cleanup_resources().unwrap();
+                panic!("cleanup did not reach the requested crash transition");
+            }
         }
         "station-recovery" => crate::backend::windows_ace::test_revoke_from_noncurrent_station()
             .expect("station-specific ACE recovery"),
+        "station-replacement" => {
+            crate::backend::windows_ace::test_revoke_rejects_same_name_desktop_replacement()
+                .expect("replacement desktop must not authorize cleanup")
+        }
+        "station-concurrent-launch" => concurrent_station_launch(&root),
         "crash-transitions" => crash_transitions(&root),
+        "station-journal-crash" => station_journal_crash(&root),
         "cleanup-retry" => interrupted_cleanup(&root),
+        "cleanup-window-retry" => interrupted_window_cleanup(&root),
+        "cleanup-window-save-failure" => window_revoke_journal_save_failure(&root),
+        "window-grant-no-mutation" => window_grant_no_mutation_does_not_journal(&root),
+        "window-witness-replacement-fault" => {
+            window_witness_crash_does_not_retire_a_replacement(&root)
+        }
         "cleanup-junction" => cleanup_junction(&root),
         other => panic!("unknown cleanup fixture mode {other}"),
     }
@@ -324,6 +441,68 @@ fn crash_transitions(root: &Path) {
     }
 }
 
+/// The owner process reaches the real AppContainer acquisition path, journals its current
+/// station/desktop grants, then exits without destructors. A later process must find and remove
+/// those grants through the durable registry, not a process-local cache.
+fn station_journal_crash(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    let caller = root.join("station-journal");
+    std::fs::create_dir(&caller).unwrap();
+    std::fs::write(caller.join("caller-owned.txt"), b"caller-owned").unwrap();
+    let foreign = ForeignProfileAce::grant(&caller);
+    let (profile, _private) = crash_owner(&caller, "fault-acquire", "acl-installed-before-ready");
+    let entry = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("crashed owner lost its station journal");
+    assert_eq!(entry.state, windows_registry::EntryState::Preparing);
+    assert!(
+        !entry.window_objects.is_empty(),
+        "the owner did not persist its window-object grants"
+    );
+    for object in &entry.window_objects {
+        assert!(
+            super::launch::test_profile_has_window_grant(&profile, object).unwrap(),
+            "owner's journaled grant was not present before later-process recovery: {object:?}"
+        );
+    }
+
+    cleanup_resources().unwrap();
+    assert!(windows_registry::test_entry(&profile).unwrap().is_none());
+    for object in &entry.window_objects {
+        assert!(
+            !super::launch::test_profile_has_window_grant(&profile, object).unwrap(),
+            "later-process recovery retained the journaled grant: {object:?}"
+        );
+    }
+    assert!(super::launch::test_profile_has_ace(&foreign.profile, &caller).unwrap());
+    assert_eq!(
+        std::fs::read(caller.join("caller-owned.txt")).unwrap(),
+        b"caller-owned"
+    );
+}
+
+/// Keep a real confined child launch behind the recovery station switch. The launch resource is
+/// acquired first so the measured wait is the production `CreateProcessW` station guard, not an
+/// earlier current-object observation.
+fn concurrent_station_launch(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    let resource = plan(root, "hold").acquire().unwrap();
+    crate::backend::windows_ace::test_spawn_blocks_during_noncurrent_recovery(|| {
+        let mut child = resource.spawn_with_stdio(
+            WindowsStdio::Null,
+            WindowsStdio::Null,
+            WindowsStdio::Null,
+        )?;
+        wait_for(&root.join(format!("ready-{}", child.id())));
+        child.kill()?;
+        child.wait()?;
+        Ok(())
+    })
+    .expect("AppContainer child launch must wait for station recovery");
+    drop(resource);
+    cleanup_resources().unwrap();
+}
+
 fn interrupted_cleanup(root: &Path) {
     let _cleanup = CleanupAfterTest;
     std::fs::write(root.join("caller-owned.txt"), b"caller-owned").unwrap();
@@ -344,6 +523,171 @@ fn interrupted_cleanup(root: &Path) {
         "fault did not occur after private deletion"
     );
     assert_recovered(&profile, &private, root, &foreign);
+}
+
+/// Crash between a successful native window-object revoke and its durable journal completion,
+/// then prove a later process consumes the persisted in-progress marker without touching a
+/// replacement DACL or replaying the already-removed grant.
+fn interrupted_window_cleanup(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    std::fs::write(root.join("caller-owned.txt"), b"caller-owned").unwrap();
+    let foreign = ForeignProfileAce::grant(root);
+    let resource = plan(root, "hold").acquire().unwrap();
+    let profile = resource.profile_name().to_string();
+    let private = resource.private_tmp().unwrap().to_path_buf();
+    drop(resource);
+    let (crashed_profile, _) = crash_owner(root, "fault-cleanup", "cleanup-window-object-revoked");
+    assert_eq!(crashed_profile, profile);
+    let entry = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("interrupted window cleanup discarded ownership");
+    assert_eq!(entry.state, windows_registry::EntryState::Closing);
+    assert_eq!(entry.window_objects.len(), 2);
+    assert!(
+        entry.window_object_revoke.is_some(),
+        "window revoke intent was not durable before the native mutation"
+    );
+    assert_recovered(&profile, &private, root, &foreign);
+}
+
+/// A failed journal completion after the native DACL mutation must retain independent progress,
+/// even though `finish_recovery` records the ordinary error in `recovery_error`.
+fn window_revoke_journal_save_failure(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    std::fs::write(root.join("caller-owned.txt"), b"caller-owned").unwrap();
+    let foreign = ForeignProfileAce::grant(root);
+    let resource = plan(root, "hold").acquire().unwrap();
+    let profile = resource.profile_name().to_string();
+    let private = resource.private_tmp().unwrap().to_path_buf();
+    drop(resource);
+
+    unsafe { std::env::set_var(FAULT, "cleanup-window-object-journal-save") };
+    let error = cleanup_resources().expect_err("injected journal completion save must fail");
+    unsafe { std::env::remove_var(FAULT) };
+    assert!(
+        error
+            .to_string()
+            .contains("injected window-object cleanup journal save failure")
+    );
+    let entry = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("journal save failure discarded ownership");
+    assert_eq!(entry.state, windows_registry::EntryState::RecoveryNeeded);
+    assert!(
+        entry.window_object_revoke.is_some(),
+        "ordinary recovery-error recording erased native-revoke progress"
+    );
+    assert!(
+        entry.recovery_error.is_some(),
+        "the injected journal failure was not recorded for diagnosis"
+    );
+    assert_recovered(&profile, &private, root, &foreign);
+}
+
+/// A NULL-DACL/no-mutation outcome grants the confined child no new ACE to clean up. The
+/// acquisition journal must therefore stay empty instead of turning an unrelated permissive DACL
+/// into future cleanup authority.
+fn window_grant_no_mutation_does_not_journal(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let objects = create_test_window_objects(
+        &format!("nub-null-dacl-station-{}-{stamp}", std::process::id()),
+        &format!("nub-null-dacl-desktop-{}-{stamp}", std::process::id()),
+    )
+    .unwrap();
+    let [station, desktop] = objects.journal_objects();
+    crate::backend::windows_ace::test_set_null_window_dacl(&station).unwrap();
+    crate::backend::windows_ace::test_set_null_window_dacl(&desktop).unwrap();
+    crate::backend::windows_ace::test_set_current_objects(Some(vec![station, desktop]));
+    let acquired = plan(root, "hold").acquire();
+    crate::backend::windows_ace::test_set_current_objects(None);
+    let resource = acquired.unwrap();
+    let profile = resource.profile_name().to_string();
+    let entry = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("no-mutation acquisition lost its profile entry");
+    assert!(
+        entry.window_objects.is_empty(),
+        "a no-mutation window DACL outcome created cleanup ownership"
+    );
+    drop(resource);
+    cleanup_resources().unwrap();
+    assert!(windows_registry::test_entry(&profile).unwrap().is_none());
+}
+
+/// The witness is checked before progress is persisted. Crash at that boundary, recreate the
+/// recorded names with a narrower same-SID grant, and prove the later cleanup keeps both the
+/// replacement ACE and the ownership journal rather than treating absent witness as completion.
+fn witness_before_intent_fault(_root: &Path) {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let profile = format!("nub-test-window-witness-{}-{stamp}", std::process::id());
+    let station_name = format!("nub-witness-station-{}-{stamp}", std::process::id());
+    let desktop_name = format!("nub-witness-desktop-{}-{stamp}", std::process::id());
+    let objects = create_test_window_objects(&station_name, &desktop_name).unwrap();
+    let sid = super::launch::SidGuard(super::launch::derive_appcontainer(&profile).unwrap());
+    crate::backend::windows_ace::grant_persistent(&objects.object, sid.0).unwrap();
+    windows_registry::test_insert_window_object_recovery(&profile, objects.object.clone()).unwrap();
+    cleanup_resources().unwrap();
+    panic!("cleanup did not reach witness-before-intent crash transition");
+}
+
+fn window_witness_crash_does_not_retire_a_replacement(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    let (profile, _) = crash_owner(
+        root,
+        "fault-cleanup",
+        "cleanup-window-object-witness-checked",
+    );
+    let entry = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("witness-boundary crash discarded the journal");
+    assert!(
+        entry.window_object_revoke.is_none(),
+        "witness-boundary crash persisted revoke authority before ownership was established"
+    );
+    assert_eq!(
+        entry.window_objects.len(),
+        1,
+        "fixture must journal exactly one replacement candidate"
+    );
+    let object = entry.window_objects[0].clone();
+    let replacement =
+        create_test_window_objects(&object.station, object.desktop.as_deref().unwrap())
+            .expect("same-name replacement window objects");
+    let sid = super::launch::SidGuard(super::launch::derive_appcontainer(&profile).unwrap());
+    crate::backend::windows_ace::test_grant_narrow_desktop_ace(&object, sid.0).unwrap();
+
+    let error = cleanup_resources().expect_err("fresh replacement must retain the journal");
+    assert!(error.to_string().contains("ownership witness is absent"));
+    assert!(
+        crate::backend::windows_ace::test_has_narrow_desktop_ace(&object, sid.0).unwrap(),
+        "cleanup changed the same-SID replacement ACE"
+    );
+    let retained = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("fresh replacement incorrectly retired its journal");
+    assert_eq!(retained.state, windows_registry::EntryState::RecoveryNeeded);
+    assert_eq!(retained.window_objects, vec![object.clone()]);
+    assert!(retained.window_object_revoke.is_none());
+    let retry = cleanup_resources().expect_err("replacement must remain ambiguous on retry");
+    assert!(retry.to_string().contains("ownership witness is absent"));
+    let retried = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("retry incorrectly retired the replacement journal");
+    assert_eq!(retried.window_objects, vec![object.clone()]);
+    assert!(retried.window_object_revoke.is_none());
+    assert!(
+        crate::backend::windows_ace::test_has_narrow_desktop_ace(&object, sid.0).unwrap(),
+        "retry changed the same-SID replacement ACE"
+    );
+    drop(replacement);
+    windows_registry::test_remove_entry(&profile).unwrap();
 }
 
 fn cleanup_junction(root: &Path) {
@@ -396,6 +740,26 @@ fn windows_cleanup_retries_after_abrupt_private_root_removal() {
 }
 
 #[test]
+fn windows_cleanup_retries_after_window_revoke_before_journal_completion() {
+    isolated_scenario("cleanup-window-retry");
+}
+
+#[test]
+fn windows_cleanup_retries_after_window_revoke_journal_save_failure() {
+    isolated_scenario("cleanup-window-save-failure");
+}
+
+#[test]
+fn windows_cleanup_does_not_journal_no_mutation_window_grants() {
+    isolated_scenario("window-grant-no-mutation");
+}
+
+#[test]
+fn windows_cleanup_witness_crash_does_not_retire_same_name_replacement() {
+    isolated_scenario("window-witness-replacement-fault");
+}
+
+#[test]
 fn windows_cleanup_never_follows_private_junction_into_caller_data() {
     isolated_scenario("cleanup-junction");
 }
@@ -407,6 +771,21 @@ fn windows_cleanup_recovers_aces_from_a_noncurrent_window_station() {
     // against the recorded objects.  This models successive SSH logons in session 0 without
     // allowing the test to perturb the libtest process's own desktop attachment.
     isolated_scenario("station-recovery");
+}
+
+#[test]
+fn windows_cleanup_rejects_same_name_window_object_replacement() {
+    isolated_scenario("station-replacement");
+}
+
+#[test]
+fn windows_cleanup_recovers_window_object_journal_from_later_process() {
+    isolated_scenario("station-journal-crash");
+}
+
+#[test]
+fn windows_cleanup_serializes_real_appcontainer_launch_with_station_recovery() {
+    isolated_scenario("station-concurrent-launch");
 }
 
 #[test]
