@@ -819,6 +819,8 @@ nub install --offline  # force offline
 nub install --prefer-offline  # try the cache first
 ```
 
+When Nub provisioned the project's Node, a dependency that compiles a native addon builds offline as well: Nub fills the `node-gyp` header cache from that Node instead of letting `node-gyp` download the headers from nodejs.org. On Windows the download stays, because the official Node zip carries no headers.
+
 ## Lockfile compatibility
 
 Run Nub in a repo that already uses npm, pnpm, Yarn, or Bun and it behaves *as that package manager* — no migration, no new files, and no `nub.lock` in a project it does not own. Nub infers the incumbent, then mirrors it: same lockfile format, same config files, same manifest fields. Inference walks one precedence chain:

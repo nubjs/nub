@@ -33,6 +33,8 @@ A `--smol` binary first looks in Nub's Node store, version-manager installations
 
 The embedded runtime is stripped and compressed, so the file you ship is a fraction of the ~100 MB of Node inside it. Matching compiled binaries share one extracted copy; a second compiled app adds its own bundled code, not another copy of Node.
 
+Large extracted programs built for the host platform on Node 24 or later also carry precompiled ESM bytecode. This increases executable and cache sizes to reduce repeated compilation. Node validates the bytecode before use and falls back to source when it cannot use the cache. Compilation does not run application code.
+
 Both shapes target one operating system and architecture, and both extract the bundled app into a cache directory. The first run must be able to create that cache, or deployment must prewarm it as described below. The cache must allow execution only when Nub will run Node from it. A `--smol` binary that has already proved a usable Node elsewhere stores only app data there, so a `noexec` cache is valid. The default shape also extracts Node unless it can adopt a matching Node from Nub's ordinary store.
 
 ## Runtime licenses
@@ -898,6 +900,8 @@ nub compile app.ts --sourcemap=external --sourcemap-exclude-sources
 The default shape extracts Node under `compile-node/<version>-<hash>`, keyed by the runtime's content hash. Compiled binaries with matching embedded Node share that extraction. A compiled artifact can instead adopt a matching Node from Nub's ordinary store, but `nub run` does not reuse `compile-node` extractions. On systems using the XDG base-directory convention, the cache lives under `$XDG_CACHE_HOME/nub`; otherwise it uses `$HOME/.cache/nub` and falls back to a private per-user directory under `$TMPDIR` when needed.
 
 Each candidate is tried for real. A read-only cold cache is skipped rather than fatal, and a `noexec` cache is skipped only when that cache must supply Node. A `--smol` binary with a proven external Node can use it for app data. A binary on AWS Lambda or in a `readOnlyRootFilesystem` pod falls through to the temp directory when needed. When no candidate works, the error reports the directories it tried and why each was unsuitable.
+
+The app's extracted files are validated before publication, not scanned on every launch. Later runs check the private cache directory, completion marker, entry file, and bootstrap. If other extracted files are modified or deleted afterward, remove that app's extraction directory to restore them on the next run.
 
 For a locked-down Linux deploy, warm the cache at image-build time in an executable XDG cache directory. The extraction lands in an ordinary layer, and the runtime hit writes nothing at all.
 

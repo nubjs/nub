@@ -1004,6 +1004,27 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  compile-code-cache:
+    name: Compile code cache (${{ matrix.os }}, node 26)
+    needs: matrix-plan
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '26'
+      - run: node --test crates/nub-cli/src/compile/code_cache.test.cjs
+
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})
     needs: matrix-plan
@@ -1282,6 +1303,11 @@ jobs:
           test -f "$launcher"
           export __NUB_LAUNCHER_TEMPLATE="$launcher"
           cargo test -p nub-cli --features compile --test integration compile_artifact_process_bootstrap_topology -- --exact
+          compiler="$GITHUB_WORKSPACE/target/debug/nub"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then compiler="$compiler.exe"; fi
+          node tests/compile-code-cache/probe.mjs \
+            --nub "$compiler" --target "$(node -p process.versions.node)" \
+            --out "$RUNNER_TEMP/nub-compile-code-cache"
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             cargo test -p nub-cli --features compile --test integration
           fi
@@ -1698,7 +1724,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots]
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, compile-code-cache, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed

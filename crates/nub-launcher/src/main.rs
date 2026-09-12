@@ -251,7 +251,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
             // half of that probe.
             let resolved = cache::resolve(cache_use, &|dir: &Path| {
                 if external_smol.is_some() {
-                    app_cache_is_ready(view, &app_cache_dir(dir, &view.manifest))
+                    app_cache_is_ready(&view.manifest, &app_cache_dir(dir, &view.manifest))
                         .then_some(CacheWarm::AppOnly)
                 } else {
                     verify_warm_cache(view, dir).map(CacheWarm::Managed)
@@ -313,7 +313,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
         }
     };
     // `cache::resolve` canonicalizes `app_dir`'s root, so these are absolute paths
-    // to files already covered by the exact payload-cache verification. They are
+    // to files already covered by the warm-cache readiness checks. They are
     // the only two cache paths that leave Rust and become Node arguments, so the
     // verbatim spelling stops here (see `node_argument`).
     let extracted = app_dir.as_ref().map(|dir| {
@@ -663,15 +663,9 @@ fn configure_compiled_bootstrap(cmd: &mut Command, manifest: &Manifest, bootstra
 /// Point Node's compile cache at a directory BESIDE the app extraction, never
 /// inside it, unless the user chose their own.
 ///
-/// `nub run` already gets one (`spawn.rs`'s `<cache>/nub/v8-compile-cache`); a
-/// compiled artifact got none, so it re-compiled the same bundle on every launch.
-/// It must live OUTSIDE the extracted tree. `app_cache_is_ready` requires that
-/// directory to hold exactly the payload's files and nothing else, so a compile
-/// cache written inside it makes the tree mismatch on every launch — and the app
-/// is then re-extracted every time, forever, because the fix-up re-creates the
-/// very directory that breaks the check. Measured at ~25 ms per launch on a
-/// one-file fixture before this was moved out, and the cache itself never
-/// survived, so the feature cost time instead of saving it.
+/// Keep runtime-written cache entries separate from the published payload, so
+/// replacing an extraction does not discard Node's cache and publication can
+/// validate the payload without including runtime-generated files.
 ///
 /// Keyed by `app_sha256` for the same reason the extraction is: a rebuilt artifact
 /// lands on a different key and cannot read a stale cache, so there is nothing to
@@ -793,8 +787,8 @@ struct VerifiedWarmCache {
 ///
 /// The two conditions mirror the early returns in `acquire_embedded_node` and
 /// `ensure_app` — via the same path helpers, so a warm verdict and extraction
-/// cannot disagree. A marker is only the publication barrier; the manifest's
-/// Node metadata and the exact payload-file checks remain the acceptance policy.
+/// cannot disagree. A published app needs no tree walk; the marker and launch-file
+/// checks below are independent of the number of extracted files.
 ///
 /// An already provisioned official Node needs no compile-cache marker because
 /// its own store is the complete artifact and `acquire_embedded_node` returns it
@@ -808,7 +802,7 @@ fn verify_warm_cache(view: &PayloadView<'_>, dir: &Path) -> Option<VerifiedWarmC
     }
     // An inline payload has no app directory to verify — its chunks never leave the
     // executable — so the embedded Node is the whole warm check.
-    if !m.inline_app && !app_cache_is_ready(view, &app_dir) {
+    if !m.inline_app && !app_cache_is_ready(m, &app_dir) {
         return None;
     }
 
@@ -833,10 +827,9 @@ fn verify_warm_cache(view: &PayloadView<'_>, dir: &Path) -> Option<VerifiedWarmC
     Some(VerifiedWarmCache { node_path, app_dir })
 }
 
-/// Publication writes this root-reserved marker only after every staged file has
-/// been flushed and the tree synced. It proves publication completed, not that
-/// each cached entry still meets its acceptance policy; the ready predicates
-/// below revalidate that separately.
+/// Publication seals and validates the staged tree before atomically moving it
+/// to its final key. A marker there allows later runs to reuse the app without
+/// inspecting every extracted file again.
 const CACHE_COMPLETE_MARKER: &str = ".nub-complete";
 
 fn completion_marker_is_ready(cache_dir: &Path) -> bool {
@@ -884,25 +877,8 @@ fn embedded_node_cache_is_ready(manifest: &Manifest, cache_dir: &Path) -> bool {
     saw_node && saw_marker
 }
 
-/// What an extracted app file is accepted against.
-///
-/// A LENGTH, wherever the payload records one — and it is the only reason a warm
-/// launch costs O(files) rather than O(payload bytes). The byte comparison this
-/// replaces had to materialize the whole app region first, so every start paid a
-/// zstd decode of the entire payload: 0.2 ms on hello world, 45 ms on the same
-/// program with a 20 MB `--include`, 34 ms on a `sharp` app.
-///
-/// Why a length is the right acceptance policy is already argued in full on
-/// `Manifest::node_size`, which converted the embedded Node for exactly these
-/// reasons: the content digest is already in the PATH — the tree lives at
-/// `compile-app/<short_key(app_sha256)>` — so re-reading the bytes established no
-/// identity the directory name did not already assert. All it added was detecting
-/// a change since extraction, and against a same-uid attacker that is nothing:
-/// `cache_metadata_is_trusted` has established the tree is owner-only and
-/// non-group-writable, and that same uid can rewrite the artifact binary itself.
-/// The failure it must catch — an OS or antivirus sweep truncating or clearing a
-/// purgeable cache — changes the length. The app tree simply never got the
-/// treatment the Node beside it did.
+/// What a staged app file is validated against before publication. Recorded
+/// lengths avoid decompressing the payload a second time for this check.
 enum Extracted<'a> {
     Size(u64),
     /// A payload whose app region predates recorded lengths. Its bytes are the
@@ -910,17 +886,38 @@ enum Extracted<'a> {
     Bytes(Cow<'a, [u8]>),
 }
 
-/// A completed app cache is an exact materialization of `PayloadView::app_files`
-/// plus the empty marker: no file of a different length, symlinks, special files,
-/// empty extra directories, or package/module-resolution inputs absent from the
-/// payload.
-fn app_cache_is_ready(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
+/// Reuse a published extraction without enumerating its contents. Publication
+/// already validated the tree, and the content-keyed private directory prevents
+/// other principals from changing it. Same-user changes within a completed tree
+/// are not proactively repaired; removing its marker requests re-extraction.
+fn app_cache_is_ready(manifest: &Manifest, cache_dir: &Path) -> bool {
     if !cache_artifact_directory_is_trusted(cache_dir) {
         phase("  app_cache: NOT READY (directory not trusted)");
         return false;
     }
     if !completion_marker_is_ready(cache_dir) {
         phase("  app_cache: NOT READY (completion marker)");
+        return false;
+    }
+
+    // Check both paths handed to Node, regardless of how many other files the
+    // payload holds. The bootstrap is also needed by standalone preambles.
+    if !is_safe_relative_name(&manifest.entry) || manifest.entry == CACHE_COMPLETE_MARKER {
+        return false;
+    }
+    [manifest.entry.as_str(), compile::COMPILE_BOOTSTRAP_NAME]
+        .iter()
+        .all(|name| {
+            let path = cache_dir.join(name);
+            fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata_is_trusted_regular_file(&path, &metadata))
+        })
+}
+
+/// Validate the staged app against the payload before publication: exact names,
+/// lengths and executable bits, with no symlinks, special files or extra inputs.
+fn app_cache_matches_payload(view: &PayloadView<'_>, cache_dir: &Path) -> bool {
+    if !app_cache_is_ready(&view.manifest, cache_dir) {
         return false;
     }
 
@@ -1032,9 +1029,8 @@ fn collect_tree_paths(
 
 /// `symlink_metadata` for every collected path, fanned out across threads.
 ///
-/// A warm start is syscall-bound here and the calls are independent, so this is
-/// the one place in it where parallelism buys real time. Each thread owns a
-/// disjoint slice and returns its own results, so nothing is shared mutably:
+/// Publication validation is syscall-bound here and the calls are independent.
+/// Each thread owns a disjoint slice and returns its own results, so nothing is shared mutably:
 /// there is no lock to contend and no ordering to get wrong. Below the
 /// threshold the threads cost more than the stats they would save.
 fn stat_paths(paths: &[PathBuf]) -> Option<Vec<fs::Metadata>> {
@@ -2415,7 +2411,7 @@ fn smol_mirror_base() -> String {
 /// repaired through the same staged publication as the embedded Node.
 fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
     let app_dir = app_cache_dir(base, &view.manifest);
-    if app_cache_is_ready(view, &app_dir) {
+    if app_cache_is_ready(&view.manifest, &app_dir) {
         return Ok(app_dir);
     }
 
@@ -2473,7 +2469,7 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
         }
     }
     split.report(view.app_files.len());
-    publish_cache_dir(&tmp, &app_dir, |dir| app_cache_is_ready(view, dir))?;
+    publish_cache_dir(&tmp, &app_dir, |dir| app_cache_matches_payload(view, dir))?;
     Ok(app_dir)
 }
 
@@ -2850,8 +2846,7 @@ where
         })?;
     let _publication_lock = lock_cache_publication(dest)?;
 
-    // Retain a concurrent winner only after the same exact content validation
-    // every reader performs; a marker alone is never a completeness verdict.
+    // Validate a concurrent winner before discarding the staged replacement.
     if is_complete(dest) {
         let _ = fs::remove_dir_all(tmp);
         return Ok(());
@@ -3674,6 +3669,7 @@ mod tests {
     /// and fails on another for a reason that has nothing to do with what it tests.
     /// Production never has the problem: it writes through `create_private_file`,
     /// which pins 0o600 at open time and again afterwards.
+    #[cfg(unix)]
     fn write_staged_fixture(path: &Path, bytes: &[u8]) {
         fs::write(path, bytes).unwrap();
         #[cfg(unix)]
@@ -3715,6 +3711,7 @@ mod tests {
             manifest: test_manifest(),
             app_files: vec![
                 AppFile::plain("main.js", &b"app"[..]),
+                AppFile::plain(compile::COMPILE_BOOTSTRAP_NAME, &b"bootstrap"[..]),
                 AppFile::plain("nested/data.json", &br#"{"ok":true}"#[..]),
             ],
             node_blob: &[],
@@ -4169,56 +4166,54 @@ mod tests {
     }
 
     #[test]
-    fn app_cache_rejects_changed_marker_files_and_resolution_inputs() {
+    fn app_publication_rejects_changed_marker_files_and_resolution_inputs() {
         let base = fresh_cache_dir("app-integrity");
         let view = test_view();
         let app_dir = materialize_test_app(&view, &base);
         let entry = app_dir.join(&view.manifest.entry);
         let marker = app_dir.join(CACHE_COMPLETE_MARKER);
-        assert!(app_cache_is_ready(&view, &app_dir));
+        assert!(app_cache_matches_payload(&view, &app_dir));
 
         fs::write(&entry, b"attacker-controlled JavaScript").unwrap();
         assert!(
-            !app_cache_is_ready(&view, &app_dir),
+            !app_cache_matches_payload(&view, &app_dir),
             "an entry that no longer has its extracted length is not cache state"
         );
         fs::write(&entry, b"app").unwrap();
 
-        // A cleared or truncated file is the failure a purgeable cache actually
-        // produces, and it must be caught anywhere in the tree, not only at the
-        // entry Node executes.
+        // Publication validates every staged file, not only the entry.
         let nested = app_dir.join("nested/data.json");
         fs::write(&nested, b"").unwrap();
         assert!(
-            !app_cache_is_ready(&view, &app_dir),
+            !app_cache_matches_payload(&view, &app_dir),
             "every payload file is length-checked, not only the executable entry"
         );
         fs::write(&nested, br#"{"ok":true}"#).unwrap();
 
         fs::write(&marker, b"attacker marker").unwrap();
         assert!(
-            !app_cache_is_ready(&view, &app_dir),
+            !app_cache_matches_payload(&view, &app_dir),
             "the completion marker has one valid representation: an empty regular file"
         );
         fs::write(&marker, b"").unwrap();
 
         fs::remove_file(&nested).unwrap();
         assert!(
-            !app_cache_is_ready(&view, &app_dir),
+            !app_cache_matches_payload(&view, &app_dir),
             "every payload file must still exist under its exact name"
         );
         write_file(&nested, br#"{"ok":true}"#).unwrap();
 
         write_file(&app_dir.join("package.json"), br#"{"type":"commonjs"}"#).unwrap();
         assert!(
-            !app_cache_is_ready(&view, &app_dir),
+            !app_cache_matches_payload(&view, &app_dir),
             "an unexpected package.json can change Node module interpretation"
         );
         fs::remove_file(app_dir.join("package.json")).unwrap();
 
         create_staging_subdirs(&app_dir, &app_dir.join("node_modules")).unwrap();
         assert!(
-            !app_cache_is_ready(&view, &app_dir),
+            !app_cache_matches_payload(&view, &app_dir),
             "even an empty unexpected directory makes the extracted tree stale"
         );
         let _ = fs::remove_dir_all(&base);
@@ -4271,8 +4266,8 @@ mod tests {
             file.bytes = &b"not a zstd frame"[..];
         }
         assert!(
-            app_cache_is_ready(&view, &app_dir),
-            "readiness must come from the recorded extracted lengths, not the payload bytes"
+            app_cache_is_ready(&view.manifest, &app_dir),
+            "warm readiness must not read or decompress the payload's file bodies"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -4341,7 +4336,7 @@ mod tests {
         std::os::unix::fs::symlink(&attacker, &entry).unwrap();
 
         assert!(
-            !app_cache_is_ready(&view, &app_dir),
+            !app_cache_is_ready(&view.manifest, &app_dir),
             "matching names reached through symlinks are not payload files"
         );
 
@@ -4367,7 +4362,7 @@ mod tests {
         let nested = app_dir.join("nested");
         fs::set_permissions(&nested, fs::Permissions::from_mode(0o775)).unwrap();
         assert!(
-            !app_cache_is_ready(&view, &app_dir),
+            !app_cache_matches_payload(&view, &app_dir),
             "a writable payload directory permits another principal to replace files"
         );
         fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
@@ -4383,7 +4378,106 @@ mod tests {
     }
 
     #[test]
-    fn ensure_app_repairs_a_tampered_completed_tree() {
+    fn warm_app_readiness_requires_a_marker_and_safe_regular_launch_files() {
+        let base = fresh_cache_dir("app-warm-readiness");
+        let mut view = test_view();
+        let app_dir = materialize_test_app(&view, &base);
+        let marker = app_dir.join(CACHE_COMPLETE_MARKER);
+        assert!(app_cache_is_ready(&view.manifest, &app_dir));
+
+        fs::write(&marker, b"incomplete").unwrap();
+        assert!(!app_cache_is_ready(&view.manifest, &app_dir));
+        fs::remove_file(&marker).unwrap();
+        assert!(!app_cache_is_ready(&view.manifest, &app_dir));
+        fs::create_dir(&marker).unwrap();
+        assert!(!app_cache_is_ready(&view.manifest, &app_dir));
+        fs::remove_dir(&marker).unwrap();
+        write_file(&marker, b"").unwrap();
+
+        for name in [
+            view.manifest.entry.as_str(),
+            compile::COMPILE_BOOTSTRAP_NAME,
+        ] {
+            let path = app_dir.join(name);
+            fs::remove_file(&path).unwrap();
+            assert!(!app_cache_is_ready(&view.manifest, &app_dir), "{name}");
+            assert_eq!(ensure_app(&view, &base).unwrap(), app_dir);
+            assert!(app_cache_matches_payload(&view, &app_dir));
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+            assert!(!app_cache_is_ready(&view.manifest, &app_dir), "{name}");
+            assert_eq!(ensure_app(&view, &base).unwrap(), app_dir);
+            assert!(app_cache_matches_payload(&view, &app_dir));
+        }
+
+        for name in ["../outside.js", "/outside.js", CACHE_COMPLETE_MARKER] {
+            view.manifest.entry = name.to_string();
+            assert!(!app_cache_is_ready(&view.manifest, &app_dir), "{name}");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warm_app_readiness_rejects_writable_roots_and_launch_file_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let base = fresh_cache_dir("app-warm-trust");
+        let view = test_view();
+        let app_dir = materialize_test_app(&view, &base);
+        for path in [
+            app_dir.clone(),
+            app_dir.parent().unwrap().to_path_buf(),
+            app_dir.join(CACHE_COMPLETE_MARKER),
+            app_dir.join(&view.manifest.entry),
+            app_dir.join(compile::COMPILE_BOOTSTRAP_NAME),
+        ] {
+            let permissions = fs::metadata(&path).unwrap().permissions();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(!app_cache_is_ready(&view.manifest, &app_dir), "{path:?}");
+            fs::set_permissions(&path, permissions).unwrap();
+            assert!(app_cache_is_ready(&view.manifest, &app_dir));
+        }
+        for name in [
+            CACHE_COMPLETE_MARKER,
+            &view.manifest.entry,
+            compile::COMPILE_BOOTSTRAP_NAME,
+        ] {
+            let path = app_dir.join(name);
+            let moved = base.join("moved");
+            fs::rename(&path, &moved).unwrap();
+            symlink(&moved, &path).unwrap();
+            assert!(!app_cache_is_ready(&view.manifest, &app_dir), "{name}");
+            fs::remove_file(&path).unwrap();
+            fs::rename(&moved, &path).unwrap();
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn app_publication_validates_the_whole_tree_even_when_the_entry_is_ready() {
+        let base = fresh_cache_dir("app-incomplete-stage");
+        let view = test_view();
+        let staged = base.join("staged");
+        let dest = app_cache_dir(&base, &view.manifest);
+        create_staging_dir(&staged).unwrap();
+        write_file(&staged.join(&view.manifest.entry), b"app").unwrap();
+        write_file(&staged.join(compile::COMPILE_BOOTSTRAP_NAME), b"bootstrap").unwrap();
+
+        let error = publish_cache_dir(&staged, &dest, |dir| {
+            // The entry and marker exist, but nested/data.json is absent.
+            assert!(app_cache_is_ready(&view.manifest, dir));
+            app_cache_matches_payload(&view, dir)
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("staged cache failed integrity"));
+        assert!(!dest.exists(), "an incomplete tree must never be published");
+        assert!(!staged.exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ensure_app_reuses_a_completed_tree_until_its_marker_is_removed() {
         let base = fresh_cache_dir("app-repair");
         let view = test_view();
         let app_dir = materialize_test_app(&view, &base);
@@ -4393,6 +4487,19 @@ mod tests {
         )
         .unwrap();
         write_file(&app_dir.join("package.json"), br#"{"type":"commonjs"}"#).unwrap();
+        fs::remove_file(app_dir.join("nested/data.json")).unwrap();
+
+        assert_eq!(ensure_app(&view, &base).unwrap(), app_dir);
+        assert_eq!(
+            fs::read(app_dir.join(&view.manifest.entry)).unwrap(),
+            b"attacker-controlled JavaScript",
+            "reuse must not silently rewrite a completed extraction"
+        );
+        assert!(app_dir.join("package.json").exists());
+        assert!(!app_dir.join("nested/data.json").exists());
+        assert!(app_cache_is_ready(&view.manifest, &app_dir));
+        assert!(!app_cache_matches_payload(&view, &app_dir));
+        fs::remove_file(app_dir.join(CACHE_COMPLETE_MARKER)).unwrap();
 
         assert_eq!(ensure_app(&view, &base).unwrap(), app_dir);
         assert_eq!(
@@ -4400,7 +4507,7 @@ mod tests {
             b"app"
         );
         assert!(!app_dir.join("package.json").exists());
-        assert!(app_cache_is_ready(&view, &app_dir));
+        assert!(app_cache_matches_payload(&view, &app_dir));
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -4433,17 +4540,18 @@ mod tests {
         assert_eq!(mode("bin/helper"), 0o700, "a marked file must be spawnable");
         assert_eq!(mode("main.js"), 0o600, "an unmarked file stays owner-rw");
         assert_eq!(mode("nested/data.json"), 0o600);
-        assert!(app_cache_is_ready(&view, &app_dir));
+        assert!(app_cache_matches_payload(&view, &app_dir));
 
-        // A tree extracted before per-file modes existed carries the same bytes at
-        // 0o600, so only the mode can tell it apart — and it must be repaired
-        // rather than reused with a helper the app cannot spawn.
+        // Publication rejects a missing executable bit. Once published, changing
+        // a helper's mode does not trigger a scan; remove the marker to repair it.
         fs::set_permissions(
             app_dir.join("bin/helper"),
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
-        assert!(!app_cache_is_ready(&view, &app_dir));
+        assert!(!app_cache_matches_payload(&view, &app_dir));
+        assert!(app_cache_is_ready(&view.manifest, &app_dir));
+        fs::remove_file(app_dir.join(CACHE_COMPLETE_MARKER)).unwrap();
         assert_eq!(ensure_app(&view, &base).unwrap(), app_dir);
         assert_eq!(mode("bin/helper"), 0o700);
         let _ = fs::remove_dir_all(&base);
@@ -4877,7 +4985,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_readiness_rejects_shared_nested_app_and_node_files() {
+    fn windows_publication_rejects_shared_nested_app_and_node_files() {
         let base = fresh_cache_dir("windows-shared-nested-artifacts");
         let view = test_view();
         let app = materialize_test_app(&view, &base);
@@ -4885,7 +4993,7 @@ mod tests {
         fs::remove_file(&nested).unwrap();
         write_everyone_writable_test_file(&nested, br#"{"ok":true}"#);
         assert!(
-            !app_cache_is_ready(&view, &app),
+            !app_cache_matches_payload(&view, &app),
             "an Everyone-writable nested app file was accepted"
         );
 
@@ -5209,15 +5317,7 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A compile cache written by Node must not invalidate the app extraction.
-    ///
-    /// `app_cache_is_ready` requires the extraction directory to hold EXACTLY the
-    /// payload's files, so anything Node writes inside it makes the tree mismatch —
-    /// and the app is then re-extracted on every launch, forever, because the
-    /// re-extraction re-creates the directory that breaks the check. That is not
-    /// hypothetical: pointing `NODE_COMPILE_CACHE` at `app_dir/.v8-compile-cache`
-    /// did exactly this and cost 32.6 ms per launch, measured, while the cache
-    /// itself never survived. The feature spent time instead of saving it.
+    /// Runtime-generated code-cache files stay outside the published payload.
     #[cfg(unix)]
     #[test]
     fn a_node_written_compile_cache_does_not_invalidate_the_app_extraction() {
@@ -5237,7 +5337,7 @@ mod tests {
         // requires len == 0, so any content here would fail the control below.
         write_staged_fixture(&app_dir.join(CACHE_COMPLETE_MARKER), b"");
         assert!(
-            app_cache_is_ready(&view, &app_dir),
+            app_cache_matches_payload(&view, &app_dir),
             "control: a freshly written extraction must be ready, or the assertion \
              below would pass for the wrong reason"
         );
@@ -5248,10 +5348,8 @@ mod tests {
         fs::write(cache.join("12345.blob"), b"v8 code cache").unwrap();
 
         assert!(
-            app_cache_is_ready(&view, &app_dir),
-            "the compile cache must live OUTSIDE the extraction: a warm launch that \
-             re-extracts the app can never converge, because re-extracting re-creates \
-             the directory whose presence broke the check"
+            app_cache_matches_payload(&view, &app_dir),
+            "runtime-written code cache must not change the published payload"
         );
         assert!(
             !cache.starts_with(&app_dir),

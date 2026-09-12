@@ -35,6 +35,7 @@ use unicode_normalization::UnicodeNormalization;
 mod assets;
 pub mod bundle;
 mod closure;
+mod code_cache;
 mod external;
 mod icu;
 mod inject;
@@ -383,7 +384,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // loader serves them from `module.registerHooks` at real `file:` URLs, where
     // `import.meta.url` and every relative specifier already mean what they mean in
     // the extracted tree. See `compile::sea::payload`.
-    let (app_files, inline_app, app_delivery) = if use_sea {
+    let (mut app_files, inline_app, app_delivery) = if use_sea {
         (app_files, false, AppDelivery::Sea)
     } else {
         match inline::rewrite(app_files, &no_extract_inputs)? {
@@ -408,7 +409,6 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             }
         }
     };
-    let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
         live.phase("embedding", &format!("{} files", layout.assets.len()));
     }
@@ -495,6 +495,29 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         (exact, None, node, summary)
     };
 
+    let has_code_cache = if !opts.smol
+        && !use_sea
+        && !inline_app
+        && target.is_host()
+        && node_version.0.major >= 24
+    {
+        match node
+            .path
+            .as_deref()
+            .map(|path| code_cache::attach(&mut app_files, path))
+            .transpose()
+        {
+            Ok(attached) => attached.unwrap_or(false),
+            Err(error) => {
+                note(&format!("Skipping build-time code cache: {error}"));
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let app_sha = sha256_of_app(&app_files);
+
     // Compress AFTER `sha256_of_app` above: that hash is the extraction cache key
     // and must stay over the semantic content, not over whatever this zstd version
     // happens to emit. Per file rather than per region because `nub_core::compile`
@@ -540,7 +563,14 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
                             .with_context(|| format!("brotli-compressing {}", file.name))?
                     }
                 } else {
-                    zstd::encode_all(&file.bytes[..], 19)
+                    // The cache pack stays compressed after extraction. Another
+                    // high-level pass over it saves little and can dominate a build.
+                    let level = if has_code_cache && file.name == code_cache::PACK_NAME {
+                        1
+                    } else {
+                        19
+                    };
+                    zstd::encode_all(&file.bytes[..], level)
                         .with_context(|| format!("zstd-compressing {}", file.name))?
                 };
                 Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
@@ -597,6 +627,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         inline_app,
         // An inline payload runs the bootstrap as `-e` and has no preload to save.
         standalone_preamble: !inline_app
+            && !has_code_cache
             && bundled.bootstrap_optional
             && supports_standalone_preamble(opts.bundle.target_node),
     };
@@ -2644,6 +2675,8 @@ enum NodeDelivery {
 
 #[derive(Default)]
 struct EmbeddedNode {
+    /// The provisioned executable, used only by native-target build helpers.
+    path: Option<PathBuf>,
     /// The Node bytes as they go into the artifact: zstd-19 compressed under
     /// [`NodeDelivery::Compressed`], the prepared image itself under
     /// [`NodeDelivery::Verbatim`].
@@ -2703,6 +2736,7 @@ fn build_node_blob(
     // the ~20 s zstd-19 pass on a cache miss below.
     if delivery == NodeDelivery::Verbatim {
         return Ok(EmbeddedNode {
+            path: Some(node_bin),
             size: bytes.len() as u64,
             blob: bytes,
             sha256: sha,
@@ -2739,6 +2773,7 @@ fn build_node_blob(
     };
     let license = zstd::encode_all(&license[..], 19).context("zstd-19 compressing Node LICENSE")?;
     Ok(EmbeddedNode {
+        path: Some(node_bin),
         blob,
         sha256: sha,
         blake3: b3,

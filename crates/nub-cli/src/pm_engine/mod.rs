@@ -579,6 +579,17 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     let project = std::path::Path::new(project_dir);
     match rt.block_on(aube::embed::bootstrap_node_gyp(project)) {
         Ok(binary) => {
+            // node-gyp runs next, under the project's Node, so put that Node's
+            // headers where node-gyp looks before it downloads them
+            // (`nub_core::node::headers`). Plain discovery, never provisioning:
+            // the version logic fires only where node-version-management puts
+            // it. Best effort, since node-gyp's own download stays the fallback.
+            if let Ok(node) = nub_core::node::discovery::discover_node(project) {
+                nub_core::node::headers::seed_node_gyp_cache(
+                    node.path.as_std_path(),
+                    &node.version.to_string(),
+                );
+            }
             println!("{}", binary.display());
             Ok(0)
         }
