@@ -677,6 +677,17 @@ fn reply(nfd: RawFd, id: u64, err: i32) {
     }
 }
 
+fn reply_value(nfd: RawFd, id: u64, value: i64) {
+    let mut r = SeccompNotifResp {
+        id,
+        val: value,
+        ..Default::default()
+    };
+    if ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void) < 0 {
+        suplog!("[sup] SEND: {}", io::Error::last_os_error());
+    }
+}
+
 fn reply_continue(nfd: RawFd, id: u64) {
     let mut r = SeccompNotifResp {
         id,
@@ -684,6 +695,272 @@ fn reply_continue(nfd: RawFd, id: u64) {
         ..Default::default()
     };
     ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void);
+}
+
+// ---------------------------------------------------------------------------
+// send* snapshot + replay
+// ---------------------------------------------------------------------------
+
+// USER_NOTIF exposes register arguments, not the pointed-to msghdr/iovec data.  Continuing a
+// send after merely inspecting that data is explicitly racy: another child thread may replace an
+// initially-null `msg_name` with a destination while the notifying thread waits.  Replay IP
+// socket sends from these bounded, supervisor-owned snapshots instead.  The limits match the
+// kernel's `UIO_MAXIOV` batch bound and keep a malicious request from making the supervisor
+// allocate without limit.  Ordinary DNS, TLS, and package-registry writes are far below 16 MiB.
+const MAX_SEND_MMSG: usize = 1024;
+const MAX_SEND_IOV: usize = 1024;
+const MAX_SEND_BYTES: usize = 16 * 1024 * 1024;
+
+/// A connected send, copied out of target memory.  Addressed messages and ancillary data are
+/// rejected before any send in a batch: there is no safe way to replay SCM_RIGHTS (the numbers
+/// name the target's fd table) and the egress policy denies explicitly addressed IP sends.
+#[derive(Debug)]
+struct SendSnapshot {
+    bytes: Vec<u8>,
+}
+
+/// Keep a `/proc/<tid>/mem` description open from the first ID check through every read.  This
+/// binds reads to the notified address space even if a dead TID is quickly reused; the final
+/// `NOTIF_ID_VALID` check below additionally proves the blocked syscall still belongs to it.
+fn open_child_mem(tid: u32) -> io::Result<OwnedFd> {
+    let path = CString::new(format!("/proc/{tid}/mem")).unwrap();
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn child_pread(mem: RawFd, off: u64, buf: &mut [u8]) -> Result<(), i32> {
+    let got = unsafe {
+        libc::pread(
+            mem,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            off as libc::off_t,
+        )
+    };
+    if got == buf.len() as isize {
+        Ok(())
+    } else {
+        Err(if got < 0 { errno() } else { libc::EFAULT })
+    }
+}
+
+fn child_struct<T: Copy>(mem: RawFd, off: u64) -> Result<T, i32> {
+    let mut value = MaybeUninit::<T>::zeroed();
+    let bytes =
+        unsafe { std::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, size_of::<T>()) };
+    child_pread(mem, off, bytes)?;
+    Ok(unsafe { value.assume_init() })
+}
+
+fn snapshot_msghdr(mem: RawFd, hdr: libc::msghdr) -> Result<SendSnapshot, i32> {
+    // The existing policy rejects any non-NULL name, including a zero-length one.  Keep that
+    // contract, rather than treating a malformed supplied address as a connected send.
+    if !hdr.msg_name.is_null() {
+        return Err(libc::EPERM);
+    }
+    if !hdr.msg_control.is_null() || hdr.msg_controllen != 0 {
+        return Err(libc::EPERM);
+    }
+    let count = hdr.msg_iovlen;
+    if count > MAX_SEND_IOV {
+        return Err(libc::EINVAL);
+    }
+    if count != 0 && hdr.msg_iov.is_null() {
+        return Err(libc::EFAULT);
+    }
+    let bytes_len = count
+        .checked_mul(size_of::<libc::iovec>())
+        .ok_or(libc::EFAULT)?;
+    let mut iovecs = vec![unsafe { std::mem::zeroed::<libc::iovec>() }; count];
+    if bytes_len != 0 {
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(iovecs.as_mut_ptr() as *mut u8, bytes_len) };
+        child_pread(mem, hdr.msg_iov as u64, bytes)?;
+    }
+    let total = iovecs.iter().try_fold(0usize, |total, iov| {
+        total.checked_add(iov.iov_len).ok_or(libc::EFAULT)
+    })?;
+    if total > MAX_SEND_BYTES {
+        return Err(libc::EMSGSIZE);
+    }
+    let mut payload = Vec::with_capacity(total);
+    for iov in iovecs {
+        if iov.iov_len == 0 {
+            continue;
+        }
+        if iov.iov_base.is_null() {
+            return Err(libc::EFAULT);
+        }
+        let begin = payload.len();
+        payload.resize(begin + iov.iov_len, 0);
+        child_pread(mem, iov.iov_base as u64, &mut payload[begin..])?;
+    }
+    Ok(SendSnapshot { bytes: payload })
+}
+
+fn snapshot_sendto(mem: RawFd, req: &SeccompNotif) -> Result<SendSnapshot, i32> {
+    // sendto(fd, buf, len, flags, dest_addr, addrlen): no destination is the connected form.
+    if req.data.args[4] != 0 {
+        return Err(libc::EPERM);
+    }
+    let len = usize::try_from(req.data.args[2]).map_err(|_| libc::EFAULT)?;
+    if len > MAX_SEND_BYTES {
+        return Err(libc::EMSGSIZE);
+    }
+    if len != 0 && req.data.args[1] == 0 {
+        return Err(libc::EFAULT);
+    }
+    let mut bytes = vec![0; len];
+    if len != 0 {
+        child_pread(mem, req.data.args[1], &mut bytes)?;
+    }
+    Ok(SendSnapshot { bytes })
+}
+
+fn snapshot_mmsgs(mem: RawFd, base: u64, count: usize) -> Result<Vec<SendSnapshot>, i32> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if count > MAX_SEND_MMSG || base == 0 {
+        return Err(libc::EFAULT);
+    }
+    let mut total = 0usize;
+    let mut snapshots = Vec::with_capacity(count);
+    for index in 0..count {
+        let offset = index
+            .checked_mul(size_of::<libc::mmsghdr>())
+            .and_then(|offset| base.checked_add(offset as u64))
+            .ok_or(libc::EFAULT)?;
+        let snapshot = child_struct::<libc::mmsghdr>(mem, offset)
+            .and_then(|msg| snapshot_msghdr(mem, msg.msg_hdr))?;
+        total = total
+            .checked_add(snapshot.bytes.len())
+            .ok_or(libc::EMSGSIZE)?;
+        if total > MAX_SEND_BYTES {
+            return Err(libc::EMSGSIZE);
+        }
+        snapshots.push(snapshot);
+    }
+    Ok(snapshots)
+}
+
+fn notification_is_live(nfd: RawFd, id: u64) -> bool {
+    ioctl_notif(nfd, notif_id_valid(), &mut { id } as *mut u64
+        as *mut libc::c_void)
+        >= 0
+}
+
+/// Duplicate and classify the target fd before a decision.  The duplicate keeps the same open
+/// file description after another target thread closes or reuses its numeric fd, so replay uses
+/// the identity the supervisor observed, not a later target-table occupant.
+fn duplicate_child_socket(tgid: u32, fd: RawFd) -> Result<(OwnedFd, i32, i32), i32> {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, tgid, 0) } as RawFd;
+    if pidfd < 0 {
+        return Err(errno());
+    }
+    let copy = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd, fd, 0) } as RawFd;
+    unsafe { libc::close(pidfd) };
+    if copy < 0 {
+        return Err(errno());
+    }
+    let copy = unsafe { OwnedFd::from_raw_fd(copy) };
+    let mut domain = -1;
+    let mut kind = -1;
+    let mut size = size_of::<i32>() as libc::socklen_t;
+    let domain_ok = unsafe {
+        libc::getsockopt(
+            copy.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_DOMAIN,
+            &mut domain as *mut _ as *mut libc::c_void,
+            &mut size,
+        )
+    } == 0;
+    size = size_of::<i32>() as libc::socklen_t;
+    let kind_ok = unsafe {
+        libc::getsockopt(
+            copy.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut kind as *mut _ as *mut libc::c_void,
+            &mut size,
+        )
+    } == 0;
+    if domain_ok && kind_ok {
+        Ok((copy, domain, kind))
+    } else {
+        Err(libc::ENOTSOCK)
+    }
+}
+
+/// Run one replayed connected send without allowing a blocked target to strand shutdown.  A
+/// blocking target socket is retried with per-call `MSG_DONTWAIT` and a cancellable poll; a
+/// target-created nonblocking socket keeps its normal immediate EAGAIN behavior.
+fn send_snapshot(
+    control: &WorkerControl,
+    fd: RawFd,
+    bytes: &[u8],
+    flags: i32,
+) -> Result<isize, i32> {
+    let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if status < 0 {
+        return Err(errno());
+    }
+    let target_nonblocking = status & libc::O_NONBLOCK != 0;
+    loop {
+        let call_flags = if target_nonblocking {
+            flags
+        } else {
+            flags | libc::MSG_DONTWAIT
+        };
+        let result = unsafe {
+            libc::send(
+                fd,
+                bytes.as_ptr() as *const libc::c_void,
+                bytes.len(),
+                call_flags,
+            )
+        };
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = errno();
+        if target_nonblocking || (error != libc::EAGAIN && error != libc::EWOULDBLOCK) {
+            return Err(error);
+        }
+        if !control.wait(fd, libc::POLLOUT, None).unwrap_or(false) {
+            return Err(libc::ECANCELED);
+        }
+    }
+}
+
+/// Write the `sendmmsg` completion count back to the original output slot.  This is not policy
+/// input, and every attempted address/payload has already been copied.  A failed write mirrors
+/// the kernel's post-send output-fault ambiguity: report the failure only when no prior message
+/// completed; otherwise retain the documented partial-batch count.
+fn write_mmsg_len(mem: RawFd, base: u64, index: usize, len: u32) -> Result<(), i32> {
+    let offset = index
+        .checked_mul(size_of::<libc::mmsghdr>())
+        .and_then(|v| v.checked_add(std::mem::offset_of!(libc::mmsghdr, msg_len)))
+        .and_then(|v| base.checked_add(v as u64))
+        .ok_or(libc::EFAULT)?;
+    let result = unsafe {
+        libc::pwrite(
+            mem,
+            &len as *const u32 as *const libc::c_void,
+            size_of::<u32>(),
+            offset as libc::off_t,
+        )
+    };
+    if result == size_of::<u32>() as isize {
+        Ok(())
+    } else {
+        Err(if result < 0 { errno() } else { libc::EFAULT })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1570,25 +1847,122 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             continue;
         }
 
-        // send*: CONTINUE for a connected socket (NULL addr), EPERM for an addressed one.
+        // send*: IP sockets are replayed from supervisor-owned snapshots.  In particular,
+        // CONTINUE is NOT safe after reading a null msg_name: the kernel would reread mutable
+        // target memory after the response and a second thread could turn it into an addressed
+        // UDP send.  Non-IP sockets are intentionally continued after FD classification: the
+        // network policy has no authority over an AF_UNIX socketpair's SCM_RIGHTS semantics.
         if nr == libc::SYS_sendto || nr == libc::SYS_sendmsg || nr == libc::SYS_sendmmsg {
-            let addr_ptr: u64 = if nr == libc::SYS_sendto {
-                req.data.args[4]
-            } else {
-                // msghdr.msg_name is the first field; read the pointer from child mem.
-                let mut buf = [0u8; 8];
-                let got = unsafe { read_child_mem(req.pid, req.data.args[1], &mut buf) };
-                if got == 8 {
-                    u64::from_ne_bytes(buf)
-                } else {
-                    1 // treat as addressed on failure
+            let tgid = tgid_of(req.pid);
+            let (socket, domain, kind) = match duplicate_child_socket(tgid, cfd) {
+                Ok(socket) => socket,
+                // A non-socket retains normal kernel behavior (normally ENOTSOCK).  An inability
+                // to duplicate a socket is fail-closed: continuing would lose its stable identity.
+                Err(libc::ENOTSOCK) => {
+                    reply_continue(nfd, req.id);
+                    continue;
+                }
+                Err(error) => {
+                    suplog!("SUP DENY send*: could not duplicate fd {cfd}: errno={error}");
+                    reply(nfd, req.id, -libc::EPERM);
+                    continue;
                 }
             };
-            if addr_ptr == 0 {
-                reply_continue(nfd, req.id); // connected: policed at connect()
-            } else {
-                suplog!("SUP DENY UDP-send (addressed) -> EPERM");
+            if domain != libc::AF_INET && domain != libc::AF_INET6 {
+                // AF_UNIX socketpairs and inherited non-IP IPC preserve their native sendmsg
+                // (including SCM_RIGHTS) contract.  The socket-family ceiling prevents these
+                // families from being created as egress alternatives in a confined launch.
+                reply_continue(nfd, req.id);
+                continue;
+            }
+            if kind != libc::SOCK_DGRAM && kind != libc::SOCK_STREAM {
                 reply(nfd, req.id, -libc::EPERM);
+                continue;
+            }
+
+            let mem = match open_child_mem(req.pid) {
+                Ok(mem) if notification_is_live(nfd, req.id) => mem,
+                _ => {
+                    reply(nfd, req.id, -libc::EPERM);
+                    continue;
+                }
+            };
+            let snapshots = if nr == libc::SYS_sendto {
+                snapshot_sendto(mem.as_raw_fd(), &req).map(|snapshot| vec![snapshot])
+            } else if nr == libc::SYS_sendmsg {
+                child_struct::<libc::msghdr>(mem.as_raw_fd(), req.data.args[1])
+                    .and_then(|hdr| snapshot_msghdr(mem.as_raw_fd(), hdr))
+                    .map(|snapshot| vec![snapshot])
+            } else {
+                // `sendmmsg` itself caps `vlen` at UIO_MAXIOV; mirror that rather than turning
+                // an otherwise-valid oversized request into a policy error.
+                let count = (req.data.args[2] as u32 as usize).min(MAX_SEND_MMSG);
+                snapshot_mmsgs(mem.as_raw_fd(), req.data.args[1], count)
+            };
+            let snapshots = match snapshots {
+                Ok(snapshots) => snapshots,
+                Err(libc::EPERM) => {
+                    suplog!("SUP DENY IP send*: addressed or ancillary message -> EPERM");
+                    reply(nfd, req.id, -libc::EPERM);
+                    continue;
+                }
+                Err(error) => {
+                    reply(nfd, req.id, -error);
+                    continue;
+                }
+            };
+            if !notification_is_live(nfd, req.id) {
+                reply(nfd, req.id, -libc::EPERM);
+                continue;
+            }
+            if nr == libc::SYS_sendmmsg && snapshots.is_empty() {
+                reply_value(nfd, req.id, 0);
+                continue;
+            }
+
+            let flags = if nr == libc::SYS_sendto {
+                req.data.args[3] as i32
+            } else if nr == libc::SYS_sendmsg {
+                req.data.args[2] as i32
+            } else {
+                req.data.args[3] as i32
+            };
+            let mut completed = 0usize;
+            let mut first_error = None;
+            for (index, snapshot) in snapshots.iter().enumerate() {
+                match send_snapshot(&control, socket.as_raw_fd(), &snapshot.bytes, flags) {
+                    Ok(sent) => {
+                        if nr == libc::SYS_sendmmsg
+                            && let Err(error) = write_mmsg_len(
+                                mem.as_raw_fd(),
+                                req.data.args[1],
+                                index,
+                                sent as u32,
+                            )
+                        {
+                            first_error = Some(error);
+                            break;
+                        }
+                        completed += 1;
+                        if nr != libc::SYS_sendmmsg {
+                            reply_value(nfd, req.id, sent as i64);
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        first_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if nr == libc::SYS_sendmmsg {
+                if completed != 0 {
+                    reply_value(nfd, req.id, completed as i64);
+                } else {
+                    reply(nfd, req.id, -first_error.unwrap_or(libc::EFAULT));
+                }
+            } else if first_error.is_some() {
+                reply(nfd, req.id, -first_error.unwrap());
             }
             continue;
         }
@@ -2601,6 +2975,78 @@ mod lifecycle_tests {
         assert!(first.allowed(first.lookup(libc::AF_INET, &[192, 0, 2, 1]).as_deref()));
         assert!(!second.allowed(Some("first.example")));
         assert_eq!(second.lookup(libc::AF_INET, &[192, 0, 2, 1]), None);
+    }
+
+    #[test]
+    fn mixed_address_sendmmsg_control_and_snapshot_cover_every_entry() {
+        // First establish the kernel control on owned loopback UDP listeners: on a connected
+        // socket, a normal batch can send its first element to the connected peer and a later
+        // addressed element to a distinct recipient, recording each exact payload.
+        let first = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let second = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        first
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        second
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let second_addr = make_sockaddr_in(
+            u32::from_ne_bytes([127, 0, 0, 1]),
+            second.local_addr().unwrap().port(),
+        );
+        sender.connect(first.local_addr().unwrap()).unwrap();
+        let first_bytes = b"first-synthetic-datagram";
+        let second_bytes = b"second-synthetic-datagram";
+        let mut iovecs = [
+            libc::iovec {
+                iov_base: first_bytes.as_ptr() as *mut libc::c_void,
+                iov_len: first_bytes.len(),
+            },
+            libc::iovec {
+                iov_base: second_bytes.as_ptr() as *mut libc::c_void,
+                iov_len: second_bytes.len(),
+            },
+        ];
+        let mut control: [libc::mmsghdr; 2] = unsafe { std::mem::zeroed() };
+        control[0].msg_hdr = libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &mut iovecs[0],
+            msg_iovlen: 1,
+            msg_control: std::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        control[1].msg_hdr = libc::msghdr {
+            msg_name: &second_addr as *const _ as *mut libc::c_void,
+            msg_namelen: size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            msg_iov: &mut iovecs[1],
+            msg_iovlen: 1,
+            msg_control: std::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        assert_eq!(
+            unsafe { libc::sendmmsg(sender.as_raw_fd(), control.as_mut_ptr(), 2, 0) },
+            2
+        );
+        let mut received = [0u8; 64];
+        let (len, _) = first.recv_from(&mut received).unwrap();
+        assert_eq!(&received[..len], first_bytes);
+        let (len, _) = second.recv_from(&mut received).unwrap();
+        assert_eq!(&received[..len], second_bytes);
+        assert_eq!(control[0].msg_len, first_bytes.len() as u32);
+        assert_eq!(control[1].msg_len, second_bytes.len() as u32);
+
+        // The old supervisor read only `control[0].msg_hdr.msg_name`.  This very layout would
+        // therefore have continued the whole call.  The snapshot walks the complete array before
+        // any send, so the later recipient yields an atomic EPERM rather than a partial batch.
+        let mem = open_child_mem(std::process::id()).unwrap();
+        assert_eq!(
+            snapshot_mmsgs(mem.as_raw_fd(), control.as_ptr() as u64, control.len(),).unwrap_err(),
+            libc::EPERM
+        );
     }
 
     #[test]
