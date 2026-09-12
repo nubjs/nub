@@ -57,17 +57,22 @@ def _install():
 
     original_realpath = os.path.realpath
 
-    def realpath(path, *, strict=False):
-        result = original_realpath(path, strict=strict)
+    def realpath(path, *args, **kwargs):
+        result = original_realpath(path, *args, **kwargs)
         # Under an AppContainer, CPython's non-strict fallback can reach the final
         # NT name but cannot translate it to a DOS name. For a CURRENT-DIRECTORY
         # spelling it consequently returns the lexical `...\\.` rather than the
         # canonical directory. Repair only those two equivalent dot spellings;
         # paths containing links, a parent component, or a missing leaf retain
-        # CPython's own fallback unchanged. `strict=True` keeps its original error.
+        # CPython's own fallback unchanged. Forwarding only caller-supplied arguments
+        # keeps Python 3.6-3.9's one-argument signature intact and preserves the
+        # newer `strict`/`ALLOW_MISSING` semantics without interpreting them here.
         dot_paths = (".", ".\\", ".\\.", "./", "./.")
         byte_dot_paths = tuple(os.fsencode(value) for value in dot_paths)
-        if strict or path not in dot_paths + byte_dot_paths:
+        if args or kwargs:
+            return result
+        path = os.fspath(path)
+        if path not in dot_paths + byte_dot_paths:
             return result
         suffix = b"\\." if isinstance(result, bytes) else "\\."
         return result[:-len(suffix)] if result.endswith(suffix) else result
@@ -92,7 +97,9 @@ def _install():
         decoded = os.fsdecode(path)
         if "\0" in decoded:
             raise ValueError("embedded null character")
-        sys.audit("os.mkdir", path, mode, -1)
+        audit = getattr(sys, "audit", None)
+        if audit is not None:
+            audit("os.mkdir", path, mode, -1)
         # Preserve CPython's protected owner/admin/system ACL. Add only this
         # process's package SID, never All Application Packages or inherited ACEs.
         sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"

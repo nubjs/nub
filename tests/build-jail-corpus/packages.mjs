@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -93,6 +93,14 @@ for (const [name, version, probe, source = false] of selected) {
     const installLog = join(base, 'install.log');
     writeFileSync(installLog, log);
     report(installLog, join('cases', label, 'install.log'));
+    // Native GYP inputs explain a failed source build without retaining a whole installed tree.
+    // They are copied before the assertion so the failure arm has the same evidence as a pass.
+    if (source) {
+      for (const file of ['buildcheck.gypi', 'build/config.gypi', 'build/cpufeatures.vcxproj', 'build/cpu_features.vcxproj']) {
+        const candidate = join(project, 'node_modules', name, file);
+        if (existsSync(candidate)) report(candidate, join('cases', label, file));
+      }
+    }
     try {
       assert.ifError(install.error);
       assert.equal(install.status, 0, 'install succeeded');
