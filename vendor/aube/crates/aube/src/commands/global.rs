@@ -579,7 +579,18 @@ fn slot_entry_is_ours(link: &Path, pkg_dir: &Path) -> bool {
             };
             aube_linker::normalize_path(&bin_dir.join(rel.replace('\\', "/")))
         };
-        resolved.starts_with(&pkg_lex) || resolved.starts_with(&pkg_canon)
+        resolved.starts_with(&pkg_lex)
+            || resolved.starts_with(&pkg_canon)
+            // An isolated global install may point `node_modules/<alias>`
+            // into an external content store. A v3 wrapper correctly embeds
+            // that physical target, so containment alone no longer identifies
+            // it; match the target evidence read from this global package's
+            // own installed manifests, as the symlink branch above does.
+            || scan_packages(pkg_dir).iter().any(|info| {
+                owned_bins(&info.install_dir, &info.aliases)
+                    .iter()
+                    .any(|bin| bin.target.as_ref().is_some_and(|target| *target == resolved))
+            })
     }
 }
 
@@ -749,7 +760,11 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bins: &[OwnedBin]) {
                         continue;
                     };
                     let resolved = shim.target;
-                    if resolved.starts_with(&install_lex)
+                    if bin
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| *target == resolved)
+                        || resolved.starts_with(&install_lex)
                         || install_canon
                             .as_ref()
                             .is_some_and(|canon| resolved.starts_with(canon))
@@ -1110,6 +1125,102 @@ mod tests {
         assert!(
             surface_bin.join("foreign").is_file(),
             "a foreign marker-bearing wrapper must be retained"
+        );
+    }
+
+    /// Composition of the two global layouts that otherwise look harmless in
+    /// isolation: the global bin root is a directory symlink and the installed
+    /// package is a symlink into an external content store. The v3 writer must
+    /// anchor its wrapper at the physical bin directory, which makes its target
+    /// correctly resolve outside the textual global-install root. Ownership is
+    /// therefore established by the install's captured target, never marker
+    /// recognition or a broad external-store prefix.
+    #[cfg(unix)]
+    #[test]
+    fn global_v3_wrapper_in_a_symlinked_bin_root_keeps_external_store_ownership() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("surface/global-aube");
+        let install_dir = pkg_dir.join("deadbeef");
+        let surface_bin = dir.path().join("surface/sub/bin");
+        let physical_bin = dir.path().join("physical/deep/bin");
+        let store_pkg = dir.path().join("store/pkg@1.0.0/node_modules/pkg");
+        std::fs::create_dir_all(&physical_bin).unwrap();
+        std::fs::create_dir_all(surface_bin.parent().unwrap()).unwrap();
+        symlink(&physical_bin, &surface_bin).unwrap();
+        std::fs::create_dir_all(&store_pkg).unwrap();
+        std::fs::create_dir_all(install_dir.join("node_modules")).unwrap();
+        std::fs::write(
+            install_dir.join("package.json"),
+            br#"{"name":"aube-global","dependencies":{"pkg":"1.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            store_pkg.join("package.json"),
+            br#"{"name":"pkg","version":"1.0.0","bin":{"pkg":"cli.js"}}"#,
+        )
+        .unwrap();
+        let target = store_pkg.join("cli.js");
+        std::fs::write(&target, "#!/usr/bin/env node\n").unwrap();
+        symlink(&store_pkg, install_dir.join("node_modules/pkg")).unwrap();
+        // `scan_packages` reaches the install through the same hash pointer a
+        // real global add writes.
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        symlink(&install_dir, pkg_dir.join("current")).unwrap();
+
+        aube_linker::create_bin_shim(
+            &surface_bin,
+            "pkg",
+            &install_dir.join("node_modules/pkg/cli.js"),
+            aube_linker::BinShimOptions {
+                prefer_symlinked_executables: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let shim = surface_bin.join("pkg");
+        let decoded = aube_linker::sys::resolve_bin_shim(&shim).unwrap().unwrap();
+        assert_eq!(
+            std::fs::canonicalize(decoded.target).unwrap(),
+            std::fs::canonicalize(&target).unwrap()
+        );
+        assert!(
+            !target.starts_with(&pkg_dir),
+            "control: the v3 target must escape global textual containment"
+        );
+        assert!(
+            bin_slot_is_writable(&surface_bin, &pkg_dir, "pkg"),
+            "the owned external-store wrapper remains replaceable"
+        );
+
+        let foreign_target = dir.path().join("foreign/node_modules/pkg/cli.js");
+        std::fs::create_dir_all(foreign_target.parent().unwrap()).unwrap();
+        std::fs::write(&foreign_target, "#!/usr/bin/env node\n").unwrap();
+        aube_linker::create_bin_shim(
+            &surface_bin,
+            "foreign",
+            &foreign_target,
+            aube_linker::BinShimOptions {
+                prefer_symlinked_executables: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !bin_slot_is_writable(&surface_bin, &pkg_dir, "foreign"),
+            "an external target absent from this install's manifests stays foreign"
+        );
+
+        let bins = owned_bins(&install_dir, &["pkg".to_string()]);
+        unlink_bins(&install_dir, &surface_bin, &bins);
+        assert!(
+            shim.symlink_metadata().is_err(),
+            "owned wrapper must be removed"
+        );
+        assert!(
+            surface_bin.join("foreign").is_file(),
+            "foreign wrapper must survive global cleanup"
         );
     }
 
