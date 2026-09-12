@@ -69,6 +69,26 @@ jobs:
           set -o pipefail
           cargo clippy -p nub-sandbox --profile fast --all-targets --all-features -- -D warnings 2>&1 | tee reports/clippy.log
           cargo test -p nub-sandbox --profile fast --tests --no-run --message-format=json-render-diagnostics > reports/test-artifacts.jsonl
+      - name: Recording exact test binaries
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, subprocess
+          from pathlib import Path
+
+          artifacts = [json.loads(line) for line in Path('reports/test-artifacts.jsonl').read_text().splitlines()]
+          tests = [item for item in artifacts if item.get('reason') == 'compiler-artifact' and item.get('profile', {}).get('test') and item.get('executable')]
+          assert tests, 'No compiled test executables were recorded'
+          manifest = {
+              'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'binaries': [{
+                  'target': item['target']['name'],
+                  'path': item['executable'],
+                  'sha256': hashlib.sha256(Path(item['executable']).read_bytes()).hexdigest(),
+              } for item in tests],
+          }
+          Path('reports/test-binaries.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
       - name: Exercising lifecycle and enforcement contracts
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
