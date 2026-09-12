@@ -467,7 +467,9 @@ impl Drop for WindowHandle {
 }
 
 fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
-    use windows_sys::Win32::System::StationsAndDesktops::{OpenDesktopW, OpenWindowStationW};
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        OpenDesktopW, OpenWindowStationW, SetProcessWindowStation,
+    };
     let current = current_objects()?;
     if current[0].session != object.session {
         use windows_sys::Win32::System::RemoteDesktop::{
@@ -494,22 +496,81 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
             return Ok(None);
         }
     }
-    if current[0].session != object.session || current[0].station != object.station {
-        // Window-object names are scoped to an OS logon session. Never substitute
-        // a same-named object in this process's different station/session.
-        return Err(io::Error::other(
-            "sandbox window-object cleanup requires its recorded logon session and window station",
-        ));
-    }
-    let name = object.desktop.as_deref().unwrap_or(&object.station);
-    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     const READ_CONTROL_WRITE_DAC: u32 = 0x0006_0000;
-    let raw = unsafe {
-        if object.desktop.is_some() {
-            OpenDesktopW(wide.as_ptr(), 0, 0, READ_CONTROL_WRITE_DAC)
-        } else {
-            OpenWindowStationW(wide.as_ptr(), 0, READ_CONTROL_WRITE_DAC)
+    let station_name: Vec<u16> = object
+        .station
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // A window station has its own namespace for desktops.  A later SSH logon can be in the
+    // same terminal-services session but attached to a different Service-0x0-* station, so
+    // `OpenDesktopW` must not be pointed at the caller's current station.  Open the exact
+    // recorded station first; this cannot resolve a same-named station in another session.
+    let station = unsafe { OpenWindowStationW(station_name.as_ptr(), 0, READ_CONTROL_WRITE_DAC) };
+    if station.is_null() {
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(2 | 3)) {
+            return Ok(None);
         }
+        return Err(error);
+    }
+    let station_guard = WindowHandle {
+        raw: station,
+        desktop: false,
+    };
+
+    if object.desktop.is_none() {
+        // Transfer the owned station handle to the returned object.
+        let raw = station_guard.raw;
+        std::mem::forget(station_guard);
+        return Ok(Some(WindowHandle {
+            raw,
+            desktop: false,
+        }));
+    }
+
+    // `OpenDesktopW` is documented to accept desktops only from the process's current station.
+    // Keep the station swap tightly scoped and always restore the borrowed current-station handle
+    // before returning.  The resource operation lock serializes this process-wide transition with
+    // every other Nub window-object mutation; only the explicitly opened recorded station is
+    // touched, never the caller's current station or desktop.
+    let previous = unsafe { GetProcessWindowStation() };
+    if previous.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { SetProcessWindowStation(station_guard.raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    struct RestoreStation(HANDLE);
+    impl Drop for RestoreStation {
+        fn drop(&mut self) {
+            // SAFETY: this is the process's borrowed pre-switch station handle.  A failed restore
+            // is unrecoverable for this operation but must never be hidden by a different cleanup.
+            if unsafe {
+                windows_sys::Win32::System::StationsAndDesktops::SetProcessWindowStation(self.0)
+            } == 0
+            {
+                tracing::error!(error = ?io::Error::last_os_error(), "sandbox failed to restore its window station after cleanup");
+            }
+        }
+    }
+    let _restore = RestoreStation(previous);
+    let desktop_name: Vec<u16> = object
+        .desktop
+        .as_deref()
+        .expect("desktop case checked above")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // Microsoft documents that standard security access on a desktop also requires both object
+    // access bits.  Request them even though cleanup only reads/writes the descriptor.
+    let raw = unsafe {
+        OpenDesktopW(
+            desktop_name.as_ptr(),
+            0,
+            0,
+            READ_CONTROL_WRITE_DAC | DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS,
+        )
     };
     if raw.is_null() {
         let error = io::Error::last_os_error();
@@ -552,4 +613,94 @@ pub(crate) fn revoke_persistent(object: &WindowObject, sid: PSID) -> io::Result<
     };
     let sid = unsafe { sid_to_string(sid) }?;
     strip_window_object(handle.raw, &sid)
+}
+
+/// Exercise the recovery path against a real, non-current station and desktop.  It runs only in
+/// the isolated lifecycle fixture: changing a process's current station is necessarily global to
+/// that process, even though the production recovery swap is immediately restored.
+#[cfg(test)]
+pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        CreateDesktopW, CreateWindowStationW, SetProcessWindowStation,
+    };
+
+    const WINSTA_ALL_ACCESS: u32 = 0x000F_037F;
+    const DESKTOP_ALL_ACCESS: u32 = 0x000F_01FF;
+
+    let previous = unsafe { GetProcessWindowStation() };
+    if previous.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let station = unsafe { CreateWindowStationW(null_mut(), 0, WINSTA_ALL_ACCESS, null_mut()) };
+    if station.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let station_guard = WindowHandle {
+        raw: station,
+        desktop: false,
+    };
+    let station_name = object_name(station_guard.raw)?;
+    if unsafe { SetProcessWindowStation(station_guard.raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let desktop_name = format!("nub-recovery-{}", std::process::id());
+    let desktop_wide: Vec<u16> = desktop_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let desktop = unsafe {
+        CreateDesktopW(
+            desktop_wide.as_ptr(),
+            null_mut(),
+            null_mut(),
+            0,
+            DESKTOP_ALL_ACCESS,
+            null_mut(),
+        )
+    };
+    // `CreateWindowStationW` connects the process to the new station.  Restore before calling the
+    // recovery API so this is the exact successive-logon shape being guarded.
+    if unsafe { SetProcessWindowStation(previous) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if desktop.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let desktop_guard = WindowHandle {
+        raw: desktop,
+        desktop: true,
+    };
+    let sid = OwnedSid::parse("S-1-15-2-1")?;
+    let station_object = WindowObject {
+        session: current_objects()?[0].session,
+        station: station_name,
+        desktop: None,
+    };
+    let desktop_object = WindowObject {
+        desktop: Some(desktop_name),
+        ..station_object.clone()
+    };
+
+    grant_persistent(&station_object, sid.0)?;
+    grant_persistent(&desktop_object, sid.0)?;
+    revoke_persistent(&desktop_object, sid.0)?;
+    revoke_persistent(&station_object, sid.0)?;
+
+    // Both lookups force the recovery machinery to target the old station, not the fixture's
+    // current one.  The original handles remain open solely to keep the test objects alive.
+    let station = open_recorded(&station_object)?.expect("test station disappeared");
+    let desktop = open_recorded(&desktop_object)?.expect("test desktop disappeared");
+    let station_removed = !window_object_has_sid(station.raw, "S-1-15-2-1")?;
+    let desktop_removed = !window_object_has_sid(desktop.raw, "S-1-15-2-1")?;
+    drop(desktop);
+    drop(station);
+    drop(desktop_guard);
+    drop(station_guard);
+    if station_removed && desktop_removed {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "cleanup retained an ACE on a non-current window object",
+        ))
+    }
 }
