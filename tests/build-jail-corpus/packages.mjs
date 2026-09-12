@@ -6,7 +6,10 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const binary = resolve(process.env.NUB_BIN);
-const root = mkdtempSync(join(tmpdir(), 'nub-jail-packages-'));
+const requestedTempRoot = process.env.CORPUS_TEMP_ROOT ? resolve(process.env.CORPUS_TEMP_ROOT) : resolve(tmpdir());
+mkdirSync(requestedTempRoot, { recursive: true });
+const root = mkdtempSync(join(requestedTempRoot, 'nub-jail-packages-'));
+assert.equal(resolve(dirname(root)), requestedTempRoot, 'fixture root uses CORPUS_TEMP_ROOT');
 const linkedProject = process.env.CORPUS_LINKED_PROJECT === '1';
 const reportRoot = process.env.CORPUS_REPORT ? resolve(process.env.CORPUS_REPORT) : null;
 if (reportRoot) mkdirSync(reportRoot, { recursive: true });
@@ -53,7 +56,7 @@ const results = [];
 console.log(`Fixture root: ${root}`);
 const provenance = join(root, 'provenance.json');
 writeFileSync(provenance, JSON.stringify({
-  binary, sha256: createHash('sha256').update(readFileSync(binary)).digest('hex'),
+  binary, sha256: createHash('sha256').update(readFileSync(binary)).digest('hex'), requestedTempRoot, fixtureRoot: root,
   node: process.execPath, version: process.version, platform: process.platform, arch: process.arch,
 }, null, 2));
 report(provenance, 'provenance.json');
