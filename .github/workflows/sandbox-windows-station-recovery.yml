@@ -1,0 +1,50 @@
+name: Sandbox Windows station recovery probe
+
+on:
+  push:
+    branches: [windows-station-recovery]
+    paths:
+      - crates/nub-sandbox/src/backend/windows.rs
+      - crates/nub-sandbox/src/backend/windows_ace.rs
+      - crates/nub-sandbox/src/backend/windows_cleanup_tests.rs
+      - crates/nub-sandbox/Cargo.toml
+      - .github/workflows/sandbox-windows-station-recovery.yml
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: sandbox-reuse-native
+          cache-on-failure: true
+      - name: Recovering a noncurrent station journal
+        run: |
+          set -o pipefail
+          mkdir -p reports
+          { git rev-parse HEAD; rustc -Vv; uname -a; id; } > reports/environment.txt
+          cargo test -p nub-sandbox --profile fast --lib windows_cleanup_recovers_aces_from_a_noncurrent_window_station -- --nocapture --test-threads=1 2>&1 | tee reports/station-recovery.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sandbox-windows-station-recovery-${{ matrix.os }}
+          path: reports
+          retention-days: 30

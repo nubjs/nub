@@ -182,6 +182,8 @@ fn windows_cleanup_fixture() {
             cleanup_resources().unwrap();
             panic!("cleanup did not reach the requested crash transition");
         }
+        "station-recovery" => crate::backend::windows_ace::test_revoke_from_noncurrent_station()
+            .expect("station-specific ACE recovery"),
         "crash-transitions" => crash_transitions(&root),
         "cleanup-retry" => interrupted_cleanup(&root),
         "cleanup-junction" => cleanup_junction(&root),
@@ -396,6 +398,15 @@ fn windows_cleanup_retries_after_abrupt_private_root_removal() {
 #[test]
 fn windows_cleanup_never_follows_private_junction_into_caller_data() {
     isolated_scenario("cleanup-junction");
+}
+
+#[test]
+fn windows_cleanup_recovers_aces_from_a_noncurrent_window_station() {
+    // A process-wide station change belongs in a short-lived fixture process.  The fixture creates
+    // a second station/desktop, restores its original station, then exercises the journal cleanup
+    // against the recorded objects.  This models successive SSH logons in session 0 without
+    // allowing the test to perturb the libtest process's own desktop attachment.
+    isolated_scenario("station-recovery");
 }
 
 #[test]

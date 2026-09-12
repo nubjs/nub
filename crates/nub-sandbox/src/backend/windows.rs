@@ -2759,13 +2759,19 @@ pub(super) mod launch {
                     &mut pi,
                 )
             };
-            let result = timed("native_spawn", || {
-                if launch() == 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
+            // A recovery may briefly borrow this process's window station to open a recorded
+            // desktop.  Creating an AppContainer child during that interval would bind USER32 to
+            // the wrong station, so share the in-process station lock with that borrow.
+            let result = {
+                let _station = crate::backend::windows_ace::station_guard();
+                timed("native_spawn", || {
+                    if launch() == 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                })
+            };
             if let Err(error) = result {
                 return Err(io::Error::new(
                     error.kind(),
@@ -4180,21 +4186,26 @@ pub(super) mod launch {
             | CREATE_NO_WINDOW
             | CREATE_UNICODE_ENVIRONMENT;
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // This helper is an AppContainer process too: keep its loader attachment out of a
+        // concurrent recorded-station borrow.
         // SAFETY: cmdline/cwd_wide/attr/sec_caps/caps all outlive this call; lpCommandLine is a
         // writable UTF-16 buffer; bInheritHandles TRUE so the scoped handle list takes effect.
-        let ok = unsafe {
-            CreateProcessW(
-                std::ptr::null(),
-                cmdline.as_mut_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                1,
-                flags,
-                env_block.as_ptr().cast(),
-                cwd_wide.as_ptr(),
-                std::ptr::from_mut(&mut si).cast(),
-                &mut pi,
-            )
+        let ok = {
+            let _station = crate::backend::windows_ace::station_guard();
+            unsafe {
+                CreateProcessW(
+                    std::ptr::null(),
+                    cmdline.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1,
+                    flags,
+                    env_block.as_ptr().cast(),
+                    cwd_wide.as_ptr(),
+                    std::ptr::from_mut(&mut si).cast(),
+                    &mut pi,
+                )
+            }
         };
         if ok == 0 {
             let error = io::Error::last_os_error();
