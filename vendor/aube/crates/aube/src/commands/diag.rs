@@ -17,19 +17,18 @@
  * schema additions.
  */
 
-use clap::{Args, Subcommand};
 use miette::{IntoDiagnostic, Result, WrapErr};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct DiagArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: DiagCommand,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum DiagCommand {
     /// Show critical path / starvation / per-pkg lifecycle from a saved trace.
     Analyze {
@@ -43,10 +42,10 @@ pub enum DiagCommand {
         /// Comparison trace
         b: PathBuf,
         /// Minimum |Δsum_ms| to surface (default 50)
-        #[arg(long, default_value_t = 50.0)]
+        #[usage(long, default_value_t = 50.0, default = "50")]
         min_delta_ms: f64,
         /// Minimum |%change| to surface (default 10)
-        #[arg(long, default_value_t = 10.0)]
+        #[usage(long, default_value_t = 10.0, default = "10")]
         min_pct: f64,
     },
 }

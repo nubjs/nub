@@ -1,32 +1,30 @@
 //! `aube access` — manage package visibility and team access on an npm registry.
 
 use crate::commands::{make_client, split_name_spec};
-use clap::{Args, Subcommand};
 use miette::{IntoDiagnostic, miette};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct AccessArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: AccessCommand,
     /// Emit registry responses as JSON when the subcommand has a result.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
     /// One-time password from a 2FA authenticator; sent as `npm-otp`.
-    #[arg(long)]
+    #[usage(long)]
     pub otp: Option<String>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum AccessCommand {
     /// Get package visibility status.
     Get {
-        #[command(subcommand)]
+        #[usage(subcommand)]
         command: AccessGetCommand,
     },
     /// Grant a team read-only or read-write access to a package.
-    #[command(override_usage = "access grant <PERMISSIONS> <TEAM> <PACKAGE>")]
     Grant {
         /// `read-only` or `read-write`.
         permissions: String,
@@ -37,16 +35,15 @@ pub enum AccessCommand {
     },
     /// List packages visible to a user, organization, or team.
     List {
-        #[command(subcommand)]
+        #[usage(subcommand)]
         command: AccessListCommand,
     },
     /// Alias for `list packages`.
-    #[command(override_usage = "access ls [ENTITY]\n       access ls packages [ENTITY]")]
     Ls {
         /// User, `@organization`, or `@scope:team`. Also accepts pnpm's
         /// `packages [ENTITY]` compatibility form. Accepted forms are
         /// `aube access ls [ENTITY]` and `aube access ls packages [ENTITY]`.
-        #[arg(num_args = 0..=2)]
+        #[usage(arg, var_max = 2)]
         entities: Vec<String>,
     },
     /// Revoke a team's access to a package.
@@ -65,7 +62,7 @@ pub enum AccessCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum AccessListCommand {
     /// List collaborators for a package, optionally filtering to one user.
     Collaborators {
@@ -81,7 +78,7 @@ pub enum AccessListCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum AccessGetCommand {
     /// Get a package's public or restricted status.
     Status {
@@ -396,7 +393,6 @@ fn emit_json(value: &serde_json::Value) -> miette::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{AccessArgs, AccessCommand, bare_package, format_collaborators, split_team};
-    use clap::Parser;
 
     #[test]
     fn bare_package_rejects_specifiers() {
@@ -419,7 +415,7 @@ mod tests {
 
     #[test]
     fn ls_accepts_the_pnpm_packages_marker() {
-        let cli = crate::Cli::try_parse_from(["aube", "access", "ls", "packages", "@scope"])
+        let cli = crate::Cli::try_parse_test_from(["aube", "access", "ls", "packages", "@scope"])
             .expect("access ls packages should parse");
         let Some(crate::Commands::Access(AccessArgs {
             command: AccessCommand::Ls { entities },

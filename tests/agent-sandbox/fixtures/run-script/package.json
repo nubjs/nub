@@ -1,0 +1,7 @@
+{
+  "name": "fixture-run-script",
+  "version": "1.0.0",
+  "scripts": {
+    "hello": "node -e \"console.log('SCRIPT-OK')\""
+  }
+}

@@ -1,5 +1,5 @@
 {
   "title": "Package manager",
   "defaultOpen": false,
-  "pages": ["...", "pnpm", "npm", "bun", "yarn", "virtual-store"]
+  "pages": ["...", "pnpm", "npm", "bun", "yarn", "virtual-store", "extensions"]
 }

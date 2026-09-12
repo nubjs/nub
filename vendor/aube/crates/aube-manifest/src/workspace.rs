@@ -8,9 +8,10 @@
 //!   workspace-level mutation.
 //! - [`mutations`] — the domain-specific mutations: `allowBuilds`
 //!   and `patchedDependencies`.
-//! - [`yaml_patch`] — comment-preserving diff-and-apply on top of
-//!   `yamlpatch`, with a manual injector for new sub-mappings (which
-//!   `yamlpatch::Op::Add` mishandles).
+//! - `yaml_patch` — optional comment-preserving diff-and-apply on top
+//!   of `yamlpatch`, with a manual injector for new sub-mappings (which
+//!   `yamlpatch::Op::Add` mishandles). Enabled by the
+//!   `workspace-yaml-preserve` feature.
 //!
 //! The submodules are private; the public API is re-exported from
 //! this module so callers continue to use `aube_manifest::workspace::X`.
@@ -18,6 +19,7 @@
 mod config;
 mod edits;
 mod mutations;
+#[cfg(feature = "workspace-yaml-preserve")]
 mod yaml_patch;
 
 pub use config::{
@@ -570,6 +572,7 @@ updateConfig:
         );
     }
 
+    #[cfg(feature = "workspace-yaml-preserve")]
     #[test]
     fn edit_workspace_yaml_preserves_comments_around_unchanged_keys() {
         // The whole point of going through yamlpatch: a structural
@@ -617,6 +620,7 @@ allowBuilds:
         );
     }
 
+    #[cfg(feature = "workspace-yaml-preserve")]
     #[test]
     fn upsert_workspace_patched_dependency_preserves_comments_on_real_change() {
         // patch-commit on a workspace yaml that already documents
@@ -860,6 +864,7 @@ patchedDependencies:
         );
     }
 
+    #[cfg(feature = "workspace-yaml-preserve")]
     #[test]
     fn remove_workspace_patched_dependency_preserves_comments_on_real_remove() {
         // Removing one patch entry from a multi-entry list must keep

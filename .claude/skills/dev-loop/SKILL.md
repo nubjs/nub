@@ -15,12 +15,19 @@ description: >-
   separately measured to give 0% Rust speedup and is NOT used. Covers the real
   incantations (`cargo
   build -p nub-cli --profile fast`, `make install-dev`, `make addon-fast`), the
-  test invocations, and the exact CI cheap gates.
+  test invocations, and the exact CI cheap gates. SCOPE — the local loop is the
+  EXCEPTION, not the default: a cold build, `clippy --all-targets
+  --all-features`, a full `cargo test`, a `release` build or a multi-fixture
+  sweep goes OFF-HOST, via a CI-run test or the `remote-build` skill. This skill
+  covers only what must stay local — the ~5s warm rebuild you are actively
+  iterating against, and macOS-native checks.
 metadata:
   internal: true
 ---
 
 # Building & testing nub
+
+**Before you build anything here: does this belong on the local box at all?** The default home for a build, a gate, or a test run is off-host — a committed test that CI runs, or an ephemeral spot VM via the `remote-build` skill (`--job clippy|test|adhoc --detach`, collected with `--attach`). What stays local is the ~5s warm incremental rebuild you are actively iterating against, and macOS-native behavior. A cold build, `clippy --all-targets --all-features`, a full `cargo test`, a `release` build or a multi-fixture sweep goes remote unless you have a stated reason. See `AGENTS.md` → "Builds and tests go REMOTE by default".
 
 nub is a Rust workspace — `nub-cli`, `nub-core`, `nub-native` plus the vendored aube PM engine (`vendor/aube`, plain in-tree files, its own Cargo workspace, linked in-process as a library).
 

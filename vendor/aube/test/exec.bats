@@ -90,6 +90,33 @@ EOF
 	assert_file_not_exist packages/sentinel-ran
 }
 
+@test "aube exec -r finds binaries installed at the workspace root" {
+	cat >pnpm-workspace.yaml <<'EOF'
+packages:
+  - packages/*
+EOF
+	cat >package.json <<'EOF'
+{"name":"root","version":"0.0.0","private":true}
+EOF
+	mkdir -p packages/a node_modules/.bin
+	cat >packages/a/package.json <<'EOF'
+{"name":"a","version":"0.0.0"}
+EOF
+	cat >node_modules/.bin/root-tool <<'EOF'
+#!/bin/sh
+echo "root-tool:${PWD##*/}"
+EOF
+	chmod +x node_modules/.bin/root-tool
+
+	run aube -r exec --no-install root-tool
+	assert_success
+	assert_output "root-tool:a"
+
+	run aube -r exec --parallel --no-install root-tool
+	assert_success
+	assert_output --partial "root-tool:a"
+}
+
 # Regression: terminating the aube process must tear down the tool it
 # launched instead of orphaning it under init. See discussion #1059.
 #

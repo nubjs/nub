@@ -1,7 +1,6 @@
 //! Inspect npm publishing evidence for one exact package version.
 
 use crate::commands::{make_client, packument_full_cache_dir, split_name_spec};
-use clap::Args;
 use miette::{IntoDiagnostic, WrapErr, miette};
 use serde::Serialize;
 
@@ -21,20 +20,20 @@ Examples:
   $ aube trust check @hono/node-server@1.19.17 --json
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub(super) struct CheckArgs {
     /// Exact npm package version to inspect
     ///
     /// Example: `@hono/node-server@1.19.17`.
-    #[arg(value_name = "PACKAGE@VERSION")]
+    #[usage(arg, name = "PACKAGE@VERSION")]
     pub package: String,
     /// Evaluate the policy without aube's built-in package exceptions
-    #[arg(long)]
+    #[usage(long)]
     pub ignore_default_excludes: bool,
     /// Emit a JSON report
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 

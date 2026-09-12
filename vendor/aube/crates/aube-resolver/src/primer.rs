@@ -120,7 +120,7 @@ impl PrimerDist {
                 .tarball
                 .clone()
                 .unwrap_or_else(|| deterministic_tarball_url(name, version)),
-            integrity: self.integrity.clone(),
+            integrity: self.integrity.as_ref().map(|i| i.to_sri()),
             shasum: None,
             unpacked_size: None,
             attestations: self.provenance.then(|| Attestations {

@@ -130,3 +130,108 @@ fn top_level_package_extensions_shapes_resolution_and_invalidates_freshness() {
          the edit must invalidate the install fast path so it re-resolves: {err2}"
     );
 }
+
+/// The bundled compatibility database repairs a real published package whose
+/// manifest is wrong, and `ignoreCompatibilityDb` turns it off.
+///
+/// This is pnpm's own bundled data — Yarn's `packageExtensions` database plus
+/// pnpm's additions — and pnpm merges it into every install. `reactcss@1.2.3`
+/// requires `react` and declares it nowhere, so the catalog entry
+/// `reactcss@* -> peerDependencies.react` is what makes `auto-install-peers`
+/// supply it. Until the engine's embedder gate came off, that catalog applied
+/// only to standalone aube, so this package installed under pnpm and threw
+/// `Cannot find module 'react'` under nub.
+///
+/// Both arms matter. The opt-out arm is the control: it proves the pass is the
+/// database doing work rather than `react` arriving by some other route, and it
+/// proves the setting is still reachable — an escape hatch that silently did
+/// nothing would leave no way to decline the repair.
+#[test]
+#[ignore = "network: resolves reactcss@1.2.3 and the react the compat database adds"]
+fn the_bundled_compatibility_database_repairs_a_published_phantom() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let manifest = r#"{"name":"compatdb","version":"1.0.0","dependencies":{"reactcss":"1.2.3"}}"#;
+    let store = pm_tmpdir("compatdb-store");
+    let cache = pm_tmpdir("compatdb-cache");
+
+    let on = pm_tmpdir("compatdb-on");
+    std::fs::write(on.join("package.json"), manifest).unwrap();
+    let (err_on, code_on) = run_install_in_store(&on, &store, &cache, &["install"]);
+    assert_eq!(code_on, 0, "install with the database failed: {err_on}");
+    assert!(
+        store_has(&on, "react"),
+        "the bundled database must add reactcss's undeclared react peer so it is \
+         installed: {err_on}"
+    );
+
+    let off = pm_tmpdir("compatdb-off");
+    std::fs::write(off.join("package.json"), manifest).unwrap();
+    std::fs::write(off.join(".npmrc"), "ignore-compatibility-db=true\n").unwrap();
+    let (err_off, code_off) = run_install_in_store(&off, &store, &cache, &["install"]);
+    assert_eq!(
+        code_off, 0,
+        "install with the database off failed: {err_off}"
+    );
+    assert!(
+        !store_has(&off, "react"),
+        "ignore-compatibility-db must decline the repair, leaving reactcss's \
+         undeclared import unresolved: {err_off}"
+    );
+}
+
+/// The bundled database repairs a phantom that Yarn's curated catalog does not
+/// cover, which is the whole reason nub ships the larger set.
+///
+/// `@datadog/sketches-js` declares `protobufjs` only in `devDependencies`, so a
+/// consumer never gets it, while `dist/ddsketch/proto/compiled.js` does
+/// `require('protobufjs/minimal')` — reachable through a subpath, which is why
+/// the package's own main entry loads fine and hides the break. Yarn's database
+/// has no entry for it; the machine-derived one adds `protobufjs` as a real
+/// dependency, so it is materialized.
+///
+/// A hard `dependencies` edge is deliberately what this asserts. Most of the
+/// bundled set is optional peers, which install nothing on their own and only
+/// repair a strict layout, so an optional-peer entry would not prove the
+/// database reached the resolver at all.
+#[test]
+#[ignore = "network: resolves @datadog/sketches-js and the protobufjs the database adds"]
+fn the_bundled_database_repairs_a_phantom_yarns_catalog_misses() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let manifest =
+        r#"{"name":"bundled","version":"1.0.0","dependencies":{"@datadog/sketches-js":"2.1.1"}}"#;
+    let store = pm_tmpdir("bundled-store");
+    let cache = pm_tmpdir("bundled-cache");
+
+    let on = pm_tmpdir("bundled-on");
+    std::fs::write(on.join("package.json"), manifest).unwrap();
+    let (err_on, code_on) = run_install_in_store(&on, &store, &cache, &["install"]);
+    assert_eq!(code_on, 0, "install with the database failed: {err_on}");
+    assert!(
+        store_has(&on, "protobufjs"),
+        "the bundled database must add the protobufjs that @datadog/sketches-js \
+         requires but declares only as a devDependency: {err_on}"
+    );
+
+    // The control. Without it a pass proves only that protobufjs arrived, not
+    // that this database is what put it there — and it re-checks that the one
+    // escape hatch covers the bundled layer, not just the vendored catalogs.
+    let off = pm_tmpdir("bundled-off");
+    std::fs::write(off.join("package.json"), manifest).unwrap();
+    std::fs::write(off.join(".npmrc"), "ignore-compatibility-db=true\n").unwrap();
+    let (err_off, code_off) = run_install_in_store(&off, &store, &cache, &["install"]);
+    assert_eq!(
+        code_off, 0,
+        "install with the database off failed: {err_off}"
+    );
+    assert!(
+        !store_has(&off, "protobufjs"),
+        "ignore-compatibility-db must decline the bundled database too, leaving \
+         the undeclared import unresolved: {err_off}"
+    );
+}

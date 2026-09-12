@@ -44,7 +44,7 @@ cooperatively cancels at a safe install boundary.
 
 Rejected promises are `AubeError` objects with a stable `code` and a
 human-readable `diagnostic`. Published `ERR_AUBE_*` values follow aube's
-[error-code stability policy](https://github.com/jdx/aube/blob/main/docs/error-codes.md).
+[error-code stability policy](https://github.com/aubepkg/aube/blob/main/docs/error-codes.md).
 
 ## Configuration
 
@@ -106,4 +106,4 @@ crates/aube-node/poc/run.sh
 
 CI also installs the generated npm tarballs in Node and Bun consumers and
 type-checks the public declarations. For support, use
-[GitHub Discussions](https://github.com/jdx/aube/discussions).
+[GitHub Discussions](https://github.com/aubepkg/aube/discussions).

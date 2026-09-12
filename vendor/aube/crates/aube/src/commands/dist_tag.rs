@@ -20,18 +20,17 @@
 //! deliberately bypasses the project lock.
 
 use crate::commands::{make_client, split_name_spec};
-use clap::{Args, Subcommand};
 use miette::{Context, miette};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct DistTagArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: DistTagCommand,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum DistTagCommand {
     /// Add or update a dist-tag on a package.
     ///
@@ -44,7 +43,7 @@ pub enum DistTagCommand {
         /// Tag to create or update. Defaults to `latest`.
         tag: Option<String>,
         /// One-time password from a 2FA authenticator; sent as `npm-otp`.
-        #[arg(long)]
+        #[usage(long)]
         otp: Option<String>,
     },
     /// List every dist-tag for a package.
@@ -59,14 +58,14 @@ pub enum DistTagCommand {
         package: Option<String>,
     },
     /// Remove a dist-tag from a package.
-    #[command(visible_alias = "remove")]
+    #[usage(alias = "remove")]
     Rm {
         /// Package name (no version).
         package: String,
         /// Tag to remove.
         tag: String,
         /// One-time password from a 2FA authenticator; sent as `npm-otp`.
-        #[arg(long)]
+        #[usage(long)]
         otp: Option<String>,
     },
 }

@@ -1,5 +1,6 @@
 pub mod adaptive;
 pub mod age_gate;
+pub mod agent_sandbox;
 pub mod buf;
 pub mod cache;
 pub mod collections;
@@ -42,6 +43,7 @@ pub use engine_context::{
 pub mod path;
 pub mod pkg;
 pub mod snapshot;
+pub mod terminal;
 pub mod url;
 
 use serde::{Deserialize, Deserializer};

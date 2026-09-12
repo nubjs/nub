@@ -1,11 +1,13 @@
 //! The default-trust dependency list backing the `defaultTrust`
 //! build-policy floor.
 //!
-//! The list is Bun's curated `default-trusted-dependencies.txt`,
-//! vendored verbatim with provenance recorded in the data file's
-//! header (`data/default-trusted-dependencies.txt`). Adopting the
-//! list as-is keeps the trust root traceable to an existing,
-//! widely-deployed curation instead of inventing a new one.
+//! The list is Bun's curated `default-trusted-dependencies.txt` plus the
+//! names pnpm's trusted-dependencies allowlist adds to it — one, at the
+//! vendored snapshot. Both curations are vendored verbatim and both
+//! provenances are recorded in the data file's header
+//! (`data/default-trusted-dependencies.txt`). Adopting existing,
+//! widely-deployed curations keeps the trust root traceable instead of
+//! inventing a new one.
 //!
 //! Membership here is necessary but never sufficient: the floor that
 //! consumes this list (`aube`'s install pipeline) ranks below every
@@ -45,6 +47,13 @@ mod tests {
         for name in ["esbuild", "sharp", "better-sqlite3", "@vscode/sqlite3"] {
             assert!(is_default_trusted(name), "{name} must be on the list");
         }
+        // The one name pnpm's list adds over bun's, and so the whole
+        // observable difference the merge makes: this fails if a refresh
+        // of the bun list drops the marked pnpm-only entries.
+        assert!(
+            is_default_trusted("@parcel/watcher"),
+            "@parcel/watcher is pnpm's addition to bun's list and must survive a refresh"
+        );
         assert!(!is_default_trusted("definitely-not-on-the-list"));
         assert!(
             !is_default_trusted("# Default-trusted dependency build allowlist."),

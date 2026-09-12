@@ -1,0 +1,51 @@
+---
+title: "Nub 0.8.3"
+description: Repairs the self-upgrade channel, adds a config field naming the exact Node binary a project runs, and fixes install and runtime issues on shipped binaries.
+author: The Nub Team
+date: 2026-09-03
+---
+
+A patch release that repairs the self-upgrade channel, adds a `nodeExecutable` config field, and fixes install and runtime issues that only appeared on shipped binaries.
+
+<NubIntro />
+
+> [!IMPORTANT]
+> **Upgrading from 0.7.5 picks up the whole 0.8.x line.** The [0.8.0](/blog/nub-0-8-0), [0.8.1](/blog/nub-0-8-1), and [0.8.2](/blog/nub-0-8-2) releases published to npm but never claimed the GitHub **Latest** marker, which is what `nub upgrade` and the install scripts resolve — so the upgrade channel kept serving 0.7.5. This release fixes the pipeline, adds a post-publish check that the channel serves each new release, and moves the channel forward.
+
+## `nodeExecutable`
+
+A project can now name the exact Node binary it runs, above every pin source:
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  // a command in $(...) runs, and its output is the path
+  "nodeExecutable": "$(mise which node)"
+}
+```
+
+The command runs through the platform shell in your working directory, so a directory-aware tool — mise, asdf, fnm, Volta — answers for the project you are actually in. To take whatever Node leads your `PATH`, ask the shell for it with `"$(which node)"`; Nub's own `node` shim is excluded from the answer, so the recipe works even with shims installed. A plain path works too, absolute or relative to the file. The binary's version is still detected, so the support floor and tier selection still apply. Documentation is at [nubjs.com/docs/config](https://nubjs.com/docs/config#nodeexecutable). ([#835](https://github.com/nubjs/nub/pull/835))
+
+## Runtime and install
+
+| PR | What changed |
+| --- | --- |
+| [#834](https://github.com/nubjs/nub/pull/834) | Nested Node processes no longer hang or exit silently under a shipped Nub on the compat tier (Node 18.19–22.14) — the failure behind `nub install` dying on packages whose install scripts shell out to Node, such as `sqlite3`. |
+| [#836](https://github.com/nubjs/nub/pull/836) | An install that could not run a dependency's build scripts retries them on the next install, instead of recording the tree as complete and reporting "Already up to date" forever. |
+| [#839](https://github.com/nubjs/nub/pull/839) | The launcher's Node-version probe cache works under a group-writable umask, instead of silently re-probing on every launch. |
+| [#829](https://github.com/nubjs/nub/pull/829) | A compiled `--smol` executable refuses a discovered Node that cannot run its loader shim, instead of failing at startup on the Node 23.0–23.4 band. |
+
+## Configuration and CLI
+
+| PR | What changed |
+| --- | --- |
+| [#842](https://github.com/nubjs/nub/pull/842) | Setting an `.npmrc` key that a `nub.jsonc` install field already answers is refused, naming the field to set instead. |
+| [#833](https://github.com/nubjs/nub/pull/833) | Config settings nothing under Nub reads are rejected with a working replacement named per key, and `preferFrozenLockfile` is now honored. |
+| [#831](https://github.com/nubjs/nub/pull/831) | Nub finds pnpm's global config and credentials on Windows the way pnpm does, including on machines with no home directory set. |
+| [#838](https://github.com/nubjs/nub/pull/838) | The `ci` command accepts `-P`/`--prod` and `-D`/`--dev`, matching pnpm 11, so a Docker build stage can produce a devDependency-free tree. |
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.8.3) list every change in this release.
+
+## Get started
+
+<GetStarted />

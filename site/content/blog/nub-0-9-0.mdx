@@ -1,0 +1,103 @@
+---
+title: "Nub 0.9"
+description: Bundles a compatibility database that repairs packages whose published code imports dependencies their own manifest never declares, and renames the root build allowlist.
+author: The Nub Team
+date: 2026-09-07
+---
+
+Nub 0.9 applies a `packageExtensions` compatibility database to every install, repairing packages whose published code imports dependencies their own manifest never declares. Two `package.json` root fields change with it.
+
+<NubIntro />
+
+> [!IMPORTANT]
+> **The top-level build allowlist is renamed, and the old name now errors.** A project carrying a root `allowBuilds` map is refused with `ERR_NUB_ALLOW_BUILDS_RENAMED` until it is renamed `allowScripts`. See [Breaking changes](#breaking-changes) below.
+
+## Dependency compatibility database
+
+A package whose published code imports something its manifest never declares still works under npm's flat `node_modules`: the upward directory walk finds a copy something else happened to install. Under an isolated layout there is no such copy, and the import fails at runtime rather than at install time.
+
+`reactcss@1.2.3` is the shape of the problem. It requires React and declares it nowhere:
+
+```bash
+nub install && node -e 'require("reactcss")'
+Error: Cannot find module 'react'
+```
+
+Both pnpm and Yarn ship a curated `packageExtensions` database that repairs these manifests at resolve time. Nub carried that data already — Yarn's entries plus pnpm's additions, 161 in all — but applied none of it, so it resolved a strictly smaller dependency graph than the tool whose CLI it mirrors. Those catalogs now apply, and because Nub's resolver already defaults `auto-install-peers` on, React lands in the store and resolves from `reactcss`.
+
+On top of them, 0.9 bundles a second, larger database: the one published as `@nubjs/extensions`, derived by running Nub's own phantom detector over the 10,000 most-downloaded packages on npm. It is a strict superset of Yarn's — a gate in that project fails the build if any Yarn rule is weakened — so the two layers agree wherever they overlap.
+
+Of the 654 entries Yarn lacks, 25 add a hard `dependencies` edge, so `nub install` materializes a package `pnpm install` does not. The remaining ~629 are optional peers: they install nothing on their own, and only repair resolution under a strict layout such as Yarn PnP with no fallback, or pnpm with hoisting off.
+
+Both layers are declined together:
+
+```ini title=".npmrc"
+# resolve every manifest exactly as published, repairing nothing
+ignore-compatibility-db=true
+```
+
+The database is a snapshot rather than a fetch. `nubjs/package-extensions` rebuilds daily, and tracking it live would make resolution depend on a registry round trip and let one Nub build install different trees on different days. Vendoring pins one dataset per Nub release and makes each refresh a reviewable commit. Neither layer is read by the lockfile's `packageExtensionsChecksum`, so a refresh cannot drift a lockfile or abort a frozen install.
+
+## The `nub` export condition
+
+Nub is a registered WinterTC runtime key, so a package can now carry a `nub` branch in its `exports` map the way it carries `bun` or `deno` ones:
+
+```json title="package.json"
+{
+  "exports": {
+    ".": {
+      "nub": "./dist/nub.js",
+      "default": "./dist/index.js"
+    }
+  }
+}
+```
+
+Every CLI-augmented run passes `--conditions=nub` to Node, alongside whatever the project declares in `nub.jsonc` or a tsconfig `customConditions`. Conditions are a set, so a package with no `nub` key resolves exactly as it does on plain Node.
+
+Compat mode is unaffected — `--node` and `NODE_COMPAT` skip the option builder entirely, so a compat run keeps Node's own condition set. The standalone `@nubjs/runner` leaves the condition set alone too, because its contract is that a file resolves identically under it, under tsx, and under plain Node. Documentation is at [nubjs.com/docs/runtime/resolution](https://nubjs.com/docs/runtime/resolution). ([#913](https://github.com/nubjs/nub/pull/913))
+
+## Breaking changes
+
+### The root build allowlist is renamed to `allowScripts`
+
+npm 12 blocks dependency install scripts by default and reads its allowlist from a top-level `allowScripts` map in `package.json` ([RFC npm/rfcs#868](https://github.com/npm/rfcs/pull/868)), with the same shape and the same deny-wins fold Nub already used — in the same file, at the same nesting level Nub wrote its own `allowBuilds` map to. Two tools were claiming one slot under two names, and a project driven by both accumulated two allowlists that neither tool could see.
+
+```diff title="package.json"
+- "allowBuilds": { "esbuild": true }
++ "allowScripts": { "esbuild": true }
+```
+
+One map now serves both tools, and `nub approve-builds` under an npm incumbent heals npm as well. A project still carrying a top-level `allowBuilds` is refused with `ERR_NUB_ALLOW_BUILDS_RENAMED` naming the rename, rather than warned: honoring neither key would drop the map's explicit `false` denials along with its approvals, which fails in the permissive direction.
+
+pnpm's own `allowBuilds` — in `pnpm-workspace.yaml` or under `package.json#pnpm` — is untouched. That surface belongs to pnpm, and `nub pm use pnpm` renames the map back on the way out. ([#863](https://github.com/nubjs/nub/pull/863))
+
+### Three root install fields are no longer read
+
+`auditConfig`, `allowUnusedPatches` and `allowNonAppliedPatches` were read from the `package.json` root. No package manager reads any of the three there, so they were un-namespaced names held on the strength of nobody having claimed them yet — the position `allowBuilds` was in when npm 12 shipped `allowScripts` into the same slot.
+
+Nothing replaces them. For advisories, `nub audit --ignore <id>` already exists and is repeatable, matching numeric advisory ids, GHSA ids and CVE ids together. Under a pnpm incumbent, pnpm's own `pnpm.*` and workspace-YAML homes for these settings are still read. ([#871](https://github.com/nubjs/nub/pull/871))
+
+## Bug fixes
+
+| PR | What changed |
+| --- | --- |
+| [#906](https://github.com/nubjs/nub/pull/906) | Editing `packageExtensions` re-resolves the graph. The edit discarded the lockfile but still handed the old graph to the resolver as a reuse hint, so it rewrote the checksum, installed nothing, and reported "Already up to date". |
+| [#837](https://github.com/nubjs/nub/pull/837) | A pnpmfile's `preResolution` hook runs on every install and receives pnpm's lockfile shape. |
+| [#855](https://github.com/nubjs/nub/pull/855) | npm workspace importer detection is fixed, and `afterAllResolved` receives pnpm's lockfile shape. |
+| [#848](https://github.com/nubjs/nub/pull/848) | A `link:` directory dependency emits its link pair in the npm lockfile. |
+| [#727](https://github.com/nubjs/nub/pull/727) | Dependency lifecycle builds run in dependency order. |
+| [#718](https://github.com/nubjs/nub/pull/718) | A package manifest carrying duplicate fields is accepted rather than rejected. |
+| [#583](https://github.com/nubjs/nub/pull/583) | Writing `package.json` preserves its line endings and its EOF newline. |
+| [#849](https://github.com/nubjs/nub/pull/849) | Remix 3 projects get a project-local store. |
+| [#854](https://github.com/nubjs/nub/pull/854) | Installs degrade gracefully inside coding-agent sandboxes. |
+| [#856](https://github.com/nubjs/nub/pull/856), [#830](https://github.com/nubjs/nub/pull/830) | `--js-defer-import-eval` is injected from the load hook instead of argv, and the signal naming Nub's argv-only flags survives the worker-thread boundary. A Next.js 16 and Turbopack build died on the previous shape. |
+| [#892](https://github.com/nubjs/nub/pull/892) | The CommonJS cache is preserved under standalone loader imports. |
+| [#897](https://github.com/nubjs/nub/pull/897) | Inspected source is reused for JavaScript lowering. |
+| [#903](https://github.com/nubjs/nub/pull/903) | The launcher probes the payload map instead of scanning it once per directory. |
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.9.0) list every change in this release.
+
+## Get started
+
+<GetStarted />

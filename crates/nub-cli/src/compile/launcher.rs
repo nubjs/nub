@@ -179,7 +179,7 @@ fn fetch(target: &TargetPlatform, sources: &Sources) -> Result<PathBuf> {
     let dir = dest.parent().expect("cache path has a parent");
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    eprintln!("Fetching the {} launcher …", target.triple());
+    super::note(&format!("Fetching the {} launcher …", target.triple()));
     // PID-scoped, so two concurrent compiles for the same triple cannot write
     // each other's bytes mid-download. They still race on the commit below.
     let staged = dir.join(format!(

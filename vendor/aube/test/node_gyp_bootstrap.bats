@@ -73,6 +73,50 @@ JSON
 	assert_file_exists "$XDG_CACHE_HOME/aube/tools/node-gyp/v12/node_modules/.bin/node-gyp"
 }
 
+@test "bootstrap repairs a cached node-gyp whose virtual store was deleted" {
+	if [ -z "${AUBE_TEST_REGISTRY:-}" ]; then
+		skip "AUBE_TEST_REGISTRY not set (Verdaccio not running)"
+	fi
+
+	run aube __node-gyp-bootstrap "$PWD"
+	assert_success
+	assert_file_exists "$output"
+
+	# Isolated installs write a regular .bin wrapper. Deleting its target
+	# used to leave the wrapper looking healthy to the bootstrap fast path.
+	rm -rf "$XDG_CACHE_HOME/aube/virtual-store"
+	run aube __node-gyp-bootstrap "$PWD"
+	assert_success
+	assert_file_exists "$output"
+	run "$output" --help
+	assert_success
+}
+
+@test "dep lifecycle does not bootstrap node-gyp unless invoked" {
+	if [ -z "${AUBE_TEST_REGISTRY:-}" ]; then
+		skip "AUBE_TEST_REGISTRY not set (Verdaccio not running)"
+	fi
+	cat >package.json <<'JSON'
+{
+  "name": "node-gyp-lazy-dep-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "aube-test-builds-marker": "^1.0.0"
+  },
+  "pnpm": {
+    "allowBuilds": {
+      "aube-test-builds-marker": true
+    }
+  }
+}
+JSON
+
+	run aube install
+	assert_success
+	assert_file_exists aube-builds-marker.txt
+	assert_dir_not_exists "$XDG_CACHE_HOME/aube/tools/node-gyp/v12"
+}
+
 @test "aube test adds bootstrapped node-gyp to PATH" {
 	# Ported from pnpm/test/install/lifecycleScripts.ts:128
 	# ('node-gyp is in the PATH'). The setup scrubbed ambient node-gyp,

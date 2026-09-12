@@ -38,7 +38,13 @@ export const NPM_INSTALLERS: string[][] = [['pnpm', 'install']]
 // rustup's cargo shim — the only cargo that understands `+nightly`, and so
 // the only one whose `cargo update` can honor the [unstable]
 // min-publish-age soak (see .cargo/config.toml).
-export const RUSTUP_CARGO = path.join(os.homedir(), '.cargo/bin/cargo')
+// CARGO_HOME-aware: rustup installs its shims under $CARGO_HOME/bin.
+const CARGO_HOME = process.env.CARGO_HOME || path.join(os.homedir(), '.cargo')
+export const RUSTUP_CARGO = path.join(
+  CARGO_HOME,
+  'bin',
+  process.platform === 'win32' ? 'cargo.exe' : 'cargo',
+)
 
 // Pinned external tool manifest + the local tool rack it installs into:
 // exact versions under rack/<tool>/<version>/, flat PATH handles in bin/.

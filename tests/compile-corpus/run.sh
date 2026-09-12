@@ -43,8 +43,18 @@ for f in a-*.mjs; do
   if ! "$NUB" compile "$WORK/$f" --out "$WORK/bin-$n" > "$WORK/log-$n" 2>&1; then
     printf '%-16s %-6s %s\n' "$n" FAIL "compile failed — see log-$n"; fail=$((fail+1)); continue
   fi
-  ejected=$(grep -A9 '^Shipping' "$WORK/log-$n" 2>/dev/null \
-    | grep -oE '^  [a-z@][a-z0-9@/._-]*' | tr -d ' ' | paste -sd, -)
+  # The header states how many entries follow, so take exactly that many rather
+  # than guessing where the list stops. `grep -A9` guessed with a fixed nine-line
+  # window and swept in the resolved-build block's `output` / `runtime` / `target`
+  # rows; guessing by leading character instead would drop a digit-leading package
+  # such as `7zip-bin`, which sorts first and would hide every entry behind it.
+  # This column is the one a reader trusts to spot over-ejection, so a parser that
+  # can either invent or swallow entries is worse than no column.
+  ejected=$(awk '
+    /^Shipping / { left = $2 + 0; next }
+    left > 0 && /^  [^ ]/ { print $1; left--; next }
+    left > 0 { exit }
+  ' "$WORK/log-$n" 2>/dev/null | paste -sd, -)
 
   mv node_modules .nm-hidden
   rm -rf "$WORK/c-$n"

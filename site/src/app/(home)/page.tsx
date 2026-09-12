@@ -952,10 +952,10 @@ function NubxBand() {
 
 /* Source: tests/cross-runtime/results.json `scores.denoExclusions`, using Node 26.7.0's own test tree (tests/node-suite at v26.7.0) with Deno's directory set and config skips applied. Rate = the share of the tests real Node passes that this runtime ALSO passes, so numerator and denominator come from the same set. Do NOT recompute it as runtime_pass / node_pass: that draws the numerator from a larger set than the denominator and reads high (98.8 vs 98.6 for nub on the same June data). */
 const COMPAT = [
-  { name: 'Node 26.7', rate: 100, tests: '5,046 / 5,046', us: false, dim: false },
-  { name: 'Nub', rate: 98.5, tests: '4,968 / 5,046', us: true, dim: false },
-  { name: 'Deno 2.9', rate: 74.2, tests: '3,742 / 5,046', us: false, dim: true },
-  { name: 'Bun 1.4', rate: 70.1, tests: '3,535 / 5,046', us: false, dim: true },
+  { name: 'Node 26.7', rate: 100, tests: '4,690 / 4,690', us: false, dim: false },
+  { name: 'Nub', rate: 98.4, tests: '4,613 / 4,690', us: true, dim: false },
+  { name: 'Deno 2.9', rate: 72.4, tests: '3,397 / 4,690', us: false, dim: true },
+  { name: 'Bun 1.4', rate: 68.5, tests: '3,214 / 4,690', us: false, dim: true },
 ];
 
 function Compatibility() {
@@ -1004,7 +1004,7 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Node 26.7&rsquo;s own test suite under Deno&rsquo;s compatibility lens, scored against stock Node. Most of Nub&rsquo;s 78 misses are tests that assert on machinery Nub installs itself &mdash; the permission model, module-loader hooks, the test runner, the compile cache &mdash; or on stack and output snapshots its preload changes.<br/>
+          Node 26.7&rsquo;s own test suite under Deno&rsquo;s compatibility lens, scored against stock Node. Most of Nub&rsquo;s 77 misses are tests that assert on machinery Nub installs itself &mdash; the permission model, module-loader hooks, the test runner, the compile cache &mdash; or on stack and output snapshots its preload changes.<br/>
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"
@@ -1038,13 +1038,15 @@ const RULES = [
    `packageExtensions` row has no pm_engine dialect-scoping (no per-PM conflict);
    the nub=yes cell is grounded in the embedded aube engine, which honors a
    top-level `packageExtensions` natively (vendor/aube/crates/aube-manifest/src/lib.rs
-   `package_extensions()` → resolver package_ext.rs). Same for `allowBuilds` — a real
-   pnpm field (pnpm-workspace.yaml; pnpm/core/types/src/package.ts) that aube reads via
-   its pnpm-compat settings family; bun honors none of it (only `trustedDependencies`).
+   `package_extensions()` → resolver package_ext.rs). Same for `allowScripts` — a real
+   npm field (top-level package.json, npm 12; RFC npm/rfcs#868) that the engine reads at
+   the manifest root (vendor/aube/crates/aube-manifest/src/lib.rs ROOT_ALLOW_SCRIPTS_KEY).
+   pnpm=no because pnpm's own map is `allowBuilds` in pnpm-workspace.yaml, which nub
+   still reads under a pnpm incumbent — a different field, so a different row's claim.
    Both bun=no cells verified: zero refs in bun source + docs.
    `trustedDependencies` is nub=no on purpose: `honors_trusted_dependencies` returns
    true for Role::Bun ALONE (config_scope.rs, asserted for every other role), so under
-   its own identity nub reads the neutral `allowBuilds` and ignores bun's branded field.
+   its own identity nub reads the neutral `allowScripts` and ignores bun's branded field.
    `catalog:` is yarn=yes for berry — `role_honors_catalog` honors Role::Yarn at major>=2
    (pm_engine/mod.rs); only a `1.x` pin refuses. Version-gated cells show the modern
    line's truth, same as npm=yes for `overrides` (which npm gained in 8.3). Legend:
@@ -1076,8 +1078,8 @@ const PM_MATRIX: { field: ReactNode; cells: Record<(typeof PM_COLUMNS)[number], 
     cells: { npm: 'no', pnpm: 'yes', yarn: 'yes', bun: 'no', nub: 'yes' },
   },
   {
-    field: <><Mono>allowBuilds</Mono></>,
-    cells: { npm: 'no', pnpm: 'yes', yarn: 'no', bun: 'no', nub: 'yes' },
+    field: <><Mono>allowScripts</Mono></>,
+    cells: { npm: 'yes', pnpm: 'no', yarn: 'no', bun: 'no', nub: 'yes' },
   },
   {
     field: <><Mono>trustedDependencies</Mono></>,
@@ -1444,8 +1446,8 @@ function Footer() {
             title="Toolkit"
             links={[
               ['File runner', '/docs/runtime'],
-              ['Runner', '/docs/runner'],
-              ['Script runner', '/docs/runner/run'],
+              ['Script runner', '/docs/run'],
+              ['Bin runner', '/docs/nubx'],
               ['Package manager', '/docs/pm'],
               ['Version manager', '/docs/node'],
               ['Watch mode', '/docs/watch'],

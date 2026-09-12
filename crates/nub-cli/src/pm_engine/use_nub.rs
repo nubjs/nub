@@ -15,7 +15,7 @@
 //! - resolution-bearing keys → `package.json` under ecosystem-standard
 //!   top-level names (`workspaces` incl. the object form,
 //!   `workspaces.catalog(s)`, `overrides`, `patchedDependencies`, the
-//!   three-state `allowBuilds` map, `auditConfig`);
+//!   three-state `allowScripts` map);
 //! - settings → `.npmrc` (the same vocabulary, kebab spellings — one engine
 //!   reads both homes, so this is a mechanical move, not a translation);
 //! - engine-unsupported keys → warn-drop naming each (the three repo-wide
@@ -240,6 +240,14 @@ const ENGINE_UNSUPPORTED: &[(&str, &str)] = &[
         "allowUnusedPatches",
         "unreferenced patch files always error in the engine",
     ),
+    // Was migrated to a top-level `auditConfig` until nub stopped reading that
+    // key. Reporting it is the whole point: the alternative is a conversion
+    // that says it succeeded while the project's triaged advisories quietly
+    // come back on the next audit.
+    (
+        "auditConfig",
+        "nub has no persistent audit-ignore config — pass `nub audit --ignore <id>`, which takes advisory numbers, GHSA ids and CVE ids",
+    ),
     (
         "fetchingConcurrency",
         "use network-concurrency in .npmrc instead",
@@ -377,13 +385,11 @@ pub(crate) struct YamlMigration {
     /// and package.json live in the same directory, so relative patch paths
     /// stay correct).
     pub patched_dependencies: Option<Map<String, Value>>,
-    /// Top-level three-state `allowBuilds` map. Folds the legacy trio:
-    /// `onlyBuiltDependencies` → `true`, `neverBuiltDependencies` /
-    /// `ignoredBuiltDependencies` → `false` (asked-and-answered, not
-    /// security denial). Explicit `allowBuilds` entries win the fold.
+    /// Entries for the top-level three-state `allowScripts` map. Folds the
+    /// legacy trio: `onlyBuiltDependencies` → `true`, `neverBuiltDependencies`
+    /// / `ignoredBuiltDependencies` → `false` (asked-and-answered, not
+    /// security denial). Explicit pnpm `allowBuilds` entries win the fold.
     pub allow_builds: Option<Map<String, Value>>,
-    /// Top-level `auditConfig` (aube's existing extension home).
-    pub audit_config: Option<Value>,
     /// `.npmrc` lines to append, as `(key, value)` (key already kebab).
     pub npmrc: Vec<(String, String)>,
     /// Engine-unsupported keys found, as `key — note` summary lines.
@@ -446,7 +452,6 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
             "catalogs" => m.catalogs = Some(value.clone()),
             "overrides" => m.overrides = value.as_object().cloned(),
             "patchedDependencies" => m.patched_dependencies = value.as_object().cloned(),
-            "auditConfig" => m.audit_config = Some(value.clone()),
             // handled by the folds above
             "allowBuilds"
             | "onlyBuiltDependencies"
@@ -601,9 +606,10 @@ pub(crate) fn write_nub_identity_fields(
 /// - `workspaces` membership + catalogs: the yaml was authoritative under
 ///   pnpm (it shadows `package.json#workspaces`), so yaml values overwrite —
 ///   any differing pre-existing value is named in the returned notes.
-/// - `overrides` / `patchedDependencies` / `allowBuilds` / `auditConfig`:
+/// - `overrides` / `patchedDependencies` / `allowScripts`:
 ///   per-key insert; an existing top-level entry wins (the engine's merge
-///   already ranked top-level above the yaml), conflicts named.
+///   already ranked top-level above the yaml), conflicts named. pnpm's
+///   `allowBuilds` map lands under the neutral `allowScripts` name.
 /// - `pnpm` namespace: removed (migrated through the same table by the
 ///   caller; unread under nub identity).
 ///
@@ -668,7 +674,7 @@ pub(crate) fn apply_manifest_edits(
     for (key, entries) in [
         ("overrides", &m.overrides),
         ("patchedDependencies", &m.patched_dependencies),
-        ("allowBuilds", &m.allow_builds),
+        (aube_manifest::ROOT_ALLOW_SCRIPTS_KEY, &m.allow_builds),
     ] {
         let Some(entries) = entries else { continue };
         let target = obj.entry(key).or_insert_with(|| Value::Object(Map::new()));
@@ -692,14 +698,6 @@ pub(crate) fn apply_manifest_edits(
             }
         }
     }
-    if let Some(audit) = &m.audit_config
-        && obj.get("auditConfig").is_none_or(|prev| prev == audit)
-    {
-        obj.insert("auditConfig".into(), audit.clone());
-    } else if m.audit_config.is_some() {
-        notes.push("auditConfig: package.json already sets a differing value — kept".into());
-    }
-
     obj.remove("pnpm");
     notes
 }
@@ -938,8 +936,10 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
             "patchedDependencies",
             migration.patched_dependencies.is_some(),
         ),
-        ("allowBuilds", migration.allow_builds.is_some()),
-        ("auditConfig", migration.audit_config.is_some()),
+        (
+            aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
+            migration.allow_builds.is_some(),
+        ),
     ] {
         if present {
             println!("  package.json: top-level {key} migrated");
@@ -1093,11 +1093,40 @@ fn remove_strays(paths: &[std::path::PathBuf], why: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fold the two manifest-root build-allowlist spellings into the single map
+/// pnpm reads, with an explicit `false` beating any allow — the same deny-wins
+/// rule the engine applies when one package is named by several sources.
+///
+/// Both arguments are passed because a manifest can legitimately carry both: the
+/// rename refusal only guards paths that build an install session, and `nub pm
+/// use pnpm` is not one. Order is irrelevant to the result; a denial in either
+/// map survives.
+///
+/// `None` when neither name holds an object, which is what keeps a manifest with
+/// nothing to migrate on the idempotent-rerun path.
+fn merge_root_allow_maps(legacy: Option<&Value>, current: Option<&Value>) -> Option<Value> {
+    let mut out: Option<Map<String, Value>> = None;
+    for map in [legacy, current].into_iter().flatten() {
+        let Some(map) = map.as_object() else { continue };
+        let acc = out.get_or_insert_with(Map::new);
+        for (key, value) in map {
+            if acc.get(key) == Some(&Value::Bool(false)) {
+                continue;
+            }
+            acc.insert(key.clone(), value.clone());
+        }
+    }
+    out.map(Value::Object)
+}
+
 /// The yaml-regeneration half of `nub pm use pnpm` — the exact reverse of
 /// [`run_use_nub`]'s migration: collect the nub-mode homes out of
 /// `package.json` (`workspaces` membership + catalogs, top-level `overrides`
-/// / `patchedDependencies` / `allowBuilds` / `auditConfig`), write them into
-/// `pnpm-workspace.yaml` (merging into an existing yaml, package.json values
+/// / `patchedDependencies` / `allowScripts`, plus a legacy `auditConfig` left
+/// by a pre-drop conversion), write them into
+/// `pnpm-workspace.yaml` under pnpm's own key names (`allowScripts` →
+/// `allowBuilds`; the rest keep their spelling), merging into an existing yaml
+/// with package.json values
 /// winning — they were the live config under nub), and remove the migrated
 /// keys from `package.json`. Settings already in `.npmrc` stay there — pnpm
 /// reads them too. Returns the summary lines; empty when there was nothing
@@ -1121,7 +1150,27 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
     };
     let overrides = manifest.get("overrides").cloned();
     let patched = manifest.get("patchedDependencies").cloned();
-    let allow_builds = manifest.get("allowBuilds").cloned();
+    // The nub-mode home is the neutral top-level `allowScripts`; pnpm's home
+    // for the same map is `allowBuilds`, so this one entry is renamed on the
+    // way out rather than moved verbatim.
+    //
+    // The pre-cutover root key is read here too, and MERGED rather than chosen
+    // between. This command never builds an install session, so the
+    // `ERR_NUB_ALLOW_BUILDS_RENAMED` refusal cannot reach it — a project that
+    // predates the rename, or that is part-way through it and carries both
+    // spellings, would otherwise switch to pnpm with its build policy stranded
+    // at a root key pnpm does not read. Taking one map wholesale would drop the
+    // other's entries silently, and the entry that matters is a `false`: losing
+    // a denial runs a script the project refused.
+    let allow_builds = merge_root_allow_maps(
+        manifest.get(aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY),
+        manifest.get(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY),
+    );
+    // Rescue only. `nub pm use nub` no longer writes this key — nub has no
+    // persistent audit-ignore config — but a project converted before that
+    // change still carries one, doing nothing. Carrying it back to pnpm's own
+    // home is the one place it becomes live again, so the switch restores a
+    // policy rather than leaving it stranded at a name nothing reads.
     let audit_config = manifest.get("auditConfig").cloned();
 
     if packages.is_none()
@@ -1162,7 +1211,11 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
             "workspaces",
             "overrides",
             "patchedDependencies",
-            "allowBuilds",
+            aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
+            // Cleared alongside the current spelling. Both were folded into the
+            // one map written above, so removing only one would strand a
+            // duplicate nothing reads.
+            aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY,
             "auditConfig",
         ] {
             obj.remove(key);
@@ -1183,6 +1236,49 @@ mod tests {
 
     fn src(json: serde_json::Value) -> Map<String, Value> {
         json.as_object().cloned().unwrap()
+    }
+
+    /// `pnpm.auditConfig` has no destination under nub identity, so the
+    /// conversion must NAME it rather than write it somewhere nothing reads.
+    ///
+    /// It used to be migrated to a top-level `package.json` `auditConfig`.
+    /// Once nub stopped reading that key the same write became a silent policy
+    /// loss dressed as a successful migration — the project's triaged
+    /// advisories would come back on the next audit with nothing said. The
+    /// assertions are the two halves of "loud": it must not reach the manifest,
+    /// and the summary must carry the remedy.
+    #[test]
+    fn an_audit_config_is_reported_as_unsupported_rather_than_migrated() {
+        let m = plan_migration(&src(json!({
+            "auditConfig": { "ignoreGhsas": ["GHSA-xxxx-yyyy-zzzz"] }
+        })))
+        .unwrap();
+
+        let dropped = m.dropped.join("\n");
+        assert!(
+            dropped.contains("auditConfig"),
+            "the conversion must name the key it could not carry: {dropped:?}"
+        );
+        assert!(
+            dropped.contains("nub audit --ignore"),
+            "and must name what replaces it: {dropped:?}"
+        );
+        assert!(
+            !m.npmrc.iter().any(|(k, _)| k.contains("audit")),
+            "no invented `.npmrc` home either: {:?}",
+            m.npmrc
+        );
+
+        let mut manifest = Map::new();
+        let notes = apply_manifest_edits(&mut manifest, &m, None, "^0.8.0");
+        assert!(
+            manifest.get("auditConfig").is_none(),
+            "a key nub does not read must not be written to package.json: {manifest:?}"
+        );
+        assert!(
+            !notes.join("\n").contains("auditConfig"),
+            "and it must not be reported as moved: {notes:?}"
+        );
     }
 
     #[test]
@@ -1416,7 +1512,7 @@ mod tests {
                 "packageManager": "nub@0.1.0",
                 "workspaces": { "packages": ["packages/*"], "catalog": { "react": "^18.0.0" } },
                 "overrides": { "lodash": "4.17.21" },
-                "allowBuilds": { "esbuild": true, "fsevents": false }
+                "allowScripts": { "esbuild": true, "fsevents": false }
             }))
             .unwrap(),
         )
@@ -1432,13 +1528,15 @@ mod tests {
         assert_eq!(yaml["packages"][0], "packages/*");
         assert_eq!(yaml["catalog"]["react"], "^18.0.0");
         assert_eq!(yaml["overrides"]["lodash"], "4.17.21");
+        // The map is renamed on the way out: nub's neutral `allowScripts`
+        // lands under pnpm's own `allowBuilds` key in the yaml.
         assert_eq!(yaml["allowBuilds"]["esbuild"], true);
 
         let manifest: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
         )
         .unwrap();
-        for key in ["workspaces", "overrides", "allowBuilds"] {
+        for key in ["workspaces", "overrides", "allowScripts"] {
             assert!(
                 manifest.get(key).is_none(),
                 "{key} must move back into the yaml"
@@ -1447,6 +1545,104 @@ mod tests {
 
         // Idempotent rerun: nothing left to move.
         assert!(regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
+    }
+
+    /// A project that predates the `allowBuilds` → `allowScripts` rename can
+    /// reach `nub pm use pnpm` directly: that command builds no install
+    /// session, so the rename refusal never runs. The legacy map must still
+    /// migrate, or the switch strands the whole build policy at a root key
+    /// pnpm does not read.
+    #[test]
+    fn regenerate_migrates_a_pre_cutover_allow_builds_map() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "app",
+                "packageManager": "nub@0.1.0",
+                "allowBuilds": { "esbuild": true, "fsevents": false }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let lines = regenerate_workspace_yaml(dir.path()).unwrap();
+        assert!(
+            !lines.is_empty(),
+            "the legacy map must be migrated, not skipped"
+        );
+
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(dir.path().join("pnpm-workspace.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(yaml["allowBuilds"]["esbuild"], true);
+        assert_eq!(
+            yaml["allowBuilds"]["fsevents"], false,
+            "a denial must survive the switch — losing it runs a script the project refused"
+        );
+
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            manifest.get("allowBuilds").is_none(),
+            "the legacy key must not be left behind as a duplicate"
+        );
+    }
+
+    /// A manifest can carry both spellings — the rename refusal guards only the
+    /// paths that build an install session, and this is not one. Choosing one
+    /// map wholesale would drop the other's entries, and the entry that matters
+    /// is the denial: `fsevents: false` in the stale map against `true` in the
+    /// new one has to reach pnpm as `false`, or the switch runs a script the
+    /// project refused.
+    #[test]
+    fn regenerate_folds_both_allow_spellings_with_the_denial_winning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "app",
+                "packageManager": "nub@0.1.0",
+                "allowScripts": { "esbuild": true, "fsevents": true, "sharp": true },
+                "allowBuilds": { "fsevents": false, "canvas": false, "sharp": true }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        regenerate_workspace_yaml(dir.path()).unwrap();
+
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(dir.path().join("pnpm-workspace.yaml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            yaml["allowBuilds"]["fsevents"], false,
+            "a denial in the stale map must beat an allow in the new one"
+        );
+        assert_eq!(
+            yaml["allowBuilds"]["esbuild"], true,
+            "an entry only the new map carries must survive"
+        );
+        assert_eq!(
+            yaml["allowBuilds"]["canvas"], false,
+            "an entry only the stale map carries must survive"
+        );
+        assert_eq!(yaml["allowBuilds"]["sharp"], true);
+
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
+        )
+        .unwrap();
+        for key in ["allowScripts", "allowBuilds"] {
+            assert!(
+                manifest.get(key).is_none(),
+                "{key} must not be left behind once folded into the yaml"
+            );
+        }
     }
 
     #[test]

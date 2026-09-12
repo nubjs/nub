@@ -22,10 +22,9 @@
 //! npm-published bytes — the command lists every cached integrity and
 //! asks the user to disambiguate.
 
-use clap::Args;
 use miette::{IntoDiagnostic, miette};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct CatIndexArgs {
     /// Package to inspect, in `name@version` form (e.g. `lodash@4.17.21`,
     /// `@babel/core@7.26.0`).

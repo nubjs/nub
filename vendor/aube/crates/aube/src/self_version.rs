@@ -63,6 +63,14 @@ pub(crate) async fn maybe_switch(settings: &crate::startup::StartupSettings) -> 
         return Ok(());
     }
 
+    // An explicit error policy validates the invoking aube itself. Do
+    // not silently satisfy it by switching to another installed binary:
+    // callers use this policy when they want a version mismatch to stop
+    // every aube command.
+    if pin.on_fail == aube_manifest::OnFail::Error {
+        return self_pin_unsatisfied(&pin, "onFail is \"error\"".to_string());
+    }
+
     // Resolve the pin to an exact version: exact pins directly, ranges
     // against installed versions first, then the published list. A
     // range that can't be resolved (offline, or nothing satisfies)
@@ -192,11 +200,19 @@ fn self_pin_unsatisfied(pin: &SelfPin, detail: String) -> miette::Result<()> {
     // Product name in the spec syntax shown to the user (standalone aube →
     // "aube"): the pin reads `packageManager: "<name>@<version>"`.
     let name = aube_util::embedder().name;
+    let help = if pin.on_fail == aube_manifest::OnFail::Error {
+        format!(
+            "run the project with a {name} version satisfying {}, or set devEngines.packageManager.onFail to \"warn\", \"ignore\", or \"download\"",
+            pin.raw
+        )
+    } else {
+        format!(
+            "pin an exact released version (e.g. `packageManager: \"{name}@<version>\"`), or set managePackageManagerVersions=false to skip switching"
+        )
+    };
     Err(miette!(
         code = aube_codes::errors::ERR_AUBE_RUNTIME_VERSION_UNSATISFIED,
-        help = format!(
-            "pin an exact released version (e.g. `packageManager: \"{name}@<version>\"`), or set managePackageManagerVersions=false to skip switching"
-        ),
+        help = help,
         "the project pins {name}@{} via {}, but this is {name}@{} and {detail}",
         pin.raw,
         pin.source,

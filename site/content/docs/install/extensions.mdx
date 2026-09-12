@@ -1,0 +1,101 @@
+---
+title: "@nubjs/extensions"
+description: An open package extensions database for undeclared npm dependencies, with ready-to-use configuration for pnpm and Yarn.
+---
+
+Nub's [phantom detector](/docs/install/virtual-store#phantom-detection-and-ejection) scans published npm packages for undeclared dependencies. The results are available as a standalone package on [npm](https://www.npmjs.com/package/@nubjs/extensions), with the [source, data and scan records on GitHub](https://github.com/nubjs/package-extensions).
+
+```sh
+nub add -D @nubjs/extensions
+```
+
+```js
+import { packageExtensions } from '@nubjs/extensions';
+```
+
+Nub bundles a snapshot of this database for dependency resolution. There is no need to install the package to use it with Nub; the standalone export is for other tools and package managers.
+
+## Using the data
+
+The export is an array of `[selector, extension]` pairs, using the same format as `@yarnpkg/extensions`. Each selector identifies a package and version range; its extension supplies missing dependency declarations or peer metadata.
+
+```js
+import { packageExtensions } from '@nubjs/extensions';
+
+const extensions = Object.fromEntries(packageExtensions);
+```
+
+For tools that read JSON directly, the package also exports `@nubjs/extensions/package-extensions.json`. The [repository's JSON dataset](https://github.com/nubjs/package-extensions/blob/main/package-extensions.json) includes rules, version-specific evidence and scan provenance. [Weekly npm download estimates](https://github.com/nubjs/package-extensions/blob/main/inputs/downloads.json) are available separately.
+
+## pnpm and Yarn
+
+Installing the npm package alone does not enable its rules in pnpm or Yarn. Merge the generated configuration into the appropriate project file, then run the package manager's install command:
+
+| Package manager | Project file | Generated configuration |
+| --- | --- | --- |
+| Yarn 2 and newer | `.yarnrc.yml` | [Yarn configuration](https://github.com/nubjs/package-extensions/blob/main/dist/yarnrc.yml) |
+| pnpm 10 and newer | `pnpm-workspace.yaml` | [pnpm workspace configuration](https://github.com/nubjs/package-extensions/blob/main/dist/pnpm-workspace.yaml) |
+| pnpm 9 | The `pnpm` field in `package.json` | [pnpm package configuration](https://github.com/nubjs/package-extensions/blob/main/dist/pnpm-package.json) |
+
+For example, this entry supplies a dependency that `@nrwl/devkit` imports without declaring:
+
+```yaml
+packageExtensions:
+  "@nrwl/devkit@*":
+    dependencies:
+      tslib: "*"
+```
+
+The generated Yarn configuration includes a `logFilters` block to suppress warnings about rules for packages that are not installed. Keep that block when importing the full database.
+
+See the [pnpm](https://pnpm.io/settings#packageextensions) and [Yarn](https://yarnpkg.com/configuration/yarnrc#packageExtensions) settings references for the configuration format.
+
+## Coverage and updates
+
+The repository has a daily scan of the top 10,000 npm packages by downloads and publishes an npm update when extension rules change. It retains Yarn's package extensions and supports fixed rules for cases that static analysis cannot infer. Nub's bundled snapshot updates separately from the npm package.
+
+A finding records the version examined, not every version of a package. Some references belong to optional integrations or published type declarations rather than unconditional runtime imports. Check the rule's version range and evidence when investigating a package.
+
+## Fixing a package
+
+Declare the dependencies used by the published package, including its type declarations:
+
+| Usage | Manifest field |
+| --- | --- |
+| A library the package needs its own copy of | `dependencies` |
+| A compatible host supplied by the application | `peerDependencies` |
+| A consumer-selected integration | `peerDependencies` with optional peer metadata |
+| A dependency whose failed or omitted installation is handled | `optionalDependencies` |
+| A tool used only for development or builds | `devDependencies` |
+
+### Optional integrations
+
+For an optional React integration, declare the peer and mark it optional, using the versions the package supports:
+
+```json title="package.json"
+{
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true }
+  }
+}
+```
+
+The optional marker does not make an unconditional import safe when React is absent. Keep optional integrations out of the default entry point's eager import graph. Unlike an optional peer, an `optionalDependencies` entry requests installation unless optional dependencies are omitted; runtime code must handle its absence.
+
+See [npm's optional peer documentation](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/#peerdependenciesmeta).
+
+### Testing the fix
+
+1. Pack the package and install its tarball in a fresh consumer using Yarn Plug'n'Play without fallback, or pnpm with hoisting disabled.
+2. Exercise the public runtime, CLI and type entry points.
+3. Test optional integrations with their peers installed and absent. The base entry point should work in both cases.
+4. Report the corrected version so the database's affected range can be updated.
+
+## Contributing
+
+Open an [issue](https://github.com/nubjs/package-extensions/issues/new) or [pull request](https://github.com/nubjs/package-extensions/pulls) with the package name, version, import path and a reproduction. Corrections, missing entries and version-range updates are welcome.
+
+Fixed rules belong in [inputs/manual-extensions.json](https://github.com/nubjs/package-extensions/blob/main/inputs/manual-extensions.json), not the generated output. They are merged into the database on every rebuild, including rules the detector cannot infer. See the [repository instructions](https://github.com/nubjs/package-extensions#regenerating) for the format and checks.

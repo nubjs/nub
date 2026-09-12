@@ -12,40 +12,42 @@
 //! All operations require an existing auth token in `.npmrc` (you must be
 //! logged in to manage tokens).
 
-use clap::{Args, Subcommand};
 use miette::miette;
 
 use crate::commands::make_client;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct TokenArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: TokenCommand,
 
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum TokenCommand {
     /// List the account's auth tokens.
-    #[command(visible_alias = "ls")]
+    #[usage(alias = "ls")]
     List,
     /// Create a new auth token.
     Create {
         /// Account password. If omitted, read from stdin.
-        #[arg(short = 'p', long)]
+        #[usage(short = 'p', long)]
         password: Option<String>,
         /// Create a read-only token.
-        #[arg(long)]
+        #[usage(long)]
         read_only: bool,
         /// Restrict the token to these CIDR ranges. Repeatable.
-        #[arg(long, value_name = "CIDR")]
+        #[usage(long, value_name = "CIDR")]
         cidr: Vec<String>,
     },
     /// Revoke a token by its key (or token-value prefix).
-    #[command(visible_alias = "rm")]
-    Revoke { key: String },
+    #[usage(alias = "rm")]
+    Revoke {
+        /// The token key, or a prefix of the token value.
+        key: String,
+    },
 }
 
 pub async fn run(args: TokenArgs) -> miette::Result<()> {

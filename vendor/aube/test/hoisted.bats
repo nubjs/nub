@@ -81,6 +81,93 @@ YAML
 	assert_failure
 }
 
+@test "hoisted workspaces share compatible dependencies at the workspace root" {
+	mkdir -p packages/app packages/lib
+	cat >package.json <<'JSON'
+{"name":"root","private":true}
+JSON
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+nodeLinker: hoisted
+YAML
+	cat >packages/app/package.json <<'JSON'
+{"name":"app","private":true,"dependencies":{"is-number":"7.0.0"}}
+JSON
+	cat >packages/lib/package.json <<'JSON'
+{"name":"lib","private":true,"dependencies":{"is-number":"7.0.0"}}
+JSON
+
+	run aube install
+	assert_success
+	assert_dir_exists node_modules/is-number
+	assert_not_exists packages/app/node_modules/is-number
+	assert_not_exists packages/lib/node_modules/is-number
+	run bash -c '
+app=$(cd packages/app && node -p '\''require.resolve("is-number/package.json")'\'')
+lib=$(cd packages/lib && node -p '\''require.resolve("is-number/package.json")'\'')
+test "$(realpath "$app")" = "$(realpath "$lib")"
+'
+	assert_success
+}
+
+@test "hoisted workspace root placements stay warm before scripts" {
+	mkdir -p packages/app
+	cat >package.json <<'JSON'
+{"name":"root","private":true,"scripts":{"ok":"printf 'ok\\n'"}}
+JSON
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+nodeLinker: hoisted
+YAML
+	cat >packages/app/package.json <<'JSON'
+{"name":"app","private":true,"dependencies":{"is-number":"7.0.0"}}
+JSON
+
+	run aube install
+	assert_success
+	assert_dir_exists node_modules/is-number
+	assert_not_exists packages/app/node_modules/is-number
+
+	# `assert_line` rather than `assert_output`: `aube run` also echoes the
+	# `$ <cmd>` line. Using `-s` to get an exact match would mute the
+	# "Auto-installing" notice this test is here to refute.
+	run aube run ok
+	assert_success
+	assert_line "ok"
+	refute_output --partial "Auto-installing"
+	run aube run ok
+	assert_success
+	assert_line "ok"
+	refute_output --partial "Auto-installing"
+}
+
+@test "hoistingLimits=workspaces keeps dependencies under each workspace" {
+	mkdir -p packages/app packages/lib
+	cat >package.json <<'JSON'
+{"name":"root","private":true}
+JSON
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+nodeLinker: hoisted
+hoistingLimits: workspaces
+YAML
+	cat >packages/app/package.json <<'JSON'
+{"name":"app","private":true,"dependencies":{"is-number":"7.0.0"}}
+JSON
+	cat >packages/lib/package.json <<'JSON'
+{"name":"lib","private":true,"dependencies":{"is-number":"7.0.0"}}
+JSON
+
+	run aube install
+	assert_success
+	assert_not_exists node_modules/is-number
+	assert_dir_exists packages/app/node_modules/is-number
+	assert_dir_exists packages/lib/node_modules/is-number
+}
+
 @test "--node-linker=pnp is rejected" {
 	_setup_basic_fixture
 	run aube install --node-linker=pnp

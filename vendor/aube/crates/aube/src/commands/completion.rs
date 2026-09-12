@@ -1,232 +1,197 @@
-use miette::{IntoDiagnostic, Result, WrapErr};
+use miette::{Result, miette};
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[derive(clap::Args)]
+/// The programs aube answers for: itself, and the two applets its spec declares as views.
+const PROGRAMS: [&str; 3] = ["aube", "aubr", "aubx"];
+
+#[derive(usage_rs::Args)]
 pub struct CompletionArgs {
     /// The shell to generate completions for (bash, zsh, fish)
-    #[arg(value_name = "SHELL")]
+    #[usage(arg, name = "SHELL")]
     pub shell: String,
-    /// Emit dynamic candidates for the shell completion engine.
-    #[arg(long, hide = true, value_enum)]
-    complete: Option<CompletionKind>,
-    /// Current word being completed.
-    #[arg(long, hide = true, default_value = "")]
-    query: String,
-}
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum CompletionKind {
-    Package,
-    Bin,
-    Workspace,
-    Setting,
-    Patch,
+    /// Replace a file at a target path that aube did not write
+    #[usage(long, requires = "--install", effect = "write")]
+    pub force: bool,
+
+    /// Install the scripts where this shell looks for them, instead of printing them
+    ///
+    /// Writes one script per program — aube, aubr and aubx — and nothing else: no shell rc file
+    /// and no PowerShell profile is edited. Where a shell needs a one-time line of its own, it is
+    /// printed for you to add.
+    #[usage(long, effect = "write")]
+    pub install: bool,
 }
 
 pub async fn run(args: CompletionArgs) -> Result<()> {
-    if args.is_probe() {
-        args.run_probe(None).await;
-        return Ok(());
+    let shell = usage_rs::complete::Shell::from_name(&args.shell)
+        .ok_or_else(|| miette!("unsupported shell {:?}", args.shell))?;
+    if args.install {
+        return install(shell, args.force);
     }
-    let shell = args.shell.as_str();
-    // Command name from the active embedder (standalone aube → "aube").
-    let name = aube_util::embedder().name;
-    let usage_cmd = format!("{name} usage");
-    let output = Command::new("usage")
-        .args([
-            "g",
-            "completion",
-            shell,
-            name,
-            "--usage-cmd",
-            &usage_cmd,
-            "--cache-key",
-            env!("CARGO_PKG_VERSION"),
-        ])
-        .output()
-        .into_diagnostic()
-        .wrap_err("failed to invoke `usage`; install it from https://usage.jdx.dev")?;
-    ensure_success(shell, &output)?;
-
-    let aubr = generate_multicall_completion(shell, "run", "aubr", true)?;
-    let aubx = generate_multicall_completion(shell, "dlx", "aubx", false)?;
-
-    let mut stdout = std::io::stdout();
-    stdout
-        .write_all(&output.stdout)
-        .into_diagnostic()
-        .wrap_err("failed to write completions to stdout")?;
-    stdout
-        .write_all(&aubr.stdout)
-        .into_diagnostic()
-        .wrap_err("failed to write aubr completions to stdout")?;
-    stdout
-        .write_all(&aubx.stdout)
-        .into_diagnostic()
-        .wrap_err("failed to write aubx completions to stdout")?;
+    for program in PROGRAMS {
+        print!(
+            "{}",
+            crate::completion_app(program).completion_script(shell)
+        );
+    }
     Ok(())
 }
 
-impl CompletionArgs {
-    pub(crate) fn is_probe(&self) -> bool {
-        self.complete.is_some()
-    }
+/// Put each program's script where this shell looks for it, and say what is left to do.
+///
+/// One install per program rather than one for `aube`: an applet is completed under its own name,
+/// so `aubr` needs its own file, exactly as it needs its own script. The location comes from
+/// usage's resolver, so `aube completion zsh --install` and `usage g completion zsh aubr --install`
+/// cannot disagree about where an applet's completion lives.
+fn install(shell: usage_rs::complete::Shell, force: bool) -> Result<()> {
+    use usage_rs::install::{self, Loading, OnForeign, Wrote};
 
-    pub(crate) async fn run_probe(&self, cwd: Option<&Path>) {
-        let Some(kind) = self.complete else {
-            return;
-        };
-        let Some(cwd) = super::completion_start_dir(cwd) else {
-            return;
-        };
-        print_candidates(kind, &self.query, &cwd).await;
-    }
-}
-
-fn generate_multicall_completion(
-    shell: &str,
-    subcommand: &str,
-    name: &str,
-    append_shared_completers: bool,
-) -> Result<std::process::Output> {
-    let mut child = Command::new("usage")
-        .args(["g", "completion", shell, name, "-f", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .into_diagnostic()
-        .wrap_err("failed to invoke `usage`; install it from https://usage.jdx.dev")?;
-    let spec = multicall_usage_spec(subcommand, name, append_shared_completers);
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| {
-            miette::miette!(
-                code = aube_codes::errors::ERR_AUBE_COMPLETION_FAILED,
-                "failed to open stdin for `usage g completion {shell}`"
-            )
-        })?
-        .write_all(spec.as_bytes())
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to send the {name} usage spec to `usage`"))?;
-    let output = child
-        .wait_with_output()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to wait for `usage` to generate {name} completions"))?;
-    ensure_success(shell, &output)?;
-    Ok(output)
-}
-
-fn ensure_success(shell: &str, output: &std::process::Output) -> Result<()> {
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(miette::miette!(
-        code = aube_codes::errors::ERR_AUBE_COMPLETION_FAILED,
-        "`usage g completion {shell}` failed: {}",
-        stderr.trim()
-    ))
-}
-
-fn multicall_usage_spec(subcommand: &str, name: &str, append_shared_completers: bool) -> String {
-    let mut cmd = crate::command();
-    let mut spec = clap_usage::spec(&mut cmd, aube_util::prog());
-    let root_flags = spec
-        .cmd
-        .flags
-        .iter()
-        .filter(|flag| flag.global)
-        .cloned()
-        .collect::<Vec<_>>();
-    // WHY: these are compile-time members of `Cli`; if one disappeared its
-    // completion generator would be invalid and its focused test would fail.
-    let mut command = spec
-        .cmd
-        .subcommands
-        .shift_remove(subcommand)
-        .unwrap_or_else(|| panic!("aube command must contain {subcommand}"));
-    command.flags.splice(0..0, root_flags);
-    command.name = name.to_string();
-    command.full_cmd = vec![name.to_string()];
-    command.aliases.clear();
-    command.hidden_aliases.clear();
-    command.usage = command.usage.replacen(&aube_util::cmd(subcommand), name, 1);
-
-    // Completion owns only aubx's first positional. Everything after the
-    // command is passed to the fetched binary and must not be interpreted as
-    // more aube arguments.
-    if name == "aubx"
-        && let Some(params) = command.args.first_mut()
-    {
-        params.var = false;
-        params.var_max = Some(1);
-        // WHY: `automatic` is a usage-lib enum literal; failure would mean
-        // the completion protocol changed underneath clap_usage.
-        params.double_dash = "automatic"
-            .parse()
-            .expect("automatic must remain a valid usage double-dash mode");
-        params.usage = params.usage();
-    }
-
-    spec.name = name.to_string();
-    spec.bin = name.to_string();
-    spec.usage = command.usage.clone();
-    spec.about = command.help.clone();
-    spec.about_long = command.help_long.clone();
-    spec.cmd = command;
-
-    let extra = if append_shared_completers {
-        include_str!("../../assets/extra.usage.kdl")
-            .replace("{run}", name)
-            .replace(
-                "{completers}",
-                &include_str!("../../assets/completion.usage.kdl").replace("{bin}", "aube"),
-            )
+    let on_foreign = if force {
+        OnForeign::Overwrite
     } else {
-        format!(
-            "{}\n{}",
-            include_str!("../../assets/completion.usage.kdl").replace("{bin}", "aube"),
-            include_str!("../../assets/aubx.usage.kdl")
-        )
+        OnForeign::Refuse
     };
-    format!("// @generated by aube for the {name} multicall surface\n{spec}\n{extra}")
-}
+    // The environment is described from this process rather than reached for inside the resolver,
+    // which is what lets a test point the same code path somewhere harmless.
+    let env = install::Env::from_process();
 
-async fn print_candidates(kind: CompletionKind, query: &str, cwd: &Path) {
-    let mut candidates = match kind {
-        CompletionKind::Package => package_candidates(cwd, query).await,
-        CompletionKind::Bin => bin_candidates(cwd),
-        CompletionKind::Workspace => workspace_candidates(cwd),
-        CompletionKind::Setting => setting_candidates(),
-        CompletionKind::Patch => patch_candidates(cwd),
-    };
-    candidates.sort_by(|a, b| a.0.cmp(&b.0));
-    candidates.dedup_by(|a, b| a.0 == b.0);
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-    write_candidates(&mut stdout, candidates);
-}
-
-fn write_candidates(writer: &mut impl Write, candidates: Vec<(String, String)>) {
-    for (value, description) in candidates {
-        if writeln!(
-            writer,
-            "{}:{}",
-            escape_completion_field(&value),
-            escape_completion_field(&description)
-        )
-        .is_err()
-        {
-            break;
+    // Collected rather than printed per program: all three land in the same directory, so a shell
+    // that needs a line needs it once, and saying it three times is noise a reader has to compare
+    // to be sure it really is the same line.
+    let mut instructions: Vec<(String, String)> = Vec::new();
+    let mut notes: Vec<&'static str> = Vec::new();
+    for program in PROGRAMS {
+        let done = crate::completion_app(program)
+            .install_completion(shell, &env, on_foreign)
+            .map_err(|err| as_diagnostic(program, err))?;
+        eprintln!("installing to {}", done.plan.path.display());
+        if done.wrote == Wrote::Unchanged {
+            eprintln!("already up to date");
+        }
+        if let Loading::Manual { line, file, .. } = &done.plan.loading {
+            let entry = (file.clone(), line.clone());
+            if !instructions.contains(&entry) {
+                instructions.push(entry);
+            }
+        }
+        if let Some(note) = done.plan.note.filter(|note| !notes.contains(note)) {
+            notes.push(note);
         }
     }
+
+    for (file, line) in instructions {
+        eprintln!("\nadd this to {file}, once:\n\n{line}\n");
+    }
+    for note in notes {
+        eprintln!("note: {note}");
+    }
+    Ok(())
 }
+
+/// An install failure as something aube can print, with the way out where there is one.
+///
+/// The chain is walked rather than formatted away: `Display` names the step and the path, and the
+/// operating system's own words are on `source()`.
+fn as_diagnostic(program: &str, err: usage_rs::install::Error) -> miette::Report {
+    let mut message = err.to_string();
+    let mut cause = std::error::Error::source(&err);
+    while let Some(next) = cause {
+        message.push_str(&format!(": {next}"));
+        cause = next.source();
+    }
+    match &err {
+        usage_rs::install::Error::Foreign { .. } => miette!(
+            "{program}: {message}\n\nPass --force to replace it, or redirect the scripts yourself."
+        ),
+        _ => miette!("{program}: {message}"),
+    }
+}
+
+fn finish(mut candidates: Vec<(String, String)>) -> Vec<usage_rs::spec::Candidate<'static>> {
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.dedup_by(|a, b| a.0 == b.0);
+    candidates
+        .into_iter()
+        .map(|(value, description)| usage_rs::spec::Candidate::described(value, description))
+        .collect()
+}
+
+fn completion_dir(ctx: &usage_rs::spec::CompleteCtx<'_>) -> Option<PathBuf> {
+    let mut dir = None;
+    let mut words = ctx.words.iter();
+    while let Some(word) = words.next() {
+        if let Some(value) = word
+            .strip_prefix("--dir=")
+            .or_else(|| word.strip_prefix("--cd="))
+            .or_else(|| word.strip_prefix("--prefix="))
+        {
+            dir = Some(PathBuf::from(value));
+        } else if matches!(word.as_str(), "-C" | "--dir" | "--cd" | "--prefix") {
+            dir = words.next().map(PathBuf::from);
+        } else if let Some(value) = word.strip_prefix("-C").filter(|value| !value.is_empty()) {
+            dir = Some(PathBuf::from(value));
+        }
+    }
+    super::completion_start_dir(dir.as_deref())
+}
+
+macro_rules! sync_completer {
+    ($name:ident, $body:expr) => {
+        fn $name(ctx: usage_rs::spec::CompleteCtx<'_>) -> usage_rs::complete::CompletionFuture<'_> {
+            Box::pin(async move {
+                completion_dir(&ctx)
+                    .as_deref()
+                    .map($body)
+                    .map(finish)
+                    .unwrap_or_default()
+            })
+        }
+    };
+}
+
+fn complete_package(
+    ctx: usage_rs::spec::CompleteCtx<'_>,
+) -> usage_rs::complete::CompletionFuture<'_> {
+    Box::pin(async move {
+        let Some(cwd) = completion_dir(&ctx) else {
+            return Vec::new();
+        };
+        finish(package_candidates(&cwd, ctx.prefix).await)
+    })
+}
+sync_completer!(complete_bin, bin_candidates);
+sync_completer!(complete_workspace, workspace_candidates);
+sync_completer!(complete_patch, patch_candidates);
+fn complete_setting(
+    _: usage_rs::spec::CompleteCtx<'_>,
+) -> usage_rs::complete::CompletionFuture<'_> {
+    Box::pin(async { finish(setting_candidates()) })
+}
+fn complete_script(
+    ctx: usage_rs::spec::CompleteCtx<'_>,
+) -> usage_rs::complete::CompletionFuture<'_> {
+    Box::pin(async move {
+        let Some(dir) = completion_dir(&ctx) else {
+            return Vec::new();
+        };
+        finish(super::run::script_completion_candidates(Some(&dir)))
+    })
+}
+
+pub(crate) static COMPLETIONS: [usage_rs::complete::CompletionOverlay<'static>; 9] = [
+    usage_rs::complete::CompletionOverlay::async_any("package", complete_package),
+    usage_rs::complete::CompletionOverlay::async_any("packages", complete_package),
+    usage_rs::complete::CompletionOverlay::async_any("pkg", complete_package),
+    usage_rs::complete::CompletionOverlay::async_any("params", complete_package),
+    usage_rs::complete::CompletionOverlay::async_any("bin", complete_bin),
+    usage_rs::complete::CompletionOverlay::async_any("workspace", complete_workspace),
+    usage_rs::complete::CompletionOverlay::async_any("key", complete_setting),
+    usage_rs::complete::CompletionOverlay::async_any("patch", complete_patch),
+    usage_rs::complete::CompletionOverlay::async_any("script", complete_script),
+];
 
 async fn package_candidates(cwd: &Path, query: &str) -> Vec<(String, String)> {
     let mut candidates = dependency_candidates(cwd);
@@ -354,48 +319,30 @@ fn patch_candidates(cwd: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-fn escape_completion_field(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            ':' => escaped.push_str("\\:"),
-            ch if ch.is_control() => escaped.push(' '),
-            ch => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        bin_candidates, dependency_candidates, escape_completion_field, multicall_usage_spec,
-        package_name_from_spec, setting_candidates, write_candidates,
+        bin_candidates, dependency_candidates, package_name_from_spec, setting_candidates,
     };
-    use std::io::{self, Write};
 
     #[test]
-    fn aubr_spec_roots_run_arguments_and_dynamic_completion() {
-        let spec = multicall_usage_spec("run", "aubr", true);
-        assert!(spec.contains("name aubr\nbin aubr"));
-        assert!(spec.contains("arg \"[SCRIPT]\""));
-        assert!(spec.contains("flag --no-install"));
-        assert!(spec.contains("flag \"-C --dir --cd --prefix\""));
-        assert!(spec.contains("complete \"script\" run=\"aubr --complete\""));
-        assert!(!spec.contains("\ncmd install "));
-    }
-
-    #[test]
-    fn aubx_spec_completes_only_the_command_position() {
-        let spec = multicall_usage_spec("dlx", "aubx", false);
-        assert!(spec.contains("name aubx\nbin aubx"));
-        assert!(spec.contains("arg \"[PARAMS]\""));
-        assert!(!spec.contains("arg \"[PARAMS]…\""));
-        assert!(spec.contains("complete \"params\""));
-        assert!(spec.contains("complete \"package\""));
-        assert!(spec.contains("replace(from=\"'\", to=\"'\\\\''\")"));
-        assert!(!spec.contains("\ncmd install "));
+    fn built_in_scripts_target_each_binary() {
+        let shell = usage_rs::complete::Shell::Bash;
+        assert!(
+            crate::completion_app("aube")
+                .completion_script(shell)
+                .contains("aube")
+        );
+        assert!(
+            crate::completion_app("aubr")
+                .completion_script(shell)
+                .contains("aubr")
+        );
+        assert!(
+            crate::completion_app("aubx")
+                .completion_script(shell)
+                .contains("aubx")
+        );
     }
 
     #[test]
@@ -433,29 +380,5 @@ mod tests {
         assert_eq!(package_name_from_spec("react@next"), "react");
         assert_eq!(package_name_from_spec("@scope/pkg@^2"), "@scope/pkg");
         assert_eq!(package_name_from_spec("@scope/pkg"), "@scope/pkg");
-        assert_eq!(
-            escape_completion_field("1.0: useful\npackage"),
-            "1.0\\: useful package"
-        );
-    }
-
-    #[test]
-    fn candidate_output_stops_quietly_on_broken_pipe() {
-        struct BrokenPipe;
-
-        impl Write for BrokenPipe {
-            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        write_candidates(
-            &mut BrokenPipe,
-            vec![("react".to_string(), "19.1.0".to_string())],
-        );
     }
 }

@@ -5,27 +5,26 @@
 //! maintainers, keywords, package URL) and supports `--json` (the raw
 //! package objects) and `--search-limit`.
 
-use clap::Args;
 use miette::miette;
 use serde_json::Value;
 
 use crate::commands::make_client;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct SearchArgs {
     /// Search terms. Joined with spaces into a single query.
-    #[arg(required = true)]
+    #[usage(arg, required)]
     pub query: Vec<String>,
 
     /// Print the raw package objects as JSON.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 
     /// Maximum number of results to show (default: 20).
-    #[arg(long, value_name = "N", default_value_t = 20)]
+    #[usage(long, value_name = "N", default_value_t = 20, default = "20")]
     pub search_limit: u32,
 
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 

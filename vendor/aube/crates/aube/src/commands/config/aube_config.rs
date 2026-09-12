@@ -2,10 +2,11 @@ use super::{literal_aliases, setting_for_key, settings_meta};
 use crate::commands::npmrc::symlink_target_or_self;
 use miette::{Context, IntoDiagnostic, miette};
 use std::path::{Path, PathBuf};
+use toml_edit::{DocumentMut, Item, Value};
 use yaml_serde::Value as YamlValue;
 
 pub(super) struct AubeConfigEdit {
-    table: toml::map::Map<String, toml::Value>,
+    document: DocumentMut,
 }
 
 impl AubeConfigEdit {
@@ -14,7 +15,7 @@ impl AubeConfigEdit {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self {
-                    table: toml::map::Map::new(),
+                    document: DocumentMut::new(),
                 });
             }
             Err(e) => {
@@ -23,16 +24,22 @@ impl AubeConfigEdit {
                     .wrap_err_with(|| format!("failed to read {}", path.display()));
             }
         };
-        let table = toml::from_str::<toml::Table>(&raw)
+        let document = raw
+            .parse::<DocumentMut>()
             .into_diagnostic()
             .wrap_err_with(|| format!("failed to parse {}", path.display()))?;
-        Ok(Self { table })
+        Ok(Self { document })
     }
 
     pub(super) fn entries(&self) -> Vec<(String, String)> {
-        self.table
+        self.document
+            .as_table()
             .iter()
-            .filter_map(|(key, value)| toml_value_to_raw(value).map(|raw| (key.clone(), raw)))
+            .filter_map(|(key, item)| {
+                item.as_value()
+                    .and_then(toml_value_to_raw)
+                    .map(|raw| (key.to_string(), raw))
+            })
             .collect()
     }
 
@@ -43,9 +50,11 @@ impl AubeConfigEdit {
     ) -> miette::Result<()> {
         let value = raw_to_toml_value(meta, raw)?;
         for alias in literal_aliases(meta.npmrc_keys) {
-            self.table.remove(&alias);
+            if alias != meta.name {
+                self.document.as_table_mut().remove(&alias);
+            }
         }
-        self.table.insert(meta.name.to_string(), value);
+        set_value_preserving_decor(self.document.as_table_mut(), meta.name, value);
         Ok(())
     }
 
@@ -54,22 +63,24 @@ impl AubeConfigEdit {
     /// npm-shared `.npmrc` surface — they're aube-only by elimination,
     /// so they belong in aube's own config rather than `~/.npmrc`.
     pub(super) fn set_unknown(&mut self, key: &str, raw: &str) {
-        self.table
-            .insert(key.to_string(), toml::Value::String(raw.to_string()));
+        set_value_preserving_decor(
+            self.document.as_table_mut(),
+            key,
+            Value::from(raw.to_string()),
+        );
     }
 
     pub(super) fn remove_aliases(&mut self, aliases: &[String]) -> bool {
-        let before = self.table.len();
+        let table = self.document.as_table_mut();
+        let before = table.len();
         for alias in aliases {
-            self.table.remove(alias);
+            table.remove(alias);
         }
-        before != self.table.len()
+        before != table.len()
     }
 
     pub(super) fn save(&self, path: &Path) -> miette::Result<()> {
-        let out = toml::to_string_pretty(&self.table)
-            .into_diagnostic()
-            .wrap_err(format!("failed to serialize {} config", aube_util::prog()))?;
+        let out = self.document.to_string();
         // Follow symlinks so a user-managed `~/.config/aube/config.toml`
         // pointing at e.g. a dotfiles repo keeps its symlink intact;
         // atomic_write renames a sibling temp over the path, which
@@ -78,6 +89,17 @@ impl AubeConfigEdit {
         aube_util::fs_atomic::atomic_write(&write_path, out.as_bytes())
             .into_diagnostic()
             .wrap_err_with(|| format!("failed to write {}", write_path.display()))
+    }
+}
+
+fn set_value_preserving_decor(table: &mut toml_edit::Table, key: &str, mut value: Value) {
+    if let Some(item) = table.get_mut(key) {
+        if let Some(existing) = item.as_value() {
+            *value.decor_mut() = existing.decor().clone();
+        }
+        *item = Item::Value(value);
+    } else {
+        table.insert(key, Item::Value(value));
     }
 }
 
@@ -335,38 +357,39 @@ fn is_aube_config_setting(meta: &settings_meta::SettingMeta) -> bool {
     ) || meta.type_.starts_with('"')
 }
 
-fn raw_to_toml_value(meta: &settings_meta::SettingMeta, raw: &str) -> miette::Result<toml::Value> {
+fn raw_to_toml_value(meta: &settings_meta::SettingMeta, raw: &str) -> miette::Result<Value> {
     match meta.type_ {
         "bool" => aube_settings::parse_bool(raw)
-            .map(toml::Value::Boolean)
+            .map(Value::from)
             .ok_or_else(|| miette!("{} expects a boolean value", meta.name)),
         "int" => raw
             .trim()
             .parse::<i64>()
-            .map(toml::Value::Integer)
+            .map(Value::from)
             .map_err(|_| miette!("{} expects an integer value", meta.name)),
-        "list<string>" => Ok(toml::Value::Array(
-            parse_string_list(raw)
-                .into_iter()
-                .map(toml::Value::String)
-                .collect(),
-        )),
-        _ => Ok(toml::Value::String(raw.to_string())),
+        "list<string>" => {
+            let mut array = toml_edit::Array::new();
+            for item in parse_string_list(raw) {
+                array.push(item);
+            }
+            Ok(Value::Array(array))
+        }
+        _ => Ok(Value::from(raw.to_string())),
     }
 }
 
-fn toml_value_to_raw(value: &toml::Value) -> Option<String> {
+fn toml_value_to_raw(value: &Value) -> Option<String> {
     match value {
-        toml::Value::String(s) => Some(s.clone()),
-        toml::Value::Integer(n) => Some(n.to_string()),
-        toml::Value::Float(n) => Some(n.to_string()),
-        toml::Value::Boolean(b) => Some(b.to_string()),
-        toml::Value::Array(items) => {
+        Value::String(s) => Some(s.value().clone()),
+        Value::Integer(n) => Some(n.value().to_string()),
+        Value::Float(n) => Some(n.value().to_string()),
+        Value::Boolean(b) => Some(b.value().to_string()),
+        Value::Array(items) => {
             let values: Vec<String> = items.iter().filter_map(toml_value_to_raw).collect();
             Some(values.join(","))
         }
-        toml::Value::Datetime(d) => Some(d.to_string()),
-        toml::Value::Table(_) => None,
+        Value::Datetime(d) => Some(d.value().to_string()),
+        Value::InlineTable(_) => None,
     }
 }
 
@@ -453,6 +476,52 @@ mod tests {
         assert_eq!(
             project_aube_config_path(Path::new("/proj")),
             Some(PathBuf::from("/proj/.config/aube/config.toml"))
+        );
+    }
+
+    #[test]
+    fn save_preserves_comments_formatting_and_setting_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = r#"# Security
+strictDepBuilds = true # keep this rationale
+minimumReleaseAge = 1440
+trustPolicyExclude = [
+    "example-a",
+    # This package has no provenance yet.
+    "example-b",
+]
+
+# Shell
+scriptShell = 'C:\Program Files\git\bin\bash.exe'
+"#;
+        std::fs::write(&path, original).unwrap();
+
+        let meta = settings_meta::find("minimumReleaseAge").unwrap();
+        let mut edit = AubeConfigEdit::load(&path).unwrap();
+        edit.set(meta, "2880").unwrap();
+        edit.save(&path).unwrap();
+
+        let expected = original.replacen("minimumReleaseAge = 1440", "minimumReleaseAge = 2880", 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn adding_setting_appends_without_reordering_existing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original =
+            "# Deliberately not alphabetical\nstrictDepBuilds = true\nminimumReleaseAge = 2880\n";
+        std::fs::write(&path, original).unwrap();
+
+        let meta = settings_meta::find("trustPolicy").unwrap();
+        let mut edit = AubeConfigEdit::load(&path).unwrap();
+        edit.set(meta, "no-downgrade").unwrap();
+        edit.save(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{original}trustPolicy = \"no-downgrade\"\n")
         );
     }
 

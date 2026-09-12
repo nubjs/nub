@@ -162,27 +162,6 @@ pub(super) fn classify_bun_ident(
     Ok((name, raw_version.to_string(), None, alias_of))
 }
 
-/// The protocol token of a version tail that reached
-/// [`classify_bun_ident`]'s registry-pin fall-through while carrying a
-/// `<token>:` protocol prefix — i.e. a source the classifier has no
-/// branch for (an unknown/future bun protocol, or a malformed spec like
-/// a `git+…` tail `parse_git_spec` rejected). A genuine registry pin is
-/// an exact semver version, which can never contain `:`, so a
-/// protocol-shaped tail here means "unresolvable from this lockfile",
-/// not "registry". Consulted only under `strict_unsupported_source`;
-/// the lenient default keeps the historical reclassify-to-registry
-/// behavior without ever calling this.
-pub(super) fn unrecognized_protocol(raw_version: &str) -> Option<&str> {
-    let token = &raw_version[..raw_version.find(':')?];
-    let mut chars = token.chars();
-    if !chars.next()?.is_ascii_alphabetic() {
-        return None;
-    }
-    chars
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        .then_some(token)
-}
-
 pub(super) fn rebase_workspace_scoped_local_source(
     key: &str,
     local: LocalSource,

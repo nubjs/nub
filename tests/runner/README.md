@@ -19,7 +19,12 @@ TSX=1 tests/runner/run-matrix.sh                        # differential: same fix
 | `using.ts` | `using` lowering — resolves the `@oxc-project/runtime` helpers from the package's real dependency |
 | `worker-main.ts` | a worker thread inheriting the preload and transpiling its own `.ts` entry |
 | `clobber.ts` | a real installed `@js-temporal/polyfill` must load, not the CLI's synthetic global re-export — covers the clear on both tiers |
+| `cache-main.ts` | imported CommonJS retains `require.cache`, `require.extensions` and `require.resolve.paths`, with the package preloaded from argv or from `NODE_OPTIONS` |
+| `foreign-main.mjs` | synchronous resolve/load hooks registered by an earlier preload see the same imported-CommonJS call sequence as plain Node on that version |
+| `foreign-async-main.mjs` | an earlier async preload, and Node's underscore spelling of the user-loader flag, both keep Node's user-loader CommonJS handoff intact |
 | `greet` | `nubr` column only: a `package.json` script whose body is `nubr main.ts`, so it also proves the command is on a script's own `PATH` |
+
+The two `foreign-*` fixtures are scored against a control rather than against `expected.txt`: the same command is run with the package's own preload dropped, and the package has to reproduce plain Node's output byte for byte. Node's imported-CommonJS behavior moves between majors — 18.19 gives such a module a live `require.cache` where 20.19 and up leave it undefined — so a pinned string asserts the wrong thing on some supported version, which is what it did.
 
 The fixture project is `"type": "module"`, so `.ts` files with `import`/`export` are ES modules; `.cts` content must be CommonJS (`module.exports`) because the loader transpiles syntax without converting module formats.
 

@@ -11,7 +11,7 @@ Nub's types package declares the keyed Promise combinators, `Temporal`, the brow
 
 ## How augmentation works
 
-Nub augments the stock Node binary through mechanisms Node itself provides. It does not patch Node, replace V8, or ship a fork.
+Nub augments the stock Node binary through mechanisms Node itself provides.
 
 - **JavaScript polyfills** run from Nub's preload and feature-detect each property before defining it. They fill missing globals and methods without replacing native or user-supplied implementations.
 - **Lazy globals** defer larger fallbacks until first use. On older Node versions, reading `Temporal` loads the fallback and replaces the getter with the resulting namespace.
@@ -19,11 +19,11 @@ Nub augments the stock Node binary through mechanisms Node itself provides. It d
 - **Experimental flags** expose APIs already built into a particular Node release. Nub derives flags from the exact Node version because passing an unknown flag would abort Node during startup.
 - **Loader hooks** add supported import formats through Node's module-loader API. They do not emulate native subsystems that are absent from the running Node.
 
-Native implementations always win. As Node adds an API, Nub's feature check steps aside and the native one takes over.
+Native implementations always win.
 
 Compatibility mode turns all of this off: `nub --node`, or `NODE_COMPAT=1`, runs the project's pinned Node with no polyfills, preload patches, loader hooks, or automatically enabled flags. See [the runtime overview](/docs/runtime#compatibility-mode).
 
-Availability below covers Nub's supported Node range, beginning with Node 18.19. A native-version note says when Nub steps aside.
+Availability below covers Nub's supported Node range, beginning with Node 18.19. Each entry names the Node version where the native implementation takes over.
 
 ## JavaScript APIs
 
@@ -366,7 +366,7 @@ try {
 
 ### `Math.sumPrecise()`
 
-The [`Math.sumPrecise()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sumPrecise) method reduces floating-point error and avoids overflow caused only by an unfortunate addition order.
+The [`Math.sumPrecise()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sumPrecise) method reduces floating-point error and avoids overflow caused by addition order.
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships this method yet.
@@ -600,6 +600,26 @@ const database = new DatabaseSync("app.db");
 const row = database.prepare("SELECT count(*) AS count FROM users").get();
 ```
 
+### `AsyncLocalStorage`
+
+Node 24 rebuilt [`AsyncLocalStorage`](https://nodejs.org/api/async_context.html#class-asynclocalstorage) on V8's context frames, which cuts the cost of carrying a store across every `await` roughly in half. Nub turns that implementation on for Node 22 and 23.
+
+<Callout title="Delivery">
+Version-gated Node behavior, default on Node 24+. Nub passes `--experimental-async-context-frame` on Node 22.9–23.x. Tracing SDKs, request-context plugins, and frameworks that read the store on each request get the faster path with no code change.
+</Callout>
+
+```ts
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const requestId = new AsyncLocalStorage<string>();
+
+// every hop below reads the store; propagation is what got cheaper
+await requestId.run("req-1", async () => {
+  await fetchUser();
+  console.log(requestId.getStore()); // "req-1"
+});
+```
+
 ### Native addon imports
 
 Native `.node` addons can be imported directly from an ES module.
@@ -684,7 +704,7 @@ console.log(memory.readFileSync("/data/message.txt", "utf8"));
 The [`import defer`](https://github.com/tc39/proposal-defer-import-eval) form resolves and links a module without running it. Evaluation happens on the first property access of the namespace.
 
 <Callout title="Delivery">
-Version-gated V8 feature available on Node 26.4+. Nub passes `--js-defer-import-eval` on the command line, since Node rejects that flag in `NODE_OPTIONS`. A subprocess launched as `node` inherits it through Nub's shim; one launched by absolute executable path does not.
+Version-gated V8 feature available on Node 26.4+. Nub turns on V8's `--js-defer-import-eval` flag inside the process the first time it loads a module that uses the syntax, so a program that never uses it runs with V8's default flags. A subprocess running the same Node inherits it, whether launched as `node` or by absolute executable path.
 </Callout>
 
 ```ts
@@ -697,7 +717,7 @@ if (consented) {
 ```
 
 <Callout type="warn" title="The dynamic form aborts the process">
-Nub enables this V8 feature for every program on Node 26.4+, not only the ones that use it. So the dynamic counterpart, `import.defer(specifier)`, behaves differently than it does on bare Node: Node raises a catchable `SyntaxError`, while under Nub the same code dies on a V8 fatal error that no handler can catch. The underlying crash is a Node defect, but Nub is what exposes it. Use the static form.
+Once a program uses the static form, the V8 feature is on for the whole process, and the dynamic counterpart, `import.defer(specifier)`, then behaves differently than it does on bare Node: Node raises a catchable `SyntaxError`, while the same call terminates the process with an uncatchable V8 fatal error. A program that uses only the dynamic form keeps Node's `SyntaxError`. The crash is a Node defect that the flag exposes. Use the static form.
 </Callout>
 
 ### Module syntax detection

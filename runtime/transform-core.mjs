@@ -207,6 +207,20 @@ export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
 // `maybeTranspilePlainJs` gate); a no-op plain-JS file falls through to Node's
 // native loader untouched, byte-identical. node_modules is excluded at the gate.
 export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
+// A bare `commonjs`/`module` format on a file nub would transpile can only have
+// been assigned by a hook layered ABOVE nub's. Node's resolver labels a `.ts` file
+// `commonjs-typescript`/`module-typescript` (or `typescript` when the package has
+// no `type`) and leaves `.jsx` unlabelled, and nub's own resolve returns no format;
+// the bare form is what tsx's resolve hook writes (getFormatFromFileUrl), and its
+// load hook then expects the RAW source back from `nextLoad` so it can run its own
+// module-format transform — a mixed `import` + `require` file becomes CJS there,
+// where nub's syntax detection would make it ESM and `require` undefined. Both
+// tiers step aside on this signal, the fast tier only once the user registration
+// is known to carry a load hook (preload-common.cjs). Plain JS is excluded: Node
+// assigns those the bare form itself.
+export function outerHookOwnsFormat(format, ext) {
+  return (format === "commonjs" || format === "module") && TRANSPILE_EXTS.has(ext) && !PLAIN_JS_EXTS.has(ext);
+}
 // The data loaders nub SHIPS — a runtime feature, not a project setting, so they stay
 // in force inside node_modules too (see dataExtsFor).
 const BUILTIN_DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
@@ -785,16 +799,145 @@ export function maybeSweepCache() {
     .catch(() => {});
 }
 
+// ── Runtime V8 flags (`Mitigation::RuntimeV8Flag`) ──────────────────
+// A V8 syntax flag nub does NOT put on argv. The Rust spawn layer names it in
+// `__NUB_RUNTIME_V8_FLAGS` (`<node-version> <flag>…`, flags.rs RUNTIME_V8_FLAGS_ENV)
+// and both load hooks route every result through `noteRuntimeV8FlagSource`, which
+// turns the flag on with `v8.setFlagsFromString` the first time a source uses the
+// syntax. V8 consults such a flag per parse (`v8_flags.js_defer_import_eval` is read
+// in the parser alone, with an empty bootstrapper hook) and Node runs V8 with
+// `--no-freeze-flags-after-init`, so a flip made before the hook returns is in force
+// when Node compiles that module — verified on 26.4.0 and 26.7.0, identical deferral
+// to the argv flag.
+//
+// What it buys: a V8 flag that is non-default at STARTUP enters V8's flag hash, and
+// the code cache Node embeds for its own internals is keyed on that hash, so every
+// builtin compiled after startup (`node:http`, `crypto`, `zlib`, …) is rejected and
+// rebuilt from source — ~20 ms for a program loading those, measured on 26.7.0. The
+// flip charges that only to a program that actually uses the syntax, and only for
+// the internals loaded after it. The flag also never appears in `process.execArgv`,
+// where forwarding it into a Worker once killed a Next.js 16 + Turbopack build.
+//
+// Every Nub launch sets or removes the var, so a child that re-enters Nub carries its
+// own decision; it is NOT deleted here, so a process that makes no such decision — a
+// Worker, the `module.register` loader worker, a child spawned by absolute path —
+// starts from a copy of this env and gets the feature too. Two guards close the gaps
+// inheritance leaves: a polarity already on this process's own `process.execArgv`
+// wins, either sign (V8 has the flag, or the user negated it, and the parent's signal
+// must not override that); and the version stamp makes a descendant on a different
+// Node (an inherited-NODE_OPTIONS grandchild) ignore a set computed for another
+// binary, because a flag V8 does not know is an "Error: unrecognized flag" on stderr.
+// `v8_flags` is process-global, so one flip from any thread serves every isolate.
+// Node documents a post-init flag change as unsupported; for a flag the parser reads
+// as one bool at the `import` token, the exposure is a benign race with a worker
+// parsing concurrently, which sees the old value for that one parse.
+//
+// Detection is textual. The static form is always `import defer * as` — V8 allows
+// `defer` with a namespace import only — so the pattern requires the `*`, which
+// keeps prose that merely names the two words (a comment, a docs string) from
+// arming the flag. Whitespace or comments between the tokens still match. A false
+// positive that survives (the three tokens inside a string) only recreates the
+// state every program had when the flag rode argv. The dynamic form
+// `import.defer()` is NOT matched, on purpose: it aborts the process on every 26.x
+// measured (a V8 fatal in Node's phase wiring), so a program that uses only that
+// form keeps bare Node's catchable SyntaxError.
+const TOKEN_GAP = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)`;
+const IMPORT_DEFER_RE = new RegExp(String.raw`\bimport${TOKEN_GAP}+defer${TOKEN_GAP}*\*`);
+const RUNTIME_V8_FLAG_DETECTORS = {
+  "--js-defer-import-eval": sourceUsesImportDefer,
+};
+// Formats whose source Node compiles as an ES module. `import defer` is module-only
+// syntax, so a CommonJS, JSON or wasm result can never need the flip; a null format
+// is still undecided and is scanned.
+const ESM_FORMATS = new Set(["module", "module-typescript", "typescript"]);
+
+// The source as a string, or null when a byte-level scan for `needle` misses — so a
+// file that cannot match is never decoded.
+function sourceText(source, needle) {
+  if (typeof source === "string") return source.includes(needle) ? source : null;
+  let buf = null;
+  if (ArrayBuffer.isView(source)) {
+    buf = Buffer.from(source.buffer, source.byteOffset, source.byteLength);
+  } else if (source instanceof ArrayBuffer) {
+    buf = Buffer.from(source);
+  }
+  return buf !== null && buf.includes(needle) ? buf.toString("utf8") : null;
+}
+
+// Whether `source` (string, Buffer, TypedArray or ArrayBuffer) carries a static
+// `import defer` declaration.
+export function sourceUsesImportDefer(source) {
+  const text = sourceText(source, "defer");
+  return text !== null && IMPORT_DEFER_RE.test(text);
+}
+
+// `-e`/`-p` code never passes through a load hook, so it is scanned once at
+// arm time: the preload runs before Node compiles the eval string.
+function evalSourceFromExecArgv(execArgv) {
+  if (!Array.isArray(execArgv)) return null;
+  for (let i = 0; i < execArgv.length; i++) {
+    const arg = execArgv[i];
+    if (typeof arg !== "string") continue;
+    if (arg === "-e" || arg === "--eval" || arg === "-p" || arg === "--print" || arg === "-pe" || arg === "-ep") {
+      return i + 1 < execArgv.length && typeof execArgv[i + 1] === "string" ? execArgv[i + 1] : null;
+    }
+    if (arg.startsWith("--eval=") || arg.startsWith("--print=")) return arg.slice(arg.indexOf("=") + 1);
+  }
+  return null;
+}
+
+// Flags still to turn on, or null once nothing is armed — the hot path is one null
+// check per load.
+let pendingRuntimeV8Flags = null;
+
+function turnOnRuntimeV8Flag(flag) {
+  pendingRuntimeV8Flags.delete(flag);
+  if (pendingRuntimeV8Flags.size === 0) pendingRuntimeV8Flags = null;
+  try {
+    __getBuiltin("node:v8").setFlagsFromString(flag);
+  } catch {
+    // The module then fails exactly as it would on bare Node.
+  }
+}
+
+// Route a load result through the runtime-flag scan and hand it back unchanged.
+export function noteRuntimeV8FlagSource(result) {
+  if (pendingRuntimeV8Flags === null || result == null || result.source == null) return result;
+  if (result.format != null && !ESM_FORMATS.has(result.format)) return result;
+  for (const flag of [...pendingRuntimeV8Flags]) {
+    if (RUNTIME_V8_FLAG_DETECTORS[flag](result.source)) turnOnRuntimeV8Flag(flag);
+  }
+  return result;
+}
+
+{
+  const raw = process.env.__NUB_RUNTIME_V8_FLAGS;
+  if (raw) {
+    const [stampedVersion, ...flags] = raw.split(" ").filter(Boolean);
+    const execArgv = Array.isArray(process.execArgv) ? process.execArgv : [];
+    const armed = stampedVersion === process.versions.node
+      ? flags.filter((flag) =>
+          Object.hasOwn(RUNTIME_V8_FLAG_DETECTORS, flag) &&
+          !execArgv.includes(flag) && !execArgv.includes(`--no-${flag.slice(2)}`))
+      : [];
+    if (armed.length > 0) {
+      pendingRuntimeV8Flags = new Set(armed);
+      const evalSource = evalSourceFromExecArgv(execArgv);
+      if (evalSource !== null) noteRuntimeV8FlagSource({ format: "module", source: evalSource });
+    }
+  }
+}
+
 // ── Transpile ───────────────────────────────────────────────────────
 // Transpile a TS/JSX file to JS, returning `{ format, source, shortCircuit }` in
 // the shape both hook tiers hand back to Node. Format is detected (not derived
 // from extension alone), so a CommonJS-syntax `.ts` is reported `commonjs` — the
 // fix that makes `require()` of a TS file work on the compat tier, where Node's
 // CJS translator loads it via this hook and keys on the returned format.
-export function loadTranspile(url, ext) {
+export function loadTranspile(url, ext, source) {
   __ensureBuiltins();
   const filePath = fileURLToPath(url);
-  const source = readFileSync(filePath, "utf8");
+  source ??= readFileSync(filePath, "utf8");
   const dir = dirname(filePath);
   // The transform-relevant compilerOptions slice + the byte-for-byte cache-key
   // component (`tsconfigHash`) both come from the native tsconfig reader.
@@ -878,7 +1021,15 @@ export function loadTranspile(url, ext) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");
     throw new Error(`Transpile error in ${filePath}:\n${details}`);
   }
-  return { format: result.format, source: result.code, shortCircuit: true };
+  // `responseURL` is what an OUTER user hook keys on. Node's default load sets it
+  // to the file URL, and tsx's load hook takes its CommonJS branch only when the
+  // result `nextLoad` hands back carries a `file:` responseURL — without it, tsx
+  // re-transformed a `.ts` file nub had already emitted as CJS in its ESM branch,
+  // and `require` was undefined at run time (`tsx script.ts` under `nub run`).
+  // Node itself defaults a missing responseURL to the URL, so only a hook layered
+  // above nub's can observe the difference; every file-URL result nub
+  // short-circuits carries it for that reason.
+  return { format: result.format, source: result.code, responseURL: url, shortCircuit: true };
 }
 
 // Project-source plain JS (`.js`/`.mjs`/`.cjs`) gate. Returns a transpiled load
@@ -895,7 +1046,7 @@ export function loadTranspile(url, ext) {
 // sites (the byte-parity boundary). JSX-in-`.js` is out of scope for the syntax
 // gate (lang is "ts", which does not parse JSX); use `.jsx`, or say so explicitly
 // with a `loader` entry, which takes the unconditional path below instead.
-export function maybeTranspilePlainJs(url, ext) {
+export function maybeTranspilePlainJs(url, ext, source) {
   __ensureBuiltins();
   // An explicit `loader` entry pointing this extension at a code dialect moved it
   // into TRANSPILE_EXTS, which for every other member means "always compile". Only
@@ -906,11 +1057,10 @@ export function maybeTranspilePlainJs(url, ext) {
   // while the ESM path transpiles the same file on both tiers. The registration
   // loop deliberately skips `.js`/`.cjs` because this wrapper owns them, so there
   // is nothing else downstream to catch it.
-  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext);
+  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext, source);
   const filePath = fileURLToPath(url);
-  let source;
   try {
-    source = readFileSync(filePath, "utf8");
+    source ??= readFileSync(filePath, "utf8");
   } catch {
     // Unreadable here → let Node's loader surface its own error.
     return null;
@@ -921,10 +1071,10 @@ export function maybeTranspilePlainJs(url, ext) {
     return null; // no-op: Node's native loader handles it, byte-identical.
   }
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,
-  // source maps, the Stage-3 decorator guard, format detection, cache). loadTranspile
-  // re-reads + re-parses, but only for the rare file that actually needs lowering.
+  // source maps, the Stage-3 decorator guard, format detection, cache), reusing
+  // the bytes already inspected by the gate.
   try {
-    return loadTranspile(url, ext);
+    return loadTranspile(url, ext, source);
   } catch (err) {
     // #225: a plain-JS file the transformable verdict flagged (a `using` decl or
     // `v`-flag RegExp somewhere) but whose transform oxc then REJECTS — V8 tolerates
@@ -998,7 +1148,7 @@ export function loadData(url, ext) {
   const parsed = dataValue(url, ext);
 
   if (parsed == null) {
-    return { format: "module", source: "export default undefined;\n", shortCircuit: true };
+    return { format: "module", source: "export default undefined;\n", responseURL: url, shortCircuit: true };
   }
 
   // Default export only. Data modules deliberately do NOT emit per-key named
@@ -1008,7 +1158,7 @@ export function loadData(url, ext) {
   // default — `import cfg from "./c.yaml"; const { host } = cfg;` — which the
   // `@nubjs/types` `Record<string, unknown>` default type makes sound.
   const code = `export default ${JSON.stringify(parsed)};\n`;
-  return { format: "module", source: code, shortCircuit: true };
+  return { format: "module", source: code, responseURL: url, shortCircuit: true };
 }
 
 // Import Text: `import s from "./any.file" with { type: "text" }` → the raw file
@@ -1024,5 +1174,5 @@ export function loadData(url, ext) {
 const __textDecoder = new TextDecoder();
 export function loadTextImport(url) {
   const text = __textDecoder.decode(readFileSync(fileURLToPath(url)));
-  return { format: "module", source: `export default ${JSON.stringify(text)};\n`, shortCircuit: true };
+  return { format: "module", source: `export default ${JSON.stringify(text)};\n`, responseURL: url, shortCircuit: true };
 }

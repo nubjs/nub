@@ -30,6 +30,7 @@ diffy = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tempfile = "3"
+libc = { workspace = true }
 
 # clonefile(2) for the macOS whole-dir materialization fast path.
 [target.'cfg(target_os = "macos")'.dependencies]

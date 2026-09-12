@@ -62,9 +62,9 @@ node --require @nubjs/runner app.ts           # CommonJS delivery
 }
 ```
 
-## What it adds
+## Features
 
-The package arms the same resolve and transpile hooks the `nub` command uses, and nothing else — no polyfills, no globals, no `.env` loading:
+The package registers the resolve and transpile hooks the `nub` command uses, without its polyfills, globals, or `.env` loading:
 
 - Full TypeScript — `enum`, `namespace`, parameter properties, `emitDecoratorMetadata` decorators — not just the erasable subset Node's built-in stripping accepts
 - JSX / TSX with the automatic runtime
@@ -85,7 +85,7 @@ node --require @nubjs/runner app.ts       # same, delivered as a CommonJS preloa
 node --import @nubjs/runner/esm app.ts    # ESM hooks only
 ```
 
-Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The package transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, exactly as it would under plain Node.
+Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The package transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, as it would under plain Node.
 
 ## Node flags
 
@@ -123,4 +123,4 @@ CMD ["--import", "@nubjs/runner", "server.ts"]
 
 ## The runner and the `nub` command
 
-Running `nub app.ts` gives you everything on this page plus [the rest of the runtime](/docs/runtime) — polyfilled web APIs, `.env` loading, Node version provisioning — with no flags. Reach for the standalone runner when you cannot install the binary or the `node` invocation is fixed; reach for `nub` everywhere else. The two share one transpiler and one resolver, so a file behaves the same under either.
+Running `nub app.ts` gives you everything on this page plus [the rest of the runtime](/docs/runtime) — polyfilled web APIs, `.env` loading, Node version provisioning — with no flags. Use the standalone runner when you cannot install the binary or the `node` invocation is fixed, and `nub` everywhere else. The two share one transpiler and one resolver, so a file behaves the same under either.

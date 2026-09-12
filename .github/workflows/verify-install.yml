@@ -29,6 +29,20 @@ on:
         required: false
         default: "https://raw.githubusercontent.com/nubjs/nub/main"
   push:
+    # Trunk only — an unrestricted push ran this on every feature branch, around the
+    # opt-in gate. The pull_request trigger below keeps the pre-merge coverage.
+    branches: [main]
+    paths:
+      - install.sh
+      - install.ps1
+      - site/public/install.sh
+      - site/public/install.ps1
+      - tests/installer/checksums.sh
+      - tests/installer/checksums.ps1
+      - .github/workflows/verify-install.yml
+  pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     paths:
       - install.sh
       - install.ps1
@@ -50,6 +64,7 @@ jobs:
   # A site deploy with a stale installer is a silent regression — users hit a broken
   # script while the root copy looks fine. This job catches that on every push.
   drift-guard:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     name: drift-guard (root ↔ site/public)
     runs-on: ubuntu-latest
     steps:
@@ -72,6 +87,7 @@ jobs:
           echo "install.ps1: in sync ✓"
 
   ps1:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     name: install.ps1 · ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -160,6 +176,7 @@ jobs:
           nub --version
 
   sh:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     name: install.sh · ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -211,6 +228,7 @@ jobs:
             || { echo "install.sh did not add ~/.nub/bin to any shell rc"; exit 1; }
 
   musl:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     name: install.sh · linux-${{ matrix.arch }}-musl
     strategy:
       fail-fast: false
@@ -262,6 +280,7 @@ jobs:
   # the only job that validates the branch's own script changes end-to-end (the
   # curl-based jobs above fetch from `source`, which defaults to main).
   harness:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     name: install.sh harness · ${{ matrix.os }}
     strategy:
       fail-fast: false

@@ -54,6 +54,12 @@
       "groupName": "npm dependencies (minor+patch)",
       "matchManagers": ["npm"],
       "matchUpdateTypes": ["minor", "patch"]
+    },
+    {
+      "description": "decmpfs 0.1.2+ fails to compile for musl targets (FICLONE ioctl request typed c_ulong, which is c_int on musl), and nub builds musl (docker-smoke alpine leg, release musl binaries). Hold at 0.1.0 until upstream fixes it — mirrors the rule in upstream aube.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["decmpfs"],
+      "allowedVersions": "<=0.1.0"
     }
   ],
   "vulnerabilityAlerts": {

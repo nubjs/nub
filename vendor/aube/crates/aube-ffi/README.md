@@ -20,6 +20,6 @@ must be released with `aube_string_free`.
 A callback-driven host should call `aube_wait` after its terminal event to
 release the completed operation handle without blocking.
 
-See the [C ABI embedding guide](https://aube.jdx.dev/embedding/ffi) for schemas,
+See the [C ABI embedding guide](https://aube.sh/embedding/ffi) for schemas,
 ownership rules, and examples. For support, use
-[GitHub Discussions](https://github.com/jdx/aube/discussions).
+[GitHub Discussions](https://github.com/aubepkg/aube/discussions).

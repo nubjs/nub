@@ -1,0 +1,10 @@
+# Known-red corpus entries: "<owner/repo> <reason>". Same discipline as the other
+# harnesses: this list must SHRINK. A listed repo that installs and checks clean
+# fails the run (XPASS-STALE), so the green flip is recorded by deleting its line
+# in the same commit as the fix.
+
+# rollup's postinstall runs patch-package against packages it does not depend on
+# directly (`@types/rimraf` and one more). npm hoists them to the root; nub's
+# isolated layout keeps only direct dependencies there, so the patch targets are
+# absent. Installs with `node-linker=hoisted` in the project's .npmrc.
+rollup/rollup postinstall patch-package expects transitive packages hoisted to the root

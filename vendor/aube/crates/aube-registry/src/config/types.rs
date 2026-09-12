@@ -102,7 +102,7 @@ pub struct NpmConfig {
     /// (`local-address`). Parsed as `IpAddr`; unparseable values are
     /// dropped at load time and logged.
     pub local_address: Option<std::net::IpAddr>,
-    /// Maximum concurrent connections per origin (`maxsockets`).
+    /// Idle connection pool size per host (`maxsockets`).
     /// Plumbed into reqwest's `pool_max_idle_per_host`, which is the
     /// closest analogue to npm/pnpm's per-origin socket cap.
     pub max_sockets: Option<usize>,

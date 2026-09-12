@@ -48,6 +48,33 @@ impl Linker {
         }
     }
 
+    fn checked_modules_dir(&self, project_dir: &Path) -> Result<PathBuf, Error> {
+        let project_dir = aube_util::path::normalize_lexical(project_dir);
+        let modules_dir =
+            aube_util::path::normalize_lexical(&project_dir.join(&self.modules_dir_name));
+        let lexical_is_safe = modules_dir != project_dir && modules_dir.starts_with(&project_dir);
+        let canonical_is_safe = project_dir.canonicalize().map_or(true, |project| {
+            modules_dir
+                .ancestors()
+                .find_map(|ancestor| {
+                    ancestor.canonicalize().ok().map(|canonical_ancestor| {
+                        if ancestor == modules_dir {
+                            canonical_ancestor != project
+                                && canonical_ancestor.starts_with(&project)
+                        } else {
+                            canonical_ancestor == project
+                                || canonical_ancestor.starts_with(&project)
+                        }
+                    })
+                })
+                .unwrap_or(false)
+        });
+        if !lexical_is_safe || !canonical_is_safe {
+            return Err(Error::UnsafeModulesDir(modules_dir));
+        }
+        Ok(modules_dir)
+    }
+
     /// Link all packages into node_modules for the given project.
     pub fn link_all(
         &self,
@@ -55,14 +82,16 @@ impl Linker {
         graph: &LockfileGraph,
         package_indices: &BTreeMap<String, PackageIndex>,
     ) -> Result<LinkStats, Error> {
+        let project_dir = aube_util::path::normalize_lexical(project_dir);
+        let modules_dir = self.checked_modules_dir(&project_dir)?;
         if matches!(self.node_linker, NodeLinker::Hoisted) {
             let mut stats = LinkStats::default();
             let mut placements = HoistedPlacements::default();
             hoisted::link_hoisted_importer(
                 self,
                 hoisted::HoistedImporterDirs {
-                    root: project_dir,
-                    importer: project_dir,
+                    root: &project_dir,
+                    importer: &project_dir,
                 },
                 graph.root_deps(),
                 graph,
@@ -79,7 +108,7 @@ impl Linker {
             // leftover `.aube/<dep_path>/` directories until their
             // eventual cleanup. Honors `virtualStoreDir`.
             let _ = crate::remove_dir_all_with_retry(
-                &self.aube_dir_for(project_dir).join("node_modules"),
+                &self.aube_dir_for(&project_dir).join("node_modules"),
             );
             stats.hoisted_placements = Some(placements);
             return Ok(stats);
@@ -88,14 +117,14 @@ impl Linker {
         if self.use_global_virtual_store && self.hoist {
             remove_hidden_hoist_tree(&self.virtual_store.join("node_modules"));
             return self.without_global_virtual_store().link_all(
-                project_dir,
+                &project_dir,
                 graph,
                 package_indices,
             );
         }
 
-        let nm = project_dir.join(&self.modules_dir_name);
-        let aube_dir = self.aube_dir_for(project_dir);
+        let nm = modules_dir;
+        let aube_dir = self.aube_dir_for(&project_dir);
 
         mkdirp(&aube_dir)?;
 
@@ -163,7 +192,7 @@ impl Linker {
             );
         }
 
-        let nested_link_targets = build_nested_link_targets(project_dir, graph);
+        let nested_link_targets = build_nested_link_targets(&project_dir, graph);
 
         // Step 1: Populate .aube virtual store
         //
@@ -666,7 +695,7 @@ impl Linker {
         // symlink (it is not a plan child); re-adding it here converges.
         if self.hoist_workspace_packages {
             for (importer_path, deps) in &physical {
-                let nm = importer_dir(importer_path).join(&self.modules_dir_name);
+                let nm = self.checked_modules_dir(&importer_dir(importer_path))?;
                 for dep in *deps {
                     crate::validate_package_link_name(&dep.name)?;
                     let Some(ws_dir) = workspace_dirs.get(&dep.name) else {
@@ -712,21 +741,31 @@ impl Linker {
         package_indices: &BTreeMap<String, PackageIndex>,
         workspace_dirs: &BTreeMap<String, PathBuf>,
     ) -> Result<LinkStats, Error> {
-        if matches!(self.node_linker, NodeLinker::Hoisted) {
-            return self.link_workspace_hoisted(root_dir, graph, package_indices, workspace_dirs);
+        let root_dir = aube_util::path::normalize_lexical(root_dir);
+        self.checked_modules_dir(&root_dir)?;
+        for importer_path in graph.importers.keys() {
+            if !is_physical_importer(importer_path) || importer_path == "." {
+                continue;
+            }
+            let importer_dir = aube_util::path::normalize_lexical(&root_dir.join(importer_path));
+            self.checked_modules_dir(&importer_dir)?;
         }
         if self.use_global_virtual_store && self.hoist {
             remove_hidden_hoist_tree(&self.virtual_store.join("node_modules"));
             return self.without_global_virtual_store().link_workspace(
-                root_dir,
+                &root_dir,
                 graph,
                 package_indices,
                 workspace_dirs,
             );
         }
 
-        let root_nm = root_dir.join(&self.modules_dir_name);
-        let aube_dir = self.aube_dir_for(root_dir);
+        if matches!(self.node_linker, NodeLinker::Hoisted) {
+            return self.link_workspace_hoisted(&root_dir, graph, package_indices, workspace_dirs);
+        }
+
+        let root_nm = self.checked_modules_dir(&root_dir)?;
+        let aube_dir = self.aube_dir_for(&root_dir);
 
         mkdirp(&aube_dir)?;
         mkdirp(&root_nm)?;
@@ -757,7 +796,7 @@ impl Linker {
             );
         }
 
-        let nested_link_targets = build_nested_link_targets(root_dir, graph);
+        let nested_link_targets = build_nested_link_targets(&root_dir, graph);
 
         // Step 1a: Materialize local (`file:` dir/tarball, `portal:`,
         // `exec:`) packages straight into the shared per-project
@@ -1483,6 +1522,9 @@ impl Linker {
         };
 
         if matches!(state, EntryState::Fresh) {
+            if !project_local {
+                self.reconcile_virtual_store_entry(dep_path, pkg, nested_link_targets)?;
+            }
             local_stats.packages_cached += 1;
             return Ok(local_stats);
         }
@@ -1978,35 +2020,18 @@ pub(crate) fn reconcile_top_level_link(
         // else (dangling, wrong target, not a reparse point) falls
         // through to a best-effort reclaim.
         //
-        // Canonicalize is ~5 syscalls on NTFS (open reparse, read
-        // reparse data, close, query attrs ×2). With ~1000 top-level
-        // links per warm install that's 5000 syscalls just for
-        // expected_abs. Cache canonical forms keyed by the absolute
-        // path so a second call to the same target returns
-        // immediately.
-        use std::sync::OnceLock;
-        static CANON_CACHE: OnceLock<
-            std::sync::RwLock<std::collections::HashMap<PathBuf, PathBuf>>,
-        > = OnceLock::new();
-        fn cached_canonicalize(p: &Path) -> std::io::Result<PathBuf> {
-            let map = CANON_CACHE.get_or_init(Default::default);
-            if let Some(hit) = map.read().expect("canon cache poisoned").get(p) {
-                return Ok(hit.clone());
-            }
-            let canon = p.canonicalize()?;
-            map.write()
-                .expect("canon cache poisoned")
-                .insert(p.to_path_buf(), canon.clone());
-            Ok(canon)
-        }
+        // The canonical forms are recomputed on every call, never memoized:
+        // the destination is mutable DURING reconciliation and a concurrent
+        // install can repair it, so a cached answer can report a link fresh
+        // that another process has since repointed.
         let expected_abs = if expected_target.is_absolute() {
             expected_target.to_path_buf()
         } else {
             let parent = link_path.parent().unwrap_or_else(|| Path::new(""));
             parent.join(expected_target)
         };
-        if let Ok(link_canon) = cached_canonicalize(link_path)
-            && let Ok(exp_canon) = cached_canonicalize(&expected_abs)
+        if let Ok(link_canon) = link_path.canonicalize()
+            && let Ok(exp_canon) = expected_abs.canonicalize()
             && link_canon == exp_canon
         {
             return Ok(true);

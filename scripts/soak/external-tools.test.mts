@@ -9,12 +9,15 @@ import { fileURLToPath } from 'node:url'
 
 import { SOAK_DAYS, addDaysIso, todayIso } from './constants.mts'
 import {
+  PLATFORM_KEYS,
   checkDockerPrebake,
   checkPins,
   download,
   extractArchive,
   installTool,
   main,
+  pruneExpiredSoakBypasses,
+  staleBypasses,
 } from './external-tools.mts'
 import { DOCKER_PREBAKE, EXTERNAL_TOOLS_JSON, REPO_ROOT, SURFACES } from './paths.mts'
 
@@ -32,7 +35,32 @@ test('checkPins flags missing pins, bad SRIs, and asset entries with no integrit
   assert.equal(checkPins({ a: { version: '1.0.0', release: 'asset' } }).length, 1)
 })
 
-test('checkPins validates soakBypass dates, arithmetic, and expiry', () => {
+// A key `platformKey()` cannot produce is a DEAD pin: the tool silently has
+// no asset for that host until an install runs there and fails, so the
+// manifest gate is the only thing that catches the typo before an alpine or
+// win-arm64 runner does.
+test('every manifest platform key is one platformKey() can produce', () => {
+  const tools: Record<string, { platforms?: Record<string, unknown> }> = JSON.parse(
+    readFileSync(EXTERNAL_TOOLS_JSON, 'utf8'),
+  ).tools
+  for (const [name, pin] of Object.entries(tools)) {
+    for (const key of Object.keys(pin.platforms ?? {})) {
+      assert.ok(PLATFORM_KEYS.has(key), `${name}: dead platform key '${key}'`)
+    }
+  }
+  assert.match(
+    checkPins({
+      a: {
+        version: '1.0.0',
+        release: 'asset',
+        platforms: { 'windows-arm64': { asset: 'a', integrity: GOOD_SRI } },
+      },
+    })[0]!,
+    /dead pin/,
+  )
+})
+
+test('checkPins validates soakBypass dates and arithmetic; expiry is a warning, not a failure', () => {
   const pub = addDaysIso(todayIso(), -1)
   const good = {
     a: {
@@ -42,15 +70,65 @@ test('checkPins validates soakBypass dates, arithmetic, and expiry', () => {
     },
   }
   assert.deepEqual(checkPins(good), [])
+  assert.deepEqual(staleBypasses(good), [])
   const wrongMath = structuredClone(good)
   wrongMath.a.soakBypass.removable = addDaysIso(pub, 3)
   assert.match(checkPins(wrongMath)[0]!, /removable/)
+  // A bypass vouching for a version other than the one pinned is a hard
+  // finding: the annotation would say an unshipped version was reviewed.
+  const versionMismatch = structuredClone(good)
+  versionMismatch.a.soakBypass.version = '0.9.0'
+  assert.match(checkPins(versionMismatch)[0]!, /soakBypass is for/)
+  // Expired-but-valid is STALE, not unsafe: checkPins exits clean, the
+  // stale list reports it, and --fix / soak-autofix prunes it.
   const expired = structuredClone(good)
   expired.a.soakBypass = { version: '1.0.0', published: '2020-01-01', removable: '2020-01-08' }
-  assert.match(checkPins(expired)[0]!, /expired/)
+  assert.deepEqual(checkPins(expired), [])
+  assert.deepEqual(staleBypasses(expired), ['a'])
   const impossible = structuredClone(good)
   impossible.a.soakBypass = { version: '1.0.0', published: '2026-13-45', removable: '2026-13-52' }
   assert.match(checkPins(impossible)[0]!, /calendar/)
+  assert.deepEqual(staleBypasses(impossible), [])
+})
+
+test('pruneExpiredSoakBypasses prunes only valid, expired annotations', () => {
+  const pub = addDaysIso(todayIso(), -1)
+  const doc = {
+    tools: {
+      fresh: {
+        version: '1.0.0',
+        integrity: GOOD_SRI,
+        soakBypass: { version: '1.0.0', published: pub, removable: addDaysIso(pub, SOAK_DAYS) },
+      },
+      expired: {
+        version: '1.0.0',
+        integrity: GOOD_SRI,
+        soakBypass: { version: '1.0.0', published: '2020-01-01', removable: '2020-01-08' },
+      },
+      // Malformed dates stay findings for a human — never silently pruned.
+      malformed: {
+        version: '1.0.0',
+        integrity: GOOD_SRI,
+        soakBypass: { version: '1.0.0', published: '2026-13-45', removable: '2026-13-52' },
+      },
+      unannotated: { version: '1.0.0', integrity: GOOD_SRI },
+    },
+  }
+  // Wrong-arithmetic + already-past removable: hard failure territory,
+  // never pruned or stale.
+  ;(doc.tools as Record<string, unknown>)['wrongmath'] = {
+    version: '1.0.0',
+    integrity: GOOD_SRI,
+    soakBypass: { version: '1.0.0', published: todayIso(), removable: '2020-01-02' },
+  }
+  assert.deepEqual(pruneExpiredSoakBypasses(doc), ['expired'])
+  assert.ok('soakBypass' in (doc.tools as Record<string, { soakBypass?: object }>)['wrongmath']!)
+  assert.deepEqual(staleBypasses(doc.tools), [])
+  assert.ok(doc.tools.fresh.soakBypass)
+  assert.ok(!('soakBypass' in doc.tools.expired))
+  assert.ok(doc.tools.malformed.soakBypass)
+  // Idempotent: a second pass finds nothing left to prune.
+  assert.deepEqual(pruneExpiredSoakBypasses(doc), [])
 })
 
 test('the repo Dockerfile prebake (when present) matches the tracked pins', t => {
@@ -124,6 +202,49 @@ test('checkDockerPrebake flags every drift class (synthetic image)', () => {
   )
 })
 
+// The reason the arg-list parse replaced a substring match: a multi-arg
+// install line must SATISFY an msrv it contains. Only the negative case was
+// covered before, so the fix itself was untested.
+test('checkDockerPrebake accepts an msrv satisfied by a later install arg', () => {
+  const tools = {
+    'sfw-free': {
+      version: '1.0.0',
+      platforms: { 'linux-arm64': { asset: 'sfw-linux-arm64', integrity: GOOD_SRI } },
+    },
+  }
+  const body = [
+    'for cmd in npm yarn pnpm pip pip3 uv cargo; do make_shim "$cmd"; done',
+    'RUN rustup toolchain install 1.91.0 1.93.0 --profile minimal',
+    'RUN curl -o /x https://github.com/SocketDev/sfw-free/releases/download/v1.0.0/sfw-linux-arm64',
+    'COPY rack/sfw-free/1.0.0/sfw /usr/local/bin/sfw',
+    `RUN asset=sfw-linux-arm64; sha=${'0'.repeat(128)} verify`,
+  ].join('\n')
+  // 1.93 is the SECOND argument — a substring match for
+  // "toolchain install 1.93" would miss it and false-fail.
+  const problems = checkDockerPrebake(body, tools, '', '1.93')
+  assert.equal(problems.some(p => /msrv toolchain/.test(p)), false)
+  // And a version the line does NOT install is still reported.
+  assert.ok(checkDockerPrebake(body, tools, '', '1.99').some(p => /msrv toolchain/.test(p)))
+})
+
+// The 5xx branch is the one this retry logic is named for; the auth
+// fallback test above does not reach it.
+test('download retries a 5xx and succeeds on the second attempt', async t => {
+  const payload = Buffer.from('after-5xx')
+  let calls = 0
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls += 1
+    return calls === 1 ? new Response('boom', { status: 503 }) : new Response(payload)
+  })
+  await withEnv('GITHUB_TOKEN', undefined, async () => {
+    assert.deepEqual(
+      await download('https://example.com/a', sriOf(payload)),
+      payload,
+    )
+  })
+  assert.equal(calls, 2)
+})
+
 test('download sends the GitHub token to github.com only', async t => {
   const payload = Buffer.from('pinned-bytes')
   const seen: Array<{ host: string; auth: string | undefined }> = []
@@ -140,6 +261,45 @@ test('download sends the GitHub token to github.com only', async t => {
   })
   assert.equal(seen[0]!.auth, 'Bearer ghs_test_token')
   assert.equal(seen[1]!.auth, undefined)
+})
+
+test('download keeps auth across a 5xx retry, drops it only on 401/403/404', async t => {
+  const payload = Buffer.from('private-bytes')
+  const seen: Array<string | undefined> = []
+  let calls = 0
+  t.mock.method(globalThis, 'fetch', async (_url: string | URL, init?: RequestInit) => {
+    seen.push((init?.headers as Record<string, string> | undefined)?.authorization)
+    calls += 1
+    // First attempt: transient 500. Retry must still carry the token, or a
+    // private asset would 404 and never recover.
+    return calls === 1 ? new Response('boom', { status: 500 }) : new Response(payload)
+  })
+  await withEnv('GITHUB_TOKEN', 'ghs_test_token', async () => {
+    const got = await download('https://github.com/o/r/releases/download/v1/a', sriOf(payload))
+    assert.deepEqual(got, payload)
+  })
+  assert.equal(seen.length, 2)
+  assert.ok(seen[0], 'first attempt is authed')
+  assert.ok(seen[1], 'the 5xx retry stays authed')
+})
+
+test('download falls back to unauthenticated when the authed fetch fails', async t => {
+  const payload = Buffer.from('public-bytes')
+  const seen: Array<string | undefined> = []
+  t.mock.method(globalThis, 'fetch', async (_url: string | URL, init?: RequestInit) => {
+    const auth = (init?.headers as Record<string, string> | undefined)?.authorization
+    seen.push(auth)
+    // Authed fetch is rejected 404 (as a public cross-repo asset endpoint
+    // can when handed an Actions token); the unauthenticated retry wins.
+    return auth ? new Response('nope', { status: 404 }) : new Response(payload)
+  })
+  await withEnv('GITHUB_TOKEN', 'ghs_test_token', async () => {
+    const got = await download('https://github.com/o/r/releases/download/v1/a', sriOf(payload))
+    assert.deepEqual(got, payload)
+  })
+  assert.equal(seen.length, 2)
+  assert.ok(seen[0])
+  assert.equal(seen[1], undefined)
 })
 
 test('download rejects http errors and integrity mismatches', async t => {

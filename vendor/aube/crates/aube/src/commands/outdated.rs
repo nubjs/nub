@@ -17,7 +17,6 @@
 use super::{DepFilter, make_client, packument_cache_dir, packument_full_cache_dir};
 use aube_lockfile::{DepType, DirectDep, dep_type_label};
 use aube_registry::Packument;
-use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -59,34 +58,29 @@ Examples:
   All dependencies up to date.
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct OutdatedArgs {
     /// Optional package name (prefix match) to filter the report
     pub pattern: Option<String>,
 
     /// Show only devDependencies
-    #[arg(short = 'D', long, conflicts_with = "prod")]
+    #[usage(short = 'D', long, conflicts = "--prod")]
     pub dev: bool,
 
     /// Check globally-installed packages instead of the current project.
-    #[arg(short = 'g', long, conflicts_with = "workspace_root")]
+    #[usage(short = 'g', long, conflicts = "--workspace-root")]
     pub global: bool,
 
     /// Emit a JSON object keyed by package name instead of the default table
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 
     /// Also show deps whose `wanted` version matches the installed version
-    #[arg(long)]
+    #[usage(long)]
     pub long: bool,
 
     /// Show only production dependencies (skip devDependencies)
-    #[arg(
-        short = 'P',
-        long,
-        conflicts_with = "dev",
-        visible_alias = "production"
-    )]
+    #[usage(short = 'P', long, long = "production", conflicts = "--dev")]
     pub prod: bool,
     /// Operate on the workspace root regardless of cwd.
     ///
@@ -94,13 +88,13 @@ pub struct OutdatedArgs {
     /// `aube outdated -w` reports the root manifest's deps instead
     /// of the sub-package's. No-op when paired with `-r` / `--filter`
     /// (those already drive workspace selection from the root).
-    #[arg(short = 'w', long = "workspace-root", visible_alias = "workspace")]
+    #[usage(short = 'w', long = "workspace-root", long = "workspace")]
     pub workspace_root: bool,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct Row {
     // Skipped on serialize — the outer `render_json` map is keyed by
     // name, so duplicating it inside each entry would diverge from
@@ -372,8 +366,8 @@ async fn run_filtered(
         }
         let ctx = files.ctx(&raw_workspace, env, &[]);
         let ignored = super::update::ignored_update_dependencies_from_ctx(&ctx, &pkg.manifest);
-        let selected_roots: Vec<DirectDep> = roots
-            .iter()
+        let selected_roots: Vec<DirectDep> = direct_manifest_deps(roots, &pkg.manifest)
+            .into_iter()
             .filter(|dep| !ignored.contains(&dep.name))
             .cloned()
             .collect();
@@ -528,14 +522,27 @@ async fn run_one(cwd: &Path, args: OutdatedArgs, importer: Option<String>) -> mi
         Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
     };
 
-    let roots: Vec<DirectDep> = graph
-        .root_deps()
-        .iter()
+    let roots: Vec<DirectDep> = direct_manifest_deps(graph.root_deps(), &manifest)
+        .into_iter()
         .filter(|dep| !ignored.contains(&dep.name))
         .cloned()
         .collect();
     let gate = age_gate_for(cwd);
     run_graph(cwd, args, &graph, &roots, importer, gate.as_ref()).await
+}
+
+fn direct_manifest_deps<'a>(
+    roots: &'a [DirectDep],
+    manifest: &aube_manifest::PackageJson,
+) -> Vec<&'a DirectDep> {
+    roots
+        .iter()
+        .filter(|dep| {
+            manifest.dependencies.contains_key(&dep.name)
+                || manifest.dev_dependencies.contains_key(&dep.name)
+                || manifest.optional_dependencies.contains_key(&dep.name)
+        })
+        .collect()
 }
 
 async fn run_graph(
@@ -620,7 +627,11 @@ async fn collect_rows(
     // dependency on the default path of a read-only command. The cache's TTL
     // and ETag revalidation are the same freshness terms the ungated path
     // already runs on.
-    let needs_time = gate.is_some();
+    //
+    // `registrySupportsTimeField` opts a registry that DOES serve `time` in
+    // the abbreviated document out of the heavier fetch.
+    let needs_time = gate.is_some()
+        && !super::with_settings_ctx(cwd, aube_settings::resolved::registry_supports_time_field);
     let full_cache_dir = packument_full_cache_dir();
 
     // An `npm:` alias carries the alias as `DirectDep.name`, which the
@@ -669,6 +680,7 @@ async fn collect_rows(
     }
 
     let mut rows: Vec<Row> = Vec::new();
+    let mut blocked_updates = BTreeMap::new();
     // Several deps can share one registry name, and the lookup below reads
     // the shared entry rather than consuming it, so a failed fetch would
     // otherwise warn once per dep.
@@ -677,10 +689,10 @@ async fn collect_rows(
         let registry_name = registry_name_for(dep);
         // `get`, not `remove`: several deps can share one registry name.
         let packument = packuments.get(&registry_name);
-        let current = match graph.get_package(&dep.dep_path) {
-            Some(p) => p.version.clone(),
-            None => "(missing)".to_string(),
-        };
+        // `None` (dep absent from the graph) rather than the `(missing)`
+        // sentinel: the sentinel is unparseable as semver, and the
+        // never-downgrade clamp below would then pin the column to it.
+        let current = graph.get_package(&dep.dep_path).map(|p| p.version.clone());
         let packument = match packument {
             Some(Ok(p)) => p,
             Some(Err(e)) => {
@@ -700,23 +712,29 @@ async fn collect_rows(
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let latest = latest_pick(packument, &registry_name, gate, &current);
+        let latest_info = super::policy_version_info(
+            packument,
+            &registry_name,
+            "latest",
+            gate,
+            current.as_deref(),
+        );
+        if let Some(blocked) = latest_info.blocked {
+            super::record_age_gated_update(&mut blocked_updates, dep.name.clone(), blocked);
+        }
+        let latest = latest_info.selected;
 
-        // Wanted = highest version in the packument that still satisfies the
-        // manifest range. Fall back to `current` when the range is unparseable
-        // (workspace:/file: specifiers, git URLs, etc.) so we don't lie.
+        // Wanted = the version an update would resolve inside the manifest
+        // range after applying the release-age window. Falls back to `current`
+        // when the range is unparseable (workspace:/file: specifiers, git
+        // URLs) so we don't lie.
         let spec = dep.specifier.as_deref();
-        let (wanted, wanted_undated) = match spec {
-            Some(spec) => gated_pick(
-                packument,
-                &registry_name,
-                spec,
-                gate,
-                super::wanted_version(packument, spec),
-            ),
-            None => (None, false),
-        };
-        let wanted = wanted.unwrap_or_else(|| current.clone());
+        let wanted_info = spec.map(|spec| {
+            super::policy_version_info(packument, &registry_name, spec, gate, current.as_deref())
+        });
+        if let Some(blocked) = wanted_info.as_ref().and_then(|info| info.blocked.as_ref()) {
+            super::record_age_gated_update(&mut blocked_updates, dep.name.clone(), blocked.clone());
+        }
 
         // The registry dated no version in the MANIFEST's range, so the gate
         // admits none of them and an install of this package hard-errors.
@@ -725,18 +743,25 @@ async fn collect_rows(
         // package, on stderr beside the fetch warning above, so stdout stays
         // data.
         //
-        // Keyed on the `wanted` column ALONE, which is why `latest_pick`
-        // discards its own verdict rather than offering it here. The `latest`
-        // column answers a different question: it resolves the literal
-        // `latest` range, which a gated pick widens to `<=dist-tags.latest` —
-        // a candidate set bounded by the tag and disjoint from the manifest
-        // range. Plain `update` resolves the manifest range, so a refusal in
-        // the `latest` column is no evidence about it. A stale or rolled-back
-        // `latest` tag reaches that state routinely, and folding it in here
-        // told the user an update would fail on a package where it succeeds.
-        if wanted_undated && warned.insert(registry_name.clone()) {
-            warn_undatable(&registry_name);
+        // Keyed on the `wanted` column ALONE. The `latest` column answers a
+        // different question: it resolves the literal `latest` range, which a
+        // gated pick widens to `<=dist-tags.latest` — a candidate set bounded
+        // by the tag and disjoint from the manifest range. Plain `update`
+        // resolves the manifest range, so a refusal in the `latest` column is
+        // no evidence about it. A stale or rolled-back `latest` tag reaches
+        // that state routinely, and folding it in here told the user an update
+        // would fail on a package where it succeeds.
+        if let Some(spec) = spec {
+            let (_, wanted_undated) = gated_pick(packument, &registry_name, spec, gate, None);
+            if wanted_undated && warned.insert(registry_name.clone()) {
+                warn_undatable(&registry_name);
+            }
         }
+
+        let current = current.unwrap_or_else(|| "(missing)".to_string());
+        let wanted = wanted_info
+            .and_then(|info| info.selected)
+            .unwrap_or_else(|| current.clone());
 
         let latest_known = latest.is_some();
         let latest_drift = latest.as_deref().is_some_and(|l| l != current);
@@ -755,6 +780,7 @@ async fn collect_rows(
             });
         }
     }
+    super::warn_age_gated_updates(&blocked_updates);
 
     Ok((rows, true))
 }
@@ -766,9 +792,8 @@ fn has_drift(rows: &[Row]) -> bool {
     // current, or its wanted version diverges from current — a missing
     // `latest` dist-tag must never flip the exit code.
     //
-    // A window that admits nothing needs no special case here: `gated_pick`
-    // returns `None`, `wanted` falls back to `current` and `latest` stays
-    // unknown, so the row reports no drift on its own (#722).
+    // A window that admits nothing needs no special case here: both columns
+    // fall back to `current`, so the row reports no drift on its own (#722).
     rows.iter()
         .any(|r| (r.latest_known && r.current != r.latest) || r.current != r.wanted)
 }
@@ -896,6 +921,25 @@ fn render_table(rows: &[Row], long: bool) {
         return;
     }
 
+    let rows: Vec<Row> = rows
+        .iter()
+        .cloned()
+        .map(|mut row| {
+            row.name = aube_util::terminal::sanitize_inline(&row.name).into_owned();
+            row.current = aube_util::terminal::sanitize_inline(&row.current).into_owned();
+            row.wanted = aube_util::terminal::sanitize_inline(&row.wanted).into_owned();
+            row.latest = aube_util::terminal::sanitize_inline(&row.latest).into_owned();
+            row.specifier = row
+                .specifier
+                .map(|value| aube_util::terminal::sanitize_inline(&value).into_owned());
+            row.importer = row
+                .importer
+                .map(|value| aube_util::terminal::sanitize_inline(&value).into_owned());
+            row
+        })
+        .collect();
+    let rows = rows.as_slice();
+
     // Compute column widths.
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(7).max(7);
     let cur_w = rows
@@ -1015,8 +1059,8 @@ fn render_no_checkable_global_json() -> miette::Result<()> {
 
 #[cfg(test)]
 mod colorize_tests {
-    use super::{Row, colorize_diff};
-    use aube_lockfile::DepType;
+    use super::{Row, colorize_diff, direct_manifest_deps};
+    use aube_lockfile::{DepType, DirectDep};
 
     fn strip_ansi(s: &str) -> String {
         // Strip CSI sequences for assertion purposes — the renderer
@@ -1036,6 +1080,33 @@ mod colorize_tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn direct_manifest_deps_excludes_auto_installed_peers() {
+        let mut manifest = aube_manifest::PackageJson::default();
+        manifest
+            .dependencies
+            .insert("vite".to_string(), "^8.0.0".to_string());
+        let roots = vec![
+            DirectDep {
+                name: "vite".to_string(),
+                dep_path: "vite@8.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("^8.0.0".to_string()),
+            },
+            DirectDep {
+                name: "esbuild".to_string(),
+                dep_path: "esbuild@0.28.1".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("^0.28.0".to_string()),
+            },
+        ];
+
+        let selected = direct_manifest_deps(&roots, &manifest);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "vite");
     }
 
     #[test]

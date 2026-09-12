@@ -43,7 +43,7 @@
 ///   The shared `pnpm-workspace.yaml` compat surface is gated separately on the
 ///   `EngineContext` (`read_branded_pnpm_config`), per the role.
 /// - `manifest_namespace` = `""` — nub reads its config from the manifest
-///   ROOT (top-level `workspaces`/`overrides`/`allowBuilds`), not a branded
+///   ROOT (top-level `workspaces`/`overrides`/`allowScripts`), not a branded
 ///   `"nub"` object.
 /// - `env_prefix` = `None` — nub exposes NONE of aube's internal debug /
 ///   perf-bisect toggle family (`AUBE_DISABLE_*`, `AUBE_CAS_*`, `AUBE_INTERNAL_*`,
@@ -224,14 +224,6 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // git/jsr/unknown protocol in a yarn.lock or bun.lock) aborts at plan time
     // for a non-optional dep, instead of reclassify→404 / silent drop.
     strict_unsupported_source: true,
-    // A fully-satisfied warm install (node_modules present, lockfile/manifest/
-    // settings/layout all match) short-circuits to an instant "Already up to
-    // date" regardless of `trustPolicy`, matching npm/pnpm/bun and aube's own
-    // offline + `aube run` auto-install paths. The trust gate is a resolve-time
-    // downgrade defense with nothing to validate on a no-op (zero resolve/fetch/
-    // link); any install that does REAL work misses the short-circuit and still
-    // trips the gate during resolution. Standalone aube keeps the re-validation.
-    warm_trust_revalidate: false,
     // Default `trustPolicyIgnoreAfter` to a 14-day window (in minutes) when the
     // user hasn't set it. A legitimate maintenance backport on an old major —
     // published later in wall-clock than a newer major that adopted OIDC
@@ -361,14 +353,18 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
             "nub chooses its own output streams. Redirect the command's stdout or stderr \
              in your shell instead.",
         ),
-        // Parity no-ops in the engine ITSELF, not just under nub: accepted and
-        // wired to nothing. Both carry the standing note in settings.toml that
-        // the flag comes off once a caller starts gating on them.
+        // A parity no-op in the engine ITSELF, not just under nub: accepted and
+        // wired to nothing. It carries the standing note in settings.toml that
+        // the flag comes off once a caller starts gating on it.
+        //
+        // `ignoreCompatibilityDb` USED to sit here beside it, on the grounds that
+        // nub shipped no compatibility database. It ships one now — the same
+        // vendored Yarn + pnpm catalogs pnpm merges into every install — so the
+        // setting has a real reader and must stay settable. Leaving it listed
+        // would strip it from `meta::find`, make `config set` refuse it, and
+        // fall the accessor through to the default: a database applied to every
+        // install with no way to turn it off.
         ("useBetaCli", "nub has no beta-gated commands."),
-        (
-            "ignoreCompatibilityDb",
-            "nub ships no package-compatibility database, so there is nothing to disable.",
-        ),
         // `install::FrozenMode::default_for_env` asks `aube_util::env::is_ci()`,
         // which reads the `CI` ENVIRONMENT VARIABLE. No reader consults the
         // config key, so an `.npmrc` `ci=` line has never decided anything.
@@ -419,7 +415,6 @@ const _: () = {
     assert!(NUB.gvs_over_default_hoist);
     assert!(NUB.primer_ttl.is_none());
     assert!(NUB.tty_progress);
-    assert!(!NUB.warm_trust_revalidate);
     assert!(matches!(NUB.trust_policy_ignore_after_default, Some(20160)));
     assert!(NUB.extra_settings_fingerprint.is_some());
     // Non-empty (the pattern implies it) and still led by the entry the list was

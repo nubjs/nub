@@ -73,7 +73,7 @@ pub fn parse_yaml(source: &str) -> Result<serde_json::Value, String> {
 
 /// Parse TOML source into a JSON value.
 pub fn parse_toml(source: &str) -> Result<serde_json::Value, String> {
-    let value: toml::Value = source
+    let value: toml::Table = source
         .parse()
         .map_err(|e| format!("TOML parse error: {e}"))?;
 

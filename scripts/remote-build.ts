@@ -113,7 +113,11 @@ Jobs:
   clippy   the full CI clippy gate (default)
   test     the whole-workspace test suite
   adhoc    build the nub binary + real addon, then run YOUR --script at the synced repo
-           root with NUB_BIN naming the built binary. For fixture probes and ad-hoc e2e
+           root with NUB_BIN naming the built binary. NUB_BIN carries DEFAULT features
+           only, so a probe of a feature-gated command (\`nub compile\`) must build its
+           own: \`cargo build -p nub-cli --features compile --profile fast\` and then
+           \$CARGO_TARGET_DIR/fast/nub -- never \$PWD/target, which this job never uses.
+           For fixture probes and ad-hoc e2e
            sweeps (the ad-hoc-test loop) that need no macOS-specific behavior. The image
            carries Node ${NODE_MAJOR} + npm; a script installs any other reference tool itself.
 
@@ -488,10 +492,16 @@ tests/brand-lint/check-path-literals.sh`;
     // sees ZERO `NUB_*` vars, and cargo passes its own environment straight through. The one
     // failure aborted the run at `tests/integration.rs`, so every suite after it
     // alphabetically was silently never reached by ANY remote test job.
+    // The `compile` line is ci.yml:1080 and it is NOT optional padding: `compile`
+    // is not a default feature, so the bare `cargo test` above runs ZERO compile
+    // tests and still exits 0. This job reported green for a pull request whose
+    // every change was under `compile/`, and the PR was merged on that green.
+    // Keep both lines in lockstep with ci.yml's test job.
     return `${PREPARE}(cd crates/nub-native && cargo build)
 cp "$CARGO_TARGET_DIR/debug/libnub_native.so" runtime/addons/nub-native.node
 unset NUB_ALLOW_INCOMPLETE_RUNTIME
-cargo test`;
+cargo test
+cargo test -p nub-cli --features compile --bin nub compile::`;
   }
   // The caller's script RUNS the binary, which the gates never do — two consequences. The
   // placeholder addon PREPARE staged must be overwritten with the real one (a non-embedded
@@ -907,6 +917,10 @@ cargo build -p nub-cli --profile fast || echo "WARM-WARN: nub-cli warm-up failed
 # The test job runs on the DEFAULT profile (matching ci.yml), a separate artifact universe
 # from \`fast\`. --no-run stops at link, which is all the warming needs.
 cargo test --workspace --no-run || echo "WARM-WARN: test warm-up failed; the test job will cold-compile"
+# jobScript("test")'s SECOND cargo line. \`compile\` is not a default feature, so the
+# --workspace line above warms a different feature set and none of its artifacts are
+# reusable here — cargo rebuilds nub-cli and its graph from scratch without this.
+cargo test -p nub-cli --features compile --bin nub compile:: --no-run || echo "WARM-WARN: compile-feature test warm-up failed; the test job will cold-compile it"
 # nub-native is an EXCLUDED workspace (panic=unwind cdylib), so --workspace never reaches it,
 # and the clippy line above is both a different profile directory and a different driver. Its
 # heavy deps (oxc with features=["full"], napi 3, oxc_napi, oxc_sourcemap[napi]) are declared

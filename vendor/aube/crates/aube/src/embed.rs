@@ -9,10 +9,12 @@
 use std::path::{Path, PathBuf};
 
 pub use crate::commands::add::AddToProjectOptions;
+pub use crate::commands::install::node_gyp_bootstrap::bootstrap_node_gyp;
 pub use crate::commands::install::{
-    DepSelection, FrozenMode, InstallControl, InstallEvent, InstallOutputLevel, InstallOutputMode,
-    InstallPhase, InstallProgressSnapshot, InstallPrompt, InstallPromptFuture,
-    InstallPromptHandler, InstallReporter,
+    DepSelection, EmbedderInstallOverrides, FrozenMode, INSTALL_OUTPUT_CODE_LIFECYCLE_SCRIPT,
+    InstallControl, InstallEvent, InstallOutputLevel, InstallOutputMode, InstallPhase,
+    InstallProgressSnapshot, InstallPrompt, InstallPromptFuture, InstallPromptHandler,
+    InstallReporter,
 };
 pub use crate::runtime::{EmbedderRuntime, set_embedder_runtime};
 pub use aube_manifest::{Error as ManifestError, PackageJson, Workspaces};
@@ -135,12 +137,30 @@ pub fn discover_workspace_packages(
 
 /// Install the dependencies declared by a project.
 pub async fn install(options: InstallOptions) -> Result<()> {
+    install_with_overrides(options, EmbedderInstallOverrides::default()).await
+}
+
+/// Install dependencies with host-owned storage and materialization policy.
+///
+/// Unlike process-wide defaults registered by [`initialize`], these overrides
+/// apply only to this invocation and win over environment variables and
+/// project/user configuration.
+pub async fn install_with_overrides(
+    options: InstallOptions,
+    overrides: EmbedderInstallOverrides,
+) -> Result<()> {
+    // The CLI initializes diagnostics during argument dispatch, but hosts that
+    // call the embedding facade never pass through that path. Honor the same
+    // env-driven AUBE_DIAG_* surface here so embedded installs can produce a
+    // low-overhead trace without requiring host-specific plumbing.
+    aube_util::diag::init();
     let mut command_options =
         crate::commands::install::InstallOptions::with_mode(options.frozen_mode);
     command_options.project_dir = Some(options.project_dir);
     command_options.dep_selection = options.dep_selection;
     command_options.ignore_scripts = options.ignore_scripts;
     command_options.skip_root_lifecycle = !options.run_root_lifecycle;
+    command_options.run_dev_preinstall = options.run_root_lifecycle;
     command_options.dry_run = options.dry_run;
     command_options.lockfile_only = options.lockfile_only;
     command_options.force = options.force;
@@ -150,7 +170,14 @@ pub async fn install(options: InstallOptions) -> Result<()> {
     command_options.osv_transitive_check = options.osv_transitive_check;
     command_options.control = options.control;
     command_options.embedder_runtime = options.runtime;
-    crate::commands::install::run(command_options).await
+    overrides.append_to(&mut command_options.cli_flags);
+    let result = crate::commands::scope_embedder_install_overrides(
+        overrides,
+        crate::commands::install::run(command_options),
+    )
+    .await;
+    aube_util::diag::flush_file();
+    result
 }
 
 /// Add packages to a project's manifest and install the resulting graph.
@@ -165,7 +192,39 @@ pub async fn add(
     packages: &[String],
     options: AddToProjectOptions,
 ) -> Result<()> {
-    crate::commands::add::add_to_project(project_dir, packages, options).await
+    add_with_overrides(
+        project_dir,
+        packages,
+        options,
+        EmbedderInstallOverrides::default(),
+    )
+    .await
+}
+
+/// Add packages with host-owned storage and materialization policy.
+///
+/// The overrides apply to the chained install only, at higher precedence than
+/// environment variables and project/user configuration.
+pub async fn add_with_overrides(
+    project_dir: &Path,
+    packages: &[String],
+    options: AddToProjectOptions,
+    overrides: EmbedderInstallOverrides,
+) -> Result<()> {
+    // See install_with_overrides: embedded adds bypass CLI diagnostic init.
+    aube_util::diag::init();
+    let result = crate::commands::scope_embedder_install_overrides(
+        overrides.clone(),
+        crate::commands::add::add_to_project_with_overrides(
+            project_dir,
+            packages,
+            options,
+            overrides,
+        ),
+    )
+    .await;
+    aube_util::diag::flush_file();
+    result
 }
 
 /// Run a package's script (`package.json` `scripts.<name>`) in `project_dir`,

@@ -8,6 +8,12 @@ use crate::Resolver;
 use aube_lockfile::LockfileGraph;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgeGatedUpdate {
+    pub name: String,
+    pub version: String,
+}
+
 /// Subset of packument facts the install summary printer wants to
 /// render next to a direct-dependency line. Returned only for direct
 /// deps where at least one signal is set — the printer skips the badge
@@ -19,7 +25,7 @@ use std::collections::HashMap;
 /// summary, so the badge column just signals "this direct dep is one
 /// of the WARN lines you saw" without duplicating the message.
 ///
-/// [crate-deprecations]: https://github.com/jdx/aube/blob/main/crates/aube/src/deprecations.rs
+/// [crate-deprecations]: https://github.com/aubepkg/aube/blob/main/crates/aube/src/deprecations.rs
 #[derive(Debug, Clone, Default)]
 pub struct DirectDepInfo {
     /// True when the packument marks the *resolved* version as
@@ -37,6 +43,56 @@ pub struct DirectDepInfo {
 }
 
 impl Resolver {
+    /// Return direct updates that an ungated resolve would select but the
+    /// active `minimumReleaseAge` policy hides. The selected gated version
+    /// must match the resolved graph, which avoids mislabeling a difference
+    /// caused by an override, lockfile preference, or another resolver rule.
+    pub fn age_gated_updates(&self, graph: &LockfileGraph) -> Vec<AgeGatedUpdate> {
+        let Some(minimum_release_age) = self.minimum_release_age.as_ref() else {
+            return Vec::new();
+        };
+        let mut updates = Vec::new();
+        for deps in graph.importers.values() {
+            for dep in deps {
+                let Some(pkg) = graph.packages.get(&dep.dep_path) else {
+                    continue;
+                };
+                if pkg.local_source.is_some() {
+                    continue;
+                }
+                let Some(packument) = self.cache.get(pkg.registry_name()) else {
+                    continue;
+                };
+                let Some(range) = dep.specifier.as_deref() else {
+                    continue;
+                };
+                let crate::PickResult::Found(selected) = crate::pick_version_for_add(
+                    packument,
+                    pkg.registry_name(),
+                    range,
+                    Some(minimum_release_age),
+                ) else {
+                    continue;
+                };
+                if selected.version != pkg.version {
+                    continue;
+                }
+                let crate::PickResult::Found(ungated) =
+                    crate::pick_version_for_add(packument, pkg.registry_name(), range, None)
+                else {
+                    continue;
+                };
+                if is_newer(&ungated.version, &selected.version) {
+                    updates.push(AgeGatedUpdate {
+                        name: dep.name.clone(),
+                        version: ungated.version.clone(),
+                    });
+                }
+            }
+        }
+        updates
+    }
+
     /// Snapshot per-direct-dep packument facts so the install summary
     /// printer can render them inline after the resolver — and its
     /// packument cache — is dropped. Keys are `DirectDep::dep_path`;
@@ -88,6 +144,16 @@ fn is_prerelease(version: &str) -> bool {
     node_semver::Version::parse(version)
         .map(|v| !v.pre_release.is_empty())
         .unwrap_or(false)
+}
+
+fn is_newer(candidate: &str, selected: &str) -> bool {
+    match (
+        node_semver::Version::parse(candidate),
+        node_semver::Version::parse(selected),
+    ) {
+        (Ok(candidate), Ok(selected)) => candidate > selected,
+        _ => candidate != selected,
+    }
 }
 
 #[cfg(test)]

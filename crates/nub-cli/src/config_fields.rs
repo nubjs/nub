@@ -58,6 +58,9 @@ enum Shape {
     Str,
     /// `string[]`, written as a JSON array.
     StrList,
+    /// `string | string[]` (`prefix`): a bare string is a command line, a JSON
+    /// array is its argv.
+    Command,
     /// `boolean | "varlock" | string[]` (`envFile`).
     EnvFile,
     /// `boolean | "warn" | "error"` (`verifyDeps`).
@@ -93,6 +96,12 @@ const FIELDS: &[Field] = &[
         address: "nodeExecutable",
         path: "nodeExecutable",
         shape: Shape::Str,
+        global_only: false,
+    },
+    Field {
+        address: "prefix",
+        path: "prefix",
+        shape: Shape::Command,
         global_only: false,
     },
     Field {
@@ -432,7 +441,7 @@ fn document(field: &Field, value: Value) -> Map<String, Value> {
 fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
     let trimmed = raw.trim_start();
     let structured = match field.shape {
-        Shape::StrList | Shape::EnvFile => trimmed.starts_with('['),
+        Shape::StrList | Shape::EnvFile | Shape::Command => trimmed.starts_with('['),
         Shape::Loader | Shape::Linker => trimmed.starts_with('{'),
         Shape::Bool | Shape::Str | Shape::VerifyDeps => false,
     };
@@ -468,7 +477,7 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
                 });
             }
         },
-        Shape::Str | Shape::Linker => Value::String(raw.into()),
+        Shape::Str | Shape::Linker | Shape::Command => Value::String(raw.into()),
         // The two shapes with no scalar spelling of their own: a bare shell
         // string here is a missing pair of brackets or braces, not a value.
         Shape::StrList => {

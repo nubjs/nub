@@ -44,7 +44,7 @@ const defaultBun = ratio('gvs-warm', 'bun', { approximate: true })
 const testPnpm = ratio('install-test', 'pnpm')
 const testBun = ratio('install-test', 'bun')
 
-const paragraph = `**[Fast installs](https://aube.jdx.dev/benchmarks).** Warm installs are ${about(defaultPnpm)} faster than pnpm and ${about(defaultBun)} faster than Bun in the current benchmarks. Repeat test commands run up to ${testPnpm} faster than pnpm and up to ${testBun} faster than Bun.`
+const paragraph = `**[Fast installs](https://aube.sh/benchmarks).** Warm installs are ${about(defaultPnpm)} faster than pnpm and ${about(defaultBun)} faster than Bun in the current benchmarks. Repeat test commands run up to ${testPnpm} faster than pnpm and up to ${testBun} faster than Bun.`
 
 const START = '<!-- BENCH_RATIOS:START -->'
 const END = '<!-- BENCH_RATIOS:END -->'

@@ -57,3 +57,5 @@ tar = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = "0.6"
 proptest = "1"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "aws_lc_rs"] }
+tokio-rustls = "0.26"

@@ -77,6 +77,86 @@ body {
   font-family: var(--aube-sans);
 }
 
+.aube-team-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 32px 0 48px;
+}
+
+.vp-doc a.aube-team-member {
+  background: linear-gradient(180deg, var(--aube-bg-soft), var(--aube-bg-alt));
+  border: 1px solid var(--aube-line);
+  border-radius: 14px;
+  color: var(--aube-text);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 24px;
+  text-decoration: none;
+  transition:
+    border-color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.vp-doc a.aube-team-member:hover {
+  border-color: var(--aube-faint);
+  transform: translateY(-2px);
+}
+
+.aube-team-member img {
+  border: 1px solid var(--aube-line);
+  border-radius: 50%;
+  height: 96px;
+  margin: 0 0 24px;
+  object-fit: cover;
+  width: 96px;
+}
+
+.aube-team-role {
+  color: var(--aube-accent);
+  font-family: var(--aube-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.aube-team-member h2 {
+  border: 0;
+  color: var(--aube-text);
+  font-family: var(--aube-serif);
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1.05;
+  margin: 10px 0 4px;
+  padding: 0;
+}
+
+.aube-team-handle {
+  color: var(--aube-faint);
+  font-family: var(--aube-mono);
+  font-size: 12px;
+}
+
+.aube-team-company {
+  color: var(--aube-muted);
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.aube-team-member p {
+  color: var(--aube-muted);
+  font-size: 15px;
+  line-height: 1.5;
+  margin: 18px 0 0;
+}
+
+@media (max-width: 760px) {
+  .aube-team-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Navbar logo */
 .VPNavBarTitle .VPImage.logo {
   display: none;

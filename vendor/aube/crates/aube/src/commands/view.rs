@@ -10,9 +10,18 @@
 //! passed, the target package name is read from the local manifest.
 
 use crate::commands::{make_client, packument_full_cache_dir, resolve_version, split_name_spec};
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use serde_json::Value;
+
+macro_rules! terminal_println {
+    () => {
+        println!()
+    };
+    ($($arg:tt)*) => {{
+        let rendered = format!($($arg)*);
+        println!("{}", aube_util::terminal::sanitize(&rendered));
+    }};
+}
 
 pub const AFTER_LONG_HELP: &str = "\
 Examples:
@@ -49,7 +58,7 @@ Examples:
   $ aube view react@next --json
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ViewArgs {
     /// Package to view, optionally with a version or dist-tag.
     ///
@@ -65,13 +74,16 @@ pub struct ViewArgs {
     /// Print the full JSON of the selected version instead of the summary.
     ///
     /// Mutually exclusive with `field`.
-    #[arg(long, conflicts_with = "field")]
+    #[usage(long)]
     pub json: bool,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
 pub async fn run(args: ViewArgs) -> miette::Result<()> {
+    if args.json && args.field.is_some() {
+        return Err(miette!("--json cannot be used with a field argument"));
+    }
     args.network.install_overrides();
     let cwd = crate::dirs::project_root_or_cwd()?;
     let package = match &args.package {
@@ -150,12 +162,12 @@ fn dotted_get<'a>(mut value: &'a Value, path: &str) -> Option<&'a Value> {
 /// field lookups.
 fn print_value(value: &Value) {
     match value {
-        Value::String(s) => println!("{s}"),
+        Value::String(s) => terminal_println!("{s}"),
         Value::Null => {}
-        Value::Bool(_) | Value::Number(_) => println!("{value}"),
+        Value::Bool(_) | Value::Number(_) => terminal_println!("{value}"),
         _ => {
             let json = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-            println!("{json}");
+            terminal_println!("{json}");
         }
     }
 }
@@ -186,19 +198,21 @@ fn print_summary(packument: &Value, version_meta: &Value, name: &str, version: &
         .map(|o| o.len())
         .unwrap_or(0);
 
-    println!("{name}@{version} | {license} | deps: {deps_count} | versions: {versions_count}");
+    terminal_println!(
+        "{name}@{version} | {license} | deps: {deps_count} | versions: {versions_count}"
+    );
 
     if let Some(desc) = version_meta.get("description").and_then(|v| v.as_str())
         && !desc.is_empty()
     {
-        println!();
-        println!("{desc}");
+        terminal_println!();
+        terminal_println!("{desc}");
     }
 
     if let Some(home) = version_meta.get("homepage").and_then(|v| v.as_str())
         && !home.is_empty()
     {
-        println!("{home}");
+        terminal_println!("{home}");
     }
 
     if let Some(keywords) = version_meta.get("keywords").and_then(|v| v.as_array())
@@ -209,8 +223,8 @@ fn print_summary(packument: &Value, version_meta: &Value, name: &str, version: &
             .filter_map(|k| k.as_str().map(String::from))
             .collect();
         if !kws.is_empty() {
-            println!();
-            println!("keywords: {}", kws.join(", "));
+            terminal_println!();
+            terminal_println!("keywords: {}", kws.join(", "));
         }
     }
 
@@ -221,14 +235,14 @@ fn print_summary(packument: &Value, version_meta: &Value, name: &str, version: &
             _ => vec![],
         };
         if !names.is_empty() {
-            println!();
-            println!("bin: {}", names.join(", "));
+            terminal_println!();
+            terminal_println!("bin: {}", names.join(", "));
         }
     }
 
     if let Some(dist) = version_meta.get("dist").and_then(|v| v.as_object()) {
-        println!();
-        println!("dist");
+        terminal_println!();
+        terminal_println!("dist");
         for key in [
             "tarball",
             "shasum",
@@ -241,7 +255,7 @@ fn print_summary(packument: &Value, version_meta: &Value, name: &str, version: &
                     Value::String(s) => s.clone(),
                     _ => v.to_string(),
                 };
-                println!(".{key}: {display}");
+                terminal_println!(".{key}: {display}");
             }
         }
     }
@@ -249,11 +263,11 @@ fn print_summary(packument: &Value, version_meta: &Value, name: &str, version: &
     if let Some(deps) = version_meta.get("dependencies").and_then(|v| v.as_object())
         && !deps.is_empty()
     {
-        println!();
-        println!("dependencies:");
+        terminal_println!();
+        terminal_println!("dependencies:");
         for (k, v) in deps {
             if let Some(range) = v.as_str() {
-                println!("{k}: {range}");
+                terminal_println!("{k}: {range}");
             }
         }
     }
@@ -261,8 +275,8 @@ fn print_summary(packument: &Value, version_meta: &Value, name: &str, version: &
     if let Some(maintainers) = version_meta.get("maintainers").and_then(|v| v.as_array())
         && !maintainers.is_empty()
     {
-        println!();
-        println!("maintainers:");
+        terminal_println!();
+        terminal_println!("maintainers:");
         for m in maintainers {
             let who = m
                 .get("name")
@@ -270,9 +284,9 @@ fn print_summary(packument: &Value, version_meta: &Value, name: &str, version: &
                 .unwrap_or("<unknown>");
             let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
             if email.is_empty() {
-                println!("- {who}");
+                terminal_println!("- {who}");
             } else {
-                println!("- {who} <{email}>");
+                terminal_println!("- {who} <{email}>");
             }
         }
     }
@@ -280,11 +294,11 @@ fn print_summary(packument: &Value, version_meta: &Value, name: &str, version: &
     if let Some(tags) = packument.get("dist-tags").and_then(|v| v.as_object())
         && !tags.is_empty()
     {
-        println!();
-        println!("dist-tags:");
+        terminal_println!();
+        terminal_println!("dist-tags:");
         for (k, v) in tags {
             if let Some(s) = v.as_str() {
-                println!("{k}: {s}");
+                terminal_println!("{k}: {s}");
             }
         }
     }

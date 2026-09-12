@@ -3,7 +3,7 @@
 //! Two settings land here:
 //! - `catalogMode` governs how `add` writes the manifest specifier for a
 //!   package that already appears in the default workspace catalog.
-//! - `cleanupUnusedCatalogs` trims workspace-yaml catalog entries that
+//! - `catalogPrune` trims workspace-yaml catalog entries that
 //!   no importer references, after a successful resolve.
 //!
 //! Both features share the same source of truth (`WorkspaceConfig::catalog`
@@ -125,7 +125,7 @@ pub(crate) fn range_compatible(
 ///
 /// Goes through `aube_manifest::workspace::edit_workspace_yaml`, which
 /// no-ops the rewrite when the closure produces no structural change —
-/// catalog cleanup runs on every install under `cleanupUnusedCatalogs`
+/// catalog cleanup runs on every install under `catalogPrune`
 /// and we don't want to strip user comments on the steady-state pass
 /// where every declared entry is still referenced.
 pub(crate) fn prune_unused_catalog_entries(
@@ -207,7 +207,7 @@ pub(crate) fn prune_unused_catalog_entries(
     .map_err(miette::Report::new)
     .wrap_err_with(|| {
         format!(
-            "failed to write {} after cleanupUnusedCatalogs",
+            "failed to write {} after catalogPrune",
             workspace_path.display()
         )
     })?;
@@ -755,7 +755,7 @@ mod tests {
         // annotations on the catalog entries that survive — the whole
         // reason aube routes catalog rewrites through
         // `edit_workspace_yaml` is so the daily install (which runs
-        // `cleanupUnusedCatalogs`) doesn't silently strip comments off
+        // `catalogPrune`) doesn't silently strip comments off
         // the entries the user took the time to document.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pnpm-workspace.yaml");

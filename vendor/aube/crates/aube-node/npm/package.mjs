@@ -45,7 +45,7 @@ if (process.env.AUBE_NODE_BINARY) {
   writeFileSync(resolve(stage, "package.json"), JSON.stringify({
     name: name(os, cpu, libc), version,
     description: "Platform addon for @jdxcode/aube-node; install the root package instead",
-    license: "MIT", repository: "https://github.com/jdx/aube", main: "aube.node",
+    license: "MIT", repository: "https://github.com/aubepkg/aube", main: "aube.node",
     files: ["aube.node", "README.md"], preferUnplugged: true,
     os: [os], cpu: [cpu], ...(libc ? { libc: [libc] } : {}),
   }, null, 2) + "\n")

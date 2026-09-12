@@ -27,7 +27,7 @@ Loaders are keyed on file extension:
 - `.yaml` / `.yml`
 - `.txt` — loaded as a string, no parsing
 
-The `.json` extension is intentionally not in this set — it is Node-native (`resolveJsonModule`), so Nub leaves it to Node.
+The `.json` extension is not in this set: JSON modules are Node-native.
 
 ## Custom extensions
 
@@ -53,7 +53,7 @@ Any other value stops the command with an error.
 
 ## Default export
 
-A data module exposes a single default export — the parsed value, exactly like Node's own JSON modules. There are no named exports; destructure the default to pull out top-level keys.
+A data module exposes a single default export — the parsed value, like Node's own JSON modules. There are no named exports; destructure the default to pull out top-level keys.
 
 ```yaml title="config.yaml"
 host: localhost
@@ -67,7 +67,7 @@ const { host, port } = config;      // "localhost", 5432
 
 The object formats are typed `Record<string, unknown>`, so destructured keys are `unknown` — narrow or cast them at the use site. A data file whose top-level value is an array or scalar imports as that value via the default; cast it, since the wildcard type assumes an object.
 
-## Import any file as text
+## Text imports
 
 Add the `with { type: "text" }` import attribute to read a file's raw contents as a string, whatever its extension.
 

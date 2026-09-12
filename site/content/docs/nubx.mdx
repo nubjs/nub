@@ -1,0 +1,137 @@
+---
+title: Bin runner
+description: Run a CLI by name — the project's own copy when it is installed, fetched from the registry when it is not, and never fetched silently in CI.
+---
+
+Run a CLI by name, whether or not the project has it installed:
+
+```bash
+nubx eslint . --fix        # installed — runs the local copy
+nubx vitest run --coverage
+nubx cowsay "hi"           # not installed — offers to fetch it
+```
+
+Resolution is local first. Nub walks the `node_modules/.bin` chain — the nearest `node_modules/.bin`, then up through parent directories to the workspace root — and execs the match directly, with no network and no Node process in the wrapper. In a Yarn Plug'n'Play project, PnP-registered bins resolve through `pnpapi`, the way `yarn exec` does. See [module resolution](/docs/runtime/resolution#yarn-plugnplay).
+
+Only a local miss reaches the registry, as with `npx`, with two differences: dispatch happens in Rust rather than a Node bootstrap, and a fetch is never silent.
+
+<Bench
+  label="dispatch a locally-installed CLI · 50 runs"
+  accent="sky"
+  max={201}
+  rows={[
+    { cmd: 'nub exec', ms: 11.6, us: true, label: 'tie with bun x' },
+    { cmd: 'bun x', ms: 10.6 },
+    { cmd: 'pnpm exec', ms: 175, ratio: 15 },
+    { cmd: 'npm exec', ms: 201, ratio: 17 },
+  ]}
+  source="https://github.com/nubjs/nub/tree/main/tests/bench/bin-runner"
+/>
+
+## Registry fetches
+
+Where `npx` downloads without asking, `nubx` asks. The first fetch of a given tool prompts, runs it once you agree, and remembers the answer:
+
+```console
+$ nubx cowsay "Hello"
+The cowsay bin is not installed locally.
+Install and run from the remote registry?
+  ● Yes
+  ○ No
+  ○ Never (don't ask me again)
+```
+
+Later runs skip the prompt. A pinned version (`nubx cowsay@1.5.0`) is remembered indefinitely; a floating one (`nubx cowsay`, which tracks `latest`) is re-confirmed after a day, so a tool that has moved to a new version asks again before running new code.
+
+Outside a terminal there is no way to ask, so the fetch fails closed — in CI, and any time stdin isn't a terminal:
+
+```console
+$ nubx cowsay "hi"          # in CI
+nubx: refusing to download cowsay in CI.
+  A CI job should declare the tool as a dependency, or pass -y to fetch it.
+```
+
+A fetched package runs through Nub's normal install resolver, so the registry safeguards apply: the `minimumReleaseAge` cooling window (see [the cooling window](/docs/install#cooling-window)) and skipped lifecycle scripts. [`nub dlx`](#nub-dlx) is the explicit way to fetch and run a package outside the prompt.
+
+### `-y`
+
+Pass `-y` (`--yes`) to consent up front: it skips the first-run prompt and lets a fetch through in CI or any other non-interactive context.
+
+```bash
+nubx -y cowsay "hi"
+```
+
+### `exec.implicitDlx`
+
+Answering **Never** turns the implicit fetch off permanently. Nub records `exec.implicitDlx` in its global settings file (`~/.config/nub/nub.jsonc`), and from then on a local miss stops instead of offering a download. Explicit fetches — [`nub dlx`](#nub-dlx) and `nubx -y` — are unaffected, because asking for them is itself the consent.
+
+Restore the prompt at any time:
+
+```bash
+nub config set exec.implicitDlx prompt
+```
+
+## Arguments
+
+Everything after the tool name is forwarded to it untouched — no `--` separator needed.
+
+```bash
+nubx eslint . --fix --max-warnings 0
+nubx vitest run --coverage
+```
+
+## `--node`
+
+Pass `--node` to run the tool with runtime augmentation disabled — see [the runtime overview](/docs/runtime#--node) for the full contract. Resolution and the registry fetch still run; only the augmentation is off.
+
+```bash
+nubx --node prisma generate
+```
+
+## `nub exec`
+
+The local half of `nubx` on its own: the same `node_modules/.bin` walk, and never the registry.
+
+```bash
+nub exec eslint . --fix
+nub exec --node tsc --noEmit   # augmentation off
+```
+
+When nothing matches, `nub exec` prints an install hint and exits 127. It takes the same workspace flags as `nub run` — [`--filter`](/docs/run#--filter), `-r`, `--parallel` — and `--node`.
+
+## `nub dlx`
+
+The remote half on its own: fetch a package from the registry and run its bin. Typing the command is itself the consent, so `nub dlx` never prompts and runs in CI.
+
+```bash
+nub dlx create-vite my-app
+nub x create-vite my-app                       # short alias, as bunx / bun x
+nub dlx -p @angular/cli ng new my-app          # bin name differs from the package
+nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'  # shell one-liner with the bin on PATH
+nub dlx --node prisma generate                 # augmentation off
+```
+
+The flags mirror `pnpm dlx` — see the [full docs](https://pnpm.io/cli/dlx) on pnpm.io.
+
+A fetched package is subject to the same safeguards as an install, and shares the persistent cache with `nubx`:
+
+- **Lifecycle scripts are skipped.** Downloading a tool is not consent to run its dependencies' build scripts. Approve one with `--allow-build=<pkg>`, the same allowlist [`nub install`](/docs/install) uses.
+- **The cooling window applies.** A resolved version must be older than `minimumReleaseAge` (default 24 hours), so a tool whose latest release is inside the window runs at the newest release that clears it, and says so. See [the cooling window](/docs/install#cooling-window).
+
+Whether a tool may be pulled from the registry at all is a decision about your machine, so the [`dlx`](/docs/config#dlx) block lives in the global `nub.jsonc` only:
+
+```jsonc title="~/.config/nub/nub.jsonc"
+{
+  // ...
+  "dlx": {
+    "consent": "never"  // no implicit nubx registry fetch; an explicit nub dlx still runs
+  }
+}
+```
+
+## Related
+
+- [Script runner](/docs/run) — `nub run`, the workspace-aware `package.json` script runner.
+- [Running files](/docs/runtime) — TypeScript-first file execution.
+- [Watch mode](/docs/watch) — restart on change.
+- [Module resolution](/docs/runtime/resolution) — the resolver, including Yarn Plug'n'Play.

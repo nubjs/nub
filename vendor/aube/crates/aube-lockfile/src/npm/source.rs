@@ -1,24 +1,6 @@
 use crate::{GitSource, HostedGit, HostedGitHost, LocalSource, LockedPackage, RemoteTarballSource};
 use std::path::PathBuf;
 
-/// True when a package's local source is a git dependency in *either*
-/// representation: a plain git-clone source (`LocalSource::Git`) or a
-/// host-served codeload archive (`RemoteTarball { git_hosted: true }`).
-/// Upstream #857 reclassified github/gitlab/bitbucket-shorthand git
-/// deps to the codeload-tarball form, so the npm writer's git
-/// special-casing must recognize both — a plain (non-git) remote
-/// tarball stays excluded.
-pub(crate) fn is_git_local_source(src: Option<&LocalSource>) -> bool {
-    matches!(
-        src,
-        Some(LocalSource::Git(_))
-            | Some(LocalSource::RemoteTarball(RemoteTarballSource {
-                git_hosted: true,
-                ..
-            }))
-    )
-}
-
 /// Recover `(HostedGit, sha)` from a codeload-style archive URL that a
 /// hosted git dep resolves to — the inverse of [`HostedGit::tarball_url`].
 /// Returns `None` for any URL that isn't a recognized host archive
@@ -140,6 +122,7 @@ pub(super) fn npm_resolved_field(pkg: &LockedPackage) -> Option<String> {
                 None => Some(format!("{url}#{}", git.resolved)),
             }
         }
+        Some(LocalSource::RemoteTarball(tarball)) => Some(tarball.url.clone()),
         _ => None,
     })
 }

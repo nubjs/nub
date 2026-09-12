@@ -5,10 +5,10 @@
 //! `get`/`set` shorthands, and the native package.json editors `pkg`,
 //! `set-script` (engine-implemented, not an npm shell-out).
 //!
-//! The wiring helpers (`parse_verb`, `run_async`) are
-//! shared with [`super::publish_family`] — see its module doc for the
-//! common shape (brand-rewritten help/usage, engine session preflight,
-//! failures through [`present::emit_report`]).
+//! The wiring helpers (`verb_cli`, `run_wired`, `run_engine`) are shared with
+//! [`super::publish_family`] — see its module doc for the common shape
+//! (one stamped `usage_rs::Cli` root per verb, brand-rewritten help/usage,
+//! engine session preflight, failures through [`present::emit_report`]).
 //!
 //! Family notes:
 //! - `store path` prints the *resolved* store-version dir on stdout — under
@@ -92,14 +92,20 @@
 //!   engine unchanged.
 //! - `config explain` / `config find` / `config tui` stay unwired: they
 //!   print engine reference docs straight to stdout, bypassing the brand
-//!   rewrite. They are hidden from `--help` by [`config_command`], which is
-//!   also where nub's own `init` and `path` subcommands are added — help is rendered from
-//!   the same `Command` that parses, so the two cannot disagree.
+//!   rewrite. They are hidden but still parse, so the refusal keeps its
+//!   settings-reference pointer instead of degrading to "unexpected
+//!   argument". nub declares its OWN [`NubConfigCommand`] enum rather than
+//!   mounting the engine's: usage builds its tables statically, so there is
+//!   no `mut_subcommand` to hide a variant, restate an `about`, or splice in
+//!   nub's `init` and `path` at run time. The enum still carries the engine's
+//!   own args types for every wired variant, so the flag surface comes from
+//!   upstream rather than a hand mirror, and help is rendered from the same
+//!   tables that parse — the two cannot disagree.
 
 use anyhow::Result;
 use aube::commands::config::{ConfigArgs, ConfigCommand};
 
-use super::publish_family::{Parsed, VerbArgs, run_async};
+use super::publish_family::{Parsed, plain_verb_cli, run_wired, verb_cli};
 use super::{VerbSpec, present, stub_error};
 
 /// Dispatcher for the family's verbs (see [`super::publish_family::run_verb`]
@@ -112,25 +118,73 @@ pub(crate) fn run_verb(
 ) -> Result<i32> {
     use aube::commands as cmd;
     match spec.canonical {
-        "store" => run_async::<cmd::store::StoreArgs, _, _>(typed, args, cmd::store::run),
-        "cache" => run_async::<cmd::cache::CacheArgs, _, _>(typed, args, cmd::cache::run),
-        "cat-file" => {
-            run_async::<cmd::cat_file::CatFileArgs, _, _>(typed, args, cmd::cat_file::run)
-        }
-        "cat-index" => {
-            run_async::<cmd::cat_index::CatIndexArgs, _, _>(typed, args, cmd::cat_index::run)
-        }
-        "find-hash" => {
-            run_async::<cmd::find_hash::FindHashArgs, _, _>(typed, args, cmd::find_hash::run)
-        }
+        "store" => run_wired!(StoreCli, typed, args, cmd::store::run),
+        "cache" => run_wired!(CacheCli, typed, args, cmd::cache::run),
+        "cat-file" => run_wired!(CatFileCli, typed, args, cmd::cat_file::run),
+        "cat-index" => run_wired!(CatIndexCli, typed, args, cmd::cat_index::run),
+        "find-hash" => run_wired!(FindHashCli, typed, args, cmd::find_hash::run),
         "config" | "get" | "set" => run_config(spec.canonical, typed, args),
-        "pkg" => run_async::<cmd::pkg::PkgArgs, _, _>(typed, args, cmd::pkg::run),
-        "set-script" => {
-            run_async::<cmd::set_script::SetScriptArgs, _, _>(typed, args, cmd::set_script::run)
-        }
+        "pkg" => run_wired!(PkgCli, typed, args, cmd::pkg::run),
+        "set-script" => run_wired!(SetScriptCli, typed, args, cmd::set_script::run),
         // Unreachable while the registry and this match agree; kept so a
         // future registry addition degrades to the stub instead of panicking.
         _ => Err(stub_error(typed, args, pm_hint)),
+    }
+}
+
+plain_verb_cli!(
+    CatFileCli,
+    "nub cat-file",
+    aube::commands::cat_file::CatFileArgs
+);
+plain_verb_cli!(
+    CatIndexCli,
+    "nub cat-index",
+    aube::commands::cat_index::CatIndexArgs
+);
+plain_verb_cli!(
+    FindHashCli,
+    "nub find-hash",
+    aube::commands::find_hash::FindHashArgs
+);
+plain_verb_cli!(PkgCli, "nub pkg", aube::commands::pkg::PkgArgs);
+plain_verb_cli!(
+    SetScriptCli,
+    "nub set-script",
+    aube::commands::set_script::SetScriptArgs
+);
+
+// `store` and `cache` carry an engine subcommand enum, and usage refuses to
+// flatten a group that declares subcommands. Each root re-declares the
+// engine's own enum and rebuilds the args struct, so the surface still comes
+// from upstream.
+verb_cli! {
+    StoreCli, "nub store", {
+        #[usage(subcommand)]
+        command: aube::commands::store::StoreCommand,
+    }
+}
+
+impl StoreCli {
+    fn into_engine(self) -> aube::commands::store::StoreArgs {
+        aube::commands::store::StoreArgs {
+            command: self.command,
+        }
+    }
+}
+
+verb_cli! {
+    CacheCli, "nub cache", {
+        #[usage(subcommand)]
+        command: aube::commands::cache::CacheCommand,
+    }
+}
+
+impl CacheCli {
+    fn into_engine(self) -> aube::commands::cache::CacheArgs {
+        aube::commands::cache::CacheArgs {
+            command: self.command,
+        }
     }
 }
 
@@ -139,24 +193,9 @@ pub(crate) fn run_verb(
 /// subcommand name is spliced into the argv so all three flow through one
 /// `ConfigArgs` parse (and usage errors render as `nub get …` / `nub set …`).
 fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
-    // `init` and `path` are nub's OWN subcommands, absent from the engine's
-    // `ConfigCommand`, so they must be claimed ahead of the parse that would
-    // reject them — the same interception shape `try_nub_config` uses for
-    // nub-namespaced keys. Only the `config`/`c` spelling: under the hidden
-    // `get`/`set` shorthands these words are setting keys, not subcommands.
-    if canonical == "config"
-        && let [subcommand, rest @ ..] = args
-        && matches!(subcommand.as_str(), "init" | "path")
-        // `--help` is left to the parse below, which renders the subcommand's
-        // own help from the augmented command rather than manual validation.
-        && !rest.iter().any(|arg| arg == "-h" || arg == "--help")
-    {
-        return match subcommand.as_str() {
-            "init" => run_config_init(typed, rest),
-            "path" => run_config_path(typed, rest),
-            _ => unreachable!(),
-        };
-    }
+    // Under the two shorthands `init`/`path` are setting KEYS, not
+    // subcommands, which the splice already settles: they land on the
+    // shorthand's `key` positional rather than selecting a command.
     let (bin, argv): (String, Vec<String>) = match canonical {
         "config" => (format!("nub {typed}"), args.to_vec()),
         shorthand => (
@@ -166,9 +205,18 @@ fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
                 .collect(),
         ),
     };
-    let mut parsed = match parse_config_args(&bin, &argv) {
-        Parsed::Ok(args) => args,
+    let cli = match ConfigCli::parse_argv(&bin, &argv) {
+        Parsed::Ok(cli) => cli,
         Parsed::Exit(code) => return Ok(code),
+    };
+    let mut parsed = match cli.route() {
+        ConfigRoute::Engine(parsed) => parsed,
+        // nub's own subcommands. They are in the parse tree rather than
+        // intercepted ahead of it, so `--help` and a bad flag render from the
+        // very tables that run them.
+        ConfigRoute::Init(init) => return run_config_init(typed, &init),
+        ConfigRoute::Path(path) => return run_config_path(typed, &path),
+        ConfigRoute::Unwired(sub) => return Err(unwired_config_sub(sub)),
     };
     inherit_parent_scope(&mut parsed);
     protect_default_auth_scope(&mut parsed);
@@ -218,111 +266,137 @@ fn protect_default_auth_scope(parsed: &mut ConfigArgs) {
     }
 }
 
-/// The `config` command as NUB wires it: the engine's derived `ConfigArgs`
-/// (still the source of truth for every flag and the subcommands it owns), plus
-/// nub's own `init` and `path`, minus the three nub refuses.
-///
-/// Help is rendered from the same `Command` that parses, so `--help` cannot
-/// advertise a surface that does not run — the failure this exists to fix, where
-/// `path` worked but was invisible while `explain`/`find`/`tui` were listed and
-/// errored.
-fn config_command(bin: &str) -> clap::Command {
-    use clap::CommandFactory as _;
-
-    let mut cmd = VerbArgs::<ConfigArgs>::command().name(bin.to_string());
-    for unwired in ["explain", "find", "tui"] {
-        cmd = cmd.mut_subcommand(unwired, |sub| sub.hide(true));
+// The `config` command as NUB wires it: the engine's own args types for every
+// wired subcommand (so the flag surface stays upstream's), nub's own `about`
+// text, nub's own `init` and `path`, and the three nub refuses kept parseable
+// but hidden.
+//
+// Help is rendered from the same tables that parse, so `--help` cannot
+// advertise a surface that does not run — the failure this exists to fix, where
+// `path` worked but was invisible while `explain`/`find`/`tui` were listed and
+// errored.
+verb_cli! {
+    ConfigCli, "nub config", {
+        #[usage(flatten)]
+        list: aube::commands::config::ListArgs,
+        #[usage(subcommand)]
+        command: Option<NubConfigCommand>,
     }
-    // Each `about` names both homes, because one key space spans them.
-    cmd.mut_subcommand("get", |sub| {
-        sub.about("Print the effective value of a setting key or `nub.jsonc` field")
-    })
-    .mut_subcommand("set", |sub| {
-        sub.about(
-            "Write a setting key to `.npmrc`, or a field to `nub.jsonc`. Protected credentials use the user `.npmrc` unless `--local` is explicit",
-        )
-    })
-    .mut_subcommand("delete", |sub| {
-        sub.about(
-            "Remove a setting key from `.npmrc`, or a field from `nub.jsonc`. Protected credentials use the user `.npmrc` unless `--local` is explicit",
-        )
-    })
-    .subcommand(config_init_command())
-    .subcommand(clap::Command::new("path").about("Print the path of the global `nub.jsonc`"))
 }
 
-/// The independently parsed Nub-owned `init` surface. Keeping one command
-/// builder for both top-level help and execution makes an advertised flag a
-/// runnable flag by construction.
-fn config_init_command() -> clap::Command {
-    clap::Command::new("init")
-        .about("Create a commented `nub.jsonc` without changing any defaults")
-        .arg(
-            clap::Arg::new("global")
-                .short('g')
-                .long("global")
-                .help("Create the user configuration instead of the project configuration")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            clap::Arg::new("local")
-                .long("local")
-                .help("Create the project file (the default)")
-                .action(clap::ArgAction::SetTrue)
-                .conflicts_with("global"),
-        )
+// Each wired `about` names BOTH homes, because one key space spans `.npmrc`
+// and `nub.jsonc`. (Doc comments on the variants ARE the about text.)
+#[derive(Debug, usage_rs::Subcommands)]
+enum NubConfigCommand {
+    /// Print the effective value of a setting key or `nub.jsonc` field
+    Get(aube::commands::config::GetArgs),
+    /// Write a setting key to `.npmrc`, or a field to `nub.jsonc`. Protected credentials use the user `.npmrc` unless `--local` is explicit
+    Set(aube::commands::config::SetArgs),
+    /// Remove a setting key from `.npmrc`, or a field from `nub.jsonc`. Protected credentials use the user `.npmrc` unless `--local` is explicit
+    #[usage(alias("rm", "remove", "unset"))]
+    Delete(aube::commands::config::KeyArgs),
+    /// Print every key/value from nub config and selected `.npmrc` file(s)
+    #[usage(alias = "ls")]
+    List(aube::commands::config::ListArgs),
+    /// Explain a known setting, including defaults and supported config sources
+    #[usage(hide)]
+    Explain(ExplainStubArgs),
+    /// Search known settings by name, source key, or description
+    #[usage(hide, alias = "search")]
+    Find(FindStubArgs),
+    /// Browse known settings in an interactive terminal UI
+    #[usage(hide)]
+    Tui,
+    /// Create a commented `nub.jsonc` without changing any defaults
+    Init(ConfigInitArgs),
+    /// Print the path of the global `nub.jsonc`
+    Path(ConfigPathArgs),
 }
 
-/// Parse against [`config_command`], routing help and usage output through the
-/// same brand rewrite [`parse_verb`] applies.
-fn parse_config_args(bin: &str, args: &[String]) -> Parsed<ConfigArgs> {
-    use clap::FromArgMatches as _;
+// The three engine subcommands nub refuses still parse, so `nub config explain
+// <key>` reaches the settings-reference pointer instead of "unexpected
+// argument". A greedy positional swallows whatever they were given — the
+// refusal is the same either way, and the engine's own arg types for these
+// three are not exported. One stub type per variant, not one shared: two
+// variants mounting the same `Args` type would carry the same command key.
+#[derive(Debug, usage_rs::Args)]
+#[allow(dead_code)] // parsed only so the refusal can name the subcommand
+struct ExplainStubArgs {
+    /// The setting key to explain.
+    #[usage(arg, double_dash = "automatic")]
+    args: Vec<String>,
+}
 
-    let argv = std::iter::once(bin.to_string()).chain(args.iter().cloned());
-    let parsed = config_command(bin)
-        .try_get_matches_from(argv)
-        .and_then(|matches| VerbArgs::<ConfigArgs>::from_arg_matches(&matches));
-    match parsed {
-        Ok(wrap) => Parsed::Ok(wrap.args),
-        Err(err) => {
-            let rendered = present::rewrite_help(err.render().to_string());
-            if matches!(
-                err.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
-                print!("{rendered}");
-                Parsed::Exit(0)
-            } else {
-                eprint!("{rendered}");
-                Parsed::Exit(2)
-            }
-        }
+#[derive(Debug, usage_rs::Args)]
+#[allow(dead_code)] // parsed only so the refusal can name the subcommand
+struct FindStubArgs {
+    /// The query to search known settings for.
+    #[usage(arg, double_dash = "automatic")]
+    args: Vec<String>,
+}
+
+// Nub's OWN `config init` surface. One declaration backs both the help page and
+// the run, which makes an advertised flag a runnable flag by construction.
+#[derive(Debug, usage_rs::Args)]
+#[allow(dead_code)] // `local` is the documented default; only `global` is read
+struct ConfigInitArgs {
+    /// Create the user configuration instead of the project configuration
+    #[usage(short = 'g', long, conflicts = "--local")]
+    global: bool,
+    /// Create the project file (the default)
+    #[usage(long, conflicts = "--global")]
+    local: bool,
+}
+
+// Nub's OWN `config path` surface. `--global` is accepted and inert: the file
+// this prints is the global one, and refusing the flag a user reaches for
+// would be a worse answer than honoring it.
+#[derive(Debug, usage_rs::Args)]
+struct ConfigPathArgs {
+    /// Print the user configuration's path (the only path this prints)
+    #[usage(short = 'g', long)]
+    global: bool,
+}
+
+/// Where a parsed `nub config` invocation goes.
+enum ConfigRoute {
+    /// The engine's own `ConfigArgs`, reassembled from nub's surface.
+    Engine(ConfigArgs),
+    Init(ConfigInitArgs),
+    Path(ConfigPathArgs),
+    /// `explain` / `find` / `tui` — parsed, hidden, refused by name.
+    Unwired(&'static str),
+}
+
+impl ConfigCli {
+    /// Split nub's parsed surface into the engine's args or a nub-own
+    /// subcommand. Every wired variant already carries the engine's own args
+    /// type, so this is a rename rather than a translation.
+    fn route(self) -> ConfigRoute {
+        let command = match self.command {
+            None => None,
+            Some(NubConfigCommand::Get(args)) => Some(ConfigCommand::Get(args)),
+            Some(NubConfigCommand::Set(args)) => Some(ConfigCommand::Set(args)),
+            Some(NubConfigCommand::Delete(args)) => Some(ConfigCommand::Delete(args)),
+            Some(NubConfigCommand::List(args)) => Some(ConfigCommand::List(args)),
+            Some(NubConfigCommand::Explain(_)) => return ConfigRoute::Unwired("explain"),
+            Some(NubConfigCommand::Find(_)) => return ConfigRoute::Unwired("find"),
+            Some(NubConfigCommand::Tui) => return ConfigRoute::Unwired("tui"),
+            Some(NubConfigCommand::Init(args)) => return ConfigRoute::Init(args),
+            Some(NubConfigCommand::Path(args)) => return ConfigRoute::Path(args),
+        };
+        ConfigRoute::Engine(ConfigArgs {
+            list: self.list,
+            command,
+        })
     }
 }
 
 /// Create a behavior-neutral project or user-global `nub.jsonc`. Every setting
 /// is commented out; the active schema URL gives editors the exhaustive field
 /// descriptions and completions. Existing files are never merged or replaced.
-fn run_config_init(typed: &str, rest: &[String]) -> Result<i32> {
-    let bin = format!("nub {typed} init");
-    let argv = std::iter::once(bin.clone()).chain(rest.iter().cloned());
-    let matches = match config_init_command().name(bin).try_get_matches_from(argv) {
-        Ok(matches) => matches,
-        Err(error) => {
-            let rendered = present::rewrite_help(error.render().to_string());
-            if matches!(
-                error.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
-                print!("{rendered}");
-                return Ok(0);
-            }
-            eprint!("{rendered}");
-            return Ok(2);
-        }
-    };
-
-    let global = matches.get_flag("global");
+fn run_config_init(typed: &str, init: &ConfigInitArgs) -> Result<i32> {
+    let global = init.global;
     let (path, scope) = if global {
         let path = crate::config::config_path().ok_or_else(|| {
             anyhow::anyhow!(
@@ -362,11 +436,10 @@ fn run_config_init(typed: &str, rest: &[String]) -> Result<i32> {
 /// so the precedence lives in exactly one place. Prints whether or not the file
 /// exists and never creates it: the point is `$EDITOR "$(nub config path)"` on a
 /// machine that has no settings yet.
-fn run_config_path(typed: &str, rest: &[String]) -> Result<i32> {
-    if !rest.is_empty() && rest != ["--global"] && rest != ["-g"] {
-        eprintln!("nub {typed} path: takes no arguments\n\x20\x20usage: nub {typed} path");
-        return Ok(2);
-    }
+fn run_config_path(typed: &str, path_args: &ConfigPathArgs) -> Result<i32> {
+    // `--global` is the only flag declared, and it is inert: this prints the
+    // global file either way. Anything else was already rejected by the parse.
+    let _ = path_args.global;
     let path = crate::config::config_path().ok_or_else(|| {
         anyhow::anyhow!(
             "nub {typed} path: no config directory resolves\n\
@@ -679,9 +752,9 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
             let json = get.json;
             return run_config_get_registry(parsed, json);
         }
-        Some(ConfigCommand::Explain(_)) => return Err(unwired_config_sub("explain")),
-        Some(ConfigCommand::Find(_)) => return Err(unwired_config_sub("find")),
-        Some(ConfigCommand::Tui) => return Err(unwired_config_sub("tui")),
+        // `explain`/`find`/`tui` never reach here: nub's own subcommand enum
+        // has no variant that maps onto them, so `ConfigCli::route` refuses
+        // them by name before the engine args are assembled.
         // `get` / `list` / `delete` / bare `config` delegate unchanged.
         _ => {}
     }
@@ -740,25 +813,31 @@ fn unwired_config_sub(sub: &str) -> anyhow::Error {
 
 #[cfg(test)]
 mod help_tests {
+    use super::ConfigCli;
+    use crate::pm_engine::publish_family::set_display_name;
+
+    /// A `nub config <sub>` long-help page, rendered from the same tables the
+    /// parse walks and put through the brand rewrite.
+    fn sub_help(name: &str) -> String {
+        set_display_name("nub config");
+        let cmd = ConfigCli::command()
+            .subcommands
+            .iter()
+            .find(|sub| sub.name == name)
+            .unwrap_or_else(|| panic!("config has a {name} subcommand"));
+        crate::pm_engine::present::rewrite_help(
+            ConfigCli::render_help(cmd, true).unwrap_or_default(),
+        )
+    }
+
     /// Nub's public config help exposes the project-default / `--global`
     /// grammar and does not retain the engine's location selector as a hidden
     /// compatibility surface.
     #[test]
     fn config_help_exposes_global_without_location() {
-        let mut cmd = super::config_command("nub config");
-        let help = crate::pm_engine::present::rewrite_help(cmd.render_long_help().to_string());
-        let set_help = crate::pm_engine::present::rewrite_help(
-            cmd.find_subcommand_mut("set")
-                .expect("config has a set subcommand")
-                .render_long_help()
-                .to_string(),
-        );
-        let delete_help = crate::pm_engine::present::rewrite_help(
-            cmd.find_subcommand_mut("delete")
-                .expect("config has a delete subcommand")
-                .render_long_help()
-                .to_string(),
-        );
+        let help = ConfigCli::long_help("nub config");
+        let set_help = sub_help("set");
+        let delete_help = sub_help("delete");
         for (name, text) in [
             ("config", &help),
             ("config set", &set_help),
@@ -772,11 +851,40 @@ mod help_tests {
             assert!(!text.contains("--location"), "nub {name}: {text}");
         }
         for text in [&set_help, &delete_help] {
+            // usage wraps the about paragraph at the render width, so compare
+            // the sentence with its line breaks folded.
+            let folded = text.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(
-                text.contains(
+                folded.contains(
                     "Protected credentials use the user `.npmrc` unless `--local` is explicit"
                 ),
                 "{text}"
+            );
+        }
+    }
+
+    /// Help advertises exactly the surface that runs: nub's own `init`/`path`
+    /// are listed, and the three the engine owns but nub refuses are hidden
+    /// while still parsing (so their refusal keeps its pointer).
+    #[test]
+    fn config_help_lists_only_the_wired_subcommands() {
+        let help = ConfigCli::long_help("nub config");
+        for wired in ["get", "set", "delete", "list", "init", "path"] {
+            assert!(help.contains(wired), "{wired} must be listed: {help}");
+        }
+        let names: Vec<&str> = ConfigCli::command()
+            .subcommands
+            .iter()
+            .map(|sub| sub.name)
+            .collect();
+        for unwired in ["explain", "find", "tui"] {
+            assert!(
+                names.contains(&unwired),
+                "{unwired} must still parse so its refusal keeps the pointer: {names:?}"
+            );
+            assert!(
+                !help.contains(unwired),
+                "{unwired} is refused and must not be advertised: {help}"
             );
         }
     }

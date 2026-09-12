@@ -41,6 +41,7 @@ JSON
     "is-odd": "^3.0.1"
   }
 }
+
 JSON
 	run aube install
 	assert_success
@@ -53,6 +54,53 @@ JSON
 	assert_failure
 	assert_output --partial "is-odd@3.0.1"
 	assert_output --partial "is-number"
+}
+
+@test "aube check reports a dangling importer link when its cell is missing" {
+	cat >package.json <<'JSON'
+{
+  "name": "check-missing-cell",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1"
+  }
+}
+JSON
+	run aube install
+	assert_success
+
+	rm -rf node_modules/.aube/is-odd@3.0.1
+	run aube check
+	assert_failure
+	assert_output --partial "dangling dependency link"
+	assert_output --partial "is-odd"
+}
+
+@test "aube check from a workspace member scans the shared installation" {
+	cat >package.json <<'JSON'
+{"name":"check-workspace-root","version":"1.0.0","private":true}
+JSON
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+YAML
+	mkdir -p packages/a packages/b
+	cat >packages/a/package.json <<'JSON'
+{"name":"check-workspace-a","version":"1.0.0"}
+JSON
+	cat >packages/b/package.json <<'JSON'
+{"name":"check-workspace-b","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}
+JSON
+	run aube install
+	assert_success
+
+	rm -rf node_modules/.aube/is-odd@3.0.1
+	cd packages/a
+	run aube check
+	assert_failure
+	assert_output --partial "packages/b"
+	assert_output --partial "dangling dependency link"
+	assert_output --partial "is-odd"
 }
 
 @test "aube check --json emits a structured report" {

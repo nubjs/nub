@@ -11,16 +11,15 @@
 //! the user dir.
 
 use crate::patches::copy_dir_all;
-use clap::Args;
 use miette::{IntoDiagnostic, Result, miette};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PatchArgs {
     /// Package spec, `<name>@<version>`.
     ///
-    /// The package must already be installed in `node_modules` (we
-    /// copy from the linked virtual store, not from the registry, so
+    /// The package must already be installed in `node_modules` (aube
+    /// copies from the linked virtual store, not from the registry, so
     /// the layout matches what install would later patch).
     pub package: String,
 
@@ -28,7 +27,7 @@ pub struct PatchArgs {
     ///
     /// When omitted, `aube` picks a fresh temp dir under the system
     /// tmpdir.
-    #[arg(long, value_name = "DIR")]
+    #[usage(long, value_name = "DIR")]
     pub edit_dir: Option<PathBuf>,
 
     /// Ignore any existing patch entry for this package.
@@ -37,7 +36,7 @@ pub struct PatchArgs {
     /// re-applying the existing patch first. Accepted for pnpm parity;
     /// aube already extracts from the *linked* (post-patch) tree, so
     /// this flag is effectively informational here.
-    #[arg(long)]
+    #[usage(long)]
     pub ignore_existing: bool,
 }
 
@@ -70,6 +69,20 @@ pub async fn run(args: PatchArgs) -> Result<()> {
     let pnpm_dir = super::resolve_virtual_store_dir_for_cwd(&cwd);
     let vstore_max_len = super::resolve_virtual_store_dir_max_length_for_cwd(&cwd);
     let pkg_dir = find_pnpm_entry(&pnpm_dir, &name, &version, vstore_max_len)?;
+
+    // The edit snapshot must represent the currently declared patch.
+    // In particular, a prior patch-commit can have updated the patch
+    // and lockfile before its convenience relink failed. Refuse to
+    // snapshot that stale tree: appending a diff based on it would
+    // produce hunks against the wrong baseline.
+    if let Some(reason) = crate::state::check_needs_install(&cwd) {
+        return Err(miette!(
+            code = aube_codes::errors::ERR_AUBE_PATCH_FAILED,
+            "installed package tree is out of date ({reason}); run `{}` before `{}`",
+            aube_util::cmd("install"),
+            aube_util::cmd("patch")
+        ));
+    }
 
     // Build the edit + source dirs. Defaults live under
     // `<tmp>/aube-patch-<name>-<version>-<pid>/` so concurrent

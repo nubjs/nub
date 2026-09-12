@@ -101,6 +101,191 @@ impl ShimName {
 /// (`npm --yes create x`) is not recognized — strictness errs toward refusing.
 const TRANSPARENT_VERBS: [&str; 4] = ["init", "create", "dlx", "exec"];
 
+/// The opt-in marker `nub pm shim --route-installs` leaves in the shim dir.
+/// While it is present, the `npm` shim runs the install verbs on nub's
+/// engine ([`npm_install_route`]); every other invocation keeps the ratified
+/// matrix above. A file rather than config so the opt-in lives and dies with
+/// the shims: `nub pm unshim` removes the dir and the routing with it, and a
+/// project checkout carries nothing.
+pub const ROUTE_INSTALLS_MARKER: &str = ".route-installs";
+
+/// Whether the shim dir carries the [`ROUTE_INSTALLS_MARKER`].
+pub fn route_installs_enabled(shim_dir: &Path) -> bool {
+    shim_dir.join(ROUTE_INSTALLS_MARKER).is_file()
+}
+
+/// Write or remove the [`ROUTE_INSTALLS_MARKER`]. Idempotent either way.
+pub fn set_route_installs(shim_dir: &Path, on: bool) -> Result<()> {
+    let marker = shim_dir.join(ROUTE_INSTALLS_MARKER);
+    if on {
+        std::fs::create_dir_all(shim_dir)
+            .with_context(|| format!("creating shim dir {}", shim_dir.display()))?;
+        std::fs::write(&marker, "").with_context(|| format!("writing {}", marker.display()))?;
+    } else if marker.is_file() {
+        std::fs::remove_file(&marker).with_context(|| format!("removing {}", marker.display()))?;
+    }
+    Ok(())
+}
+
+/// Which npm install verb the shim is routing: `ci` (frozen, node_modules
+/// removed first — `nub ci`) or a bare `install` (the lockfile is updated on
+/// drift — `nub install --no-frozen-lockfile`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpmInstallVerb {
+    Ci,
+    Install,
+}
+
+/// An `npm ci` / `npm install` the shim runs on nub's engine, with npm's
+/// flags translated to the engine's knobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NpmEngineInstall {
+    pub verb: NpmInstallVerb,
+    /// `--ignore-scripts[=bool]` as given on the command line; `None` when
+    /// absent, so the caller can fall back to npm's config
+    /// ([`npm_ignore_scripts_configured`]) — the command line outranks it.
+    pub ignore_scripts: Option<bool>,
+    /// Dev dependencies effectively omitted: `--omit=dev`, `--production`,
+    /// `--only=prod`, or `NODE_ENV=production`, unless `--include=dev` or
+    /// `--production=false` takes them back. npm also hands lifecycle
+    /// scripts `NODE_ENV=production` exactly then.
+    pub prod: bool,
+    /// Optional dependencies effectively omitted: `--omit=optional`,
+    /// `--no-optional`, `--optional=false`, unless `--include=optional`.
+    pub no_optional: bool,
+}
+
+/// npm's boolean spellings: a bare flag is `true`, `=true`/`=1` and
+/// `=false`/`=0` are explicit; anything else is not a boolean npm accepts
+/// here, and the caller falls through.
+fn npm_bool(value: Option<&str>) -> Option<bool> {
+    match value {
+        None | Some("true") | Some("1") => Some(true),
+        Some("false") | Some("0") => Some(false),
+        _ => None,
+    }
+}
+
+/// Classify an `npm` argv for install routing. Pure over the argv, like
+/// [`decide`]. `Some` only for the install verbs with no positional and no
+/// flag outside the translated set below; anything else — `npm install
+/// react`, `--legacy-peer-deps`, `--workspace`, `--prefix`, an unknown flag
+/// or an unknown value — is `None`, and the caller hands the argv to the real
+/// npm as it always did. Falling through on an unmapped flag costs the
+/// speedup, never the result.
+///
+/// The dependency axis follows npm's own contract: `--omit` and
+/// `--include` accumulate, `include` wins over `omit` whatever the order,
+/// `NODE_ENV=production` is an ambient `omit=dev` that `--include=dev` or
+/// `--production=false` overrides, and `omit=peer` is not something the
+/// engine does, so it falls through. Ignored, because they shape npm's
+/// output or its own cache rather than the tree: `--audit`, `--fund`,
+/// `--prefer-offline`, `--loglevel`, `--silent`, `--quiet`, `-s`, `-q`,
+/// `-d`/`-dd`/`-ddd`, `--progress`, `--color`, `--foreground-scripts`.
+pub fn npm_install_route(args: &[String], node_env_production: bool) -> Option<NpmEngineInstall> {
+    let mut verb: Option<NpmInstallVerb> = None;
+    let mut ignore_scripts: Option<bool> = None;
+    let (mut omit_dev, mut include_dev) = (node_env_production, false);
+    let (mut omit_optional, mut include_optional) = (false, false);
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let (flag, value) = match arg.split_once('=') {
+            Some((f, v)) => (f, Some(v)),
+            None => (arg, None),
+        };
+        // `--omit dev` and `--loglevel warn`: the value as the next token
+        // when it was not attached.
+        let take_value = |i: &mut usize| -> Option<String> {
+            match value {
+                Some(v) => Some(v.to_string()),
+                None => {
+                    *i += 1;
+                    args.get(*i).cloned()
+                }
+            }
+        };
+        match flag {
+            "--ignore-scripts" => ignore_scripts = Some(npm_bool(value)?),
+            "--production" | "--prod" => {
+                if npm_bool(value)? {
+                    omit_dev = true;
+                } else {
+                    include_dev = true;
+                }
+            }
+            "--only" => match take_value(&mut i)?.as_str() {
+                "prod" | "production" => omit_dev = true,
+                _ => return None,
+            },
+            "--omit" => match take_value(&mut i)?.as_str() {
+                "dev" => omit_dev = true,
+                "optional" => omit_optional = true,
+                _ => return None,
+            },
+            "--include" => match take_value(&mut i)?.as_str() {
+                "dev" => include_dev = true,
+                "optional" => include_optional = true,
+                "prod" => {}
+                _ => return None,
+            },
+            "--no-optional" => omit_optional = true,
+            "--optional" => {
+                if npm_bool(value)? {
+                    include_optional = true;
+                } else {
+                    omit_optional = true;
+                }
+            }
+            "--audit" | "--fund" | "--prefer-offline" | "--progress" | "--foreground-scripts" => {
+                npm_bool(value)?;
+            }
+            "--loglevel" => {
+                take_value(&mut i)?;
+            }
+            "--no-audit" | "--no-fund" | "--silent" | "--quiet" | "-s" | "-q" | "-d" | "-dd"
+            | "-ddd" | "--no-progress" | "--color" | "--no-color" => {}
+            _ if flag.starts_with('-') => return None,
+            // npm's own alias table for the two verbs, `lib/utils/cmd-list.js`
+            // (npm 12.0.2) — the misspellings are npm's, not ours.
+            "ci" | "clean-install" | "ic" | "install-clean" | "isntall-clean" if verb.is_none() => {
+                verb = Some(NpmInstallVerb::Ci);
+            }
+            "install" | "add" | "i" | "in" | "ins" | "inst" | "insta" | "instal" | "isnt"
+            | "isnta" | "isntal" | "isntall"
+                if verb.is_none() =>
+            {
+                verb = Some(NpmInstallVerb::Install)
+            }
+            // A second positional is a package spec (`npm install react`) or
+            // a verb that is not an install.
+            _ => return None,
+        }
+        i += 1;
+    }
+    Some(NpmEngineInstall {
+        verb: verb?,
+        ignore_scripts,
+        prod: omit_dev && !include_dev,
+        no_optional: omit_optional && !include_optional,
+    })
+}
+
+/// npm's effective `ignore-scripts` outside the command line: the
+/// environment (`npm_config_ignore_scripts`, any letter case, as npm reads
+/// it) outranks the project `.npmrc`, which outranks the user's. A routed
+/// install honors it because npm would have, and the routed path otherwise
+/// runs every build script.
+pub fn npm_ignore_scripts_configured(project_root: &Path) -> bool {
+    if let Some((_, v)) =
+        std::env::vars().find(|(k, _)| k.eq_ignore_ascii_case("npm_config_ignore_scripts"))
+    {
+        return matches!(v.trim(), "true" | "1");
+    }
+    crate::workspace::scripts::npmrc_value(project_root, "ignore-scripts")
+        .is_some_and(|v| matches!(v.as_str(), "true" | "1"))
+}
+
 /// Whether this shim invocation was spawned by an already-running package
 /// manager (a nested call), versus typed by the user at a shell (a top-level
 /// call). Decides whether a NAME-MISMATCH is a hard refusal (top-level — the
@@ -1696,6 +1881,101 @@ mod tests {
     /// cleaned, PIDs recycle, and a recycled-PID run re-entering a stale
     /// sibling finds last run's links/files (the tests/pm_shim.rs `tmp` flake
     /// — see its doc for the full post-mortem).
+    fn route(args: &[&str]) -> Option<NpmEngineInstall> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        npm_install_route(&args, false)
+    }
+
+    #[test]
+    fn npm_install_route_translates_the_install_verbs_and_falls_through_on_the_rest() {
+        let ci = route(&["ci"]).unwrap();
+        assert_eq!(ci.verb, NpmInstallVerb::Ci);
+        assert!(ci.ignore_scripts.is_none() && !ci.prod && !ci.no_optional);
+        for alias in ["clean-install", "ic", "install-clean", "isntall-clean"] {
+            assert_eq!(route(&[alias]).unwrap().verb, NpmInstallVerb::Ci, "{alias}");
+        }
+        for alias in ["i", "add", "in", "instal", "isntall"] {
+            assert_eq!(
+                route(&[alias]).unwrap().verb,
+                NpmInstallVerb::Install,
+                "{alias}"
+            );
+        }
+
+        // The flags CI workflows carry, translated or ignored.
+        let ava = route(&["install", "--no-audit", "--ignore-scripts"]).unwrap();
+        assert_eq!(ava.verb, NpmInstallVerb::Install);
+        assert_eq!(ava.ignore_scripts, Some(true));
+        assert_eq!(
+            route(&["ci", "--ignore-scripts=false"])
+                .unwrap()
+                .ignore_scripts,
+            Some(false)
+        );
+        assert!(route(&["ci", "--omit=dev"]).unwrap().prod);
+        assert!(route(&["ci", "--omit", "dev"]).unwrap().prod);
+        assert!(route(&["ci", "--production"]).unwrap().prod);
+        assert!(route(&["ci", "--only=prod"]).unwrap().prod);
+        assert!(route(&["ci", "--omit=optional"]).unwrap().no_optional);
+        assert!(route(&["ci", "--optional=false"]).unwrap().no_optional);
+        let ignored = route(&[
+            "ci",
+            "--no-fund",
+            "--audit=false",
+            "--prefer-offline",
+            "--loglevel",
+            "error",
+            "--loglevel=warn",
+        ])
+        .unwrap();
+        assert!(!ignored.prod && !ignored.no_optional && ignored.ignore_scripts.is_none());
+
+        // include wins over omit in either order, and over the ambient
+        // NODE_ENV=production; an explicit false is false.
+        assert!(!route(&["ci", "--omit=dev", "--include=dev"]).unwrap().prod);
+        assert!(!route(&["ci", "--include=dev", "--omit=dev"]).unwrap().prod);
+        assert!(
+            !route(&["ci", "--omit=optional", "--include=optional"])
+                .unwrap()
+                .no_optional
+        );
+        let env_prod = |argv: &[&str]| {
+            let args: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
+            npm_install_route(&args, true).unwrap().prod
+        };
+        assert!(env_prod(&["ci"]), "NODE_ENV=production is npm's --omit=dev");
+        assert!(
+            !env_prod(&["install", "--production=false"]),
+            "--production=false restores dev"
+        );
+        assert!(!env_prod(&["ci", "--include=dev"]));
+
+        // Anything the engine cannot honor verbatim runs on the real npm.
+        for argv in [
+            vec!["install", "react"],
+            vec!["ci", "--legacy-peer-deps"],
+            vec!["ci", "--workspace=a"],
+            vec!["ci", "-w", "a"],
+            vec!["install", "--no-package-lock"],
+            vec!["ci", "--prefix", "sub"],
+            vec!["ci", "--omit=peer"],
+            vec!["ci", "--include=peer"],
+            vec!["ci", "--production=maybe"],
+            vec!["ci", "--ignore-scripts=yes"],
+            vec!["ci", "--only=dev"],
+            vec!["ci", "--loglevel"],
+            vec!["install", "-g", "npm"],
+            vec!["--version"],
+            vec!["run", "build"],
+            vec![],
+        ] {
+            assert!(
+                route(&argv).is_none(),
+                "{argv:?} must fall through to the real npm"
+            );
+        }
+    }
+
     fn tmpdir(tag: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         static STARTED_NANOS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();

@@ -1,18 +1,20 @@
 use miette::{Context, IntoDiagnostic, miette};
 use sha2::Digest;
 
-/// The per-package marker the side-effects cache stamps. Brand-scoped to the
-/// active embedder because this file lands inside the global CAS store AND
-/// inside a consumer's `node_modules` — a hardcoded `aube` leaf puts the
-/// engine's brand in an embedder's user-visible tree. `prog()` is `"aube"`
-/// under the default profile, so standalone aube's on-disk name is unchanged.
-fn side_effects_cache_marker() -> String {
+/// Filename prefix of the installer-owned marker the side-effects cache
+/// stamps beside each package. Brand-scoped to the active embedder because
+/// the marker lands inside a consumer's `node_modules` — a hardcoded `aube`
+/// leaf puts the engine's brand in an embedder's user-visible tree. `prog()`
+/// is `"aube"` under the default profile, so standalone aube's on-disk name
+/// is unchanged.
+fn side_effects_cache_marker_prefix() -> String {
     format!(".{}-side-effects-cache", aube_util::prog())
 }
 
-/// True for this cache's marker under ANY brand — `.<tool>-side-effects-cache`.
-/// Used by the directory hash so a marker left by a differently-branded build
-/// is excluded from the digest rather than changing it.
+/// True for a LEGACY in-package marker under ANY brand —
+/// `.<tool>-side-effects-cache`. Markers now live beside the package rather
+/// than inside it; the directory hash still skips the old spelling so a tree
+/// stamped by an earlier build is not re-hashed over a file this cache wrote.
 fn is_side_effects_marker_name(name: &str) -> bool {
     name.starts_with('.') && name.ends_with("-side-effects-cache")
 }
@@ -67,9 +69,17 @@ impl<'a> SideEffectsCacheConfig<'a> {
 
 #[derive(Debug, Clone)]
 pub(super) struct SideEffectsCacheEntry {
+    already_applied: bool,
     engine: String,
     input_hash: String,
+    marker_path: std::path::PathBuf,
     path: std::path::PathBuf,
+}
+
+struct SideEffectsMarker {
+    engine: String,
+    input_hash: String,
+    output_hash: String,
 }
 
 pub(super) enum SideEffectsCacheRestore {
@@ -85,17 +95,7 @@ impl SideEffectsCacheEntry {
         version: &str,
         package_dir: &std::path::Path,
     ) -> miette::Result<Self> {
-        // Take only the hash half of the marker: it fingerprints the
-        // package *before* its scripts ran, which is what keys this entry
-        // no matter which engine last built the directory. Reading it
-        // engine-agnostically is also what keeps a marker written before
-        // engines were recorded from forcing a rehash of the post-build
-        // tree, which would key the entry off the wrong bytes.
-        let input_hash = match read_valid_side_effects_marker(package_dir) {
-            Some(marker) => marker.input_hash,
-            None => hash_dir_for_side_effects_cache(package_dir)?,
-        };
-        let safe_name = name.replace('/', "__");
+        let marker_path = side_effects_marker_path(package_dir, name)?;
         // `input_hash` fingerprints the package *before* its scripts run,
         // so it can never stand in for the engine. Reuse the virtual
         // store's own engine name rather than a second spelling of it, so
@@ -104,7 +104,26 @@ impl SideEffectsCacheEntry {
             Some(v) => aube_lockfile::graph_hash::engine_name_default(v).0,
             None => aube_lockfile::graph_hash::platform_name(),
         };
+        let current_hash = hash_dir_for_side_effects_cache(package_dir)?;
+        // A marker naming a different engine cannot authorize the
+        // already-applied skip: the tree it describes was built against
+        // another Node ABI, so its `.node` files would fail at load time with
+        // a `NODE_MODULE_VERSION` mismatch. Dropping it degrades to a restore
+        // or a rebuild, never to a silent skip.
+        let marker =
+            read_valid_side_effects_marker(&marker_path).filter(|marker| marker.engine == engine);
+        let already_applied = marker
+            .as_ref()
+            .is_some_and(|marker| marker.output_hash == current_hash);
+        let input_hash = match marker {
+            Some(marker) if already_applied || marker.input_hash == current_hash => {
+                marker.input_hash
+            }
+            _ => current_hash,
+        };
+        let safe_name = name.replace('/', "__");
         Ok(Self {
+            already_applied,
             path: location
                 .root
                 .join(format!("{safe_name}@{version}"))
@@ -112,6 +131,7 @@ impl SideEffectsCacheEntry {
                 .join(&input_hash),
             engine,
             input_hash,
+            marker_path,
         })
     }
 
@@ -119,7 +139,11 @@ impl SideEffectsCacheEntry {
         &self,
         package_dir: &std::path::Path,
     ) -> miette::Result<SideEffectsCacheRestore> {
-        if self.marker_matches(package_dir) && self.path.is_dir() {
+        // The installer-owned marker sits outside package content and records
+        // both the pre-build input and post-build output hashes. A swept
+        // reusable cache therefore does not invalidate an intact build, while
+        // missing or modified generated output still forces restore/rebuild.
+        if self.already_applied {
             tracing::debug!(
                 "side-effects-cache: already applied {}",
                 self.path.display()
@@ -146,27 +170,9 @@ impl SideEffectsCacheEntry {
         // the entry is written. Walk-driven because this output was
         // never in a package index. No-op off macOS.
         aube_linker::strip_quarantine_from_tree(package_dir);
-        // The copy carries the entry's own marker across, so restamping is
-        // a no-op except for an entry saved before markers named an engine
-        // — that one would fail every future match and re-copy forever.
-        write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+        self.write_marker(package_dir)?;
         tracing::debug!("side-effects-cache: restored {}", self.path.display());
         Ok(SideEffectsCacheRestore::Restored)
-    }
-
-    /// True when this package directory's contents were produced by *this*
-    /// entry. Both halves are load-bearing: entries segregate by engine, so
-    /// several now share one input hash, and matching on the hash alone
-    /// would let the skip above fire for a build made under a different
-    /// Node ABI — leaving that build's `.node` in place for a runtime
-    /// `NODE_MODULE_VERSION` failure. A marker with no engine (written
-    /// before this was recorded) never matches, so it degrades to a restore
-    /// or a rebuild, never to a silent skip.
-    fn marker_matches(&self, package_dir: &std::path::Path) -> bool {
-        read_valid_side_effects_marker(package_dir).is_some_and(|marker| {
-            marker.engine.as_deref() == Some(self.engine.as_str())
-                && marker.input_hash == self.input_hash
-        })
     }
 
     pub(super) fn save(
@@ -180,7 +186,7 @@ impl SideEffectsCacheEntry {
                     .into_diagnostic()
                     .wrap_err_with(|| format!("failed to remove {}", self.path.display()))?;
             } else {
-                write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+                self.write_marker(package_dir)?;
                 return Ok(());
             }
         }
@@ -194,7 +200,7 @@ impl SideEffectsCacheEntry {
             .into_diagnostic()
             .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
         sweep_stale_side_effects_tmp_dirs(parent);
-        write_side_effects_marker(package_dir, &self.engine, &self.input_hash)?;
+        self.write_marker(package_dir)?;
 
         let tmp = parent.join(format!(
             "{SIDE_EFFECTS_CACHE_TMP_PREFIX}{}-{}",
@@ -236,6 +242,16 @@ impl SideEffectsCacheEntry {
             }
         }
     }
+
+    fn write_marker(&self, package_dir: &std::path::Path) -> miette::Result<()> {
+        let output_hash = hash_dir_for_side_effects_cache(package_dir)?;
+        write_side_effects_marker(
+            &self.marker_path,
+            &self.engine,
+            &self.input_hash,
+            &output_hash,
+        )
+    }
 }
 
 fn sweep_stale_side_effects_tmp_dirs(parent: &std::path::Path) {
@@ -265,34 +281,64 @@ fn should_remove_side_effects_tmp_dir(entry: &std::fs::DirEntry) -> bool {
 }
 
 pub(crate) fn side_effects_cache_root(store: &aube_store::Store) -> std::path::PathBuf {
-    store
-        .virtual_store_dir()
+    let virtual_store_dir = store.virtual_store_dir();
+    let virtual_store_root = if virtual_store_dir.file_name()
+        == Some(std::ffi::OsStr::new(
+            crate::commands::settings_context::GVS_REGISTRY_NAMESPACE_VERSION,
+        )) {
+        virtual_store_dir
+            .parent()
+            .unwrap_or(virtual_store_dir.as_path())
+    } else {
+        virtual_store_dir.as_path()
+    };
+    virtual_store_root
         .parent()
         .unwrap_or_else(|| store.root())
         .join("side-effects-v1")
 }
 
-/// Parsed marker contents: `<engine>:<input_hash>`. `engine` is `None` for
-/// the bare-hash form written before the engine was recorded.
-struct SideEffectsMarker {
-    engine: Option<String>,
-    input_hash: String,
+fn side_effects_marker_path(
+    package_dir: &std::path::Path,
+    name: &str,
+) -> miette::Result<std::path::PathBuf> {
+    let parent = package_dir.parent().ok_or_else(|| {
+        miette!(
+            "package directory has no parent for side effects marker: {}",
+            package_dir.display()
+        )
+    })?;
+    let name_hash = sha2::Sha256::digest(name.as_bytes());
+    Ok(parent.join(format!(
+        "{}-{}",
+        side_effects_cache_marker_prefix(),
+        hex::encode(name_hash)
+    )))
 }
 
-/// Only the hash half is validated, because only the hash is ever joined
-/// into a path — the engine a lookup keys on comes from the install's own
-/// resolved Node, and the marker's copy is compared, never trusted as a
-/// path segment.
-fn read_valid_side_effects_marker(package_dir: &std::path::Path) -> Option<SideEffectsMarker> {
-    let marker = std::fs::read_to_string(package_dir.join(side_effects_cache_marker())).ok()?;
-    let marker = marker.trim();
-    let (engine, hash) = match marker.rsplit_once(':') {
-        Some((engine, hash)) => (Some(engine), hash),
-        None => (None, marker),
-    };
-    is_side_effects_cache_hash(hash).then(|| SideEffectsMarker {
-        engine: engine.map(str::to_owned),
-        input_hash: hash.to_ascii_lowercase(),
+/// Parsed marker contents. `engine` is compared, never joined into a path —
+/// the engine a lookup keys on comes from the install's own resolved Node.
+/// Only `v2` is accepted: the engine-less `v1` form cannot rule out an
+/// ABI mismatch, so it degrades to a restore or a rebuild.
+fn read_valid_side_effects_marker(marker_path: &std::path::Path) -> Option<SideEffectsMarker> {
+    let marker = std::fs::read_to_string(marker_path).ok()?;
+    let mut lines = marker.lines();
+    let version = lines.next()?;
+    let engine = lines.next()?;
+    let input_hash = lines.next()?;
+    let output_hash = lines.next()?;
+    if version != "v2"
+        || engine.is_empty()
+        || lines.next().is_some()
+        || !is_side_effects_cache_hash(input_hash)
+        || !is_side_effects_cache_hash(output_hash)
+    {
+        return None;
+    }
+    Some(SideEffectsMarker {
+        engine: engine.to_owned(),
+        input_hash: input_hash.to_ascii_lowercase(),
+        output_hash: output_hash.to_ascii_lowercase(),
     })
 }
 
@@ -301,19 +347,20 @@ fn is_side_effects_cache_hash(value: &str) -> bool {
 }
 
 fn write_side_effects_marker(
-    package_dir: &std::path::Path,
+    marker_path: &std::path::Path,
     engine: &str,
     input_hash: &str,
+    output_hash: &str,
 ) -> miette::Result<()> {
     aube_util::fs_atomic::atomic_write(
-        &package_dir.join(side_effects_cache_marker()),
-        format!("{engine}:{input_hash}").as_bytes(),
+        marker_path,
+        format!("v2\n{engine}\n{input_hash}\n{output_hash}\n").as_bytes(),
     )
     .into_diagnostic()
     .wrap_err_with(|| {
         format!(
-            "failed to write side effects cache marker in {}",
-            package_dir.display()
+            "failed to write side effects cache marker {}",
+            marker_path.display()
         )
     })
 }
@@ -339,10 +386,10 @@ fn hash_dir_inner(
 
     for entry in entries {
         let path = entry.path();
-        // Skip ANY brand's marker, not just the active one. A tree installed by
-        // an earlier build carries the previous spelling, and folding that file
-        // into the hash would invalidate every cached entry exactly once, for a
-        // file this cache wrote itself.
+        // Skip a LEGACY in-package marker under ANY brand. A tree installed
+        // by an earlier build carries one, and folding that file into the hash
+        // would invalidate every cached entry exactly once, for a file this
+        // cache wrote itself.
         if path
             .file_name()
             .and_then(|n| n.to_str())
@@ -552,6 +599,19 @@ mod tests {
     }
 
     #[test]
+    fn cache_root_is_a_sibling_of_the_versioned_virtual_store_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let store = aube_store::Store::with_dirs(dir.path().join("store/files"), cache_dir.clone())
+            .with_virtual_store_dir(cache_dir.join("virtual-store/v1"));
+
+        assert_eq!(
+            side_effects_cache_root(&store),
+            cache_dir.join("side-effects-v1")
+        );
+    }
+
+    #[test]
     fn cache_path_segregates_by_platform() {
         let dir = tempfile::tempdir().unwrap();
         let pkg = package_fixture(dir.path());
@@ -598,34 +658,48 @@ mod tests {
     #[test]
     fn side_effects_marker_accepts_only_sha512_hex() {
         let dir = tempfile::tempdir().unwrap();
-        let marker_path = dir.path().join(side_effects_cache_marker());
+        let marker_path = dir.path().join("marker");
 
         std::fs::write(&marker_path, "../../evil").unwrap();
-        assert!(read_valid_side_effects_marker(dir.path()).is_none());
+        assert!(read_valid_side_effects_marker(&marker_path).is_none());
 
         std::fs::write(
             &marker_path,
-            format!("darwin-arm64-node26:{}", "z".repeat(128)),
+            format!(
+                "v2\ndarwin-arm64-node26\n{}\n{}\n",
+                "z".repeat(128),
+                "B".repeat(128)
+            ),
         )
         .unwrap();
         assert!(
-            read_valid_side_effects_marker(dir.path()).is_none(),
+            read_valid_side_effects_marker(&marker_path).is_none(),
             "a non-hex hash must be rejected however it is prefixed"
         );
 
-        std::fs::write(&marker_path, format!("{}\n", "A".repeat(128))).unwrap();
-        let legacy = read_valid_side_effects_marker(dir.path()).unwrap();
-        assert_eq!(legacy.engine, None);
-        assert_eq!(legacy.input_hash, "a".repeat(128));
+        std::fs::write(
+            &marker_path,
+            format!("v1\n{}\n{}\n", "A".repeat(128), "B".repeat(128)),
+        )
+        .unwrap();
+        assert!(
+            read_valid_side_effects_marker(&marker_path).is_none(),
+            "an engine-less v1 marker cannot rule out an ABI mismatch, so it is not accepted"
+        );
 
         std::fs::write(
             &marker_path,
-            format!("darwin-arm64-node26:{}\n", "A".repeat(128)),
+            format!(
+                "v2\ndarwin-arm64-node26\n{}\n{}\n",
+                "A".repeat(128),
+                "B".repeat(128)
+            ),
         )
         .unwrap();
-        let current = read_valid_side_effects_marker(dir.path()).unwrap();
-        assert_eq!(current.engine.as_deref(), Some("darwin-arm64-node26"));
+        let current = read_valid_side_effects_marker(&marker_path).unwrap();
+        assert_eq!(current.engine, "darwin-arm64-node26");
         assert_eq!(current.input_hash, "a".repeat(128));
+        assert_eq!(current.output_hash, "b".repeat(128));
     }
 
     #[test]
@@ -679,12 +753,17 @@ mod tests {
 
         let saved = entry(&root, &pkg, Some("26.5.0"));
         saved.save(&pkg, false).unwrap();
-        std::fs::write(pkg.join(side_effects_cache_marker()), &saved.input_hash).unwrap();
+        // Downgrade the marker to the engine-less form an older build wrote.
+        std::fs::write(
+            side_effects_marker_path(&pkg, "p").unwrap(),
+            format!("v1\n{}\n{}\n", saved.input_hash, saved.input_hash),
+        )
+        .unwrap();
 
         let reread = entry(&root, &pkg, Some("26.5.0"));
         assert_eq!(
             reread.input_hash, saved.input_hash,
-            "an engineless marker must still supply the input hash, so the entry keeps its key"
+            "an engineless marker leaves the entry keyed on the directory's own hash"
         );
         assert!(
             matches!(
@@ -702,5 +781,88 @@ mod tests {
             ),
             "the restore restamps the marker, so the skip returns on the next install"
         );
+    }
+
+    #[test]
+    fn applied_marker_survives_reusable_cache_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        let cache = dir.path().join("cache");
+
+        let saved = entry(&cache, &pkg, Some("26.5.0"));
+        std::fs::write(pkg.join("built.node"), "built").unwrap();
+        saved.save(&pkg, false).unwrap();
+        std::fs::remove_dir_all(&cache).unwrap();
+
+        let reread = entry(&cache, &pkg, Some("26.5.0"));
+        assert!(!reread.path.exists());
+        assert!(matches!(
+            reread.restore_if_available(&pkg).unwrap(),
+            SideEffectsCacheRestore::AlreadyApplied
+        ));
+    }
+
+    #[test]
+    fn stale_marker_does_not_skip_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        let cache = dir.path().join("cache");
+
+        let saved = entry(&cache, &pkg, Some("26.5.0"));
+        std::fs::write(pkg.join("built.node"), "built").unwrap();
+        saved.save(&pkg, false).unwrap();
+        std::fs::remove_dir_all(&cache).unwrap();
+        std::fs::remove_file(pkg.join("built.node")).unwrap();
+
+        assert!(matches!(
+            entry(&cache, &pkg, Some("26.5.0"))
+                .restore_if_available(&pkg)
+                .unwrap(),
+            SideEffectsCacheRestore::Miss
+        ));
+    }
+
+    #[test]
+    fn changed_package_does_not_restore_stale_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        let cache = dir.path().join("cache");
+
+        let original = entry(&cache, &pkg, Some("26.5.0"));
+        std::fs::write(pkg.join("built.node"), "old build").unwrap();
+        original.save(&pkg, false).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            "{\"name\":\"p\",\"revision\":2}\n",
+        )
+        .unwrap();
+        std::fs::remove_file(pkg.join("built.node")).unwrap();
+
+        let changed = entry(&cache, &pkg, Some("26.5.0"));
+        assert_ne!(changed.path, original.path);
+        assert!(matches!(
+            changed.restore_if_available(&pkg).unwrap(),
+            SideEffectsCacheRestore::Miss
+        ));
+    }
+
+    #[test]
+    fn package_supplied_marker_is_not_installer_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = package_fixture(dir.path());
+        // A tarball that ships the LEGACY in-package marker name must not be
+        // able to claim its own build is already applied.
+        std::fs::write(
+            pkg.join(side_effects_cache_marker_prefix()),
+            format!("v2\nany-engine\n{}\n{}\n", "a".repeat(128), "b".repeat(128)),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            entry(dir.path(), &pkg, Some("26.5.0"))
+                .restore_if_available(&pkg)
+                .unwrap(),
+            SideEffectsCacheRestore::Miss
+        ));
     }
 }

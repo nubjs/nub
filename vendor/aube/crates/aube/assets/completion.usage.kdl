@@ -1,15 +1,12 @@
-// Dynamic completion follows mise's custom-completer pattern: the usage
-// spec delegates candidate production to a hidden, machine-oriented CLI mode.
-//
-// usage renders the current token into `sh -c`. Wrap it in single quotes and
-// replace every embedded apostrophe with the POSIX close/escape/reopen form so
-// arbitrary input remains one inert argument.
-complete "package" run=#"{bin} completion _ --complete package --query='{{ words[CURRENT] | replace(from="'", to="'\\''") }}'"# descriptions=#true
-complete "packages" run=#"{bin} completion _ --complete package --query='{{ words[CURRENT] | replace(from="'", to="'\\''") }}'"# descriptions=#true
-complete "pkg" run=#"{bin} completion _ --complete package --query='{{ words[CURRENT] | replace(from="'", to="'\\''") }}'"# descriptions=#true
-complete "bin" run="{bin} completion _ --complete bin" descriptions=#true
-complete "workspace" run="{bin} completion _ --complete workspace" descriptions=#true
-complete "key" run="{bin} completion _ --complete setting" descriptions=#true
-complete "patch" run="{bin} completion _ --complete patch" descriptions=#true
+// Let external usage consumers ask the same compiled completers as the
+// built-in scripts. shell_join preserves argv boundaries; shell_quote carries
+// the reconstructed line through sh -c as one inert --line value.
+complete "package" run="{bin} __complete_word__ --candidates package --line={{ words | shell_join | shell_quote }}"
+complete "packages" run="{bin} __complete_word__ --candidates packages --line={{ words | shell_join | shell_quote }}"
+complete "pkg" run="{bin} __complete_word__ --candidates pkg --line={{ words | shell_join | shell_quote }}"
+complete "bin" run="{bin} __complete_word__ --candidates bin --line={{ words | shell_join | shell_quote }}"
+complete "workspace" run="{bin} __complete_word__ --candidates workspace --line={{ words | shell_join | shell_quote }}"
+complete "key" run="{bin} __complete_word__ --candidates key --line={{ words | shell_join | shell_quote }}"
+complete "patch" run="{bin} __complete_word__ --candidates patch --line={{ words | shell_join | shell_quote }}"
 complete "dir" type="dir"
 complete "path" type="path"

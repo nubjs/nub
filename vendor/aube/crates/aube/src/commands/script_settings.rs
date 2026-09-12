@@ -47,45 +47,50 @@ pub(crate) fn configure_script_settings(
     // `.npmrc`/workspace-derived fields above are the only ones this function
     // owns. Default-empty on the context ⇒ behavior-preserving.
     let overlay = aube_util::engine_context();
-    aube_scripts::set_script_settings(aube_scripts::ScriptSettings {
-        node_options,
-        script_shell,
-        unsafe_perm,
-        shell_emulator,
-        node_bin_dir: runtime.as_ref().and_then(|r| r.bin_dir.clone()),
-        node_program: runtime
-            .as_ref()
-            .and_then(|r| r.node_program.clone())
-            .or_else(aube_runtime::node_on_path),
-        // Falls back to `node_program`: an embedder that wraps the runtime
-        // without naming a separate real binary means "the same one".
-        node_execpath: runtime
-            .as_ref()
-            .and_then(|r| r.node_execpath.clone().or_else(|| r.node_program.clone()))
-            .or_else(aube_runtime::node_on_path),
-        extra_env: crate::runtime::embedder_extra_env(),
-        env_overlay: overlay.env_overlay,
-        path_prepends: overlay.path_prepends,
-        command: command.map(str::to_string),
-        // `npm_config_node_gyp` parity: hand every lifecycle script a
-        // runnable node-gyp stand-in. The shim is written once into
-        // aube's cache; a write failure here is non-fatal (the var just
-        // stays unset, matching pre-parity behavior).
-        node_gyp_js: super::install::node_gyp_bootstrap::lazy_js_shim_path().ok(),
-        node_gyp_project_dir: Some(cwd.to_path_buf()),
-        // `npm_config_registry` parity: export the resolved default
-        // registry so dependency postinstalls (and `aube run` scripts)
-        // see the same registry aube resolved from `.npmrc` / env.
-        // Defaults to `https://registry.npmjs.org/` when nothing
-        // overrides it.
-        registry: {
-            let r = aube_registry::config::NpmConfig::load(cwd).registry;
-            (!r.is_empty()).then_some(r)
+    aube_scripts::set_script_settings_with_path_order(
+        aube_scripts::ScriptSettings {
+            node_options,
+            script_shell,
+            unsafe_perm,
+            shell_emulator,
+            node_bin_dir: runtime.as_ref().and_then(|r| r.bin_dir.clone()),
+            node_program: runtime
+                .as_ref()
+                .and_then(|r| r.node_program.clone())
+                .or_else(aube_runtime::node_on_path),
+            // Falls back to `node_program`: an embedder that wraps the runtime
+            // without naming a separate real binary means "the same one".
+            node_execpath: runtime
+                .as_ref()
+                .and_then(|r| r.node_execpath.clone().or_else(|| r.node_program.clone()))
+                .or_else(aube_runtime::node_on_path),
+            extra_env: crate::runtime::embedder_extra_env(),
+            env_overlay: overlay.env_overlay,
+            path_prepends: overlay.path_prepends,
+            command: command.map(str::to_string),
+            // `npm_config_node_gyp` parity: hand every lifecycle script a
+            // runnable node-gyp stand-in. The shim is written once into
+            // aube's cache; a write failure here is non-fatal (the var just
+            // stays unset, matching pre-parity behavior).
+            node_gyp_js: super::install::node_gyp_bootstrap::lazy_js_shim_path().ok(),
+            node_gyp_project_dir: Some(cwd.to_path_buf()),
+            // `npm_config_registry` parity: export the resolved default
+            // registry so dependency postinstalls (and `aube run` scripts)
+            // see the same registry aube resolved from `.npmrc` / env.
+            // Defaults to `https://registry.npmjs.org/` when nothing
+            // overrides it.
+            registry: {
+                let r = aube_registry::config::NpmConfig::load(cwd).registry;
+                (!r.is_empty()).then_some(r)
+            },
+            http_proxy,
+            https_proxy,
+            no_proxy,
         },
-        http_proxy,
-        https_proxy,
-        no_proxy,
-    });
+        runtime
+            .as_ref()
+            .is_some_and(|r| r.bin_dir_precedes_project_bins),
+    );
 }
 
 /// Load `.npmrc` + workspace settings for `cwd` and push them into the

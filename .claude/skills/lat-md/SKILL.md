@@ -1,7 +1,7 @@
 ---
 name: lat-md
 description: Search, read and maintain nub's knowledge graph under wiki/ with the `lat` CLI — the design and research corpus, cross-linked and checked. Invoke (via the Skill tool) before designing or changing anything non-trivial, to find the decision that already governs it instead of re-deriving it; and after any change that alters architecture, behavior or test coverage, because `lat check` is a CI gate and a stale wiki link now fails the build. Carries the commands, the section-id syntax, the two rules that make a section valid, and the three nub-specific traps — never run bare `lat init`, never create `.agents/skills/`, and Rust symbols inside a `mod` block cannot be linked.
-version: 1.0.0
+version: 1.1.0
 metadata:
   internal: true
 ---
@@ -10,28 +10,39 @@ metadata:
 
 The design and research corpus in `wiki/` is a [lat.md](https://github.com/1st1/lat.md) graph: cross-linked markdown, with `lat check` enforcing that every link and code reference still resolves. The repo root carries a `lat.md` symlink pointing at `wiki/`, because `lat` finds its graph by that directory name.
 
-`npm run lat:check` runs the gate exactly as CI does. It is deliberately NOT a root devDependency: it pulls ~185 transitive packages, and the root `npm ci` runs through a Socket Firewall shim in every `ci.yml` test leg, where that much extra install tripped the "assert root deps actually installed" guard across the matrix.
+The package scripts fetch an exact Lat version outside the root dependency tree. `nub run lat:check` runs the same graph gate as CI; `nub run lat <command>` exposes the full CLI without a global install. The pin in `package.json` is checked against both MCP configurations by `scripts/lat.test.mjs`.
 
-**There is no local `lat` binary, and only `check` has a script.** Reach the other commands one of two ways — either `npx --yes lat.md@<version> <cmd>`, or install once with `npm i -g lat.md@<version>` and then call `lat` directly. Take `<version>` from the `lat:check` script in the root `package.json`, which is the single place it is pinned.
+**Do not invoke bare `lat`.** It is not installed globally. Run commands from the repository root with `nub run lat`, or use the MCP tools. With only Node/npm installed, `npm run --silent lat -- <command>` is equivalent.
+
+## Local setup and recovery
+
+Run `nub run lat:index` once in each new checkout or worktree. It invokes `reindex --local --yes`, builds the index, and records a local-backend preference for that checkout. This is an explicit local-machine setup operation, not a Nub build. Initial indexing can take several minutes; warm searches only embed new or changed sections.
+
+- **Storage:** the ignored `wiki/.cache/vectors.db` contains section text and local MiniLM embeddings. Only the graph is indexed, not all source files or `internal/`. Do not commit the cache or move private documents into the public wiki to make them searchable.
+- **Offline operation:** the first package fetch needs network access. Once cached, embedding and search need no network or API key. The stored local model ignores hosted keys; the per-checkout preference survives deletion of the vector cache. A new checkout has a new path and needs its own bootstrap.
+- **Recovery:** run `nub run lat:index` after cache corruption or a backend mismatch. Do not run it before every query: normal `search` already refreshes changed sections. Run `nub run lat config` to find the user-level preference file; there is no API key to configure for local search.
+- **Code-reference scans:** install ripgrep (`rg`) on PATH. Lat uses it for `check`, `refs`, and `section`; its fallback can traverse large nested checkouts and is much slower. GitHub's Ubuntu runner already supplies it.
+- **Agent tools:** `.mcp.json` configures Claude; `.codex/config.toml` configures Codex. Both launch the pinned Lat MCP server and expose `lat_search`, `lat_section`, `lat_locate`, `lat_refs`, `lat_expand`, and `lat_check`. Restart the agent after config changes and approve the project MCP server if prompted. The CLI fallback works in sessions that have not reloaded.
+- **Prompt reminder:** both agents run the same dependency-free `scripts/lat-prompt.mjs` hook. It directs nontrivial tasks to the graph without fetching packages or embedding anything during prompt submission. Do not enable Lat's generated stop hook: it counts `lat.md/` diffs rather than this repo's tracked `wiki/` paths and can attribute unrelated shared-tree changes to the current task.
 
 ## Use it before you design, and after you change
 
 Read the graph first. A grep over `crates/` tells you what the code does; the graph tells you **why**, and what was already tried and rejected. Both matter, and the second is the one you cannot recover by reading source.
 
-Every command below except `lat search` is run in CI against this graph and must exit 0 — `.github/workflows/lat-check.yml` extracts this block and executes it, because `lat check` itself never reads `.claude/skills/**`. `lat search` is skipped there because it builds the 128 MB index. Section ids are real; substitute your own.
+CI executes the navigation examples below against this graph. A separate small-fixture test builds local embeddings, searches, refreshes edited content, and calls the MCP server; it does not rebuild the entire wiki index. Section ids are real; substitute your own.
 
 ```bash
-lat search "why is the user's Node spawned instead of embedded"   # semantic search, offline, no API key
-lat locate "Two tiers"                                            # find a section by name
-lat section "architecture#Architecture#Turning it off"            # print a section with its links
-lat refs "architecture#Architecture#Composition"                  # what points AT this section
-lat expand "fix [[compat-mode-tests]]"                            # resolve [[refs]] in a prompt
-lat check                                                         # the gate CI runs
+nub run lat search "why is the user's Node spawned instead of embedded"   # semantic search
+nub run lat locate "Two tiers"                                            # find a section by name
+nub run lat section "architecture#Architecture#Turning it off"            # print a section with its links
+nub run lat refs "architecture#Architecture#Composition"                  # incoming references
+nub run lat expand "fix [[compat-mode-tests]]"                            # resolve references in a prompt
+nub run lat check                                                         # the graph gate
 ```
 
 Three gates run it for you, cheapest first: `.githooks/pre-commit` when the staged changes touch `wiki/` or this skill, `.githooks/pre-push` unconditionally (so a symbol rename that orphans a doc link is caught even though no doc was edited), and the `lat-check` job on pull requests to `main`. Both hooks warn rather than block if the checker cannot run, and both take `NUB_SKIP_LAT_CHECK=1`.
 
-After a change that alters architecture, behavior, or test coverage, update the graph in the same commit and run `lat check`. It runs on every pull request against `main`, so a doc naming a symbol you just renamed fails there rather than rotting quietly. It is not a *required* check until someone adds it to branch protection, and a stacked pull request based on another branch does not run it at all.
+After a change that alters architecture, behavior, or test coverage, update the graph in the same commit and run `nub run lat:check`. CI runs on main pushes and on the `ci` label for pull requests targeting `main`; opening or pushing a PR alone does not request a run. Stacked PRs based on another branch do not run this workflow.
 
 ## Section ids and links
 

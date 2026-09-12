@@ -33,11 +33,11 @@ aube reads configuration from `.npmrc` regardless of which tool wrote it.
 Writes follow a routing rule: settings marked `npmShared = true` in
 [`crates/aube-settings/settings.toml`][settings-toml] (plus per-host auth/cert
 templates and scoped registries) land in `.npmrc` so npm, yarn, and pnpm see
-the same value. Aube-only and pnpm-only settings land in
+the same value. aube-only and pnpm-only settings land in
 `~/.config/aube/config.toml` instead, so unknown-to-npm keys don't trigger
 warnings from sibling tools.
 
-[settings-toml]: https://github.com/jdx/aube/blob/main/crates/aube-settings/settings.toml
+[settings-toml]: https://github.com/aubepkg/aube/blob/main/crates/aube-settings/settings.toml
 
 ## Managed hardening config
 
@@ -78,7 +78,7 @@ registries, per-host auth, proxy/TLS, and the npm-standard scalars tagged
 when it writes to one. See the [settings reference](/settings/) — each entry
 lists its `.npmrc` key alongside the other sources.
 
-Aube map settings (`allowBuilds`, `overrides`, `packageExtensions`, …) accept
+aube map settings (`allowBuilds`, `overrides`, `packageExtensions`, …) accept
 **dotted writes** at project scope to edit one entry at a time:
 
 ```sh

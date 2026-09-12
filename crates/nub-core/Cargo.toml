@@ -18,7 +18,7 @@
 # `scripts/set-version.mjs` does not stamp it, same as nub-cache-key.)
 [package]
 name = "nub-core"
-version = "0.8.3"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -41,14 +41,25 @@ camino = "1"
 libc = "0.2"
 dirs-next = "2"
 dotenvy = "0.15"
-flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
+# `zlib-rs`, not `zlib-ng`: the same algorithms, ported to Rust, so the gzip hot
+# path keeps its speed without a C toolchain. `zlib-ng` reaches us through
+# `libz-ng-sys`, which builds via CMake — and CMake defaults MSVC to the DYNAMIC
+# CRT and cannot be talked out of it from here. Every shipped Windows binary links
+# `+crt-static` (without it a compiled artifact dies at 0xC0000135 on a machine
+# with no VC++ redistributable), and mixing the two halves is not a warning: the C
+# objects ask for `__imp__wassert` and the link fails outright. The `cc`-built
+# dependencies are fine — cc-rs reads `CARGO_CFG_TARGET_FEATURE` and switches to
+# `-MT` — but cmake-rs only forwards that flag when no CMake generator is chosen,
+# which is not the case on a Windows runner. A pure-Rust backend removes the whole
+# question, and takes CMake out of the cross-compile path as a bonus.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 glob-match = "0.2"
+hex = "0.4"
 getrandom = "0.3"
 liblzma = { version = "0.4", features = ["static"] }
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
-    "rustls-tls",
-    "rustls-tls-native-roots",
+    "rustls",
     "socks",
     "gzip",
 ] }
@@ -70,8 +81,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # sha1 (ancient PM publishes carry only a sha1 dist.shasum) sits alongside sha2.
 # Pinned 0.10 to share `digest` 0.10 with sha2 — a single Digest trait, no second
 # major. sha512 is preferred; sha1 is the fail-closed fallback only.
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = "0.11"
+sha2 = "0.11"
 tar = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 thiserror = "2"
@@ -87,12 +98,30 @@ ruzstd = { version = "0.8", optional = true }
 # win-arm64/musl), vs ~6 ms for BLAKE3's portable SIMD. BLAKE3 is collision/preimage
 # resistant — fully adequate for integrity — and builds identically on every target.
 # (`sha2` stays for the 32-bit cache KEY, which is not on the hot path.)
-blake3 = { version = "1", optional = true }
+#
+# NOT optional, though the R2 digest use above is `embed-runtime`-only: the
+# per-binary Node flag cache (`node::discovery`, `FLAG_ENTRY_DIR`) names its entry
+# files by hashing the binary's path, and that cache is read on every spawn in
+# every build. Unconditional costs the shipped artifacts nothing — nub-launcher
+# already depends on blake3 directly and nub-cli's release build turns
+# `embed-runtime` on — so only a feature-off dev build gains it.
+blake3 = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# CPU-budget detection (resource_limits::cpu_budget): num_cpus::get() reads the
+# cgroup CFS quota (cgroup v1 `cpu.cfs_quota_us`/`cfs_period_us` AND v2 `cpu.max`,
+# via /proc/self/mountinfo) and returns min(ceil(quota/period), logical_cores) —
+# exactly the automaxprocs algorithm, maintained, 2-dep. Closes the v1-quota +
+# affinity-blocked gaps in std's `available_parallelism()`. The only caller is
+# Linux-gated, so the launcher's macOS and Windows binaries never link it.
+num_cpus = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # `GetConsoleWindow`, for `spawn::process_has_console`.
+    "Win32_System_Console",
 ] }
 
 # Build-time only (embed-runtime): tar + zstd-compress the staged runtime tree
@@ -101,9 +130,24 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 tar = { version = "0.4", optional = true }
 zstd = { version = "0.13", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 # Bakes the R2 per-entrypoint BLAKE3 digests (the runtime side decodes with the
 # `blake3` dep above). build-deps never reach the shipped binary.
+#
+# STILL OPTIONAL, and `embed-runtime` must keep listing `dep:blake3` even though the
+# NORMAL dependency of the same name is now unconditional — this is the activator for
+# THIS one, and nothing else is. Dropping it from the feature list compiles a
+# build.rs whose `#[cfg(feature = "embed-runtime")]` half calls `blake3::hash` with
+# the crate unlinked: E0433 from the build script.
+#
+# NO GATE WE RUN CATCHES THAT, which is the part worth remembering. An optional
+# dependency no feature mentions still gets an IMPLICIT feature of its own name, and
+# `--all-features` turns it on — so `clippy --all-targets --all-features` and the
+# whole test suite stay green while the real build, which asks for the exact set
+# (`--features embed-runtime,compile`), breaks. It surfaced on CI's musl
+# native-islands leg and nowhere before it. Verify a change here with
+# `cargo tree -p nub-core -e build --features nub-core/embed-runtime`: blake3 present
+# with the feature, absent without, so a feature-off dev build still pays nothing.
 blake3 = { version = "1", optional = true }
 
 # Unix-only: terminating-signal forwarding to the child (SIGINT/SIGTERM/SIGHUP).

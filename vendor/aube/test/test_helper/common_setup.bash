@@ -46,7 +46,7 @@ _common_setup() {
 	unset AUBE_TRACE
 
 	# Keep the update notifier (install.rs:… -> update_check.rs) from
-	# hitting aube.jdx.dev during BATS. Unsetting CI re-enables it by
+	# hitting aube.sh during BATS. Unsetting CI re-enables it by
 	# default, so we suppress it explicitly here — otherwise every
 	# `aube install` / `add` / `update` test would spend ~1.5s on a
 	# DNS/timeout round-trip for no benefit.

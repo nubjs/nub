@@ -23,18 +23,34 @@ pub(crate) fn load_manifest_or_default(root: &Path) -> miette::Result<aube_manif
     }
 }
 
-/// Serialize `value` as pretty JSON with a trailing newline and
-/// atomically write it to `path`. Wraps the serialize + atomic-write
-/// pair used by add/remove/update/audit when mutating `package.json`.
+/// Serialize `value` as pretty JSON in the file's own surface style (indent
+/// unit, line endings, trailing-newline state) and atomically write it to
+/// `path`. Wraps the serialize + atomic-write pair used by
+/// add/remove/update/audit when mutating `package.json`.
 pub(crate) fn write_manifest_json<T: serde::Serialize>(
     path: &Path,
     value: &T,
 ) -> miette::Result<()> {
-    let json = serde_json::to_string_pretty(value)
+    let existing = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error)
+                .into_diagnostic()
+                .wrap_err("failed to read package.json");
+        }
+    };
+    // An absent (or empty) manifest has no style to imitate, and detecting one
+    // from `""` would read as "no trailing newline".
+    let style = if existing.is_empty() {
+        aube_manifest::JsonStyle::default()
+    } else {
+        aube_manifest::detect_json_style(&existing)
+    };
+    let json = aube_manifest::serialize_json_with_style(value, &style)
         .into_diagnostic()
         .wrap_err("failed to serialize package.json")?;
-    write_manifest_atomic(path, format!("{json}\n").as_bytes())
-        .wrap_err("failed to write package.json")
+    write_manifest_atomic(path, json.as_bytes()).wrap_err("failed to write package.json")
 }
 
 pub(crate) fn update_manifest_json_object<F>(path: &Path, update: F) -> miette::Result<()>
@@ -44,6 +60,7 @@ where
     let content = std::fs::read_to_string(path)
         .into_diagnostic()
         .wrap_err("failed to read package.json")?;
+    let style = aube_manifest::detect_json_style(&content);
     let mut json: serde_json::Value = serde_json::from_str(&content)
         .into_diagnostic()
         .wrap_err("failed to parse package.json")?;
@@ -53,10 +70,10 @@ where
 
     update(obj)?;
 
-    let json = serde_json::to_string_pretty(&json)
+    let json = aube_manifest::serialize_json_with_style(&json, &style)
         .into_diagnostic()
         .wrap_err("failed to serialize package.json")?;
-    write_manifest_atomic(path, format!("{json}\n").as_bytes())
+    write_manifest_atomic(path, json.as_bytes())
 }
 
 pub(crate) fn write_manifest_dep_sections(
@@ -171,6 +188,78 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert_eq!(root_key_order(&written), ["name", "license"]);
         assert!(!written.contains("devDependencies"));
+    }
+
+    #[test]
+    fn write_manifest_json_rejects_invalid_utf8_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        let invalid_utf8 = [0xff];
+        std::fs::write(&path, invalid_utf8).unwrap();
+
+        let result = write_manifest_json(&path, &serde_json::json!({ "name": "example" }));
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), invalid_utf8);
+    }
+
+    #[test]
+    fn write_manifest_dep_sections_preserves_indentation() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, indent) in [
+            ("tabs", "\t"),
+            ("four-spaces", "    "),
+            ("three-spaces", "   "),
+        ] {
+            let path = dir.path().join(format!("package-{name}.json"));
+            std::fs::write(&path, format!("{{\n{indent}\"name\": \"{name}\"\n}}\n")).unwrap();
+            let mut manifest = aube_manifest::PackageJson::from_path(&path).unwrap();
+            manifest
+                .dependencies
+                .insert("foo".to_string(), "1.0.0".to_string());
+
+            write_manifest_dep_sections(&path, &manifest).unwrap();
+
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                format!(
+                    "{{\n{indent}\"name\": \"{name}\",\n{indent}\"dependencies\": {{\n{indent}{indent}\"foo\": \"1.0.0\"\n{indent}}}\n}}\n"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn write_manifest_json_preserves_crlf_and_a_missing_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        std::fs::write(
+            &path,
+            "{\r\n    \"name\": \"example\",\r\n    \"license\": \"MIT\"\r\n}",
+        )
+        .unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        write_manifest_json(&path, &value).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\r\n    \"name\": \"example\",\r\n    \"license\": \"MIT\"\r\n}"
+        );
+    }
+
+    #[test]
+    fn write_manifest_json_gives_a_new_manifest_the_default_style() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+
+        write_manifest_json(&path, &serde_json::json!({ "name": "example" })).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\n  \"name\": \"example\"\n}\n"
+        );
     }
 
     fn root_key_order(raw: &str) -> Vec<String> {

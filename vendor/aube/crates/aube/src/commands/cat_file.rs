@@ -8,13 +8,12 @@
 //! This is a read-only introspection command: no lockfile, no node_modules,
 //! no project lock.
 
-use clap::Args;
 use miette::{IntoDiagnostic, miette};
 use std::io::Write;
 
 use crate::commands::open_store;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct CatFileArgs {
     /// File hash to look up.
     ///

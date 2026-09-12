@@ -1,24 +1,21 @@
 import { InstallTabs } from '@/components/install-tabs';
+import { MigrationPrompt, ViewRepoLink } from '@/components/migration-prompt';
+import { START_PROMPT } from '@/lib/start-prompt';
 
-/* The standing "Get started" block for blog posts: the install tabs plus a pointer
-   at the agent adoption prompt (public/start.md, served at /start.md). Every release
-   post ends with one, so a reader who arrives from a link can install without hunting
-   for the docs.
+/* The standing "Get started" block for blog posts: the install tabs at the full
+   prose width, with the same "Copy agent prompt" / "View repo" row the homepage
+   puts under its hero tabs. Every release post ends with one, so a reader who
+   arrives from a link can install without hunting for the docs.
 
-   The copy is maintainer-authored and shared across posts: edit it HERE, not in an
-   individual .mdx. The link must stay root-relative — a bare `start.md` would resolve
-   against /blog/ and 404. */
+   Shared across posts: edit it HERE, not in an individual .mdx. */
 export function GetStarted() {
   return (
-    <div className="my-6">
-      <InstallTabs />
-      {/* The space after the link is written as an explicit {' '} expression: the
-          literal space that follows a closing tag on the same line does not survive
-          this build, which renders as "prompt`into`". */}
-      <p className="mt-4">
-        Or paste this <a href="/start.md">&quot;Get Started&quot; prompt</a>{' '}
-        into an agent. It will install Nub and explain how it can be used in your project. (It won&apos;t make any changes without permission.)
-      </p>
+    <div className="not-prose my-6">
+      <InstallTabs wide />
+      <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2">
+        <MigrationPrompt prompt={START_PROMPT} />
+        <ViewRepoLink />
+      </div>
     </div>
   );
 }

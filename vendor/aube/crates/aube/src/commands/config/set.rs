@@ -2,10 +2,9 @@ use super::{
     Location, NpmrcEdit, aube_config, is_npm_shared_key, resolve_aliases, setting_for_key,
 };
 use aube_settings::meta as settings_meta;
-use clap::Args;
 use miette::miette;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct SetArgs {
     /// Setting key (canonical name or `.npmrc` alias).
     pub key: String,
@@ -14,11 +13,11 @@ pub struct SetArgs {
     pub value: String,
 
     /// Use the user configuration instead of the project configuration.
-    #[arg(short = 'g', long, conflicts_with = "local")]
+    #[usage(short = 'g', long, conflicts = "--local")]
     pub global: bool,
 
     /// Use the project configuration (the default).
-    #[arg(long, conflicts_with = "global")]
+    #[usage(long, conflicts = "--global")]
     pub local: bool,
 }
 

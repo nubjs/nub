@@ -40,11 +40,20 @@
 let _bootstrapCreateRequire = null;
 // Compiled global Workers must carry their fixed-root bootstrap exactly once.
 let _compiledBootstrapRequireArg = null;
+// The blob-URL registry, supplied by an importer that already holds it. Set only
+// by the compile preamble: a compiled bundle has no sibling files to
+// `createRequire` (see the load below), and it is the ONE importer for which the
+// shared-instance argument does not apply, because nothing else in a compiled
+// artifact ever reaches worker-blob-url.cjs.
+let _blobUrlModule = null;
 export function setBootstrapCreateRequire(fn) {
   _bootstrapCreateRequire = fn;
 }
 export function setCompiledBootstrapRequireArg(requireArg) {
   _compiledBootstrapRequireArg = requireArg;
+}
+export function setBlobUrlModule(mod) {
+  _blobUrlModule = mod;
 }
 function __getBuiltin(id) {
   if (typeof process.getBuiltinModule === "function") return process.getBuiltinModule(id);
@@ -96,11 +105,13 @@ export function installWorkerPolyfill() {
   // wraps URL.createObjectURL (worker-blob-url.cjs). Loaded via createRequire so
   // both this lazily-loaded ESM module and the eager CJS preload reference the SAME
   // module instance (Node dedupes by resolved path) — i.e. the SAME registry.
-  const { blobUrlSource, installBlobUrlSupport } = (
-    typeof process.getBuiltinModule === "function"
-      ? __getBuiltin("node:module").createRequire(import.meta.url)
-      : _bootstrapCreateRequire(import.meta.url)
-  )("./worker-blob-url.cjs");
+  const { blobUrlSource, installBlobUrlSupport } =
+    _blobUrlModule ??
+    (
+      typeof process.getBuiltinModule === "function"
+        ? __getBuiltin("node:module").createRequire(import.meta.url)
+        : _bootstrapCreateRequire(import.meta.url)
+    )("./worker-blob-url.cjs");
 
   // Resolve a worker-error stack frame to {filename,lineno,colno} so the
   // ErrorEvent carries real source location, per WHATWG §10.2.6 (the spec
@@ -722,4 +733,16 @@ if (!isMainThread && parentPort) {
 // on-`require` contract the fast-tier call sites (preload.cjs, polyfills.cjs) rely on.
 // On the FLOOR (getBuiltinModule absent) this is skipped; the compat main-thread
 // preload calls setBootstrapCreateRequire(...) + installWorkerPolyfill() explicitly.
-if (typeof process.getBuiltinModule === "function") installWorkerPolyfill();
+//
+// Skipped inside a COMPILED artifact for the same reason as the floor: its preamble
+// hands this module the blob-URL registry through `setBlobUrlModule` — a compiled
+// bundle has no sibling file to `createRequire` — and a setter cannot run before an
+// auto-install at module eval. So the compile preamble owns the call, exactly as the
+// compat preload does. The bootstrap record is published before any ESM in the
+// process runs, which makes it a sound signal at module-eval time.
+if (
+  typeof process.getBuiltinModule === "function" &&
+  process[Symbol.for("nub.compile.bootstrap")] === undefined
+) {
+  installWorkerPolyfill();
+}

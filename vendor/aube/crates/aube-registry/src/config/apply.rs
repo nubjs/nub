@@ -9,7 +9,7 @@ use super::url::{
     is_public_npmjs_url, lookup_by_uri_prefix, normalize_npmrc_uri_key, normalize_registry_url,
     package_scope, registry_uri_key,
 };
-use super::util::{non_empty, pem_value};
+use super::util::{non_empty, pem_value, proxy_url};
 
 impl NpmConfig {
     /// Register default scope→registry mappings that aube ships with
@@ -58,17 +58,18 @@ impl NpmConfig {
     /// single `https-proxy=...` line in `.npmrc` configures both.
     pub fn apply_proxy_env(&mut self) {
         if self.https_proxy.is_none() {
-            self.https_proxy = self
-                .npmrc_proxy
-                .clone()
-                .or_else(|| env_any(&["HTTPS_PROXY", "https_proxy"]));
+            self.https_proxy = match self.npmrc_proxy.as_deref() {
+                Some("false") => None,
+                Some(_) => self.npmrc_proxy.clone(),
+                None => env_any(&["HTTPS_PROXY", "https_proxy"]),
+            };
         }
         if self.http_proxy.is_none() {
-            self.http_proxy = self
-                .https_proxy
-                .clone()
-                .or_else(|| env_any(&["HTTP_PROXY", "http_proxy"]))
-                .or_else(|| env_any(&["PROXY", "proxy"]));
+            self.http_proxy = self.https_proxy.clone();
+            if self.http_proxy.is_none() && self.npmrc_proxy.as_deref() != Some("false") {
+                self.http_proxy =
+                    env_any(&["HTTP_PROXY", "http_proxy"]).or_else(|| env_any(&["PROXY", "proxy"]));
+            }
         }
         if self.no_proxy.is_none() {
             self.no_proxy = env_any(&["NO_PROXY", "no_proxy"]);
@@ -379,10 +380,10 @@ impl NpmConfig {
                 } else {
                     match key.as_str() {
                         "https-proxy" | "httpsProxy" => {
-                            self.https_proxy = non_empty(value);
+                            self.https_proxy = proxy_url(value);
                         }
                         "http-proxy" | "httpProxy" => {
-                            self.http_proxy = non_empty(value);
+                            self.http_proxy = proxy_url(value);
                         }
                         "proxy" => {
                             // pnpm treats `.npmrc proxy=` as the
@@ -393,7 +394,7 @@ impl NpmConfig {
                             self.npmrc_proxy = non_empty(value);
                         }
                         _ => {
-                            self.no_proxy = non_empty(value);
+                            self.no_proxy = proxy_url(value);
                         }
                     }
                 }

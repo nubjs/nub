@@ -125,7 +125,7 @@ fn render_page(settings: &[SettingRef<'_>]) -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Aube generates this page from [`settings.toml`](https://github.com/jdx/aube/blob/main/crates/aube-settings/settings.toml). Edit that registry and rerun `{COMMAND}` instead of editing this page by hand."
+        "aube generates this page from [`settings.toml`](https://github.com/aubepkg/aube/blob/main/crates/aube-settings/settings.toml). Edit that registry and rerun `{COMMAND}` instead of editing this page by hand."
     )
     .unwrap();
     writeln!(out).unwrap();

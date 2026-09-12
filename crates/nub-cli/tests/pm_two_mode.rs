@@ -403,9 +403,10 @@ fn use_nub_warns_about_phantom_deps_only_when_leaving_a_hoisting_pm() {
 /// hooks rewrite the dep graph), so under a non-pnpm incumbent it's
 /// another tool's config and must not be honored. A `preResolution` hook
 /// writes a marker file when it runs — the cleanest cross-tool "did the
-/// hook fire?" signal. `--no-frozen-lockfile` forces the resolve so the
-/// hook actually gets a chance to run (a frozen/already-current install
-/// short-circuits before pnpmfile detection).
+/// hook fire?" signal. `--no-frozen-lockfile` keeps the rows on the
+/// resolve path, which is where every hook runs; `preResolution` alone
+/// now also fires on an already-current install, so what these rows
+/// isolate is the incumbent gate, not the install path.
 ///
 /// nub identity: the cwd-default `.pnpmfile` is gated off silently. Unlike
 /// `pnpm-workspace.yaml`, this stray pnpm-named file intentionally gets no

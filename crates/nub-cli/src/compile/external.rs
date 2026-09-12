@@ -146,6 +146,13 @@ pub struct Shim {
 /// record before any generated helper can consume it. A resolver hook, when the
 /// build needs one, follows the bootstrap and precedes the worker chunk. Both
 /// imports are dynamic so their evaluation order is the source order here.
+///
+/// `requireArg` is checked for PRESENCE rather than for being a string, because a
+/// missing preload path is a real state and not a failure: it is what the bootstrap
+/// publishes wherever there is no file to preload, which is both containers that do
+/// not extract. The single-executable shape reaches this wrapper with the
+/// neutralized copy (`sea::neutralize_preload_arg`), and the two accessors above it
+/// are what actually prove the record published.
 pub fn worker_wrappers(
     workers: &[WorkerRoot],
     install_hook: bool,
@@ -167,7 +174,7 @@ pub fn worker_wrappers(
                  const record = process[Symbol.for(\"nub.compile.bootstrap\")];\n\
                  if (typeof record?.createRequire !== \"function\" ||\n\
                      typeof record?.getBuiltin !== \"function\" ||\n\
-                     typeof record?.requireArg !== \"string\") {{\n\
+                     !Object.hasOwn(record, \"requireArg\")) {{\n\
                    throw new Error(\"nub compile: internal Worker bootstrap failed\");\n\
                  }}\n\
                  {}await import({chunk});\n",
@@ -772,7 +779,7 @@ mod tests {
         assert!(
             source.contains(r#"typeof record?.createRequire !== "function""#)
                 && source.contains(r#"typeof record?.getBuiltin !== "function""#)
-                && source.contains(r#"typeof record?.requireArg !== "string""#)
+                && source.contains(r#"!Object.hasOwn(record, "requireArg")"#)
                 && source.contains("internal Worker bootstrap failed"),
             "the private record must be rejected before generated helpers consume it: {source}"
         );

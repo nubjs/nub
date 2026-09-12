@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/pnpm/pnpm",
+  "commit": "fc0278acd70586f654230fdb258df122e0074be8",
+  "paths": [
+    "pnpm/crates/package-manager/src/compat_package_extensions.json",
+    "pnpm/crates/package-manager/src/pnpm_compat_package_extensions.json"
+  ],
+  "merge": {
+    "order": ["compat_package_extensions.json", "pnpm_compat_package_extensions.json"],
+    "entryOrder": "preserved",
+    "duplicateSelectors": "rejected"
+  },
+  "yarnPackage": "@yarnpkg/extensions@2.0.7",
+  "licenses": ["BSD-2-Clause", "MIT"]
+}

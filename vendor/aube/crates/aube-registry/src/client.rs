@@ -27,9 +27,10 @@ mod slow_tarball_tests;
 pub use cache::CachedPackumentLookup;
 use dist_tags::*;
 pub use endpoints::PackageSearchResult;
+pub(crate) use http::probe_client_builder;
 use http::*;
 pub use npm_verbs::{Owner, TokenInfo};
-use parse::parse_full_response;
+use parse::{parse_full_response, parse_full_response_seed};
 
 /// Accept header for packument requests. `vnd.npm.install-v1+json` is the
 /// abbreviated (corgi) format npmjs emits for installs; the `application/json`

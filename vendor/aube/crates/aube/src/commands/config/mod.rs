@@ -22,34 +22,33 @@ mod tui;
 
 use crate::commands::npmrc::{NpmrcEdit, user_npmrc_path};
 use aube_settings::meta as settings_meta;
-use clap::{Args, Subcommand};
 use miette::miette;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ConfigArgs {
-    #[command(flatten)]
+    #[usage(flatten)]
     pub list: list::ListArgs,
 
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: Option<ConfigCommand>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum ConfigCommand {
     /// Delete a key from aube config or the selected `.npmrc` file
-    #[command(visible_aliases = ["rm", "remove", "unset"])]
+    #[usage(alias("rm", "remove", "unset"))]
     Delete(delete::DeleteArgs),
     /// Explain a known setting, including defaults and supported config sources
     Explain(explain::ExplainArgs),
     /// Search known settings by name, source key, or description
-    #[command(visible_alias = "search")]
+    #[usage(alias = "search")]
     Find(find::FindArgs),
     /// Print the effective value of a key
     Get(GetArgs),
     /// Print every key/value from aube config and selected `.npmrc` file(s)
-    #[command(visible_alias = "ls")]
+    #[usage(alias = "ls")]
     List(list::ListArgs),
     /// Write a key=value pair to aube config or the selected `.npmrc` file
     Set(SetArgs),
@@ -57,7 +56,7 @@ pub enum ConfigCommand {
     Tui,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct KeyArgs {
     /// The setting key.
     ///
@@ -66,11 +65,11 @@ pub struct KeyArgs {
     pub key: String,
 
     /// Use the user configuration instead of the project configuration.
-    #[arg(short = 'g', long, conflicts_with = "local")]
+    #[usage(short = 'g', long, conflicts = "--local")]
     pub global: bool,
 
     /// Use the project configuration (the default).
-    #[arg(long, conflicts_with = "global")]
+    #[usage(long, conflicts = "--global")]
     pub local: bool,
 }
 
@@ -102,8 +101,11 @@ pub(crate) use aube_config::{
     load_project_entries as load_project_aube_config_entries,
     load_user_entries as load_user_aube_config_entries,
 };
-pub(crate) use get_cmd::GetArgs;
-pub(crate) use set_cmd::SetArgs;
+// `pub`, not `pub(crate)`: an embedder composing its own `config` command
+// tree from these arg types (nub does) needs every type a `pub` field names.
+pub use get_cmd::GetArgs;
+pub use list::ListArgs;
+pub use set_cmd::SetArgs;
 pub use set_cmd::set_project_scalar_to_workspace_yaml;
 
 impl Location {

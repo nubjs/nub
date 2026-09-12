@@ -1,0 +1,51 @@
+# Times a `nub` call from cmd.exe through npm's `nub.cmd` shim against the real
+# `nub.exe` the launcher hardlinks beside it. Runs on demand only, never on a
+# push or a pull request: `gh workflow run bench-windows-dispatch.yml`, then
+# download the `windows-dispatch-results` artifact and commit a run worth
+# keeping under tests/bench/windows-dispatch/results/. The README there says
+# what it measures.
+name: bench windows dispatch
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    name: nub.cmd vs nub.exe on windows-latest
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '26'
+
+      - name: Install hyperfine
+        shell: pwsh
+        run: |
+          $v = '1.20.0'
+          $dir = "hyperfine-v$v-x86_64-pc-windows-msvc"
+          Invoke-WebRequest -Uri "https://github.com/sharkdp/hyperfine/releases/download/v$v/$dir.zip" -OutFile hyperfine.zip
+          Expand-Archive hyperfine.zip -DestinationPath "$env:RUNNER_TEMP/hyperfine"
+          "$env:RUNNER_TEMP/hyperfine/$dir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install nub from npm
+        shell: bash
+        run: |
+          npm install -g @nubjs/nub@latest
+          nub --version
+
+      - name: Run the benchmark
+        shell: bash
+        run: bash tests/bench/windows-dispatch/run.sh --save
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: windows-dispatch-results
+          path: tests/bench/windows-dispatch/results/
+          if-no-files-found: error

@@ -31,8 +31,8 @@ Read the [full docs](https://www.typescriptlang.org/docs/handbook/decorators.htm
 
 ## Design-type metadata
 
-When `emitDecoratorMetadata` is also set, Nub emits the `Reflect.metadata(...)` calls that DI containers read for constructor-parameter type inference. The emitted code references `Reflect.metadata`, so install and import `reflect-metadata` yourself, exactly as on plain TypeScript — Nub does not auto-inject it.
+When `emitDecoratorMetadata` is also set, Nub emits the `Reflect.metadata(...)` calls that DI containers read for constructor-parameter type inference. The emitted code references `Reflect.metadata`, so install and import `reflect-metadata` yourself, as on plain TypeScript.
 
 ## Stage 3 decorators
 
-Stage 3 decorators (TypeScript 5's default when no legacy mode is selected) are not supported: that transform is an [upstream gap in oxc](https://github.com/oxc-project/oxc/issues/9170), so Nub rejects Stage-3-shaped decorator syntax with a diagnostic pointing you at `decorators: "legacy"`.
+Stage 3 decorators (TypeScript 5's default when no legacy mode is selected) are not supported: that transform is an [upstream gap in oxc](https://github.com/oxc-project/oxc/issues/9170), so Nub rejects Stage-3-shaped decorator syntax with a diagnostic that names `decorators: "legacy"`.

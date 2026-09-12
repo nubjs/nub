@@ -22,7 +22,14 @@ const WINDOWS_TABS: Tab[] = [
   { id: 'mise', label: 'mise', command: 'mise use -g nub' },
 ];
 
-export function InstallTabs({ className = '' }: { className?: string }) {
+export function InstallTabs({
+  className = '',
+  wide = false,
+}: {
+  className?: string;
+  /** Fill the container instead of capping at `max-w-xl` (the blog's prose column). */
+  wide?: boolean;
+}) {
   // Server-render the Unix set; the Windows swap happens on mount, since the
   // platform isn't knowable until there's a navigator to read.
   const [isWindows, setIsWindows] = useState(false);
@@ -50,7 +57,7 @@ export function InstallTabs({ className = '' }: { className?: string }) {
   }
 
   return (
-    <div className={`w-full max-w-xl text-left ${className}`}>
+    <div className={`w-full ${wide ? '' : 'max-w-xl'} text-left ${className}`}>
       {/* Tab strip + command box form one connected panel (shared border, no
           seam). Symmetric padding keeps the labels vertically centered. */}
       <div

@@ -32,14 +32,25 @@ concurrency:
   group: perf-backfill
   cancel-in-progress: false
 
+env:
+  MBX_DISABLE: "1"
+
 jobs:
   measure:
     name: Measure released binaries
     # Same runner class as perf.yml. Absolute instruction counts shift between
     # machine types by more than a real regression does, so the backfilled
     # series and the ongoing one have to come from the same kind of machine.
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
     timeout-minutes: 60
+    env:
+      # Rust 1.97.1 is part of the digest-pinned benchmark image.
+      MISE_DISABLE_TOOLS: rust
+      RUSTUP_TOOLCHAIN: 1.97.1
+      TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-aube-rust1.97.1-img5263c143
     permissions:
       contents: read # listing releases and downloading assets; no write here
     steps:
@@ -51,17 +62,33 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          cache: false
         env:
           MISE_LOCKED: "1"
 
-      - name: Install valgrind
+      - name: Runner metadata
         run: |
-          command -v valgrind || {
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends valgrind
-          }
-          valgrind --version
+          {
+            echo '### Runner metadata'
+            echo '```text'
+            echo 'environment-revision: perf-runner@fd66d9b'
+            echo 'image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68'
+            uname -a
+            lscpu
+            mise --version
+            rustc --version
+            cargo --version
+            valgrind --version
+            for zone in /sys/class/thermal/thermal_zone*/temp; do
+              [ -r "$zone" ] && printf '%s: %s\n' "$zone" "$(cat "$zone")"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify valgrind
+        run: valgrind --version
 
       # `sbom` rather than tak's default of `--version`. aube's `-V` is
       # documented as "print version and check for updates", and a subject that
@@ -88,7 +115,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LIMIT: ${{ inputs.limit }}
         run: |
-          tak backfill --bench release-graph --limit "$LIMIT" -- \
+          taskset -c 0-3 tak backfill --bench release-graph --limit "$LIMIT" -- \
             -C "$GITHUB_WORKSPACE/fixtures/medium" sbom
 
       # A bundle is how the notes reach the publish job: it carries the ref and
@@ -128,7 +155,7 @@ jobs:
     # just keeps them out of the shared series, which matters because a branch
     # may have changed the fixture or the subject while keeping the bench name.
     if: github.ref == 'refs/heads/main'
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write # pushing refs/notes/tak is a write to this repository
@@ -142,7 +169,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         env:
           MISE_LOCKED: "1"
 

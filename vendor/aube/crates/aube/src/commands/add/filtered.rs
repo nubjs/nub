@@ -44,6 +44,7 @@ pub(super) async fn run(
         &args.packages,
         args.allow_low_downloads,
         crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
+        &[],
     )
     .await?;
 
@@ -88,12 +89,19 @@ pub(super) async fn run(
             &mut install_opts,
             args.dangerously_allow_all_builds,
         );
+        install_opts.ignore_scripts = args.ignore_scripts;
         install_opts.workspace_filter = filter.clone();
+        install_opts.run_dev_preinstall = true;
+        install_opts.script_command = "add";
         // See the sibling `aube add` codepath for why this flag is set:
         // live OSV API on the resolved transitives.
         install_opts.osv_transitive_check = true;
         // `--lockfile-only`: write the lockfile + manifests, skip linking.
         install_opts.lockfile_only = args.lockfile_only;
+        // Same as the sibling path: the chained install owns the hooks.
+        install_opts.pnpmfile = args.pnpmfile.clone();
+        install_opts.global_pnpmfile = args.global_pnpmfile.clone();
+        install_opts.ignore_pnpmfile = args.ignore_pnpmfile;
         install::run_with_project_lock(install_opts, &lock).await?;
         Ok(())
     }

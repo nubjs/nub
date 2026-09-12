@@ -1,0 +1,216 @@
+name: node-addon implementation
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      CERTIFICATES_P12:
+        required: false
+      CERTIFICATES_P12_PASS:
+        required: false
+
+concurrency:
+  group: node-addon-${{ inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' && inputs.tag == '' }}
+
+env:
+  MBX_DISABLE: "1"
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.targets.outputs.include }}
+    steps:
+      - id: targets
+        shell: bash
+        env:
+          INCLUDE_INTEL_MACOS: ${{ github.event_name == 'release' || inputs.tag != '' }}
+        run: |
+          include=$(jq -cn '[
+            {"runner":"macos-15","target":"aarch64-apple-darwin","os":"darwin","cpu":"arm64","package":"darwin-arm64","binary":"libaube_node.dylib","smoke":true},
+            {"runner":"macos-15-intel","target":"x86_64-apple-darwin","os":"darwin","cpu":"x64","package":"darwin-x64","binary":"libaube_node.dylib","smoke":true},
+            {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","os":"linux","cpu":"arm64","package":"linux-arm64","binary":"libaube_node.so","smoke":true},
+            {"runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","os":"linux","cpu":"x64","package":"linux-x64","binary":"libaube_node.so","smoke":true},
+            {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","os":"linux","cpu":"arm64","libc":"musl","package":"linux-arm64-musl","binary":"libaube_node.so"},
+            {"runner":"ubuntu-latest","target":"x86_64-unknown-linux-musl","os":"linux","cpu":"x64","libc":"musl","package":"linux-x64-musl","binary":"libaube_node.so"},
+            {"runner":"windows-latest","target":"aarch64-pc-windows-msvc","os":"win32","cpu":"arm64","package":"win32-arm64","binary":"aube_node.dll"},
+            {"runner":"windows-latest","target":"x86_64-pc-windows-msvc","os":"win32","cpu":"x64","package":"win32-x64","binary":"aube_node.dll","smoke":true}
+          ]')
+          if [[ "$INCLUDE_INTEL_MACOS" != true ]]; then
+            include=$(jq -c 'map(select(.package != "darwin-x64"))' <<< "$include")
+          fi
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: targets
+    name: ${{ matrix.package }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.targets.outputs.include) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      MISE_EXEC_AUTO_INSTALL: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false, ref: "${{ inputs.tag || github.ref }}" }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "24", package-manager-cache: false }
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        if: github.event_name != 'release' && inputs.tag == ''
+        with:
+          install: false
+          cache: false
+          add_shims_to_path: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        if: github.event_name != 'release' && inputs.tag == ''
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Rust target
+        shell: bash
+        run: rustup target add '${{ matrix.target }}'
+      - name: Install musl compiler
+        if: matrix.libc == 'musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build addon
+        if: github.event_name != 'release' && inputs.tag == ''
+        shell: bash
+        run: |
+          if [[ '${{ matrix.libc }}' == musl ]]; then
+            export RUSTFLAGS='-C target-feature=-crt-static'
+          fi
+          mise exec -- cargo build --locked --profile napi -p aube-node --target '${{ matrix.target }}'
+      - name: Build release addon
+        if: github.event_name == 'release' || inputs.tag != ''
+        shell: bash
+        run: |
+          if [[ '${{ matrix.libc }}' == musl ]]; then
+            export RUSTFLAGS='-C target-feature=-crt-static'
+          fi
+          cargo build --locked --profile napi -p aube-node --target '${{ matrix.target }}'
+      - name: Import macOS signing certificate
+        if: (github.event_name == 'release' || inputs.tag != '') && matrix.os == 'darwin'
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASS }}
+      - name: Sign macOS addon
+        if: (github.event_name == 'release' || inputs.tag != '') && matrix.os == 'darwin'
+        shell: bash
+        run: |
+          codesign --force --sign 'Developer ID Application: Jeffrey Dickey (4993Y37DX6)' \
+            --options runtime --timestamp \
+            'target/${{ matrix.target }}/napi/${{ matrix.binary }}'
+      - name: Set package version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then version=${RELEASE_TAG#v}; else version="0.0.0-smoke.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Pack platform package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OUT_DIR: ${{ runner.temp }}/packages
+          AUBE_NODE_BINARY: target/${{ matrix.target }}/napi/${{ matrix.binary }}
+          AUBE_NODE_OS: ${{ matrix.os }}
+          AUBE_NODE_CPU: ${{ matrix.cpu }}
+          AUBE_NODE_LIBC: ${{ matrix.libc }}
+        run: node crates/aube-node/npm/package.mjs
+      - name: Smoke-load native addon
+        if: matrix.smoke
+        shell: bash
+        env:
+          SMOKE_ADDON: ${{ runner.temp }}/aube.node
+        run: |
+          cp 'target/${{ matrix.target }}/napi/${{ matrix.binary }}' "$SMOKE_ADDON"
+          node -e "require(process.env.SMOKE_ADDON)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aube-node-${{ matrix.package }}
+          path: ${{ runner.temp }}/packages/*.tgz
+          if-no-files-found: error
+
+  packages:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false, ref: "${{ inputs.tag || github.ref }}" }
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: "24", package-manager-cache: false }
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          tool_versions: bun 1.3.11
+          install_args: bun
+          cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with: { pattern: aube-node-*, path: packages, merge-multiple: true }
+      - name: Pack root package
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          INCLUDE_INTEL_MACOS: ${{ github.event_name == 'release' || inputs.tag != '' }}
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then VERSION=${RELEASE_TAG#v}; else VERSION="0.0.0-smoke.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"; fi
+          VERSION="$VERSION" OUT_DIR="$PWD/packages" node crates/aube-node/npm/package.mjs
+          expected=8
+          if [[ "$INCLUDE_INTEL_MACOS" == true ]]; then expected=9; fi
+          test "$(find packages -maxdepth 1 -name '*.tgz' -print | wc -l)" -eq "$expected"
+      - name: Smoke-test installed packages with Node and Bun
+        shell: bash
+        run: | # zizmor: ignore[adhoc-packages] installs only tarballs built by the required matrix jobs
+          mkdir npm-smoke
+          cd npm-smoke
+          npm init --yes >/dev/null
+          npm install --force --ignore-scripts --no-package-lock ../packages/*.tgz
+          node -e "require('@jdxcode/aube-node')"
+          node --input-type=module -e "import { install } from '@jdxcode/aube-node'; if (typeof install !== 'function') process.exit(1)"
+          cp "$GITHUB_WORKSPACE/crates/aube-node/npm/typecheck.ts" .
+          npx --yes --package=typescript@5.9.3 tsc --strict --noEmit \
+            --lib ES2022,DOM --module NodeNext --moduleResolution NodeNext typecheck.ts
+          cd ..
+          mkdir bun-smoke
+          cd bun-smoke
+          bun init --yes >/dev/null
+          # Cross-compiling hosts install every optional target package before
+          # building their platform matrix.
+          bun install --os="*" --cpu="*" ../packages/*.tgz
+          bun -e "require('@jdxcode/aube-node')"
+          AUBE_NODE_OS=linux AUBE_NODE_ARCH=x64 AUBE_NODE_LIBC=glibc \
+            bun "$GITHUB_WORKSPACE/crates/aube-node/npm/compile-smoke.mjs"
+          test "$(stat --format=%s aube-node-smoke)" -lt 157286400
+          ./aube-node-smoke
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with: { name: aube-node-npm-packages, path: "packages/*.tgz", if-no-files-found: error }
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.event_name == 'release' || inputs.tag != ''
+        with: { subject-path: "packages/*.tgz" }
+      - name: Publish platform and root packages
+        if: github.event_name == 'release' || inputs.tag != ''
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: | # zizmor: ignore[use-trusted-publishing] publishes each tarball with npm provenance via OIDC
+          version=${RELEASE_TAG#v}; tag=latest; [[ "$version" == *-* ]] && tag=next
+          publish_package() {
+            local package=$1 name
+            name=$(tar -xOf "$package" package/package.json | jq -r .name)
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} is already published"
+              return
+            fi
+            npm publish "$package" --access public --provenance --tag "$tag"
+          }
+          # Relative paths need the ./ prefix or npm parses them as
+          # hosted-git owner/repo shorthands instead of local tarballs.
+          for package in ./packages/*-darwin-*.tgz ./packages/*-linux-*.tgz ./packages/*-win32-*.tgz; do publish_package "$package"; done
+          publish_package "./packages/jdxcode-aube-node-${version}.tgz"

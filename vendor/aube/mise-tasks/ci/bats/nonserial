@@ -29,7 +29,7 @@ BATS_REPORT_FILENAME="$report_name" ./test/bats/bin/bats \
 	--report-formatter junit \
 	--output "$report_dir" \
 	--jobs "$jobs" \
-	--parallel-binary-name parallel \
+	--parallel-binary-name rush \
 	--filter-tags "!serial" \
 	"${test_files[@]}" || status=$?
 

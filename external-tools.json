@@ -2,7 +2,7 @@
   "tools": {
     "pnpm": {
       "description": "pnpm — the fleet's package manager.",
-      "version": "11.8.0",
+      "version": "11.24.0",
       "packageManager": "pnpm",
       "repository": "github:pnpm/pnpm",
       "release": "asset",
@@ -13,35 +13,35 @@
       "platforms": {
         "darwin-arm64": {
           "asset": "pnpm-darwin-arm64.tar.gz",
-          "integrity": "sha512-kgYcLu653+Gx7l7qEtM2zMNLBvb96ABcRSkzOrbfvkndb+veMt6lHJK5r3wTfuRYlDb8Lnk/h0wUD6sP3taJ9g=="
+          "integrity": "sha512-okhM0JIHGBQGFtFIP8b7rx/nvvB511OGqSDaZNIx7xZ5H+BtGescRDRh+dKCYmJvr7ccxBCF4KOfEhybuooDvg=="
         },
         "darwin-x64": {
-          "asset": "pnpm-11.8.0.tgz",
-          "integrity": "sha512-wfXnxMskHI8XS3Q4UdgvQrgCMkr8iw8Ra5atsVqgZmSUjd42lgo7oQebpbSyndAUATW5S1tfUmNZIknWjlVfJg=="
+          "asset": "pnpm-11.24.0.tgz",
+          "integrity": "sha512-vSfjRel23LC+C3oSKCF7BJqBfiGx81XJDb59xGZxiVqLwebQbCRVRQXqk+oLRfSJon7Bv7yN5qlln8oPFvoAAA=="
         },
         "linux-arm64": {
           "asset": "pnpm-linux-arm64.tar.gz",
-          "integrity": "sha512-p1IcVUlwYf3OJQYmdHGFr08d1BOSatHEmLJSBSdoNPGqOqfslFHjSqiuZ/3yuQxxypqp8OfnM3ci3Jh7ZEBlSw=="
+          "integrity": "sha512-Uhm3cB1mb3mVN3u3YmGNlcuOwEBc1uZW0ODCRzlq6l5F8WX5TXltvBVbRrlvBWOzgv/JUDfZXVw7p691KAXeVw=="
         },
         "linux-arm64-musl": {
           "asset": "pnpm-linux-arm64-musl.tar.gz",
-          "integrity": "sha512-u5Do3diwK7FL5vk+i/x2I4q4ujdZ5gSoLNgmlt1w2C7NOjAZOpDK0CJYM4gDa5BetEwzdNpuN/gaMqzJk6I5NA=="
+          "integrity": "sha512-+50WzTfQ41rnOTHsZOQk2/+1KIo+/eH2i9Q2oYzzMXCtnb/Mx5ec2A39d2opZoFj0HONxnZkEhmYRS/wu4s5EQ=="
         },
         "linux-x64": {
           "asset": "pnpm-linux-x64.tar.gz",
-          "integrity": "sha512-Sn7hG4Xsq6pmi8TE8lpIkwRzAYzf5qtFk8zSsZWkSJFcmv5FlsrO8UP3lLRI+ppcRNYS10FMCTwXe3Nt66A0Pg=="
+          "integrity": "sha512-MOouiomOm6Q6BhISGiKoLSXILt9UqJNa3F+SyT3YqbskNNpFEaUfZtCQN95D9Yy/9NAE/KOEhPVRpZpeyNNf9A=="
         },
         "linux-x64-musl": {
           "asset": "pnpm-linux-x64-musl.tar.gz",
-          "integrity": "sha512-5WXlo2yCDmoBIue5iHRK3zNSPVAmzci+5RhuxwUA4hnH9W3TFjDnQHyAzDVnkY878mfTXE35THZeEc1OKYPmag=="
+          "integrity": "sha512-dnqWpwbm/m5OEVqDEyf3jgJ8bLylRaOt+qmU8p1tdi62jN4Y3TRri5PavopYAKRwaR6bvOHEkXghLJ88yBrlzg=="
         },
         "win-arm64": {
           "asset": "pnpm-win32-arm64.zip",
-          "integrity": "sha512-iv1hJEj9FUiVFae2cmCYjbRK0Xn27Uh+kpglT2LWvQyl4WeIOgs1ouKrptVxk3X3t7DB5vuYKbsmE+9BnoQ4FA=="
+          "integrity": "sha512-laOgqON3iksEwNFi07dzeSOG9U8+ZgYElFFqOl7DDH4xcPCKBaSUkvvj6rq9QYm1bkk4E+oQyi+jiLU6Qw2/gw=="
         },
         "win-x64": {
           "asset": "pnpm-win32-x64.zip",
-          "integrity": "sha512-jyqMgedndbck/xJjXPem5Lw7V0YtDfiUJIB81e/hmnrg3yLKPoyCKO5ILegYkLPIr945IJRcVoJZwjtog8FCqg=="
+          "integrity": "sha512-ScYF853vPjdyJQeysSV7QXDo9YY+rnJoAblMrJK+6fzF1NXDhHCPLytpLnpxsbVDXP3iicAHyM5MhBKxbSMeaw=="
         }
       }
     },
@@ -52,78 +52,104 @@
       ],
       "description": "npm — pinned, SRI-verified registry tarball; installed without self-update",
       "repository": "npm:npm",
-      "version": "12.0.0",
-      "integrity": "sha512-qzvPQfNSY7louiM6rv7dL0hi5esBGLn1lLwxbdyL5XOIssWzoYMwn8xqvWhYcZL6onTkenYSxrtKxsFrFbUFyw=="
+      "version": "12.0.2",
+      "integrity": "sha512-uIXokLlBj6FpNUTQX1PmT5pz7BlIN9QlixX+zdaSNHsd0qUXsbDLr50xzY6Sw7cJVr0uzHKDOle0swmPW/p5Qw=="
     },
     "sfw-free": {
       "description": "Socket Firewall (free tier) — malware gate on dep installs.",
-      "version": "1.13.1",
+      "version": "1.15.1",
       "repository": "github:SocketDev/sfw-free",
       "release": "asset",
       "binaryName": "sfw",
       "notes": [
         "Used when SOCKET_SECURITY_KEY is not set",
-        "Shims npm/yarn/pnpm so every install call passes through the firewall"
+        "Shims npm/yarn/pnpm so every install call passes through the firewall",
+        "sfw >= 1.14.0 exempts loopback in NO_PROXY and sends its own diagnostics to stderr; cargo still bypasses the shim in CI (SFW_SHIM_ACTIVE_CARGO) because the shim's SSL_CERT_FILE holds only the firewall CA and breaks nub's own nodejs.org fetches"
       ],
       "platforms": {
         "darwin-arm64": {
           "asset": "sfw-free-macos-arm64",
-          "integrity": "sha512-T6wBOJGdRVSI8577lGqRNzNd6Q+1vqKyaqGgOA8G4M5MU2vcsUnXuJTgP2MMZjUqROSXUlFL0mHguuxXT2QadQ=="
+          "integrity": "sha512-WmTGyJa3O56uX0elw06UX0al/3S/Is0xWDkxb+rdrdW1s/Ud86fQi0XIwFdh77AGdDg568mDbzTdo5bucPobfQ=="
         },
         "darwin-x64": {
           "asset": "sfw-free-macos-x86_64",
-          "integrity": "sha512-4G/AIY5UGU81wcepDKErY5u0nY85D8UM9nXTEPv8CR2rOV/s4IcmrkxywwZ3ipejHVQB7QmCVt0/SsqWglGikw=="
+          "integrity": "sha512-EVBcuWNBwQZ0G7dRwYPMSgFNC16i/fYa40XHgDy/oOPLNFP5lkRJq4mZGe9a0gmf79ghIkZCCINRZZ3ZrkobeQ=="
         },
         "linux-arm64": {
           "asset": "sfw-free-linux-arm64",
-          "integrity": "sha512-FYRYR52SL+KKFldW4ogYOUnTH5OSqvtXwzGFeWi0W2x+75KZcPiGzWBbhMmh0f5QtgYLV+4qdREgmKCBEayNtA=="
+          "integrity": "sha512-YkiVl7cpvwsqszMEqWs4EQK2iQUViu7Y7k/JNjz74GtuJycmoo+7ZXVAXeaaMUVg69cy5v1aWO5+r8tUY8wuHQ=="
         },
         "linux-x64": {
           "asset": "sfw-free-linux-x86_64",
-          "integrity": "sha512-waLrsPG2a7EOv0XuvXDQZGgCZ4MTtOfZh8TmGbM6gn2B6Nh6HI+15jaoKdAS9wgdTyIqTuqU+O+NtVYd+kuFaA=="
+          "integrity": "sha512-vi3s1mQ6YXoSBii8KWL/2nJ15judW6KTZKxY+nzp60VVSNR36lUAmLYfW+PH2Ta4jYu8+zHeZwXZvzWImBQFcQ=="
+        },
+        "linux-arm64-musl": {
+          "asset": "sfw-free-musl-linux-arm64",
+          "integrity": "sha512-ZMVyhhUxTamnQkIAhwjOx1vp3syFwl6nWqDL5ydL8YAdiMHC6280K28W+KPP7yeUlXekcKueNO0Sd/N4LIkSmQ=="
+        },
+        "linux-x64-musl": {
+          "asset": "sfw-free-musl-linux-x86_64",
+          "integrity": "sha512-RwsULiuR2DM6lepxNTzdMcAZvMAunMg/ccsfnccxNKBAtHIUZkriPbbAJAHUUrLG7BhgKFHr3V+P4juwrfKoEQ=="
         },
         "win-x64": {
           "asset": "sfw-free-windows-x86_64.exe",
-          "integrity": "sha512-YYnfwR6M/PHo72LSyKtpY3bAUG4F4ckToJqGx5Fkz4rwg1+48hkxuBaF3hdxHUdHPkfO5grDyoNgXGe7FojGcg=="
+          "integrity": "sha512-ZRuz2N0CmEXJuyhADFyqXU3bBDPp6UmDuXBSMoxcFyzUO/q3/5QRgVCimyOU09cG1XS9TRGvPSyL5y6sFN6D2A=="
+        },
+        "win-arm64": {
+          "asset": "sfw-free-windows-arm64.exe",
+          "integrity": "sha512-Js7zoNMFf/iUjFb30vyAs6ffSg7CXMVHuwrPUWIKh5qjAKVtDDTOdaLuUzf/KQSj8XdFfFIImrNyB1vkwce49w=="
         }
       }
     },
     "sfw-enterprise": {
       "description": "Socket Firewall (enterprise tier) — selected when SOCKET_SECURITY_KEY is set.",
-      "version": "1.13.1",
+      "version": "1.15.1",
       "repository": "github:SocketDev/firewall-release",
       "release": "asset",
       "binaryName": "sfw",
       "notes": [
         "Used when SOCKET_SECURITY_KEY is set (the one env var every Socket product reads)",
-        "Same shims as sfw-free, broader ecosystem support (Ruby, .NET, Go on Linux)"
+        "Same shims as sfw-free, broader ecosystem support (Ruby, .NET, Go on Linux)",
+        "sfw >= 1.14.0 exempts loopback in NO_PROXY and sends its own diagnostics to stderr; cargo still bypasses the shim in CI (SFW_SHIM_ACTIVE_CARGO) because the shim's SSL_CERT_FILE holds only the firewall CA and breaks nub's own nodejs.org fetches"
       ],
       "platforms": {
         "darwin-arm64": {
           "asset": "sfw-macos-arm64",
-          "integrity": "sha512-ZDy2C6leKyTHZFvcZZpG2eQqVzs7buk+Hs92fkaMYME829QzyxdGQVVgwEVaGJpedGdUvhksKKcvT9IynI1kxg=="
+          "integrity": "sha512-9X5UyqYFC4SdjdF76YmvVRVVJJYa1O6WIvtrRq1vaAH/+8nEuU7ALtv8W04Ft6ntswXeswMtV0pUPrx8DHh6sg=="
         },
         "darwin-x64": {
           "asset": "sfw-macos-x86_64",
-          "integrity": "sha512-cm76we0sn7kqPOya/ZGQpPyhjRDyFT5lHigeT5Qso+QaPL6Cmwi0FVs2L7l63j+WR/9eYPU1WjjGOto5NbWsEQ=="
+          "integrity": "sha512-6nHvZ8u4k3gK0o0goXjJ8JzdjASLMLIx2AmfyMGBw+Mfw7m6JFNTnMUHDaHFJHR15JTxRZYvQMgsFLKLghaeag=="
         },
         "linux-arm64": {
           "asset": "sfw-linux-arm64",
-          "integrity": "sha512-9qPi3mobBfyq1k+pD2GDG0tZkhy16f7FXE9oGiwmwPvy5PXwnlzqEXnYld3qGsKIVwNhunev/If26oROTHbrHA=="
+          "integrity": "sha512-8hQR7e2RytYIC4ymlzcXgAmO9+B2xDPP0exSm02m2gTNxuqz24cXNcdpPYOxPO7Bw7FQKmTs/y6txl5D8P+GlQ=="
         },
         "linux-x64": {
           "asset": "sfw-linux-x86_64",
-          "integrity": "sha512-lu9h8UzDZt34gdCEVHBGW6goE1Ayykq413EovV5B4nG7jBK27mI0GQstzVbWXA3wWaweT39PehXGtVpdqIDGSA=="
+          "integrity": "sha512-HtWaqw2kAPQ/7vv0DY+jfUdx6Z+66NF5K/YhQO4OjO1qG9yA/pJeDADt7NiG4We8I3iFhyCbdsn19o1emPKheg=="
+        },
+        "linux-arm64-musl": {
+          "asset": "sfw-musl-linux-arm64",
+          "integrity": "sha512-xhShMq0bLrx1UYFUM/nxLhACTevKDveRO9oa0hCaSQNCd7AK4Lxiw4IHiz4K3k4nkoj779sO2BQPvQHSgDsFPg=="
+        },
+        "linux-x64-musl": {
+          "asset": "sfw-musl-linux-x86_64",
+          "integrity": "sha512-+Xd2LUGA/xqD/0e1WAdiasRY0EA1ROovm448YlnFaiYTqs0sP3MphLFmanY7HpK+GxTQuaaOmRN7fjwr0cN7VQ=="
         },
         "win-x64": {
           "asset": "sfw-windows-x86_64.exe",
-          "integrity": "sha512-URZXauIsdUT12E2KTc4sfsxRmJm7nRJzAgM+IYGX4Xq+X0cl/eAbH5SpYIJKpsnW9csSztW9ceyPhlM+f3neIQ=="
+          "integrity": "sha512-vZdptPsQPYnBvRR3S+6bikfk3WdkE+0d1a0CoPmSY8QPdfOG3jC4JxdTMN0FvHUzwR5iZQhfomJWq73F/PDWgg=="
+        },
+        "win-arm64": {
+          "asset": "sfw-windows-arm64.exe",
+          "integrity": "sha512-IVQ7FWCGT1ivaA13G2Gcau28eyjtjEorLrgSrjeZGaQQzrB9b+1yQ9V/oplk0JFBLOA116P4kUvZunP/rxRkrw=="
         }
       }
     },
     "zizmor": {
       "description": "GitHub Actions security linter — audits .github/ for workflow-injection / credential-leak patterns.",
-      "version": "1.26.1",
+      "version": "1.29.0",
       "repository": "github:zizmorcore/zizmor",
       "release": "asset",
       "notes": [
@@ -133,23 +159,23 @@
       "platforms": {
         "darwin-arm64": {
           "asset": "zizmor-aarch64-apple-darwin.tar.gz",
-          "integrity": "sha512-UfLPPdYejR8fvrFwr9Tos7LKFvqr7YcAHWZlAmeo7imYI/fIucYnCY6HeDyk2cbFUvDpQTdps6WQS1QpqCtTfQ=="
+          "integrity": "sha512-lXyZ6VFPvuPZdn/j+ZKHNTrwDelq2mpGmZCNT8QEvpKxvg5v3cP+gLLTxoBo3q591UuPLpLpgQ29eMXu1FnSeg=="
         },
         "darwin-x64": {
           "asset": "zizmor-x86_64-apple-darwin.tar.gz",
-          "integrity": "sha512-SCbcEzF/zy2qNuNaocLPIUC4Wuq5GnHt0iUFve3qx6bJyFdzU6pDFZkF64dojGC7M5gAcK/4acXGPx3YnMDy/g=="
+          "integrity": "sha512-PTiTH43f43WY7yVjC0Mvigsh8XoQzDMH9/bcvhEVpl0i8nO7HBS47uvgolLh5McSCI9u8CKvCHqKm132ku3FuQ=="
         },
         "linux-arm64": {
           "asset": "zizmor-aarch64-unknown-linux-gnu.tar.gz",
-          "integrity": "sha512-TkGvwt0zYdmiJ7LZmy6Bz9CdkqcuEpFKhXUK9m0MhSPxBx2gYBsrw6OxGSttMEQ3bvxdvyG6rqbnMgjyDZB1zA=="
+          "integrity": "sha512-VuBT1NwuQez9OSaucn3fkdvRmd0cRoLomozfnebDnQEtxNbcq+GJAVxeYusS0t3PTDNcC4oOBtEIh6AiyvZbLQ=="
         },
         "linux-x64": {
           "asset": "zizmor-x86_64-unknown-linux-gnu.tar.gz",
-          "integrity": "sha512-zTMERMDd3JfaRX12klj2fhZGDyrXeLkVUY1QJkCv8RRmAa9uVuH88gHOnv4CQtC5hXS7FPRJzvCVOnw38gV83g=="
+          "integrity": "sha512-+ud35oavU/AEGqKoNZVg8b/dwuFuKM/TfujGmXomnV3mScdhmavrkiNpx/9vUbQ+htk7eYfK2nRStzIVWA19KA=="
         },
         "win-x64": {
           "asset": "zizmor-x86_64-pc-windows-msvc.zip",
-          "integrity": "sha512-Pijh/CrrOAkZzLiTr2LTHdI8d6+5Ql6B+suY6fXVmL8UVa+4Q36hHL5K67iRFz03v/V/UcrY6+dfhnmot/xfww=="
+          "integrity": "sha512-r6YP+e2GsOklaxEf9JHrixkeR0NNkVAaMGcvwLxkt1JlYJpxFizH/LzhcsMmPSrLkELf6LNB2JL8hpDa5dBAww=="
         }
       }
     },

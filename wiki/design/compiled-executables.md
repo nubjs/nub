@@ -298,7 +298,7 @@ The augmentations reach an artifact through **three** mechanisms, chosen per aug
 | kind | examples | how it travels |
 | --- | --- | --- |
 | **Transform-time** | TypeScript, JSX, decorators + metadata, data-format imports | the bundler applies it; the result is in the payload |
-| **Polyfill** | Temporal, URLPattern, float16, browser-shape Worker, navigator + locks, the `abort-controller` clobber | `runtime/compile-preamble.mjs` is bundled in, and `__nub_compile_bootstrap.cjs` is loaded first through `--require` to hand it the builtin accessors it needs |
+| **Polyfill** | Temporal, URLPattern, float16, browser-shape Worker, navigator + locks, the `abort-controller` clobber | `runtime/compile-preamble.mjs` is bundled in; `__nub_compile_bootstrap.cjs` hands it the builtin accessors it needs, as a `--require` preload when the payload reaches `child_process` or a worker and otherwise from a path the launcher passes in the environment. A polyfill the target has natively is stripped from the bundle; one it lacks (Temporal, URLPattern, Float16Array) is installed as a lazy global whose package evaluates on the first read, never at start. On a target with Node's compile cache (22.1+) the chunk is shaped so the cache holds the runtime's startup functions after the first run, rather than their being compiled from source on every start |
 | **Node flag** | `--experimental-sqlite`, `--experimental-websocket`, `--experimental-eventsource`, `--experimental-webstorage`, `--experimental-wasm-modules`, `--enable-source-maps` | **computed at RUN time by the launcher**, through the same `flags::compute_inject_flags` the `nub` CLI uses |
 
 The third row is the one worth stating plainly, because baking it would be the obvious wrong answer. Which flags a Node needs is a function of its VERSION, and for `--smol` the version is not known until the machine that runs the binary is known. So the launcher links `nub-core` and asks the same policy at startup, against the Node it is about to spawn. A build-time snapshot would be wrong for `--smol` and would rot for embed the moment the flag bands moved.
@@ -387,22 +387,22 @@ This is worth stating as a policy rather than leaving as an accident, because th
 
 Verified by running an artifact in a directory carrying a hostile `.env`, `tsconfig.json`, `package.json`, `nub.jsonc`, `.npmrc` and `.node-version` at once: a `.env` that would inject a variable, a tsconfig that would change the JSX and target settings, a package.json redirecting `main`/`exports`/`imports`, and a Node pin naming a different version. The output is identical to the same binary run in an empty directory. The `nub` CLI in that same directory does read `nub.jsonc` and fails on it, which is what makes the artifact's silence evidence rather than coincidence.
 
-One caveat belongs here, because it is a real way to make a binary fail to start and it is Node's rather than Nub's. The artifact bootstraps through `--require`, and Node synthesizes that preload's parent module at the current directory — so a **malformed** `package.json` sitting there fails resolution with `ERR_INVALID_PACKAGE_CONFIG` before any user code runs. Plain `node --require <anything>` in the same directory fails identically with no Nub involved, and a *valid* `package.json` of any shape has no effect. Inherited Node behavior with a narrow trigger, not configuration being read.
+One caveat belongs here, because it is a real way to make a binary fail to start and it is Node's rather than Nub's. An artifact whose payload reaches `child_process` or a worker bootstraps through `--require`, and Node synthesizes that preload's parent module at the current directory — so a **malformed** `package.json` sitting there fails resolution with `ERR_INVALID_PACKAGE_CONFIG` before any user code runs. Plain `node --require <anything>` in the same directory fails identically with no Nub involved, and a *valid* `package.json` of any shape has no effect. Inherited Node behavior with a narrow trigger, not configuration being read. An artifact that bootstraps from the preamble instead has no preload and starts normally there (verified with a `{` for a `package.json`: the `Worker`-mentioning binary dies with that code, the plain one prints its output).
 
 ## Startup
 
 Compare a compiled artifact against running the same bundle on an installed Node, rather than against an empty script: an empty script measures Node's floor and charges Nub for work the application would pay under any bundler.
 
-Measured on a hello-world program, warm, taking the minimum of forty runs and subtracting the harness floor:
+Measured on a hello-world program, warm, taking the minimum of 120 runs:
 
 | | |
 | --- | --- |
-| `node -e 0` | 27.0 ms |
-| a neutral bundle on installed Node | 29.8 ms |
-| the same program's bundle on installed Node | 35.0 ms |
-| the compiled artifact | 41.6 ms |
+| `node -e 0` | 31.3 ms |
+| a neutral bundle on installed Node | 33.3 ms |
+| the same program's bundle on installed Node | 38.0 ms |
+| the compiled artifact | 45.3 ms |
 
-The artifact costs 11.8 ms more than bundling the program and running it on an installed Node, of which 6.6 ms is the launcher and the second process it starts. Node's own startup accounts for most of the remainder and is not something Nub can reduce: the artifact runs stock Node.
+The artifact costs 12.0 ms more than the neutral-bundle row, and 7.3 ms more than the same program's own bundle — the launcher's cache verification plus loading the Node image it hands control to. Two costs that used to sit in that gap are gone: on Unix the launcher replaces itself with Node via `exec` instead of starting a second process and forwarding signals to it, and an artifact whose module graph is fully bundled — no `--external`, no retained computed `import()`, no verbatim payload file — skips the V8 syntax flags, which when non-default at startup make Node reject its embedded builtin code cache for every internal module compiled afterwards. (Measured while `--js-defer-import-eval` still rode argv; it has since moved to a runtime flip that a program without the syntax never triggers, so on the run path the cost is gone for such programs too.) Node's own startup accounts for most of the remainder and is not something Nub can reduce: the artifact runs stock Node.
 
 That overhead is close to fixed, so hello-world is the worst case for it. The 122-package application starts in about 88 ms, where the extra work is the application's own modules rather than anything the launcher adds. Read the table as a floor the artifact pays once, not as a proportional cost.
 

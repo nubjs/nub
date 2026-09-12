@@ -12,6 +12,8 @@ name: winget manifest
 
 on:
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     paths:
       - "winget/**"
       - ".github/workflows/winget-validate.yml"
@@ -27,6 +29,7 @@ permissions: {}
 jobs:
   install-from-manifest:
     name: winget install --manifest (windows)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1

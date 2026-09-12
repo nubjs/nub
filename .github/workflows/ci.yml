@@ -4,6 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+    # PR CI IS OPT-IN, and `labeled` is deliberately the ONLY pull_request type:
+    # opening a PR and pushing to it start nothing. A run is asked for explicitly with
+    # `gh pr edit <n> --add-label ci`; ci-optin.yml strips the label again the moment it
+    # fires, so that same one command re-triggers and the label is a button rather than
+    # a state. Every job below repeats the matching `github.event.label.name == 'ci'`
+    # guard, because a `labeled` event fires for ANY label — without it, adding
+    # `bug` would launch the matrix. WHY: review rounds re-ran and then cancelled the
+    # whole cross-platform matrix on every push, which is where most of the runner pool
+    # went. push:main and the nightly schedule are untouched, so trunk keeps full
+    # automatic coverage and trunk-red.yml still reports anything a skipped PR run
+    # would have caught.
+    types: [labeled]
     branches: [main]
   schedule:
     # Nightly full cross-OS matrix at 06:00 UTC (offset from the lockfile-roundtrip
@@ -18,8 +30,12 @@ on:
 # No-scope default token; each job opts into the read scopes its steps use.
 permissions: {}
 
+# The event name is part of the group so a trunk push cannot cancel the nightly
+# schedule run. rust-cache saves in a post-step that a cancelled job never reaches,
+# and 34 of the last 39 push:main runs were cancelled by the next push — so the
+# nightly is the one run guaranteed to refresh every trunk-scoped cache key.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -39,6 +55,7 @@ jobs:
   # instead of duplicating workflow files or hand-maintaining parallel matrices.
   matrix-plan:
     name: Plan matrices
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -98,6 +115,13 @@ jobs:
             scripts:
               - 'scripts/**'
               - 'package.json'
+              # skip.test.mjs, the cross-runtime harness's skip classifier
+              - 'tests/cross-runtime/**'
+              # ci-optin.test.mjs asserts the opt-in guard over every workflow FILE, so a
+              # workflow-only change has to reach `test:scripts`. Without this the one edit
+              # the lint exists to catch — a new job added without the `ci` label guard —
+              # would set run_rust but not run_scripts, and skip its own gate.
+              - '.github/workflows/**'
               # soak's pinned surfaces (see the header of scripts/soak/soak.mts)
               - '.cargo/config.toml'
               - '.npmrc'
@@ -174,7 +198,7 @@ jobs:
   check:
     name: Check
     needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -199,7 +223,15 @@ jobs:
         with:
           shared-key: ci-check
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --manifest-path crates/nub-phantom/Cargo.toml --all-targets
+      # `--locked`, because this crate is its OWN workspace with its own tracked
+      # `Cargo.lock` — the fifth in the repo, alongside the root, nub-native,
+      # nub-launcher and vendor/aube. Without it this step silently re-resolves
+      # around a stale lock, so a manifest change that should have moved the lock
+      # passes here and the tracked file keeps describing a dependency graph that
+      # no longer exists. That is not hypothetical: switching this crate's gzip
+      # backend left the lock still naming the old CMake-backed one, and nothing
+      # in the build caught it. Nothing else covers this workspace either.
+      - run: cargo check --locked --manifest-path crates/nub-phantom/Cargo.toml --all-targets
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
@@ -221,7 +253,7 @@ jobs:
   clippy:
     name: Clippy
     needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -310,7 +342,7 @@ jobs:
   embed-runtime:
     name: embed-runtime verify (${{ matrix.os }})
     needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -365,7 +397,7 @@ jobs:
   windows-embed-roundtrip:
     name: Windows embedded runtime and compile
     needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: windows-latest
     permissions:
       contents: read
@@ -375,11 +407,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      # Throwaway job: read-only cache (save-if: false) so it never churns the budget.
+      # `save-if: main`, NOT `save-if: false`. This key had no writer anywhere in the
+      # repo, so every run — PR and trunk alike — logged "No cache found." and paid a
+      # cold ~24 min release build of nub.exe before reaching the first gate. A
+      # read-only cache is only cheap when something else fills it; with no writer it
+      # is the most expensive setting available. Trunk fills it, PRs read it.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: ci-win-embed-roundtrip
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             crates/nub-native
@@ -424,7 +460,23 @@ jobs:
       # the staged runtime/ into the binary; the binary extracts it on first run. The
       # feature (not the profile) is what triggers the include_bytes! blob arm + the
       # find_preload extraction path, so this exercises the same code a release build does.
+      # Static MSVC CRT, matching what release.yml ships — this leg is where a link
+      # failure surfaces on a PR instead of during a release. Rust links the CRT
+      # dynamically by default, which puts VCRUNTIME140.dll and VCRUNTIME140_1.dll in
+      # nub.exe's import table; on a clean Windows Server 2022 the process then dies at
+      # 0xC0000135 with EMPTY stderr, because the loader fails it before any code runs.
+      #
+      # Set per-STEP rather than per-job deliberately: the addon built above is a cdylib
+      # loaded into the user's node.exe and MUST keep the dynamic CRT, or it gets a
+      # private heap and any allocation crossing that boundary becomes corruption.
+      # `+crt-static` is STICKY — a later `-crt-static` does not undo it, in either
+      # order and with no warning — so the flag must never reach a build that has to
+      # stay dynamic. That is also why this is an env var here and not a root
+      # `.cargo/config.toml`: cargo CONCATENATES rustflags down the directory tree, so a
+      # root config would reach crates/nub-native with no way to opt back out.
       - name: Build release nub.exe (--features embed-runtime,compile)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build -p nub-cli --release --features embed-runtime,compile
       # `nub compile` injects this real release launcher into the artifact. Build
       # it in its own workspace, as release.yml does; it is intentionally not a
@@ -432,6 +484,29 @@ jobs:
       - name: Build release nub-launcher template
         shell: bash
         run: (cd crates/nub-launcher && cargo build --locked --release)
+      # GATE: neither shipped Windows binary may depend on the VC++ redistributable.
+      #
+      # This runner already HAS the redistributable, so every functional test above
+      # passes whether or not the static CRT survived — deleting
+      # crates/nub-launcher/.cargo/config.toml or the RUSTFLAGS above would go
+      # unnoticed here and fail only on a user's clean machine, silently, at
+      # 0xC0000135 with nothing on stderr. Nothing else in CI can see that, so the
+      # linkage contract is asserted directly against the artifact.
+      #
+      # It walks the PE import directory rather than searching the file for the string
+      # `VCRUNTIME140.dll`, which is the shortcut that looks equivalent and is not: a DLL
+      # name is ordinary ASCII, so any copy anywhere matches. Measured on Microsoft's own
+      # node.exe, a whole-file search reports five VC++ DLLs it does not import. The
+      # script also refuses a file whose import table it could not read, so the gate
+      # cannot pass by finding nothing.
+      - name: Verify no VC++ redistributable dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in target/release/nub.exe crates/nub-launcher/target/release/nub-launcher.exe; do
+            test -f "$f" || { echo "::error::$f not found — this gate must not be skipped silently"; exit 1; }
+            node scripts/pe-imports.mjs --check "$f" > /dev/null
+          done
       # The WHOLE point of a Windows runner is the on-access AV heuristic (process
       # writes a DLL then dlopen's it). GitHub-hosted runners ship with real-time
       # protection OFF, so try to turn it ON before the round-trip so the scan is
@@ -469,7 +544,21 @@ jobs:
           # Cold, isolated cache so the FIRST run is forced to extract (proves the
           # DLL write + dlopen). cache_dir() honors XDG_CACHE_HOME on every platform,
           # so the extracted dir is <XDG_CACHE_HOME>\nub\runtime-<key>.
-          $cache = Join-Path $env:RUNNER_TEMP "nub-embed-cache"
+          # NOT under RUNNER_TEMP, which is on D: — and about one windows-latest
+          # image in six gives D:\a\_temp an EFFECTIVE
+          # `Authenticated Users: Modify` ACE. `Modify` contains DELETE, which is in
+          # the runtime cache's non-leaf dangerous mask, so nub correctly refuses the
+          # ancestor, relocates the cache, and leaves no runtime-* dir where the
+          # assertions below look for one. That is nub behaving as designed on a
+          # volume where any authenticated user could delete the cache; only an
+          # ancestor nub owns is repairable, and this one belongs to the runner.
+          #
+          # Measured, not guessed: a 12-shard probe walking the real predicate found
+          # RUNNER_TEMP unusable on 1 shard while USERPROFILE, LOCALAPPDATA and TEMP
+          # were usable on all 12 — including that shard. USERPROFILE is on the system
+          # volume and carries no such grant. (`TEMP` also works but is an 8.3 short
+          # path here, which is a poor thing to compare against.)
+          $cache = Join-Path $env:USERPROFILE "nub-embed-cache"
           if (Test-Path $cache) { Remove-Item -Recurse -Force $cache }
           $env:XDG_CACHE_HOME = $cache
           $nubRoot = Join-Path $cache "nub"
@@ -681,17 +770,30 @@ jobs:
   # extract -> verify -> dlopen -> execute -> warm reuse -> R2 zero-false-positive +
   # self-heal. Non-blocking (NOT in ci-gate); the verify LOGIC is ci-gate-required via
   # the embed-runtime macos leg. Delete alongside windows-embed-roundtrip post-decision.
+  #
+  # It now runs on trunk as well as pull requests, for the cache below: the job builds a
+  # release binary from scratch, and a PR-only job can never populate a trunk-scoped
+  # cache, so it was cold on every single run. Trunk pays that cold build once per
+  # Rust-relevant push; every PR after it restores. It is also gated on `run_rust` — a
+  # docs- or site-only PR cannot change what this builds, yet before the gate this job
+  # was the ENTIRE wall time of such a PR's CI run (~17 min on a macos-14 runner, while
+  # every Rust job around it correctly skipped).
   macos-embed-roundtrip:
     name: macOS embed round-trip (TEMPORARY, PR #175)
-    if: github.event_name == 'pull_request'
+    needs: matrix-plan
+    if: >-
+      (github.event_name != 'pull_request' || github.event.label.name == 'ci') &&
+      needs.matrix-plan.outputs.run_rust == 'true' &&
+      (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     runs-on: macos-14
     permissions:
       contents: read
-    # Its fixture is `enum`-only, which needs no vendored helper, so this leg covers the
-    # extract/dlopen round-trip rather than the transpile path. Its Windows twin DOES
-    # stage node_modules (for the offline `--smol` compile gate) and so keeps the gate on.
-    env:
-      NUB_ALLOW_INCOMPLETE_RUNTIME: "1"
+    # This leg now stages the vendored runtime like its Windows twin, so the binary it
+    # builds is COMPLETE, and `NUB_ALLOW_INCOMPLETE_RUNTIME` is gone with it — AGENTS.md
+    # forbids that flag on any binary meant to be run, and this one is uploaded for
+    # people to run. Staging a tree is not the same as PROVING it resolves, so the
+    # round-trip fixture below carries the legacy-decorator detector rather than `enum`
+    # alone; `enum` inlines and would pass over an empty node_modules.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -701,13 +803,52 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: ci-mac-embed-roundtrip
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             crates/nub-native
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
+      - run: npm install --no-audit --no-fund --loglevel=error
+      # Stage the vendored helpers into runtime/ so the embedded blob can transpile
+      # anything, not just the erasable-syntax fixture below. The list is exactly the
+      # one nub-core/build.rs enforces once NUB_ALLOW_INCOMPLETE_RUNTIME is gone, and
+      # the copies match the two sibling staging steps in this file.
+      #
+      # `jsbi` is TRANSITIVE (via @js-temporal/polyfill) yet copied from the root,
+      # which holds only because npm hoists it there as a real directory — verified by
+      # running this package.json through `npm install` rather than assumed. Under an
+      # isolated layout it sits in the store with no root entry, so a future installer
+      # swap here breaks this line before it breaks anything else. The Windows twin
+      # pins `--node-linker hoisted` for the same reason.
+      - name: Stage runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf runtime/node_modules
+          mkdir -p \
+            runtime/node_modules/@js-temporal \
+            runtime/node_modules/@oxc-project \
+            runtime/node_modules/@petamoriken
+          cp -R node_modules/@js-temporal/polyfill runtime/node_modules/@js-temporal/
+          cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
+          cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
+          cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
+      # Without the typosquat corpus, aube-resolver/build.rs ships an EMPTY primer and
+      # says so only in a cargo warning — the binary then falls back to network
+      # packument fetches at exit 0, which would silently turn any install benchmark
+      # run against this artifact into a measurement of the network. AUBE_REQUIRE_PRIMER
+      # on the build below turns that warning into a hard failure; this step supplies
+      # what it then demands. Same pair as mac-build.yml, and the reason is the same.
+      - name: Generate typosquat popularity corpus
+        run: |
+          set -euo pipefail
+          cd vendor/aube
+          node scripts/generate-primer.mjs \
+            --top 1 \
+            --out "$RUNNER_TEMP/primer-discard.json" \
+            --popular-names-out crates/aube-resolver/data/popular-top100000-v1.json
       - name: Build + stage release nub-native addon
         shell: bash
         run: |
@@ -716,7 +857,19 @@ jobs:
           mkdir -p runtime/addons
           cp target/release/libnub_native.dylib runtime/addons/nub-native.node
       - name: Build release nub (--features embed-runtime)
+        env:
+          AUBE_REQUIRE_PRIMER: "1"
         run: cargo build -p nub-cli --release --features embed-runtime
+      # The libsui signing-determinism test is `cfg(target_vendor = "apple")`, and the
+      # per-OS launcher step in the test job reaches macOS only on push:main and
+      # nightly. This is the one macOS leg every pull request runs, so a
+      # filename-dependent signature regresses here rather than on the next main run.
+      - name: libsui units (macOS, pull requests)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd crates/nub-launcher
+          cargo test --locked -p libsui --lib
       - name: Round-trip — extract, verify, dlopen, execute, warm cache, R2 self-heal
         shell: bash
         run: |
@@ -731,14 +884,37 @@ jobs:
           work="$RUNNER_TEMP/fixture"
           rm -rf "$work"; mkdir -p "$work"
           fixture="$work/embed.ts"
-          # `enum` is NON-ERASABLE — see the Windows twin of this step. Node strips
-          # type ANNOTATIONS natively since 23.6, so a types-only fixture proves
-          # nothing about nub; Node rejects `enum`, so this file executes only if
-          # the extract -> dlopen -> transpile round-trip really happened.
+          # Two constructs, because they fail on different halves of the blob — the
+          # same pair the Windows twin carries, for the reasons documented there.
+          #
+          # `enum` is NON-ERASABLE: Node has stripped type ANNOTATIONS natively since
+          # 23.6, so a types-only fixture proves nothing about nub. Node rejects
+          # `enum`, so this file executes only if extract -> dlopen -> transpile
+          # really happened.
+          #
+          # `enum` alone is BLIND to the vendored node_modules, though — oxc inlines
+          # it and it pulls no helper. That is why this job could stage a runtime
+          # tree, upload a binary built from it, and never once prove the tree
+          # resolves. The legacy DECORATOR is the detector: its transpiled output
+          # requires `@oxc-project/runtime/helpers/decorateMetadata`, and an extracted
+          # tree has no parent node_modules to reach it through — only its own
+          # (`vendored_node_path`, crates/nub-core/src/node/spawn.rs). Measured by the
+          # Windows twin against a binary staged with an EMPTY runtime/node_modules:
+          # the enum-only fixture exits 0 and prints the success marker, this one
+          # exits 1 with MODULE_NOT_FOUND.
+          #
+          # CommonJS entry (no package.json) is deliberate and depends on the Node 24
+          # pin above: down-levelling a legacy decorator is version-independent, but
+          # RESOLVING its helper from a CJS entry is unsupported below require(esm)
+          # (Node <20.19 / 22.0-22.11).
+          cat > "$work/tsconfig.json" <<'EOF'
+          {"compilerOptions":{"experimentalDecorators":true,"emitDecoratorMetadata":true}}
+          EOF
           cat > "$fixture" <<'EOF'
           enum Answer { Value = 42 }
-          const greeting: string = "embed-roundtrip-ok";
-          console.log(`${greeting}-${Answer.Value}`);
+          function tag(_t: any, _k: string, d: PropertyDescriptor) { return d; }
+          class Probe { @tag greet(): string { return "embed-roundtrip-ok"; } }
+          console.log(`${new Probe().greet()}-${Answer.Value}`);
           EOF
 
           # --- First run: extract -> verify -> dlopen -> transpile -> execute ---
@@ -782,10 +958,77 @@ jobs:
           echo "R2 self-heal confirmed: tampered dylib detected, re-extracted, restored, still executed"
           echo "ROUND-TRIP OK (macOS): extract -> verify -> dlopen -> execute -> warm reuse -> R2"
 
+      # PUBLISH THE BINARY THIS JOB ALREADY BUILT. The release build above is the whole
+      # cost of a downloadable macOS dev build, and it is paid by every run that reaches
+      # here either way (every Rust-relevant PR, plus trunk, which is what fills the
+      # cache) — so the artifact is worth seconds of upload rather than a second job. One
+      # file, not two: --features embed-runtime carries the addon and the vendored
+      # runtime inside the binary, so this is standalone and needs no checkout to run.
+      # The round-trip step above tampers only with the EXTRACTED cache copy, so
+      # target/release/nub is untouched by the time it is staged here.
+      - name: Stage the downloadable binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/nub dist/nub
+          # arm64 macOS SIGKILLs an unsigned binary, so verify rather than let a
+          # developer discover it as what looks like a build bug.
+          codesign --verify --verbose=1 dist/nub || codesign -s - dist/nub
+          file dist/nub
+          (cd dist && shasum -a 256 nub | tee SHA256SUMS)
+          ./dist/nub --version
+          # The one step a download really does need. A BROWSER download carries
+          # com.apple.quarantine, which Gatekeeper enforces before anything else, and
+          # an ad-hoc signature can never satisfy Gatekeeper — only notarization can.
+          # `gh run download` sets no quarantine, so that path needs nothing at all.
+          #
+          # The ad-hoc signature itself SURVIVES the artifact zip (measured on the
+          # pr867 artifact: `codesign -dv` reports adhoc, linker-signed, and the
+          # checksum matches), so re-signing is a fallback for a broken signature
+          # rather than a routine step. `spctl` rejecting the binary is expected and
+          # is not that: it assesses against notarization, which no dev build has.
+          cat > dist/HOW-TO-RUN.txt <<'EOF'
+          shasum -a 256 -c SHA256SUMS
+          xattr -d com.apple.quarantine nub 2>/dev/null || true
+          chmod +x nub && ./nub --version
+          # if macOS kills it, the signature did not survive: codesign -s - nub
+          EOF
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          # The job also runs on trunk now, where pull_request.number is empty; name the
+          # trunk artifact by SHA so it is not a bare `-pr` suffix.
+          name: nub-macos-arm64-${{ github.event_name == 'pull_request' && format('pr{0}', github.event.pull_request.number) || format('main-{0}', github.sha) }}
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  compile-code-cache:
+    name: Compile code cache (${{ matrix.os }}, node 26)
+    needs: matrix-plan
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: '26'
+      - run: node --test crates/nub-cli/src/compile/code_cache.test.cjs
+
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})
     needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -801,10 +1044,14 @@ jobs:
     # upgrades itself to enterprise when the secret appears.
     env:
       SOCKET_SECURITY_KEY: ${{ secrets.SOCKET_SECURITY_KEY }}
-      # cargo test spawns nub test binaries that talk to LOCAL registry
-      # mocks; routing `cargo` through the sfw shim would wrap that traffic
-      # in the firewall proxy and mangle it (upstream ECONNRESET, 405s on
-      # registry writes). The sentinel makes the cargo shim exec the real
+      # cargo test spawns nub test binaries that fetch from nodejs.org (Node
+      # provisioning on the sub-22.15 legs, the embedded runtime for the
+      # compile tests). The cargo shim exports sfw's SSL_CERT_FILE — a
+      # bundle holding only the firewall's own CA — which REPLACES the
+      # trust store for those fetches, so every ubuntu test leg fails with
+      # `invalid peer certificate: UnknownIssuer` (sfw 1.15.1, measured
+      # 2026-09-05; the loopback registry mocks are fine since 1.14.0
+      # exempts localhost). The sentinel makes the cargo shim exec the real
       # cargo directly — pnpm/npm installs stay firewalled.
       SFW_SHIM_ACTIVE_CARGO: "1"
     strategy:
@@ -929,6 +1176,13 @@ jobs:
         shell: bash
         env:
           MATRIX_NODE: ${{ matrix.node }}
+          # download() attaches this to github.com fetches only (release
+          # assets: pnpm/sfw binaries), for the authenticated rate limit —
+          # unauthenticated runners share a per-IP budget. It grants no
+          # extra reach: every pinned asset repo is public, and a
+          # repo-scoped Actions token cannot read another org's private
+          # one anyway.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           # The soak scripts are erasable-TS .mts and need a type-stripping
           # Node; the compat legs run them with the side-installed 26.5
@@ -1003,7 +1257,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo "__NUB_BUSYBOX_EXE=$GITHUB_WORKSPACE/vendor/busybox-w32/busybox64.exe" >> "$GITHUB_ENV"
+      - name: Standalone runner package fixtures
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.15'
+        run: tests/runner/run-matrix.sh
       - run: cargo test
+      - name: Constrained-memory GC acceptance
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        run: python3 tests/gc-tuning/verify.py --nub target/debug/nub
       # `compile` is not a default feature, so the bare `cargo test` above never
       # builds `src/compile/**` — including the bundler's emitted-chunk validity
       # gate, whose whole job is to stop `nub compile` reporting success on output
@@ -1032,12 +1292,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --manifest-path crates/nub-launcher/Cargo.toml
+          # `cd`, not `--manifest-path`: cargo discovers `.cargo/config.toml` by walking up
+          # from the WORKING DIRECTORY, so the manifest form silently skipped the launcher's
+          # own config and built it with the dynamic MSVC CRT while every shipped path
+          # (release.yml, compile-native.yml, the Windows embed job) builds it static. This
+          # step would then have tested a launcher linked unlike the one users get.
+          (cd crates/nub-launcher && cargo build --locked)
           launcher="$GITHUB_WORKSPACE/crates/nub-launcher/target/debug/nub-launcher"
           if [[ "$RUNNER_OS" == "Windows" ]]; then launcher="$launcher.exe"; fi
           test -f "$launcher"
           export __NUB_LAUNCHER_TEMPLATE="$launcher"
           cargo test -p nub-cli --features compile --test integration compile_artifact_process_bootstrap_topology -- --exact
+          compiler="$GITHUB_WORKSPACE/target/debug/nub"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then compiler="$compiler.exe"; fi
+          node tests/compile-code-cache/probe.mjs \
+            --nub "$compiler" --target "$(node -p process.versions.node)" \
+            --out "$RUNNER_TEMP/nub-compile-code-cache"
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             cargo test -p nub-cli --features compile --test integration
           fi
@@ -1047,10 +1317,20 @@ jobs:
       # where the inherit-only-ACE defect lived: it made every Windows cache base
       # unusable, and no CI leg could see it. The launcher is already built above,
       # so covering the OS legs it actually targets costs one `cargo test`.
-      - name: nub-launcher cache chain (per-OS)
+      - name: nub-launcher cache chain + libsui units (per-OS)
         if: matrix.node == '24' && runner.os != 'Linux'
         shell: bash
-        run: cd crates/nub-launcher && cargo test --locked
+        run: |
+          set -euo pipefail
+          cd crates/nub-launcher
+          cargo test --locked
+          # vendor/libsui reaches every workspace as a path/patch dependency and is
+          # a MEMBER of none, so until now nothing anywhere ran its unit tests —
+          # `cargo test -p libsui` from the repo root fails outright. This
+          # workspace patches it in, so `-p` resolves here. `--lib` scopes it to
+          # the units: a crate-doc doctest reads a fixture file that does not
+          # exist and has always failed.
+          cargo test --locked -p libsui --lib
       # The default compile shape builds from the runtime extracted out of the
       # feature-on nub binary, so it cannot resolve these package imports from the
       # checkout's root node_modules. Copy the same locked pure-JS set release.yml
@@ -1126,7 +1406,7 @@ jobs:
   pnp:
     name: Yarn PnP (${{ matrix.os }}, node ${{ matrix.node }})
     needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -1206,7 +1486,7 @@ jobs:
   fmt:
     name: Format
     needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1228,7 +1508,7 @@ jobs:
     # The @nubjs/types declarations live under npm/nub-types/**; skip the tsc
     # fixtures when only docs/site/Rust changed. run_rust includes .github/** so
     # a CI edit still re-runs them.
-    if: needs.matrix-plan.outputs.run_types == 'true' || needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_types == 'true' || needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1261,7 +1541,7 @@ jobs:
     # touches NEITHER group — the ci-gate aggregator treats a skip as success.
     # A `rust-toolchain*` edit deliberately lands in both `rust` and `scripts`,
     # so it runs here too: `tools:check` is what pins that file.
-    if: needs.matrix-plan.outputs.run_site == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_site == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1309,7 +1589,7 @@ jobs:
     # This is the backstop, not the primary defence: it only fires for PRs into
     # main, and the branches that broke are pushed directly and never PR'd.
     # The .githooks/pre-push hook is what covers those.
-    if: needs.matrix-plan.outputs.run_site == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_site == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1352,6 +1632,7 @@ jobs:
   # on every event costs seconds.
   oxc-lockstep:
     name: oxc lockstep
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -1369,6 +1650,7 @@ jobs:
   # Cargo.toml, runtime/version.mjs and the published schema snapshots at once.
   version-consistency:
     name: Version consistency
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1390,7 +1672,7 @@ jobs:
     # Path-gated on BOTH groups: the governor itself is scripts/**, which lives
     # in the `scripts` filter, while the harness is tests/**, which lives in
     # `rust` — neither group alone covers this job. Same shape as docs-links.
-    if: needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
     # Both platforms: the governor is only ever INSTALLED on the maintainer's
     # darwin host (bash-3.2 /bin/sh, BSD ps/awk), while ubuntu's dash + procps
     # is the other dialect the same POSIX script must keep speaking.
@@ -1424,7 +1706,7 @@ jobs:
     # Path-gated on BOTH groups, like the other scripts gates: the collector is
     # scripts/**, its harness tests/**. Ubuntu and macOS because the script must
     # keep speaking both the BSD and GNU stat/date/find dialects.
-    if: needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -1450,7 +1732,7 @@ jobs:
   nubr-script:
     name: Runner script contract (${{ matrix.os }})
     needs: matrix-plan
-    if: needs.matrix-plan.outputs.run_rust == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -1470,8 +1752,8 @@ jobs:
 
   ci-gate:
     name: CI gate
-    if: always()
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots, nubr-script]
+    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, compile-code-cache, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots, nubr-script]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed

@@ -214,11 +214,13 @@ fn yarn_offline_mirror_configured(root: &Path) -> bool {
 /// default (which lets GVS engage), it pushes an EXPLICIT `hoist=true` that
 /// vetoes GVS (per-project + hidden tree), rather than silently dropping the
 /// directive.
-pub(crate) fn injected_deps_present(root: &Path) -> bool {
+/// `workspace_members` is the caller's one-shot workspace discovery for `root`
+/// (see `nub_setting_defaults`), shared with the version gates that scan the
+/// same manifests.
+pub(crate) fn injected_deps_present(root: &Path, workspace_members: &[PathBuf]) -> bool {
     manifest_has_injected(&root.join("package.json"))
-        || aube_workspace::find_workspace_packages(root)
-            .into_iter()
-            .flatten()
+        || workspace_members
+            .iter()
             .any(|dir| manifest_has_injected(&dir.join("package.json")))
 }
 
@@ -522,7 +524,7 @@ fn bunfig_install_bool(root: &Path, key: &str) -> Option<bool> {
     let mut value = None;
     for path in bunfig_paths(root) {
         if let Some(raw) = read_config_text(&path)
-            && let Ok(parsed) = raw.parse::<toml::Value>()
+            && let Ok(parsed) = raw.parse::<toml::Table>()
             && let Some(b) = parsed
                 .get("install")
                 .and_then(toml::Value::as_table)
@@ -820,7 +822,7 @@ mod tests {
             r#"{"name":"x","dependenciesMeta":{"foo":{"injected":true}}}"#,
         )
         .unwrap();
-        assert!(injected_deps_present(d.path()));
+        assert!(injected_deps_present(d.path(), &[]));
     }
 
     #[test]

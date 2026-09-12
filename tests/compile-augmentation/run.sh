@@ -37,9 +37,13 @@ read -r -a EXTRA_COMPILE_FLAGS <<< "${COMPILE_FLAGS:-}"
 # name is defaulted from the entry — so asking for `./bin` on Windows produces an
 # extensionless file, and whether that runs then depends on the shell rather than
 # on nub. Naming the suffix here keeps the harness saying what it means.
+#
+# Each fixture builds to its OWN name. Reusing one across fixtures let a Windows
+# leg fail on the rename that publishes the next build: the previous artifact
+# had been run and deleted, but a lingering handle kept the name delete-pending,
+# and the replace failed with a sharing violation.
 EXE=""
 case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) EXE=.exe ;; esac
-ARTIFACT="bin$EXE"
 
 rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || exit 1
 printf '%s\n' "$NODE_VERSION" > .node-version
@@ -49,6 +53,14 @@ npm init -y >/dev/null 2>&1
 # resolving. Installed once here rather than vendored into the repo.
 npm i --silent --no-audit --no-fund react reflect-metadata >/dev/null 2>&1 \
   || { echo "could not install the fixture dependencies (offline?)" >&2; exit 2; }
+# The manifest as the setup left it, restored before every fixture. A sidecar that
+# overwrites `package.json` would otherwise decide how every LATER fixture is
+# classified — see the reset at the top of the loop.
+cp package.json .pristine-package.json
+
+# The built N-API addon, for a fixture that needs a REAL `.node` to load. Per
+# platform, so it cannot be committed beside the fixture that wants it.
+NATIVE_ADDON="${NUB_NATIVE_ADDON:-$HERE/../../runtime/addons/nub-native.node}"
 
 # The Node the artifact will embed, so the plain-node column is the SAME build
 # the other two columns run — otherwise a difference could be a version gap
@@ -77,9 +89,39 @@ for fixture in "${fixtures[@]}"; do
   name="${base%.*}"
   ext="${base##*.}"
   entry="app.$ext"
+
+  # Every fixture starts from the tree the setup built, and nothing the last one
+  # staged survives into it. The work directory is REUSED — reinstalling
+  # `node_modules` per fixture would dominate the run — so without this reset a
+  # sidecar leaks: three of them drop a `{"type":"module"}` manifest at the root,
+  # and whichever ran first then decided how every later fixture was classified.
+  # That is ordering coupling in a shared harness, which is the shape that turns
+  # into a flake nobody can reproduce. It also makes a fixture possible that
+  # NEEDS an ESM manifest without imposing one on its neighbours.
+  find . -mindepth 1 -maxdepth 1 \
+    ! -name node_modules ! -name package.json ! -name package-lock.json \
+    ! -name .node-version ! -name .pristine-package.json \
+    -exec rm -rf {} +
+  cp .pristine-package.json package.json
+
   cp "$fixture" "./$entry"
   # Anything the fixture needs beside it (a data file, a tsconfig, a worker entry).
   [ -d "$HERE/fixtures/$name.d" ] && cp -R "$HERE/fixtures/$name.d/." ./
+
+  # A fixture that needs a real native addon staged at a path of its own. Kept in
+  # a `.addon` file for the same reason `.flags` is: a table in here would drift
+  # from the fixtures it describes. A hard error rather than a skip — the addon is
+  # present wherever this harness is meant to run, and a fixture that quietly
+  # disappears is how a gate stops gating without anyone noticing.
+  if [ -f "$HERE/fixtures/$name.addon" ]; then
+    addon_rel="$(head -1 "$HERE/fixtures/$name.addon")"
+    if [ ! -f "$NATIVE_ADDON" ]; then
+      echo "fixture $name needs $NATIVE_ADDON — build it with 'make addon-fast'" >&2
+      exit 2
+    fi
+    mkdir -p "$(dirname "./$addon_rel")"
+    cp "$NATIVE_ADDON" "./$addon_rel"
+  fi
 
   # Last line AND exit status. A compiled CLI's exit code is contract — a binary
   # that returns 0 where the program returned 1 breaks every script wrapping it,
@@ -104,10 +146,11 @@ for fixture in "${fixtures[@]}"; do
   fi
 
   built=1
+  artifact="bin-$name$EXE"
   if "$NUB" compile "$entry" ${compile_flags[@]+"${compile_flags[@]}"} \
-       ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out "./$ARTIFACT" >./build.log 2>&1; then
+       ${EXTRA_COMPILE_FLAGS[@]+"${EXTRA_COMPILE_FLAGS[@]}"} --out "./$artifact" >./build.log 2>&1; then
     rm -rf ./cache
-    got_out="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/$ARTIFACT" 2>&1)"; got_rc=$?
+    got_out="$(cd "${TMPDIR:-/tmp}" && XDG_CACHE_HOME="$WORK/cache" "$WORK/$artifact" 2>&1)"; got_rc=$?
     got="$(printf '%s' "$got_out" | tail -1) rc=$got_rc"
   else
     built=0
@@ -123,7 +166,7 @@ for fixture in "${fixtures[@]}"; do
       echo "--- end $name ---"
     } >&2
   fi
-  rm -f "./$ARTIFACT"
+  rm -f "./$artifact"
 
   # A few augmentations are SUPPOSED to disappear when compiled — .env loading
   # above all, because a baked program's configuration must not depend on the
@@ -151,6 +194,21 @@ for fixture in "${fixtures[@]}"; do
   else
     verdict='FAIL'; fail=$((fail + 1))
   fi
+  # Same reasoning as the build-log dump above, for the half it did not cover: the
+  # cell holds the artifact's LAST line, which for a crash is Node's version
+  # banner and names nothing. Every Windows fixture failed as `Node.js v24 rc=1`
+  # and the stack that would have explained it was already in hand, unprinted.
+  case "$verdict" in
+    FAIL*)
+      if [ "$built" = 1 ]; then
+        {
+          echo "--- $name: artifact output (rc=$got_rc), expected: $ref ---"
+          printf '%s\n' "$got_out"
+          echo "--- end $name ---"
+        } >&2
+      fi
+      ;;
+  esac
   # Did nub change anything here at all? If not, the row cannot fail for the
   # right reason and is reported so the coverage claim stays honest.
   if [ "$plain" != "$ref" ]; then

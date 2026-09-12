@@ -91,6 +91,15 @@ fn specs() -> Vec<KeySpec> {
             is_empty: None,
         },
         KeySpec {
+            key: ConfigKey::Prefix,
+            name: "prefix",
+            set: |c, t| c.prefix = Some(strings(t)),
+            matches: |c, t| c.prefix == Some(strings(t)),
+            // An empty command names no program, so the parser refuses it.
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
             key: ConfigKey::Preload,
             name: "preload",
             set: |c, t| c.preload = Some(strings(t)),
@@ -284,7 +293,7 @@ fn specs() -> Vec<KeySpec> {
 }
 
 /// One per `ConfigKey` variant; [`ordinal`] is what keeps it honest.
-const KEY_COUNT: usize = 21;
+const KEY_COUNT: usize = 22;
 
 /// Exhaustive by construction: adding a `ConfigKey` variant breaks this match,
 /// forcing the new key into the spec table.
@@ -311,6 +320,7 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::InstallMinimumReleaseAge => 18,
         ConfigKey::InstallMinimumReleaseAgeExclude => 19,
         ConfigKey::DlxConsent => 20,
+        ConfigKey::Prefix => 21,
     }
 }
 

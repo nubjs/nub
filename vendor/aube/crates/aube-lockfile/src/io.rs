@@ -1031,6 +1031,58 @@ pub enum Error {
         /// Comma-joined filenames of the conflicting lockfiles.
         found: String,
     },
+    #[error(
+        "lockfile {path} contains named-registry package `{dep_path}` from `{registry_name}:`, which aube does not support yet"
+    )]
+    #[diagnostic(
+        code(ERR_AUBE_UNSUPPORTED_NAMED_REGISTRY),
+        help(
+            "aube cannot install this lockfile yet; use pnpm 11.20 or newer instead for this project"
+        )
+    )]
+    UnsupportedNamedRegistry {
+        path: std::path::PathBuf,
+        dep_path: String,
+        registry_name: String,
+    },
+    /// pnpm lockfile formats older than v9 (`lockfileVersion` 5.x /
+    /// 6.0, written by pnpm 8.x and earlier) put direct deps in a
+    /// top-level `dependencies:` map and key packages as
+    /// `/name@version`, with no `importers:` or `snapshots:`. Those
+    /// parse into an *empty* graph rather than failing, so without
+    /// this guard an install would link nothing and still exit 0.
+    #[error("lockfile {path} declares lockfileVersion {version}, which aube does not support")]
+    #[diagnostic(
+        code(ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION),
+        help(
+            "aube reads pnpm lockfile version 9 (pnpm v9 and newer). regenerate it with `npx pnpm@latest install`, or delete the lockfile and run `aube install` to resolve from package.json"
+        )
+    )]
+    UnsupportedPnpmLockfileVersion {
+        path: std::path::PathBuf,
+        version: String,
+    },
+    /// A lockfile whose declared `lockfileVersion` is v9 or newer but
+    /// whose body is pre-v9 (top-level `dependencies:`, no
+    /// `importers:`). Shares the code above: the cause the user has to
+    /// act on, and the remedy, are the same as a declared pre-v9
+    /// version.
+    #[error(
+        "lockfile {path} declares lockfileVersion {version} but its body uses the pre-v9 pnpm layout ({marker})"
+    )]
+    #[diagnostic(
+        code(ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION),
+        help(
+            "aube reads pnpm lockfile version 9 (pnpm v9 and newer). regenerate it with `npx pnpm@latest install`, or delete the lockfile and run `aube install` to resolve from package.json"
+        )
+    )]
+    PnpmLockfileLegacyLayout {
+        path: std::path::PathBuf,
+        version: String,
+        /// Which pre-v9 shape was seen, rendered into the message so the
+        /// user can see what gave the file away.
+        marker: String,
+    },
     #[error("failed to read lockfile {0}: {1}")]
     Io(std::path::PathBuf, std::io::Error),
     /// Structural/serialization lockfile errors that have no source

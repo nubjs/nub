@@ -6,32 +6,267 @@ use super::side_effects_cache::{
     SideEffectsCacheConfig, SideEffectsCacheEntry, SideEffectsCacheRestore,
 };
 
-/// Run a root-package lifecycle hook, announcing it to the user if defined
-/// and turning aube_scripts::Error into a miette::Report with context.
-/// Silent when the hook isn't defined in package.json.
-pub(super) async fn run_root_lifecycle(
-    project_dir: &std::path::Path,
+/// Run a lifecycle hook of one importer — the root or a workspace member —
+/// with the member's `.bin` chain up to the workspace root on `PATH`, plus
+/// the lazy `node-gyp` shim when neither the project nor the ambient `PATH`
+/// has one (see [`aube_scripts::run_member_hook`]; the shim is the same one
+/// dependency builds get, and stays out of the way when a real node-gyp
+/// resolves). Silent when the hook isn't defined; the failure names the
+/// importer, since "root" was what a member's failing `prepare` used to be
+/// reported as.
+pub(super) async fn run_importer_lifecycle(
+    workspace_root: &std::path::Path,
+    importer_dir: &std::path::Path,
+    importer_path: &str,
     modules_dir_name: &str,
     manifest: &aube_manifest::PackageJson,
     hook: aube_scripts::LifecycleHook,
 ) -> miette::Result<()> {
-    // Only announce when the hook is actually defined, so projects without
-    // lifecycle scripts don't get noise in their install output.
-    if !manifest.scripts.contains_key(hook.script_name()) {
+    let script_name = hook.script_name();
+    if !manifest.scripts.contains_key(script_name) {
         return Ok(());
     }
-    tracing::debug!("Running {} script...", hook.script_name());
-    aube_scripts::run_root_hook(project_dir, modules_dir_name, manifest, hook)
+    let label = if importer_path == "." {
+        "root"
+    } else {
+        importer_path
+    };
+    tracing::debug!("Running {label} {script_name} script...");
+    let project_bin_dir = workspace_root.join(modules_dir_name).join(".bin");
+    let node_gyp_bin_dir = node_gyp_bootstrap::lazy_shim_bin_dir(&project_bin_dir)?;
+    let tool_dirs: Vec<&std::path::Path> = node_gyp_bin_dir.iter().map(|d| d.as_path()).collect();
+    aube_scripts::run_member_hook(
+        importer_dir,
+        workspace_root,
+        modules_dir_name,
+        manifest,
+        hook,
+        &tool_dirs,
+    )
+    .await
+    .map_err(|e| miette!("{label} {script_name} script failed: {e}"))?;
+    Ok(())
+}
+
+/// npm's link build pass (`Arborist#build(linkNodes, { type: 'links' })`
+/// in `rebuild.js`): a `file:` directory dependency is a symlink to a
+/// directory the project owns, and npm runs its `preinstall` → `prepare` →
+/// `install` → `postinstall` there, one hook across every link before the
+/// next — the shape of a workspace member's own hooks rather than a
+/// dependency build, so no build policy, no jail, no side-effects cache.
+/// Two things npm's build set does for a link carry over: a target with a
+/// `binding.gyp` and no install hook gets the implicit `node-gyp rebuild`
+/// (`#addToBuildSet`, the same synthesis the dependency pass applies), and a
+/// link reachable only through `optionalDependencies` fails its own scripts
+/// without failing the install (`_handleOptionalFailure`, which trashes the
+/// node — the caller removes its links and keeps its bins out, so code that
+/// falls back on the module's absence gets the fallback rather than a
+/// half-built package). npm links bins between `prepare` and `install`;
+/// here the caller regenerates every bin once the pass has run, which is
+/// what makes a bin `prepare` generated resolve.
+///
+/// Only an npm lockfile links a `file:` directory (pnpm copies it into the
+/// store and builds the copy as a dependency; a `link:` is scriptless in
+/// every manager), so the caller gates on the incumbent. A directory whose
+/// hooks already run as an importer's — the root and each workspace member,
+/// `importers` here — is excluded; the graph's own importer set is not the
+/// test, because the npm reader keeps every link target as an importer when
+/// the manifest declares no `workspaces`. So is a directory with no
+/// `package.json` to name a script.
+pub(super) async fn run_link_lifecycle_scripts(
+    project_dir: &std::path::Path,
+    modules_dir_name: &str,
+    graph: &aube_lockfile::LockfileGraph,
+    importers: &[(String, aube_manifest::PackageJson)],
+) -> miette::Result<LinkLifecycleOutcome> {
+    struct LinkTarget {
+        spec: String,
+        dep_paths: Vec<String>,
+        manifest: aube_manifest::PackageJson,
+        optional: bool,
+    }
+    let optional_only = aube_resolver::platform::optional_only_packages(graph);
+    let mut links: std::collections::BTreeMap<std::path::PathBuf, LinkTarget> =
+        std::collections::BTreeMap::new();
+    for (dep_path, pkg) in &graph.packages {
+        let Some(aube_lockfile::LocalSource::Link(path)) = &pkg.local_source else {
+            continue;
+        };
+        if let Some(link) = links.get_mut(path) {
+            // The same directory linked under two names: one build, and
+            // every graph key it answers to when the build fails.
+            link.dep_paths.push(dep_path.clone());
+            link.optional &= optional_only.contains(dep_path);
+            continue;
+        }
+        if importers
+            .iter()
+            .any(|(importer, _)| std::path::Path::new(importer) == path.as_path())
+        {
+            continue;
+        }
+        let target = project_dir.join(path);
+        let manifest_path = target.join("package.json");
+        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let mut manifest = aube_manifest::PackageJson::parse(&manifest_path, content)
+            .map_err(miette::Report::new)
+            .wrap_err_with(|| format!("failed to parse {}", manifest_path.display()))?;
+        if let Some(script) = aube_scripts::default_install_script(&target, &manifest) {
+            manifest.scripts.insert(
+                aube_scripts::LifecycleHook::Install
+                    .script_name()
+                    .to_string(),
+                script.to_string(),
+            );
+        }
+        links.insert(
+            path.clone(),
+            LinkTarget {
+                spec: format!("{}@{}", pkg.name, pkg.version),
+                dep_paths: vec![dep_path.clone()],
+                manifest,
+                optional: optional_only.contains(dep_path),
+            },
+        );
+    }
+    const HOOKS: [aube_scripts::LifecycleHook; 4] = [
+        aube_scripts::LifecycleHook::PreInstall,
+        aube_scripts::LifecycleHook::Prepare,
+        aube_scripts::LifecycleHook::Install,
+        aube_scripts::LifecycleHook::PostInstall,
+    ];
+    let has_work = |link: &LinkTarget| {
+        HOOKS
+            .iter()
+            .any(|hook| link.manifest.scripts.contains_key(hook.script_name()))
+    };
+    if !links.values().any(has_work) {
+        return Ok(LinkLifecycleOutcome::default());
+    }
+    tracing::debug!("phase:link_lifecycle {} linked directories", links.len());
+    let mut failed: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+    for hook in HOOKS {
+        for (path, link) in &links {
+            if failed.contains(path) {
+                continue;
+            }
+            let label = path.to_string_lossy();
+            let result = run_importer_lifecycle(
+                project_dir,
+                &project_dir.join(path),
+                &label,
+                modules_dir_name,
+                &link.manifest,
+                hook,
+            )
+            .await;
+            match result {
+                Ok(()) => {}
+                Err(error) if link.optional => {
+                    tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
+                        "{} is an optional dependency and failed to build; continuing without it: {error}",
+                        link.spec
+                    );
+                    failed.insert(path.clone());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let failed_optional = failed
+        .iter()
+        .map(|path| {
+            let link = &links[path];
+            FailedOptionalLink {
+                spec: link.spec.clone(),
+                dep_paths: link.dep_paths.clone(),
+            }
+        })
+        .collect();
+    Ok(LinkLifecycleOutcome {
+        ran: true,
+        failed_optional,
+    })
+}
+
+/// What [`run_link_lifecycle_scripts`] did: whether any script ran (a bin
+/// relink is then due), and the optional-only links whose scripts failed.
+#[derive(Debug, Default)]
+pub(super) struct LinkLifecycleOutcome {
+    pub ran: bool,
+    pub failed_optional: Vec<FailedOptionalLink>,
+}
+
+#[derive(Debug)]
+pub(super) struct FailedOptionalLink {
+    /// `name@version`, the key the state file records so the next install
+    /// retries the build instead of sealing the tree.
+    pub spec: String,
+    /// Every graph key the directory was linked under.
+    pub dep_paths: Vec<String>,
+}
+
+/// npm's trash for an optional node whose build failed: unlink it from
+/// every importer that placed it, and take it out of `graph` so the bin
+/// relink that follows never shims it. A `file:` link is only ever an
+/// importer's direct dependency (a published package cannot name a local
+/// directory), so the importers' own `node_modules` are the whole set of
+/// placements. Only a link is removed — a symlink, or the NTFS junction
+/// `aube_linker::sys::create_dir_link` makes on Windows, which reports as a
+/// directory rather than a symlink — never a real directory at that name,
+/// and never the link's target.
+pub(super) fn trash_failed_optional_links(
+    project_dir: &std::path::Path,
+    modules_dir_name: &str,
+    graph: &mut aube_lockfile::LockfileGraph,
+    failed: &[FailedOptionalLink],
+) -> miette::Result<()> {
+    for link in failed {
+        for dep_path in &link.dep_paths {
+            for (importer_path, deps) in graph.importers.iter_mut() {
+                let importer_dir =
+                    super::workspace::importer_project_dir(project_dir, importer_path);
+                for dep in deps.iter().filter(|dep| &dep.dep_path == dep_path) {
+                    let placement = importer_dir.join(modules_dir_name).join(&dep.name);
+                    if let Ok(metadata) = std::fs::symlink_metadata(&placement)
+                        && crate::commands::fs_helpers::is_link_or_junction_metadata(&metadata)
+                    {
+                        crate::commands::fs_helpers::remove_existing(&placement)?;
+                    }
+                }
+                deps.retain(|dep| &dep.dep_path != dep_path);
+            }
+            graph.packages.remove(dep_path);
+        }
+    }
+    Ok(())
+}
+
+/// Run a named root-package lifecycle script.
+///
+/// Most install hooks use [`aube_scripts::LifecycleHook`], but pnpm's
+/// root-only `pnpm:devPreinstall` hook is intentionally outside the npm
+/// lifecycle enum. Keeping the spawn and error path here makes the special
+/// hook behave exactly like the ordinary root lifecycle.
+pub(super) async fn run_root_lifecycle_script(
+    project_dir: &std::path::Path,
+    modules_dir_name: &str,
+    manifest: &aube_manifest::PackageJson,
+    script_name: &str,
+) -> miette::Result<()> {
+    // Only announce when the hook is actually defined, so projects without
+    // lifecycle scripts don't get noise in their install output.
+    if !manifest.scripts.contains_key(script_name) {
+        return Ok(());
+    }
+    tracing::debug!("Running {script_name} script...");
+    aube_scripts::run_root_script_by_name(project_dir, modules_dir_name, manifest, script_name)
         .await
-        .map_err(|e| {
-            // Old message was just the bare error string. User got
-            // a cryptic "exit status 1" with no hook name, no script
-            // path, nothing. Tag with which hook fired so the log
-            // line is self-documenting. This is the common case
-            // (failed preinstall on `aube install`) so the regression
-            // really hurt triage.
-            miette!("root {} script failed: {e}", hook.script_name())
-        })?;
+        .map_err(|e| miette!("root {script_name} script failed: {e}"))?;
     Ok(())
 }
 
@@ -50,8 +285,8 @@ pub(super) async fn run_root_lifecycle(
 ///   the same denylist; `true`/absent is the default, only `false` denies)
 /// - the `--dangerously-allow-all-builds` escape hatch
 ///
-/// Workspace-level entries in the `allowBuilds` map take precedence
-/// over the manifest map for the same pattern, matching pnpm. The
+/// Workspace and manifest entries in the `allowBuilds` map merge for the same
+/// pattern, with an explicit denial from either source taking precedence. The
 /// flat lists are pure append — deny always wins at `decide()` time.
 pub(crate) fn build_policy_from_sources(
     manifest: &aube_manifest::PackageJson,
@@ -77,6 +312,13 @@ pub(crate) fn build_policy_from_manifest_sources<'a>(
     Vec<aube_scripts::BuildPolicyError>,
 ) {
     let mut merged = std::collections::BTreeMap::new();
+    // The policy holds only what the project declared. Default trust is the
+    // `defaultTrust` floor's job (`default_trust.rs`): it is consulted on
+    // `Unspecified`, gates every listed package on provenance, advisory
+    // vetting and the cooling window, and names what it let through. A
+    // built-in allowlist seeded here (the bundled pnpm trusted list,
+    // `assets/trusted-dependencies.json`) would answer `Allow` ahead of the
+    // floor, skipping those gates and the disclosure.
     let mut only_built = Vec::new();
     let mut never_built = Vec::new();
     for manifest in manifests {
@@ -96,7 +338,10 @@ pub(crate) fn build_policy_from_manifest_sources<'a>(
         never_built.extend(manifest.dependencies_meta_built_false());
     }
     for (k, v) in workspace.allow_builds_raw() {
-        merged.insert(k, v);
+        merged
+            .entry(k)
+            .and_modify(|existing| merge_allow_build(existing, v.clone()))
+            .or_insert(v);
     }
     only_built.extend(workspace.only_built_dependencies.iter().cloned());
     never_built.extend(workspace.never_built_dependencies.iter().cloned());
@@ -281,7 +526,7 @@ pub(super) fn resolve_link_strategy(
         // handle. `open_store` performs lockfile + IO work; a second
         // call to fetch `virtual_store_dir` would repeat that on the
         // hot path of every `auto`-mode install.
-        let store = super::super::open_store(cwd).ok();
+        let store = super::super::open_store_with_ctx(cwd, ctx).ok();
         let store_dir = store.as_ref().map(|s| s.root().to_path_buf());
         // Probe against the GVS dir when GVS is on. The GVS dir won't
         // exist yet on a cold install, so create it before the probe
@@ -377,10 +622,14 @@ pub(super) fn resolve_link_strategy(
 }
 
 /// What [`run_dep_lifecycle_scripts`] did.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct DepLifecycleOutcome {
     /// Lifecycle scripts actually executed.
     pub ran: usize,
+    /// Whether any package's on-disk contents changed — a script ran, or a
+    /// side-effects-cache entry was restored over the tree. Drives the
+    /// post-build bin relink, which a restore needs as much as a real build.
+    pub package_contents_changed: bool,
     /// Spec keys of packages the policy ALLOWED to build whose build
     /// could not be attempted, because the materialized directory or
     /// its `package.json` was not on disk when the phase ran. Both are
@@ -410,6 +659,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // paths that must never floor (rebuild).
     floor: &super::default_trust::DefaultTrustFloor,
     virtual_store_dir_max_length: usize,
+    canonicalize_package_dir: bool,
     child_concurrency: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
     side_effects_cache: SideEffectsCacheConfig<'_>,
@@ -443,9 +693,12 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         package_dir: std::path::PathBuf,
         manifest: aube_manifest::PackageJson,
         cache_entry: Option<SideEffectsCacheEntry>,
-        /// Graph key, kept so the optional-only classification below resolves
-        /// per job without re-walking the graph.
+        /// Graph key, kept so the optional-only classification and the
+        /// build-phase assignment below resolve per job without re-walking
+        /// the graph.
         dep_path: String,
+        /// Children-first build phase, filled in once every job is known.
+        phase: usize,
     }
 
     let mut jobs: Vec<BuildJob> = Vec::new();
@@ -455,6 +708,15 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         if let Some(selected) = selected_dep_paths
             && !selected.contains(dep_path)
         {
+            continue;
+        }
+        // A linked directory is a symlink to its source, never a store
+        // entry, so it is not a dependency build: the on-disk check below
+        // could only ever warn for it (and did, under an allow-all policy).
+        // Its scripts are its own — a workspace member's run as an
+        // importer's, and a `file:` link's run in
+        // [`run_link_lifecycle_scripts`], npm's link build pass.
+        if matches!(pkg.local_source, Some(aube_lockfile::LocalSource::Link(_))) {
             continue;
         }
         // True when this package runs only because the `defaultTrust`
@@ -525,6 +787,29 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             unbuilt.push(pkg.source_approval_key().unwrap_or_else(|| pkg.spec_key()));
             continue;
         }
+        // With the global virtual store on Windows, changing directory through
+        // an NTFS junction preserves the logical `.aube/<dep_path>` path.
+        // Native build tools such as
+        // node-gyp can then resolve a dependency to its graph-hashed GVS path
+        // but interpret that path relative to the unhashed local `.aube/`
+        // namespace, leaving an apparently missing `node_api.gyp`. POSIX
+        // `getcwd` resolves the outer symlink and masks the same mismatch.
+        // Enter the physical shared-store directory explicitly so the script
+        // cwd and every nested dependency use the same namespace.
+        let package_dir = if canonicalize_package_dir {
+            lifecycle_package_dir(&package_dir, true)
+                .await
+                .into_diagnostic()
+                .wrap_err_with(|| {
+                    format!(
+                        "failed to resolve isolated package directory for {} at {}",
+                        pkg.name,
+                        package_dir.display()
+                    )
+                })?
+        } else {
+            package_dir
+        };
         // Read the dep's `package.json` directly from its materialized
         // location. Previously we looked it up via `package_indices`,
         // but the fetch phase now skips `load_index` for packages
@@ -589,11 +874,15 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             manifest: dep_manifest,
             cache_entry,
             dep_path: dep_path.clone(),
+            phase: 0,
         });
     }
 
     if jobs.is_empty() {
-        return Ok(DepLifecycleOutcome { ran: 0, unbuilt });
+        return Ok(DepLifecycleOutcome {
+            unbuilt,
+            ..Default::default()
+        });
     }
 
     // A package reachable ONLY through `optionalDependencies` is one the
@@ -606,6 +895,20 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // this silently inert on a frozen install off an npm/bun/yarn lockfile.
     // A package with even one fully-required path stays required.
     let optional_only = aube_resolver::platform::optional_only_packages(graph);
+
+    let selected: std::collections::BTreeSet<String> =
+        jobs.iter().map(|job| job.dep_path.clone()).collect();
+    let phases = super::delta::dependency_build_phases(graph, &selected);
+    let phase_by_path: std::collections::BTreeMap<&str, usize> = phases
+        .iter()
+        .enumerate()
+        .flat_map(|(phase, paths)| paths.iter().map(move |path| (path.as_str(), phase)))
+        .collect();
+    for job in &mut jobs {
+        job.phase = *phase_by_path
+            .get(job.dep_path.as_str())
+            .expect("every selected lifecycle job must have a build phase");
+    }
 
     // Name what the floor let through — the floor must never be a
     // silent allow path. One line, not per-package, so big graphs
@@ -670,12 +973,16 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         node_gyp_bootstrap::lazy_shim_bin_dir(&project_bin_dir)?
     });
 
-    // Pass 2 (parallel, bounded): fan out across `child_concurrency`
-    // concurrent workers. Inside one job the three hooks
-    // (preinstall → install → postinstall) still run sequentially —
-    // pnpm's execution model is "at most N packages building in
-    // parallel," not "at most N scripts running," so hook ordering
-    // within a single package is preserved.
+    // Pass 2 (dependency-ordered, parallel within each phase): all jobs are
+    // registered up front so the existing first-error cancellation stays
+    // intact, but a job does not start until every EARLIER phase has fully
+    // drained, which is what puts a dependency's build ahead of its consumer's.
+    // Jobs within one phase stay bounded by `child_concurrency`, and inside one
+    // job the three hooks (preinstall → install → postinstall) still run
+    // sequentially — pnpm's execution model is "at most N packages building in
+    // parallel," not "at most N scripts running." pnpm sequences the same way:
+    // `buildSequence` chunks the build subgraph and `runGroups` runs one chunk
+    // at a time under `childConcurrency`.
     //
     // Cancellation on first failure uses `JoinSet`, which aborts every
     // outstanding task when it's dropped. A plain `Vec<JoinHandle>`
@@ -687,6 +994,34 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // waiting for the longest-running one to finish.
     let concurrency = child_concurrency.max(1);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let (phase_tx, phase_rx) = tokio::sync::watch::channel(0usize);
+    let phase_remaining = std::sync::Arc::new(
+        phases
+            .iter()
+            .map(|phase| std::sync::atomic::AtomicUsize::new(phase.len()))
+            .collect::<Vec<_>>(),
+    );
+    // The gate has to open on EVERY exit path a job can take, which is why
+    // this is a drop guard rather than a decrement at the end of the task
+    // body. An optional-only package whose build fails is tolerated by the
+    // drain loop below, so a success-only decrement would leave that phase's
+    // counter above zero and every later phase parked on the watch channel
+    // forever — a hang, not a failure. The early returns from a
+    // side-effects-cache hit and the `?` on every fallible step are the same
+    // shape. A phase-k guard only comes into existence once the gate has
+    // already reached k, so the sends stay monotonic.
+    struct PhaseGuard {
+        remaining: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>>,
+        tx: tokio::sync::watch::Sender<usize>,
+        phase: usize,
+    }
+    impl Drop for PhaseGuard {
+        fn drop(&mut self) {
+            if self.remaining[self.phase].fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+                let _ = self.tx.send(self.phase + 1);
+            }
+        }
+    }
     let project_dir = project_dir.to_path_buf();
     let modules_dir_name = modules_dir_name.to_string();
     let should_restore_side_effects_cache = side_effects_cache.should_restore();
@@ -696,7 +1031,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // `(optional, spec, outcome)` rather than a bare result: the drain loop has
     // to know whether the package that failed was optional-only, and an error
     // surfacing from `join_next` carries no identity of its own.
-    let mut set: tokio::task::JoinSet<(bool, String, miette::Result<usize>)> =
+    let mut set: tokio::task::JoinSet<(bool, String, miette::Result<DepLifecycleOutcome>)> =
         tokio::task::JoinSet::new();
     for job in jobs {
         let sem = semaphore.clone();
@@ -706,7 +1041,23 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         let jail_policy = jail_policy.clone();
         let job_optional = optional_only.contains(&job.dep_path);
         let job_spec = format!("{}@{}", job.name, job.version);
+        let phase_tx = phase_tx.clone();
+        let mut phase_rx = phase_rx.clone();
+        let phase_remaining = phase_remaining.clone();
         let task = crate::dep_chain::scope_current(async move {
+            // The task owns a `phase_tx` clone until the guard below takes it,
+            // so `changed()` can never see every sender dropped and the error
+            // arm is unreachable. Keep it that way: an error here returns
+            // BEFORE the guard exists, and for an optional-only package the
+            // drain loop tolerates that — which would park every later phase.
+            while *phase_rx.borrow_and_update() < job.phase {
+                phase_rx.changed().await.into_diagnostic()?;
+            }
+            let _phase_guard = PhaseGuard {
+                remaining: phase_remaining,
+                tx: phase_tx,
+                phase: job.phase,
+            };
             let _permit = sem.acquire().await.unwrap();
             if should_restore_side_effects_cache && let Some(cache_entry) = job.cache_entry.clone()
             {
@@ -723,8 +1074,14 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     )
                 })?;
                 match restore_result? {
-                    SideEffectsCacheRestore::Restored | SideEffectsCacheRestore::AlreadyApplied => {
-                        return Ok(0);
+                    SideEffectsCacheRestore::Restored => {
+                        return Ok(DepLifecycleOutcome {
+                            package_contents_changed: true,
+                            ..Default::default()
+                        });
+                    }
+                    SideEffectsCacheRestore::AlreadyApplied => {
+                        return Ok(DepLifecycleOutcome::default());
                     }
                     SideEffectsCacheRestore::Miss => {}
                 }
@@ -855,7 +1212,11 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     );
                 }
             }
-            Ok(ran_here)
+            Ok(DepLifecycleOutcome {
+                ran: ran_here,
+                package_contents_changed: ran_here > 0,
+                ..Default::default()
+            })
         });
         let task = crate::runtime::scope_current(task);
         let task = aube_scripts::scope_current(task);
@@ -863,12 +1224,16 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     }
 
     let mut ran = 0usize;
+    let mut package_contents_changed = false;
     while let Some(res) = set.join_next().await {
         // A `JoinError` here is a task-level panic — an aube bug, not a package
         // whose build failed — so it stays fatal even for an optional package.
-        let (optional, spec, outcome) = res.into_diagnostic()?;
-        match outcome {
-            Ok(count) => ran += count,
+        let (optional, spec, job_outcome) = res.into_diagnostic()?;
+        match job_outcome {
+            Ok(job_outcome) => {
+                ran += job_outcome.ran;
+                package_contents_changed |= job_outcome.package_contents_changed;
+            }
             // An optional-only package's build failure is not the install's
             // error: npm (`_handleOptionalFailure` during reify) and pnpm
             // (`buildDependency`'s catch) both continue. Warned per package
@@ -900,7 +1265,11 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             Err(error) => return Err(error),
         }
     }
-    Ok(DepLifecycleOutcome { ran, unbuilt })
+    Ok(DepLifecycleOutcome {
+        ran,
+        package_contents_changed,
+        unbuilt,
+    })
 }
 
 /// Persist a freshly imported package index under the store key(s) a
@@ -949,6 +1318,20 @@ fn persist_pkg_index(
             code = aube_codes::warnings::WARN_AUBE_CACHE_WRITE_FAILED,
             "Failed to cache index for {display_name}@{version}: {e}"
         );
+    }
+}
+
+async fn lifecycle_package_dir(
+    package_dir: &std::path::Path,
+    canonicalize: bool,
+) -> std::io::Result<std::path::PathBuf> {
+    if canonicalize {
+        let package_dir = package_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::dirs::canonicalize(&package_dir))
+            .await
+            .map_err(std::io::Error::other)?
+    } else {
+        Ok(package_dir.to_path_buf())
     }
 }
 
@@ -1180,9 +1563,12 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     let mut resp = client.start_tarball_stream(url).await.map_err(|e| {
         let is_throttle = e.is_throttle();
         TarballStreamErr {
-            report: miette!(
-                "failed to fetch {display_name}@{version}: {e}{}",
-                crate::dep_chain::format_chain_for(registry_name, version)
+            report: super::fetch::fetch_failure(
+                &e,
+                format!(
+                    "failed to fetch {display_name}@{version}: {e}{}",
+                    crate::dep_chain::format_chain_for(registry_name, version)
+                ),
             ),
             is_throttle,
         }
@@ -1495,6 +1881,208 @@ pub(super) fn unreviewed_dep_builds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trash removes the link the linker itself makes — a symlink, or
+    /// the junction on Windows — from every importer that placed it, leaves
+    /// the link's target and a real directory of the same shape alone, and
+    /// prunes the graph the bin relink reads.
+    #[test]
+    fn trash_failed_optional_links_removes_the_placement_link_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        let target = project.join("opt-dep");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("package.json"), "{}").unwrap();
+        let modules = project.join("node_modules");
+        std::fs::create_dir_all(modules.join("real-dir")).unwrap();
+        aube_linker::sys::create_dir_link(&target, &modules.join("opt-dep")).unwrap();
+        // A member that placed the same link under its own node_modules.
+        let member_modules = project.join("packages/a/node_modules");
+        std::fs::create_dir_all(&member_modules).unwrap();
+        aube_linker::sys::create_dir_link(&target, &member_modules.join("opt-dep")).unwrap();
+
+        let dep = |name: &str, dep_path: &str| aube_lockfile::DirectDep {
+            name: name.to_string(),
+            dep_path: dep_path.to_string(),
+            dep_type: aube_lockfile::DepType::Optional,
+            specifier: None,
+        };
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![
+                dep("opt-dep", "opt-dep@link+opt-dep"),
+                dep("real-dir", "real-dir@1.0.0"),
+            ],
+        );
+        graph.importers.insert(
+            "packages/a".to_string(),
+            vec![dep("opt-dep", "opt-dep@link+opt-dep")],
+        );
+        for (dep_path, name) in [
+            ("opt-dep@link+opt-dep", "opt-dep"),
+            ("real-dir@1.0.0", "real-dir"),
+        ] {
+            graph.packages.insert(
+                dep_path.to_string(),
+                aube_lockfile::LockedPackage {
+                    name: name.to_string(),
+                    version: "1.0.0".to_string(),
+                    dep_path: dep_path.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        trash_failed_optional_links(
+            project,
+            "node_modules",
+            &mut graph,
+            &[FailedOptionalLink {
+                spec: "opt-dep@1.0.0".to_string(),
+                dep_paths: vec!["opt-dep@link+opt-dep".to_string()],
+            }],
+        )
+        .unwrap();
+
+        assert!(
+            modules.join("opt-dep").symlink_metadata().is_err()
+                && member_modules.join("opt-dep").symlink_metadata().is_err(),
+            "both placements of the failed link are gone"
+        );
+        assert!(
+            target.join("package.json").is_file(),
+            "the link's target directory is untouched"
+        );
+        assert!(
+            modules.join("real-dir").is_dir(),
+            "a real directory is not a link and stays"
+        );
+        assert!(!graph.packages.contains_key("opt-dep@link+opt-dep"));
+        assert!(graph.packages.contains_key("real-dir@1.0.0"));
+        assert!(
+            graph
+                .importers
+                .values()
+                .flatten()
+                .all(|dep| dep.name != "opt-dep"),
+            "every importer edge to the failed link is pruned"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_virtual_store_lifecycle_uses_physical_package_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let physical = temp
+            .path()
+            .join("shared-store")
+            .join("pkg@1.0.0")
+            .join("node_modules")
+            .join("pkg");
+        std::fs::create_dir_all(&physical).unwrap();
+        let logical = temp
+            .path()
+            .join("project")
+            .join("node_modules")
+            .join(".aube")
+            .join("pkg@1.0.0");
+        std::fs::create_dir_all(logical.parent().unwrap()).unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            physical.parent().and_then(std::path::Path::parent).unwrap(),
+            &logical,
+        )
+        .unwrap();
+        #[cfg(windows)]
+        {
+            let target = physical.parent().and_then(std::path::Path::parent).unwrap();
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&logical)
+                .arg(target)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+
+        let logical_package = logical.join("node_modules/pkg");
+        assert_eq!(
+            lifecycle_package_dir(&logical_package, true).await.unwrap(),
+            crate::dirs::canonicalize(&physical).unwrap()
+        );
+        assert_eq!(
+            lifecycle_package_dir(&logical_package, false)
+                .await
+                .unwrap(),
+            logical_package
+        );
+    }
+
+    /// A project that declares nothing gets a policy that decides nothing:
+    /// a listed-by-default package is `Unspecified` so the `defaultTrust`
+    /// floor, with its gates and disclosure, is what admits it.
+    #[test]
+    fn undeclared_policy_leaves_default_trust_to_the_floor() {
+        let manifest = aube_manifest::PackageJson::default();
+        let workspace = aube_manifest::WorkspaceConfig::default();
+        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            policy.decide("esbuild", "0.28.1"),
+            aube_scripts::AllowDecision::Unspecified
+        );
+        assert_eq!(
+            policy.decide("sharp", "0.35.2"),
+            aube_scripts::AllowDecision::Unspecified
+        );
+    }
+
+    #[test]
+    fn explicit_deny_overrides_default_trust() {
+        let manifest = manifest_with_allow_build("esbuild", false);
+        let workspace = aube_manifest::WorkspaceConfig::default();
+        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            policy.decide("esbuild", "0.28.1"),
+            aube_scripts::AllowDecision::Deny
+        );
+    }
+
+    #[test]
+    fn project_deny_overrides_workspace_allow() {
+        let manifest = manifest_with_allow_build("esbuild", false);
+        let mut workspace = aube_manifest::WorkspaceConfig::default();
+        workspace
+            .allow_builds
+            .insert("esbuild".to_string(), yaml_serde::Value::Bool(true));
+        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            policy.decide("esbuild", "0.28.1"),
+            aube_scripts::AllowDecision::Deny
+        );
+    }
+
+    #[test]
+    fn workspace_deny_overrides_default_trust() {
+        let manifest = aube_manifest::PackageJson::default();
+        let mut workspace = aube_manifest::WorkspaceConfig::default();
+        workspace
+            .allow_builds
+            .insert("esbuild".to_string(), yaml_serde::Value::Bool(false));
+        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            policy.decide("esbuild", "0.28.1"),
+            aube_scripts::AllowDecision::Deny
+        );
+    }
 
     #[test]
     fn member_allow_build_conflict_denies() {

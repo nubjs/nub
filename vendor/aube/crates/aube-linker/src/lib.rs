@@ -43,13 +43,13 @@ pub use pool::default_linker_parallelism;
 pub use quarantine::strip_quarantine_from_tree;
 pub use sweep::{is_physical_importer, mkdirp, remove_dir_all_with_retry, sweep_stale_tmp_dirs};
 pub(crate) use sweep::{sweep_stale_top_level_entries, try_remove_entry};
+#[cfg(windows)]
+pub use sys::win_shim_paths;
 pub use sys::{
     BinShimOptions, create_bin_shim, create_dir_link, is_native_executable, normalize_path,
     parse_posix_shim_target, parse_win_shim_target, remove_bin_shim, validate_bin_name,
     validate_bin_target,
 };
-#[cfg(windows)]
-pub use sys::win_shim_paths;
 
 /// Strategy for arranging packages under `node_modules/`.
 ///

@@ -44,6 +44,124 @@ fn package_index(store: &Store, package_json: &str, index_js: &str) -> PackageIn
     index
 }
 
+#[test]
+fn refuses_modules_dir_at_or_outside_project() {
+    for modules_dir in [".", "nested/..", "..", "../.."] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(project_dir.join("nested")).unwrap();
+        let marker = project_dir.join("package.json");
+        std::fs::write(&marker, b"{}").unwrap();
+        let store = Store::at(dir.path().join("store/files"));
+        let linker = Linker::new(&store, LinkStrategy::Copy).with_modules_dir_name(modules_dir);
+
+        let err = linker
+            .link_all(&project_dir, &LockfileGraph::default(), &BTreeMap::new())
+            .unwrap_err();
+
+        assert!(matches!(err, Error::UnsafeModulesDir(_)));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_modules_dir_symlink_to_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::os::unix::fs::symlink(&project_dir, project_dir.join("modules")).unwrap();
+    let marker = project_dir.join("package.json");
+    std::fs::write(&marker, b"{}").unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let linker = Linker::new(&store, LinkStrategy::Copy).with_modules_dir_name("modules");
+
+    let err = linker
+        .link_all(&project_dir, &LockfileGraph::default(), &BTreeMap::new())
+        .unwrap_err();
+
+    assert!(matches!(err, Error::UnsafeModulesDir(_)));
+    assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_modules_dir_through_symlink_outside_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    let outside_dir = dir.path().join("outside");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    std::os::unix::fs::symlink(&outside_dir, project_dir.join("modules")).unwrap();
+    let marker = outside_dir.join("marker");
+    std::fs::write(&marker, b"keep").unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let linker =
+        Linker::new(&store, LinkStrategy::Copy).with_modules_dir_name("modules/not-created");
+
+    let err = linker
+        .link_all(&project_dir, &LockfileGraph::default(), &BTreeMap::new())
+        .unwrap_err();
+
+    assert!(matches!(err, Error::UnsafeModulesDir(_)));
+    assert_eq!(std::fs::read(&marker).unwrap(), b"keep");
+}
+
+#[test]
+fn workspace_modes_refuse_modules_dir_at_or_outside_root() {
+    for node_linker in [NodeLinker::Isolated, NodeLinker::Hoisted] {
+        for modules_dir in [".", "nested/..", "..", "../.."] {
+            let dir = tempfile::tempdir().unwrap();
+            let project_dir = dir.path().join("project");
+            std::fs::create_dir_all(project_dir.join("nested")).unwrap();
+            let marker = project_dir.join("package.json");
+            std::fs::write(&marker, b"{}").unwrap();
+            let store = Store::at(dir.path().join("store/files"));
+            let linker = Linker::new(&store, LinkStrategy::Copy)
+                .with_node_linker(node_linker)
+                .with_modules_dir_name(modules_dir);
+            let mut graph = LockfileGraph::default();
+            graph.importers.insert(".".to_string(), Vec::new());
+
+            let err = linker
+                .link_workspace(&project_dir, &graph, &BTreeMap::new(), &BTreeMap::new())
+                .unwrap_err();
+
+            assert!(matches!(err, Error::UnsafeModulesDir(_)));
+            assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_modes_refuse_importer_modules_dir_symlink_to_importer() {
+    for node_linker in [NodeLinker::Isolated, NodeLinker::Hoisted] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        let importer_dir = project_dir.join("packages/app");
+        std::fs::create_dir_all(&importer_dir).unwrap();
+        std::os::unix::fs::symlink(&importer_dir, importer_dir.join("modules")).unwrap();
+        let marker = importer_dir.join("package.json");
+        std::fs::write(&marker, b"{}").unwrap();
+        let store = Store::at(dir.path().join("store/files"));
+        let linker = Linker::new(&store, LinkStrategy::Copy)
+            .with_node_linker(node_linker)
+            .with_modules_dir_name("modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .importers
+            .insert("packages/app".to_string(), Vec::new());
+
+        let err = linker
+            .link_workspace(&project_dir, &graph, &BTreeMap::new(), &BTreeMap::new())
+            .unwrap_err();
+
+        assert!(matches!(err, Error::UnsafeModulesDir(_)));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+    }
+}
+
 fn make_graph() -> LockfileGraph {
     let mut packages = BTreeMap::new();
 
@@ -907,7 +1025,7 @@ fn workspace_selected_package_materializes_locally_while_dependencies_use_gvs() 
 
 #[test]
 fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
-    // Reproduces jdx/aube#393: a partially corrupt CAS leaves the
+    // Reproduces aubepkg/aube#393: a partially corrupt CAS leaves the
     // cached package index pointing at a missing shard. Materialize
     // must distinguish "source CAS file missing" from a generic ENOENT
     // and drop the stale index JSON so the next install re-imports
@@ -1023,7 +1141,7 @@ fn test_link_file_fresh_hardlink_short_circuits_when_source_missing() {
 
     let linker = Linker::new_with_gvs(&store, LinkStrategy::Hardlink, true);
     let err = linker
-        .link_file_fresh(&stored, "hello.txt", &dst)
+        .link_file_fresh(&stored, "hello.txt", &dst, None)
         .expect_err("source missing must fail");
     assert!(
         matches!(
@@ -1096,7 +1214,7 @@ fn realized_inode_matches_source_on_reflink_failure(strategy: LinkStrategy) -> b
         // Hold the guard across the materialize so a sibling test can't flip
         // the global flag mid-call; the flag is restored on drop, panic-safe.
         let _forced = ForcedReflinkFailure::engage();
-        linker.link_file_fresh(&stored, "payload.bin", &dst)
+        linker.link_file_fresh(&stored, "payload.bin", &dst, None)
     };
     result.expect("a reflink strategy must still materialize the file via its fallback");
 
@@ -1477,6 +1595,61 @@ fn test_global_virtual_store_is_populated() {
 
     let bar_global = virtual_store.join("bar@2.0.0/node_modules/bar/index.js");
     assert!(bar_global.exists());
+}
+
+#[test]
+fn warm_link_repairs_stale_global_virtual_store_dependency_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let virtual_store = store.virtual_store_dir();
+    // A default hoist vetoes the shared store here (the project-local
+    // hidden tree wins), so opt out of it to exercise the global entry.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+    let graph = make_graph();
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let nested_bar = virtual_store.join("foo@1.0.0/node_modules/bar");
+    let stale_bar = virtual_store.join("bar@2.0.0-stale/node_modules/bar");
+    std::fs::create_dir_all(&stale_bar).unwrap();
+    crate::sweep::try_remove_entry(&nested_bar);
+    crate::sys::create_dir_link(&stale_bar, &nested_bar).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(&nested_bar).unwrap(),
+        std::fs::canonicalize(&stale_bar).unwrap()
+    );
+
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let expected_bar = virtual_store.join("bar@2.0.0/node_modules/bar");
+    assert_eq!(
+        std::fs::canonicalize(&nested_bar).unwrap(),
+        std::fs::canonicalize(&expected_bar).unwrap(),
+        "a cached parent entry must reconcile its nested dependency identity"
+    );
+}
+
+#[test]
+fn cached_entry_repair_rejects_dependency_path_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = setup_store_with_files(dir.path());
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true);
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let sentinel = outside.join("sentinel");
+    std::fs::write(&sentinel, "keep").unwrap();
+    let mut pkg = make_graph().packages.remove("foo@1.0.0").unwrap();
+    pkg.dependencies =
+        BTreeMap::from([(outside.to_string_lossy().into_owned(), "1.0.0".to_string())]);
+
+    assert!(
+        linker
+            .reconcile_virtual_store_entry("foo@1.0.0", &pkg, None)
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "keep");
 }
 
 #[test]
@@ -2027,6 +2200,89 @@ fn gvs_off_relinks_scoped_git_source_without_eexist() {
         .expect("relinking an existing scoped git source entry must not fail with EEXIST");
 }
 
+#[test]
+fn warm_link_repairs_stale_shared_source_dependency_link() {
+    use aube_lockfile::{GitSource, LocalSource};
+
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let (store, mut indices) = setup_store_with_files(dir.path());
+    let git = LocalSource::Git(GitSource {
+        url: "https://github.com/example/source-parent.git".to_string(),
+        committish: None,
+        resolved: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        integrity: None,
+        subpath: None,
+    });
+    let parent_dep_path = git.dep_path("source-parent");
+    let parent_file = store
+        .import_bytes(b"module.exports = 'parent';", false)
+        .unwrap();
+    let mut parent_index = PackageIndex::default();
+    parent_index.insert("index.js".to_string(), parent_file);
+    indices.insert(parent_dep_path.clone(), parent_index);
+
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "source-parent".to_string(),
+                dep_path: parent_dep_path.clone(),
+                dep_type: DepType::Production,
+                specifier: None,
+            }],
+        )]),
+        packages: BTreeMap::from([
+            (
+                parent_dep_path.clone(),
+                LockedPackage {
+                    name: "source-parent".to_string(),
+                    version: "1.0.0".to_string(),
+                    dependencies: BTreeMap::from([("bar".to_string(), "2.0.0".to_string())]),
+                    dep_path: parent_dep_path.clone(),
+                    local_source: Some(git),
+                    ..Default::default()
+                },
+            ),
+            (
+                "bar@2.0.0".to_string(),
+                LockedPackage {
+                    name: "bar".to_string(),
+                    version: "2.0.0".to_string(),
+                    dep_path: "bar@2.0.0".to_string(),
+                    ..Default::default()
+                },
+            ),
+        ]),
+        ..Default::default()
+    };
+    // Same as the registry variant above: no default hoist, so the shared
+    // store is exercised.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let parent_entry = store.virtual_store_dir().join(dep_path_to_filename(
+        &parent_dep_path,
+        DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+    ));
+    let nested_bar = parent_entry.join("node_modules/bar");
+    let stale_bar = store
+        .virtual_store_dir()
+        .join("bar@2.0.0-stale/node_modules/bar");
+    std::fs::create_dir_all(&stale_bar).unwrap();
+    crate::sweep::try_remove_entry(&nested_bar);
+    crate::sys::create_dir_link(&stale_bar, &nested_bar).unwrap();
+
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    assert_eq!(
+        std::fs::canonicalize(&nested_bar).unwrap(),
+        std::fs::canonicalize(store.virtual_store_dir().join("bar@2.0.0/node_modules/bar"))
+            .unwrap()
+    );
+}
+
 /// Regression: a version bump keeps the same top-level name
 /// (`foo`) but must repoint `node_modules/foo` at the new
 /// `.aube/foo@<new>` entry. The old `.aube/foo@<old>/` is left
@@ -2564,7 +2820,7 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
         let stored = &index[rel];
         let target = baseline.join(rel);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        linker.link_file_fresh(stored, rel, &target).unwrap();
+        linker.link_file_fresh(stored, rel, &target, None).unwrap();
         if stored.executable {
             xx::file::make_executable(&target).unwrap();
         }

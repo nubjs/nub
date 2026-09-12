@@ -408,7 +408,7 @@ fn asset_name(source: &Path, bytes: &[u8]) -> String {
     } else {
         stem
     };
-    let hash = format!("{:x}", Sha256::digest(bytes));
+    let hash = hex::encode(Sha256::digest(bytes));
     asset_name_with_hash(source, &stem, &hash)
 }
 

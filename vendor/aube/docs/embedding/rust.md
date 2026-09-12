@@ -1,10 +1,16 @@
 # Embedding in Rust
 
+## Migrating to aube 2
+
+`aube_resolver::ResolutionMode` now includes `LowestDirect` and is
+`#[non_exhaustive]`. Downstream matches must include a wildcard arm so future
+resolution modes can be added without another source-breaking enum change.
+
 Add aube without its binary-only default features:
 
 ```toml
 [dependencies]
-aube = { version = "1", default-features = false }
+aube = { version = "2", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -107,8 +113,8 @@ manages Node itself describes how Node should be invoked with an
 `EmbedderRuntime`.
 
 A host that merely selects a toolchain (a version manager) uses `selector` —
-the bin directory goes on `PATH` and its `node` is both `NODE` and
-`npm_node_execpath`:
+the bin directory goes on `PATH` after project-local `.bin` directories, and
+its `node` is both `NODE` and `npm_node_execpath`:
 
 ```rust
 use aube::embed::EmbedderRuntime;
@@ -117,8 +123,9 @@ let runtime = EmbedderRuntime::selector("/opt/mytool/node-24.4.1/bin");
 ```
 
 A host that *wraps* Node — an instrumenting runtime, a transpiling loader, a
-sandbox — uses `wrapper`. The shim is `NODE` and goes on `PATH` so a script's
-`node` / `$NODE` stays wrapped, while `real_node` is exported as
+sandbox — uses `wrapper`. The shim is `NODE` and leads `PATH` so a script's
+`node` / `$NODE` stays wrapped even when a dependency provides a `node` bin,
+while `real_node` is exported as
 `npm_node_execpath` so `node-gyp` builds against the real binary. Use
 `env_append` to add a `NODE_OPTIONS` preload without dropping the user's value
 (`env_set` overwrites):
@@ -130,6 +137,11 @@ let runtime = EmbedderRuntime::wrapper("/opt/mytool/shim/node")
     .version("24.4.1") // supplied, not probed
     .env_append("NODE_OPTIONS", "--import /opt/mytool/preload.mjs");
 ```
+
+Use `.without_path()` when the host should set `NODE` and use the wrapper for
+direct aube spawns but intentionally leave bare `node` resolution to the
+inherited `PATH`. Calling `.path_dir(...)` later restores an explicit PATH
+entry; the last path builder call wins.
 
 `internal_node` splits off the node aube's *internal* machinery spawns —
 pnpmfile hooks, the security scanner, version probes — so those hot paths run

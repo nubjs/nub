@@ -8,7 +8,6 @@
 //! This is a pure read — no network, no filesystem mutation, no project lock.
 
 use aube_lockfile::{DepType, LockfileGraph, dep_type_label};
-use clap::Args;
 use miette::{Context, miette};
 use std::collections::{BTreeSet, HashSet};
 
@@ -37,34 +36,29 @@ Examples:
   $ aube why --json debug
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct WhyArgs {
     /// Package name to search for (exact match against package names)
     pub package: String,
 
     /// Only follow chains that start at a devDependency
-    #[arg(short = 'D', long, conflicts_with = "prod")]
+    #[usage(short = 'D', long, conflicts = "--prod")]
     pub dev: bool,
 
     /// Only follow chains that start at a production (or optional) dependency
-    #[arg(
-        short = 'P',
-        long,
-        conflicts_with = "dev",
-        visible_alias = "production"
-    )]
+    #[usage(short = 'P', long, long = "production", conflicts = "--dev")]
     pub prod: bool,
 
     /// Output as JSON — an array of chain objects
-    #[arg(long, conflicts_with = "parseable")]
+    #[usage(long, conflicts = "--parseable")]
     pub json: bool,
 
     /// Append each node's `.aube/<dep_path>` store path to the tree output
-    #[arg(long)]
+    #[usage(long)]
     pub long: bool,
 
     /// Tab-separated output: one line per chain, `importer\tdep_type\tname@ver\t...`
-    #[arg(long)]
+    #[usage(long)]
     pub parseable: bool,
 }
 

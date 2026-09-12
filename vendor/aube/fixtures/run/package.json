@@ -1,0 +1,8 @@
+{
+  "name": "aube-bench-run",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "noop": "id"
+  }
+}

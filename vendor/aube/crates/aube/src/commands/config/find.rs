@@ -1,10 +1,9 @@
 use super::{literal_aliases, setting_search_score, settings_meta};
-use clap::Args;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct FindArgs {
     /// Words to search for.
-    #[arg(required = true)]
+    #[usage(arg, required)]
     pub query: Vec<String>,
 }
 

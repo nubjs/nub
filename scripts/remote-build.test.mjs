@@ -107,7 +107,10 @@ test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
 // make them fail on a malformed library rather than skip.
 test("jobScript(test) matches CI: whole workspace, real addon staged over the placeholder", () => {
   const s = jobScript("test", "fast");
-  assert.match(s, /\ncargo test$/, "CI runs the whole workspace, not -p nub-cli");
+  // Its own line, not the end of the script: the compile-feature line legitimately
+  // follows it. The claim being pinned is still that the whole workspace runs here,
+  // never `-p nub-cli` alone.
+  assert.match(s, /\ncargo test\n/, "CI runs the whole workspace, not -p nub-cli");
   assert.match(s, /crates\/nub-native && cargo build/);
   assert.match(s, /cp "\$CARGO_TARGET_DIR\/debug\/libnub_native\.so" runtime\/addons\/nub-native\.node/);
   // Anchored to the COMMAND, not the raw text: PREPARE is shared by both jobs and its

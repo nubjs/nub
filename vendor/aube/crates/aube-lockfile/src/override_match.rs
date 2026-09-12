@@ -79,6 +79,14 @@ pub(crate) fn apply<'a>(
     })
 }
 
+/// Extract the final package target from any supported pnpm/yarn override key.
+/// Unlike [`compile`], this accepts ancestor chains because catalog expansion
+/// needs the target name even when the override cannot apply to an importer.
+pub(crate) fn target_package_name(key: &str) -> Option<String> {
+    let target = split_segments(key)?.pop()?;
+    parse_segment(target).map(|(name, _)| name)
+}
+
 fn parse_key(key: &str) -> Option<(String, Option<String>)> {
     if key.is_empty() {
         return None;
@@ -95,51 +103,50 @@ fn parse_key(key: &str) -> Option<(String, Option<String>)> {
 /// Split `key` on pnpm `>` chain separators (and yarn `/` ancestors),
 /// while keeping `>` characters that belong to a version comparator
 /// (`>=`, `>1.0.0`, `> 1`) attached to the segment they qualify.
+/// pnpm treats `>` as a parent delimiter unless the preceding byte is
+/// a space, `|`, or `@`; this matches its `/[^ |@]>/` boundary rule.
 /// Mirrors `aube-resolver::override_rule::split_segments`.
 fn split_segments(key: &str) -> Option<Vec<&str>> {
-    if key.contains('>') {
-        let bytes = key.as_bytes();
-        let mut parts: Vec<&str> = Vec::new();
-        let mut start = 0;
-        let mut i = 0;
-        let mut in_req = false;
-        while i < bytes.len() {
-            let c = bytes[i];
-            if c == b'@' && !in_req && i != start {
-                in_req = true;
-            } else if c == b'>' {
-                if in_req {
-                    let comparator_cont = bytes
-                        .get(i + 1)
-                        .is_some_and(|&n| matches!(n, b'=' | b' ' | b'v') || n.is_ascii_digit());
-                    if comparator_cont {
-                        i += 1;
-                        continue;
-                    }
-                }
-                if start == i {
-                    return None;
-                }
-                parts.push(&key[start..i]);
-                start = i + 1;
-                in_req = false;
-            }
-            i += 1;
-        }
-        if start >= bytes.len() {
+    let bytes = key.as_bytes();
+    let mut pnpm_parts: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'>' && i == 0 {
             return None;
         }
-        parts.push(&key[start..]);
-        return Some(parts);
+        if bytes[i] == b'>' && !matches!(bytes[i - 1], b' ' | b'|' | b'@') {
+            if start == i {
+                return None;
+            }
+            pnpm_parts.push(&key[start..i]);
+            start = i + 1;
+        }
+        i += 1;
     }
-    // Yarn slash form: split on `/` except the scope-introducing `/`.
-    let bytes = key.as_bytes();
+    if start >= bytes.len() {
+        return None;
+    }
+    pnpm_parts.push(&key[start..]);
+
+    // Split each pnpm segment on Yarn `/` ancestors except the
+    // scope-introducing slash. This second pass is required even when
+    // the key contains `>`: it may be a comparator in a slash-form
+    // selector such as `parent/lodash@>=4`.
     let mut out: Vec<&str> = Vec::new();
+    for part in pnpm_parts {
+        split_slash_segments(part, &mut out)?;
+    }
+    Some(out)
+}
+
+fn split_slash_segments<'a>(part: &'a str, out: &mut Vec<&'a str>) -> Option<()> {
+    let bytes = part.as_bytes();
     let mut start = 0;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'/' {
-            let current = &key[start..i];
+            let current = &part[start..i];
             let scope = current.starts_with('@') && !current[1..].contains('/');
             if !scope {
                 if current.is_empty() {
@@ -151,12 +158,12 @@ fn split_segments(key: &str) -> Option<Vec<&str>> {
         }
         i += 1;
     }
-    let tail = &key[start..];
+    let tail = &part[start..];
     if tail.is_empty() {
         return None;
     }
     out.push(tail);
-    Some(out)
+    Some(())
 }
 
 /// Parse a single segment `name[@range]` (scoped or unscoped) into its
@@ -294,6 +301,29 @@ mod tests {
             ("parent/foo", "1.0.0"),
         ]));
         assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn target_name_supports_pnpm_and_yarn_ancestor_selectors() {
+        assert_eq!(target_package_name("parent>foo").as_deref(), Some("foo"));
+        assert_eq!(target_package_name("parent/foo").as_deref(), Some("foo"));
+        assert_eq!(target_package_name("**/foo").as_deref(), Some("foo"));
+        assert_eq!(
+            target_package_name("parent/@scope/foo@^1").as_deref(),
+            Some("@scope/foo")
+        );
+        assert_eq!(
+            target_package_name("parent/lodash@>=4.0.0").as_deref(),
+            Some("lodash")
+        );
+        assert_eq!(
+            target_package_name("parent/@scope/foo@>1.0.0").as_deref(),
+            Some("@scope/foo")
+        );
+        assert_eq!(
+            target_package_name("parent@^1>123numeric").as_deref(),
+            Some("123numeric")
+        );
     }
 
     #[test]

@@ -329,6 +329,22 @@ fn parse_release_age_minutes(raw: &str) -> Result<u64, String> {
     Ok(dur.as_secs().div_ceil(60))
 }
 
+/// A parsed `--minimum-release-age` value, in whole minutes.
+///
+/// The parser takes no value-parser closures — a Rust callback cannot travel in
+/// a portable spec — so [`parse_release_age_minutes`] is reached through this
+/// newtype's `FromStr`. Its `Err` string is what a usage error prints, which is
+/// what makes that wording user-facing.
+#[derive(Debug, Clone, Copy)]
+pub struct ReleaseAge(pub u64);
+
+impl std::str::FromStr for ReleaseAge {
+    type Err = String;
+    fn from_str(raw: &str) -> Result<Self, String> {
+        parse_release_age_minutes(raw).map(ReleaseAge)
+    }
+}
+
 // The per-invocation age-gate flags, flattened into every nub surface that
 // resolves from the registry (`install`/`ci`, the engine verbs via
 // `EngineGlobals`, and `nubx`).
@@ -348,24 +364,24 @@ fn parse_release_age_minutes(raw: &str) -> Result<u64, String> {
 // `install.minimumReleaseAgeStrict` in `nub.jsonc` either — one axis (how
 // long), not two.
 //
-// (Plain `//`, not rustdoc: a `///` comment on a clap `Args` struct becomes the
+// (Plain `//`, not rustdoc: a `///` comment on a usage `Args` struct becomes the
 // augmented command's `--help` about-text and clobbers the verb's own, the same
 // hazard `EngineGlobals` documents. This one leaked onto `nub add --help`.)
-#[derive(Debug, Default, Clone, clap::Args)]
+#[derive(Debug, Default, Clone, usage_rs::Args)]
 pub struct AgeGateFlags {
     /// How old a version must be before it can be installed: a duration with a
     /// unit (`30s`, `5m`, `2h`, `3d`, `1w`), or a bare number meaning minutes.
     /// `0` turns the age gate off for this run. Overrides `minimumReleaseAge`
     /// from config.
-    #[arg(long, value_name = "DURATION", value_parser = parse_release_age_minutes)]
-    pub minimum_release_age: Option<u64>,
+    #[usage(long, value_name = "DURATION")]
+    pub minimum_release_age: Option<ReleaseAge>,
 
     /// Exempt packages from the age gate for this run (repeatable). Entry
     /// grammar matches the config field: a bare name, a `*` name glob, or a
     /// name with a version range. REPLACES any configured
     /// `minimumReleaseAgeExclude` rather than adding to it, so pass every
     /// package you still need exempt.
-    #[arg(long, value_name = "PKG")]
+    #[usage(long, value_name = "PKG")]
     pub minimum_release_age_exclude: Vec<String>,
 }
 
@@ -376,7 +392,7 @@ impl AgeGateFlags {
     /// without needing a `sources.cli` alias declared in `settings.toml`.
     fn cli_overrides(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        if let Some(minutes) = self.minimum_release_age {
+        if let Some(ReleaseAge(minutes)) = self.minimum_release_age {
             out.push(("minimumReleaseAge".to_string(), minutes.to_string()));
         }
         if !self.minimum_release_age_exclude.is_empty() {
@@ -555,7 +571,7 @@ mod tests {
     #[test]
     fn zero_reaches_the_engine_as_the_off_switch() {
         let flags = AgeGateFlags {
-            minimum_release_age: Some(0),
+            minimum_release_age: Some(ReleaseAge(0)),
             ..Default::default()
         };
         assert_eq!(
@@ -601,15 +617,20 @@ mod tests {
     }
 
     /// The flag inherits the config grammar's rejections, so a value the file
-    /// refuses cannot sneak in through the CLI.
+    /// refuses cannot sneak in through the CLI. Asserted through `FromStr`,
+    /// which is the path the parser takes and the source of the printed reason.
     #[test]
     fn release_age_rejects_what_the_config_grammar_rejects() {
         for bad in ["3y", "-1d", "3 d", "d", "3_0d", ""] {
+            let err = bad.parse::<ReleaseAge>().expect_err(&format!(
+                "{bad:?} must be rejected on the flag, as in nub.jsonc"
+            ));
             assert!(
-                parse_release_age_minutes(bad).is_err(),
-                "{bad:?} must be rejected on the flag, as it is in nub.jsonc"
+                err.contains("expected minutes") && err.contains(bad),
+                "{bad:?} rejected with an unusable reason: {err}"
             );
         }
+        assert_eq!("2h".parse::<ReleaseAge>().map(|a| a.0), Ok(120));
     }
 
     /// Repeated `--minimum-release-age-exclude` must arrive as ONE joined entry:

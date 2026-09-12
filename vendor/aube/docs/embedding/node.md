@@ -53,7 +53,7 @@ import { configure, install } from "@jdxcode/aube-node"
 
 configure({
   defaults: {
-    minimumReleaseAge: "259200", // seconds; 3-day cooldown for fresh releases
+    minimumReleaseAge: "4320", // minutes; 3-day cooldown for fresh releases
   },
 })
 ```

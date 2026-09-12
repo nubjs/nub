@@ -15,27 +15,26 @@
 //! scope's packages to the right registry without further config.
 
 use crate::commands::npmrc::{NpmrcEdit, registry_host_key, resolve_registry, user_npmrc_path};
-use clap::Args;
 use miette::{IntoDiagnostic, miette};
 use std::io::{BufRead, IsTerminal};
 use std::time::{Duration, Instant};
 
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct LoginArgs {
     /// Authentication flow: `legacy` (token paste; default) or `web`
     /// (OAuth flow against `{registry}/-/v1/login`).
-    #[arg(long, value_name = "TYPE", default_value = "legacy")]
+    #[usage(long, value_name = "TYPE", default = "legacy")]
     pub auth_type: String,
 
     /// Scope to bind this registry to (e.g. `@myorg`).
     ///
     /// When set, the scope->registry mapping is also written to
     /// `~/.npmrc`.
-    #[arg(long, value_name = "SCOPE")]
+    #[usage(long, value_name = "SCOPE")]
     pub scope: Option<String>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 

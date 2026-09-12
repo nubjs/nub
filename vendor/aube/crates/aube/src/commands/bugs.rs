@@ -5,7 +5,6 @@
 //! `repository`. With package names, metadata is fetched from the registry.
 
 use crate::commands::{make_client, packument_full_cache_dir, resolve_version, split_name_spec};
-use clap::Args;
 use miette::miette;
 use serde_json::Value;
 
@@ -19,12 +18,12 @@ Examples:
   $ aube issues react react-dom
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct BugsArgs {
     /// Packages to open bug trackers for. Defaults to the current project.
     pub packages: Vec<String>,
 
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 

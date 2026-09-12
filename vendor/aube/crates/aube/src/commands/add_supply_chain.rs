@@ -133,7 +133,22 @@ pub(crate) async fn run_gates(
     // failures: under `Required` it's a hard fail with
     // `ERR_AUBE_ADVISORY_CHECK_FAILED`; otherwise OSV/download probes
     // are skipped while the independent package-age gate still runs.
+    // A sandbox that has declared the network off (Codex sets
+    // `CODEX_SANDBOX_NETWORK_DISABLED=1`) cannot answer a probe; skipping
+    // saves the failed request and the warning it would print. `Required`
+    // still fails, exactly as an unreachable OSV would.
+    let network_off = aube_util::agent_sandbox::network_disabled();
+    if network_off && matches!(advisory_check, AdvisoryCheck::Required) {
+        return Err(miette!(
+            code = ERR_AUBE_ADVISORY_CHECK_FAILED,
+            "the sandbox has network access disabled and `advisoryCheck = required` is set"
+        ));
+    }
     let probe_client = match aube_registry::supply_chain::build_probe_client() {
+        Ok(_) if network_off => {
+            tracing::debug!("sandbox network is disabled; skipping OSV and downloads probes");
+            None
+        }
         Ok(client) => Some(client),
         Err(e) => {
             if matches!(advisory_check, AdvisoryCheck::Off) {
@@ -1677,6 +1692,18 @@ mod tests {
     fn similar_name_skips_exact_and_distant_names() {
         assert_eq!(
             find_similar_package_name("lodash", "lodash\nexpress\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn popular_package_is_not_flagged_by_a_lower_ranked_similar_name() {
+        assert_eq!(
+            find_similar_package_name("esbuild", "esbuild\nmsbuild\n"),
+            None
+        );
+        assert_eq!(
+            find_similar_package_name("@types/node", "@types/node\n@types/code\n"),
             None
         );
     }

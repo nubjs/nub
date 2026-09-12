@@ -31,6 +31,9 @@ pub enum InstallOutputLevel {
     Error,
 }
 
+/// Event code attached to stdout and stderr lines emitted by lifecycle scripts.
+pub const INSTALL_OUTPUT_CODE_LIFECYCLE_SCRIPT: &str = "AUBE_LIFECYCLE_SCRIPT_OUTPUT";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallProgressSnapshot {
     pub phase: Option<InstallPhase>,
@@ -172,6 +175,15 @@ impl InstallControl {
         self.reporter.clone()
     }
 
+    pub(crate) fn script_output_reporter(
+        &self,
+    ) -> Option<Arc<dyn aube_scripts::ScriptOutputReporter>> {
+        (self.output == InstallOutputMode::Events).then(|| {
+            Arc::new(InstallScriptOutputReporter(self.clone()))
+                as Arc<dyn aube_scripts::ScriptOutputReporter>
+        })
+    }
+
     pub(crate) async fn confirm(&self, prompt: InstallPrompt) -> Option<miette::Result<bool>> {
         let handler = self.prompt_handler.clone()?;
         Some(tokio::select! {
@@ -239,6 +251,19 @@ impl InstallControl {
             // pass ran and no file was materialized.
             files_linked: 0,
         }));
+    }
+}
+
+#[derive(Debug)]
+struct InstallScriptOutputReporter(InstallControl);
+
+impl aube_scripts::ScriptOutputReporter for InstallScriptOutputReporter {
+    fn report(&self, _stream: aube_scripts::ScriptOutputStream, line: String) {
+        self.0.output(
+            InstallOutputLevel::Info,
+            Some(INSTALL_OUTPUT_CODE_LIFECYCLE_SCRIPT),
+            line,
+        );
     }
 }
 

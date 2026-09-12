@@ -127,7 +127,8 @@ impl Resolver {
 
     /// Set the resolution mode. Defaults to `Highest` (pnpm's classic
     /// behavior). `TimeBased` switches direct deps to lowest-satisfying
-    /// and constrains transitives by a publish-date cutoff.
+    /// and constrains transitives by a publish-date cutoff; `LowestDirect`
+    /// switches only direct dependencies to lowest-satisfying.
     pub fn with_resolution_mode(mut self, mode: ResolutionMode) -> Self {
         self.resolution_mode = mode;
         self

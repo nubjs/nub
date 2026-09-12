@@ -26,3 +26,6 @@ tests/fixtures/loader-redirect-both-ways/*  text eol=lf
 # native host rather than Linux alone. `**` rather than `*` because the `.d`
 # companion directories nest, and their sources feed the same byte comparisons.
 tests/compile-augmentation/fixtures/**  text eol=lf
+# PowerShell 5.1 reads a BOM-less script in the ANSI codepage and is happiest with
+# CRLF; keep this probe byte-identical on every checkout.
+tests/compile-hide-console/*.ps1 text eol=crlf

@@ -164,11 +164,9 @@ struct NpmDownloadsResponse {
 /// `aube add a b c` can reuse a single client + connection pool
 /// across all per-package downloads requests.
 pub fn build_probe_client() -> Result<reqwest::Client, SupplyChainError> {
-    Ok(
-        aube_util::http::with_webpki_root_fallback(reqwest::Client::builder())
-            .timeout(PROBE_TIMEOUT)
-            .build()?,
-    )
+    Ok(crate::client::probe_client_builder()
+        .timeout(PROBE_TIMEOUT)
+        .build()?)
 }
 
 /// Probe OSV for `MAL-*` advisories on every candidate against a

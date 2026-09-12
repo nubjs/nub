@@ -41,7 +41,7 @@ export const EXPECTED_REMOTES: Record<string, string> = {
  */
 export function normalizeGitHubRepo(url: string): string | null {
   const m =
-    /^(?:https:\/\/|ssh:\/\/git@|git@)github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url.trim())
+    /^(?:https:\/\/(?:[^@/\s]+@)?|ssh:\/\/git@|git@)github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url.trim())
   return m ? m[1]! : null
 }
 

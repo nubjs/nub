@@ -93,6 +93,44 @@ EOF
 	refute_output --partial "is-odd  "
 }
 
+@test "aube outdated does not report an installed young release as hidden" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "outdated-young-installed",
+		  "version": "1.0.0",
+		  "dependencies": { "is-odd": "3.0.1" }
+		}
+	EOF
+	run aube install
+	assert_success
+
+	cat >.npmrc <<'EOF'
+minimumReleaseAge=999999999
+minimumReleaseAgeStrict=true
+EOF
+	run aube outdated
+	assert_success
+	assert_output --partial "up to date"
+	refute_output --partial "updates hidden by minimumReleaseAge"
+	refute_output --partial "3.0.0"
+}
+
+@test "aube outdated does not report releases blocked by minimumReleaseAge" {
+	_write_pkg_with_old_is_odd
+	echo "minimumReleaseAge=0" >.npmrc
+	run aube install
+	assert_success
+
+	cat >.npmrc <<'EOF'
+minimumReleaseAge=999999999
+minimumReleaseAgeStrict=true
+EOF
+	run aube outdated
+	assert_success
+	assert_output --partial "up to date"
+	assert_output --partial "updates hidden by minimumReleaseAge: is-odd@3.0.1"
+}
+
 @test "aube outdated does not propose a downgrade off a deprecated latest" {
 	# is-odd@3.0.1 is both the `latest` dist-tag and deprecated
 	# ("please use is-even") in the fixture registry. pnpm returns the

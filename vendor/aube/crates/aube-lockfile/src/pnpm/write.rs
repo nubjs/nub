@@ -65,6 +65,48 @@ mod tests {
 
 /// Write a LockfileGraph as pnpm-lock.yaml v9 format.
 pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Result<(), Error> {
+    let Built { lockfile, .. } = build(path, graph, manifest)?;
+    let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
+    let yaml = reformat_for_pnpm_parity(&yaml);
+    // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
+    // quarantine during the write used to leave the user with a
+    // truncated pnpm-lock.yaml on disk, next install failed to
+    // parse and the user thought their lockfile was gone. See
+    // atomic_write_lockfile for full rationale.
+    crate::atomic_write_lockfile(path, yaml.as_bytes())?;
+    Ok(())
+}
+
+/// Project a `LockfileGraph` onto pnpm's v9 lockfile schema without
+/// serializing it. Split out of [`write`] so the pnpmfile hook view
+/// ([`super::hook_view`]) hands hooks the exact same projection the
+/// writer puts on disk — dep-path translation, patch-hash suffixes,
+/// alias recovery and all — instead of a second, drifting one.
+/// `path` decides `pnpm-lock.yaml`-only behavior (native alias
+/// encoding) and roots the workspace-member manifest reads.
+/// [`build`]'s output: the projection, plus the key correspondence a
+/// pnpmfile hook round-trip needs.
+pub(super) struct Built {
+    pub lockfile: WritablePnpmLockfile,
+    /// `snapshots:` key -> the graph `dep_path` it was derived from.
+    ///
+    /// The two spellings diverge for anything that is not a plain
+    /// registry dep: pnpm keys on the resolved specifier
+    /// (`is-obj@https://codeload…/tar.gz/<sha>`) while the graph keys on
+    /// an FS-safe hashed dep_path (`is-obj@url+f5ca9b17a622e185`). A
+    /// hook is handed the pnpm spelling, so an edit it makes to
+    /// `packages[<pnpm key>]` cannot be applied back to the graph
+    /// without this map. Derived in the snapshot loop below, where both
+    /// spellings are in hand, rather than re-computed by a second copy
+    /// of the key rules that could drift from it.
+    pub snapshot_keys: BTreeMap<String, String>,
+}
+
+pub(super) fn build(
+    path: &Path,
+    graph: &LockfileGraph,
+    manifest: &PackageJson,
+) -> Result<Built, Error> {
     let native_pnpm_aliases = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -768,6 +810,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             .collect()
     };
     let mut snapshots = BTreeMap::new();
+    let mut snapshot_keys = BTreeMap::new();
     for (dep_path, pkg) in &graph.packages {
         // `link:` deps are omitted from snapshots (pnpm parity). `exec:`
         // is omitted for the same reason it is omitted from packages:
@@ -789,6 +832,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             }
         };
         key = decorate_patch_hash(&key, Some(pkg));
+        snapshot_keys.insert(key.clone(), dep_path.clone());
         let pkg_deps = rewrite_local_deps(pkg.dependencies.clone());
         let pkg_opt_deps = rewrite_local_deps(pkg.optional_dependencies.clone());
         snapshots.insert(
@@ -953,15 +997,10 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
         snapshots,
     };
 
-    let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
-    let yaml = reformat_for_pnpm_parity(&yaml);
-    // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
-    // quarantine during the write used to leave the user with a
-    // truncated pnpm-lock.yaml on disk, next install failed to
-    // parse and the user thought their lockfile was gone. See
-    // atomic_write_lockfile for full rationale.
-    crate::atomic_write_lockfile(path, yaml.as_bytes())?;
-    Ok(())
+    Ok(Built {
+        lockfile,
+        snapshot_keys,
+    })
 }
 
 fn registry_tarball_url_is_not_derivable(
@@ -1036,7 +1075,7 @@ fn pruned_time_entries(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WritablePnpmLockfile {
+pub(super) struct WritablePnpmLockfile {
     lockfile_version: String,
     settings: WritableSettings,
     /// pnpm v9 emits a top-level `catalogs:` map immediately after

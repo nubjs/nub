@@ -30,9 +30,13 @@ tracing = { workspace = true }
 # a direct dep keeps the workspace honest about who actually uses it.
 regex = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# `direct.rs` asks `access(X_OK)` — the same question a shell's PATH search
+# asks — instead of re-deriving executability from mode bits and our uid.
+libc = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = { workspace = true }
-libc = { workspace = true }
 seccompiler = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -52,6 +56,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_JobObjects",
 ] }
+
+[dev-dependencies]
+# `implicit_gyp_install.rs` builds PackageJson fixtures from manifest JSON so
+# the `gypfile` opt-out is exercised through the same deserialize path a real
+# package.json takes, rather than by hand-populating `extra`.
+serde_json = { workspace = true }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Tests poll grandchild liveness with OpenProcess / GetExitCodeProcess.

@@ -54,6 +54,25 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
         ..Default::default()
     };
 
+    // npm does not tag remote-tarball package entries separately from
+    // registry packages: both use an HTTP(S) `resolved` URL. The declared
+    // dependency specifier is the discriminator. Collect every URL spec so
+    // matching entries retain their non-registry identity instead of later
+    // being sent through packument validation.
+    let remote_tarball_specs: BTreeSet<&str> = raw
+        .packages
+        .values()
+        .flat_map(|entry| {
+            entry
+                .dependencies
+                .values()
+                .chain(entry.dev_dependencies.values())
+                .chain(entry.optional_dependencies.values())
+        })
+        .map(String::as_str)
+        .filter(|spec| LocalSource::looks_like_remote_tarball_url(spec))
+        .collect();
+
     // npm workspace links come in pairs:
     // - `node_modules/@scope/pkg: { resolved: "packages/pkg", link: true }`
     // - `packages/pkg: { name, version, dependencies, ... }`
@@ -62,11 +81,32 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
     // the target path entry carries the package metadata. Skip the target-path
     // record during the main loop and let the link entry synthesize a local
     // package from it.
+    //
+    // One more shape, which is neither: a `link` whose target is a registry
+    // package inside `node_modules`. npm writes it to point a nested
+    // dependent's peer at the copy above it — puppeteer's lockfile has
+    // `…/browserslist/node_modules/browserslist` linking back to
+    // `…/browserslist` for update-browserslist-db's peer. The target is a
+    // registry package and stays one; the link is only an install path
+    // that resolves to it, so it creates no package of its own.
+    let pointer_link_target = |entry: &super::raw::RawNpmPackage| -> Option<String> {
+        if !entry.link {
+            return None;
+        }
+        let target = entry.resolved.as_deref()?;
+        if !target.split('/').any(|segment| segment == "node_modules") {
+            return None;
+        }
+        let target_entry = raw.packages.get(target)?;
+        (!target_entry.link && target_entry.version.is_some()).then(|| target.to_string())
+    };
     let link_targets: BTreeSet<String> = raw
         .packages
         .values()
+        .filter(|entry| pointer_link_target(entry).is_none())
         .filter_map(|entry| entry.link.then(|| entry.resolved.clone()).flatten())
         .collect();
+    let mut pointer_links: Vec<(String, String)> = Vec::new();
 
     // Map each install_path to the locked dep_path it resolves to. We need
     // this for the nested-resolution walk, including local/workspace links
@@ -105,6 +145,10 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
             .as_ref()
             .filter(|real| real.as_str() != install_name.as_str())
             .cloned();
+        if let Some(target) = pointer_link_target(entry) {
+            pointer_links.push((install_path.clone(), target));
+            continue;
+        }
         let (package_entry, version, dep_path, local_source) = if entry.link {
             let target = entry.resolved.as_ref().ok_or_else(|| {
                 Error::parse(
@@ -118,12 +162,16 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
                     format!("linked package '{install_name}' points to missing target '{target}'"),
                 )
             })?;
-            let version = target_entry.version.clone().ok_or_else(|| {
-                Error::parse(
-                    path,
-                    format!("linked package '{install_name}' target '{target}' has no version"),
-                )
-            })?;
+            // npm writes no `version` on a local package whose manifest
+            // declares none (a test fixture linked as `file:test/fixture`
+            // is the common shape — mocha ships one). The resolver
+            // defaults such a package to `0.0.0` (`install::workspace`);
+            // mirror that so a read graph matches a fresh resolve instead
+            // of refusing a lockfile npm itself wrote.
+            let version = target_entry
+                .version
+                .clone()
+                .unwrap_or_else(|| "0.0.0".to_string());
             let local = LocalSource::Link(PathBuf::from(target));
             (
                 target_entry,
@@ -138,6 +186,15 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
             let local_source = entry.resolved.as_deref().and_then(|r| {
                 crate::npm::source::local_git_source_from_resolved(r)
                     .or_else(|| crate::npm::source::local_file_source_from_resolved(r))
+                    .or_else(|| {
+                        remote_tarball_specs.contains(r).then(|| {
+                            LocalSource::RemoteTarball(crate::RemoteTarballSource {
+                                url: r.to_string(),
+                                integrity: entry.integrity.clone().unwrap_or_default(),
+                                git_hosted: false,
+                            })
+                        })
+                    })
             });
             let dep_path = local_source.as_ref().map_or_else(
                 || format!("{install_name}@{version}"),
@@ -265,6 +322,18 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
     // npm.rs's data model doesn't express that, and in practice npm
     // dedupes only when the transitives match anyway.
     type ResolvedDepMap = BTreeMap<String, String>;
+    // A pointer link resolves to whatever its target resolves to, whichever
+    // of the two the map visited first.
+    for (install_path, target) in pointer_links {
+        if let Some(target_info) = install_path_info.get(&target) {
+            let info = InstallPathInfo {
+                name: target_info.name.clone(),
+                dep_path: target_info.dep_path.clone(),
+            };
+            install_path_info.insert(install_path, info);
+        }
+    }
+
     let mut resolved_by_dep_path: BTreeMap<String, (ResolvedDepMap, ResolvedDepMap)> =
         BTreeMap::new();
     for (install_path, entry) in &raw.packages {
@@ -326,6 +395,46 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
                 }
             }
         }
+        // Peers, by placement. npm records the copy of a peer each dependent
+        // sees — auto-installed and hoisted to the root, or nested beside the
+        // dependent when the root's copy does not satisfy it — and ties it to
+        // no regular dependency edge. The graph carries that placement as a
+        // dependency edge so two downstream passes see it. `filter_graph`'s
+        // reachability walk keeps a peer-only package alive: `react-dom`
+        // reached solely through a transitive package's peer edge was pruned,
+        // and the package died at runtime with `Cannot find package`. And
+        // `apply_peer_contexts` takes the recorded copy when no ancestor
+        // provides a satisfying one, where it used to fall back to the newest
+        // version in the graph or to an ancestor's out-of-range copy
+        // (eslint-plugin-react was handed xo's eslint 10 with npm's nested
+        // eslint 9 sitting in the lockfile). An ancestor that satisfies the
+        // range still wins, as it does for every lockfile shape. The range is
+        // deliberately not added to `declared`: the npm writer emits only
+        // declared names under `dependencies`, so the round trip stays
+        // byte-identical. An optional peer (`peerDependenciesMeta`) is an
+        // optional edge, so a provider that is otherwise only optionally
+        // reachable keeps that classification and platform pruning can still
+        // drop it.
+        for peer_name in package_entry.peer_dependencies.keys() {
+            if resolved.contains_key(peer_name) {
+                continue;
+            }
+            if let Some(target_install_path) =
+                crate::npm::layout::resolve_nested(lookup_path, peer_name, &install_path_info)
+                && let Some(target_info) = install_path_info.get(&target_install_path)
+            {
+                let tail =
+                    crate::npm::dep_path_tail(&target_info.name, &target_info.dep_path).to_string();
+                let optional = package_entry
+                    .peer_dependencies_meta
+                    .get(peer_name)
+                    .is_some_and(|meta| meta.optional);
+                resolved.insert(peer_name.clone(), tail.clone());
+                if optional {
+                    resolved_optional.insert(peer_name.clone(), tail);
+                }
+            }
+        }
         resolved_by_dep_path.insert(dep_path, (resolved, resolved_optional));
     }
     for (dep_path, (deps, optional_deps)) in resolved_by_dep_path {
@@ -347,10 +456,23 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
     // frozen install rejects the lockfile with
     // `specifiers in the lockfile don't match package.json` — the same
     // way the non-root workspace importers below already thread it.
-    let push_direct =
+    //
+    // One row per name, first section wins, in the resolver's own
+    // priority (`dependencies` > `devDependencies` >
+    // `optionalDependencies`, `seed_direct_deps`). A manifest may list
+    // one package under two sections — promptfoo carries
+    // `@anthropic-ai/claude-agent-sdk` as both a dev and an optional dep,
+    // and npm mirrors both onto the root entry. Recording both rows made
+    // the section check read the optional row as
+    // `manifest section is devDependencies, lockfile section is
+    // optionalDependencies` and refuse every frozen install.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut push_direct =
         |dep_name: &str, specifier: &str, dep_type: DepType, direct: &mut Vec<DirectDep>| {
             let root_path = format!("node_modules/{dep_name}");
-            if let Some(info) = install_path_info.get(&root_path) {
+            if let Some(info) = install_path_info.get(&root_path)
+                && seen.insert(info.name.clone())
+            {
                 direct.push(DirectDep {
                     name: info.name.clone(),
                     dep_path: info.dep_path.clone(),
@@ -367,6 +489,9 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
     }
     for (dep_name, specifier) in &root.optional_dependencies {
         push_direct(dep_name, specifier, DepType::Optional, &mut direct);
+    }
+    for (dep_name, specifier) in required_peers_not_declared(&root) {
+        push_direct(dep_name, specifier, DepType::Production, &mut direct);
     }
 
     // npm symlinks every workspace member (and any other top-level
@@ -425,14 +550,56 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
     // `packages/app`, ...) carries that package's own dependency sections.
     // Preserve those target paths as graph importers so install/link and a
     // later package-lock rewrite keep each workspace's node_modules tree.
+    //
+    // But only for targets that are actually MEMBERS. npm writes the very
+    // same pair for a local directory dependency — `vendor/local` gets a
+    // bare `name`/`version` entry plus a `link: true` record — so taking
+    // every link target registered phantom importers for paths outside the
+    // workspace. `drift` then compared them against the real member list
+    // and failed every `--frozen-lockfile` with `workspace importer
+    // vendor/local is in the lockfile but not in the workspace`, including
+    // against lockfiles npm itself had written.
+    //
+    // The shapes are identical in the lockfile — a root importer's own
+    // `file:./dep` also produces a root link record — so the manifest's
+    // `workspaces` patterns are the only thing that can decide. A
+    // non-member still becomes a proper local-source package via the link
+    // entry's own synthesis pass above; it just stops pretending to be an
+    // importer.
+    // The LOCKFILE's own copy comes first: npm mirrors `workspaces` into
+    // `packages[""]`, so a lockfile is self-describing and a caller that
+    // passes a bare manifest still gets the right answer. The manifest is
+    // the fallback for a lockfile written before that field was emitted.
+    //
+    // When NEITHER carries patterns, keep every link target, exactly as
+    // before. That is the conservative direction on purpose: dropping a
+    // real member costs it its importer entry and breaks its install,
+    // while keeping a stray one only reproduces the pre-existing
+    // behaviour. It is also the case for a workspace whose members are
+    // declared outside package.json (a `pnpm-workspace.yaml` project
+    // converted to npm format), where absence of patterns says nothing
+    // about whether members exist.
+    let member_patterns: Vec<String> = raw
+        .packages
+        .get("")
+        .and_then(|root| root.workspaces.as_ref())
+        .or(manifest.workspaces.as_ref())
+        .map(|w| w.patterns().to_vec())
+        .unwrap_or_default();
     for target in &link_targets {
         if target.is_empty() {
+            continue;
+        }
+        if !member_patterns.is_empty()
+            && !aube_workspace::matches_member_patterns(target, &member_patterns)
+        {
             continue;
         }
         let Some(package_entry) = raw.packages.get(target) else {
             continue;
         };
         let mut direct = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         for (dep_name, specifier, dep_type) in package_entry
             .dependencies
             .iter()
@@ -449,10 +616,15 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
                     .iter()
                     .map(|(name, spec)| (name, spec, DepType::Optional)),
             )
+            .chain(
+                required_peers_not_declared(package_entry)
+                    .map(|(name, spec)| (name, spec, DepType::Production)),
+            )
         {
             if let Some(target_install_path) =
                 crate::npm::layout::resolve_nested(target, dep_name, &install_path_info)
                 && let Some(info) = install_path_info.get(&target_install_path)
+                && seen.insert(info.name.clone())
             {
                 direct.push(DirectDep {
                     name: info.name.clone(),
@@ -465,6 +637,31 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
         graph.importers.insert(target.clone(), direct);
     }
     Ok(graph)
+}
+
+/// An importer's required peers that no dependency section already
+/// declares, as (name, range) — the ones npm 7+ auto-installs into an
+/// ancestor `node_modules/` and that aube's own resolver seeds onto the
+/// importer as a `Production` direct dep carrying the peer range
+/// (`auto_install_peers`). The reader has to surface them the same way:
+/// the freshness check compares the manifest's required peers against the
+/// importer's recorded specifiers, so leaving them out read every
+/// workspace member with a peer as `manifest adds <peer>@<range>` under
+/// `--frozen-lockfile` (apollo-server's `@apollo/cache-control-types`,
+/// socket.io's cluster adapter). An optional peer (`peerDependenciesMeta`)
+/// is never auto-installed, so it stays out.
+fn required_peers_not_declared(
+    entry: &RawNpmPackage,
+) -> impl Iterator<Item = (&String, &String)> + '_ {
+    entry.peer_dependencies.iter().filter(|(name, _)| {
+        !entry
+            .peer_dependencies_meta
+            .get(*name)
+            .is_some_and(|meta| meta.optional)
+            && !entry.dependencies.contains_key(*name)
+            && !entry.dev_dependencies.contains_key(*name)
+            && !entry.optional_dependencies.contains_key(*name)
+    })
 }
 
 /// Lift a pre-npm-7 nested-`dependencies` tree into the flat,

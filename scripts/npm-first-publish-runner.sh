@@ -39,11 +39,11 @@ for name in "${packages[@]}"; do
       fs.writeFileSync('$dir/package.json', JSON.stringify({
         name: '$name',
         version: '0.0.0',
-        description: 'Placeholder — the Nub loader ships here with the next Nub release.',
+        description: 'Placeholder — the Nub runner ships here with the next Nub release.',
         license: 'MIT',
-        repository: 'https://github.com/nubjs/nub',
+        repository: { type: 'git', url: 'git+https://github.com/nubjs/nub.git' },
       }, null, 2) + '\n');
-      fs.writeFileSync('$dir/README.md', 'Placeholder — the Nub loader ships here with the next Nub release. See https://github.com/nubjs/nub.\n');
+      fs.writeFileSync('$dir/README.md', 'Placeholder — the Nub runner ships here with the next Nub release. See https://github.com/nubjs/nub.\n');
     "
     echo "→ publishing $name@0.0.0 (placeholder)"
     (cd "$dir" && npm publish --access public) || { echo "publish failed for $name"; exit 1; }

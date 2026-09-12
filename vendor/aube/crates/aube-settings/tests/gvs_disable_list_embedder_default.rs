@@ -25,8 +25,9 @@ const SETTING: &str = "disableGlobalVirtualStoreForPackages";
 /// aube's built-in default, verbatim from `settings.toml`. Asserting against
 /// this string list is the "default is unchanged" half of the contract.
 /// v1.35.0 dropped `vite`/`vitepress` here once #1106 made the GVS work under
-/// Vite; nub tracks that list rather than pinning its own.
-const AUBE_DEFAULT: &[&str] = &["next", "nuxt", "parcel"];
+/// Vite; v2 dropped `nuxt`/`parcel` (#1312) and added the Metro family
+/// (#1297). nub tracks that list rather than pinning its own.
+const AUBE_DEFAULT: &[&str] = &["next", "expo", "react-native", "metro"];
 
 /// A stand-in embedder list. Deliberately disjoint from `AUBE_DEFAULT` so the
 /// override assertion below fails if the embedder tier stops being consulted —

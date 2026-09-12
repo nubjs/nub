@@ -1,20 +1,18 @@
-use clap::Args;
 use miette::IntoDiagnostic;
 use miette::miette;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-#[derive(Debug, Args)]
-#[command(disable_help_flag = true, disable_version_flag = true)]
+#[derive(Debug, usage_rs::Args)]
 pub struct NodeArgs {
     /// Arguments to pass to Node.js
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[usage(arg, double_dash = "automatic")]
     pub args: Vec<OsString>,
 }
 
 pub async fn run(args: NodeArgs) -> miette::Result<Option<i32>> {
     crate::runtime::ensure_for_cwd(&crate::dirs::cwd()?).await?;
-    let node = crate::runtime::node_program();
+    let node = resolved_node_program();
 
     #[cfg(unix)]
     let mut cmd = std::process::Command::new(&node);
@@ -22,9 +20,9 @@ pub async fn run(args: NodeArgs) -> miette::Result<Option<i32>> {
     let mut cmd = tokio::process::Command::new(&node);
 
     cmd.args(&args.args);
-    let runtime_dirs = crate::runtime::path_entries();
-    if !runtime_dirs.is_empty() {
-        cmd.env("PATH", aube_scripts::prepend_paths(&runtime_dirs));
+    let child_path_entries = crate::runtime::node_child_path_entries();
+    if !child_path_entries.is_empty() {
+        cmd.env("PATH", aube_scripts::prepend_paths(&child_path_entries));
     }
     // `NODE` / `npm_node_execpath` and any embedder env (e.g. a wrapper's
     // `NODE_OPTIONS` preload), so a direct `aube node` is invoked the same
@@ -70,13 +68,13 @@ pub async fn run_spawn(
         None => crate::dirs::cwd()?,
     };
     crate::runtime::ensure_for_cwd(&cwd).await?;
-    let node = crate::runtime::node_program();
+    let node = resolved_node_program();
     let mut cmd = tokio::process::Command::new(&node);
     cmd.args(&args);
     cmd.current_dir(&cwd);
-    let runtime_dirs = crate::runtime::path_entries();
-    if !runtime_dirs.is_empty() {
-        cmd.env("PATH", aube_scripts::prepend_paths(&runtime_dirs));
+    let child_path_entries = crate::runtime::node_child_path_entries();
+    if !child_path_entries.is_empty() {
+        cmd.env("PATH", aube_scripts::prepend_paths(&child_path_entries));
     }
     for (key, value) in crate::runtime::child_env_vars() {
         cmd.env(key, value);
@@ -95,4 +93,15 @@ pub async fn run_spawn(
             )
         })?;
     Ok(status.code())
+}
+
+fn resolved_node_program() -> PathBuf {
+    let node = crate::runtime::node_program();
+    let is_activated_shim = crate::tool_shims::activated_shim_dir()
+        .is_some_and(|dir| node.parent() == Some(dir.as_path()));
+    if node.components().count() == 1 || is_activated_shim {
+        aube_runtime::node_on_path().unwrap_or(node)
+    } else {
+        node
+    }
 }

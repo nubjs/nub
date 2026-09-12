@@ -386,6 +386,94 @@ fn a_custom_condition_can_point_at_typescript_source_in_a_linked_workspace_packa
     );
 }
 
+/// Two dependencies: one branching on `nub`, which nub sets itself, and one branching
+/// on a condition only the project's own config can supply. Both carry a `default`, so
+/// each package reports which branch answered.
+fn runtime_key_fixture() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    for (name, condition) in [("nub-pkg", "nub"), ("user-pkg", "user-declared")] {
+        let pkg = project.join("node_modules").join(name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(
+                r#"{{ "type": "module", "exports": {{ ".": {{ "{condition}": "./selected.js", "default": "./default.js" }} }} }}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(pkg.join("selected.js"), "export default 'selected';\n").unwrap();
+        std::fs::write(pkg.join("default.js"), "export default 'default';\n").unwrap();
+    }
+    std::fs::write(
+        project.join("package.json"),
+        r#"{ "dependencies": { "nub-pkg": "*", "user-pkg": "*" } }"#,
+    )
+    .unwrap();
+    // A `.mjs` entry so the `--node` control runs under vanilla Node on every version
+    // in the support band, rather than measuring native type stripping.
+    std::fs::write(
+        project.join("main.mjs"),
+        "import nub from 'nub-pkg';\nimport user from 'user-pkg';\n\
+         console.log(JSON.stringify({ nub, user }));\n",
+    )
+    .unwrap();
+    (temp, project)
+}
+
+fn runtime_key_probe(temp: &tempfile::TempDir, project: &Path, args: &[&str]) -> serde_json::Value {
+    let mut command = Command::new(nub_binary());
+    command
+        .current_dir(project)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .args(args);
+    probe_json(&format!("nub {}", args.join(" ")), command)
+}
+
+/// Nub's WinterTC runtime key reaches Node's resolver on an augmented run, so a package
+/// can ship a `nub` branch the way it ships `bun` or `deno` ones.
+///
+/// `--node` is the control and it is what makes this a test rather than a coincidence:
+/// compat mode is zero augmentation, so the same fixture must fall through to
+/// `default`. The second package proves the key ADDS to the project's own conditions
+/// instead of replacing them.
+#[test]
+fn the_nub_runtime_key_rides_augmented_runs_and_not_compat_mode() {
+    let (temp, project) = runtime_key_fixture();
+
+    let augmented = runtime_key_probe(&temp, &project, &["main.mjs"]);
+    assert_eq!(
+        augmented["nub"], "selected",
+        "an augmented run must select the `nub` branch: {augmented}"
+    );
+    assert_eq!(
+        augmented["user"], "default",
+        "nothing declares `user-declared` yet: {augmented}"
+    );
+
+    let compat = runtime_key_probe(&temp, &project, &["--node", "main.mjs"]);
+    assert_eq!(
+        compat["nub"], "default",
+        "compat mode must contribute no conditions of nub's own: {compat}"
+    );
+
+    std::fs::write(
+        project.join("nub.jsonc"),
+        r#"{ "conditions": ["user-declared"] }"#,
+    )
+    .unwrap();
+    let composed = runtime_key_probe(&temp, &project, &["main.mjs"]);
+    assert_eq!(
+        composed["user"], "selected",
+        "a configured condition must still reach the resolver: {composed}"
+    );
+    assert_eq!(
+        composed["nub"], "selected",
+        "and it must not displace the runtime key: {composed}"
+    );
+}
+
 /// A project whose `customConditions` live in a base config it `extends`, plus one
 /// dependency whose `exports` map has that condition and a `default`.
 struct ConditionFixture {

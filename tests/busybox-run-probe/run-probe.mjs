@@ -106,6 +106,15 @@ writeFileSync(
         // on the default shell (must be `none` ⇒ busybox) and once via
         // `--script-shell <bash>` (must be a version ⇒ the override reached bash).
         bashver: "echo bashver=${BASH_VERSION:-none}",
+        // busybox-w32 up-cases every environment name as it loads the Windows
+        // environment, so a script body that reads `$npm_package_name` — the
+        // spelling npm, pnpm, yarn and bun all deliver — saw nothing. nub restores
+        // the lowercase names it set; these two cases are what says so.
+        pkgenv: "echo NAME=[$npm_package_name] EVENT=[$npm_lifecycle_event]",
+        // Enumeration is a separate symptom from expansion: Windows'
+        // `process.env` is case-INSENSITIVE, so a lookup by name worked even while
+        // `Object.keys` returned zero lowercase npm_ names.
+        pkgenum: "node enumenv.mjs",
       },
     },
     null,
@@ -116,6 +125,14 @@ writeFileSync(
 // TS-only syntax: transpiles under nub's augmentation, throws under plain node —
 // so the `transpile` case proves the preload reached the busybox-spawned child.
 writeFileSync(join(fixture, "probe.ts"), 'const n: number = 7;\nconsole.log("TS_OK=" + n);\n');
+
+// Counted rather than looked up: `process.env.npm_package_name` answers on Windows
+// whatever the casing, so only enumeration can tell the two apart.
+writeFileSync(
+  join(fixture, "enumenv.mjs"),
+  'const lower = Object.keys(process.env).filter((n) => n.startsWith("npm_"));\n' +
+    'console.log("LOWER=" + lower.length);\n',
+);
 
 // ── run each case through the integrated `nub run` ───────────────────────────
 function run(exe, extraArgs, script) {
@@ -156,6 +173,21 @@ const cases = [
   { id: "default_shell_is_busybox", args: [], script: "bashver", ok: (o) => o.includes("bashver=none") },
   // `--script-shell` must still reach a real native shell (Git Bash), which DOES
   // set $BASH_VERSION — proving the override bypasses busybox.
+  // The script body reads the lowercase names, as every other package manager's
+  // scripts do. Asserting the VALUE, not just presence: an empty expansion is
+  // exactly the broken behavior.
+  {
+    id: "lowercase_npm_env_expands",
+    args: [],
+    script: "pkgenv",
+    ok: (o) => o.includes("NAME=[busybox-run-probe-fixture]") && o.includes("EVENT=[pkgenv]"),
+  },
+  {
+    id: "lowercase_npm_env_enumerates",
+    args: [],
+    script: "pkgenum",
+    ok: (o) => /LOWER=(\d+)/.test(o) && Number(o.match(/LOWER=(\d+)/)[1]) > 0,
+  },
   {
     id: "script_shell_override_reaches_bash",
     args: ["--script-shell", gitBash],
@@ -186,6 +218,25 @@ function check(id, cond, detail) {
   total++;
   if (!cond) failures++;
   process.stdout.write(`RESULT|${id}|${cond ? "PASS" : "FAIL"}|${JSON.stringify(String(detail).slice(0, 300))}\n`);
+}
+
+// (0) INSTRUMENT CHECK for the two casing cases. They assert that nub RESTORES a
+// name busybox up-cased — which proves nothing unless busybox still up-cases. Drive
+// the staged shell directly with a lowercase name in its environment: the lowercase
+// spelling must come back EMPTY and the uppercase one must carry the value. If this
+// ever flips, busybox changed and the restoration is dead code rather than a fix.
+{
+  const raw = spawnSync(sidecarSrc, ["sh", "-c", "echo RAW=[$npm_package_name] UP=[$NPM_PACKAGE_NAME]"], {
+    env: { ...process.env, npm_package_name: "acme" },
+    encoding: "utf8",
+    timeout: 60000,
+  });
+  const out = (raw.stdout ?? "") + (raw.stderr ?? "");
+  check(
+    "busybox_still_upcases_env_names",
+    out.includes("RAW=[]") && out.includes("UP=[acme]"),
+    out.trim().slice(0, 200),
+  );
 }
 
 // (1) SIDECAR layout — busybox.exe beside nub.exe, how the win32 package, the release

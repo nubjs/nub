@@ -1,6 +1,6 @@
 //! Ties a spawned child's lifetime to the aube process so that stopping
 //! aube stops the tool it launched, instead of orphaning it under `init`
-//! (`ppid=1`). See <https://github.com/jdx/aube/discussions/1059>.
+//! (`ppid=1`). See <https://github.com/aubepkg/aube/discussions/1059>.
 //!
 //! `aube dlx <tool>` / `aube exec <bin>` used to `spawn` a child and simply
 //! await it, with no link between the child and aube's own lifetime. A

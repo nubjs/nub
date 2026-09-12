@@ -49,27 +49,27 @@ const KNOWN_CPU: &[&str] = &[
 ];
 const KNOWN_LIBC: &[&str] = &["glibc", "musl"];
 
-// (Plain `//`, not rustdoc: a `///` comment on a clap `Args` struct becomes the
+// (Plain `//`, not rustdoc: a `///` comment on a usage `Args` struct becomes the
 // augmented command's `--help` about-text and clobbers the verb's own — the
 // same hazard `AgeGateFlags` documents, which leaked onto `nub add --help`.)
-#[derive(Debug, Default, Clone, clap::Args)]
+#[derive(Debug, Default, Clone, usage_rs::Args)]
 pub struct PlatformFlags {
     /// Operating system(s) to install optional dependencies for. Repeatable or
     /// comma-separated. Use `current` for this machine's own, `*` for every
     /// one. REPLACES any configured `supportedArchitectures.os`.
-    #[arg(long, value_name = "OS", value_delimiter = ',')]
+    #[usage(long, value_name = "OS", delimiter = ',')]
     pub os: Vec<String>,
 
     /// CPU architecture(s) to install optional dependencies for. Repeatable or
     /// comma-separated. Use `current` for this machine's own, `*` for every
     /// one. REPLACES any configured `supportedArchitectures.cpu`.
-    #[arg(long, value_name = "CPU", value_delimiter = ',')]
+    #[usage(long, value_name = "CPU", delimiter = ',')]
     pub cpu: Vec<String>,
 
     /// C library/libraries to install optional dependencies for (`glibc`,
     /// `musl`). Only consulted on Linux — no other platform's packages declare
     /// one. REPLACES any configured `supportedArchitectures.libc`.
-    #[arg(long, value_name = "LIBC", value_delimiter = ',')]
+    #[usage(long, value_name = "LIBC", delimiter = ',')]
     pub libc: Vec<String>,
 }
 
@@ -80,7 +80,7 @@ impl PlatformFlags {
     }
 
     /// The per-axis override, with an empty axis meaning "not named" rather
-    /// than "select nothing". Clap cannot distinguish `--os` absent from
+    /// than "select nothing". The parser cannot distinguish `--os` absent from
     /// `--os` given no values, and the latter is a usage error it already
     /// rejects, so an empty vec here is unambiguously absence.
     fn override_set(&self) -> CliSupportedArchitectures {

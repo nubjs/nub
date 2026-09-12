@@ -90,10 +90,13 @@ EOF
 
 ```bash
 # from your worktree:
-cargo build -p nub-cli --profile fast        # -> <worktree>/target/fast/nub
-NUB=<worktree>/target/fast/nub
+scripts/rust-build.sh build -p nub-cli --profile fast
+NUB="$(scripts/rust-build.sh --print-target)/fast/nub"      # DERIVE it; see below
+ls -l "$NUB"                                                # and eyeball the mtime
 # or, if you ran `make install-dev`:  NUB=nub-dev
 ```
+
+**Never hardcode `<worktree>/target/fast/nub`.** The wrapper builds into a content-hashed bucket under `~/.cache/nub/shared-target-<hash>/` AND CoW-seeds the worktree's own `target/` from a warm bucket — so `<worktree>/target/fast/nub` exists, is executable, reports a plausible `--version`, and is not what you just built. There is no error and no warning. Measured 2026-09-05: a probe script read that path for an hour while the real build sat in the bucket, and the stale copy happened to hold an earlier version of the same change, so every run looked plausible; the tell was the sweep finally disagreeing with a unit test. Derive the path from `--print-target` and print its mtime, so a stale read shows up in the output instead of being inferred later. (`cargo test` is immune — it compiles from source.)
 
 If the change touches the runtime/transpiler (the N-API addon), build the addon too: `make addon-fast` (or `make install-dev`, which does both).
 
@@ -152,8 +155,8 @@ Ad-hoc verification proves *this* change; a committed test prevents the *next* r
 ```bash
 FIX=$(mktemp -d /tmp/nub-fix.XXXX); cd "$FIX"        # 1. fixture
 # ...write minimal package.json / lockfile / tsconfig / source...
-cargo build -p nub-cli --profile fast                # 2. build dev nub
-NUB=<worktree>/target/fast/nub
+scripts/rust-build.sh build -p nub-cli --profile fast # 2. build dev nub
+NUB="$(scripts/rust-build.sh --print-target)/fast/nub" #    derive, never hardcode target/
 "$NUB" <subcommand>; echo "exit: $?"                 # 3. run it
 cat the-effect; pnpm <equiv>                         # 4. verify effect (differential)
 "$NUB" <variant>; "$NUB" <bad-input>                # 5. probe edges

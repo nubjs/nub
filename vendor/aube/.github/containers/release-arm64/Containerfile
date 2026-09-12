@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+FROM ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+
+ARG LLVM_VERSION=20
+ARG LLVM_PACKAGE_VERSION=1:20.1.8~++20250708123950+0de59a293f7a-1~exp1~20250708004007.131
+ARG LLVM_KEY_SHA256=8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d
+ARG MISE_VERSION=2026.8.16
+ARG MISE_SHA256=5bbe2e7751f1872fd574ba90cbc1f81db7cfa4f395d77ba52ba70b33ad466d9e
+
+# Direct package revisions from the Ubuntu focal arm64 and LLVM 20
+# repositories. Bump deliberately when refreshing the release toolchain.
+ARG BUILD_ESSENTIAL_VERSION=12.8ubuntu1.1
+ARG CA_CERTIFICATES_VERSION=20240203~20.04.1
+ARG CMAKE_VERSION=3.16.3-1ubuntu1.20.04.1
+ARG CURL_VERSION=7.68.0-1ubuntu2.25
+ARG GIT_VERSION=1:2.25.1-1ubuntu3.14
+ARG GNUPG_VERSION=2.2.19-3ubuntu2.5
+ARG NINJA_VERSION=1.10.0-1build1
+ARG PERL_VERSION=5.30.0-9ubuntu0.5
+ARG PKG_CONFIG_VERSION=0.29.1-0ubuntu4
+ARG WGET_VERSION=1.20.3-1ubuntu2.1
+ARG XZ_UTILS_VERSION=5.2.4-1ubuntu1.1
+
+# The mounted repository has a broader developer tool list. Keep runtime
+# auto-install disabled so this focused, non-root release image uses only the
+# system tools installed from its scoped config below.
+ENV DEBIAN_FRONTEND=noninteractive \
+    MISE_CACHE_DIR=/mise/cache \
+    MISE_CONFIG_DIR=/mise \
+    MISE_DATA_DIR=/mise \
+    MISE_INSTALL_PATH=/usr/local/bin/mise \
+    MISE_SYSTEM_DATA_DIR=/usr/local/share/mise \
+    MISE_AUTO_INSTALL=false \
+    MISE_TRUSTED_CONFIG_PATHS=/mise \
+    MISE_YES=1 \
+    CARGO_HOME=/usr/local/share/mise/cargo \
+    RUSTUP_HOME=/usr/local/share/mise/rustup \
+    PATH=/usr/local/share/mise/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      "build-essential=${BUILD_ESSENTIAL_VERSION}" \
+      "ca-certificates=${CA_CERTIFICATES_VERSION}" \
+      "cmake=${CMAKE_VERSION}" \
+      "curl=${CURL_VERSION}" \
+      "git=${GIT_VERSION}" \
+      "gnupg=${GNUPG_VERSION}" \
+      "ninja-build=${NINJA_VERSION}" \
+      "perl=${PERL_VERSION}" \
+      "pkg-config=${PKG_CONFIG_VERSION}" \
+      "wget=${WGET_VERSION}" \
+      "xz-utils=${XZ_UTILS_VERSION}" \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && wget -qO /tmp/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key \
+    && echo "${LLVM_KEY_SHA256}  /tmp/llvm-snapshot.gpg.key" | sha256sum -c - \
+    && gpg --dearmor -o /etc/apt/keyrings/llvm.gpg /tmp/llvm-snapshot.gpg.key \
+    && rm -f /tmp/llvm-snapshot.gpg.key \
+    && echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/focal/ llvm-toolchain-focal-${LLVM_VERSION} main" \
+      > "/etc/apt/sources.list.d/llvm-toolchain-${LLVM_VERSION}.list" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      "bolt-${LLVM_VERSION}=${LLVM_PACKAGE_VERSION}" \
+      "clang-${LLVM_VERSION}=${LLVM_PACKAGE_VERSION}" \
+      "lld-${LLVM_VERSION}=${LLVM_PACKAGE_VERSION}" \
+      "llvm-${LLVM_VERSION}-tools=${LLVM_PACKAGE_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p "$CARGO_HOME" "$RUSTUP_HOME" \
+    && curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/mise-v${MISE_VERSION}-linux-arm64" \
+      -o "$MISE_INSTALL_PATH" \
+    && echo "${MISE_SHA256}  ${MISE_INSTALL_PATH}" | sha256sum -c - \
+    && chmod 0755 "$MISE_INSTALL_PATH"
+
+COPY mise.toml /mise/config.toml
+
+RUN mise install --system \
+    && mise exec -- node --version \
+    && mise exec -- rustc --version \
+    && chmod -R a+rX /mise /usr/local/share/mise

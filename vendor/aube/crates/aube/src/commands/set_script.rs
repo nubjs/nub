@@ -7,24 +7,23 @@
 //! shell doesn't need to quote a single `key=value`. The write reuses the
 //! same atomic, key-order-preserving manifest update as `pkg`.
 
-use clap::Args;
 use miette::miette;
 use serde_json::Value;
 
 use super::property_path;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct SetScriptArgs {
     /// Script name (the key under `scripts`).
     pub name: String,
 
     /// The command the script runs. Remaining args are joined with spaces.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    #[usage(arg, required, double_dash = "automatic")]
     pub command: Vec<String>,
 
     /// Operate on the package.json in this directory (default: the
     /// nearest project root, or the cwd).
-    #[arg(short = 'C', long, value_name = "DIR")]
+    #[usage(short = 'C', long, value_name = "DIR")]
     pub dir: Option<std::path::PathBuf>,
 }
 

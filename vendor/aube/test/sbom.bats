@@ -14,6 +14,7 @@ _setup_mixed_fixture() {
 {
   "name": "sbom-test",
   "version": "1.2.3",
+  "license": "Apache-2.0",
   "dependencies": {
     "is-odd": "^3.0.1"
   },
@@ -36,6 +37,66 @@ JSON
 	assert_output --partial '"pkg:npm/is-number@7.0.0"'
 }
 
+@test "aube sbom emits CycloneDX licenses for root and dependency components" {
+	_setup_mixed_fixture
+	run bash -c 'aube sbom | jq -e "
+	  .metadata.component.licenses[0].license.id == \"Apache-2.0\"
+	  and
+	  any(.components[]; .name == \"is-odd\" and .licenses[0].license.id == \"MIT\")
+	"'
+	assert_success
+}
+
+@test "aube sbom finds licenses with a custom virtual store filename limit" {
+	cat >package.json <<'JSON'
+{
+  "name": "sbom-custom-limit",
+  "version": "1.0.0",
+  "dependencies": {
+    "@pnpm.e2e/pre-and-postinstall-scripts-example": "2.0.0"
+  }
+}
+JSON
+	run env AUBE_VIRTUAL_STORE_DIR_MAX_LENGTH=40 aube install
+	assert_success
+
+	run bash -c 'aube sbom | jq -e "
+	  any(.components[]; .name == \"@pnpm.e2e/pre-and-postinstall-scripts-example\" and .licenses[0].license.id == \"MIT\")
+	"'
+	assert_success
+}
+
+@test "aube sbom falls back to install-state license metadata" {
+	_setup_mixed_fixture
+	run find node_modules/.aube -path '*/node_modules/is-odd/package.json' -delete
+	assert_success
+
+	run bash -c 'aube sbom | jq -e "
+	  any(.components[]; .name == \"is-odd\" and .licenses[0].license.id == \"MIT\")
+	"'
+	assert_success
+}
+
+@test "aube sbom reads current license metadata from linked packages" {
+	mkdir linked
+	cat >linked/package.json <<'JSON'
+{"name":"linked","version":"1.0.0","license":"MIT"}
+JSON
+	cat >package.json <<'JSON'
+{"name":"sbom-linked","version":"1.0.0","dependencies":{"linked":"link:./linked"}}
+JSON
+	run aube install
+	assert_success
+	cat >linked/package.json <<'JSON'
+{"name":"linked","version":"1.0.0","license":"Apache-2.0"}
+JSON
+
+	run bash -c 'aube sbom | jq -e "
+	  any(.components[]; .name == \"linked\" and .licenses[0].license.id == \"Apache-2.0\")
+	"'
+	assert_success
+}
+
 @test "aube sbom --format spdx emits SPDX 2.3 JSON" {
 	_setup_mixed_fixture
 	run aube sbom --format spdx
@@ -47,7 +108,17 @@ JSON
 	# SPDXRef-Root must have outgoing DEPENDS_ON edges to its direct deps,
 	# not just inter-package edges between closure entries.
 	assert_output --partial '"spdxElementId": "SPDXRef-Root"'
-	assert_output --partial 'aube.jdx.dev/spdx/'
+	assert_output --partial 'aube.sh/spdx/'
+}
+
+@test "aube sbom --format spdx emits declared but not concluded licenses" {
+	_setup_mixed_fixture
+	run bash -c 'aube sbom --format spdx | jq -e "
+	  any(.packages[]; .SPDXID == \"SPDXRef-Root\" and .licenseDeclared == \"Apache-2.0\" and .licenseConcluded == \"NOASSERTION\")
+	  and
+	  any(.packages[]; .name == \"is-odd\" and .licenseDeclared == \"MIT\" and .licenseConcluded == \"NOASSERTION\")
+	"'
+	assert_success
 }
 
 @test "aube sbom --prod drops devDependencies" {
@@ -85,4 +156,42 @@ JSON
 	run aube sbom
 	assert_failure
 	assert_output --partial "no lockfile"
+}
+
+@test "aube sbom classifies invalid workspace config" {
+	_setup_mixed_fixture
+	cat >pnpm-workspace.yaml <<'YAML'
+packages: [
+YAML
+
+	run aube sbom
+	assert_failure
+	assert_output --partial "ERR_AUBE_WORKSPACE_PARSE"
+}
+
+@test "aube sbom filters foreign optional packages unless lockfile-only is requested" {
+	if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then
+		skip "win32 host would install the win32 optional dependency"
+	fi
+	cat >package.json <<'JSON'
+{
+  "name": "sbom-platform-filter",
+  "version": "1.0.0",
+  "optionalDependencies": {
+    "aube-test-optional-win32": "1.0.0"
+  }
+}
+JSON
+	run aube install
+	assert_success
+	run grep -F 'aube-test-optional-win32@1.0.0' aube-lock.yaml
+	assert_success
+
+	run aube sbom
+	assert_success
+	refute_output --partial 'aube-test-optional-win32'
+
+	run aube sbom --lockfile-only
+	assert_success
+	assert_output --partial 'aube-test-optional-win32'
 }

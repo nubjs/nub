@@ -61,7 +61,7 @@ pub(super) struct LockfileOnlyInput<'a> {
     pub revalidate_release_policy: bool,
     pub lockfile_conflict_marker_warning_emitted: bool,
     pub existing_for_resolver: Option<&'a LockfileGraph>,
-    pub source_kind_before: Option<LockfileKind>,
+    pub write_kind: LockfileKind,
     pub lockfile_enabled: bool,
     pub lockfile_include_tarball_url: bool,
     pub shared_workspace_lockfile: bool,
@@ -97,7 +97,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         revalidate_release_policy,
         lockfile_conflict_marker_warning_emitted,
         existing_for_resolver,
-        source_kind_before,
+        write_kind,
         lockfile_enabled,
         lockfile_include_tarball_url,
         shared_workspace_lockfile,
@@ -256,8 +256,10 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             crate::pnpmfile::detect(cwd, pnpmfile, ws_config.pnpmfile_path.as_deref()).as_deref(),
         )
     };
-    crate::commands::run_pnpmfile_pre_resolution(&pnpmfile_paths, cwd, existing_for_resolver)
-        .await?;
+    // `preResolution` already ran in `install::run_inner`, ahead of the
+    // `--lockfile-only` short-circuit that reaches this function — and
+    // ahead of the up-to-date early return above it, which used to skip
+    // the hook entirely.
     super::control::check_cancelled()?;
     let (read_package_host, read_package_forwarders) =
         match crate::pnpmfile::ReadPackageHostChain::spawn(&pnpmfile_paths, cwd)
@@ -282,14 +284,10 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             // `lockfile=false` collapses to `None` so the resolver
             // doesn't waste a fetch widening a lockfile that will
             // never be written. With lockfiles enabled, a missing
-            // `source_kind_before` means "we'll create the default
-            // aube-lock.yaml", so the aube-native wide default
-            // applies.
-            target_lockfile_kind: lockfile_enabled.then(|| {
-                source_kind_before
-                    .unwrap_or_else(|| crate::commands::default_lockfile_kind(settings_ctx))
-            }),
-            dependency_policy: Some(dependency_policy.clone()),
+            // With lockfiles enabled, `write_kind` is either the existing
+            // format or the configured creation default.
+            target_lockfile_kind: lockfile_enabled.then_some(write_kind),
+            dependency_policy: dependency_policy.clone(),
             cache_full_packuments: true,
             ignore_scripts,
         },
@@ -311,7 +309,8 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     // resolve-time logs strictly ahead of post-resolve logs in the
     // ndjson stream.
     crate::pnpmfile::ReadPackageHostChain::drain_forwarders(read_package_forwarders).await;
-    crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, cwd, &mut graph).await?;
+    crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, cwd, manifest, &mut graph)
+        .await?;
     // Same patch-config recording as the main install branch — keeps
     // `--lockfile-only` output byte-identical to a full install's.
     crate::patches::record_patches_on_graph(cwd, &mut graph)?;
@@ -336,8 +335,10 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             }
         }
     }
-    let lo_write_kind =
-        source_kind_before.unwrap_or_else(|| crate::commands::default_lockfile_kind(settings_ctx));
+    let lo_write_kind = write_kind;
+    if matches!(lo_write_kind, LockfileKind::Pnpm) {
+        graph.patched_dependencies = crate::patches::read_patched_dependencies(cwd)?;
+    }
     // Same runtime-pin recording as the main install path.
     crate::runtime::refresh_lockfile_pin(
         &mut graph,
@@ -466,6 +467,42 @@ fn package_extensions_drift(
     } else {
         DriftStatus::Fresh
     }
+}
+
+/// The existing-graph hint handed to the resolver, or `None` to withhold it.
+///
+/// Withholding matters because resolver reuse is not merely an optimization:
+/// it accepts a locked package WITHOUT fetching its packument, and the
+/// packument is the only place a `packageExtensions` entry is ever applied.
+/// Discarding the lockfile on drift is therefore only half a fix — the
+/// re-resolve would load the new extensions and still hand back the locked
+/// dependency set, so the edit would rewrite the lockfile's checksum and
+/// change nothing else.
+///
+/// Pure, with the embedder posture passed in rather than read from the
+/// process-global engine context, so the wiring this guards is unit-testable
+/// without mutating global state.
+pub(super) fn existing_graph_hint<'a>(
+    lockfile_pre_parse: Option<&'a (LockfileGraph, LockfileKind)>,
+    revalidate_release_policy: bool,
+    enforce_package_extensions_checksum: bool,
+    effective_package_extensions_checksum: Option<&str>,
+) -> Option<&'a LockfileGraph> {
+    // Reuse can also accept a locked package without fetching its publish
+    // time, which would bypass an age gate being revalidated.
+    if revalidate_release_policy {
+        return None;
+    }
+    let (graph, _) = lockfile_pre_parse?;
+    if enforce_package_extensions_checksum
+        && matches!(
+            graph.check_package_extensions_drift(effective_package_extensions_checksum),
+            DriftStatus::Stale { .. }
+        )
+    {
+        return None;
+    }
+    Some(graph)
 }
 
 pub(super) fn select_lockfile_result(
@@ -625,6 +662,26 @@ pub(super) fn select_lockfile_result(
     }
 }
 
+/// Patch-config drift for a caller outside the install pipeline
+/// (`remove`'s lockfile-trim fast path). The install modes above run the
+/// same comparison inline. It has to be the hash-aware check: a pnpm
+/// lockfile records each patch as a content hash, and nub's reader keeps
+/// that hash rather than a path, so a path-map comparison would report
+/// every recorded pnpm patch as missing.
+pub(crate) fn check_patch_drift(
+    cwd: &Path,
+    graph: &LockfileGraph,
+    kind: LockfileKind,
+) -> miette::Result<DriftStatus> {
+    let (effective_patch_paths, effective_patch_hashes) =
+        crate::patches::effective_patch_config(cwd)?;
+    Ok(graph.check_patched_dependencies_drift(
+        kind,
+        &effective_patch_paths,
+        &effective_patch_hashes,
+    ))
+}
+
 fn active_lockfile_has_conflict_markers(lockfile_dir: &Path) -> bool {
     aube_lockfile::active_lockfile_has_conflict_markers(lockfile_dir)
 }
@@ -752,5 +809,67 @@ pub(super) fn lockfile_source_label(kind: LockfileKind) -> &'static str {
         LockfileKind::Npm => "package-lock.json",
         LockfileKind::NpmShrinkwrap => "npm-shrinkwrap.json",
         LockfileKind::Bun => "bun.lock",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph_with_checksum(checksum: Option<&str>) -> (LockfileGraph, LockfileKind) {
+        let graph = LockfileGraph {
+            package_extensions_checksum: checksum.map(str::to_string),
+            ..Default::default()
+        };
+        (graph, LockfileKind::Aube)
+    }
+
+    /// A packageExtensions edit must withhold the resolver's reuse hint.
+    ///
+    /// Discarding the lockfile is not enough on its own: reuse resolves a
+    /// locked package without fetching its packument, which is the only place
+    /// an extension is applied. Before this wiring existed the re-resolve
+    /// loaded the new extensions and still returned the locked dependency set,
+    /// so `nub install` reported `Already up to date` and installed nothing.
+    #[test]
+    fn a_package_extensions_edit_withholds_the_resolver_reuse_hint() {
+        let locked = graph_with_checksum(Some("sha256-written-with-the-old-extensions"));
+        assert!(
+            existing_graph_hint(Some(&locked), false, true, Some("sha256-edited")).is_none(),
+            "a drifted checksum must withhold the hint, or the edit resolves to nothing"
+        );
+        // Adding a first extension to a project that had none drifts too: the
+        // lockfile records no checksum and the effective one is now `Some`.
+        let never_extended = graph_with_checksum(None);
+        assert!(
+            existing_graph_hint(Some(&never_extended), false, true, Some("sha256-edited"))
+                .is_none(),
+            "a first extension must withhold the hint"
+        );
+    }
+
+    /// Reuse survives everything that is not drift — the hint is the warm
+    /// path, so withholding it on a steady-state install would re-fetch every
+    /// packument in the tree on every run.
+    #[test]
+    fn an_unchanged_project_keeps_the_resolver_reuse_hint() {
+        let matching = graph_with_checksum(Some("sha256-same"));
+        assert!(
+            existing_graph_hint(Some(&matching), false, true, Some("sha256-same")).is_some(),
+            "an unchanged checksum must keep the hint"
+        );
+        let no_extensions = graph_with_checksum(None);
+        assert!(
+            existing_graph_hint(Some(&no_extensions), false, true, None).is_some(),
+            "a project with no extensions at all must keep the hint"
+        );
+        // Standalone aube does not enforce the checksum, so the whole layer is
+        // a no-op there even against a graph that would otherwise read as
+        // drifted — its lockfile never carries the field to begin with.
+        let drifted = graph_with_checksum(Some("sha256-written"));
+        assert!(
+            existing_graph_hint(Some(&drifted), false, false, Some("sha256-edited")).is_some(),
+            "a non-enforcing embedder must be unaffected by this layer"
+        );
     }
 }

@@ -37,6 +37,17 @@ const config = {
       { source: '/docs/running-files', destination: '/docs/runtime', permanent: true },
       { source: '/docs/files', destination: '/docs/runtime', permanent: true },
       { source: '/docs/running-scripts', destination: '/docs/run', permanent: true },
+      // The runner section dissolved into top-level run + nubx pages (2026-09-07);
+      // exec and dlx are sections of the nubx page.
+      { source: '/docs/runner', destination: '/docs/nubx', permanent: true },
+      { source: '/docs/runner/run', destination: '/docs/run', permanent: true },
+      { source: '/docs/runner/exec', destination: '/docs/nubx#nub-exec', permanent: true },
+      { source: '/docs/runner/dlx', destination: '/docs/nubx#nub-dlx', permanent: true },
+      { source: '/docs/runner/:path*', destination: '/docs/nubx', permanent: true },
+      // The raw-markdown mirrors of the same pages, as linked from /llms.txt.
+      { source: '/llms/docs/runner.mdx', destination: '/llms/docs/nubx.mdx', permanent: true },
+      { source: '/llms/docs/runner/run.mdx', destination: '/llms/docs/run.mdx', permanent: true },
+      { source: '/llms/docs/runner/:path*', destination: '/llms/docs/nubx.mdx', permanent: true },
       { source: '/docs/managing-node', destination: '/docs/node', permanent: true },
       // setup-nub + docker folded into the Deployment section (2026-07-14).
       { source: '/docs/setup-nub', destination: '/docs/deployment/github-action', permanent: true },

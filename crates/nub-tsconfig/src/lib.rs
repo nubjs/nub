@@ -190,6 +190,27 @@ pub fn diagnostics(dir: &str, explicit: Option<&str>) -> Vec<String> {
     load_for_dir(dir, explicit).diagnostics.clone()
 }
 
+/// [`diagnostics`] without the stderr report — for a caller that tolerates an
+/// unreadable config and does not want it announced. The PM verbs are the case:
+/// `nub install` is what puts a tsconfig's `extends` target into `node_modules`
+/// in the first place, so on a fresh clone the config legitimately cannot be read
+/// until the install has run, and the user would read a warning about their own
+/// devDependency on every CI run. The result is memoized like every other load,
+/// so a later loud call in the same process for the same directory stays quiet
+/// too — the PM process never reaches one.
+pub fn probe_diagnostics(dir: &str, explicit: Option<&str>) -> Vec<String> {
+    load_for_dir_with(dir, explicit, Report::No)
+        .diagnostics
+        .clone()
+}
+
+/// Whether a load writes its diagnostics to stderr ([`report_diagnostics`]).
+#[derive(Clone, Copy, PartialEq)]
+enum Report {
+    Yes,
+    No,
+}
+
 /// Config paths this process has already written a warning for. The CLI hands
 /// these to the child through [`REPORTED_ENV`] so the addon does not repeat them.
 pub fn reported_config_paths() -> Vec<String> {
@@ -240,13 +261,17 @@ fn report_diagnostics(config_path: &str, diags: &[String]) {
 /// Shared internal entry — returns the cached `Loaded` (with its matcher) so the
 /// resolver can reuse the same state without re-reading the FS.
 fn load_for_dir(dir: &str, explicit: Option<&str>) -> Arc<Loaded> {
+    load_for_dir_with(dir, explicit, Report::Yes)
+}
+
+fn load_for_dir_with(dir: &str, explicit: Option<&str>, report: Report) -> Arc<Loaded> {
     // NUL cannot occur in a path on any platform nub runs on, so it separates the
     // two halves of the key without a collision an ordinary path could produce.
     let key = format!("{dir}\0{}", explicit.unwrap_or_default());
     if let Some(hit) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return hit.clone();
     }
-    let loaded = Arc::new(build_loaded(dir, explicit));
+    let loaded = Arc::new(build_loaded(dir, explicit, report));
     let mut entries = cache().lock().unwrap_or_else(|e| e.into_inner());
     if entries.len() >= CACHE_MAX_ENTRIES {
         entries.clear();
@@ -255,7 +280,7 @@ fn load_for_dir(dir: &str, explicit: Option<&str>) -> Arc<Loaded> {
     loaded
 }
 
-fn build_loaded(dir: &str, explicit: Option<&str>) -> Loaded {
+fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
     let Some(config_path) = explicit
         .map(str::to_string)
         .or_else(|| find_up(dir, "tsconfig.json"))
@@ -279,7 +304,9 @@ fn build_loaded(dir: &str, explicit: Option<&str>) -> Loaded {
             // the CLI can refuse the run; a silent fallback to defaults here is
             // indistinguishable from having no tsconfig at all (#731).
             diagnostics.push(e);
-            report_diagnostics(&config_path, &diagnostics);
+            if report == Report::Yes {
+                report_diagnostics(&config_path, &diagnostics);
+            }
             return Loaded {
                 path: Some(slash(&config_path)),
                 compiler_options: None,
@@ -290,7 +317,9 @@ fn build_loaded(dir: &str, explicit: Option<&str>) -> Loaded {
             };
         }
     };
-    report_diagnostics(&config_path, &diagnostics);
+    if report == Report::Yes {
+        report_diagnostics(&config_path, &diagnostics);
+    }
 
     let co = parsed
         .get("compilerOptions")

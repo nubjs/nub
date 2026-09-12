@@ -1,6 +1,7 @@
+use super::bin_linking::{LinkAllBinsInput, ManagedBinLinks, link_all_bins};
 use super::sweep::invalidate_changed_aube_entries;
 use super::{InstallPhaseTimings, lifecycle::resolve_link_strategy};
-use super::{bin_linking, delta, gvs};
+use super::{delta, gvs};
 use crate::commands::inject;
 use crate::state;
 use miette::{Context, IntoDiagnostic, miette};
@@ -95,6 +96,7 @@ pub(super) struct LinkPhaseOutput {
     pub(super) current_leaf_hashes: Option<BTreeMap<String, String>>,
     pub(super) current_subtree_hashes: Option<BTreeMap<String, String>>,
     pub(super) patch_hashes: BTreeMap<String, String>,
+    pub(super) managed_bin_links: ManagedBinLinks,
 }
 
 /// Dep paths whose hoisted placement can be left in place rather than wiped
@@ -449,30 +451,56 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     // `run_inner` before the fetch phase, which publishes store entries of
     // its own through the prewarm materializer.
 
+    // Registered BEFORE the link so a concurrent GVS prune cannot sweep the
+    // shared entries this link is about to point at; rolled back below if the
+    // link fails.
+    if linker.uses_global_virtual_store() {
+        super::super::gvs_registry::register_project(&store.virtual_store_dir(), cwd, aube_dir)
+            .wrap_err("failed to register project with global virtual store")?;
+    }
+
     let stats = if has_workspace {
         linker
             .link_workspace(cwd, graph_for_link, package_indices, ws_dirs)
-            .into_diagnostic()
-            .wrap_err("failed to link workspace node_modules")?
+            .map_err(|error| (error, "failed to link workspace node_modules"))
     } else {
         linker
             .link_all(cwd, graph_for_link, package_indices)
-            .into_diagnostic()
-            .wrap_err("failed to link node_modules")?
+            .map_err(|error| (error, "failed to link node_modules"))
     };
+    let stats = match stats {
+        Ok(stats) => stats,
+        Err((error, context)) => {
+            if linker.uses_global_virtual_store()
+                && let Err(cleanup_error) = super::super::gvs_registry::unregister_if_unreferenced(
+                    &store.virtual_store_dir(),
+                    cwd,
+                    aube_dir,
+                )
+            {
+                tracing::debug!("failed to clean up GVS project registration: {cleanup_error}");
+            }
+            return Err(error).into_diagnostic().wrap_err(context);
+        }
+    };
+    if linker.uses_global_virtual_store() {
+        super::super::gvs_registry::register_project(&store.virtual_store_dir(), cwd, aube_dir)
+            .wrap_err("failed to record project entries in the global virtual store")?;
+    }
 
-    // Record this project as a store user, now that the link has SUCCEEDED
-    // and its node_modules actually reaches what it depends on. `store prune`
-    // marks live entries by walking the registered projects, and it treats an
-    // empty registry as "prune nothing" — so registering a project whose link
-    // had not yet run would arm the sweep with a project that marks nothing.
-    //
-    // Registered on every linker mode, not just the shared store: the
-    // extracted-tree tier is keyed the same way whether or not the graph hash
-    // was applied, so a project-local install still owns tree entries that
-    // only its own `.aube/` names can protect. Best-effort — a registry write
-    // must never fail an install.
-    if register_in_store && let Err(e) = store.register_project(cwd) {
+    // Every linker mode registers, not just the shared store: the
+    // extracted-tree tier under the store is keyed the same way whether or
+    // not the graph hash was applied, so a project-local install still owns
+    // tree entries that only its own `.aube/` names can protect, and
+    // `store prune` marks live entries by walking the registered projects.
+    // Recorded after the link SUCCEEDED (a project whose link had not run
+    // would arm the sweep with a project that marks nothing); best-effort —
+    // a registry write must never fail an install.
+    if register_in_store
+        && !linker.uses_global_virtual_store()
+        && let Err(e) =
+            super::super::gvs_registry::register_project(&store.virtual_store_dir(), cwd, aube_dir)
+    {
         tracing::debug!("could not register project against the store: {e}");
     }
 
@@ -483,6 +511,16 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         super::phase_no_work_marker(stats.files_linked == 0)
     );
     phase_timings.record("link", phase_start.elapsed());
+
+    // Keep the exact hoisted placement map in a sidecar even for filtered
+    // installs, which intentionally do not replace the main freshness state.
+    // Replanning the full graph later can associate a root-level package with
+    // the wrong conflicting version.
+    if !virtual_store_only {
+        state::write_hoisted_placements(cwd, stats.hoisted_placements.as_ref())
+            .into_diagnostic()
+            .wrap_err("failed to record hoisted package placements")?;
+    }
 
     // Apply `dependenciesMeta.<name>.injected` overrides. Only runs in
     // workspace + isolated mode: hoisted layouts don't have a
@@ -516,33 +554,28 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         phase_timings.record("inject", inject_start.elapsed());
     }
 
-    // 7. Link .bin entries (root + each workspace package).
-    //    Use graph_for_link so dev-only bins aren't linked under --prod.
-    //    In hoisted mode, the placement map returned from linking
-    //    tells bin-resolution where each dep ended up on disk
-    //    instead of assuming the `.aube/<dep_path>` convention.
-    //    Skipped under `virtualStoreOnly` — the top-level
-    //    `node_modules/.bin` directory is not meant to exist in that
-    //    mode.
-    let placements_ref = stats.hoisted_placements.as_ref();
+    // 7. Link .bin entries before dependency lifecycle scripts so builds can
+    //    invoke their own dependencies. Approved builds get a refresh pass in
+    //    finalize because a lifecycle may replace its bin target.
     let phase_start = std::time::Instant::now();
-    bin_linking::link_all_bins(bin_linking::LinkAllBinsInput {
+    let managed_bin_links = link_all_bins(LinkAllBinsInput {
+        project_dir: cwd,
         settings_ctx,
-        node_linker,
-        cwd,
         modules_dir_name,
         aube_dir,
-        graph_for_link,
+        graph: graph_for_link,
         virtual_store_dir_max_length,
-        placements: placements_ref,
-        manifest,
-        manifests,
+        placements: stats.hoisted_placements.as_ref(),
         ws_dirs,
+        manifests,
+        manifest,
+        node_linker,
         has_workspace,
         virtual_store_only,
         ignore_scripts,
         has_any_allow_rule: build_policy.has_any_allow_rule(),
         floor_may_allow_any,
+        preserved: None,
     })?;
     tracing::debug!("phase:link_bins {:.1?}", phase_start.elapsed());
     phase_timings.record("link_bins", phase_start.elapsed());
@@ -553,5 +586,6 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
         current_leaf_hashes,
         current_subtree_hashes,
         patch_hashes,
+        managed_bin_links,
     })
 }

@@ -81,21 +81,21 @@ use std::sync::LazyLock;
 /// as much a brand leak as the canonical spelling.
 static VERBS: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
     let mut verbs = BTreeSet::new();
-    collect_verbs(&aube::command(), &mut verbs);
+    collect_verbs(aube::spec().root.cmd, &mut verbs);
     verbs
 });
 
-/// Walk the clap command tree, collecting every subcommand name plus all of its
+/// Walk the usage command tree, collecting every subcommand name plus all of its
 /// aliases (visible and hidden), recursing into nested subcommands so the whole
 /// surface — top-level verbs, their aliases, and nested chains — is covered.
 /// The `external_subcommand` catch-all has no fixed name and contributes
 /// nothing; names carrying chars the `aube <verb>` matcher can't reach (e.g. the
 /// hidden `__node-gyp-bootstrap`) are harmless — they simply never match a
 /// literal.
-fn collect_verbs(cmd: &clap::Command, out: &mut BTreeSet<String>) {
-    for sub in cmd.get_subcommands() {
-        out.insert(sub.get_name().to_string());
-        for alias in sub.get_all_aliases() {
+fn collect_verbs(cmd: &usage_rs::Command<'_>, out: &mut BTreeSet<String>) {
+    for sub in cmd.subcommands {
+        out.insert(sub.name.to_string());
+        for alias in sub.aliases {
             out.insert(alias.to_string());
         }
         collect_verbs(sub, out);

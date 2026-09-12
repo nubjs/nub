@@ -17,7 +17,6 @@
 //! (network-bound on a cold cache, cached for 24 h thereafter), which
 //! also writes `<cacheDir>/update-check.json` on a successful fetch.
 
-use clap::Args;
 use miette::Context;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -34,10 +33,10 @@ Examples:
   $ aube doctor --json | jq .warnings
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct DoctorArgs {
     /// Emit a machine-readable JSON report instead of the grouped text.
-    #[arg(long, short = 'J')]
+    #[usage(long, short = 'J')]
     pub json: bool,
 }
 

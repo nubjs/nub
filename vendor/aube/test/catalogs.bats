@@ -542,6 +542,67 @@ _setup_catalog_workspace() {
 	[ "$before" = "$after" ]
 }
 
+@test "aube install: catalogPrune takes precedence over cleanupUnusedCatalogs" {
+	mkdir -p packages/lib
+	cat >pnpm-workspace.yaml <<-'EOF'
+		packages:
+		  - packages/*
+		catalog:
+		  is-odd: ^3.0.1
+		  is-even: ^1.0.0
+	EOF
+	cat >package.json <<-'EOF'
+		{ "name": "aube-test", "version": "0.0.0", "private": true }
+	EOF
+	cat >packages/lib/package.json <<-'EOF'
+		{
+		  "name": "@test/lib",
+		  "version": "1.0.0",
+		  "dependencies": { "is-odd": "catalog:" }
+		}
+	EOF
+	cat >.npmrc <<-'EOF'
+		catalogPrune=false
+		cleanupUnusedCatalogs=true
+	EOF
+
+	run aube install
+	assert_success
+	run grep "is-even" pnpm-workspace.yaml
+	assert_success
+}
+
+@test "aube install: catalogPrune environment change bypasses the warm path" {
+	mkdir -p packages/lib
+	cat >pnpm-workspace.yaml <<-'EOF'
+		packages:
+		  - packages/*
+		catalog:
+		  is-odd: ^3.0.1
+		  is-even: ^1.0.0
+	EOF
+	cat >package.json <<-'EOF'
+		{ "name": "aube-test", "version": "0.0.0", "private": true }
+	EOF
+	cat >packages/lib/package.json <<-'EOF'
+		{
+		  "name": "@test/lib",
+		  "version": "1.0.0",
+		  "dependencies": { "is-odd": "catalog:" }
+		}
+	EOF
+
+	run aube install
+	assert_success
+	run grep "is-even" pnpm-workspace.yaml
+	assert_success
+
+	run env AUBE_CATALOG_PRUNE=true aube install
+	assert_success
+	run grep "is-even" pnpm-workspace.yaml
+	assert_failure
+}
+
 @test "aube install: overrides value of catalog: resolves through catalog" {
 	# Regression: `"overrides": {"pkg": "catalog:"}` used to leak the
 	# raw `catalog:` string through to the registry resolver because

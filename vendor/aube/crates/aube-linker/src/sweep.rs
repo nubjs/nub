@@ -409,6 +409,61 @@ pub(crate) fn classify_local_entry_state(path: &Path) -> EntryState {
     }
 }
 
+/// Reconcile a directory link against its expected target.
+///
+/// Returns `Ok(true)` when the existing link stores the expected target.
+/// Missing, incorrectly-targeted, and non-link entries are removed and return
+/// `Ok(false)` so the caller can recreate the link. The target is not probed,
+/// so a dangling link that stores the expected target is considered current.
+pub(crate) fn reconcile_dir_link(link_path: &Path, expected_target: &Path) -> Result<bool, Error> {
+    #[cfg(windows)]
+    {
+        // NTFS junctions store normalized absolute targets, sometimes with a
+        // `\\?\` prefix, so compare canonical destinations rather than the
+        // relative target passed to `create_dir_link`.
+        let expected_abs = if expected_target.is_absolute() {
+            expected_target.to_path_buf()
+        } else {
+            link_path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(expected_target)
+        };
+        // The link destination is mutable during reconciliation and shared
+        // installs can repair it concurrently, so it must never be cached.
+        if let Ok(link_canon) = link_path.canonicalize()
+            && let Ok(exp_canon) = expected_abs.canonicalize()
+            && link_canon == exp_canon
+        {
+            return Ok(true);
+        }
+        if link_path.symlink_metadata().is_err() {
+            return Ok(false);
+        }
+        match std::fs::remove_dir(link_path).or_else(|_| std::fs::remove_file(link_path)) {
+            Ok(()) => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(Error::Io(link_path.to_path_buf(), e)),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match std::fs::read_link(link_path) {
+            Ok(existing) if existing == expected_target => Ok(true),
+            Ok(_) => {
+                let _ = std::fs::remove_dir(link_path).or_else(|_| std::fs::remove_file(link_path));
+                Ok(false)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => {
+                let _ =
+                    std::fs::remove_dir_all(link_path).or_else(|_| std::fs::remove_file(link_path));
+                Ok(false)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_physical_importer;

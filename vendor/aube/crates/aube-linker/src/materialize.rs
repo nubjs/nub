@@ -1,7 +1,9 @@
 use tracing::{debug, trace, warn};
 
 use crate::patches::apply_multi_file_patch;
-use crate::sweep::{EntryState, classify_entry_state, mkdirp, try_remove_entry};
+use crate::sweep::{
+    EntryState, classify_entry_state, mkdirp, reconcile_dir_link, try_remove_entry,
+};
 use crate::{Error, LinkStats, LinkStrategy, Linker, sys};
 use aube_lockfile::{LockedPackage, LockfileGraph, resolve_dep_edge, shared_local_dep_path};
 use aube_store::{PackageIndex, StoredFile};
@@ -278,6 +280,7 @@ impl Linker {
             .join(&pkg.name);
 
         if pkg_nm_dir.exists() {
+            self.reconcile_virtual_store_entry(dep_path, pkg, nested_link_targets)?;
             trace!("virtual store hit: {dep_path}");
             stats.packages_cached += 1;
             // A cache hit skips materialization, so the cold-path strip
@@ -369,6 +372,70 @@ impl Linker {
         Ok(())
     }
 
+    /// Validate and repair the dependency links inside an existing global
+    /// virtual-store package entry. The package directory itself can be a
+    /// valid cache hit while one of its sibling links still targets an old
+    /// graph identity.
+    pub(crate) fn reconcile_virtual_store_entry(
+        &self,
+        dep_path: &str,
+        pkg: &LockedPackage,
+        nested_link_targets: Option<&BTreeMap<String, PathBuf>>,
+    ) -> Result<(), Error> {
+        let pkg_nm_parent = self
+            .virtual_store
+            .join(self.virtual_store_subdir(dep_path))
+            .join("node_modules");
+        for (dep_name, dep_version) in &pkg.dependencies {
+            if dep_name == &pkg.name {
+                continue;
+            }
+            validate_package_link_name(dep_name)?;
+            let dep_dep_path = shared_local_dep_path(dep_name, dep_version)
+                .unwrap_or_else(|| format!("{dep_name}@{dep_version}"));
+            let symlink_path = pkg_nm_parent.join(dep_name);
+            let target = if let Some(abs_target) =
+                nested_link_targets.and_then(|targets| targets.get(&dep_dep_path))
+            {
+                abs_target.clone()
+            } else {
+                let sibling_subdir = self.virtual_store_subdir(&dep_dep_path);
+                #[cfg(not(windows))]
+                {
+                    let sibling_abs = self
+                        .virtual_store
+                        .join(sibling_subdir)
+                        .join("node_modules")
+                        .join(dep_name);
+                    let link_parent = symlink_path.parent().unwrap_or(&pkg_nm_parent);
+                    pathdiff::diff_paths(&sibling_abs, link_parent)
+                        .unwrap_or_else(|| sibling_abs.clone())
+                }
+                #[cfg(windows)]
+                {
+                    self.virtual_store
+                        .join(sibling_subdir)
+                        .join("node_modules")
+                        .join(dep_name)
+                }
+            };
+            if reconcile_dir_link(&symlink_path, &target)? {
+                continue;
+            }
+            if let Some(parent) = symlink_path.parent() {
+                mkdirp(parent)?;
+            }
+            if let Err(create_err) = sys::create_dir_link(&target, &symlink_path) {
+                let won_race = create_err.kind() == std::io::ErrorKind::AlreadyExists
+                    && reconcile_dir_link(&symlink_path, &target).unwrap_or(false);
+                if !won_race {
+                    return Err(Error::Io(symlink_path, create_err));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Materialize a globally-reproducible local source (a `git`
     /// dependency or a remote `.tgz`) into the shared virtual store and
     /// point the per-project `.aube/<dep_path>` entry at it — the exact
@@ -401,6 +468,7 @@ impl Linker {
         let global_entry = self.virtual_store.join(self.virtual_store_subdir(dep_path));
         let state = classify_entry_state(&local_aube_entry, &global_entry);
         if matches!(state, EntryState::Fresh) {
+            self.reconcile_virtual_store_entry(dep_path, pkg, nested_link_targets)?;
             stats.packages_cached += 1;
             // The local entry already points at a fresh global one, so
             // nothing is materialized — but the index is a parameter
@@ -651,6 +719,15 @@ impl Linker {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.clone(), e))?;
         }
 
+        // Linux can resolve every destination relative to one open package
+        // directory instead of walking the long GVS staging path per file.
+        // Failure to open is harmless: `link_file_fresh` retains the portable
+        // full-path operation and its existing copy fallback.
+        #[cfg(target_os = "linux")]
+        let pkg_nm_dir_fd = std::fs::File::open(&pkg_nm_dir).ok();
+        #[cfg(not(target_os = "linux"))]
+        let pkg_nm_dir_fd: Option<std::fs::File> = None;
+
         // `materialize_into` always writes into a fresh location
         // (either a `.tmp-<pid>-...` staging dir for the global virtual
         // store or a per-project `.aube/<dep_path>` just created by
@@ -670,7 +747,8 @@ impl Linker {
             // above. The index is immutable between the two loops.
             let target = pkg_nm_dir.join(rel_path);
 
-            if let Err(e) = self.link_file_fresh(stored, rel_path, &target) {
+            if let Err(e) = self.link_file_fresh(stored, rel_path, &target, pkg_nm_dir_fd.as_ref())
+            {
                 core::hint::cold_path();
                 if let Error::MissingStoreFile { .. } = &e {
                     invalidate_stale_index_for_package(&self.store, pkg, self.index_read_key(pkg));
@@ -853,6 +931,7 @@ impl Linker {
         stored: &StoredFile,
         rel_path: &str,
         dst: &Path,
+        dst_dir: Option<&std::fs::File>,
     ) -> Result<(), Error> {
         #[cfg(target_os = "macos")]
         const SMALL_FILE_COPY_MAX: u64 = 16 * 1024;
@@ -969,7 +1048,48 @@ impl Linker {
                 }
             }
             LinkStrategy::Hardlink => {
-                if let Err(e) = std::fs::hard_link(&stored.store_path, dst) {
+                #[cfg(target_os = "linux")]
+                let hardlink_result = if let Some(dst_dir) = dst_dir {
+                    use std::ffi::CString;
+                    use std::os::fd::AsRawFd;
+                    use std::os::unix::ffi::OsStrExt;
+
+                    let source = CString::new(stored.store_path.as_os_str().as_bytes());
+                    let relative = CString::new(rel_path.as_bytes());
+                    match (source, relative) {
+                        (Ok(source), Ok(relative)) => {
+                            // SAFETY: both C strings live through the call and
+                            // `dst_dir` owns a valid package-directory fd.
+                            let result = unsafe {
+                                libc::linkat(
+                                    libc::AT_FDCWD,
+                                    source.as_ptr(),
+                                    dst_dir.as_raw_fd(),
+                                    relative.as_ptr(),
+                                    0,
+                                )
+                            };
+                            if result == 0 {
+                                Ok(())
+                            } else {
+                                Err(std::io::Error::last_os_error())
+                            }
+                        }
+                        _ => Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "hardlink path contains nul",
+                        )),
+                    }
+                } else {
+                    std::fs::hard_link(&stored.store_path, dst)
+                };
+                #[cfg(not(target_os = "linux"))]
+                let hardlink_result = {
+                    let _ = dst_dir;
+                    std::fs::hard_link(&stored.store_path, dst)
+                };
+
+                if let Err(e) = hardlink_result {
                     core::hint::cold_path();
                     if !stored.store_path.exists() {
                         return Err(missing_source());
@@ -1272,7 +1392,7 @@ impl Linker {
 
         for (rel_path, stored) in index {
             let target = tmp.join(rel_path);
-            if let Err(e) = self.link_file_fresh(stored, rel_path, &target) {
+            if let Err(e) = self.link_file_fresh(stored, rel_path, &target, None) {
                 core::hint::cold_path();
                 let _ = std::fs::remove_dir_all(&tmp);
                 if let Error::MissingStoreFile { .. } = &e {

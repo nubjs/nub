@@ -59,6 +59,13 @@ pub struct HoistedPlacements {
 }
 
 impl HoistedPlacements {
+    /// Restore an exact placement map recorded when the tree was linked.
+    /// This avoids replaying the planner against a graph whose filtering or
+    /// iteration order may differ from the materialized install.
+    pub fn from_package_dirs(by_dep_path: BTreeMap<String, Vec<PathBuf>>) -> Self {
+        Self { by_dep_path }
+    }
+
     /// Recompute hoisted placement paths for an already-linked graph
     /// without touching disk. Used by commands like `aube rebuild`
     /// that need to find package directories after install, but must
@@ -194,17 +201,20 @@ impl PlacementPlan {
     }
 
     /// Add a workspace-member importer node whose `node_modules` is
-    /// `nm_dir`. The node hangs off the root so a member dep's ancestor
-    /// walk reaches root (and can hoist there), but it is deliberately
-    /// NOT inserted into `root.children`: it is not a package placement,
-    /// so it must not shadow a same-named package at root nor appear in
-    /// the root's stale-entry sweep set.
-    fn add_importer_node(&mut self, nm_dir: PathBuf) -> usize {
+    /// `nm_dir`. When `parent` is the root the node hangs off it, so a
+    /// member dep's ancestor walk reaches root (and can hoist there); it is
+    /// deliberately NOT inserted into `root.children`, being a synthetic
+    /// node rather than a package placement, so it must not shadow a
+    /// same-named package at root nor appear in the root's stale-entry
+    /// sweep set. `parent: None` models an importer Node's ancestor lookup
+    /// cannot reach the root from — a parent-relative member outside the
+    /// workspace directory — which must therefore keep its own local tree.
+    fn add_importer_node(&mut self, nm_dir: PathBuf, parent: Option<usize>) -> usize {
         let idx = self.nodes.len();
         self.nodes.push(TreeNode {
             pkg_dir: None,
             nm_dir,
-            parent: Some(self.root_idx),
+            parent,
             children: BTreeMap::new(),
             dep_path: None,
         });
@@ -584,12 +594,27 @@ pub(crate) fn plan_workspace(
     let mut plan = PlacementPlan::new(root_nm.clone());
     let mut queue: VecDeque<(usize, usize, String, String)> = VecDeque::new();
 
-    // (importer node index, its direct deps) — root plus every member.
-    let mut seeds: Vec<(usize, &[DirectDep])> = Vec::with_capacity(importers.len());
-    seeds.push((plan.root_idx, root_deps.as_slice()));
+    // A member whose directory does not sit under the workspace root is
+    // outside Node's ancestor walk from its own `node_modules`, so nothing
+    // hoisted to the shared root is resolvable from it. `pnpm-workspace.yaml`
+    // reaches those through a `../**` pattern. Such a member gets no root
+    // parent and keeps a local tree; it also may not vote on, or claim, a
+    // root slot it cannot read.
+    let workspace_root = root_nm.parent().unwrap_or(root_nm);
+    let root_reachable = |nm_dir: &Path| {
+        nm_dir
+            .parent()
+            .is_some_and(|importer_dir| importer_dir.starts_with(workspace_root))
+    };
+
+    // (importer node index, its direct deps, root-reachable) — root plus
+    // every member.
+    let mut seeds: Vec<(usize, &[DirectDep], bool)> = Vec::with_capacity(importers.len());
+    seeds.push((plan.root_idx, root_deps.as_slice(), true));
     for (nm_dir, deps) in &importers[1..] {
-        let idx = plan.add_importer_node(nm_dir.clone());
-        seeds.push((idx, deps.as_slice()));
+        let reachable = root_reachable(nm_dir);
+        let idx = plan.add_importer_node(nm_dir.clone(), reachable.then_some(plan.root_idx));
+        seeds.push((idx, deps.as_slice(), reachable));
     }
 
     // Deterministic root winner. The root importer's OWN direct deps own
@@ -597,10 +622,14 @@ pub(crate) fn plan_workspace(
     // under the member); members' direct deps only win a name root doesn't
     // declare. Then seed each importer's direct deps under its own node with
     // `floor = root` so shared deps hoist to the single shared root.
-    let member_direct = seeds.iter().skip(1).flat_map(|(_, deps)| deps.iter());
+    let member_direct = seeds
+        .iter()
+        .skip(1)
+        .filter(|(_, _, reachable)| *reachable)
+        .flat_map(|(_, deps, _)| deps.iter());
     preplace_root_winners(&mut plan, &mut queue, root_deps, member_direct, graph);
 
-    for (importer_idx, deps) in &seeds {
+    for (importer_idx, deps, reachable) in &seeds {
         for dep in *deps {
             let Some(pkg) = graph.packages.get(&dep.dep_path) else {
                 continue;
@@ -610,11 +639,12 @@ pub(crate) fn plan_workspace(
             // through the live symlink), matching pnpm's hoistWorkspacePackages
             // layout — do NOT hoist it to the shared root. A registry dep gets
             // `floor = root` so it hoists workspace-wide.
-            let floor = if matches!(pkg.local_source.as_ref(), Some(LocalSource::Link(_))) {
-                *importer_idx
-            } else {
-                plan.root_idx
-            };
+            let floor =
+                if !*reachable || matches!(pkg.local_source.as_ref(), Some(LocalSource::Link(_))) {
+                    *importer_idx
+                } else {
+                    plan.root_idx
+                };
             queue.push_back((*importer_idx, floor, dep.name.clone(), dep.dep_path.clone()));
         }
     }
@@ -627,7 +657,11 @@ pub(crate) fn plan_workspace(
         let Some(pkg) = graph.packages.get(&dep_path) else {
             continue;
         };
-        enqueue_transitives(&mut queue, outcome.node_idx, plan.root_idx, pkg, graph);
+        // Propagate the floor rather than pinning it to the root: for every
+        // root-reachable seed it already IS the root, and for a member outside
+        // the workspace directory it keeps the whole subtree inside that
+        // member's local tree (its nodes have no ancestor path to the root).
+        enqueue_transitives(&mut queue, outcome.node_idx, floor, pkg, graph);
     }
 
     Ok(plan)
@@ -844,11 +878,18 @@ fn materialize_hoisted_node(
                 .map_err(|e| Error::Io(parent.clone(), e))?;
         }
 
+        // Match the isolated materializer's Linux fast path: resolve every
+        // destination relative to one open package directory.
+        #[cfg(target_os = "linux")]
+        let pkg_dir_fd = std::fs::File::open(&pkg_dir).ok();
+        #[cfg(not(target_os = "linux"))]
+        let pkg_dir_fd: Option<std::fs::File> = None;
+
         for (rel_path, stored) in index {
             // Key already validated in the parent-collection loop above;
             // the index is immutable between the two.
             let target = pkg_dir.join(rel_path);
-            if let Err(e) = linker.link_file_fresh(stored, rel_path, &target) {
+            if let Err(e) = linker.link_file_fresh(stored, rel_path, &target, pkg_dir_fd.as_ref()) {
                 if let Error::MissingStoreFile { .. } = &e {
                     crate::invalidate_stale_index_for_package(
                         &linker.store,
@@ -1286,6 +1327,37 @@ mod tests {
             !plan.nodes.iter().any(|n| n.parent == Some(plan.root_idx)
                 && n.dep_path.as_deref() == Some("@scope/core@0.0.0")),
             "the link: sibling must not be hoisted to the workspace root"
+        );
+    }
+
+    #[test]
+    fn workspace_importer_outside_root_keeps_a_local_copy() {
+        // A `../**` workspace pattern can name a member that lives OUTSIDE
+        // the workspace directory. Node's ancestor walk from
+        // `/sibling/node_modules` never reaches `/workspace/node_modules`, so
+        // hoisting that member's dep to the shared root would leave it
+        // unresolvable. It gets its own copy instead.
+        let root_nm = PathBuf::from("/workspace/node_modules");
+        let outside_nm = PathBuf::from("/sibling/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .packages
+            .insert("shared@1.0.0".into(), pkg("shared", "1.0.0", &[]));
+        let deps = vec![dep("shared", "shared@1.0.0")];
+        let seeds = vec![(root_nm.clone(), deps.clone()), (outside_nm.clone(), deps)];
+
+        let plan = plan_workspace(&seeds, &graph).unwrap();
+
+        let dirs: BTreeSet<PathBuf> = plan
+            .nodes
+            .iter()
+            .filter(|n| n.dep_path.as_deref() == Some("shared@1.0.0"))
+            .filter_map(|n| n.pkg_dir.clone())
+            .collect();
+        assert_eq!(
+            dirs,
+            BTreeSet::from([root_nm.join("shared"), outside_nm.join("shared")]),
+            "an importer outside the workspace root cannot share the root placement"
         );
     }
 

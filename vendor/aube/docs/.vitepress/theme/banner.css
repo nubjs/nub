@@ -8,12 +8,13 @@
   gap: 0.75rem;
   align-items: center;
   justify-content: center;
-  padding: 0.5rem 2.75rem;
+  padding: 0.5rem 3.25rem 0.5rem 2.75rem;
   background: var(--aube-coral-dark, #9e4a2a);
   color: #fff;
   font-size: 0.9rem;
   line-height: 1.4;
   text-align: center;
+  min-height: 2.75rem;
 }
 
 /* Reserve breathing room at the layout bottom so content near the
@@ -29,7 +30,9 @@
    don't need a fallback for the banner-less case if we later relax
    the gate. */
 body:has(> .jdx-banner) .Layout {
-  padding-bottom: calc(var(--vp-layout-top-height, 0px) + var(--vp-nav-height, 64px));
+  padding-bottom: calc(
+    var(--vp-layout-top-height, 0px) + var(--vp-nav-height, 64px)
+  );
 }
 
 .jdx-banner a {
@@ -48,7 +51,13 @@ body:has(> .jdx-banner) .Layout {
   font-size: 1.25rem;
   cursor: pointer;
   line-height: 1;
-  padding: 0 0.5rem;
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
   opacity: 0.7;
 }
 .jdx-banner button:hover {
@@ -59,13 +68,13 @@ body:has(> .jdx-banner) .Layout {
     flex-direction: column;
     gap: 0.125rem;
     font-size: 0.8rem;
-    padding: 0.5rem 2.25rem;
+    padding: 0.5rem max(2.75rem, 44px);
     line-height: 1.3;
     text-wrap: balance;
   }
   .jdx-banner button {
-    top: 0.25rem;
-    right: 0.25rem;
-    transform: none;
+    top: 50%;
+    right: 0;
+    transform: translateY(-50%);
   }
 }

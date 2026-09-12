@@ -1,3 +1,5 @@
+min_version = "2026.8.16"
+
 [env]
 _.path = ["./bin"]
 
@@ -7,6 +9,8 @@ cargo.binstall_native = true
 
 [tools]
 actionlint = "latest"
+mr-boxington = "1.5.0"
+usage = "6.6.1"
 communique = "latest"
 "github:bnjbvr/cargo-machete" = "latest"
 "github:foresterre/cargo-msrv" = "latest"
@@ -17,7 +21,7 @@ communique = "latest"
 # TODO: switch to plain `tak = "0.0.4"` once a mise release ships the registry
 # entry from jdx/mise#11307 — the shorthand exists on main but the registry is
 # compiled in, so it is not usable until then.
-"github:jdx/tak" = "0.0.4"
+"github:jdx/tak" = "v0.0.9"
 hk = "latest"
 node = "24"
 pitchfork = "latest"
@@ -29,13 +33,27 @@ pkl = "latest"
 rush = "latest"
 shellcheck = "latest"
 shfmt = "latest"
-usage = "latest"
+
+[wrappers.cargo]
+command = "mbx"
+env = { MBX_CARGO_SHIM_MODE = "1" }
 
 [tasks.lint]
 run = "hk check --all --slow"
 
 [tasks.lint-fix]
 run = "hk fix --all --slow"
+
+# Apply clippy's machine-applicable autofixes via cargo-fixit — a drop-in
+# replacement for `cargo clippy --fix` that skips the full re-check compile
+# between fix rounds, so repeated runs are faster. Pinned through mise's cargo
+# backend (the repo's convention for compiled cargo tools, matching
+# cargo-audit/cargo-deny in CI), so a contributor gets it with no manual
+# install. No `cargo clippy --fix` fallback — cargo-fixit is the only path.
+# Modeled on `cargo fix` 1.89: add `--all-targets` to also fix tests/benches,
+# and `--allow-dirty`/`--allow-staged` to run on a dirty tree.
+[tasks.fix]
+run = "mise x cargo:cargo-fixit@0.1.15 -- cargo fixit --clippy --all-targets --allow-dirty --allow-staged"
 
 [tasks.build]
 run = "cargo build"
@@ -89,7 +107,7 @@ run = [
 ]
 
 # Regenerate `benchmarks/results.json` (and the markdown summary) by
-# re-running the full hyperfine scenario matrix with a release build
+# re-running the full hyperfine scenario matrix with a release-mode binary
 # and 10 runs × 3 warmups, then writing the structured output into
 # the repo in-place. Commit the updated JSON and the chart on the
 # VitePress benchmarks page picks it up automatically — the page's
@@ -108,7 +126,7 @@ env = {
   AUBE_FORCE_METADATA_PRIMER = "true",
 }
 run = [
-  "cargo build --release",
+  "if [ -z \"${AUBE_BIN:-}\" ]; then cargo build --release; fi",
   "mise x aqua:sharkdp/hyperfine@latest github:pnpm/pnpm@latest npm:@yarnpkg/cli-dist@latest bun@latest deno@latest npm:vlt@latest node@24 -- bash benchmarks/bench.sh",
   "node benchmarks/update-readme.mts",
 ]
@@ -124,30 +142,44 @@ run = [
 # The store warm-up is the one networked step. It has to happen before tak runs
 # because the install benchmark uses --offline, and it is outside the
 # measurement on purpose — nothing tak times ever touches the registry.
+[tasks."perf:build"]
+run = "mbx build --release"
+
 [tasks.perf]
 dir = "{{config_root}}"
-env = { npm_config_enable_global_virtual_store = "true" }
+# Cachegrind aggregates instructions from every worker. Pin the pools so idle
+# work-stealing races do not move the install count by 10%+ between runs.
+env = { npm_config_enable_global_virtual_store = "true", TOKIO_WORKER_THREADS = "1", RAYON_NUM_THREADS = "1", AUBE_LINK_CONCURRENCY = "1" }
 run = [
-  "cargo build --release",
   "./target/release/aube -C fixtures/medium install --frozen-lockfile",
   "tak run",
 ]
+depends = ["perf:build"]
 
 # Same measurement, appended to refs/notes/tak for this commit. Run by the
 # `perf` workflow on every push to main; the notes are what the history is.
 # Safe to run locally — nothing leaves the machine until `tak push`.
 [tasks."perf:record"]
 dir = "{{config_root}}"
-env = { npm_config_enable_global_virtual_store = "true" }
+env = { npm_config_enable_global_virtual_store = "true", TOKIO_WORKER_THREADS = "1", RAYON_NUM_THREADS = "1", AUBE_LINK_CONCURRENCY = "1" }
 run = [
-  "cargo build --release",
   "./target/release/aube -C fixtures/medium install --frozen-lockfile",
   "tak run --record",
 ]
+depends = ["perf:build"]
 
 [tasks."build:pgo"]
 dir = "{{config_root}}"
 run = "bash benchmarks/pgo.bash"
+
+# Build a separately linked runner with command-only features. Release
+# archives deliberately keep shipping `aubr` as a symlink to the PGO-trained
+# `aube`: this artifact is useful for measuring the standalone design, but it
+# adds a second ~40 MiB executable and has not beaten the multicall binary.
+[tasks."build:aubr-lean"]
+dir = "{{config_root}}"
+env = { CARGO_TARGET_DIR = "{{config_root}}/target/aubr-lean" }
+run = "cargo build --release --locked -p aube --bin aubr --no-default-features --features mimalloc,rustls,hickory-dns"
 
 [tasks.render]
 depends = ["build"]
@@ -156,6 +188,7 @@ run = [
   "rm -rf docs/cli && mkdir -p docs/cli",
   "usage g markdown -mf aube.usage.kdl --out-dir docs/cli --url-prefix /cli",
   "usage g json -f aube.usage.kdl > docs/cli/commands.json",
+  "node scripts/patch-generated-cli-docs.mjs",
   "cargo run -p aube-settings --bin generate-settings-docs",
   "cargo run -p aube-codes --bin generate-error-codes-docs",
 ]

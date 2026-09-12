@@ -9,6 +9,33 @@ teardown() {
 	_common_teardown
 }
 
+@test "malformed packageExtensions fail before resolution" {
+	cat >pnpm-workspace.yaml <<-'EOF'
+		packageExtensions:
+		  is-odd@3:
+		    dependencies:
+		      is-number: null
+	EOF
+	run aube install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "ERR_AUBE_INVALID_PACKAGE_EXTENSION"
+	assert_output --partial "dependencies.is-number"
+}
+
+@test "non-object packageExtensions fail before resolution" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "invalid-package-extensions",
+		  "version": "1.0.0",
+		  "packageExtensions": []
+		}
+	EOF
+	run aube install --no-frozen-lockfile
+	assert_failure
+	assert_output --partial "ERR_AUBE_INVALID_PACKAGE_EXTENSION"
+	assert_output --partial "setting must be an"
+}
+
 # Sanity baseline: with no override, is-odd@3.0.1's `is-number: ^6.0.0`
 # range resolves to is-number@6.0.0 (the highest matching version in
 # the fixture registry).
