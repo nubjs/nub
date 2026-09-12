@@ -47,7 +47,7 @@ for (const source of ['NUB_CACHE_DIR', '.npmrc global-virtual-store-dir']) {
     writeFileSync(join(dependencyDir, 'package.json'), JSON.stringify({ name: dependency, version: '1.0.0', main: 'index.cjs' }));
     writeFileSync(join(dependencyDir, 'index.cjs'), "module.exports = 'dependency-loaded';\n");
     const dependencyArchive = join(base, 'dependency.tgz');
-    execFileSync('tar', ['-czf', dependencyArchive, '-C', base, 'dependency']);
+    execFileSync('tar', ['-czf', 'dependency.tgz', 'dependency'], { cwd: base });
     const dependencyBytes = readFileSync(dependencyArchive);
 
     writeFileSync(join(targetDir, 'package.json'), JSON.stringify({
@@ -69,7 +69,7 @@ for (const source of ['NUB_CACHE_DIR', '.npmrc global-virtual-store-dir']) {
       process.exit(fs.readFileSync(${JSON.stringify(canary)}, 'utf8').length > 0 ? 0 : 3);
     `);
     const targetArchive = join(base, 'target.tgz');
-    execFileSync('tar', ['-czf', targetArchive, '-C', base, 'target']);
+    execFileSync('tar', ['-czf', 'target.tgz', 'target'], { cwd: base });
     const targetBytes = readFileSync(targetArchive);
     const server = createServer((req, res) => {
       const tarball = (name, bytes) => ({
