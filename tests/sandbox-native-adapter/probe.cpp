@@ -28,6 +28,7 @@ struct Payload {
     BOOL section_dacl_probe;
     BOOL sync_dacl_probe;
     BOOL nt_null_probe;
+    BOOL pid_link_probe;
 };
 static Payload state = {};
 
@@ -118,6 +119,7 @@ int wmain(int argc, wchar_t** argv) {
     state.section_dacl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_SECTION_DACL_PROBE", nullptr, 0) != 0;
     state.sync_dacl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_SYNC_DACL_PROBE", nullptr, 0) != 0;
     state.nt_null_probe = GetEnvironmentVariableW(L"NUB_NATIVE_NT_NULL_PROBE", nullptr, 0) != 0;
+    state.pid_link_probe = GetEnvironmentVariableW(L"NUB_NATIVE_PID_LINK_PROBE", nullptr, 0) != 0;
     DWORD pid = wcstoul(argv[1], nullptr, 10);
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
                                  PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
@@ -317,7 +319,7 @@ static bool initialize_private_security() {
 class PackageAcl {
     PACL value_ = nullptr;
 public:
-    explicit PackageAcl(PACL original) {
+    explicit PackageAcl(PACL original, DWORD access = GENERIC_ALL) {
         ACL_SIZE_INFORMATION info = {};
         if (!original || !GetAclInformation(original, &info, sizeof(info), AclSizeInformation)) return;
         DWORD bytes = info.AclBytesInUse + DWORD(sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) +
@@ -327,7 +329,7 @@ public:
         if (!acl) return;
         memcpy(acl, original, info.AclBytesInUse);
         acl->AclSize = static_cast<WORD>(bytes);
-        if (!AddAccessAllowedAce(acl, acl->AclRevision, GENERIC_ALL, state.package_sid)) {
+        if (!AddAccessAllowedAce(acl, acl->AclRevision, access, state.package_sid)) {
             LocalFree(acl);
             return;
         }
@@ -430,6 +432,11 @@ using NtSemaphore = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, 
 static NtMutant true_create_mutant = nullptr;
 static NtEvent true_create_event = nullptr;
 static NtSemaphore true_create_semaphore = nullptr;
+using NtLinkCreate = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PUNICODE_STRING);
+using NtLinkQuery = NTSTATUS (NTAPI*)(HANDLE, PUNICODE_STRING, PULONG);
+static NtLinkCreate true_create_link = nullptr;
+static NtOpenSectionFn true_open_link = nullptr;
+static NtLinkQuery true_query_link = nullptr;
 
 static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
     if (!attrs || !attrs->RootDirectory || !attrs->ObjectName || !attrs->ObjectName->Buffer ||
@@ -490,6 +497,76 @@ static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
     if (wcslen(root) <= prefix || _wcsnicmp(root, package, prefix) || root[prefix] != L'\\') return false;
     leaf = root + prefix + 1;
     return (!wcsncmp(leaf, L"msys-", 5) || !wcsncmp(leaf, L"cygwin-", 7)) && !wcschr(leaf, L'\\');
+}
+
+static bool decimal_name(PUNICODE_STRING name, const wchar_t* prefix) {
+    if (!name || !name->Buffer || name->Length % sizeof(wchar_t) ||
+        name->MaximumLength < name->Length) return false;
+    size_t size = name->Length / sizeof(wchar_t), start = wcslen(prefix);
+    if (size <= start || size > start + 10 || wcsncmp(name->Buffer, prefix, start)) return false;
+    for (size_t i = start; i < size; ++i)
+        if (name->Buffer[i] < L'0' || name->Buffer[i] > L'9') return false;
+    return true;
+}
+
+// MSYS maps Windows PIDs to POSIX PIDs with Object Manager links, not file
+// symlinks. A denied query becomes PID zero, the child return value of fork.
+static NTSTATUS NTAPI create_link(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
+                                  PUNICODE_STRING target) {
+    wchar_t root[1024] = {};
+    bool scoped = msys_section_root(attrs, root);
+    PACL original = nullptr;
+    BOOL present = FALSE, defaulted = FALSE;
+    bool candidate = state.pid_link_probe && scoped &&
+        decimal_name(attrs->ObjectName, L"winpid.") && decimal_name(target, L"") &&
+        attrs->SecurityDescriptor && GetSecurityDescriptorDacl(attrs->SecurityDescriptor,
+            &present, &original, &defaulted) && present && original;
+    PackageAcl acl(candidate ? original : nullptr, 1 /* SYMBOLIC_LINK_QUERY */);
+    OBJECT_ATTRIBUTES redirected = {};
+    SECURITY_DESCRIPTOR descriptor = {};
+    PSID owner = nullptr, group = nullptr;
+    BOOL owner_default = FALSE, group_default = FALSE;
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    const SECURITY_DESCRIPTOR_CONTROL flags = SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED;
+    bool adapted = candidate && acl.get() &&
+        GetSecurityDescriptorOwner(attrs->SecurityDescriptor, &owner, &owner_default) &&
+        GetSecurityDescriptorGroup(attrs->SecurityDescriptor, &group, &group_default) &&
+        GetSecurityDescriptorControl(attrs->SecurityDescriptor, &control, &revision) &&
+        InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) &&
+        SetSecurityDescriptorOwner(&descriptor, owner, owner_default) &&
+        SetSecurityDescriptorGroup(&descriptor, group, group_default) &&
+        SetSecurityDescriptorDacl(&descriptor, TRUE, acl.get(), defaulted) &&
+        SetSecurityDescriptorControl(&descriptor, flags, static_cast<SECURITY_DESCRIPTOR_CONTROL>(control & flags));
+    if (adapted) {
+        redirected = *attrs;
+        redirected.SecurityDescriptor = &descriptor;
+    }
+    auto status = true_create_link(handle, access, adapted ? &redirected : attrs, target);
+    if (scoped) diagnostic("ADAPTER_PID_LINK_CREATE pid=%lu name=%.*ls target=%.*ls access=%08lx adapted=%d status=%08lx\n",
+        GetCurrentProcessId(), int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer,
+        target ? int(target->Length / sizeof(wchar_t)) : 0, target ? target->Buffer : L"",
+        access, adapted, static_cast<ULONG>(status));
+    return status;
+}
+
+static NTSTATUS NTAPI open_link(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs) {
+    auto status = true_open_link(handle, access, attrs);
+    DWORD error = GetLastError();
+    wchar_t root[1024] = {};
+    if (msys_section_root(attrs, root)) diagnostic("ADAPTER_PID_LINK_OPEN pid=%lu name=%.*ls access=%08lx handle=%p status=%08lx\n",
+        GetCurrentProcessId(), int(attrs->ObjectName->Length / sizeof(wchar_t)), attrs->ObjectName->Buffer,
+        access, status >= 0 ? *handle : nullptr, static_cast<ULONG>(status));
+    SetLastError(error);
+    return status;
+}
+
+static NTSTATUS NTAPI query_link(HANDLE handle, PUNICODE_STRING target, PULONG needed) {
+    auto status = true_query_link(handle, target, needed);
+    diagnostic("ADAPTER_PID_LINK_QUERY pid=%lu handle=%p target=%.*ls status=%08lx\n",
+        GetCurrentProcessId(), handle, status >= 0 && target ? int(target->Length / sizeof(wchar_t)) : 0,
+        status >= 0 && target ? target->Buffer : L"", static_cast<ULONG>(status));
+    return status;
 }
 
 static NTSTATUS NTAPI create_section(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs,
@@ -1022,6 +1099,9 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_create_mutant, "NtCreateMutant") ||
         !resolve_nt(true_create_event, "NtCreateEvent") ||
         !resolve_nt(true_create_semaphore, "NtCreateSemaphore") ||
+        !resolve_nt(true_create_link, "NtCreateSymbolicLinkObject") ||
+        !resolve_nt(true_open_link, "NtOpenSymbolicLinkObject") ||
+        !resolve_nt(true_query_link, "NtQuerySymbolicLinkObject") ||
         !resolve_nt(true_io_control, "NtDeviceIoControlFile") ||
         !resolve_nt(true_close, "NtClose") ||
         !resolve_nt(query_object, "NtQueryObject")) {
@@ -1050,6 +1130,9 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_mutant), create_mutant);
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_event), create_event);
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_semaphore), create_semaphore);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_create_link), create_link);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_open_link), open_link);
+    DetourAttach(reinterpret_cast<PVOID*>(&true_query_link), query_link);
     DetourAttach(reinterpret_cast<PVOID*>(&true_io_control), mount_io_control);
     DetourAttach(reinterpret_cast<PVOID*>(&true_close), mount_close);
     LONG result = DetourTransactionCommit();
