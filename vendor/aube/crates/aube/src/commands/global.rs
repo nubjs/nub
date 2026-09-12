@@ -553,13 +553,32 @@ fn slot_entry_is_ours(link: &Path, pkg_dir: &Path) -> bool {
         let Ok(content) = std::fs::read_to_string(link) else {
             return false;
         };
-        let rel = aube_linker::parse_posix_shim_target(&content)
-            .map(str::to_string)
-            .or_else(|| aube_linker::parse_win_shim_target(&content));
-        let Some(rel) = rel else {
-            return false;
+        #[cfg(unix)]
+        let resolved = if aube_linker::parse_posix_shim_target(&content).is_some() {
+            // The marker alone identifies only a generated-wrapper FORMAT, not
+            // ownership. Let the version-aware decoder reproduce the POSIX
+            // wrapper's basedir semantics, then prove the decoded target is
+            // inside this global package root below.
+            let Ok(Some(shim)) = aube_linker::resolve_bin_shim(link) else {
+                return false;
+            };
+            shim.target
+        } else {
+            let Some(rel) = aube_linker::parse_win_shim_target(&content) else {
+                return false;
+            };
+            aube_linker::normalize_path(&bin_dir.join(rel.replace('\\', "/")))
         };
-        let resolved = aube_linker::normalize_path(&bin_dir.join(rel.replace('\\', "/")));
+        #[cfg(not(unix))]
+        let resolved = {
+            let rel = aube_linker::parse_posix_shim_target(&content)
+                .map(str::to_string)
+                .or_else(|| aube_linker::parse_win_shim_target(&content));
+            let Some(rel) = rel else {
+                return false;
+            };
+            aube_linker::normalize_path(&bin_dir.join(rel.replace('\\', "/")))
+        };
         resolved.starts_with(&pkg_lex) || resolved.starts_with(&pkg_canon)
     }
 }
@@ -712,22 +731,24 @@ pub fn unlink_bins(install_dir: &Path, bin_dir: &Path, bins: &[OwnedBin]) {
                 }
                 Err(_) => {
                     // Regular-file shim (`preferSymlinkedExecutables=false`):
-                    // read the `# aube-bin-shim` marker line generated
-                    // alongside the script body to recover the
-                    // `$basedir`-relative target, then lex-normalize from
-                    // the link's own directory to match the shim's
-                    // string-level resolution semantics (`$basedir` is
-                    // `dirname "$0"`). Canonicalizing here would
-                    // follow the install's symlinks into the shared
-                    // virtual store, so the ownership check has to
-                    // stay textual.
+                    // recognize only the generated POSIX format, then use the
+                    // version-aware decoder to recover its target. Containment
+                    // below remains the ownership proof; a marker alone must
+                    // never authorize deleting another tool's wrapper.
                     let Some(content) = std::fs::read_to_string(&link).ok() else {
                         continue;
                     };
-                    let Some(rel) = aube_linker::parse_posix_shim_target(&content) else {
+                    if aube_linker::parse_posix_shim_target(&content).is_none() {
+                        continue;
+                    }
+                    // A v2 wrapper resolves from its lexical basedir; v3
+                    // resolves from its physical basedir. Keep this removal
+                    // check aligned with execution rather than re-deriving
+                    // either form from the global bin-dir spelling.
+                    let Ok(Some(shim)) = aube_linker::resolve_bin_shim(&link) else {
                         continue;
                     };
-                    let resolved = aube_linker::normalize_path(&link_parent.join(rel));
+                    let resolved = shim.target;
                     if resolved.starts_with(&install_lex)
                         || install_canon
                             .as_ref()
@@ -992,6 +1013,104 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A global bin root may itself be a symlink (for example an XDG bin
+    /// directory redirected into a managed home). Version 2 wrappers resolve
+    /// their target from that lexical surface; version 3 wrappers resolve it
+    /// from the physical bin directory. Both can coexist while a global update
+    /// replaces or removes old installs, and a marker for an unrelated target
+    /// must remain foreign.
+    #[cfg(unix)]
+    #[test]
+    fn global_wrapper_ownership_uses_each_posix_version_basedir() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let surface_bin = dir.path().join("surface/sub/bin");
+        let physical_bin = dir.path().join("physical/deep/bin");
+        std::fs::create_dir_all(surface_bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&physical_bin).unwrap();
+        symlink(&physical_bin, &surface_bin).unwrap();
+
+        let v2_install = dir.path().join("surface/global/v2-install");
+        let v3_install = dir.path().join("physical/global/v3-install");
+        for target in [
+            v2_install.join("node_modules/pkg/live.js"),
+            v3_install.join("node_modules/pkg/live.js"),
+        ] {
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, "#!/usr/bin/env node\n").unwrap();
+        }
+
+        let write_wrapper = |name: &str, version: u8, target: &str| {
+            std::fs::write(
+                surface_bin.join(name),
+                format!("#!/bin/sh\n# aube-bin-shim v{version} target={target}\n"),
+            )
+            .unwrap();
+        };
+        // The v2 target is relative to `surface/sub/bin`, while v3's is
+        // relative to `physical/deep/bin`. Applying either spelling from the
+        // other basedir lands at a sibling `global/` directory that does not
+        // contain the install.
+        let v2_rel = "../../global/v2-install/node_modules/pkg";
+        let v3_rel = "../../global/v3-install/node_modules/pkg";
+        for (name, version, rel) in [
+            ("v2-live", 2, format!("{v2_rel}/live.js")),
+            ("v2-stale", 2, format!("{v2_rel}/stale.js")),
+            ("v3-live", 3, format!("{v3_rel}/live.js")),
+            ("v3-stale", 3, format!("{v3_rel}/stale.js")),
+        ] {
+            write_wrapper(name, version, &rel);
+        }
+        write_wrapper("foreign", 3, "../../foreign/node_modules/pkg/tool.js");
+
+        let v2_root = v2_install.parent().unwrap();
+        let v3_root = v3_install.parent().unwrap();
+        for name in ["v2-live", "v2-stale"] {
+            assert!(
+                bin_slot_is_writable(&surface_bin, v2_root, name),
+                "v2 {name} must resolve from the lexical bin surface"
+            );
+        }
+        for name in ["v3-live", "v3-stale"] {
+            assert!(
+                bin_slot_is_writable(&surface_bin, v3_root, name),
+                "v3 {name} must resolve from the physical bin directory"
+            );
+        }
+        assert!(
+            !bin_slot_is_writable(&surface_bin, v3_root, "foreign"),
+            "a matching marker does not establish ownership without containment"
+        );
+
+        let owned = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| OwnedBin {
+                    name: (*name).to_string(),
+                    target: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        unlink_bins(&v2_install, &surface_bin, &owned(&["v2-live", "v2-stale"]));
+        unlink_bins(
+            &v3_install,
+            &surface_bin,
+            &owned(&["v3-live", "v3-stale", "foreign"]),
+        );
+
+        for name in ["v2-live", "v2-stale", "v3-live", "v3-stale"] {
+            assert!(
+                surface_bin.join(name).symlink_metadata().is_err(),
+                "owned {name} wrapper must be removed whether its target is live or stale"
+            );
+        }
+        assert!(
+            surface_bin.join("foreign").is_file(),
+            "a foreign marker-bearing wrapper must be retained"
+        );
     }
 
     /// The layout a real isolated install produces: `node_modules/<alias>` is a
