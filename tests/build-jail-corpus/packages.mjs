@@ -14,6 +14,10 @@ const linkedProject = process.env.CORPUS_LINKED_PROJECT === '1';
 const reportRoot = process.env.CORPUS_REPORT ? resolve(process.env.CORPUS_REPORT) : null;
 const screen = process.env.CORPUS_OSV_SCREEN ? resolve(process.env.CORPUS_OSV_SCREEN) : null;
 const screenRoot = reportRoot ?? join(root, 'security');
+// node-gyp serializes booleans in the generated build/config.gypi as "true" or "false".
+// Keep this comparison aligned with that emitted representation while still checking that the
+// native build retained the running runtime's values.
+const nodeGypConfigValue = value => typeof value === 'boolean' ? String(value) : value;
 if (reportRoot) mkdirSync(reportRoot, { recursive: true });
 const report = (source, destination) => {
   if (!reportRoot) return;
@@ -160,7 +164,7 @@ for (const [name, version, probe, source = false] of selected) {
         // ordinary build enables it. Artifact loading alone does not detect that difference.
         for (const key of ['node_with_ltcg', 'node_module_version', 'v8_enable_pointer_compression', 'v8_enable_sandbox']) {
           if (Object.hasOwn(process.config.variables, key)) {
-            assert.equal(config.variables[key], process.config.variables[key], `native build preserves runtime ${key}`);
+            assert.equal(config.variables[key], nodeGypConfigValue(process.config.variables[key]), `native build preserves runtime ${key}`);
           }
         }
       }
