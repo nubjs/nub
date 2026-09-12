@@ -5,7 +5,7 @@ use crate::{CompileCtx, Homes, ScopeCapabilities, compile};
 use serde_json::json;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const CHILD: &str = "backend::windows_native_adapter_probe::native_adapter_child";
 
@@ -150,6 +150,139 @@ fn anonymous_pipe_bytes() -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[derive(Clone, Copy)]
+enum PipeSecurity {
+    NullAttributes,
+    NullDescriptor,
+    UserOnlyDescriptor,
+}
+
+impl PipeSecurity {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NullAttributes => "null-attributes",
+            Self::NullDescriptor => "null-descriptor",
+            Self::UserOnlyDescriptor => "user-only-descriptor",
+        }
+    }
+}
+
+/// Exercise the handle handoff used by Go's `os/exec`: no child opens the
+/// pipe by name.  It receives stdin/stdout by CreateProcess handle inheritance.
+fn inherited_pipe_roundtrip(security: PipeSecurity) -> std::io::Result<Vec<u8>> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::Foundation::GENERIC_ALL;
+    use windows_sys::Win32::Security::{
+        ACL, ACL_REVISION, AddAccessAllowedAce, GetTokenInformation, InitializeAcl,
+        InitializeSecurityDescriptor, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+        SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let check = |ok| {
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let mut acl_bytes = [0u32; 128];
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    let attributes = match security {
+        // The API itself returns non-inheritable handles here. Rust's Windows
+        // process launcher duplicates precisely its standard handles as
+        // inheritable before CreateProcess, matching Go's handoff shape.
+        PipeSecurity::NullAttributes => std::ptr::null(),
+        PipeSecurity::NullDescriptor => std::ptr::addr_of!(attributes),
+        PipeSecurity::UserOnlyDescriptor => {
+            let mut token = std::ptr::null_mut();
+            check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
+            let token = unsafe { OwnedHandle::from_raw_handle(token) };
+            let mut user = [0usize; 64];
+            let mut needed = 0;
+            check(unsafe {
+                GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenUser,
+                    user.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&user) as u32,
+                    &mut needed,
+                )
+            })?;
+            let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+            let acl = acl_bytes.as_mut_ptr().cast::<ACL>();
+            check(unsafe {
+                InitializeAcl(acl, std::mem::size_of_val(&acl_bytes) as u32, ACL_REVISION)
+            })?;
+            check(unsafe { AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, sid) })?;
+            let descriptor = std::ptr::addr_of_mut!(descriptor).cast();
+            check(unsafe { InitializeSecurityDescriptor(descriptor, 1) })?;
+            check(unsafe { SetSecurityDescriptorDacl(descriptor, 1, acl, 0) })?;
+            attributes.lpSecurityDescriptor = descriptor;
+            std::ptr::addr_of!(attributes)
+        }
+    };
+    let pipe = |attributes: *const SECURITY_ATTRIBUTES| -> std::io::Result<(std::fs::File, std::fs::File)> {
+        let mut reader = std::ptr::null_mut();
+        let mut writer = std::ptr::null_mut();
+        check(unsafe { CreatePipe(&mut reader, &mut writer, attributes, 23) })?;
+        Ok(unsafe {
+            (
+                std::fs::File::from_raw_handle(reader),
+                std::fs::File::from_raw_handle(writer),
+            )
+        })
+    };
+    let (child_stdin, mut parent_stdin) = pipe(attributes)?;
+    let (mut parent_stdout, child_stdout) = pipe(attributes)?;
+    let mut child = Command::new(std::env::current_exe()?)
+        .args(["--exact", CHILD, "--nocapture"])
+        .env("NUB_ADAPTER_PIPE_ROUNDTRIP", security.label())
+        .stdin(Stdio::from(child_stdin))
+        .stdout(Stdio::from(child_stdout))
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let input = [0, 0xff, b'n', b'u', b'b', 0, b'\n'];
+    parent_stdin.write_all(&input)?;
+    drop(parent_stdin);
+    let mut output = Vec::new();
+    parent_stdout.read_to_end(&mut output)?;
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "{} inherited-pipe child failed: {status}",
+            security.label()
+        )));
+    }
+    Ok(output)
+}
+
+fn inherited_pipe_roundtrips() -> std::io::Result<()> {
+    let input = [0, 0xff, b'n', b'u', b'b', 0, b'\n'];
+    let mut expected = b"pipe-reply:".to_vec();
+    expected.extend(input);
+    for security in [
+        PipeSecurity::NullAttributes,
+        PipeSecurity::NullDescriptor,
+        PipeSecurity::UserOnlyDescriptor,
+    ] {
+        let output = inherited_pipe_roundtrip(security)?;
+        if output != expected {
+            return Err(std::io::Error::other(format!(
+                "{} inherited-pipe reply mismatch: {output:?}",
+                security.label()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn embedded_assets_protected() -> Option<bool> {
     use std::os::windows::ffi::OsStringExt as _;
     use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
@@ -203,6 +336,14 @@ pub(crate) fn inject_probe(pid: u32) -> std::io::Result<()> {
 
 #[test]
 fn native_adapter_child() {
+    if std::env::var_os("NUB_ADAPTER_PIPE_ROUNDTRIP").is_some() {
+        let mut input = Vec::new();
+        std::io::stdin().read_to_end(&mut input).unwrap();
+        assert_eq!(input, [0, 0xff, b'n', b'u', b'b', 0, b'\n']);
+        std::io::stdout().write_all(b"pipe-reply:").unwrap();
+        std::io::stdout().write_all(&input).unwrap();
+        return;
+    }
     if std::env::var_os("NUB_ADAPTER_PRIVATE_CHILD").is_some() {
         private_object_permissions().unwrap();
         return;
@@ -230,8 +371,6 @@ fn native_adapter_child() {
         .and_then(|mut f| f.write(b"discarded"));
     let denied = std::fs::read(&canary);
     let assets = embedded_assets_protected();
-    let pipe = anonymous_pipe_bytes();
-    eprintln!("ADAPTER_ANONYMOUS_PIPE {pipe:?}");
     let mut nested = None;
     if std::env::var_os("NUB_ADAPTER_PROBE_NESTED").is_none() {
         let output = Command::new(std::env::current_exe().unwrap())
@@ -246,6 +385,10 @@ fn native_adapter_child() {
     }
     let private_objects = private_object_permissions();
     eprintln!("ADAPTER_PRIVATE_OBJECTS {private_objects:?}");
+    let pipe = anonymous_pipe_bytes();
+    let inherited_pipes = inherited_pipe_roundtrips();
+    eprintln!("ADAPTER_ANONYMOUS_PIPE {pipe:?}");
+    eprintln!("ADAPTER_INHERITED_PIPES {inherited_pipes:?}");
     let denied_after = std::fs::read(&canary);
     let host_denied = {
         use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
@@ -282,6 +425,7 @@ fn native_adapter_child() {
             "nested": nested,
             "assets_protected": assets,
             "anonymous_pipe": pipe.as_ref().is_ok_and(|bytes| bytes == b"pipe"),
+            "inherited_pipes": inherited_pipes.is_ok(),
             "private_objects": private_objects.is_ok(),
             "host_process_denied": host_denied,
             "canary_after_object_changes": denied_after.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
@@ -297,6 +441,7 @@ fn native_adapter_child() {
         assert!(nested.is_none_or(|ok| ok));
         assert!(assets.is_none_or(|ok| ok));
         assert!(pipe.is_ok_and(|bytes| bytes == b"pipe"));
+        assert!(inherited_pipes.is_ok());
         assert!(private_objects.is_ok());
         assert!(host_denied);
         assert!(
@@ -534,6 +679,7 @@ fn native_adapter_primitives(probe: bool) {
                 "canonical",
                 "nested",
                 "anonymous_pipe",
+                "inherited_pipes",
                 "private_objects",
             ] {
                 assert_eq!(result[property], true, "{mode} {property}: {result}");

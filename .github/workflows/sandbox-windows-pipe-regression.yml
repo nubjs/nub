@@ -1,0 +1,129 @@
+name: Windows inherited-pipe regression
+
+on:
+  push:
+    branches: [windows-pipe-regression]
+    paths:
+      - crates/nub-sandbox/native/compat.cpp
+      - crates/nub-sandbox/src/backend/windows_native_adapter_probe.rs
+      - .github/workflows/sandbox-windows-pipe-regression.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inherited-pipe-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      RUSTUP_OVERRIDE_HOST_TRIPLE: x86_64-pc-windows-msvc
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      RUSTFLAGS: -C target-feature=+crt-static
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: sandbox-inherited-pipe-${{ matrix.target }}
+          cache-on-failure: true
+      - name: Preparing the base and candidate fixtures
+        shell: pwsh
+        run: |
+          git fetch origin git-lfs-transfer-eof
+          $candidate = '75784e8f0dc319a27b5b5f80ca644f953c82d926'
+          git cat-file -e "$candidate^{commit}"
+          $fixture = (git rev-parse HEAD).Trim()
+          $candidateRoot = Join-Path $env:RUNNER_TEMP 'nub-pipe-candidate'
+          git worktree add --detach $candidateRoot $candidate
+          git -C $candidateRoot cherry-pick $fixture
+          New-Item -ItemType Directory -Force reports | Out-Null
+          @{ fixtureCommit = $fixture; baseCommit = '748c22aa93225eb1b59894fc9dea691e977267fc';
+             candidateCommit = $candidate; candidateFixtureCommit = (git -C $candidateRoot rev-parse HEAD).Trim() } |
+            ConvertTo-Json | Set-Content reports/revisions.json
+      - name: Building and exercising both revisions
+        id: regression
+        shell: pwsh
+        run: |
+          $workspace = $env:GITHUB_WORKSPACE
+          $candidateRoot = Join-Path $env:RUNNER_TEMP 'nub-pipe-candidate'
+          $probe = 'backend::windows_native_adapter_probe::embedded_native_adapter_primitives_with_raw_and_plain_controls'
+          $cases = @(
+            @{ name = 'base'; root = $workspace; revision = '748c22aa93225eb1b59894fc9dea691e977267fc' },
+            @{ name = 'candidate'; root = $candidateRoot; revision = '75784e8f0dc319a27b5b5f80ca644f953c82d926' }
+          )
+          $results = @()
+          foreach ($case in $cases) {
+            $report = Join-Path $workspace "reports/$($case.name)"
+            $source = Join-Path $report 'source'
+            New-Item -ItemType Directory -Force $source | Out-Null
+            Copy-Item (Join-Path $case.root 'crates/nub-sandbox/native/compat.cpp') $source
+            Copy-Item (Join-Path $case.root 'crates/nub-sandbox/src/backend/windows_native_adapter_probe.rs') $source
+            $sourceHashes = Get-FileHash (Join-Path $source 'compat.cpp'),
+              (Join-Path $source 'windows_native_adapter_probe.rs') -Algorithm SHA256 |
+              Select-Object Path, Algorithm, Hash
+            $target = Join-Path $env:RUNNER_TEMP "nub-pipe-target-$($case.name)-${{ matrix.target }}"
+            $env:CARGO_TARGET_DIR = $target
+            Push-Location $case.root
+            try {
+              & cargo test -p nub-sandbox --profile fast --lib --no-run --message-format=json-render-diagnostics `
+                1> (Join-Path $report 'artifacts.jsonl') 2> (Join-Path $report 'compile.log')
+              $compileExit = $LASTEXITCODE
+              $binary = $null
+              $binaryHash = $null
+              $runExit = $null
+              $roundtrip = $false
+              $passed = $false
+              if ($compileExit -eq 0) {
+                $artifacts = Get-Content (Join-Path $report 'artifacts.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+                $tests = @($artifacts | Where-Object {
+                  $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'nub_sandbox' -and $_.executable
+                })
+                if ($tests.Count -ne 1) { throw "Expected one nub_sandbox test executable, got $($tests.Count)" }
+                $binary = $tests[0].executable
+                $binaryHash = (Get-FileHash $binary -Algorithm SHA256).Hash
+                & cargo test -p nub-sandbox --profile fast --lib $probe -- --exact --nocapture --test-threads=1 `
+                  *> (Join-Path $report 'test.log')
+                $runExit = $LASTEXITCODE
+                $log = Join-Path $report 'test.log'
+                $roundtrip = (Select-String -Path $log -SimpleMatch 'ADAPTER_INHERITED_PIPES Ok(())').Count -ge 3
+                $summaries = @(Select-String -Path $log -Pattern '^test result:')
+                $passed = $summaries.Count -gt 0 -and $summaries[-1].Line -match '^test result: ok\. 1 passed'
+              }
+              $results += @{ name = $case.name; revision = $case.revision; source = $sourceHashes;
+                executable = $binary; executableSha256 = $binaryHash; compileExit = $compileExit;
+                testExit = $runExit; inheritedRoundtrips = $roundtrip; assertionsPassed = $passed }
+            } catch {
+              $results += @{ name = $case.name; revision = $case.revision; source = $sourceHashes;
+                executable = $binary; executableSha256 = $binaryHash; compileExit = $compileExit;
+                testExit = $runExit; inheritedRoundtrips = $false; assertionsPassed = $false; error = $_.Exception.Message }
+            } finally {
+              Pop-Location
+            }
+          }
+          $results | ConvertTo-Json -Depth 5 | Set-Content reports/results.json
+          Get-Content reports/results.json
+          $failed = $results | Where-Object {
+            $_.compileExit -ne 0 -or $_.testExit -ne 0 -or !$_.inheritedRoundtrips -or !$_.assertionsPassed
+          }
+          if ($failed) { exit 1 }
+      - name: Preserving fixture evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-inherited-pipe-${{ matrix.os }}
+          path: reports
