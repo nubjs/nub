@@ -241,8 +241,16 @@ static NTSTATUS NTAPI set_security(HANDLE handle, SECURITY_INFORMATION kind, PSE
 }
 using NtDirectory = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
 static BOOL WINAPI anonymous_pipe(PHANDLE read, PHANDLE write, LPSECURITY_ATTRIBUTES security, DWORD size) {
-    if (true_anonymous_pipe(read, write, security, size)) return TRUE;
-    if (GetLastError() != ERROR_ACCESS_DENIED) return FALSE;
+    // A default CreatePipe DACL follows the caller's token default DACL. MSYS
+    // deliberately replaces that DACL with a user-only ACL, but an AppContainer
+    // descendant must also pass the package identity check when it receives an
+    // inherited standard stream. Use a package-local pipe whenever the caller
+    // did not choose its own descriptor. An explicit descriptor stays the
+    // caller's contract; retain the access-denied fallback for runtimes whose
+    // default pipe creation is rejected before it can create either endpoint.
+    bool default_security = !security || !security->lpSecurityDescriptor;
+    if (!default_security && true_anonymous_pipe(read, write, security, size)) return TRUE;
+    if (!default_security && GetLastError() != ERROR_ACCESS_DENIED) return FALSE;
     // CreatePipe's internal name is not package-local. Keep the anonymous
     // stream contract, but create both ends in LOCAL with the package ACL.
     static volatile LONG serial = 0;
