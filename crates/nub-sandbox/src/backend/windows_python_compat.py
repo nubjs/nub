@@ -40,6 +40,27 @@ def _audit_mkdir(sys, path, mode):
         audit("os.mkdir", path, mode, -1)
 
 
+def _trace_gyp_realpaths(os):
+    if os.environ.get("NUB_JAIL_GYP_REALPATH_TRACE") != "1":
+        return
+    import json
+    import sys
+    if not sys.argv or not sys.argv[0].lower().endswith("gyp_main.py"):
+        return
+    import gyp.common
+    dependency = r"deps\cpu_features"
+    print(
+        "NUB_GYP_REALPATH " + json.dumps({
+            "cwd": os.path.realpath("."),
+            "empty": os.path.realpath(""),
+            "dependency": os.path.realpath(dependency),
+            "relative": gyp.common.RelativePath(dependency, "."),
+        }, sort_keys=True),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _install():
     import os
     if os.name != "nt" or getattr(os.mkdir, "_appcontainer_compatible", False):
@@ -91,6 +112,7 @@ def _install():
         kernel.CloseHandle(token)
 
     _install_realpath_compat(os)
+    _trace_gyp_realpaths(os)
 
     class SecurityAttributes(ctypes.Structure):
         _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p),

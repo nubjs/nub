@@ -80,6 +80,32 @@ def audit_is_optional_on_pre_38_python():
     assert calls == [("os.mkdir", "private", 0o700, -1)]
 
 
+def gyp_relative_path(path, relative_to, realpath):
+    path = realpath(path)
+    relative_to = realpath(relative_to)
+    path_split = path.split("\\")
+    relative_to_split = relative_to.split("\\")
+    prefix_len = len(os.path.commonprefix([path_split, relative_to_split]))
+    relative_split = [".."] * (len(relative_to_split) - prefix_len)
+    relative_split.extend(path_split[prefix_len:])
+    return "\\".join(relative_split)
+
+
+def gyp_current_directory_base_is_canonicalized():
+    root = r"C:\store\cpu-features"
+
+    def fallback_realpath(path):
+        if path == ".":
+            return root + r"\."
+        if path == "deps\cpu_features":
+            return root + r"\deps\cpu_features"
+        raise AssertionError(path)
+
+    realpath = install_realpath(fallback_realpath)
+    assert gyp_relative_path("deps\cpu_features", ".", realpath) == r"deps\cpu_features"
+
+
 old_python_and_pathlike_call_once()
 strict_and_bytes_contract()
 audit_is_optional_on_pre_38_python()
+gyp_current_directory_base_is_canonicalized()

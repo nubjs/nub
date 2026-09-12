@@ -370,7 +370,7 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
             return true;
         }
         // `build_jail.rs` first removes every ambient spelling, then restores this only for
-        // its opt-in, package-scoped Windows GYP diagnostic. The exception stays in this
+        // the normal confined node-gyp compatibility adapter. The exception stays in this
         // Windows-only arm: a generic compiler caller must not turn `PYTHONPATH` into
         // lifecycle code on another backend.
         if key.eq_ignore_ascii_case("PYTHONPATH") {
@@ -643,7 +643,9 @@ pub fn windows_buildcheck_msvc_node_options(
     data_url_import(&js)
 }
 
+#[cfg(windows)]
 const WINDOWS_BUILDCHECK_MSVC: &str = include_str!("windows_buildcheck_msvc.js");
+#[cfg(windows)]
 const BUILDCHECK_MSVC_PLACEHOLDER: &str = "__NUB_BUILDCHECK_MSVC_JSON__";
 
 /// Explicit Node compatibility preloads for a Windows sandbox session.

@@ -7,6 +7,7 @@ on:
       - crates/nub-cli/src/pm_engine/**
       - crates/nub-sandbox/**
       - tests/build-jail-corpus/packages.mjs
+      - tests/build-jail-corpus/windows-python-compat.py
       - .github/workflows/windows-catalog-source-builds.yml
 
 permissions:
@@ -61,6 +62,7 @@ jobs:
           CORPUS_CONTROL_PYTHON: C:/hostedtoolcache/windows/Python/3.12.10/x64/python.exe
           NUB_BUILD_JAIL_CATALOG: ${{ github.workspace }}/corpus-input/catalog-v2.json
           NUB_JAIL_DUMP_POLICY: '1'
+          NUB_JAIL_GYP_REALPATH_TRACE: '1'
         run: |
           set +e
           CORPUS_CASE=better-sqlite3 CORPUS_REPORT="$GITHUB_WORKSPACE/reports/better-sqlite3" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/better-sqlite3.log
