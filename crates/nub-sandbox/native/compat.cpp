@@ -559,9 +559,10 @@ static bool private_msys_object(HANDLE handle) {
 }
 
 static bool null_dacl(PSECURITY_DESCRIPTOR descriptor) {
-    PACL dacl = nullptr;
-    BOOL present = FALSE, defaulted = FALSE;
-    return descriptor && GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted) &&
+    PACL dacl = nullptr, sacl = nullptr;
+    BOOL present = FALSE, defaulted = FALSE, sacl_present = FALSE;
+    return descriptor && GetSecurityDescriptorSacl(descriptor, &sacl_present, &sacl, &defaulted) &&
+           !sacl_present && GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted) &&
            present && !dacl;
 }
 
