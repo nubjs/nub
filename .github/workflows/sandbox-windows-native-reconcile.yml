@@ -126,8 +126,7 @@ jobs:
           )) {
             $env:NUB_SANDBOX_TOOL_MSYS_ROOT = $case.root
             $env:PATH = "$($case.root)/cmd;$($case.root)/mingw64/bin;$($case.root)/usr/bin;$originalPath"
-            & $test[0].executable --ignored --exact msys_preserves_native_arguments_and_denied_file_paths --nocapture --test-threads=1 *>
-              "reports/msys-contract-$($case.name).log"
+            & $test[0].executable --ignored --exact msys_preserves_native_arguments_and_denied_file_paths --nocapture --test-threads=1 *> "reports/msys-contract-$($case.name).log"
             $exit = $LASTEXITCODE
             $log = "reports/msys-contract-$($case.name).log"
             $unconfined = (Select-String -Path $log -SimpleMatch 'MSYS_CONTRACT mode=unconfined executions=').Count -eq 1
