@@ -2,7 +2,7 @@ name: Sandbox Windows station recovery probe
 
 on:
   push:
-    branches: [windows-station-recovery]
+    branches: [windows-station-recovery, sandbox-station-restore-check]
     paths:
       - crates/nub-sandbox/src/backend/windows.rs
       - crates/nub-sandbox/src/backend/windows_ace.rs
@@ -18,30 +18,54 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-11-arm]
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      RUSTFLAGS: '-C target-feature=+crt-static'
       RUST_BACKTRACE: '1'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
+      - name: Selecting the Windows compiler host
+        run: echo 'RUSTUP_OVERRIDE_HOST_TRIPLE=x86_64-pc-windows-msvc' >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          shared-key: sandbox-reuse-native
+          shared-key: sandbox-production-${{ matrix.target }}
           cache-on-failure: true
       - name: Recovering a noncurrent station journal
         run: |
           set -o pipefail
           mkdir -p reports
           { git rev-parse HEAD; rustc -Vv; uname -a; id; } > reports/environment.txt
+          cargo clippy -p nub-sandbox --profile fast --all-targets --all-features -- -D warnings 2>&1 | tee reports/clippy.log
+          cargo test -p nub-sandbox --profile fast --lib --no-run --message-format=json-render-diagnostics > reports/test-artifacts.jsonl
           cargo test -p nub-sandbox --profile fast --lib windows_cleanup_recovers_aces_from_a_noncurrent_window_station -- --nocapture --test-threads=1 2>&1 | tee reports/station-recovery.log
+          grep -Eq 'test result: ok\. 1 passed' reports/station-recovery.log
+      - name: Binding the executed test binary
+        if: always()
+        shell: pwsh
+        run: |
+          if (!(Test-Path reports/test-artifacts.jsonl)) { exit 1 }
+          $artifacts = Get-Content reports/test-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
+          $tests = @($artifacts | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.executable -and $_.profile.test })
+          if ($tests.Count -ne 1) { throw "Expected one library test executable, got $($tests.Count)" }
+          Get-FileHash -Algorithm SHA256 $tests[0].executable | Format-List | Out-File reports/test-binary.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

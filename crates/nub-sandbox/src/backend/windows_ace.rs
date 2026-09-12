@@ -68,6 +68,9 @@ static TEST_STATION_SWITCH_HOOK: Mutex<Option<StationSwitchHook>> = Mutex::new(N
 #[cfg(test)]
 static TEST_FORCE_FOREIGN_SESSION_LIVE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(test)]
+static TEST_FAIL_STATION_RESTORE: AtomicBool = AtomicBool::new(false);
+
 pub(crate) fn station_guard() -> MutexGuard<'static, ()> {
     WINDOW_STATION_LOCK
         .lock()
@@ -608,6 +611,10 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
             if self.restored {
                 return Ok(());
             }
+            #[cfg(test)]
+            if TEST_FAIL_STATION_RESTORE.swap(false, Ordering::Relaxed) {
+                return Err(io::Error::from_raw_os_error(5));
+            }
             if unsafe { SetProcessWindowStation(self.previous) } == 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -652,13 +659,14 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
         }
         return Err(error);
     }
-    // Restoration is a cleanup precondition, not diagnostics. Do this before handing the desktop
-    // back to the DACL caller so `RecoveryNeeded` retains the journal on failure.
-    restore.restore()?;
-    Ok(Some(WindowHandle {
+    // Own the opened handle before restoration can fail. The caller still receives no desktop
+    // unless restoration succeeds, so `RecoveryNeeded` retains the journal on failure.
+    let desktop = WindowHandle {
         raw,
         desktop: object.desktop.is_some(),
-    }))
+    };
+    restore.restore()?;
+    Ok(Some(desktop))
 }
 
 /// The registry journals the object before this mutation and owns the ACE until
@@ -781,6 +789,33 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
         return Err(io::Error::other(
             "foreign-session cleanup reached a current-session name collision",
         ));
+    }
+
+    // A failed normal-path restore must return an error without revoking the grant or leaking
+    // the already-open desktop. Drop retries the station restoration after the injected failure.
+    let handle_count = || -> io::Result<u32> {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+        let mut count = 0;
+        if unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(count)
+    };
+    let before_failure_station = current_objects()?[0].station.clone();
+    let before_handles = handle_count()?;
+    for _ in 0..4 {
+        TEST_FAIL_STATION_RESTORE.store(true, Ordering::Relaxed);
+        let failed_restore = revoke_persistent(&desktop_object, sid.0);
+        TEST_FAIL_STATION_RESTORE.store(false, Ordering::Relaxed);
+        if failed_restore.err().and_then(|error| error.raw_os_error()) != Some(5)
+            || current_objects()?[0].station != before_failure_station
+            || !window_object_has_sid(desktop_guard.raw, "S-1-15-2-1")?
+            || handle_count()? != before_handles
+        {
+            return Err(io::Error::other(
+                "failed station restoration lost its grant, station, or desktop handle",
+            ));
+        }
     }
 
     // Hold recovery immediately after the process-wide switch. A competing station observation
