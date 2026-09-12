@@ -169,6 +169,86 @@ print(f"port={port} connected")"#;
     output.status.success() && detail.ends_with(" connected") && parent_connected
 }
 
+/// Each sample owns a new [`Sandbox`] and therefore a distinct proxy listener. A failed sample
+/// stays failed: this is an availability sample, not a retry loop that stops at its first green
+/// result. The first child connection and the parent connection remain the paired controls from
+/// [`retained_proxy_socket_probe`].
+#[cfg(target_os = "macos")]
+fn fresh_proxy_startup_sweep(policy: &SandboxPolicy) -> bool {
+    const SAMPLES: usize = 32;
+    let mut passed = 0;
+    for sample in 1..=SAMPLES {
+        let sample_passed = match Sandbox::new(policy) {
+            Ok(sandbox) => retained_proxy_socket_probe(&sandbox),
+            Err(error) => {
+                eprintln!(
+                    "fresh startup sample {sample:02}: acquisition failed, unavailable axes: {:?}",
+                    error.lost
+                );
+                false
+            }
+        };
+        eprintln!(
+            "fresh startup sample {sample:02}: {}",
+            if sample_passed { "PASS" } else { "FAIL" }
+        );
+        passed += if sample_passed { 1 } else { 0 };
+    }
+    println!("fresh proxy startup samples: {passed}/{SAMPLES} [want {SAMPLES}/{SAMPLES}]");
+    passed == SAMPLES
+}
+
+/// A reachable listener alone is not a successful egress result. This deliberately omits the
+/// session bearer, so the first proxy response must be the fixed 407 rejection before host policy
+/// or any upstream connection is considered. It prevents a connection-only failure endpoint from
+/// being recorded as a green request.
+#[cfg(target_os = "macos")]
+fn unauthenticated_proxy_cannot_read_green(sandbox: &Sandbox) -> bool {
+    let script = r#"import os, socket, sys, urllib.parse
+port = urllib.parse.urlsplit(os.environ["HTTPS_PROXY"]).port
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=2) as stream:
+        stream.settimeout(2)
+        stream.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+        reply = stream.recv(128).split(b"\r\n", 1)[0]
+except OSError as error:
+    print(f"port={port} raw_os_error={error.errno}")
+    sys.exit(1)
+print(f"port={port} reply={reply.decode('ascii', 'replace')}")
+sys.exit(0 if reply == b"HTTP/1.1 407 Proxy Authentication Required" else 1)"#;
+    let prepared = match sandbox.prepare(CommandSpec::new("python3").args(["-c", script])) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!(
+                "unauthenticated proxy control: preparation failed, unavailable axes: {:?}",
+                error.lost
+            );
+            return false;
+        }
+    };
+    let output = match prepared.output() {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!(
+                "unauthenticated proxy control: launch failed raw_os_error={:?}",
+                error.raw_os_error()
+            );
+            return false;
+        }
+    };
+    let detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    eprintln!(
+        "unauthenticated proxy control: exited {} {}",
+        output.status,
+        if detail.is_empty() {
+            "(no output)"
+        } else {
+            &detail
+        }
+    );
+    output.status.success() && detail.ends_with("reply=HTTP/1.1 407 Proxy Authentication Required")
+}
+
 #[cfg(target_os = "macos")]
 fn curl_in_session(label: &str, sandbox: &Sandbox, noproxy: bool, curl_args: &str) -> i32 {
     let curl = if noproxy {
@@ -365,11 +445,15 @@ fn run() -> bool {
     // retained session below cannot pre-warm or hide a startup/lifetime failure here.
     let fresh_allow = curl("fresh-allow ", &allow, false, "https://example.com/");
     let fresh_deny = curl("fresh-deny  ", &allow, false, "https://www.google.com/");
+    // Thirty-two independent sessions sample proxy startup without turning an individual failure
+    // into a retry-to-green. Every sample's child is the first connection to its own proxy port.
+    let fresh_startup = fresh_proxy_startup_sweep(&allow);
     // A reusable session starts one egress proxy. Keep it alive through a parent socket control,
     // a first confined socket control, and the allow/deny curls; a one-shot `apply` per curl
     // cannot distinguish a listener-lifetime fault from a distinct-session failure.
     let sandbox = Sandbox::new(&allow).expect("acquire retained host-filter session");
     let retained_proxy = retained_proxy_socket_probe(&sandbox);
+    let unauthenticated_proxy = unauthenticated_proxy_cannot_read_green(&sandbox);
     // Cooperative (honors the injected https_proxy) — the proxy's per-host gate decides.
     let coop_allow = curl_in_session("coop-allow  ", &sandbox, false, "https://example.com/");
     let coop_deny = curl_in_session("coop-deny   ", &sandbox, false, "https://www.google.com/");
@@ -383,16 +467,22 @@ fn run() -> bool {
     println!("0 retained proxy listener + Seatbelt socket -> passed={retained_proxy} [want true]");
     println!("1 fresh-allow  (one-shot proxy, GET example)  -> exit={fresh_allow}  [want 0]");
     println!("2 fresh-deny   (one-shot proxy, GET google)   -> exit={fresh_deny}   [want != 0]");
-    println!("3 coop-allow   (retained proxy, GET example)  -> exit={coop_allow}   [want 0]");
-    println!("4 coop-deny    (retained proxy, GET google)   -> exit={coop_deny}   [want != 0]");
-    println!("5 noncoop-deny (--noproxy, GET google)        -> exit={noncoop_deny}   [want != 0]");
-    println!("6 noncoop-allw (--noproxy, GET example.com)   -> exit={noncoop_allow}   [want != 0]");
-    println!("7 noncoop-ip   (--noproxy, GET 1.1.1.1)       -> exit={noncoop_ip}   [want != 0]");
-    // 1/3 vs 2/4: the proxy's per-host gate works on both public lifecycles. 5/6/7 all blocked:
+    println!(
+        "3 fresh startup sweep (32 independent sessions)-> passed={fresh_startup} [want true]"
+    );
+    println!("4 tokenless proxy CONNECT rejects 407          -> passed={unauthenticated_proxy} [want true]");
+    println!("5 coop-allow   (retained proxy, GET example)  -> exit={coop_allow}   [want 0]");
+    println!("6 coop-deny    (retained proxy, GET google)   -> exit={coop_deny}   [want != 0]");
+    println!("7 noncoop-deny (--noproxy, GET google)        -> exit={noncoop_deny}   [want != 0]");
+    println!("8 noncoop-allw (--noproxy, GET example.com)   -> exit={noncoop_allow}   [want != 0]");
+    println!("9 noncoop-ip   (--noproxy, GET 1.1.1.1)       -> exit={noncoop_ip}   [want != 0]");
+    // 1/5 vs 2/6: the proxy's per-host gate works on both public lifecycles. 7/8/9 all blocked:
     // non-cooperative egress is denied regardless of host or DNS — never leaked.
     retained_proxy
         && fresh_allow == 0
         && fresh_deny != 0
+        && fresh_startup
+        && unauthenticated_proxy
         && coop_allow == 0
         && coop_deny != 0
         && noncoop_deny != 0
