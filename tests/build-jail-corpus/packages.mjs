@@ -6,7 +6,12 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const binary = resolve(process.env.NUB_BIN);
-const root = mkdtempSync(join(tmpdir(), 'nub-jail-packages-'));
+// MSVC derives object-file names below the source tree and still rejects sufficiently
+// deep paths. A caller can select a short, disposable root for native Windows probes;
+// ordinary test runs retain the host temporary directory.
+const fixtureBase = process.env.CORPUS_TEMP_ROOT || tmpdir();
+mkdirSync(fixtureBase, { recursive: true });
+const root = mkdtempSync(join(fixtureBase, 'nub-jail-packages-'));
 const reportRoot = process.env.CORPUS_REPORT ? resolve(process.env.CORPUS_REPORT) : null;
 if (reportRoot) mkdirSync(reportRoot, { recursive: true });
 const report = (source, destination) => {
@@ -52,7 +57,7 @@ const results = [];
 console.log(`Fixture root: ${root}`);
 const provenance = join(root, 'provenance.json');
 writeFileSync(provenance, JSON.stringify({
-  binary, sha256: createHash('sha256').update(readFileSync(binary)).digest('hex'),
+  binary, sha256: createHash('sha256').update(readFileSync(binary)).digest('hex'), fixtureBase,
   node: process.execPath, version: process.version, platform: process.platform, arch: process.arch,
 }, null, 2));
 report(provenance, 'provenance.json');
