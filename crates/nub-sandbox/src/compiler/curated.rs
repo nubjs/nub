@@ -1119,7 +1119,7 @@ fn resolve_package_from(from: &Path, name: &str) -> Option<PathBuf> {
         [scope, package] => scope.starts_with('@') && component(&scope[1..]) && component(package),
         _ => false,
     };
-    if !package_name || name.contains(['\\', ':', '*', '?', '[', ']', '\0']) {
+    if !package_name || name.contains(['\\', ':', '*', '?', '[', ']', '{', '}', '\0']) {
         return None;
     }
     from.ancestors()
@@ -1306,6 +1306,9 @@ mod tests {
         for path in [&package, &declared, &scoped, &root.path().join("withheld")] {
             std::fs::create_dir_all(path).unwrap();
         }
+        for name in ["{declared,withheld}", "declared}"] {
+            std::fs::create_dir_all(root.path().join("node_modules").join(name)).unwrap();
+        }
         assert_eq!(
             resolve_package_from(&package, "declared"),
             Some(crate::matcher::path::canonicalize_including_nonexistent(
@@ -1334,6 +1337,8 @@ mod tests {
             "declared*",
             "declared?",
             "[declared]",
+            "{declared,withheld}",
+            "declared}",
         ] {
             assert!(resolve_package_from(&package, name).is_none(), "{name}");
         }
