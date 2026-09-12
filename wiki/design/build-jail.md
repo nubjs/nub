@@ -42,7 +42,7 @@ None of these paths creates an account, requests elevation or installs a privile
 
 The engine probes native facilities at acquisition.
 
-Linux filesystem confinement requires [Landlock ABI 1](https://docs.kernel.org/userspace-api/landlock.html); per-host networking and self-process metadata add seccomp requirements. macOS uses Seatbelt. Windows uses AppContainer and extended process startup, including [`PROC_THREAD_ATTRIBUTE_JOB_LIST`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute#proc_thread_attribute_job_list).
+Linux filesystem confinement uses [Landlock](https://docs.kernel.org/userspace-api/landlock.html), whose available restrictions depend on its ABI; per-host networking and self-process metadata add seccomp requirements. macOS uses Seatbelt. Windows uses AppContainer and extended process startup, including [`PROC_THREAD_ATTRIBUTE_JOB_LIST`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute#proc_thread_attribute_job_list).
 
 The technical matrix and runtime coverage live in [`crates/nub-sandbox/README.md`](../../crates/nub-sandbox/README.md#operating-system-support). Source API requirements, runtime coverage, and release-binary loader compatibility are separate facts. A full-disk Windows catalog grant intentionally omits AppContainer; it is not a fallback from a failed confined launch.
 

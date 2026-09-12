@@ -98,7 +98,7 @@ The engine probes the facilities required by each policy at acquisition.
 
 | Platform | Required facilities | Runtime coverage |
 | --- | --- | --- |
-| Linux | Filesystem confinement requires [Landlock ABI 1](https://docs.kernel.org/userspace-api/landlock.html) (Linux 5.13+). Per-host networking additionally requires seccomp user notifications, pidfd access, and `SECCOMP_IOCTL_NOTIF_ADDFD` (Linux 5.9+). Self-process metadata requires atomic `SECCOMP_ADDFD_FLAG_SEND` injection (Linux 5.14+). | Debian 12 x86-64, kernel `6.1.0-53-cloud-amd64`, Landlock ABI 2 passed the Linux readiness contract. |
+| Linux | Filesystem confinement uses [Landlock](https://docs.kernel.org/userspace-api/landlock.html). Available restrictions depend on its ABI, not just its presence. Per-host networking additionally uses seccomp user notifications, pidfd access, and `SECCOMP_IOCTL_NOTIF_ADDFD`. Self-process metadata uses atomic `SECCOMP_ADDFD_FLAG_SEND` injection. | Ubuntu 24.04 x86-64, kernel `6.17.0-1022-azure`, runs the filesystem, network and package-install contracts. An older Linux floor is not established. |
 | macOS | Seatbelt through the system `sandbox-exec` interface. | macOS 14.8.9 arm64 passed the macOS readiness contract. |
 | Windows | AppContainer and extended process startup, including [`PROC_THREAD_ATTRIBUTE_JOB_LIST`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute#proc_thread_attribute_job_list). | Windows Server 2022 x64 and Windows 11 arm64 run the documented compatibility sequences. An older Windows floor is not established. |
 
