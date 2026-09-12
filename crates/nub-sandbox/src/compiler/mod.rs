@@ -36,8 +36,9 @@ pub use defaults::build_jail_stdio_preload_js;
 pub use defaults::{build_jail_node_options, net_gate_node_options, realpath_shim_node_options};
 #[cfg(windows)]
 pub use defaults::{
-    windows_build_jail_node_options, windows_native_realpath_shim_node_options,
-    windows_node_compat_options, windows_realpath_node_options,
+    windows_build_jail_node_options, windows_buildcheck_msvc_node_options,
+    windows_native_realpath_shim_node_options, windows_node_compat_options,
+    windows_realpath_node_options,
 };
 pub use package_network::{
     PACKAGE_NETWORK_ALLOWED, build_jail_net_allowed, package_network_allowed,

@@ -67,7 +67,9 @@ jobs:
           better_sqlite3=${PIPESTATUS[0]}
           CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features.log
           cpu_features=${PIPESTATUS[0]}
-          test "$better_sqlite3" -eq 0 && test "$cpu_features" -eq 0
+          NUB_SANDBOX_WIN_NO_BUILDCHECK_INJECT=1 CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features-withheld-adapter" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features-withheld-adapter.log
+          cpu_features_without_adapter=${PIPESTATUS[0]}
+          test "$better_sqlite3" -eq 0 && test "$cpu_features" -eq 0 && test "$cpu_features_without_adapter" -ne 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

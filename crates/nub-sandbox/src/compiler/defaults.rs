@@ -610,6 +610,39 @@ pub fn windows_build_jail_node_options(
     build_jail_node_options(package_name, package_version)
 }
 
+/// Explicit compatibility preload for `cpu-features@0.0.10`'s BuildCheck discovery.
+///
+/// BuildCheck repeats Visual Studio discovery through a PowerShell-hosted COM probe, even
+/// after Nub has already resolved and stamped the node-gyp toolchain. AppContainers cannot
+/// activate that COM server, so the caller supplies the same accepted toolchain metadata as a
+/// package-scoped compatibility adapter. It changes no raw or unconfined Node execution.
+#[cfg(windows)]
+pub fn windows_buildcheck_msvc_node_options(
+    vs_root: &str,
+    version: &str,
+    sdk_root: &str,
+    sdk_version: &str,
+) -> String {
+    let policy = serde_json::json!({
+        "vsRoot": vs_root,
+        "version": version,
+        "sdkRoot": sdk_root,
+        "sdkVersion": sdk_version,
+    });
+    let js = strip_js_comments(WINDOWS_BUILDCHECK_MSVC).replace(
+        BUILDCHECK_MSVC_PLACEHOLDER,
+        &serde_json::to_string(&policy).expect("a toolchain policy of strings always serializes"),
+    );
+    debug_assert!(
+        !js.contains(BUILDCHECK_MSVC_PLACEHOLDER),
+        "windows_buildcheck_msvc.js must contain its policy placeholder"
+    );
+    data_url_import(&js)
+}
+
+const WINDOWS_BUILDCHECK_MSVC: &str = include_str!("windows_buildcheck_msvc.js");
+const BUILDCHECK_MSVC_PLACEHOLDER: &str = "__NUB_BUILDCHECK_MSVC_JSON__";
+
 /// Explicit Node compatibility preloads for a Windows sandbox session.
 ///
 /// Pass the result as the policy's constructed `NODE_OPTIONS` before acquisition.
