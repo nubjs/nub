@@ -41,24 +41,34 @@ def _audit_mkdir(sys, path, mode):
 
 
 def _trace_gyp_realpaths(os):
-    if os.environ.get("NUB_JAIL_GYP_REALPATH_TRACE") != "1":
-        return
+    # Diagnostic-only: the jail deliberately strips ambient variables before this
+    # interpreter starts, so an outer-process opt-in cannot reach this point.
+    # Restrict the hook to the GYP entry point and the measured cpu-features path;
+    # this function is removed with the diagnostic rather than shipped.
     import json
     import sys
     if not sys.argv or not sys.argv[0].lower().endswith("gyp_main.py"):
         return
     import gyp.common
-    dependency = r"deps\cpu_features"
-    print(
-        "NUB_GYP_REALPATH " + json.dumps({
-            "cwd": os.path.realpath("."),
-            "empty": os.path.realpath(""),
-            "dependency": os.path.realpath(dependency),
-            "relative": gyp.common.RelativePath(dependency, "."),
-        }, sort_keys=True),
-        file=sys.stderr,
-        flush=True,
-    )
+    original_relative_path = gyp.common.RelativePath
+
+    def relative_path(path, relative_to, follow_path_symlink=True):
+        result = original_relative_path(path, relative_to, follow_path_symlink)
+        if "cpu_features" in str(path):
+            print(
+                "NUB_GYP_REALPATH " + json.dumps({
+                    "path": path,
+                    "relative_to": relative_to,
+                    "path_realpath": os.path.realpath(path),
+                    "relative_to_realpath": os.path.realpath(relative_to),
+                    "result": result,
+                }, sort_keys=True),
+                file=sys.stderr,
+                flush=True,
+            )
+        return result
+
+    gyp.common.RelativePath = relative_path
 
 
 def _install():
