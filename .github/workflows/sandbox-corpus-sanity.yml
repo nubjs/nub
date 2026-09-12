@@ -64,7 +64,11 @@ jobs:
             macOS) cp target/fast/libnub_native.dylib runtime/addons/nub-native.node ;;
           esac
           cargo build -p nub-cli --profile fast
-          sha256sum "$NUB_BIN" > reports/candidate.sha256
+          if [ "$RUNNER_OS" = macOS ]; then
+            shasum -a 256 "$NUB_BIN" > reports/candidate.sha256
+          else
+            sha256sum "$NUB_BIN" > reports/candidate.sha256
+          fi
       - name: Checking the changed compiler and proxy
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
@@ -84,7 +88,11 @@ jobs:
           git checkout --detach 66d094771559a86642db4eef4a325b6c46f21ebe
           git rev-parse HEAD > reports/control-source.txt
           cargo build -p nub-cli --profile fast
-          sha256sum "$NUB_BIN" > reports/control.sha256
+          if [ "$RUNNER_OS" = macOS ]; then
+            shasum -a 256 "$NUB_BIN" > reports/control.sha256
+          else
+            sha256sum "$NUB_BIN" > reports/control.sha256
+          fi
           set +e
           node --test reports/relocated-store-control.mjs > reports/control-install.log 2>&1
           code=$?

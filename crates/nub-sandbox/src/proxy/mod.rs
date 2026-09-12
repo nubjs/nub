@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_io_cancels_a_backpressured_write_without_socket_shutdown() {
+    fn shutdown_io_cancels_sustained_writes_without_socket_shutdown() {
         shutdown_io_cancels(|stream| {
             loop {
                 stream.write_all(&[0u8; 4096])?;
