@@ -60,12 +60,16 @@ Not every undeclared import breaks an install, so the scan classes each package 
 
 | What the scan found | Packages | Breaks under a strict layout? |
 | --- | ---: | --- |
-| A `.d.ts` reference to the missing package, and no unguarded runtime import | 341 | Yes, at type-check time. `tsc` reports `TS2307` inside the package's own declarations; with `skipLibCheck` the import silently becomes `any` instead. |
-| Only a guarded (`try`/`catch`) load | 114 | No error. The optional feature turns off. |
-| An undeclared framework or backend peer (`react`, `typescript`, `expo-modules-core`) | 101 | Yes. The app has the package, but a strict linker cannot connect the two until the peer is declared. |
-| A plain forgotten dependency on the main entry graph | 104 | Yes, when that code path runs. 25 have a reproduced failure under Yarn Plug'n'Play. |
+| Declaration-file reference only | 341 | Yes, at type-check time. The package's `.d.ts` files import something it never declares, so `tsc` reports `TS2307` inside them; with `skipLibCheck` the import silently becomes `any` instead. No unguarded runtime import. |
+| Guarded load only | 114 | No error. The `try`/`catch` around the import turns the optional feature off. |
+| Undeclared framework peer | 101 | Yes. The app already has `react`, `typescript` or `expo-modules-core`, but a strict linker cannot connect the two until the peer is declared. |
+| Forgotten dependency | 104 | Yes, when that code path runs. The import is unguarded on the package's main entry graph; 25 have a reproduced failure under Yarn Plug'n'Play. |
 
 Every entry ships as an optional peer, which installs nothing on its own; the 25 reproduced cases ship as `dependencies`.
+
+Every package in the database is below, ranked by weekly downloads. A row lists the imports that package does not declare, and the class the scan assigned to each.
+
+<ExtensionsTable />
 
 The new `@nubjs/extensions` package serves as a modern, 100%-compatible drop-in replacement.
 

@@ -2136,6 +2136,31 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
         hasher.update(engine.as_bytes());
         hasher.update(b"\0");
     }
+    // The shell dependency build scripts run under, for the same reason the
+    // engine above is here: a tree built by another shell can hold WRONG bytes
+    // rather than merely stale ones (`cmd.exe` exits 0 having written an
+    // unexpanded `${VAR:-default}` literally), and the warm path returns before
+    // any lifecycle or side-effects-cache code runs, so nothing downstream ever
+    // gets the chance to notice. Read from the settings and the engine context
+    // rather than from `ScriptSettings`, which the settings pass has not filled
+    // in at the freshness check.
+    //
+    // The PLATFORM DEFAULT contributes nothing, so every install written before
+    // this existed — all of which used that default — stays warm, and only a
+    // real shell change pays a slow install.
+    let lifecycle_shell = aube_scripts::shell_id_for(
+        aube_settings::resolved::script_shell(&ctx)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .as_deref()
+            .map(Path::new),
+        aube_util::engine_context().default_script_shell.as_ref(),
+    );
+    if lifecycle_shell != aube_scripts::PLATFORM_DEFAULT_SHELL_ID {
+        hasher.update(b"lifecycle_shell=");
+        hasher.update(lifecycle_shell.as_bytes());
+        hasher.update(b"\0");
+    }
     // Embedder-supplied extra fingerprint: an install-shape input the host
     // controls outside aube's resolved settings (nub's phantom-eject flag,
     // which changes which packages materialize but rides no setting). `None`
