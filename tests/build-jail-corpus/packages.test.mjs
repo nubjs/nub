@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 // Run the real fixture with only its external commands replaced. No packages are downloaded or
@@ -62,7 +62,7 @@ syncBuiltinESMExports();
 function run(t, mode, report = true) {
   const root = mkdtempSync(join(tmpdir(), 'corpus-screen-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const patch = join(root, 'commands.mjs');
+  const patch = join(root, 'commands # preload.mjs');
   const eventsFile = join(root, 'events.jsonl');
   writeFileSync(patch, preload);
   writeFileSync(eventsFile, '');
@@ -72,7 +72,7 @@ function run(t, mode, report = true) {
   delete env.CORPUS_LINKED_PROJECT;
   delete env.CORPUS_REPORT;
   if (report) env.CORPUS_REPORT = join(root, 'report');
-  const result = spawnSync(process.execPath, ['--import', patch, fileURLToPath(new URL('./packages.mjs', import.meta.url))],
+  const result = spawnSync(process.execPath, ['--import', pathToFileURL(patch).href, fileURLToPath(new URL('./packages.mjs', import.meta.url))],
     { env, cwd: tmpdir(), encoding: 'utf8', timeout: 30_000 });
   assert.ifError(result.error);
   const events = readFileSync(eventsFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
