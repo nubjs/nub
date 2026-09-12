@@ -4,7 +4,8 @@
 # speaking the cooperative HTTP CONNECT on the child's behalf. The child (curl) is NON-cooperative
 # (no HTTP_PROXY in its env, `--noproxy '*'` besides) — it dials directly and the supervisor
 # intercepts at the seccomp layer, so this is exactly A1's "non-cooperative egress blocked, never
-# leaked". Own workspace root; Linux-only.
+# leaked". Own workspace root; the public fixture carries native arms for Linux, macOS, and
+# Windows.
 [workspace]
 
 [package]

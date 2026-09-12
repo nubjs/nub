@@ -2,7 +2,7 @@ name: Hostname proxy confinement probe
 
 on:
   push:
-    branches: [sandbox-hostname-proxy-probe, sandbox-proxy-hardening]
+    branches: [sandbox-hostname-proxy-probe, sandbox-proxy-hardening, sandbox-cross-os-network-grammar]
     paths:
       - crates/nub-sandbox/**
       - tests/proxy-per-host/**
@@ -39,7 +39,7 @@ jobs:
           shared-key: sandbox-hostname-proxy
       - name: Recording environment and unconfined controls
         run: |
-          set -o pipefail
+          set -euo pipefail
           mkdir -p reports
           {
             git rev-parse HEAD
@@ -51,6 +51,11 @@ jobs:
             curl -4 -sS -o /dev/null --connect-timeout 8 --max-time 20 "https://$host/" \
               > "reports/unconfined-$host.log" 2>&1
           done
+          # The literal/CIDR fixture arms use this same public IPv4 endpoint with certificate
+          # name verification disabled. A failed control fails the job; it is not a skipped
+          # grammar assertion.
+          curl -4 -k -sS -o /dev/null --connect-timeout 8 --max-time 20 --noproxy '*' https://1.1.1.1/ \
+            > reports/unconfined-1.1.1.1.log 2>&1
       - name: Exercising hostname proxy contract
         run: |
           set -o pipefail
