@@ -3,7 +3,7 @@ name: Reusable sandbox release costs
 on:
   workflow_dispatch:
   push:
-    branches: [sandbox-reuse-epic, sandbox-native-adapter-costs]
+    branches: [sandbox-reuse-epic, sandbox-native-adapter-costs, sandbox-final-release-costs]
     paths:
       - .github/workflows/sandbox-reuse-costs.yml
       - crates/nub-sandbox/tests/lifecycle_costs.rs
