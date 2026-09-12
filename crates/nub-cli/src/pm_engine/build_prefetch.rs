@@ -340,7 +340,7 @@ pub(super) fn node_headers(
     // `cfg!(windows)`. The import library is a property of the Node being compiled
     // against, and that is what `node_facts` reports.
     let want_lib = facts.platform == "win32";
-    let dir = cache_root()
+    let dir = cache_root()?
         .join("node-headers")
         .join(node_headers_cache_key(facts));
     if headers_ready(&dir, want_lib) {
