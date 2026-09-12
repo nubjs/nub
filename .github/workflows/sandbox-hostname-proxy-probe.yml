@@ -1,0 +1,67 @@
+name: Hostname proxy confinement probe
+
+on:
+  push:
+    branches: [sandbox-hostname-proxy-probe]
+    paths:
+      - crates/nub-sandbox/**
+      - tests/proxy-per-host/**
+      - .github/workflows/sandbox-hostname-proxy-probe.yml
+      - Cargo.lock
+      - Cargo.toml
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: sandbox-hostname-proxy
+      - name: Recording environment and unconfined controls
+        run: |
+          set -o pipefail
+          mkdir -p reports
+          {
+            git rev-parse HEAD
+            rustc -Vv
+            uname -a
+            curl --version | head -1
+          } > reports/environment.txt
+          for host in example.com www.google.com; do
+            curl -4 -sS -o /dev/null --connect-timeout 8 --max-time 20 "https://$host/" \
+              > "reports/unconfined-$host.log" 2>&1
+          done
+      - name: Exercising hostname proxy contract
+        run: |
+          set -o pipefail
+          cargo run --manifest-path tests/proxy-per-host/Cargo.toml --profile fast \
+            --config 'profile.fast.inherits="dev"' \
+            --config 'profile.fast.debug="line-tables-only"' \
+            --config 'profile.fast.codegen-units=256' \
+            --config 'profile.fast.package."*".opt-level=2' \
+            > reports/proxy-per-host.log 2>&1
+          cat reports/proxy-per-host.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: hostname-proxy-${{ matrix.os }}
+          path: reports
+          retention-days: 14
