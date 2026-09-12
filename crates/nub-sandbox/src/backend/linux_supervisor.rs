@@ -3096,6 +3096,25 @@ mod lifecycle_tests {
             {
                 std::process::exit(94);
             }
+            // The parent shrinks the accepted peer's receive window before releasing this
+            // child.  That makes the following EAGAIN and cancelled replay deterministic
+            // instead of relying on localhost's default autotuned receive buffer.
+            if unsafe { libc::write(libc::STDOUT_FILENO, b"R".as_ptr() as *const libc::c_void, 1) }
+                != 1
+            {
+                std::process::exit(90);
+            }
+            let mut release = 0u8;
+            if unsafe {
+                libc::read(
+                    libc::STDIN_FILENO,
+                    &mut release as *mut u8 as *mut libc::c_void,
+                    1,
+                )
+            } != 1
+            {
+                std::process::exit(89);
+            }
             let small = 4096i32;
             unsafe {
                 libc::setsockopt(
@@ -3117,7 +3136,7 @@ mod lifecycle_tests {
             }
             unsafe { libc::fcntl(fd, libc::F_SETFL, original) };
             let action = libc::sigaction {
-                sa_sigaction: signal_noop as usize,
+                sa_sigaction: signal_noop as *const () as usize,
                 sa_mask: unsafe { std::mem::zeroed() },
                 sa_flags: 0,
                 sa_restorer: None,
@@ -3351,6 +3370,19 @@ mod lifecycle_tests {
         // Fill a fresh stream while this listener deliberately does not read it, then interrupt
         // the target's blocked sendmsg. The child must leave with EINTR within the finite
         // revalidation cadence; a stale supervisor must neither answer nor wait for writability.
+        let receive = 1024i32;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    listener.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &receive as *const _ as *const libc::c_void,
+                    size_of::<i32>() as libc::socklen_t,
+                )
+            },
+            0
+        );
         let cancel_env = [
             CString::new("NUB_SUP_SENDMMSG_MODE=cancel").unwrap(),
             CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
@@ -3368,15 +3400,18 @@ mod lifecycle_tests {
                 cwd: None,
                 ruleset_fd: -1,
                 seccomp_ceiling: None,
-                stdin: SupervisedStdio::Null,
-                stdout: SupervisedStdio::Null,
+                stdin: SupervisedStdio::Piped,
+                stdout: SupervisedStdio::Piped,
                 stderr: SupervisedStdio::Null,
                 inherited_fds: &[],
             },
         )
         .unwrap();
+        let mut ready = [0u8; 1];
+        child.take_stdout().unwrap().read_exact(&mut ready).unwrap();
+        assert_eq!(ready, *b"R");
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let (_blocked_peer, _) = loop {
+        let (blocked_peer, _) = loop {
             match listener.accept() {
                 Ok(value) => break value,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -3389,6 +3424,19 @@ mod lifecycle_tests {
                 Err(error) => panic!("cancel listener failed: {error}"),
             }
         };
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    blocked_peer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &receive as *const _ as *const libc::c_void,
+                    size_of::<i32>() as libc::socklen_t,
+                )
+            },
+            0
+        );
+        child.take_stdin().unwrap().write_all(b"G").unwrap();
         assert_eq!(child.wait().unwrap().code(), Some(0));
 
         let dns_env = [
