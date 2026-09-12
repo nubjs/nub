@@ -44,6 +44,8 @@ jobs:
           npm install --no-audit --no-fund --loglevel=error
           npm install --global node-gyp@12.4.0 --no-audit --no-fund
           mkdir -p reports C:/p runtime/addons
+      - name: Checking Python compatibility adapter semantics
+        run: python tests/build-jail-corpus/windows-python-compat.py
       - name: Building the catalog-override artifact
         run: |
           (cd crates/nub-native && cargo build --profile fast)

@@ -5,6 +5,41 @@ not the security boundary; omitting it leaves the OS policy in force.
 """
 
 
+def _install_realpath_compat(os):
+    original_realpath = os.path.realpath
+    dot_paths = (".", ".\\", ".\\.", "./", "./.")
+    byte_dot_paths = tuple(os.fsencode(value) for value in dot_paths)
+
+    def realpath(path, *args, **kwargs):
+        # Normalize PathLike once before forwarding. A stateful __fspath__ implementation must
+        # see exactly the same path in CPython and in the narrow classifier below.
+        path = os.fspath(path)
+        result = original_realpath(path, *args, **kwargs)
+        # Under an AppContainer, CPython's non-strict fallback can reach the final
+        # NT name but cannot translate it to a DOS name. For a CURRENT-DIRECTORY
+        # spelling it consequently returns the lexical `...\\.` rather than the
+        # canonical directory. Repair only those five equivalent dot spellings;
+        # paths containing links, a parent component, or a missing leaf retain
+        # CPython's own fallback unchanged. Do not introduce `strict` for Python
+        # 3.6-3.9: only the caller's arguments are forwarded. Explicit False is
+        # the default non-strict behavior; strict and ALLOW_MISSING stay untouched.
+        if args or kwargs.get("strict", False) is not False:
+            return result
+        if path not in dot_paths + byte_dot_paths:
+            return result
+        suffix = b"\\." if isinstance(result, bytes) else "\\."
+        return result[:-len(suffix)] if result.endswith(suffix) else result
+
+    realpath._appcontainer_compatible = True
+    os.path.realpath = realpath
+
+
+def _audit_mkdir(sys, path, mode):
+    audit = getattr(sys, "audit", None)
+    if audit is not None:
+        audit("os.mkdir", path, mode, -1)
+
+
 def _install():
     import os
     if os.name != "nt" or getattr(os.mkdir, "_appcontainer_compatible", False):
@@ -55,30 +90,7 @@ def _install():
     finally:
         kernel.CloseHandle(token)
 
-    original_realpath = os.path.realpath
-
-    def realpath(path, *args, **kwargs):
-        result = original_realpath(path, *args, **kwargs)
-        # Under an AppContainer, CPython's non-strict fallback can reach the final
-        # NT name but cannot translate it to a DOS name. For a CURRENT-DIRECTORY
-        # spelling it consequently returns the lexical `...\\.` rather than the
-        # canonical directory. Repair only those two equivalent dot spellings;
-        # paths containing links, a parent component, or a missing leaf retain
-        # CPython's own fallback unchanged. Forwarding only caller-supplied arguments
-        # keeps Python 3.6-3.9's one-argument signature intact and preserves the
-        # newer `strict`/`ALLOW_MISSING` semantics without interpreting them here.
-        dot_paths = (".", ".\\", ".\\.", "./", "./.")
-        byte_dot_paths = tuple(os.fsencode(value) for value in dot_paths)
-        if args or kwargs:
-            return result
-        path = os.fspath(path)
-        if path not in dot_paths + byte_dot_paths:
-            return result
-        suffix = b"\\." if isinstance(result, bytes) else "\\."
-        return result[:-len(suffix)] if result.endswith(suffix) else result
-
-    realpath._appcontainer_compatible = True
-    os.path.realpath = realpath
+    _install_realpath_compat(os)
 
     class SecurityAttributes(ctypes.Structure):
         _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p),
@@ -97,9 +109,7 @@ def _install():
         decoded = os.fsdecode(path)
         if "\0" in decoded:
             raise ValueError("embedded null character")
-        audit = getattr(sys, "audit", None)
-        if audit is not None:
-            audit("os.mkdir", path, mode, -1)
+        _audit_mkdir(sys, path, mode)
         # Preserve CPython's protected owner/admin/system ACL. Add only this
         # process's package SID, never All Application Packages or inherited ACEs.
         sddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
