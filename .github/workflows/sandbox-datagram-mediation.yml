@@ -1,0 +1,38 @@
+name: Sandbox datagram mediation
+
+on:
+  push:
+    branches: [linux-datagram-mediation, sandbox-send-integration]
+    paths:
+      - crates/nub-sandbox/src/backend/linux_supervisor.rs
+      - crates/nub-sandbox/src/backend/mod.rs
+      - .github/workflows/sandbox-datagram-mediation.yml
+
+permissions:
+  contents: read
+
+jobs:
+  linux-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: sandbox-datagram-mediation-linux
+      - name: Exercising post-exec datagram mediation
+        run: |
+          cargo test -p nub-sandbox --profile fast --lib \
+            replayed_send_ \
+            -- --nocapture --test-threads=1
+          cargo test -p nub-sandbox --profile fast --lib \
+            ancillary_rights_are_rejected_without_any_fd_duplication \
+            -- --nocapture --test-threads=1
+          cargo test -p nub-sandbox --profile fast --lib \
+            native_supervisor_replays_or_rejects_every_mmsg -- --ignored --nocapture --test-threads=1

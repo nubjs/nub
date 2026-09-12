@@ -509,6 +509,7 @@ impl SupervisedPlan {
             stdin,
             stdout,
             stderr,
+            inherited_fds: &[],
         };
         let child = linux_supervisor::spawn_supervised_with_ready(egress, launch, ready);
         // Keep the ruleset alive across the fork+exec, exactly as the `Command` path keeps

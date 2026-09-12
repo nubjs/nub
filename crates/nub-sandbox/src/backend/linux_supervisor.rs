@@ -677,6 +677,17 @@ fn reply(nfd: RawFd, id: u64, err: i32) {
     }
 }
 
+fn reply_value(nfd: RawFd, id: u64, value: i64) {
+    let mut r = SeccompNotifResp {
+        id,
+        val: value,
+        ..Default::default()
+    };
+    if ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void) < 0 {
+        suplog!("[sup] SEND: {}", io::Error::last_os_error());
+    }
+}
+
 fn reply_continue(nfd: RawFd, id: u64) {
     let mut r = SeccompNotifResp {
         id,
@@ -684,6 +695,262 @@ fn reply_continue(nfd: RawFd, id: u64) {
         ..Default::default()
     };
     ioctl_notif(nfd, notif_send(), &mut r as *mut _ as *mut libc::c_void);
+}
+
+// ---------------------------------------------------------------------------
+// send* snapshot + replay
+// ---------------------------------------------------------------------------
+
+// USER_NOTIF exposes register arguments, not the pointed-to msghdr/iovec data.  Continuing a
+// send after merely inspecting that data is explicitly racy: another child thread may replace an
+// initially-null `msg_name` with a destination while the notifying thread waits.  Replay IP
+// socket sends from these bounded, supervisor-owned snapshots instead.  The limits match the
+// kernel's `UIO_MAXIOV` batch bound and keep a malicious request from making the supervisor
+// allocate without limit.  Ordinary DNS, TLS, and package-registry writes are far below 16 MiB.
+const MAX_SEND_IOV: usize = 1024;
+const MAX_SEND_BYTES: usize = 16 * 1024 * 1024;
+
+/// A connected IP send copied out of target memory.  USER_NOTIF cannot safely write the
+/// `sendmmsg` result array, and cannot preserve AF_UNIX sender credentials, so those operations
+/// return ENOSYS rather than being emulated against a different process identity.
+#[derive(Debug)]
+struct SendSnapshot {
+    bytes: Vec<u8>,
+}
+
+/// Keep a `/proc/<tid>/mem` description open from the first ID check through every read.  This
+/// binds reads to the notified address space even if a dead TID is quickly reused; the final
+/// `NOTIF_ID_VALID` check below additionally proves the blocked syscall still belongs to it.
+fn open_child_mem(tid: u32) -> io::Result<OwnedFd> {
+    let path = CString::new(format!("/proc/{tid}/mem")).unwrap();
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn child_pread(mem: RawFd, off: u64, buf: &mut [u8]) -> Result<(), i32> {
+    let got = unsafe {
+        libc::pread(
+            mem,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            off as libc::off_t,
+        )
+    };
+    if got == buf.len() as isize {
+        Ok(())
+    } else {
+        Err(if got < 0 { errno() } else { libc::EFAULT })
+    }
+}
+
+fn child_struct<T: Copy>(mem: RawFd, off: u64) -> Result<T, i32> {
+    let mut value = MaybeUninit::<T>::zeroed();
+    let bytes =
+        unsafe { std::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, size_of::<T>()) };
+    child_pread(mem, off, bytes)?;
+    Ok(unsafe { value.assume_init() })
+}
+
+fn duplicate_child_fd(tgid: u32, fd: RawFd) -> Result<OwnedFd, i32> {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, tgid, 0) } as RawFd;
+    if pidfd < 0 {
+        return Err(errno());
+    }
+    let copy = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd, fd, 0) } as RawFd;
+    unsafe { libc::close(pidfd) };
+    if copy < 0 {
+        Err(errno())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+    }
+}
+
+fn snapshot_msghdr(mem: RawFd, hdr: libc::msghdr) -> Result<SendSnapshot, i32> {
+    if !hdr.msg_name.is_null() || hdr.msg_namelen != 0 {
+        return Err(libc::EPERM);
+    }
+    if !hdr.msg_control.is_null() || hdr.msg_controllen != 0 {
+        return Err(libc::EPERM);
+    }
+    let count = hdr.msg_iovlen;
+    if count > MAX_SEND_IOV {
+        return Err(libc::EINVAL);
+    }
+    if count != 0 && hdr.msg_iov.is_null() {
+        return Err(libc::EFAULT);
+    }
+    let bytes_len = count
+        .checked_mul(size_of::<libc::iovec>())
+        .ok_or(libc::EFAULT)?;
+    let mut iovecs = vec![unsafe { std::mem::zeroed::<libc::iovec>() }; count];
+    if bytes_len != 0 {
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(iovecs.as_mut_ptr() as *mut u8, bytes_len) };
+        child_pread(mem, hdr.msg_iov as u64, bytes)?;
+    }
+    let total = iovecs.iter().try_fold(0usize, |total, iov| {
+        total.checked_add(iov.iov_len).ok_or(libc::EFAULT)
+    })?;
+    if total > MAX_SEND_BYTES {
+        return Err(libc::EMSGSIZE);
+    }
+    let mut payload = Vec::with_capacity(total);
+    for iov in iovecs {
+        if iov.iov_len == 0 {
+            continue;
+        }
+        if iov.iov_base.is_null() {
+            return Err(libc::EFAULT);
+        }
+        let begin = payload.len();
+        payload.resize(begin + iov.iov_len, 0);
+        child_pread(mem, iov.iov_base as u64, &mut payload[begin..])?;
+    }
+    Ok(SendSnapshot { bytes: payload })
+}
+
+fn snapshot_sendto(mem: RawFd, req: &SeccompNotif) -> Result<SendSnapshot, i32> {
+    // sendto(fd, buf, len, flags, dest_addr, addrlen): a null destination is the connected form.
+    let len = usize::try_from(req.data.args[2]).map_err(|_| libc::EFAULT)?;
+    if len > MAX_SEND_BYTES {
+        return Err(libc::EMSGSIZE);
+    }
+    if len != 0 && req.data.args[1] == 0 {
+        return Err(libc::EFAULT);
+    }
+    let mut bytes = vec![0; len];
+    if len != 0 {
+        child_pread(mem, req.data.args[1], &mut bytes)?;
+    }
+    if req.data.args[4] != 0 || req.data.args[5] != 0 {
+        return Err(libc::EPERM);
+    }
+    Ok(SendSnapshot { bytes })
+}
+
+fn notification_is_live(nfd: RawFd, id: u64) -> bool {
+    ioctl_notif(nfd, notif_id_valid(), &mut { id } as *mut u64
+        as *mut libc::c_void)
+        >= 0
+}
+
+/// Duplicate and classify the target fd before a decision.  The duplicate keeps the same open
+/// file description after another target thread closes or reuses its numeric fd, so replay uses
+/// the identity the supervisor observed, not a later target-table occupant.
+fn duplicate_child_socket(tgid: u32, fd: RawFd) -> Result<(OwnedFd, i32, i32), i32> {
+    let copy = duplicate_child_fd(tgid, fd)?;
+    let mut domain = -1;
+    let mut kind = -1;
+    let mut size = size_of::<i32>() as libc::socklen_t;
+    let domain_ok = unsafe {
+        libc::getsockopt(
+            copy.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_DOMAIN,
+            &mut domain as *mut _ as *mut libc::c_void,
+            &mut size,
+        )
+    } == 0;
+    size = size_of::<i32>() as libc::socklen_t;
+    let kind_ok = unsafe {
+        libc::getsockopt(
+            copy.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut kind as *mut _ as *mut libc::c_void,
+            &mut size,
+        )
+    } == 0;
+    if domain_ok && kind_ok {
+        Ok((copy, domain, kind))
+    } else {
+        Err(libc::ENOTSOCK)
+    }
+}
+
+enum SendReplayError {
+    Errno(i32),
+    Abandoned,
+}
+
+/// A finite cadence matters: a notification can be cancelled while the duplicated socket is
+/// never writable. USER_NOTIF supplies no per-request wakeup, so revalidate the ID at this
+/// interval and emit no response when it is gone. The final pre-send check is best-effort only;
+/// cancellation and `send` cannot be made atomic through this ABI.
+const SEND_REPLAY_POLL_CADENCE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Run one replayed connected send without allowing an abandoned target request to strand the
+/// worker. A blocking target socket is retried with per-call `MSG_DONTWAIT`; target-created
+/// nonblocking sockets keep their normal immediate EAGAIN behavior.
+fn send_snapshot(
+    control: &WorkerControl,
+    listener: RawFd,
+    notification_id: u64,
+    fd: RawFd,
+    snapshot: &SendSnapshot,
+    flags: i32,
+) -> Result<isize, SendReplayError> {
+    let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if status < 0 {
+        return Err(SendReplayError::Errno(errno()));
+    }
+    let target_nonblocking = status & libc::O_NONBLOCK != 0;
+    let call_flags =
+        replay_send_flags(flags, target_nonblocking).map_err(SendReplayError::Errno)?;
+    loop {
+        if !notification_is_live(listener, notification_id) {
+            return Err(SendReplayError::Abandoned);
+        }
+        // The replay runs in Nub's parent, not the target.  Always suppress SIGPIPE here so an
+        // EPIPE is returned to the target instead of signalling the host process.  This cannot
+        // reproduce a target-installed SIGPIPE handler; that signal-delivery difference is an
+        // explicit USER_NOTIF replay limitation.
+        let result = unsafe {
+            libc::send(
+                fd,
+                snapshot.bytes.as_ptr() as *const libc::c_void,
+                snapshot.bytes.len(),
+                call_flags,
+            )
+        };
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = errno();
+        if target_nonblocking || (error != libc::EAGAIN && error != libc::EWOULDBLOCK) {
+            return Err(SendReplayError::Errno(error));
+        }
+        let ready = control
+            .wait(fd, libc::POLLOUT, Some(SEND_REPLAY_POLL_CADENCE))
+            .map_err(|error| SendReplayError::Errno(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        if control.cancelled() {
+            return Err(SendReplayError::Errno(libc::ECANCELED));
+        }
+        if !notification_is_live(listener, notification_id) {
+            return Err(SendReplayError::Abandoned);
+        }
+        if !ready {
+            continue;
+        }
+    }
+}
+
+fn replay_send_flags(flags: i32, target_nonblocking: bool) -> Result<i32, i32> {
+    // Zero-copy retains the sender's pages after send returns. The supervisor's snapshot
+    // must not outlive this call, and the target owns the socket's completion queue.
+    // Reject rather than strip the flag: stripping would also lose promised completions.
+    if flags & libc::MSG_ZEROCOPY != 0 {
+        return Err(libc::EOPNOTSUPP);
+    }
+    Ok((if target_nonblocking {
+        flags
+    } else {
+        flags | libc::MSG_DONTWAIT
+    }) | libc::MSG_NOSIGNAL)
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,6 +1683,15 @@ impl WorkerControl {
         };
     }
 
+    fn cancelled(&self) -> bool {
+        let mut fd = libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        (unsafe { libc::poll(&mut fd, 1, 0) }) > 0 && fd.revents != 0
+    }
+
     fn wait(
         &self,
         fd: RawFd,
@@ -1586,25 +1862,116 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             continue;
         }
 
-        // send*: CONTINUE for a connected socket (NULL addr), EPERM for an addressed one.
+        // `sendmmsg` writes `msg_len` output to target memory.  The USER_NOTIF ABI has no safe
+        // way to make that write: a cancelled target may have already reused the address.  Give
+        // callers ENOSYS so their usual sendmsg/sendto fallback remains available.
+        if nr == libc::SYS_sendmmsg {
+            reply(nfd, req.id, -libc::ENOSYS);
+            continue;
+        }
+
+        // Replay connected IP sendto/sendmsg from supervisor-owned snapshots.  CONTINUE is
+        // unsafe after fd classification because a concurrent dup2 can replace the numeric fd
+        // before the kernel executes it.  Non-IP sockets deliberately return ENOSYS: replaying
+        // AF_UNIX changes SO_PASSCRED/SO_PASSSEC sender identity, which this zero-privilege
+        // supervisor cannot faithfully emulate.
         if nr == libc::SYS_sendto || nr == libc::SYS_sendmsg || nr == libc::SYS_sendmmsg {
-            let addr_ptr: u64 = if nr == libc::SYS_sendto {
-                req.data.args[4]
-            } else {
-                // msghdr.msg_name is the first field; read the pointer from child mem.
-                let mut buf = [0u8; 8];
-                let got = unsafe { read_child_mem(req.pid, req.data.args[1], &mut buf) };
-                if got == 8 {
-                    u64::from_ne_bytes(buf)
-                } else {
-                    1 // treat as addressed on failure
+            let tgid = tgid_of(req.pid);
+            let (socket, domain, kind) = match duplicate_child_socket(tgid, cfd) {
+                Ok(socket) => socket,
+                // Emulate the observed non-socket result instead of continuing a mutable numeric
+                // fd that could be replaced with an egress socket before the kernel runs it.
+                Err(libc::ENOTSOCK) => {
+                    reply(nfd, req.id, -libc::ENOTSOCK);
+                    continue;
+                }
+                Err(error) => {
+                    suplog!("SUP DENY send*: could not duplicate fd {cfd}: errno={error}");
+                    reply(nfd, req.id, -libc::EPERM);
+                    continue;
                 }
             };
-            if addr_ptr == 0 {
-                reply_continue(nfd, req.id); // connected: policed at connect()
+            let ip_socket = domain == libc::AF_INET || domain == libc::AF_INET6;
+            if !ip_socket {
+                reply(nfd, req.id, -libc::ENOSYS);
+                continue;
+            }
+            if kind != libc::SOCK_DGRAM && kind != libc::SOCK_STREAM {
+                reply(nfd, req.id, -libc::ENOSYS);
+                continue;
+            }
+
+            let mem = match open_child_mem(req.pid) {
+                Ok(mem) => mem,
+                Err(_) => {
+                    reply(nfd, req.id, -libc::EPERM);
+                    continue;
+                }
+            };
+            if !notification_is_live(nfd, req.id) {
+                continue;
+            }
+            let snapshots = if nr == libc::SYS_sendto {
+                snapshot_sendto(mem.as_raw_fd(), &req).map(|snapshot| vec![snapshot])
             } else {
-                suplog!("SUP DENY UDP-send (addressed) -> EPERM");
-                reply(nfd, req.id, -libc::EPERM);
+                child_struct::<libc::msghdr>(mem.as_raw_fd(), req.data.args[1])
+                    .and_then(|hdr| snapshot_msghdr(mem.as_raw_fd(), hdr))
+                    .map(|snapshot| vec![snapshot])
+            };
+            let snapshots = match snapshots {
+                Ok(snapshots) => snapshots,
+                Err(libc::EPERM) => {
+                    suplog!(
+                        "SUP DENY send*: named IP destination or unreplayable credentials -> EPERM"
+                    );
+                    if notification_is_live(nfd, req.id) {
+                        reply(nfd, req.id, -libc::EPERM);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    if notification_is_live(nfd, req.id) {
+                        reply(nfd, req.id, -error);
+                    }
+                    continue;
+                }
+            };
+            if !notification_is_live(nfd, req.id) {
+                continue;
+            }
+            let flags = if nr == libc::SYS_sendto {
+                req.data.args[3] as i32
+            } else {
+                req.data.args[2] as i32
+            };
+            let mut first_error = None;
+            let mut abandoned = false;
+            for snapshot in &snapshots {
+                match send_snapshot(&control, nfd, req.id, socket.as_raw_fd(), snapshot, flags) {
+                    Ok(sent) => {
+                        // This check cannot close the final cancellation/send race, but it avoids
+                        // a stale response when cancellation happened during the replay itself.
+                        if notification_is_live(nfd, req.id) {
+                            reply_value(nfd, req.id, sent as i64);
+                        }
+                        break;
+                    }
+                    Err(SendReplayError::Errno(error)) => {
+                        first_error = Some(error);
+                        break;
+                    }
+                    Err(SendReplayError::Abandoned) => {
+                        abandoned = true;
+                        break;
+                    }
+                }
+            }
+            if !abandoned {
+                if let Some(error) = first_error {
+                    if notification_is_live(nfd, req.id) {
+                        reply(nfd, req.id, -error);
+                    }
+                }
             }
             continue;
         }
@@ -2153,6 +2520,9 @@ pub(super) struct SupervisedLaunch<'a> {
     pub stdin: SupervisedStdio,
     pub stdout: SupervisedStdio,
     pub stderr: SupervisedStdio,
+    /// Internal callers normally pass an empty slice.  Tests use an explicit inherited socket to
+    /// exercise post-exec notification handling; every other inherited descriptor stays CLOEXEC.
+    pub inherited_fds: &'a [RawFd],
 }
 
 #[derive(Clone, Copy)]
@@ -2322,6 +2692,12 @@ pub(super) fn spawn_supervised_with_ready(
             // harmless — each stays usable until the explicit close before `execve`.
             if mark_inherited_fds_cloexec().is_err() {
                 libc::_exit(12);
+            }
+            for fd in launch.inherited_fds {
+                let flags = libc::fcntl(*fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    libc::_exit(12);
+                }
             }
             // Gates Landlock and seccomp, both of which refuse a caller that could still gain
             // privileges through a setuid `execve`.
@@ -2651,6 +3027,540 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn replayed_send_always_suppresses_host_sigpipe() {
+        for flags in [0, libc::MSG_MORE] {
+            assert_ne!(
+                replay_send_flags(flags, false).unwrap() & libc::MSG_NOSIGNAL,
+                0,
+                "blocking replay must not signal the Nub host"
+            );
+            assert_ne!(
+                replay_send_flags(flags, true).unwrap() & libc::MSG_NOSIGNAL,
+                0,
+                "nonblocking replay must not signal the Nub host"
+            );
+        }
+    }
+
+    #[test]
+    fn replayed_send_rejects_asynchronous_buffer_ownership() {
+        for nonblocking in [false, true] {
+            for flags in [libc::MSG_ZEROCOPY, libc::MSG_ZEROCOPY | libc::MSG_MORE] {
+                assert_eq!(replay_send_flags(flags, nonblocking), Err(libc::EOPNOTSUPP));
+            }
+        }
+    }
+
+    #[test]
+    fn ancillary_rights_are_rejected_without_any_fd_duplication() {
+        // The payload is intentionally not readable: validation must refuse control data before
+        // inspecting or duplicating even a 253/254-descriptor SCM_RIGHTS array.
+        let hdr = libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: std::ptr::null_mut(),
+            msg_iovlen: 0,
+            msg_control: 1usize as *mut libc::c_void,
+            msg_controllen: 64 * 1024,
+            msg_flags: 0,
+        };
+        let mem = open_child_mem(std::process::id()).unwrap();
+        assert_eq!(
+            snapshot_msghdr(mem.as_raw_fd(), hdr).unwrap_err(),
+            libc::EPERM
+        );
+    }
+
+    #[test]
+    fn mixed_address_sendmmsg_kernel_control_reaches_each_listener() {
+        // First establish the kernel control on owned loopback UDP listeners: on a connected
+        // socket, a normal batch can send its first element to the connected peer and a later
+        // addressed element to a distinct recipient, recording each exact payload.
+        let first = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let second = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        first
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        second
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let second_addr = make_sockaddr_in(
+            u32::from_ne_bytes([127, 0, 0, 1]),
+            second.local_addr().unwrap().port(),
+        );
+        sender.connect(first.local_addr().unwrap()).unwrap();
+        let first_bytes = b"first-synthetic-datagram";
+        let second_bytes = b"second-synthetic-datagram";
+        let mut iovecs = [
+            libc::iovec {
+                iov_base: first_bytes.as_ptr() as *mut libc::c_void,
+                iov_len: first_bytes.len(),
+            },
+            libc::iovec {
+                iov_base: second_bytes.as_ptr() as *mut libc::c_void,
+                iov_len: second_bytes.len(),
+            },
+        ];
+        let mut control: [libc::mmsghdr; 2] = unsafe { std::mem::zeroed() };
+        control[0].msg_hdr = libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &mut iovecs[0],
+            msg_iovlen: 1,
+            msg_control: std::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        control[1].msg_hdr = libc::msghdr {
+            msg_name: &second_addr as *const _ as *mut libc::c_void,
+            msg_namelen: size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            msg_iov: &mut iovecs[1],
+            msg_iovlen: 1,
+            msg_control: std::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        assert_eq!(
+            unsafe { libc::sendmmsg(sender.as_raw_fd(), control.as_mut_ptr(), 2, 0) },
+            2
+        );
+        let mut received = [0u8; 64];
+        let (len, _) = first.recv_from(&mut received).unwrap();
+        assert_eq!(&received[..len], first_bytes);
+        let (len, _) = second.recv_from(&mut received).unwrap();
+        assert_eq!(&received[..len], second_bytes);
+        assert_eq!(control[0].msg_len, first_bytes.len() as u32);
+        assert_eq!(control[1].msg_len, second_bytes.len() as u32);
+
+        // The supervised regression below instead returns ENOSYS for this entire ABI, avoiding
+        // the unsafe target-memory `msg_len` writes that a transparent replay would require.
+    }
+
+    /// The child side of [`native_supervisor_replays_or_rejects_every_mmsg`].  Keeping this in
+    /// the test binary makes the regression run after an actual `execve` with the real notifier,
+    /// rather than only exercising the snapshot helper in the unconfined test process.
+    #[test]
+    fn supervised_sendmmsg_child() {
+        let Ok(mode) = std::env::var("NUB_SUP_SENDMMSG_MODE") else {
+            return;
+        };
+        let fd = std::env::var("NUB_SUP_SENDMMSG_FD")
+            .ok()
+            .and_then(|value| value.parse::<RawFd>().ok())
+            .unwrap_or(-1);
+        let second_port = std::env::var("NUB_SUP_SENDMMSG_SECOND_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(0);
+        if mode == "cancel" {
+            unsafe extern "C" fn signal_noop(_: libc::c_int) {}
+            let sync_fd = std::env::var("NUB_SUP_SENDMMSG_SYNC_FD")
+                .ok()
+                .and_then(|value| value.parse::<RawFd>().ok())
+                .unwrap_or(-1);
+            let address = make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), second_port);
+            let fd =
+                unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+            if fd < 0
+                || unsafe {
+                    libc::connect(
+                        fd,
+                        &address as *const _ as *const libc::sockaddr,
+                        size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                } < 0
+            {
+                std::process::exit(94);
+            }
+            // The parent shrinks the accepted peer's receive window before releasing this
+            // child.  That makes the following EAGAIN and cancelled replay deterministic
+            // instead of relying on localhost's default autotuned receive buffer.
+            if sync_fd < 0
+                || unsafe { libc::write(sync_fd, b"R".as_ptr() as *const libc::c_void, 1) } != 1
+            {
+                std::process::exit(90);
+            }
+            let mut release = 0u8;
+            if unsafe { libc::read(sync_fd, &mut release as *mut u8 as *mut libc::c_void, 1) } != 1
+            {
+                std::process::exit(89);
+            }
+            let small = 4096i32;
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &small as *const _ as *const libc::c_void,
+                    size_of::<i32>() as libc::socklen_t,
+                );
+            }
+            let original = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            unsafe { libc::fcntl(fd, libc::F_SETFL, original | libc::O_NONBLOCK) };
+            let fill = [0u8; 4096];
+            while unsafe { libc::send(fd, fill.as_ptr() as *const libc::c_void, fill.len(), 0) }
+                >= 0
+            {}
+            if errno() != libc::EAGAIN && errno() != libc::EWOULDBLOCK {
+                std::process::exit(95);
+            }
+            unsafe { libc::fcntl(fd, libc::F_SETFL, original) };
+            let action = libc::sigaction {
+                sa_sigaction: signal_noop as *const () as usize,
+                sa_mask: unsafe { std::mem::zeroed() },
+                sa_flags: 0,
+                sa_restorer: None,
+            };
+            unsafe { libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()) };
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t };
+            let pid = unsafe { libc::getpid() };
+            let wake = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                unsafe { libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGUSR1) };
+            });
+            let bytes = b"must-not-send-after-cancel";
+            let mut iov = libc::iovec {
+                iov_base: bytes.as_ptr() as *mut libc::c_void,
+                iov_len: bytes.len(),
+            };
+            let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_iov = &mut iov;
+            hdr.msg_iovlen = 1;
+            let result = unsafe { libc::sendmsg(fd, &mut hdr, 0) };
+            let error = errno();
+            wake.join().unwrap();
+            unsafe { libc::close(fd) };
+            // Keep the failure classes distinct in the parent assertion: the integration test
+            // needs to distinguish an unexpected successful replay from a kernel error that did
+            // not reflect the signal cancellation.
+            std::process::exit(if result == -1 && error == libc::EINTR {
+                0
+            } else if result >= 0 {
+                96
+            } else if error == libc::EAGAIN || error == libc::EWOULDBLOCK {
+                97
+            } else if error == libc::ECANCELED {
+                98
+            } else {
+                99
+            });
+        }
+        if mode == "tcp" || mode == "dns" {
+            let address = if mode == "tcp" {
+                make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), second_port)
+            } else {
+                make_sockaddr_in(u32::from_ne_bytes([8, 8, 8, 8]), 53)
+            };
+            let fd = unsafe {
+                libc::socket(
+                    libc::AF_INET,
+                    if mode == "tcp" {
+                        libc::SOCK_STREAM
+                    } else {
+                        libc::SOCK_DGRAM
+                    } | libc::SOCK_CLOEXEC,
+                    0,
+                )
+            };
+            if fd < 0
+                || unsafe {
+                    libc::connect(
+                        fd,
+                        &address as *const _ as *const libc::sockaddr,
+                        size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                } < 0
+            {
+                std::process::exit(92);
+            }
+            let query = if mode == "dns" {
+                // Synthetic DNS A query for `example.com`; the assertion is only that the
+                // resolver-bound connected datagram accepts a normal sendmsg.
+                b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01".as_slice()
+            } else {
+                b"supervised-tcp".as_slice()
+            };
+            let mut iov = libc::iovec {
+                iov_base: query.as_ptr() as *mut libc::c_void,
+                iov_len: query.len(),
+            };
+            let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_iov = &mut iov;
+            hdr.msg_iovlen = 1;
+            if mode == "tcp" {
+                let enabled = 1i32;
+                let configured = unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_ZEROCOPY,
+                        &enabled as *const _ as *const libc::c_void,
+                        size_of::<i32>() as libc::socklen_t,
+                    )
+                };
+                if configured != 0 {
+                    std::process::exit(87);
+                }
+                let sent = unsafe { libc::sendmsg(fd, &hdr, libc::MSG_ZEROCOPY) };
+                if sent != -1 || errno() != libc::EOPNOTSUPP {
+                    std::process::exit(88);
+                }
+            }
+            let sent = unsafe { libc::sendmsg(fd, &mut hdr, 0) };
+            unsafe { libc::close(fd) };
+            std::process::exit(if sent == query.len() as isize { 0 } else { 93 });
+        }
+        let bytes = b"supervised-udp";
+        let mut iov = libc::iovec {
+            iov_base: bytes.as_ptr() as *mut libc::c_void,
+            iov_len: bytes.len(),
+        };
+        let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        hdr.msg_iov = &mut iov;
+        hdr.msg_iovlen = 1;
+        let correct = if mode == "batch" {
+            let mut message: libc::mmsghdr = unsafe { std::mem::zeroed() };
+            message.msg_hdr = hdr;
+            (unsafe { libc::sendmmsg(fd, &mut message, 1, 0) }) == -1 && errno() == libc::ENOSYS
+        } else {
+            (unsafe { libc::sendmsg(fd, &mut hdr, 0) }) == bytes.len() as isize
+        };
+        std::process::exit(if correct { 0 } else { 91 });
+    }
+
+    #[test]
+    #[ignore = "requires a Linux runner permitting unprivileged seccomp notification and pidfd_getfd"]
+    fn native_supervisor_replays_or_rejects_every_mmsg() {
+        fn launch(mode: &str) -> (std::net::UdpSocket, std::net::UdpSocket, SupervisedChild) {
+            let first = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let second = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            first
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            second
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            sender.connect(first.local_addr().unwrap()).unwrap();
+            // This checks the replay's nonblocking branch on a real post-exec child; ordinary
+            // sends remain immediately writable while the parent owns the receiver.
+            sender.set_nonblocking(true).unwrap();
+            let exe = std::env::current_exe().unwrap();
+            let argv = [
+                CString::new(exe.as_os_str().as_encoded_bytes()).unwrap(),
+                CString::new("supervised_sendmmsg_child").unwrap(),
+            ];
+            let envp = [
+                CString::new(format!("NUB_SUP_SENDMMSG_MODE={mode}")).unwrap(),
+                CString::new(format!("NUB_SUP_SENDMMSG_FD={}", sender.as_raw_fd())).unwrap(),
+                CString::new(format!(
+                    "NUB_SUP_SENDMMSG_SECOND_PORT={}",
+                    second.local_addr().unwrap().port()
+                ))
+                .unwrap(),
+            ];
+            let inherited = [sender.as_raw_fd()];
+            let child = spawn_supervised(
+                policy("not-permitted.example"),
+                SupervisedLaunch {
+                    argv: &argv,
+                    envp: &envp,
+                    cwd: None,
+                    ruleset_fd: -1,
+                    seccomp_ceiling: None,
+                    stdin: SupervisedStdio::Null,
+                    stdout: SupervisedStdio::Null,
+                    stderr: SupervisedStdio::Null,
+                    inherited_fds: &inherited,
+                },
+            )
+            .unwrap();
+            (first, second, child)
+        }
+
+        let (first, second, mut child) = launch("udp");
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+        let mut bytes = [0u8; 64];
+        let (len, _) = first.recv_from(&mut bytes).unwrap();
+        assert_eq!(&bytes[..len], b"supervised-udp");
+        assert_eq!(
+            second.recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        // sendmmsg falls back explicitly, without reading or writing its target mmsghdr array.
+        let (first, second, mut child) = launch("batch");
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+        assert_eq!(
+            first.recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            second.recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        // Fresh child-created sockets exercise the regular connected routes too: loopback TCP
+        // keeps its ordinary stream sendmsg behavior, and a port-53 UDP connect still reaches
+        // the resolver-bound path rather than being rejected as an addressed datagram.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let argv = [
+            CString::new(exe.as_os_str().as_encoded_bytes()).unwrap(),
+            CString::new("supervised_sendmmsg_child").unwrap(),
+        ];
+        let tcp_env = [
+            CString::new("NUB_SUP_SENDMMSG_MODE=tcp").unwrap(),
+            CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
+            CString::new(format!(
+                "NUB_SUP_SENDMMSG_SECOND_PORT={}",
+                listener.local_addr().unwrap().port()
+            ))
+            .unwrap(),
+        ];
+        let mut child = spawn_supervised(
+            policy("not-permitted.example"),
+            SupervisedLaunch {
+                argv: &argv,
+                envp: &tcp_env,
+                cwd: None,
+                ruleset_fd: -1,
+                seccomp_ceiling: None,
+                stdin: SupervisedStdio::Null,
+                stdout: SupervisedStdio::Null,
+                stderr: SupervisedStdio::Null,
+                inherited_fds: &[],
+            },
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(value) => break value,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "TCP child did not connect"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("TCP listener failed: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut tcp = [0u8; 32];
+        let len = stream.read(&mut tcp).unwrap();
+        assert_eq!(&tcp[..len], b"supervised-tcp");
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+
+        // Fill a fresh stream while this listener deliberately does not read it, then interrupt
+        // the target's blocked sendmsg. The child must leave with EINTR within the finite
+        // revalidation cadence; a stale supervisor must neither answer nor wait for writability.
+        let receive = 1024i32;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    listener.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &receive as *const _ as *const libc::c_void,
+                    size_of::<i32>() as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let (mut sync_parent, sync_child) = std::os::unix::net::UnixStream::pair().unwrap();
+        let inherited = [sync_child.as_raw_fd()];
+        let cancel_env = [
+            CString::new("NUB_SUP_SENDMMSG_MODE=cancel").unwrap(),
+            CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
+            CString::new(format!(
+                "NUB_SUP_SENDMMSG_SECOND_PORT={}",
+                listener.local_addr().unwrap().port()
+            ))
+            .unwrap(),
+            CString::new(format!(
+                "NUB_SUP_SENDMMSG_SYNC_FD={}",
+                sync_child.as_raw_fd()
+            ))
+            .unwrap(),
+        ];
+        let mut child = spawn_supervised(
+            policy("not-permitted.example"),
+            SupervisedLaunch {
+                argv: &argv,
+                envp: &cancel_env,
+                cwd: None,
+                ruleset_fd: -1,
+                seccomp_ceiling: None,
+                stdin: SupervisedStdio::Null,
+                stdout: SupervisedStdio::Null,
+                stderr: SupervisedStdio::Null,
+                inherited_fds: &inherited,
+            },
+        )
+        .unwrap();
+        drop(sync_child);
+        let mut ready = [0u8; 1];
+        sync_parent.read_exact(&mut ready).unwrap();
+        assert_eq!(ready, *b"R");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (blocked_peer, _) = loop {
+            match listener.accept() {
+                Ok(value) => break value,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "cancel child did not connect"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("cancel listener failed: {error}"),
+            }
+        };
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    blocked_peer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &receive as *const _ as *const libc::c_void,
+                    size_of::<i32>() as libc::socklen_t,
+                )
+            },
+            0
+        );
+        sync_parent.write_all(b"G").unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+
+        let dns_env = [
+            CString::new("NUB_SUP_SENDMMSG_MODE=dns").unwrap(),
+            CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
+            CString::new("NUB_SUP_SENDMMSG_SECOND_PORT=0").unwrap(),
+        ];
+        let mut child = spawn_supervised(
+            policy("not-permitted.example"),
+            SupervisedLaunch {
+                argv: &argv,
+                envp: &dns_env,
+                cwd: None,
+                ruleset_fd: -1,
+                seccomp_ceiling: None,
+                stdin: SupervisedStdio::Null,
+                stdout: SupervisedStdio::Null,
+                stderr: SupervisedStdio::Null,
+                inherited_fds: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+    }
+
+    #[test]
     fn cancellation_wakes_an_idle_worker_and_stays_cancelled() {
         let (read, _write) = pipe_owned().unwrap();
         let control = Arc::new(WorkerControl::new().unwrap());
@@ -2658,6 +3568,7 @@ mod lifecycle_tests {
         let worker =
             std::thread::spawn(move || worker_control.wait(read.as_raw_fd(), libc::POLLIN, None));
         control.cancel();
+        assert!(control.cancelled());
         assert!(!worker.join().unwrap().unwrap());
         let (read, _write) = pipe_owned().unwrap();
         assert!(
@@ -2719,6 +3630,7 @@ mod lifecycle_tests {
             stdin: SupervisedStdio::Null,
             stdout: SupervisedStdio::Null,
             stderr: SupervisedStdio::Null,
+            inherited_fds: &[],
         };
         let result = spawn_supervised_with_ready(policy("example.test"), launch, |_| {
             Err(io::Error::other("ready callback rejected launch"))
@@ -2744,6 +3656,7 @@ mod lifecycle_tests {
                 stdin: SupervisedStdio::Piped,
                 stdout: SupervisedStdio::Piped,
                 stderr: SupervisedStdio::Piped,
+                inherited_fds: &[],
             };
             let mut child = spawn_supervised(policy("example.test"), launch).unwrap();
             child.take_stdin().unwrap().write_all(b"hello\n").unwrap();

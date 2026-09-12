@@ -230,6 +230,8 @@ The `<private>` token, also spelled `<local>`, permits RFC 1918 and IPv6 ULA add
 
 Coarse `net: true` and `net: false` policies do not start a host-filtering proxy. The build jail uses coarse catalog network permissions rather than enforcing its recorded observed-host lists. On Windows, the coarse allow grants public outbound networking, not unrestricted host/LAN/loopback access.
 
+Linux host-filtered sessions replay connected IP sends from bounded snapshots. Batch sends (`sendmmsg`) and non-IP sends return `ENOSYS`; addressed or ancillary-data IP sends return `EPERM`. Zero-copy sends return `EOPNOTSUPP`. Ordinary connected TCP and resolver-bound UDP sends remain available, with a 16 MiB payload limit. Replay suppresses host `SIGPIPE` rather than delivering that signal to the child. Cancellation is checked between bounded waits but cannot be atomic with the final send. These restrictions do not apply to coarse network policies, which do not use this supervisor.
+
 ### Environment rules
 
 The supplied ambient map is the source for environment policy. Array entries select optional keys; object entries require exact keys unless `?` or `optional: true` marks them optional.
