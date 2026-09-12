@@ -21,6 +21,12 @@ use nub_sandbox::{
 use serde_json::json;
 use serde_json::Value;
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+#[cfg(target_os = "linux")]
+use std::thread;
 
 fn policy(surface: Value) -> SandboxPolicy {
     let root = std::env::temp_dir();
@@ -74,6 +80,47 @@ fn curl(label: &str, policy: &SandboxPolicy, noproxy: bool, curl_args: &str) -> 
 }
 
 #[cfg(target_os = "linux")]
+fn loopback_relay(policy: &SandboxPolicy) -> bool {
+    // A host-local service is a separate egress channel from the proxy. This listener is the
+    // positive control: only reply with its canary after it has opened a TCP connection to the
+    // denied host. A confined curl reaching it therefore proves a local relay can cross the
+    // hostname policy; it is not merely a test that loopback sockets exist.
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback relay control");
+    let port = listener
+        .local_addr()
+        .expect("loopback relay address")
+        .port();
+    let relay = thread::spawn(move || {
+        let (mut client, _) = listener.accept().expect("accept confined relay request");
+        let mut request = [0_u8; 1024];
+        let _ = client.read(&mut request);
+        let upstream = "www.google.com:443"
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .is_some_and(|addr| {
+                TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(8)).is_ok()
+            });
+        let body = if upstream {
+            "RELAY_CANARY"
+        } else {
+            "UPSTREAM_UNREACHABLE"
+        };
+        write!(
+            client,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write loopback relay response");
+        upstream
+    });
+    let relay_url = format!("http://127.0.0.1:{port}/");
+    let client = curl("loopback-relay", policy, true, &relay_url);
+    let upstream = relay.join().expect("join loopback relay");
+    client == 0 && upstream
+}
+
+#[cfg(target_os = "linux")]
 fn run() -> bool {
     unsafe { std::env::set_var("NUB_SANDBOX_SUP_DEBUG", "1") };
     let allow = policy(json!({ "fs": true, "net": ["example.com"] }));
@@ -92,6 +139,7 @@ fn run() -> bool {
         true,
         "--connect-to example.com:443:example.com:443 https://example.com/",
     );
+    let loopback_relay = loopback_relay(&allow);
     println!();
     println!("1 compat      (allow example.com, GET example.com)  -> exit={compat}   [want 0]");
     println!(
@@ -103,7 +151,10 @@ fn run() -> bool {
     println!(
         "4 control-sni (example.com IP, SNI=example.com)     -> exit={control_sni}   [want 0]"
     );
-    compat == 0 && attack_deny != 0 && attack_sni != 0 && control_sni == 0
+    println!(
+        "5 loopback relay (denied google via 127.0.0.1)      -> reached={loopback_relay} [want false]"
+    );
+    compat == 0 && attack_deny != 0 && attack_sni != 0 && control_sni == 0 && !loopback_relay
 }
 
 #[cfg(target_os = "macos")]
@@ -135,8 +186,7 @@ fn windows_curl(label: &str, policy: &SandboxPolicy, noproxy: bool, url: &str) -
         .args([
             "-4",
             "-sS",
-            "-o",
-            "NUL",
+            "--head",
             "--connect-timeout",
             "8",
             "--max-time",
