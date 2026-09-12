@@ -2917,6 +2917,16 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // owns its own args parsing (today: stubs that error with the user's
     // real-PM fallback). `install`/`i`/`ci` are NOT in the registry — they
     // are live parser verbs handled below.
+    // The pnpm 12 engine takes the whole PM surface, `install`/`i`/`ci`
+    // included, so it intercepts ahead of both the registry and the parser.
+    #[cfg(feature = "pm-pnpm")]
+    if crate::pm_engine::pnpm_engine_selected()
+        && (matches!(subcommand.as_str(), "install" | "i" | "ci")
+            || crate::pm_engine::lookup_verb(&subcommand).is_some())
+    {
+        return crate::pm_engine::run_pnpm_engine();
+    }
+
     if let Some(spec) = crate::pm_engine::lookup_verb(&subcommand) {
         // The PM hint is only consumed by the unwired-verb stub fallback
         // (`{pm} {verb}`); use the nub-identity-aware suggestion so a fresh /

@@ -98,8 +98,10 @@ edition = "2024"
 # `--features compile` build links ONE oxc stack — the oxc-lockstep gate), and
 # oxc 0.140 requires rustc 1.95. That subsumes nub-cli's separate aube-driven
 # 1.95 need (core::hint::cold_path()) and raises nub-phantom-core/-scan too, so
-# the whole workspace shares one floor.
-rust-version = "1.95"
+# the whole workspace shares one floor. The pnpm 12 engine (a git dependency of
+# nub-cli) raises it to 1.97: its yamlpath/tree-sitter-iter pins need rustc 1.97,
+# and the MSRV-aware resolver silently downgrades them on a lower floor.
+rust-version = "1.97"
 license = "MIT"
 repository = "https://github.com/nubjs/nub"
 

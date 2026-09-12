@@ -20,6 +20,10 @@ path = "src/main.rs"
 # and `make install-dev` keep walking to the in-repo `runtime/`. CI release builds
 # pass `--features embed-runtime`.
 embed-runtime = ["nub-core/embed-runtime"]
+# The pnpm 12 engine (pacquet), consumed as a git dependency on the nubjs/pnpm
+# fork that carries the embedder seam. Opt-in while aube and pnpm coexist; the
+# flag goes away when vendor/aube is removed.
+pm-pnpm = ["dep:pnpm-cli", "dep:pnpm-config", "dep:pnpm-lockfile", "dep:pnpm-package-manager"]
 # `nub compile` (spike): the in-process Rolldown bundler + Mach-O section
 # injection/signing (libsui) + zstd-19 Node compression. OFF by default — these
 # are large, compile-time-only deps, so the everyday build and CI cheap gates
@@ -205,6 +209,12 @@ aube-util = { path = "../../vendor/aube/crates/aube-util" }
 # reads the global virtual-store path via `aube_store::dirs::cache_dir()` (embedder
 # cache_namespace-aware) to write it into `.modules.yaml`. Already a transitive dep.
 aube-store = { path = "../../vendor/aube/crates/aube-store" }
+# pnpm 12 engine crates, pinned to a commit on the nubjs/pnpm `nub-embedder`
+# branch (v12.4.1 plus the embedder patches). Move `rev` to re-pin.
+pnpm-cli = { git = "https://github.com/nubjs/pnpm", rev = "19eb39448649c926bc63b0e9fa16f0e340701460", optional = true }
+pnpm-config = { git = "https://github.com/nubjs/pnpm", rev = "19eb39448649c926bc63b0e9fa16f0e340701460", optional = true }
+pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "19eb39448649c926bc63b0e9fa16f0e340701460", optional = true }
+pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "19eb39448649c926bc63b0e9fa16f0e340701460", optional = true }
 # Same major + `fancy` as vendor/aube — present.rs renders the engine's
 # miette::Report exactly as aube's own cli_main would, then rewrites it.
 miette = { version = "7", features = ["fancy"] }
