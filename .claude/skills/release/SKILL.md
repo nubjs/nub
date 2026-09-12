@@ -66,9 +66,16 @@ git status                # The shared tree usually carries another agent's WIP,
 git commit -m "v<ver>" -- Cargo.lock Cargo.toml \
   crates/nub-core/Cargo.toml \
   crates/nub-native/Cargo.lock crates/nub-native/Cargo.toml \
-  crates/nub-launcher/Cargo.lock \
+  crates/nub-launcher/Cargo.lock crates/nub-phantom/Cargo.lock \
   npm/*/package.json runtime/version.mjs
-git show --stat HEAD      # SANITY: 17 files, all version bumps, nothing else.
+git show --stat HEAD      # SANITY: 27 files, all version bumps, nothing else: 19 package.json
+                          # (10 nub + 9 runner), 3 Cargo.toml, 4 Cargo.lock, runtime/version.mjs.
+                          # crates/nub-phantom/Cargo.lock is the one that gets missed — its
+                          # workspace is excluded from the root, ci.yml checks it `--locked`,
+                          # and v0.9.1 shipped without it (main went red, fixed in a follow-up).
+                          # `make version` also rewrites site/public/schema/v<major.minor>.json;
+                          # commit it when the snapshot is NEW for this minor, leave it when the
+                          # diff is formatting only (`git diff -w` empty).
 
 # TWO pushes, never `git push origin main --tags`. This clone has ~155 local tags against
 # ~84 on the remote — v1.x leftovers from the Node fork this repo began as — and `--tags`

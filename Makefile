@@ -206,7 +206,11 @@ version:
 	@# nub-launcher is also its own workspace and records nub-core's inlined
 	@# version, so every version bump must refresh its lock before --locked builds.
 	@cd crates/nub-launcher && cargo update -p nub-core --precise $(V)
-	@echo "✓ All packages, Cargo.toml, all three Cargo.lock files, and runtime/version.mjs set to $(V)"
+	@# nub-phantom is the fourth workspace: it depends on nub-phantom-core and
+	@# nub-phantom-scan by path, and ci.yml checks it --locked, so its lock must
+	@# record the stamped versions too (v0.9.1 shipped without this line and went red).
+	@cd crates/nub-phantom && cargo update -p nub-phantom-core -p nub-phantom-scan --precise $(V)
+	@echo "✓ All packages, Cargo.toml, all four Cargo.lock files, and runtime/version.mjs set to $(V)"
 
 # Verify version consistency across npm packages, Cargo.toml, and version.mjs,
 # AND that @oxc-project/runtime (the emit-helper runtime) is exact-pinned and

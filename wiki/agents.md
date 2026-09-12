@@ -456,10 +456,11 @@ the version-pick rules, and the mandatory post-release issue/PR comments.
 make version V=0.0.6          # sets version in all 10 npm packages, every Cargo manifest,
                               # both out-of-workspace Cargo.locks, and runtime/version.mjs
 make version-check             # verify consistency
-git commit -m "v0.0.6" -- <the 17 version files>   # path-scoped: the shared tree carries WIP.
-                               # crates/nub-launcher/Cargo.lock and crates/nub-native/Cargo.lock
-                               # are among them — each records a stamped crate's version and is
-                               # consumed under `--locked`, so omitting one tags a stale tree.
+git commit -m "v0.0.6" -- <the 27 version files>   # path-scoped: the shared tree carries WIP.
+                               # crates/nub-launcher/Cargo.lock, crates/nub-native/Cargo.lock and
+                               # crates/nub-phantom/Cargo.lock are among them — each records a
+                               # stamped crate's version and is consumed under `--locked`, so
+                               # omitting one tags a stale tree (v0.9.1 missed nub-phantom's).
 git push origin main
 git tag v0.0.6
 git push origin v0.0.6         # ONE tag, never `--tags`: this clone holds ~155 local tags against

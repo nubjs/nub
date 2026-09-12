@@ -60,7 +60,8 @@ Not every undeclared import breaks an install, so the scan classes each package 
 
 | What the scan found | Packages | Breaks under a strict layout? |
 | --- | ---: | --- |
-| Only a `.d.ts` reference, or only a guarded (`try`/`catch`) load | 455 | No. A type-check or an opt-in feature degrades instead. |
+| A `.d.ts` reference to the missing package, and no unguarded runtime import | 341 | Yes, at type-check time. `tsc` reports `TS2307` inside the package's own declarations; with `skipLibCheck` the import silently becomes `any` instead. |
+| Only a guarded (`try`/`catch`) load | 114 | No error. The optional feature turns off. |
 | An undeclared framework or backend peer (`react`, `typescript`, `expo-modules-core`) | 101 | Yes. The app has the package, but a strict linker cannot connect the two until the peer is declared. |
 | A plain forgotten dependency on the main entry graph | 104 | Yes, when that code path runs. 25 have a reproduced failure under Yarn Plug'n'Play. |
 
