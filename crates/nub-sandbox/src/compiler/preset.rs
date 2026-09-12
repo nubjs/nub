@@ -1339,10 +1339,10 @@ pub fn compile_build_jail_with_global_virtual_store(
             (*value).to_string(),
         );
     }
-    // The catalog's baseline env, AFTER the scrub so it cannot be stripped by it, and before
-    // the per-package overlay so a package can still win. The parser refuses credential-shaped
-    // names, so this cannot undo the scrub.
-    #[cfg(feature = "build-jail-catalog-override")]
+    // The catalog's fixed baseline env, AFTER the scrub so it cannot be stripped by it, and
+    // before the per-package overlay so a package can still win. `active_v2()` selects the baked
+    // catalog in production and a whole-catalog development override only in a specially-built
+    // binary; the parser refuses credential-shaped names, so this cannot undo the scrub.
     for e in crate::catalog_override::baseline_env() {
         defaults::insert_env(&mut policy.env.constructed, e.name.clone(), e.value.clone());
     }
@@ -1587,13 +1587,35 @@ mod tests {
             !unconfined.build_jail,
             "fixture precondition: this surface must NOT be the build jail, or the control below is vacuous",
         );
-        assert!(
-            !unconfined
-                .env
-                .constructed
-                .contains_key("PYTHONDONTWRITEBYTECODE"),
-            "nub must not edit the environment of a process it is not confining",
-        );
+        for name in [
+            "PYTHONDONTWRITEBYTECODE",
+            "npm_config_logs_max",
+            "npm_config_update_notifier",
+        ] {
+            assert!(
+                !unconfined.env.constructed.contains_key(name),
+                "ordinary sandbox policies must not acquire the build-jail baseline {name}",
+            );
+        }
+    }
+
+    /// Every fixed environment value in the baked catalog reaches confined lifecycle scripts.
+    /// This is deliberately separate from the override-path tests: a normal release binary has
+    /// no catalog-override feature, so this guards the production `active_v2()` fallback.
+    #[test]
+    fn baked_catalog_baseline_env_reaches_confined_scripts() {
+        let jailed = production_build_jail_policy();
+        for (name, value) in [
+            ("PYTHONDONTWRITEBYTECODE", "1"),
+            ("npm_config_logs_max", "0"),
+            ("npm_config_update_notifier", "false"),
+        ] {
+            assert_eq!(
+                jailed.env.constructed.get(name).map(String::as_str),
+                Some(value),
+                "the baked catalog baseline must set {name} for a confined lifecycle script",
+            );
+        }
     }
 
     fn build_jail_policy() -> SandboxPolicy {

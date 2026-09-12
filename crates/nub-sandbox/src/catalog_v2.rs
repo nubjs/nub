@@ -736,6 +736,16 @@ fn parse_env(root: &serde_json::Value) -> Result<Vec<BaselineEnv>, String> {
                  the catalog must not put one back"
             ));
         }
+        // Catalog values become child-process environment after the lifecycle scrub. Nub's own
+        // control variables are a separate authority channel: allowing a catalog to stamp one
+        // could alter a nested Nub invocation or replace the engine-provided plumbing. Keep both
+        // spellings out, case-insensitively for Windows' environment semantics.
+        if upper.starts_with("NUB_") || upper.starts_with("__NUB_") {
+            return Err(format!(
+                "{at}: `{name}` is reserved for Nub's internal lifecycle plumbing and the catalog \
+                 must not set it"
+            ));
+        }
         let value = obj
             .get("value")
             .and_then(|v| v.as_str())
@@ -1650,6 +1660,23 @@ mod tests {
             !first.packages["p"].default.on(Platform::Macos).network,
             "fixture precondition: macOS must be the OS whose network was withdrawn"
         );
+    }
+
+    #[test]
+    fn catalog_baseline_env_rejects_credentials_and_nub_internal_controls() {
+        for name in [
+            "NPM_TOKEN",
+            "NUB_BUILD_JAIL_CATALOG",
+            "__NUB_NODE_GYP_EXE",
+            "nub_sandbox_narrow_store_reads",
+        ] {
+            let text =
+                format!(r#"{{"packages":{{}},"env":[{{"name":"{name}","value":"value"}}]}}"#);
+            assert!(
+                parse(&text).is_err(),
+                "catalog environment entry `{name}` must be rejected",
+            );
+        }
     }
 
     // ── version resolution ────────────────────────────────────────────────────

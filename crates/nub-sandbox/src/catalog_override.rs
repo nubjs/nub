@@ -299,15 +299,13 @@ pub(crate) fn baseline_paths() -> &'static [crate::catalog_v2::BaselinePath] {
     active_v2().map_or(&[], |c| c.baseline.as_slice())
 }
 
-/// The catalog's baseline environment, or empty when no v2 catalog is in force.
+/// The catalog's fixed baseline environment, or empty when no v2 catalog is in force.
 ///
-/// ⛔ PARSED, VALIDATED, AND CONSUMED BY NOBODY — found when un-gating this module made the compiler
-/// say so. `defaults::curated_baseline_env` filters the AMBIENT env through `baseline_allows` and
-/// never consults the catalog, so a catalog's `env` entries currently affect nothing. The seam is
-/// kept rather than deleted because the catalog schema carries the axis and the corpus records it;
-/// wiring it is a behaviour change (injecting env into a jailed spawn) that wants its own measured
-/// change, not a silent ride-along with the baking work.
-#[allow(dead_code)]
+/// The compiler injects these only after constructing its scrubbed lifecycle environment, so an
+/// ambient value cannot override the catalog and the parser's credential-shaped-name rejection
+/// remains the authority that prevents a catalog from reintroducing secrets. `active_v2()` supplies
+/// the baked catalog in production; a development override replaces it only in a binary explicitly
+/// compiled with that feature.
 pub(crate) fn baseline_env() -> &'static [crate::catalog_v2::BaselineEnv] {
     active_v2().map_or(&[], |c| c.env.as_slice())
 }
