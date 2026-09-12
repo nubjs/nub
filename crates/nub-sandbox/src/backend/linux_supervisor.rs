@@ -707,31 +707,23 @@ fn reply_continue(nfd: RawFd, id: u64) {
 // socket sends from these bounded, supervisor-owned snapshots instead.  The limits match the
 // kernel's `UIO_MAXIOV` batch bound and keep a malicious request from making the supervisor
 // allocate without limit.  Ordinary DNS, TLS, and package-registry writes are far below 16 MiB.
-const MAX_SEND_MMSG: usize = 1024;
 const MAX_SEND_IOV: usize = 1024;
 const MAX_SEND_BYTES: usize = 16 * 1024 * 1024;
 
-/// A send copied out of target memory.  `rights` pins supervisor duplicates named by an
-/// `SCM_RIGHTS` control message until `sendmsg` consumes their numeric entries in `control`.
-/// This is required even for AF_UNIX: CONTINUE would re-resolve the target's fd number after we
-/// classified it, so a concurrent `dup2` could turn a benign socketpair send into IP egress.
+/// A connected IP send copied out of target memory.  USER_NOTIF cannot safely write the
+/// `sendmmsg` result array, and cannot preserve AF_UNIX sender credentials, so those operations
+/// return ENOSYS rather than being emulated against a different process identity.
 #[derive(Debug)]
 struct SendSnapshot {
     bytes: Vec<u8>,
-    name: Option<Vec<u8>>,
-    control: Vec<u8>,
-    rights: Vec<OwnedFd>,
 }
-
-const MAX_SEND_NAME: usize = size_of::<libc::sockaddr_storage>();
-const MAX_SEND_CONTROL: usize = 64 * 1024;
 
 /// Keep a `/proc/<tid>/mem` description open from the first ID check through every read.  This
 /// binds reads to the notified address space even if a dead TID is quickly reused; the final
 /// `NOTIF_ID_VALID` check below additionally proves the blocked syscall still belongs to it.
 fn open_child_mem(tid: u32) -> io::Result<OwnedFd> {
     let path = CString::new(format!("/proc/{tid}/mem")).unwrap();
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if fd < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -763,47 +755,6 @@ fn child_struct<T: Copy>(mem: RawFd, off: u64) -> Result<T, i32> {
     Ok(unsafe { value.assume_init() })
 }
 
-fn snapshot_bytes(
-    mem: RawFd,
-    ptr: *const libc::c_void,
-    len: usize,
-    cap: usize,
-) -> Result<Vec<u8>, i32> {
-    if len > cap {
-        return Err(libc::EMSGSIZE);
-    }
-    if len != 0 && ptr.is_null() {
-        return Err(libc::EFAULT);
-    }
-    let mut bytes = vec![0; len];
-    if len != 0 {
-        child_pread(mem, ptr as u64, &mut bytes)?;
-    }
-    Ok(bytes)
-}
-
-fn cmsg_align(len: usize) -> Option<usize> {
-    len.checked_add(size_of::<usize>() - 1)
-        .map(|value| value & !(size_of::<usize>() - 1))
-}
-
-fn control_word<T: Copy>(control: &[u8], offset: usize) -> Result<T, i32> {
-    let end = offset.checked_add(size_of::<T>()).ok_or(libc::EINVAL)?;
-    if end > control.len() {
-        return Err(libc::EINVAL);
-    }
-    Ok(unsafe { std::ptr::read_unaligned(control[offset..].as_ptr().cast::<T>()) })
-}
-
-fn write_control_word<T: Copy>(control: &mut [u8], offset: usize, value: T) -> Result<(), i32> {
-    let end = offset.checked_add(size_of::<T>()).ok_or(libc::EINVAL)?;
-    if end > control.len() {
-        return Err(libc::EINVAL);
-    }
-    unsafe { std::ptr::write_unaligned(control[offset..].as_mut_ptr().cast::<T>(), value) };
-    Ok(())
-}
-
 fn duplicate_child_fd(tgid: u32, fd: RawFd) -> Result<OwnedFd, i32> {
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, tgid, 0) } as RawFd;
     if pidfd < 0 {
@@ -818,90 +769,13 @@ fn duplicate_child_fd(tgid: u32, fd: RawFd) -> Result<OwnedFd, i32> {
     }
 }
 
-/// Copy control data and replace target SCM_RIGHTS integers with supervisor duplicates.  Other
-/// cmsgs are bytes, not pointers, so their copied representation is stable.  Credentials are
-/// deliberately rejected: replaying them would assert the supervisor's credentials, not the
-/// child's, and therefore cannot preserve the AF_UNIX contract.
-fn snapshot_control(
-    mem: RawFd,
-    hdr: &libc::msghdr,
-    tgid: u32,
-) -> Result<(Vec<u8>, Vec<OwnedFd>), i32> {
-    if hdr.msg_controllen == 0 {
-        return Ok((Vec::new(), Vec::new()));
+fn snapshot_msghdr(mem: RawFd, hdr: libc::msghdr) -> Result<SendSnapshot, i32> {
+    if !hdr.msg_name.is_null() || hdr.msg_namelen != 0 {
+        return Err(libc::EPERM);
     }
-    let mut control = snapshot_bytes(mem, hdr.msg_control, hdr.msg_controllen, MAX_SEND_CONTROL)?;
-    let mut rights = Vec::new();
-    let header = size_of::<libc::cmsghdr>();
-    let mut offset = 0usize;
-    while offset < control.len() {
-        let len: usize = control_word(
-            &control,
-            offset + std::mem::offset_of!(libc::cmsghdr, cmsg_len),
-        )?;
-        if len < header || len > control.len() - offset {
-            return Err(libc::EINVAL);
-        }
-        let level: i32 = control_word(
-            &control,
-            offset + std::mem::offset_of!(libc::cmsghdr, cmsg_level),
-        )?;
-        let kind: i32 = control_word(
-            &control,
-            offset + std::mem::offset_of!(libc::cmsghdr, cmsg_type),
-        )?;
-        let payload = offset + header;
-        if level == libc::SOL_SOCKET && kind == libc::SCM_CREDENTIALS {
-            return Err(libc::EPERM);
-        }
-        if level == libc::SOL_SOCKET && kind == libc::SCM_RIGHTS {
-            let bytes = len - header;
-            if bytes % size_of::<RawFd>() != 0 {
-                return Err(libc::EINVAL);
-            }
-            for index in 0..bytes / size_of::<RawFd>() {
-                let at = payload + index * size_of::<RawFd>();
-                let child_fd: RawFd = control_word(&control, at)?;
-                let duplicate = duplicate_child_fd(tgid, child_fd)?;
-                write_control_word(&mut control, at, duplicate.as_raw_fd())?;
-                rights.push(duplicate);
-            }
-        }
-        if len == control.len() - offset {
-            break;
-        }
-        offset = cmsg_align(len).ok_or(libc::EINVAL)?;
-        // `offset` above was relative to this cmsg, not the buffer.
-        offset = offset.checked_add(payload - header).ok_or(libc::EINVAL)?;
-        if offset > control.len() {
-            return Err(libc::EINVAL);
-        }
+    if !hdr.msg_control.is_null() || hdr.msg_controllen != 0 {
+        return Err(libc::EPERM);
     }
-    Ok((control, rights))
-}
-
-fn snapshot_msghdr(
-    mem: RawFd,
-    hdr: libc::msghdr,
-    tgid: u32,
-    deny_named_ip_send: bool,
-) -> Result<SendSnapshot, i32> {
-    let name = if hdr.msg_name.is_null() {
-        if hdr.msg_namelen != 0 {
-            return Err(libc::EFAULT);
-        }
-        None
-    } else {
-        if deny_named_ip_send {
-            return Err(libc::EPERM);
-        }
-        Some(snapshot_bytes(
-            mem,
-            hdr.msg_name,
-            hdr.msg_namelen as usize,
-            MAX_SEND_NAME,
-        )?)
-    };
     let count = hdr.msg_iovlen;
     if count > MAX_SEND_IOV {
         return Err(libc::EINVAL);
@@ -936,20 +810,10 @@ fn snapshot_msghdr(
         payload.resize(begin + iov.iov_len, 0);
         child_pread(mem, iov.iov_base as u64, &mut payload[begin..])?;
     }
-    let (control, rights) = snapshot_control(mem, &hdr, tgid)?;
-    Ok(SendSnapshot {
-        bytes: payload,
-        name,
-        control,
-        rights,
-    })
+    Ok(SendSnapshot { bytes: payload })
 }
 
-fn snapshot_sendto(
-    mem: RawFd,
-    req: &SeccompNotif,
-    deny_named_ip_send: bool,
-) -> Result<SendSnapshot, i32> {
+fn snapshot_sendto(mem: RawFd, req: &SeccompNotif) -> Result<SendSnapshot, i32> {
     // sendto(fd, buf, len, flags, dest_addr, addrlen): a null destination is the connected form.
     let len = usize::try_from(req.data.args[2]).map_err(|_| libc::EFAULT)?;
     if len > MAX_SEND_BYTES {
@@ -962,61 +826,10 @@ fn snapshot_sendto(
     if len != 0 {
         child_pread(mem, req.data.args[1], &mut bytes)?;
     }
-    let name = if req.data.args[4] == 0 {
-        if req.data.args[5] != 0 {
-            return Err(libc::EFAULT);
-        }
-        None
-    } else {
-        if deny_named_ip_send {
-            return Err(libc::EPERM);
-        }
-        Some(snapshot_bytes(
-            mem,
-            req.data.args[4] as *const libc::c_void,
-            usize::try_from(req.data.args[5]).map_err(|_| libc::EFAULT)?,
-            MAX_SEND_NAME,
-        )?)
-    };
-    Ok(SendSnapshot {
-        bytes,
-        name,
-        control: Vec::new(),
-        rights: Vec::new(),
-    })
-}
-
-fn snapshot_mmsgs(
-    mem: RawFd,
-    base: u64,
-    count: usize,
-    tgid: u32,
-    deny_named_ip_send: bool,
-) -> Result<Vec<SendSnapshot>, i32> {
-    if count == 0 {
-        return Ok(Vec::new());
+    if req.data.args[4] != 0 || req.data.args[5] != 0 {
+        return Err(libc::EPERM);
     }
-    if count > MAX_SEND_MMSG || base == 0 {
-        return Err(libc::EFAULT);
-    }
-    let mut total = 0usize;
-    let mut snapshots = Vec::with_capacity(count);
-    for index in 0..count {
-        let offset = index
-            .checked_mul(size_of::<libc::mmsghdr>())
-            .and_then(|offset| base.checked_add(offset as u64))
-            .ok_or(libc::EFAULT)?;
-        let snapshot = child_struct::<libc::mmsghdr>(mem, offset)
-            .and_then(|msg| snapshot_msghdr(mem, msg.msg_hdr, tgid, deny_named_ip_send))?;
-        total = total
-            .checked_add(snapshot.bytes.len())
-            .ok_or(libc::EMSGSIZE)?;
-        if total > MAX_SEND_BYTES {
-            return Err(libc::EMSGSIZE);
-        }
-        snapshots.push(snapshot);
-    }
-    Ok(snapshots)
+    Ok(SendSnapshot { bytes })
 }
 
 fn notification_is_live(nfd: RawFd, id: u64) -> bool {
@@ -1074,31 +887,19 @@ fn send_snapshot(
     }
     let target_nonblocking = status & libc::O_NONBLOCK != 0;
     loop {
-        let call_flags = if target_nonblocking {
-            flags
-        } else {
-            flags | libc::MSG_DONTWAIT
+        let call_flags = replay_send_flags(flags, target_nonblocking);
+        // The replay runs in Nub's parent, not the target.  Always suppress SIGPIPE here so an
+        // EPIPE is returned to the target instead of signalling the host process.  This cannot
+        // reproduce a target-installed SIGPIPE handler; that signal-delivery difference is an
+        // explicit USER_NOTIF replay limitation.
+        let result = unsafe {
+            libc::send(
+                fd,
+                snapshot.bytes.as_ptr() as *const libc::c_void,
+                snapshot.bytes.len(),
+                call_flags,
+            )
         };
-        let mut iov = libc::iovec {
-            iov_base: snapshot.bytes.as_ptr() as *mut libc::c_void,
-            iov_len: snapshot.bytes.len(),
-        };
-        let mut hdr = libc::msghdr {
-            msg_name: snapshot.name.as_ref().map_or(std::ptr::null_mut(), |name| {
-                name.as_ptr() as *mut libc::c_void
-            }),
-            msg_namelen: snapshot.name.as_ref().map_or(0, |name| name.len()) as libc::socklen_t,
-            msg_iov: &mut iov,
-            msg_iovlen: 1,
-            msg_control: if snapshot.control.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                snapshot.control.as_ptr() as *mut libc::c_void
-            },
-            msg_controllen: snapshot.control.len(),
-            msg_flags: 0,
-        };
-        let result = unsafe { libc::sendmsg(fd, &mut hdr, call_flags) };
         if result >= 0 {
             return Ok(result);
         }
@@ -1112,29 +913,12 @@ fn send_snapshot(
     }
 }
 
-/// Write the `sendmmsg` completion count back to the original output slot.  This is not policy
-/// input, and every attempted address/payload has already been copied.  A failed write mirrors
-/// the kernel's post-send output-fault ambiguity: report the failure only when no prior message
-/// completed; otherwise retain the documented partial-batch count.
-fn write_mmsg_len(mem: RawFd, base: u64, index: usize, len: u32) -> Result<(), i32> {
-    let offset = index
-        .checked_mul(size_of::<libc::mmsghdr>())
-        .and_then(|v| v.checked_add(std::mem::offset_of!(libc::mmsghdr, msg_len)))
-        .and_then(|v| base.checked_add(v as u64))
-        .ok_or(libc::EFAULT)?;
-    let result = unsafe {
-        libc::pwrite(
-            mem,
-            &len as *const u32 as *const libc::c_void,
-            size_of::<u32>(),
-            offset as libc::off_t,
-        )
-    };
-    if result == size_of::<u32>() as isize {
-        Ok(())
+fn replay_send_flags(flags: i32, target_nonblocking: bool) -> i32 {
+    (if target_nonblocking {
+        flags
     } else {
-        Err(if result < 0 { errno() } else { libc::EFAULT })
-    }
+        flags | libc::MSG_DONTWAIT
+    }) | libc::MSG_NOSIGNAL
 }
 
 // ---------------------------------------------------------------------------
@@ -2021,10 +1805,19 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             continue;
         }
 
-        // send*: replay every socket from supervisor-owned snapshots.  CONTINUE is unsafe even
-        // for an AF_UNIX socketpair: after classification another target thread can `dup2` an IP
-        // socket over this numeric fd before the kernel resolves it.  SCM_RIGHTS is translated to
-        // pinned supervisor duplicates so normal Unix IPC retains its target-fd semantics.
+        // `sendmmsg` writes `msg_len` output to target memory.  The USER_NOTIF ABI has no safe
+        // way to make that write: a cancelled target may have already reused the address.  Give
+        // callers ENOSYS so their usual sendmsg/sendto fallback remains available.
+        if nr == libc::SYS_sendmmsg {
+            reply(nfd, req.id, -libc::ENOSYS);
+            continue;
+        }
+
+        // Replay connected IP sendto/sendmsg from supervisor-owned snapshots.  CONTINUE is
+        // unsafe after fd classification because a concurrent dup2 can replace the numeric fd
+        // before the kernel executes it.  Non-IP sockets deliberately return ENOSYS: replaying
+        // AF_UNIX changes SO_PASSCRED/SO_PASSSEC sender identity, which this zero-privilege
+        // supervisor cannot faithfully emulate.
         if nr == libc::SYS_sendto || nr == libc::SYS_sendmsg || nr == libc::SYS_sendmmsg {
             let tgid = tgid_of(req.pid);
             let (socket, domain, kind) = match duplicate_child_socket(tgid, cfd) {
@@ -2042,8 +1835,12 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                 }
             };
             let ip_socket = domain == libc::AF_INET || domain == libc::AF_INET6;
-            if ip_socket && kind != libc::SOCK_DGRAM && kind != libc::SOCK_STREAM {
-                reply(nfd, req.id, -libc::EPERM);
+            if !ip_socket {
+                reply(nfd, req.id, -libc::ENOSYS);
+                continue;
+            }
+            if kind != libc::SOCK_DGRAM && kind != libc::SOCK_STREAM {
+                reply(nfd, req.id, -libc::ENOSYS);
                 continue;
             }
 
@@ -2055,16 +1852,11 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                 }
             };
             let snapshots = if nr == libc::SYS_sendto {
-                snapshot_sendto(mem.as_raw_fd(), &req, ip_socket).map(|snapshot| vec![snapshot])
-            } else if nr == libc::SYS_sendmsg {
-                child_struct::<libc::msghdr>(mem.as_raw_fd(), req.data.args[1])
-                    .and_then(|hdr| snapshot_msghdr(mem.as_raw_fd(), hdr, tgid, ip_socket))
-                    .map(|snapshot| vec![snapshot])
+                snapshot_sendto(mem.as_raw_fd(), &req).map(|snapshot| vec![snapshot])
             } else {
-                // `sendmmsg` itself caps `vlen` at UIO_MAXIOV; mirror that rather than turning
-                // an otherwise-valid oversized request into a policy error.
-                let count = (req.data.args[2] as u32 as usize).min(MAX_SEND_MMSG);
-                snapshot_mmsgs(mem.as_raw_fd(), req.data.args[1], count, tgid, ip_socket)
+                child_struct::<libc::msghdr>(mem.as_raw_fd(), req.data.args[1])
+                    .and_then(|hdr| snapshot_msghdr(mem.as_raw_fd(), hdr))
+                    .map(|snapshot| vec![snapshot])
             };
             let snapshots = match snapshots {
                 Ok(snapshots) => snapshots,
@@ -2084,39 +1876,17 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                 reply(nfd, req.id, -libc::EPERM);
                 continue;
             }
-            if nr == libc::SYS_sendmmsg && snapshots.is_empty() {
-                reply_value(nfd, req.id, 0);
-                continue;
-            }
-
             let flags = if nr == libc::SYS_sendto {
                 req.data.args[3] as i32
-            } else if nr == libc::SYS_sendmsg {
-                req.data.args[2] as i32
             } else {
-                req.data.args[3] as i32
+                req.data.args[2] as i32
             };
-            let mut completed = 0usize;
             let mut first_error = None;
-            for (index, snapshot) in snapshots.iter().enumerate() {
+            for snapshot in &snapshots {
                 match send_snapshot(&control, socket.as_raw_fd(), snapshot, flags) {
                     Ok(sent) => {
-                        if nr == libc::SYS_sendmmsg
-                            && let Err(error) = write_mmsg_len(
-                                mem.as_raw_fd(),
-                                req.data.args[1],
-                                index,
-                                sent as u32,
-                            )
-                        {
-                            first_error = Some(error);
-                            break;
-                        }
-                        completed += 1;
-                        if nr != libc::SYS_sendmmsg {
-                            reply_value(nfd, req.id, sent as i64);
-                            break;
-                        }
+                        reply_value(nfd, req.id, sent as i64);
+                        break;
                     }
                     Err(error) => {
                         first_error = Some(error);
@@ -2124,13 +1894,7 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                     }
                 }
             }
-            if nr == libc::SYS_sendmmsg {
-                if completed != 0 {
-                    reply_value(nfd, req.id, completed as i64);
-                } else {
-                    reply(nfd, req.id, -first_error.unwrap_or(libc::EFAULT));
-                }
-            } else if first_error.is_some() {
+            if first_error.is_some() {
                 reply(nfd, req.id, -first_error.unwrap());
             }
             continue;
@@ -3156,7 +2920,43 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn mixed_address_sendmmsg_control_and_snapshot_cover_every_entry() {
+    fn replayed_send_always_suppresses_host_sigpipe() {
+        for flags in [0, libc::MSG_MORE] {
+            assert_ne!(
+                replay_send_flags(flags, false) & libc::MSG_NOSIGNAL,
+                0,
+                "blocking replay must not signal the Nub host"
+            );
+            assert_ne!(
+                replay_send_flags(flags, true) & libc::MSG_NOSIGNAL,
+                0,
+                "nonblocking replay must not signal the Nub host"
+            );
+        }
+    }
+
+    #[test]
+    fn ancillary_rights_are_rejected_without_any_fd_duplication() {
+        // The payload is intentionally not readable: validation must refuse control data before
+        // inspecting or duplicating even a 253/254-descriptor SCM_RIGHTS array.
+        let hdr = libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: std::ptr::null_mut(),
+            msg_iovlen: 0,
+            msg_control: 1usize as *mut libc::c_void,
+            msg_controllen: 64 * 1024,
+            msg_flags: 0,
+        };
+        let mem = open_child_mem(std::process::id()).unwrap();
+        assert_eq!(
+            snapshot_msghdr(mem.as_raw_fd(), hdr).unwrap_err(),
+            libc::EPERM
+        );
+    }
+
+    #[test]
+    fn mixed_address_sendmmsg_kernel_control_reaches_each_listener() {
         // First establish the kernel control on owned loopback UDP listeners: on a connected
         // socket, a normal batch can send its first element to the connected peer and a later
         // addressed element to a distinct recipient, recording each exact payload.
@@ -3217,21 +3017,8 @@ mod lifecycle_tests {
         assert_eq!(control[0].msg_len, first_bytes.len() as u32);
         assert_eq!(control[1].msg_len, second_bytes.len() as u32);
 
-        // The old supervisor read only `control[0].msg_hdr.msg_name`.  This very layout would
-        // therefore have continued the whole call.  The snapshot walks the complete array before
-        // any send, so the later recipient yields an atomic EPERM rather than a partial batch.
-        let mem = open_child_mem(std::process::id()).unwrap();
-        assert_eq!(
-            snapshot_mmsgs(
-                mem.as_raw_fd(),
-                control.as_ptr() as u64,
-                control.len(),
-                std::process::id(),
-                true,
-            )
-            .unwrap_err(),
-            libc::EPERM
-        );
+        // The supervised regression below instead returns ENOSYS for this entire ABI, avoiding
+        // the unsafe target-memory `msg_len` writes that a transparent replay would require.
     }
 
     /// The child side of [`native_supervisor_replays_or_rejects_every_mmsg`].  Keeping this in
@@ -3296,35 +3083,20 @@ mod lifecycle_tests {
             unsafe { libc::close(fd) };
             std::process::exit(if sent == query.len() as isize { 0 } else { 93 });
         }
-        let first = b"supervised-first";
-        let second = b"supervised-second";
-        let mut iov = [
-            libc::iovec {
-                iov_base: first.as_ptr() as *mut libc::c_void,
-                iov_len: first.len(),
-            },
-            libc::iovec {
-                iov_base: second.as_ptr() as *mut libc::c_void,
-                iov_len: second.len(),
-            },
-        ];
-        let second_addr = make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), second_port);
-        let mut messages: [libc::mmsghdr; 2] = unsafe { std::mem::zeroed() };
-        for (index, msg) in messages.iter_mut().enumerate() {
-            msg.msg_hdr.msg_iov = &mut iov[index];
-            msg.msg_hdr.msg_iovlen = 1;
-        }
-        if mode == "mixed" {
-            messages[1].msg_hdr.msg_name = &second_addr as *const _ as *mut libc::c_void;
-            messages[1].msg_hdr.msg_namelen = size_of::<libc::sockaddr_in>() as libc::socklen_t;
-        }
-        let result = unsafe { libc::sendmmsg(fd, messages.as_mut_ptr(), messages.len() as u32, 0) };
-        let correct = if mode == "mixed" {
-            result == -1 && errno() == libc::EPERM
+        let bytes = b"supervised-udp";
+        let mut iov = libc::iovec {
+            iov_base: bytes.as_ptr() as *mut libc::c_void,
+            iov_len: bytes.len(),
+        };
+        let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        hdr.msg_iov = &mut iov;
+        hdr.msg_iovlen = 1;
+        let correct = if mode == "batch" {
+            let mut message: libc::mmsghdr = unsafe { std::mem::zeroed() };
+            message.msg_hdr = hdr;
+            (unsafe { libc::sendmmsg(fd, &mut message, 1, 0) }) == -1 && errno() == libc::ENOSYS
         } else {
-            result == 2
-                && messages[0].msg_len == first.len() as u32
-                && messages[1].msg_len == second.len() as u32
+            (unsafe { libc::sendmsg(fd, &mut hdr, 0) }) == bytes.len() as isize
         };
         std::process::exit(if correct { 0 } else { 91 });
     }
@@ -3379,19 +3151,18 @@ mod lifecycle_tests {
             (first, second, child)
         }
 
-        let (first, second, mut child) = launch("ordinary");
+        let (first, second, mut child) = launch("udp");
         assert_eq!(child.wait().unwrap().code(), Some(0));
         let mut bytes = [0u8; 64];
         let (len, _) = first.recv_from(&mut bytes).unwrap();
-        assert_eq!(&bytes[..len], b"supervised-first");
-        let (len, _) = first.recv_from(&mut bytes).unwrap();
-        assert_eq!(&bytes[..len], b"supervised-second");
+        assert_eq!(&bytes[..len], b"supervised-udp");
         assert_eq!(
             second.recv_from(&mut bytes).unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
 
-        let (first, second, mut child) = launch("mixed");
+        // sendmmsg falls back explicitly, without reading or writing its target mmsghdr array.
+        let (first, second, mut child) = launch("batch");
         assert_eq!(child.wait().unwrap().code(), Some(0));
         assert_eq!(
             first.recv_from(&mut bytes).unwrap_err().kind(),
