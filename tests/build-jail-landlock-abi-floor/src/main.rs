@@ -168,7 +168,7 @@ fn main() {
         );
         let text = refusal
             .err()
-            .map(|error| error.to_string())
+            .map(|error| format!("{error:?}"))
             .unwrap_or_default();
         println!("ABI-{abi} refusal={text:?}");
         let pass = text.contains("Landlock ABI 3+");
