@@ -25,7 +25,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
-      FRAMEWORK_CANDIDATE_REVISION: 5f2475750469ea54a3458b7b164c926f1214ffd6
+      FRAMEWORK_CANDIDATE_REVISION: dc77487919c4b6e23f9868491a3fa9bf3b3c7c46
       FRAMEWORK_BASELINE_REVISION: b03f68bed98cd379d2f8f4e6caa9723e1d584ad7
       FRAMEWORK_REPORT: ${{ github.workspace }}/reports/frameworks
       FRAMEWORK_CONTROLS: all
