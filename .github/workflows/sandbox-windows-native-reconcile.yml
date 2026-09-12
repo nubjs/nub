@@ -62,19 +62,30 @@ jobs:
           set -o pipefail
           cargo clippy -p nub-sandbox --profile fast --all-targets --all-features -- -D warnings 2>&1 | tee reports/clippy.log
           cargo test -p nub-sandbox --profile fast --test production_readiness_shell --no-run --message-format=json-render-diagnostics > reports/test-artifacts.jsonl
-      - name: Preparing the disposable all-images MSYS copy
+          cargo test -p nub-sandbox --profile fast --lib --no-run --message-format=json-render-diagnostics > reports/library-test-artifacts.jsonl
+      - name: Provisioning the pinned Cargo fixture
+        id: tools
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          node scripts/sandbox-native-tool-fixtures.mjs --tools=cargo 2>&1 | tee reports/native-provision.log
+          cp .sandbox-native-tool-fixtures/matrix.json reports/native-matrix.json
+      - name: Preparing the disposable all-images MSYS copy
+        id: prepare
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
         shell: pwsh
         run: |
           $gitExec = (& git --exec-path).Trim()
           $source = Split-Path (Split-Path (Split-Path $gitExec))
           & ./tests/sandbox-native-adapter/prepare-msys-aslr.ps1 -SourceRoot $source -IncludeExecutables
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (!(Test-Path "$env:NUB_NATIVE_DYNAMICBASE_ALLIMAGES_GIT/usr/bin/bash.exe")) {
+          $copy = Join-Path (Get-Location).Path '.native-adapter/git-dynamicbase-allimages'
+          if (!(Test-Path "$copy/usr/bin/bash.exe")) {
             throw 'Disposable all-images MSYS Bash is missing'
           }
       - name: Discriminating installed and disposable MSYS contracts
-        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        id: discriminator
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
         shell: pwsh
         run: |
           $artifacts = Get-Content reports/test-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
@@ -84,8 +95,16 @@ jobs:
           if ($test.Count -ne 1) { throw "Expected one exact MSYS contract binary, got $($test.Count)" }
           if (!(Test-Path $test[0].executable)) { throw "Missing contract binary: $($test[0].executable)" }
           $binary = Get-FileHash $test[0].executable -Algorithm SHA256
+          $libraryArtifacts = Get-Content reports/library-test-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
+          $libraryTests = @($libraryArtifacts | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'nub_sandbox' -and $_.executable
+          })
+          if ($libraryTests.Count -ne 1) { throw "Expected one native tool test binary, got $($libraryTests.Count)" }
+          if (!(Test-Path $libraryTests[0].executable)) { throw "Missing native tool test binary: $($libraryTests[0].executable)" }
+          $libraryBinary = Get-FileHash $libraryTests[0].executable -Algorithm SHA256
           @{ source = (Get-Content reports/source-sha.txt -Raw).Trim(); executable = $test[0].executable;
-             executableSha256 = $binary.Hash; target = '${{ matrix.target }}' } |
+             executableSha256 = $binary.Hash; nativeToolExecutable = $libraryTests[0].executable;
+             nativeToolExecutableSha256 = $libraryBinary.Hash; target = '${{ matrix.target }}' } |
             ConvertTo-Json | Set-Content reports/msys-contract-artifact.json
 
           $gitExec = (& git --exec-path).Trim()
@@ -99,6 +118,7 @@ jobs:
             Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content reports/msys-image-hashes.json
 
           $originalPath = $env:PATH
+          $originalEmbeddedAdapter = $env:NUB_NATIVE_EMBEDDED_ADAPTER
           $results = @()
           foreach ($case in @(
             @{ name = 'installed'; root = $installed },
@@ -120,13 +140,53 @@ jobs:
           $env:PATH = $originalPath
           Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
           $results | ConvertTo-Json | Set-Content reports/msys-contract-results.json
-          if ($results | Where-Object {
+
+          $toolCases = @(
+            @{ tool = 'cargo'; mode = 'unconfined'; test = 'native_tool_functionality_probe::cargo_unconfined'; embedded = $false },
+            @{ tool = 'cargo'; mode = 'embedded-native-adapter'; test = 'native_tool_functionality_probe::cargo_tooldirs'; embedded = $true },
+            @{ tool = 'git-lfs'; mode = 'unconfined'; test = 'git_tool_functionality_probe::git_windows_complete_runtime_lfs_plain'; embedded = $false },
+            @{ tool = 'git-lfs'; mode = 'embedded-native-adapter'; test = 'git_tool_functionality_probe::git_windows_complete_runtime_lfs_tooldirs'; embedded = $true }
+          )
+          $toolResults = @()
+          foreach ($image in @(
+            @{ name = 'installed'; root = $installed },
+            @{ name = 'disposable-dynamicbase-allimages'; root = $copied }
+          )) {
+            foreach ($toolCase in $toolCases) {
+              $env:NUB_SANDBOX_TOOL_MSYS_ROOT = $image.root
+              $env:PATH = "$($image.root)/cmd;$($image.root)/mingw64/bin;$($image.root)/usr/bin;$originalPath"
+              if ($toolCase.embedded) {
+                $env:NUB_NATIVE_EMBEDDED_ADAPTER = '1'
+              } else {
+                Remove-Item Env:NUB_NATIVE_EMBEDDED_ADAPTER -ErrorAction SilentlyContinue
+              }
+              $log = "reports/msys-$($toolCase.tool)-$($image.name)-$($toolCase.mode).log"
+              & cargo test -p nub-sandbox --profile fast --lib $toolCase.test -- --exact --ignored --nocapture --test-threads=1 *> $log
+              $exit = $LASTEXITCODE
+              $passed = (Select-String -Path $log -Pattern 'test result: ok\. 1 passed').Count -eq 1
+              $toolResults += @{ image = $image.name; root = $image.root; tool = $toolCase.tool; mode = $toolCase.mode;
+                test = $toolCase.test; executable = $libraryTests[0].executable; executableSha256 = $libraryBinary.Hash;
+                exit = $exit; assertionsPassed = $passed; log = $log }
+              Get-Content $log
+            }
+          }
+          $env:PATH = $originalPath
+          Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
+          if ($null -eq $originalEmbeddedAdapter) {
+            Remove-Item Env:NUB_NATIVE_EMBEDDED_ADAPTER -ErrorAction SilentlyContinue
+          } else {
+            $env:NUB_NATIVE_EMBEDDED_ADAPTER = $originalEmbeddedAdapter
+          }
+          $toolResults | ConvertTo-Json | Set-Content reports/msys-tool-results.json
+          $contractFailed = $results | Where-Object {
             $_.exit -ne 0 -or !$_.unconfined -or !$_.embeddedNativeAdapter -or !$_.assertionsPassed
-          }) { exit 1 }
-      - name: Rejecting an unbuilt or skipped discriminator
-        if: ${{ !cancelled() && steps.compile.outcome != 'success' }}
+          }
+          $toolFailed = $toolResults | Where-Object { $_.exit -ne 0 -or !$_.assertionsPassed }
+          if ($contractFailed -or $toolFailed) { exit 1 }
+      - name: Rejecting an incomplete discriminator
+        if: ${{ !cancelled() && (steps.compile.outcome != 'success' || steps.tools.outcome != 'success' || steps.prepare.outcome != 'success' || steps.discriminator.outcome != 'success') }}
         shell: pwsh
-        run: throw 'The MSYS discriminator did not run because its build or clippy gate failed'
+        run: throw 'The MSYS discriminator did not complete; see the earlier failed step and preserved reports'
       - name: Preserving discriminator evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
