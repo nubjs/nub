@@ -174,12 +174,6 @@ if (core.sweepDue()) {
   });
 }
 
-// ── Default-export `fetch` handler ──────────────────────────────────
-// Arms the deferred pass that serves an entry whose default export is a `fetch`
-// handler. Tier-independent — the same call sits in preload.cjs — and a no-op
-// unless the launcher marked this process a top-level file run.
-common.installServeEntry();
-
 // ── User preloads (`nub.jsonc` `preload`) ───────────────────────────
 // LAST, so the user's entries observe a fully-augmented realm — hooks installed,
 // polyfills in place. Awaited, so a top-level `await` inside an entry settles before
@@ -187,3 +181,15 @@ common.installServeEntry();
 // A no-op unless the spawn path put the chainer on nub's own preload rather than its
 // own `--import`. See importUserPreloadChain.
 await common.importUserPreloadChain();
+
+// ── Default-export `fetch` handler ──────────────────────────────────
+// Arms the deferred pass that serves an entry whose default export is a `fetch`
+// handler. Tier-independent — the same call sits in preload.cjs.
+//
+// LAST, AFTER the awaited preload chain above, and that order is load-bearing. The
+// pass arms a `setImmediate`, and the chainer's own `await import()` per entry yields
+// to the event loop — so arming before it put the check phase BETWEEN two of the
+// user's preload entries, where the pass imported the entry and ran it ahead of them.
+// Arming here means every preload nub carries has already run. (A preload on its own
+// `--import` token can still follow; `installServeEntry` detects that case itself.)
+common.installServeEntry();

@@ -1879,39 +1879,119 @@ function installThreadpoolPolicy() {
 // listener — no `worker_threads` probe needed here to tell the realms apart.
 const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
 
+// NEVER START THE ENTRY OURSELVES BEFORE NODE WOULD HAVE. The inspection below can
+// reach the entry through `import()`, and an `import()` that lands while a preload is
+// still pending EVALUATES THE ENTRY EARLY — ahead of the very preloads that exist to
+// set its realm up. That is not theoretical: a single `setImmediate` here put the
+// entry between two chained preload entries on Node 18.19 and 20.11, which is exactly
+// the additivity guarantee this feature is supposed to preserve. So the pass is armed
+// on two triggers, neither of which can get there first:
+//
+//   1. A `setImmediate`, which reads a CommonJS entry straight off `process.mainModule`
+//      and imports NOTHING. `Module.runMain` is synchronous, so a CommonJS entry has
+//      finished by the check phase. It may only `import()` when no preload can still
+//      follow nub's own — see `anotherPreloadMayFollow`.
+//   2. `beforeExit`, which fires when the loop drains, and therefore strictly after
+//      every preload AND the entry have run. Importing is unconditionally safe here
+//      because there is nothing left to front-run, and a `beforeExit` listener may do
+//      async work, which is what keeps the process alive once a listener binds.
+//
+// Between them the only entry that goes unserved is one reached through `import()`
+// whose module body keeps the loop busy forever WHILE a foreign preload token exists.
+// Declining to serve is the right side to fail on: reordering a user's preloads is a
+// correctness break, and not binding a port is not.
 function installServeEntry() {
   if (!process.env[SERVE_ENTRY_ENV]) return;
   delete process.env[SERVE_ENTRY_ENV];
-  // Deferred, because the entry has not been evaluated yet — the preload runs
-  // first, by construction. One `setImmediate` is enough for a CommonJS entry
-  // (`Module.runMain` is synchronous, so it has finished by the check phase); an ES
-  // module entry may still be mid-evaluation, which is why the resolution below
-  // awaits Node's own module job instead of assuming anything has landed.
-  // `.unref()` is deliberately NOT called: a synchronous script must still reach
-  // this pass, or a server whose module body does nothing asynchronous would exit
-  // before it could bind.
+  const report = (err) => {
+    // A throwing entry is handled inside, so nothing here is expected to reject and
+    // anything that does is nub's own defect, named as such. Leaving the promise
+    // unhandled instead would change the process's exit path.
+    process.stderr.write(`nub: could not inspect the entry for a fetch handler: ${err}\n`);
+  };
+  const claim = { taken: false };
+  // Not `.unref()`d: a synchronous script must still reach this pass, or a server
+  // whose module body does nothing asynchronous would exit before binding.
   setImmediate(() => {
-    // Nothing below is expected to reject — a throwing entry is handled inside — so
-    // anything arriving here is nub's own defect and is named as such. Leaving the
-    // promise unhandled instead would change the process's exit path.
-    serveEntryIfHandler().catch((err) => {
-      process.stderr.write(`nub: could not inspect the entry for a fetch handler: ${err}\n`);
-    });
+    serveEntryIfHandler(claim, !anotherPreloadMayFollow())
+      .then((deferred) => {
+        // The `beforeExit` trigger is registered ONLY when the pass above declined
+        // for want of permission to import — never on an ordinary run. A listener
+        // added up front is observable to the user's own code
+        // (`process.listenerCount("beforeExit")` reads 1 where plain Node reads 0),
+        // and an unconditional one made every `nub <file>` run carry it.
+        if (deferred) {
+          process.once("beforeExit", () => {
+            serveEntryIfHandler(claim, true).catch(report);
+          });
+        }
+      })
+      .catch(report);
   });
 }
 
-async function serveEntryIfHandler() {
-  const file = mainEntryPath();
-  if (!file) return;
-  let exported;
+// Could a preload still run after nub's own? True whenever an `--import`/`--loader`
+// token names anything but nub's own preload — a user entry on its own token, or the
+// preload chainer when the spawn path gave it one instead of loading it from inside
+// nub's preload. Deliberately conservative, and deliberately not
+// `foreignAsyncLoaderFlagPresent`, whose question is a different one: it treats the
+// chainer as nub's own (correct for tier selection, wrong here, since the chainer is
+// precisely what must not be front-run) and reads nub's compat-tier `--import` as
+// foreign.
+function anotherPreloadMayFollow() {
+  const ourDir = dirname(__filename);
+  let tokens = "";
   try {
-    exported = await entryDefaultExport(file);
+    if (Array.isArray(process.execArgv)) tokens += process.execArgv.join(" ");
+  } catch { /* execArgv unavailable — the NODE_OPTIONS channel still answers */ }
+  const opts = process.env.NODE_OPTIONS;
+  if (typeof opts === "string") tokens += ` ${opts}`;
+  const re = /(?:^|\s)--(?:experimental[-_])?(?:import|loader)(?:=|\s)("[^"]*"|\S*)/g;
+  for (const match of tokens.matchAll(re)) {
+    const value = (match[1] || "").replace(/^"|"$/g, "");
+    if (value === "") continue;
+    let path = value;
+    if (path.startsWith("file:")) {
+      try { path = fileURLToPath(path); } catch { return true; }
+    }
+    if (dirname(path) !== ourDir) return true;
+  }
+  return false;
+}
+
+// Serve the entry if its default export is a handler. Resolves TRUE when it declined
+// only because it may not import yet, which is the caller's signal to arm the late
+// trigger. `claim` is shared by both triggers: whichever gets a usable namespace takes
+// it SYNCHRONOUSLY, before any await, so the two can never both bind a listener.
+async function serveEntryIfHandler(claim, mayImport) {
+  if (claim.taken) return false;
+  const file = mainEntryPath();
+  if (!file) {
+    claim.taken = true;
+    return false;
+  }
+  const main = process.mainModule;
+  if (main && main.loaded && main.filename === file) {
+    claim.taken = true;
+    serveIfHandler(main.exports);
+    return false;
+  }
+  if (!mayImport) return true;
+  claim.taken = true;
+  let ns;
+  try {
+    ns = await import(pathToFileURL(file).href);
   } catch {
     // The entry threw. Node has already reported that as an uncaught error, and this
     // is the same failure observed a second time, so it is dropped rather than
     // doubling the report.
-    return;
+    return false;
   }
+  serveIfHandler(ns.default);
+  return false;
+}
+
+function serveIfHandler(exported) {
   const handler = fetchHandler(exported);
   if (!handler) return;
   // Required only now, so an ordinary file run never loads node:http at all.
