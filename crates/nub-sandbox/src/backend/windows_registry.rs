@@ -12,7 +12,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+// Recovery progress must not be silently dropped by an older binary's next journal write.
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 pub(crate) const BACKEND_VERSION: &str = "appcontainer-acl-v4";
 pub(crate) const MAX_IDLE_ENTRIES: usize = 64;
 pub(crate) const MAX_OWNED_BYTES: u64 = 1024 * 1024 * 1024;
@@ -1117,17 +1118,22 @@ fn load(root: &Path) -> io::Result<RegistryFile> {
     let path = root.join("registry.json");
     match std::fs::read(&path) {
         Ok(bytes) => {
-            let file: RegistryFile = serde_json::from_slice(&bytes).map_err(|error| {
+            let mut file: RegistryFile = serde_json::from_slice(&bytes).map_err(|error| {
                 io::Error::other(format!(
                     "invalid sandbox registry {}: {error}",
                     path.display()
                 ))
             })?;
-            if file.schema != SCHEMA_VERSION {
-                return Err(io::Error::other(format!(
-                    "unsupported sandbox registry schema {}",
-                    file.schema
-                )));
+            match file.schema {
+                // Schema 2 has the same ownership records but may lack revoke progress. Keep
+                // every existing identity and lease; the next locked save fences out old writers.
+                2 => file.schema = SCHEMA_VERSION,
+                SCHEMA_VERSION => {}
+                schema => {
+                    return Err(io::Error::other(format!(
+                        "unsupported sandbox registry schema {schema}"
+                    )));
+                }
             }
             Ok(file)
         }
@@ -1407,6 +1413,77 @@ mod tests {
         assert_ne!(first, identity);
     }
     use super::*;
+
+    #[test]
+    fn legacy_registry_migration_preserves_ownership_and_revoke_progress() {
+        for has_progress in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut entry = idle_entry(0, 123);
+            entry.state = EntryState::RecoveryNeeded;
+            entry.leases.insert("existing-owner".into());
+            entry.recovery_error = Some("interrupted cleanup".into());
+            entry.private_paths.push("caller-recorded-profile".into());
+            let object = WindowObject {
+                session: 1,
+                station: "fixture-station".into(),
+                desktop: None,
+            };
+            entry.window_objects.push(object.clone());
+            entry.window_object_revoke = has_progress.then_some(object);
+            let expected = serde_json::to_value(&entry).unwrap();
+            let mut legacy = expected.clone();
+            if !has_progress {
+                legacy
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("window_object_revoke");
+            }
+            let journal = root.path().join("registry.json");
+            let original = serde_json::to_vec(&serde_json::json!({
+                "schema": 2,
+                "entries": {"0": legacy},
+            }))
+            .unwrap();
+            std::fs::write(&journal, &original).unwrap();
+            let _lock = MutationLock::acquire(root.path()).unwrap();
+            let file = load(root.path()).unwrap();
+            assert_eq!(serde_json::to_value(&file.entries["0"]).unwrap(), expected);
+            assert_eq!(file.schema, 3, "older readers must reject the next save");
+            assert_eq!(std::fs::read(&journal).unwrap(), original);
+            save(root.path(), &file).unwrap();
+            let reloaded = load(root.path()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&reloaded.entries["0"]).unwrap(),
+                expected
+            );
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(saved["schema"], 3);
+        }
+    }
+
+    #[test]
+    fn unsupported_registry_schemas_are_not_rewritten() {
+        for schema in [1, SCHEMA_VERSION + 1] {
+            let root = tempfile::tempdir().unwrap();
+            let journal = root.path().join("registry.json");
+            let original = serde_json::to_vec(&serde_json::json!({
+                "schema": schema,
+                "entries": {},
+            }))
+            .unwrap();
+            std::fs::write(&journal, &original).unwrap();
+            let error = load(root.path())
+                .err()
+                .expect("unsupported schema rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported sandbox registry schema")
+            );
+            assert_eq!(std::fs::read(&journal).unwrap(), original);
+        }
+    }
 
     #[test]
     fn journal_replacement_recovers_an_interrupted_staging_write() {

@@ -2,7 +2,7 @@ name: Sandbox Windows cleanup identity probe
 
 on:
   push:
-    branches: [windows-cleanup-identity]
+    branches: [windows-cleanup-identity, sandbox-artifact-candidate]
     paths:
       - crates/nub-sandbox/src/backend/windows.rs
       - crates/nub-sandbox/src/backend/windows_ace.rs
@@ -57,6 +57,7 @@ jobs:
           cargo clippy -p nub-sandbox --profile fast --all-targets --all-features -- -D warnings 2>&1 | tee reports/clippy.log
           cargo test -p nub-sandbox --profile fast --lib --no-run --message-format=json-render-diagnostics > reports/test-artifacts.jsonl
           cargo test -p nub-sandbox --profile fast --lib windows_cleanup_ -- --nocapture --test-threads=1 2>&1 | tee reports/cleanup-identity.log
+          cargo test -p nub-sandbox --profile fast --lib windows_registry::tests:: -- --nocapture --test-threads=1 2>&1 | tee reports/registry.log
           grep -Eq 'test result: ok\. [0-9]+ passed' reports/cleanup-identity.log
       - name: Binding the executed test binary
         if: always()
