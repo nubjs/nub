@@ -45,9 +45,10 @@ const ACCESS_IOCTL_DEV: u64 = 1 << 15; // ABI 5
 const FILE_ONLY_RIGHTS: u64 =
     ACCESS_EXECUTE | ACCESS_WRITE_FILE | ACCESS_READ_FILE | ACCESS_TRUNCATE | ACCESS_IOCTL_DEV;
 
-/// The kernel's minimum Landlock ABI for filesystem rules. Below this the mechanism does
-/// not exist and the caller must fall back or refuse.
-pub(crate) const MIN_FS_ABI: u32 = 1;
+/// The kernel's minimum Landlock ABI for the filesystem grammar. ABI 3 is the first that
+/// handles `TRUNCATE`; accepting an older ABI would leave an ungranted file truncatable.
+/// The caller must refuse below this floor rather than enforce an incomplete allowlist.
+pub(crate) const MIN_FS_ABI: u32 = 3;
 
 /// The system closure a confined build needs to be able to EXECUTE and read: the loader,
 /// libc, the compiler toolchain, and the resolver/trust material.
@@ -330,8 +331,8 @@ impl LandlockRuleset {
     }
 }
 
-/// The kernel's Landlock ABI, or `None` when the kernel has no Landlock at all
-/// (`ENOSYS` on <5.13, or a kernel built without it / with it absent from `lsm=`).
+/// The kernel's Landlock ABI, or `None` when Landlock is unavailable or too old for the
+/// filesystem grammar (`ENOSYS` on <5.13, disabled or absent from `lsm=`, or ABI < 3).
 pub(crate) fn probe_abi() -> Option<u32> {
     let rc = unsafe {
         libc::syscall(
@@ -799,7 +800,8 @@ pub(crate) unsafe fn restrict_self(ruleset_fd: RawFd) -> Result<(), libc::c_int>
 /// Why the Landlock mechanism cannot be used for a given policy/host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LandlockUnavailable {
-    /// Kernel below 5.13, or built without Landlock / with it absent from `lsm=`.
+    /// Kernel without Landlock ABI 3, including an older ABI, a disabled kernel, or an
+    /// `lsm=` configuration without Landlock.
     NoKernelSupport,
     /// The policy carries a deny rule. Landlock unions rules and has no deny primitive at
     /// any ABI, so a deny is inexpressible — it would silently not restrict.
@@ -819,7 +821,7 @@ pub(crate) enum LandlockUnavailable {
 /// is an AVAILABILITY question, not a mechanism-selection one — there is nothing to select
 /// between, and the caller fails the launch closed on `Err`.
 ///
-/// BELOW THE KERNEL FLOOR (Landlock is 5.13, mid-2021) the answer is REFUSE, not
+/// BELOW THE KERNEL FLOOR (Landlock ABI 3, introduced in Linux 6.2) the answer is REFUSE, not
 /// run-unconfined-with-a-warning. The jail's contract everywhere else is fail-closed, and a
 /// dependency's install script is precisely the code whose whole reason for being confined is
 /// that it is untrusted — running it unconfined because the kernel is old inverts the
@@ -1071,6 +1073,22 @@ mod tests {
         assert_eq!(handled_access_fs(2) & ACCESS_TRUNCATE, 0);
         assert_eq!(handled_access_fs(4) & ACCESS_IOCTL_DEV, 0);
         assert_eq!(handled_access_fs(5) & ACCESS_IOCTL_DEV, ACCESS_IOCTL_DEV);
+    }
+
+    /// An allowlist cannot enforce the full write grammar before ABI 3: `TRUNCATE` would be
+    /// unhandled and therefore unrestricted. Keep the admission floor coupled to that right.
+    #[test]
+    fn filesystem_abi_floor_handles_truncate() {
+        assert_eq!(MIN_FS_ABI, 3);
+        assert_eq!(
+            handled_access_fs(MIN_FS_ABI) & ACCESS_TRUNCATE,
+            ACCESS_TRUNCATE
+        );
+        assert_eq!(
+            LandlockAccess::ReadWrite.rights(MIN_FS_ABI) & ACCESS_TRUNCATE,
+            ACCESS_TRUNCATE
+        );
+        assert_eq!(handled_access_fs(MIN_FS_ABI - 1) & ACCESS_TRUNCATE, 0);
     }
 
     /// The kernel validates the declared attr size against its own ABI, so this must grow

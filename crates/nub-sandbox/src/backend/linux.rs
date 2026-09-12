@@ -221,8 +221,9 @@ pub(crate) fn preflight(
             return Err(Degradation {
                 lost: vec!["fs".to_string(), "net".to_string()],
                 reason: Some(format!(
-                    "the dependency build jail requires Landlock (Linux 5.13+), which this \
-                     kernel does not provide: {reason:?}"
+                    "the dependency build jail requires Landlock ABI 3+ (introduced in Linux \
+                     6.2) for complete filesystem enforcement, which this kernel does not \
+                     provide: {reason:?}"
                 )),
             });
         }
