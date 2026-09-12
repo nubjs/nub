@@ -12,6 +12,12 @@
 //!
 //! The mechanism is tier-independent (both preload entries call the same installer),
 //! so the host Node covers whichever tier it falls on.
+//!
+//! Three tests here assert that something is NOT served, and an absence assertion
+//! cannot fail on its own. Their positive control is the rest of this file: each one
+//! runs a fixture that another test proves does get served, so a green absence means
+//! the exclusion held rather than that the feature was never wired. Measured with the
+//! installer stubbed out: fifteen of these go red, and exactly those three stay green.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -78,22 +84,29 @@ fn start(name: &str, env: &[(&str, &str)]) -> Server {
     // that reads one to EOF hangs instead of failing.
     let stdout = drain(child.stdout.take().unwrap());
     let stderr = drain(child.stderr.take().unwrap());
+    // Built before the wait below, so `Drop` owns the process from here on. A startup
+    // timeout panics, and without that ownership the panic would abandon a server still
+    // holding its port.
+    let mut server = Server {
+        child,
+        host: String::new(),
+        port: 0,
+        startup_line: String::new(),
+        stdout,
+        stderr,
+    };
     let mut seen = Vec::new();
     loop {
-        let line = stderr.recv_timeout(STARTUP_TIMEOUT).unwrap_or_else(|_| {
+        let line = server.stderr.recv_timeout(STARTUP_TIMEOUT).unwrap_or_else(|_| {
             panic!(
                 "{name}: no `Listening on` line within {STARTUP_TIMEOUT:?}; stderr so far: {seen:?}"
             )
         });
         if let Some((host, port)) = listening_address(&line) {
-            return Server {
-                child,
-                host,
-                port,
-                startup_line: line,
-                stdout,
-                stderr,
-            };
+            server.host = host;
+            server.port = port;
+            server.startup_line = line;
+            return server;
         }
         seen.push(line);
     }
@@ -239,10 +252,7 @@ fn parse(raw: &[u8]) -> Reply {
 /// form has to be decoded before the body can be compared.
 fn dechunk(mut rest: &[u8]) -> String {
     let mut out = Vec::new();
-    loop {
-        let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") else {
-            break;
-        };
+    while let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") {
         let size_line = String::from_utf8_lossy(&rest[..eol]).into_owned();
         let size = usize::from_str_radix(size_line.split(';').next().unwrap().trim(), 16)
             .unwrap_or_else(|_| panic!("bad chunk size {size_line:?}"));
