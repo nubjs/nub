@@ -66,55 +66,6 @@ pub(super) fn prepare_scratch_copy(
 /// from wedging install in an infinite clone loop.
 const GIT_PREPARE_MAX_DEPTH: u32 = 4;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scratch_copy_preserves_dotfiles_and_does_not_share_file_writes() {
-        let source = tempfile::tempdir().unwrap();
-        std::fs::create_dir(source.path().join(".git")).unwrap();
-        std::fs::write(
-            source.path().join(".npmrc"),
-            "registry=https://example.invalid\n",
-        )
-        .unwrap();
-        let script = source.path().join("prepare.js");
-        std::fs::write(&script, "original").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let scratch = prepare_scratch_copy(source.path(), "fixture").unwrap();
-        let path = scratch.path().to_path_buf();
-        assert!(!path.join(".git").exists());
-        assert!(path.join(".npmrc").is_file());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(path.join("prepare.js"))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o755
-            );
-            std::os::unix::fs::symlink("prepare.js", source.path().join("link.js")).unwrap();
-            let linked = prepare_scratch_copy(source.path(), "symlink fixture").unwrap();
-            assert_eq!(
-                std::fs::read_link(linked.path().join("link.js")).unwrap(),
-                std::path::Path::new("prepare.js")
-            );
-        }
-        std::fs::write(path.join("prepare.js"), "changed").unwrap();
-        assert_eq!(std::fs::read_to_string(script).unwrap(), "original");
-        drop(scratch);
-        assert!(!path.exists());
-    }
-}
-
 /// Run a nested `aube install` inside a git-dep checkout so its
 /// devDependencies are linked and its root `prepare` script runs
 /// before the caller snapshots the tree via `aube pack`.
@@ -163,4 +114,53 @@ pub(super) async fn run_git_dep_prepare(
     .into_diagnostic()
     .wrap_err_with(|| format!("git dep {spec}: nested install task failed"))?
     .wrap_err_with(|| format!("git dep {spec}: nested install for `prepare` failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_copy_preserves_dotfiles_and_does_not_share_file_writes() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join(".git")).unwrap();
+        std::fs::write(
+            source.path().join(".npmrc"),
+            "registry=https://example.invalid\n",
+        )
+        .unwrap();
+        let script = source.path().join("prepare.js");
+        std::fs::write(&script, "original").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let scratch = prepare_scratch_copy(source.path(), "fixture").unwrap();
+        let path = scratch.path().to_path_buf();
+        assert!(!path.join(".git").exists());
+        assert!(path.join(".npmrc").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path.join("prepare.js"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            std::os::unix::fs::symlink("prepare.js", source.path().join("link.js")).unwrap();
+            let linked = prepare_scratch_copy(source.path(), "symlink fixture").unwrap();
+            assert_eq!(
+                std::fs::read_link(linked.path().join("link.js")).unwrap(),
+                std::path::Path::new("prepare.js")
+            );
+        }
+        std::fs::write(path.join("prepare.js"), "changed").unwrap();
+        assert_eq!(std::fs::read_to_string(script).unwrap(), "original");
+        drop(scratch);
+        assert!(!path.exists());
+    }
 }
