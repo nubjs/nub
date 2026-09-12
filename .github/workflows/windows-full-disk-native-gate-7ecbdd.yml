@@ -1,0 +1,71 @@
+name: Windows full-disk native gate
+
+on:
+  push:
+    branches: [windows-full-disk-native-gate-7ecbdd]
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/nub-sandbox/**'
+      - '.github/workflows/windows-full-disk-native-gate-7ecbdd.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-gate:
+    name: Native gate (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Build static-CRT sandbox library and run selected tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native-gate
+          git rev-parse HEAD | tee native-gate/source-head.txt
+          rustc -vV | tee native-gate/rustc-vV.txt
+          rustc -vV | sed -n 's/^host: //p' | tee native-gate/rust-host.txt
+          export RUSTFLAGS='-C target-feature=+crt-static'
+          cargo build --locked -p nub-sandbox --lib 2>&1 | tee native-gate/build.log
+          tests=(
+            backend::windows::tests::plan_net_decides_windows_net_posture
+            backend::windows::tests::read_confine_grants_only_explicit_allows_no_degrade
+            backend::windows::tests::apply_windows_net_tiers
+            backend::windows::tests::apply_windows_full_disk_build_jail_rejects_restricted_network
+          )
+          for test_name in "${tests[@]}"; do
+            log="native-gate/${test_name##*::}.log"
+            cargo test --locked -p nub-sandbox --lib "$test_name" -- --exact >"$log" 2>&1 || {
+              cat "$log"
+              exit 1
+            }
+            cat "$log"
+            grep -F "test $test_name ... ok" "$log" > /dev/null || {
+              echo "selected test did not pass: $test_name"
+              exit 1
+            }
+          done
+          test_binary=$(find target/debug/deps -maxdepth 1 -type f -name 'nub_sandbox-*.exe' | head -n 1)
+          test -n "$test_binary" || { echo 'compiled nub-sandbox test binary not found'; exit 1; }
+          sha256sum "$test_binary" | tee native-gate/compiled-test-binary.sha256
+          printf '%s\n' "$test_binary" | tee native-gate/compiled-test-binary-path.txt
+      - name: Upload native gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-full-disk-native-gate-${{ matrix.runner }}
+          path: native-gate/
+          if-no-files-found: warn
