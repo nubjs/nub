@@ -42,14 +42,25 @@ pub(crate) fn selected() -> bool {
     selected_profile().is_some()
 }
 
-/// Rebrand the engine's diagnostic codes for nub's users.
+/// Rebrand a rendered engine report for nub's users.
 ///
-/// The engine declares ~800 `ERR_PNPM_*` codes as compile-time attributes,
-/// and two of its own code paths compare those strings literally, so the
-/// rename happens here, on the rendered report, rather than where the codes
-/// are constructed.
-fn rebrand_codes(rendered: &str) -> String {
-    rendered.replace("ERR_PNPM_", "ERR_NUB_").replace("WARN_PNPM_", "WARN_NUB_")
+/// Two families of name survive the profile and reach here as text. The
+/// engine declares ~800 `ERR_PNPM_*` codes as compile-time attributes, and
+/// two of its own code paths compare those strings literally, so renaming
+/// them at construction would change engine behavior. A handful of misuse
+/// errors likewise bake `Usage: pnpm <verb>` into a `#[display]` attribute,
+/// which the runtime program name the profile sets cannot reach.
+///
+/// Deliberately narrow: only the usage prefix and the code prefixes are
+/// rewritten. The engine also suggests commands as `` `pnpm <verb>` ``, and
+/// those are left alone — several name verbs nub either does not have or
+/// spells differently, so substituting the program name would turn a brand
+/// leak into wrong advice.
+fn rebrand(rendered: &str, embedder: Embedder) -> String {
+    rendered
+        .replace("Usage: pnpm ", &format!("Usage: {} ", embedder.program_name))
+        .replace("ERR_PNPM_", "ERR_NUB_")
+        .replace("WARN_PNPM_", "WARN_NUB_")
 }
 
 /// Run the engine on the process argv and return its exit status.
@@ -59,11 +70,11 @@ pub(crate) fn run_process_argv() -> Result<i32> {
         Ok(()) => Ok(0),
         Err(report) => {
             let rendered = format!("{report:?}");
-            // A pnpm-incumbent project must see pnpm's own codes verbatim.
+            // A pnpm-incumbent project must see pnpm's own output verbatim.
             if embedder.program_name == Embedder::PNPM.program_name {
                 eprintln!("{rendered}");
             } else {
-                eprintln!("{}", rebrand_codes(&rendered));
+                eprintln!("{}", rebrand(&rendered, embedder));
             }
             Ok(1)
         }
