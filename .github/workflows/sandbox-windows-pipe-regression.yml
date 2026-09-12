@@ -45,16 +45,27 @@ jobs:
         shell: pwsh
         run: |
           git fetch origin git-lfs-transfer-eof
+          $base = '748c22aa93225eb1b59894fc9dea691e977267fc'
           $candidate = '75784e8f0dc319a27b5b5f80ca644f953c82d926'
+          git cat-file -e "$base^{commit}"
           git cat-file -e "$candidate^{commit}"
           $fixture = (git rev-parse HEAD).Trim()
+          $baseRoot = Join-Path $env:RUNNER_TEMP 'nub-pipe-base'
           $candidateRoot = Join-Path $env:RUNNER_TEMP 'nub-pipe-candidate'
+          git worktree add --detach $baseRoot $base
           git worktree add --detach $candidateRoot $candidate
-          $fixtures = @(git rev-list --reverse "748c22aa93225eb1b59894fc9dea691e977267fc..$fixture")
-          git -C $candidateRoot cherry-pick $fixtures
+          $probe = 'crates/nub-sandbox/src/backend/windows_native_adapter_probe.rs'
+          foreach ($root in @($baseRoot, $candidateRoot)) {
+            git -C $root checkout $fixture -- $probe
+            if ($LASTEXITCODE -ne 0) { throw "Could not apply the fixture source to $root" }
+          }
+          $baseProbeHash = (Get-FileHash (Join-Path $baseRoot $probe) -Algorithm SHA256).Hash
+          $candidateProbeHash = (Get-FileHash (Join-Path $candidateRoot $probe) -Algorithm SHA256).Hash
+          if ($baseProbeHash -ne $candidateProbeHash) { throw 'Fixture source bytes differ between revisions' }
           New-Item -ItemType Directory -Force reports | Out-Null
-          @{ fixtureCommit = $fixture; baseCommit = '748c22aa93225eb1b59894fc9dea691e977267fc';
-             fixtureCommits = $fixtures; candidateCommit = $candidate;
+          @{ fixtureCommit = $fixture; fixtureProbeSha256 = $baseProbeHash;
+             baseCommit = $base; candidateCommit = $candidate;
+             baseFixtureCommit = (git -C $baseRoot rev-parse HEAD).Trim();
              candidateFixtureCommit = (git -C $candidateRoot rev-parse HEAD).Trim() } |
             ConvertTo-Json | Set-Content reports/revisions.json
       - name: Building and exercising both revisions
@@ -62,10 +73,11 @@ jobs:
         shell: pwsh
         run: |
           $workspace = $env:GITHUB_WORKSPACE
+          $baseRoot = Join-Path $env:RUNNER_TEMP 'nub-pipe-base'
           $candidateRoot = Join-Path $env:RUNNER_TEMP 'nub-pipe-candidate'
           $probe = 'backend::windows_native_adapter_probe::embedded_native_adapter_primitives_with_raw_and_plain_controls'
           $cases = @(
-            @{ name = 'base'; root = $workspace; revision = '748c22aa93225eb1b59894fc9dea691e977267fc' },
+            @{ name = 'base'; root = $baseRoot; revision = '748c22aa93225eb1b59894fc9dea691e977267fc' },
             @{ name = 'candidate'; root = $candidateRoot; revision = '75784e8f0dc319a27b5b5f80ca644f953c82d926' }
           )
           $results = @()
@@ -102,7 +114,7 @@ jobs:
                   *> (Join-Path $report 'test.log')
                 $runExit = $LASTEXITCODE
                 $log = Join-Path $report 'test.log'
-                $roundtrip = (Select-String -Path $log -SimpleMatch 'ADAPTER_INHERITED_PIPES Ok(())').Count -ge 3
+                $roundtrip = ([regex]::Matches((Get-Content -Raw $log), [regex]::Escape('ADAPTER_INHERITED_PIPES Ok(())'))).Count -ge 3
                 $summaries = @(Select-String -Path $log -Pattern '^test result:')
                 $passed = $summaries.Count -gt 0 -and $summaries[-1].Line -match '^test result: ok\. 1 passed'
               }
