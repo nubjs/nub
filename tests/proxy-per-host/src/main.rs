@@ -40,6 +40,86 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 #[cfg(target_os = "linux")]
 use std::thread;
 
+/// An endpoint-level diagnostic, not a listener-liveness check. The direct and confined arms use
+/// the same IPv4 `example.com:443` target. The confined arm reads the injected proxy URL but never
+/// prints its bearer: it records only the CONNECT status and the TLS byte counts. A `200` followed
+/// by no upstream TLS bytes places a timeout after the target gate, rather than calling it a
+/// grammar result.
+#[cfg(target_os = "macos")]
+const TLS_BOUNDARY_SCRIPT: &str = r#"import base64, os, socket, ssl, sys, time, urllib.parse
+
+TARGET = ("example.com", 443)
+TIMEOUT = 8
+
+def ipv4_socket(host, port):
+    address = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)[0][4]
+    stream = socket.create_connection(address, timeout=TIMEOUT)
+    stream.settimeout(TIMEOUT)
+    return stream
+
+def read_headers(stream):
+    reply = b""
+    while b"\r\n\r\n" not in reply and len(reply) < 4096:
+        part = stream.recv(4096 - len(reply))
+        if not part:
+            break
+        reply += part
+    return reply
+
+def handshake(stream):
+    context = ssl.create_default_context()
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = context.wrap_bio(incoming, outgoing, server_hostname=TARGET[0])
+    sent = received = 0
+    while True:
+        try:
+            tls.do_handshake()
+            break
+        except ssl.SSLWantReadError:
+            pending = outgoing.read()
+            if pending:
+                stream.sendall(pending)
+                sent += len(pending)
+            reply = stream.recv(16384)
+            if not reply:
+                raise ConnectionError("upstream closed during TLS handshake")
+            received += len(reply)
+            incoming.write(reply)
+        except ssl.SSLWantWriteError:
+            pending = outgoing.read()
+            if not pending:
+                raise RuntimeError("TLS requested a write without bytes")
+            stream.sendall(pending)
+            sent += len(pending)
+    pending = outgoing.read()
+    if pending:
+        stream.sendall(pending)
+        sent += len(pending)
+    print(f"tls_handshake=complete client_bytes={sent} upstream_bytes={received}")
+
+try:
+    proxy = os.environ.get("HTTPS_PROXY")
+    if proxy:
+        parsed = urllib.parse.urlsplit(proxy)
+        stream = ipv4_socket(parsed.hostname, parsed.port)
+        user = urllib.parse.unquote(parsed.username or "")
+        auth = base64.b64encode(f"{user}:".encode()).decode()
+        stream.sendall(
+            f"CONNECT {TARGET[0]}:{TARGET[1]} HTTP/1.1\r\nHost: {TARGET[0]}:{TARGET[1]}\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode()
+        )
+        status = read_headers(stream).split(b"\r\n", 1)[0].decode("ascii", "replace")
+        print(f"proxy_connect={status}")
+        if status != "HTTP/1.1 200 Connection established":
+            raise ConnectionError("proxy did not acknowledge CONNECT")
+    else:
+        stream = ipv4_socket(*TARGET)
+        print("direct_connect=complete")
+    handshake(stream)
+except Exception as error:
+    print(f"failure={type(error).__name__}:{error}")
+    sys.exit(1)
+"#;
+
 fn policy(surface: Value) -> SandboxPolicy {
     let root = std::env::temp_dir();
     let homes = Homes {
@@ -266,6 +346,81 @@ sys.exit(0 if reply == b"HTTP/1.1 407 Proxy Authentication Required" else 1)"#;
         }
     );
     output.status.success() && detail.ends_with("reply=HTTP/1.1 407 Proxy Authentication Required")
+}
+
+/// Execute the same IPv4 TLS handshake direct and through one live public sandbox session. The
+/// direct control removes every proxy spelling, while the confined arm must use exactly the
+/// injected loopback endpoint. Output contains status/timing boundaries but never proxy credentials.
+#[cfg(target_os = "macos")]
+fn macos_tls_boundary_probe() -> bool {
+    fn capture(label: &str, output: std::io::Result<std::process::Output>) -> bool {
+        let Ok(output) = output else {
+            eprintln!("{label}: process launch failed");
+            return false;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        eprintln!("{label}: exited {}", output.status);
+        if !stdout.is_empty() {
+            eprintln!("{label}: {stdout}");
+        }
+        if !stderr.is_empty() {
+            eprintln!("{label}: stderr {stderr}");
+        }
+        output.status.success() && stdout.contains("tls_handshake=complete")
+    }
+
+    let direct = capture(
+        "tls direct",
+        std::process::Command::new("/usr/bin/env")
+            .args([
+                "-u",
+                "https_proxy",
+                "-u",
+                "HTTPS_PROXY",
+                "-u",
+                "http_proxy",
+                "-u",
+                "HTTP_PROXY",
+                "-u",
+                "all_proxy",
+                "-u",
+                "ALL_PROXY",
+                "-u",
+                "no_proxy",
+                "-u",
+                "NO_PROXY",
+                "python3",
+                "-c",
+                TLS_BOUNDARY_SCRIPT,
+            ])
+            .output(),
+    );
+    let allow = policy(json!({ "fs": true, "net": ["example.com"] }));
+    let sandbox = match Sandbox::new(&allow) {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            eprintln!(
+                "tls proxy: acquisition failed, unavailable axes: {:?}",
+                error.lost
+            );
+            return false;
+        }
+    };
+    let prepared =
+        match sandbox.prepare(CommandSpec::new("python3").args(["-c", TLS_BOUNDARY_SCRIPT])) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                eprintln!(
+                    "tls proxy: preparation failed, unavailable axes: {:?}",
+                    error.lost
+                );
+                return false;
+            }
+        };
+    let confined = capture("tls proxy", prepared.output());
+    println!("TLS boundary direct={direct} proxy={confined} [want true true]");
+    direct && confined
 }
 
 #[cfg(target_os = "macos")]
@@ -517,12 +672,14 @@ fn run() -> bool {
     println!("9 noncoop-ip   (--noproxy, GET 1.1.1.1)       -> exit={noncoop_ip}   [want != 0]");
     println!("10 explicit IP 1.1.1.1 via proxy             -> exit={explicit_ip_allow}   [want 0]");
     println!(
-        "11 IP allow then deny 1.1.1.1                  -> exit={explicit_ip_block}   [want != 0]"
+        "11 IP allow then deny 1.1.1.1                  -> exit={explicit_ip_block}   [want 56]"
     );
     println!(
         "12 CIDR 1.1.1.0/24 via proxy                  -> exit={explicit_cidr_allow}   [want 0]"
     );
-    println!("13 CIDR allow then deny 1.1.1.1                -> exit={explicit_cidr_block}   [want != 0]");
+    println!(
+        "13 CIDR allow then deny 1.1.1.1                -> exit={explicit_cidr_block}   [want 56]"
+    );
     // 1/5 vs 2/6: the proxy's per-host gate works on both public lifecycles. 7/8/9 all blocked:
     // non-cooperative egress is denied regardless of host or DNS — never leaked. 10/12 versus
     // 11/13 prove literal and CIDR matching reaches the proxy and retains authored ordering.
@@ -537,9 +694,9 @@ fn run() -> bool {
         && noncoop_allow != 0
         && noncoop_ip != 0
         && explicit_ip_allow == 0
-        && explicit_ip_block != 0
+        && explicit_ip_block == 56
         && explicit_cidr_allow == 0
-        && explicit_cidr_block != 0
+        && explicit_cidr_block == 56
 }
 
 #[cfg(target_os = "windows")]
@@ -650,22 +807,22 @@ fn run() -> bool {
     println!("4 noncoop-ip   (--noproxy, GET 1.1.1.1)         -> exit={noncoop_ip}   [want != 0]");
     println!("5 explicit IP 1.1.1.1 via proxy             -> exit={explicit_ip_allow}   [want 0]");
     println!(
-        "6 IP allow then deny 1.1.1.1                  -> exit={explicit_ip_block}   [want != 0]"
+        "6 IP allow then deny 1.1.1.1                  -> exit={explicit_ip_block}   [want 56]"
     );
     println!(
         "7 CIDR 1.1.1.0/24 via proxy                  -> exit={explicit_cidr_allow}   [want 0]"
     );
     println!(
-        "8 CIDR allow then deny 1.1.1.1                -> exit={explicit_cidr_block}   [want != 0]"
+        "8 CIDR allow then deny 1.1.1.1                -> exit={explicit_cidr_block}   [want 56]"
     );
     coop_allow == 0
         && coop_deny != 0
         && noncoop_allow != 0
         && noncoop_ip != 0
         && explicit_ip_allow == 0
-        && explicit_ip_block != 0
+        && explicit_ip_block == 56
         && explicit_cidr_allow == 0
-        && explicit_cidr_block != 0
+        && explicit_cidr_block == 56
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -678,6 +835,12 @@ fn main() {
     #[cfg(target_os = "windows")]
     if std::env::args().nth(1).as_deref() == Some("--windows-egress-helper") {
         nub_sandbox::serve_windows_egress_helper();
+    }
+    #[cfg(target_os = "macos")]
+    if std::env::args().nth(1).as_deref() == Some("--macos-tls-boundary-probe") {
+        let pass = macos_tls_boundary_probe();
+        println!("RESULT: {}", if pass { "PASS" } else { "FAIL" });
+        std::process::exit(if pass { 0 } else { 1 });
     }
     let pass = run();
     println!("RESULT: {}", if pass { "PASS" } else { "FAIL" });

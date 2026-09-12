@@ -1,0 +1,62 @@
+name: macOS proxy TLS boundary diagnostic
+
+on:
+  push:
+    branches: [sandbox-cross-os-network-grammar]
+    paths:
+      - crates/nub-sandbox/**
+      - tests/proxy-per-host/**
+      - .github/workflows/sandbox-macos-proxy-tls-diagnostic.yml
+      - Cargo.lock
+      - Cargo.toml
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: macos-14
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: sandbox-macos-proxy-tls-diagnostic
+      - name: Recording endpoint and runner controls
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          {
+            git rev-parse HEAD
+            rustc -Vv
+            uname -a
+            curl --version | head -1
+            /usr/bin/env -u https_proxy -u HTTPS_PROXY -u http_proxy -u HTTP_PROXY -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY curl -4 -sS -o /dev/null --connect-timeout 8 --max-time 20 https://example.com/
+          } > reports/environment.txt 2>&1
+      - name: Locating the proxy TLS boundary
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path tests/proxy-per-host/Cargo.toml --profile fast \
+            --config 'profile.fast.inherits="dev"' \
+            --config 'profile.fast.debug="line-tables-only"' \
+            --config 'profile.fast.codegen-units=256' \
+            --config 'profile.fast.package."*".opt-level=2' \
+            > reports/probe-build.log 2>&1
+          shasum -a 256 target/fast/proxy-per-host-probe > reports/probe-binary.sha256
+          target/fast/proxy-per-host-probe --macos-tls-boundary-probe > reports/tls-boundary.log 2>&1
+          cat reports/tls-boundary.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: macos-proxy-tls-boundary
+          path: reports
+          retention-days: 14
