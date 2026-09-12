@@ -299,6 +299,17 @@ pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 /// give every worker its own port.
 pub const SERVE_ENTRY_ENV: &str = "__NUB_SERVE_ENTRY";
 
+/// The compiled-artifact counterpart of [`SERVE_ENTRY_ENV`], set by the launcher —
+/// or, in a single executable, by the blob's own main (`compile-sea-loader.cjs`) —
+/// and consumed by the compile preamble (`serveCompiledEntry`). A bare `1`: the
+/// program root is the entry by construction, so nothing has to be told apart. Its
+/// own variable rather than the same one because an artifact launched from inside a
+/// nub-augmented process inherits nub's `NODE_OPTIONS` preload, whose claim would
+/// read a bare value as unaddressed and, with no `argv[1]` in the inline shape,
+/// delete it before the preamble looked. Only a top-level launch is marked, never a
+/// re-exec of the artifact by its own program.
+pub const COMPILED_SERVE_ENTRY_ENV: &str = "__NUB_COMPILED_SERVE_ENTRY";
+
 /// Joins the tokens of a [`SERVE_ENTRY_ENV`] value. ASCII unit separator: it cannot
 /// appear in an argument a shell hands over, and unlike JSON it has no failure mode
 /// to guard on the reading side.

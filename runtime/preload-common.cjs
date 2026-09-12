@@ -2219,6 +2219,8 @@ module.exports = {
   claimServeEntry,
   loaderWorkerOptions,
   installServeEntry,
+  // For compiled artifacts, whose program root hands the entry over itself.
+  serveIfHandler,
   // Exported for the unit test that asserts which default-export shapes are served.
   fetchHandler,
   requireUserPreloadChain,
