@@ -2081,6 +2081,8 @@ fn busybox_script_shell(busybox: &str) -> aube_util::ScriptShell {
     aube_util::ScriptShell {
         program: PathBuf::from(busybox),
         args: vec!["sh".to_string(), "-c".to_string()],
+        // busybox-w32 up-cases every environment name it loads.
+        restore_env_casing: true,
     }
 }
 
@@ -5434,6 +5436,11 @@ mod tests {
             "busybox dispatches on argv[0] or a leading applet name, so spawned as \
              `busybox.exe` it needs `sh` before `-c` — `busybox.exe -c <body>` runs \
              no shell. This test exists because that mistake is invisible off Windows."
+        );
+        assert!(
+            spec.restore_env_casing,
+            "busybox-w32 up-cases environment names, so `$npm_package_name` in a lifecycle \
+             body expands to nothing unless the spawn re-binds the lowercase names"
         );
     }
 }

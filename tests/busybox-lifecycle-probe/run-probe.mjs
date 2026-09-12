@@ -76,6 +76,14 @@ const cases = [
     files: { "src/a.txt": "A\n", "src/b.txt": "B\n" },
     want: "A\nB",
   },
+  {
+    // busybox-w32 up-cases every environment name it loads, so without the
+    // spawn's prologue these expand to nothing. cmd.exe writes them literally.
+    id: "lowercase_npm_env_names",
+    script: 'echo "$npm_package_name:$npm_lifecycle_event" > out.txt',
+    files: {},
+    want: "probedep-lowercase-npm-env-names:postinstall",
+  },
 ];
 
 // Every case gets a DISTINCT package name. Also load-bearing, and also a
@@ -114,11 +122,10 @@ function writeFixture(dir, c) {
     ),
   );
   // LOAD-BEARING for the differential, not hygiene. The side-effects cache is
-  // on by default and keys on `(name, version, engine, input hash)` — which is
-  // IDENTICAL across the two arms, since only the shell differs and the shell
-  // is not part of the key. With it on, whichever arm ran second would hardlink
-  // the first arm's built tree back and skip the script entirely, so the
-  // control would "confirm" whatever the first arm did.
+  // on by default, and a restored tree skips the script entirely, so the marker
+  // would report an earlier build instead of this arm's shell. The key now
+  // separates the two arms' shells, but a probe must not depend on that key
+  // being right: it is one of the things under test.
   writeFileSync(join(dir, ".npmrc"), "side-effects-cache=false\n");
 }
 

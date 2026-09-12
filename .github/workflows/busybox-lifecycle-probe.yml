@@ -1,5 +1,5 @@
 # Branch-scoped Windows probe (see .claude/skills/ci-adhoc-test) — NO PR needed.
-# Pushing to the busybox-lifecycle-shell branch runs this on a real
+# Pushing to the busybox-lifecycle-main branch runs this on a real
 # windows-latest runner. It builds one nub and drives the same dependency
 # postinstall fixtures twice, with `busybox.exe` staged next to nub.exe and
 # without it — the sidecar's presence is the only variable, and its absence
@@ -7,7 +7,7 @@
 name: busybox-lifecycle-probe
 on:
   push:
-    branches: [busybox-lifecycle-shell]
+    branches: [busybox-lifecycle-main]
     paths:
       - 'tests/busybox-lifecycle-probe/**'
       - '.github/workflows/busybox-lifecycle-probe.yml'

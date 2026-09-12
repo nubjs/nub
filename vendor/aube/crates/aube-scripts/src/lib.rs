@@ -446,7 +446,12 @@ enum ShellInvocation {
     /// `<program> <args…> <body>`, the body a single argv element. `args` is
     /// `["-c"]` for a plain shell and `["sh", "-c"]` for a multi-call binary
     /// that dispatches on an applet name (busybox).
-    Args { program: PathBuf, args: Vec<String> },
+    Args {
+        program: PathBuf,
+        args: Vec<String>,
+        /// See [`aube_util::ScriptShell::restore_env_casing`].
+        restore_env_casing: bool,
+    },
     /// `cmd.exe /d /s /c "<body>"`, built with `raw_arg` — see
     /// [`spawn_shell`].
     #[cfg(windows)]
@@ -460,12 +465,14 @@ fn resolve_shell(settings: &ScriptSettings) -> ShellInvocation {
         return ShellInvocation::Args {
             program: shell.to_path_buf(),
             args: vec!["-c".to_string()],
+            restore_env_casing: false,
         };
     }
     if let Some(spec) = &settings.default_shell {
         return ShellInvocation::Args {
             program: spec.program.clone(),
             args: spec.args.clone(),
+            restore_env_casing: spec.restore_env_casing,
         };
     }
     #[cfg(windows)]
@@ -477,6 +484,7 @@ fn resolve_shell(settings: &ScriptSettings) -> ShellInvocation {
         ShellInvocation::Args {
             program: PathBuf::from("sh"),
             args: vec!["-c".to_string()],
+            restore_env_casing: false,
         }
     }
 }
@@ -500,7 +508,7 @@ fn shell_id(invocation: &ShellInvocation) -> String {
         // A multi-call binary dispatches on its leading argument (busybox
         // `sh -c`), so that applet — not the binary's own filename — names the
         // dialect that parses the script body.
-        ShellInvocation::Args { program, args } => match args.first() {
+        ShellInvocation::Args { program, args, .. } => match args.first() {
             Some(applet) if !applet.starts_with('-') => applet.clone(),
             _ => program
                 .file_stem()
@@ -596,22 +604,24 @@ fn spawn_shell_with_settings(
     script_cmd: &str,
     settings: &ScriptSettings,
 ) -> tokio::process::Command {
+    let mut cmd = shell_command(settings);
+    append_script_body(&mut cmd, settings, script_cmd);
+    cmd
+}
+
+/// The resolved shell and its leading args, with the script environment
+/// applied but no body. [`run_script`] sets more environment after this
+/// returns, and [`append_script_body`] needs the final environment, so the
+/// body is a separate step.
+fn shell_command(settings: &ScriptSettings) -> tokio::process::Command {
     let mut cmd = match resolve_shell(settings) {
-        ShellInvocation::Args { program, args } => {
+        ShellInvocation::Args { program, args, .. } => {
             let mut cmd = tokio::process::Command::new(program);
-            cmd.args(args).arg(script_cmd);
+            cmd.args(args);
             cmd
         }
         #[cfg(windows)]
-        ShellInvocation::CmdRaw => {
-            let mut cmd = tokio::process::Command::new("cmd.exe");
-            // `/d` skips AutoRun, `/s` flips the quote-stripping rule
-            // so only the *outer* `"..."` pair is removed, `/c` runs
-            // the command and exits. Build the raw argv tail manually
-            // so cmd.exe sees the original script bytes.
-            cmd.raw_arg("/d /s /c \"").raw_arg(script_cmd).raw_arg("\"");
-            cmd
-        }
+        ShellInvocation::CmdRaw => tokio::process::Command::new("cmd.exe"),
     };
     apply_script_settings_env(&mut cmd, settings);
     // Aborting the `JoinSet` that drives the parallel lifecycle pass
@@ -624,6 +634,84 @@ fn spawn_shell_with_settings(
     // whole tree.
     cmd.kill_on_drop(true);
     cmd
+}
+
+/// Put the script body on `cmd` as its last argument. Call it after every `env`
+/// call: a casing-restoring shell gets a prologue built from the environment set
+/// on `cmd` at this point.
+fn append_script_body(
+    cmd: &mut tokio::process::Command,
+    settings: &ScriptSettings,
+    script_cmd: &str,
+) {
+    match resolve_shell(settings) {
+        ShellInvocation::Args {
+            restore_env_casing: true,
+            ..
+        } => {
+            let prologue = lowercase_env_prologue(cmd.as_std());
+            cmd.arg(format!("{prologue}{script_cmd}"));
+        }
+        ShellInvocation::Args { .. } => {
+            cmd.arg(script_cmd);
+        }
+        #[cfg(windows)]
+        ShellInvocation::CmdRaw => {
+            // `/d` skips AutoRun, `/s` flips the quote-stripping rule
+            // so only the *outer* `"..."` pair is removed, `/c` runs
+            // the command and exits. Build the raw argv tail manually
+            // so cmd.exe sees the original script bytes.
+            cmd.raw_arg("/d /s /c \"").raw_arg(script_cmd).raw_arg("\"");
+        }
+    }
+}
+
+/// Re-bind, at the head of a script body, the lowercase environment names set
+/// on `command`. Shared by nub's `nub run` and the lifecycle spawn here.
+///
+/// busybox-w32's shell UP-CASES every name when it loads the Windows environment,
+/// so a script body sees `NPM_PACKAGE_NAME` and `$npm_package_name` expands to
+/// nothing — while npm, pnpm, yarn and bun all deliver the lowercase name on the
+/// same fixture. Upstream considers the up-casing correct and declined the
+/// preserve-casing patch (rmyorston/busybox-w32#125), so the restoration is the
+/// spawner's to do.
+///
+/// One `export` prologue fixes all three symptoms at once, because busybox's own
+/// variable lookup is case-SENSITIVE: `$npm_package_name` expands, the lowercase
+/// name is back in the environment every child inherits, and `Object.keys` sees
+/// it — for a consumer in any language, not only Node.
+///
+/// It re-binds NAMES, never values, so nothing needs quoting and a value carrying
+/// quotes or newlines cannot break the body. Derived from the command's own env
+/// rather than from a hand-kept list, so a variable added later is covered
+/// without anyone remembering this function.
+///
+/// Scope is deliberately what the spawner set, not the whole inherited
+/// environment. busybox up-cases an inherited lowercase name too, but restoring
+/// those means re-exporting arbitrary host variables into every script body to
+/// undo a shell's documented behavior. It also keeps the prologue small: measured
+/// at 15 exportable names and 741 bytes for `nub run` against a 32767-byte command
+/// line, because `get_envs` sees only what was set rather than what was inherited.
+pub fn lowercase_env_prologue(command: &std::process::Command) -> String {
+    let mut names: Vec<&str> = command
+        .get_envs()
+        // A `None` value is a REMOVAL, and re-exporting one would put the name back.
+        .filter(|(_, value)| value.is_some())
+        .filter_map(|(name, _)| name.to_str())
+        .filter(|name| {
+            // An uppercase-only name is unaffected by the up-casing, and a name
+            // that is not a shell identifier cannot be exported at all.
+            name.contains(|c: char| c.is_ascii_lowercase())
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .iter()
+        .map(|name| format!("export {name}=\"${}\"; ", name.to_ascii_uppercase()))
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -679,37 +767,31 @@ fn jail_profile(jail: &ScriptJail, home: &Path) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_jailed_shell(
-    script_cmd: &str,
+fn jailed_shell_command(
     settings: &ScriptSettings,
     jail: &ScriptJail,
     home: &Path,
 ) -> tokio::process::Command {
     // Same shell resolution as the unjailed path, just re-hosted under
-    // `sandbox-exec` — `CmdRaw` is unreachable here (macOS-only fn).
-    let ShellInvocation::Args { program, args } = resolve_shell(settings);
+    // `sandbox-exec` — `CmdRaw` is unreachable here (macOS-only fn). The body
+    // is appended by the caller, as for `shell_command`.
+    let ShellInvocation::Args { program, args, .. } = resolve_shell(settings);
     let profile = jail_profile(jail, home);
     let mut cmd = tokio::process::Command::new("sandbox-exec");
-    cmd.arg("-p")
-        .arg(profile)
-        .arg("--")
-        .arg(program)
-        .args(args)
-        .arg(script_cmd);
+    cmd.arg("-p").arg(profile).arg("--").arg(program).args(args);
     apply_script_settings_env(&mut cmd, settings);
-    // Matches the unjailed path — see `spawn_shell_with_settings`.
+    // Matches the unjailed path — see `shell_command`.
     cmd.kill_on_drop(true);
     cmd
 }
 
 #[cfg(target_os = "linux")]
-fn spawn_jailed_shell(
-    script_cmd: &str,
+fn jailed_shell_command(
     settings: &ScriptSettings,
     jail: &ScriptJail,
     home: &Path,
 ) -> tokio::process::Command {
-    let mut cmd = spawn_shell_with_settings(script_cmd, settings);
+    let mut cmd = shell_command(settings);
     let jail = jail.clone();
     let home = home.to_path_buf();
     unsafe {
@@ -725,13 +807,12 @@ fn spawn_jailed_shell(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn spawn_jailed_shell(
-    script_cmd: &str,
+fn jailed_shell_command(
     settings: &ScriptSettings,
     _jail: &ScriptJail,
     _home: &Path,
 ) -> tokio::process::Command {
-    spawn_shell_with_settings(script_cmd, settings)
+    shell_command(settings)
 }
 
 /// Shell-quote one arg for safe splicing into a shell command line.
@@ -1579,8 +1660,8 @@ pub async fn run_script(
             .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
     }
     let mut cmd = match (jail, jail_home.as_deref()) {
-        (Some(jail), Some(home)) => spawn_jailed_shell(script_cmd, settings, jail, home),
-        _ => spawn_shell_with_settings(script_cmd, settings),
+        (Some(jail), Some(home)) => jailed_shell_command(settings, jail, home),
+        _ => shell_command(settings),
     };
     cmd.current_dir(script_dir)
         .stderr(child_stderr())
@@ -1619,6 +1700,9 @@ pub async fn run_script(
     // `env_clear`: name/version/json plus the deep-flattened
     // engines/config/bin, and the raw script body (`npm_lifecycle_script`).
     apply_npm_manifest_env(&mut cmd, manifest, script_dir, script_cmd);
+    // Last, after every `env` call above: a casing-restoring shell's prologue is
+    // derived from the environment on `cmd`.
+    append_script_body(&mut cmd, settings, script_cmd);
 
     tracing::debug!("lifecycle: {script_name} → {script_cmd}");
     let status = run_command_killing_descendants(cmd, script_name).await?;
@@ -2663,12 +2747,13 @@ mod shell_resolution_tests {
         aube_util::ScriptShell {
             program: PathBuf::from(r"C:\nub\busybox.exe"),
             args: vec!["sh".to_string(), "-c".to_string()],
+            restore_env_casing: true,
         }
     }
 
     fn invocation(settings: &ScriptSettings) -> (String, Vec<String>) {
         match resolve_shell(settings) {
-            ShellInvocation::Args { program, args } => {
+            ShellInvocation::Args { program, args, .. } => {
                 (program.to_string_lossy().into_owned(), args)
             }
             #[cfg(windows)]
@@ -2742,6 +2827,7 @@ mod shell_resolution_tests {
                 default_shell: Some(aube_util::ScriptShell {
                     program: PathBuf::from(r"D:\other\place\busybox.exe"),
                     args: vec!["sh".to_string(), "-c".to_string()],
+                    restore_env_casing: true,
                 }),
                 ..Default::default()
             })),
@@ -2766,11 +2852,85 @@ mod shell_resolution_tests {
             shell_id(&ShellInvocation::Args {
                 program: PathBuf::from("sh"),
                 args: vec!["-c".to_string()],
+                restore_env_casing: false,
             }),
             "sh"
         );
         #[cfg(windows)]
         assert_eq!(shell_id(&ShellInvocation::CmdRaw), "cmd");
+    }
+
+    /// The prologue restores the lowercase names busybox-w32 up-cases, and the
+    /// filters are the whole contract: re-exporting the wrong thing is worse than
+    /// re-exporting nothing, because it puts a name back into the environment that
+    /// the caller had removed, or writes a line the shell refuses to parse.
+    #[test]
+    fn the_casing_prologue_rebinds_only_the_names_a_shell_can_export() {
+        let mut command = std::process::Command::new("sh");
+        command.env("npm_package_name", "acme");
+        command.env("npm_config_user_agent", "nub/0.9");
+        // Already uppercase: busybox leaves it alone, so re-binding it is noise.
+        command.env("NODE_OPTIONS", "--x");
+        // Not a shell identifier, and not exportable under any casing.
+        command.env("weird-name", "v");
+        command.env("2fast", "v");
+        // A REMOVAL. Re-exporting it would resurrect the name.
+        command.env_remove("npm_lifecycle_event");
+
+        let prologue = lowercase_env_prologue(&command);
+
+        assert_eq!(
+            prologue,
+            "export npm_config_user_agent=\"$NPM_CONFIG_USER_AGENT\"; \
+             export npm_package_name=\"$NPM_PACKAGE_NAME\"; ",
+            "only lowercase, exportable, still-set names belong in the prologue"
+        );
+
+        // A body prefixed with it is still one shell word away from the original.
+        let body = format!("{prologue}echo $npm_package_name");
+        assert!(
+            body.ends_with("; echo $npm_package_name"),
+            "the prologue must end in a separator so the body is a fresh command: {body}"
+        );
+    }
+
+    /// `run_script` sets `npm_lifecycle_event` and the manifest variables AFTER it
+    /// builds the shell, so the prologue must be built when the body goes on. A
+    /// shell that keeps name casing is the control: its body stays unchanged.
+    #[test]
+    fn the_body_prologue_covers_names_set_after_the_shell_was_built() {
+        let body_of = |settings: &ScriptSettings| {
+            let mut cmd = shell_command(settings);
+            cmd.env("npm_lifecycle_event", "postinstall");
+            append_script_body(&mut cmd, settings, "echo $npm_lifecycle_event");
+            cmd.as_std()
+                .get_args()
+                .last()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+
+        let restored = body_of(&ScriptSettings {
+            default_shell: Some(busybox()),
+            ..Default::default()
+        });
+        assert!(
+            restored.contains("export npm_lifecycle_event=\"$NPM_LIFECYCLE_EVENT\"; "),
+            "a name set after the shell was built must be re-bound: {restored}"
+        );
+        assert!(
+            restored.ends_with("; echo $npm_lifecycle_event"),
+            "{restored}"
+        );
+
+        let plain = body_of(&ScriptSettings {
+            script_shell: Some(PathBuf::from("sh")),
+            ..Default::default()
+        });
+        assert_eq!(
+            plain, "echo $npm_lifecycle_event",
+            "a shell that keeps name casing must get the body unchanged"
+        );
     }
 
     /// The leading-args form has to survive an actual spawn, not just
@@ -2785,6 +2945,7 @@ mod shell_resolution_tests {
             default_shell: Some(aube_util::ScriptShell {
                 program: PathBuf::from("/usr/bin/env"),
                 args: vec!["sh".to_string(), "-c".to_string()],
+                restore_env_casing: false,
             }),
             ..Default::default()
         };

@@ -455,6 +455,12 @@ pub struct EngineContext {
 pub struct ScriptShell {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// The shell up-cases environment names when it loads the Windows
+    /// environment, as busybox-w32 does, so a body would see `NPM_PACKAGE_NAME`
+    /// and `$npm_package_name` would expand to nothing. When set, the spawn
+    /// re-binds the lowercase names it set at the head of the body
+    /// (`aube_scripts::lowercase_env_prologue`).
+    pub restore_env_casing: bool,
 }
 
 impl Default for EngineContext {

@@ -111,9 +111,11 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
 
 /// A POSIX-only `postinstall`: braced parameter expansion with a default, and
 /// the `test` utility. `cmd.exe` leaves `${…}` literal (quotes included) and has
-/// no `test`, so under cmd this writes different bytes AND exits non-zero.
-const POSIX_SHELL_PROBE: &str =
-    "echo \"MARK=${SHELL_PROBE:-posix}\" > shell.txt && test -d . && echo dirok >> shell.txt";
+/// no `test`, so under cmd this writes different bytes AND exits non-zero. The
+/// last line reads a lowercase npm variable, which busybox-w32 up-cases on load,
+/// so it is empty on Windows unless the spawn re-binds the lowercase names.
+const POSIX_SHELL_PROBE: &str = "echo \"MARK=${SHELL_PROBE:-posix}\" > shell.txt && test -d . \
+     && echo dirok >> shell.txt && echo \"$npm_package_name\" >> shell.txt";
 
 /// Lifecycle scripts run under a POSIX `sh` on every platform: the system
 /// `/bin/sh` on Unix, and on Windows the bundled busybox-w32 `sh` the engine
@@ -121,8 +123,8 @@ const POSIX_SHELL_PROBE: &str =
 /// engine defaulted to before. The body is the assertion: cmd.exe cannot run it,
 /// so a regression here fails the install rather than passing quietly.
 ///
-/// Root and dependency hooks share aube's one `spawn_shell_with_settings`, so
-/// this pins the shell selection for both. The dependency path end-to-end (and
+/// Root and dependency hooks share aube's one `run_script` spawn, so this pins
+/// the shell selection for both. The dependency path end-to-end (and
 /// the cmd.exe-vs-busybox differential, which needs a real Windows runner) is
 /// `tests/busybox-lifecycle-probe/`.
 #[test]
@@ -143,10 +145,12 @@ fn install_runs_lifecycle_scripts_under_a_posix_shell() {
     });
     assert_eq!(
         marker.replace("\r\n", "\n"),
-        "MARK=posix\ndirok\n",
+        "MARK=posix\ndirok\napp\n",
         "the lifecycle shell did not expand `${{SHELL_PROBE:-posix}}` or run `test -d .`, so it \
          is not a POSIX sh. On Windows that means the bundled busybox sidecar was not used and \
-         the engine fell back to cmd.exe.\nstdout: {stdout}\nstderr: {stderr}"
+         the engine fell back to cmd.exe. A missing last line (`app`) means `$npm_package_name` \
+         expanded to nothing: busybox up-cased the name and the spawn did not re-bind it.\
+         \nstdout: {stdout}\nstderr: {stderr}"
     );
 }
 
