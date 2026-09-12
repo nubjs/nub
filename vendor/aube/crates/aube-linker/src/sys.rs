@@ -214,7 +214,7 @@ pub fn create_bin_shim(
         std::fs::create_dir_all(link_parent)?;
         let _ = std::fs::remove_file(&link_path);
         if write_shim {
-            let rel = relative_bin_target(link_parent, target);
+            let rel = shim_bin_target(link_parent, target);
             let node_path = opts
                 .extend_node_path
                 .then(|| shim_node_path(link_parent, bin_dir, opts.hidden_modules_dir, "/", ":"));
@@ -578,6 +578,31 @@ fn symlink_bin_target(link_parent: &Path, target: &Path) -> std::path::PathBuf {
         Ok(physical) => relative_bin_target(&physical, &resolved).into(),
         Err(_) => target.to_path_buf(),
     }
+}
+
+/// Pick the relative target a shell wrapper resolves from `$basedir`.
+///
+/// A wrapper normally runs from its surface path, so the ordinary relative
+/// path remains portable. In the global virtual store, however, lifecycle
+/// execution deliberately canonicalizes the package directory. The wrapper
+/// then runs from its physical, graph-hashed `.bin/` directory; a target
+/// relative to the unhashed project surface dangles. Prefer the surface form
+/// when it resolves to the target, and otherwise anchor the wrapper at that
+/// physical directory.
+#[cfg(unix)]
+fn shim_bin_target(link_parent: &Path, target: &Path) -> String {
+    let surface = relative_bin_target(link_parent, target);
+    let Ok(resolved) = std::fs::canonicalize(target) else {
+        // Generated output may appear only after a lifecycle script runs.
+        // Keep the existing surface-relative form for that case.
+        return surface;
+    };
+    if std::fs::canonicalize(link_parent.join(&surface)).is_ok_and(|p| p == resolved) {
+        return surface;
+    }
+    std::fs::canonicalize(link_parent)
+        .map(|physical| relative_bin_target(&physical, &resolved))
+        .unwrap_or(surface)
 }
 
 /// Build the value the bin shim assigns to `NODE_PATH`. Always starts
@@ -2220,6 +2245,65 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn create_bin_shim_wrapper_anchors_on_the_physical_dir_inside_a_shared_store() {
+        // Isolated installs use wrappers to carry NODE_PATH. Lifecycle execution
+        // canonicalizes the package directory, so this wrapper is launched from
+        // the graph-hashed GVS entry rather than its unhashed project surface.
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let host_bin = store.join("host@1.0.0-aaaaaaaa/node_modules/.bin");
+        let dep_bin = store.join("dep@1.0.0-bbbbbbbb/node_modules/dep/bin");
+        std::fs::create_dir_all(&host_bin).unwrap();
+        std::fs::create_dir_all(&dep_bin).unwrap();
+        let real_target = dep_bin.join("dep");
+        std::fs::write(&real_target, "#!/bin/sh\necho shared-store-wrapper\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&real_target, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let surface_store = dir.path().join("proj/node_modules/.store");
+        std::fs::create_dir_all(&surface_store).unwrap();
+        for (surface, real) in [
+            ("host@1.0.0", "host@1.0.0-aaaaaaaa"),
+            ("dep@1.0.0", "dep@1.0.0-bbbbbbbb"),
+        ] {
+            std::os::unix::fs::symlink(store.join(real), surface_store.join(surface)).unwrap();
+        }
+
+        let bin_dir = surface_store.join("host@1.0.0/node_modules/.bin");
+        let target = surface_store.join("dep@1.0.0/node_modules/dep/bin/dep");
+        create_bin_shim(
+            &bin_dir,
+            "dep",
+            &target,
+            BinShimOptions {
+                prefer_symlinked_executables: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let shim = host_bin.join("dep");
+        let body = std::fs::read_to_string(&shim).unwrap();
+        assert!(
+            body.contains(
+                "# aube-bin-shim v2 target=../../../dep@1.0.0-bbbbbbbb/node_modules/dep/bin/dep"
+            ),
+            "wrapper must be relative to its physical GVS directory:\n{body}"
+        );
+        for path in [shim, surface_store.join("host@1.0.0/node_modules/.bin/dep")] {
+            let output = std::process::Command::new(&path).output().unwrap();
+            assert!(
+                output.status.success(),
+                "wrapper at {} stderr: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, b"shared-store-wrapper\n");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn create_bin_shim_symlink_falls_back_to_absolute_for_a_missing_target() {
         // Nothing to canonicalize, so no relative path can be derived
         // safely. Keep the pre-#568 absolute form rather than guessing.
@@ -2231,6 +2315,30 @@ mod tests {
         create_bin_shim(&bin_dir, "gone", &target, BinShimOptions::default()).unwrap();
 
         assert_eq!(std::fs::read_link(bin_dir.join("gone")).unwrap(), target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_bin_shim_wrapper_keeps_a_surface_target_when_it_is_missing() {
+        // A lifecycle may create its declared bin after this link pass. Without
+        // a resolved target, the physical GVS anchor is unknowable, so retain
+        // the existing surface-relative wrapper form.
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        let target = dir.path().join("node_modules/gone/bin/gone");
+        create_bin_shim(
+            &bin_dir,
+            "gone",
+            &target,
+            BinShimOptions {
+                prefer_symlinked_executables: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let shim = std::fs::read_to_string(bin_dir.join("gone")).unwrap();
+        assert_eq!(parse_posix_shim_target(&shim), Some("../gone/bin/gone"));
     }
 
     #[cfg(unix)]
