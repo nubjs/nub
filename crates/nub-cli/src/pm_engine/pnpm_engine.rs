@@ -96,21 +96,52 @@ fn rebrand(rendered: &str, embedder: Embedder) -> String {
         .replace("WARN_PNPM_", "WARN_NUB_")
 }
 
+/// Diagnostic codes whose command has already printed its own report.
+///
+/// The engine's entry point skips the top-level render for these, so a host
+/// that renders unconditionally prints the same failure twice. Kept here
+/// rather than read from the engine because the list is private to it; the
+/// upstream seam is the right long-term home, and until it exports one this
+/// has to be checked against `is_reported_error` when the pin moves.
+const SELF_REPORTED_CODES: [&str; 3] = [
+    "ERR_PNPM_DEDUPE_CHECK_ISSUES",
+    "ERR_PNPM_PEER_DEP_ISSUES",
+    "ERR_PNPM_NO_MATCHING_PROJECTS",
+];
+
+/// Whether the failing command already reported itself.
+fn is_self_reported(report: &miette::Report) -> bool {
+    report
+        .code()
+        .is_some_and(|code| SELF_REPORTED_CODES.contains(&code.to_string().as_str()))
+}
+
 /// Run the engine on the process argv and return its exit status.
 pub(crate) fn run_process_argv() -> Result<i32> {
     let embedder = match selection() {
         Some(Selection::Forced(embedder)) => embedder,
         Some(Selection::Auto) | None => profile_from_identity()?,
     };
+    // The engine's own entry point installs this before it can print. It
+    // drops each cause the level above already states in full, so a host
+    // that leaves miette at its default renders chains the engine collapses
+    // — a divergence invisible on a one-level diagnostic and plain on a
+    // deep one.
+    pnpm_diagnostics::install_report_handler();
     match pnpm_cli::run(std::env::args_os().collect(), embedder) {
         Ok(()) => Ok(0),
         Err(report) => {
-            let rendered = format!("{report:?}");
-            // A pnpm-incumbent project must see pnpm's own output verbatim.
-            if embedder.program_name == Embedder::PNPM.program_name {
-                eprintln!("{rendered}");
-            } else {
-                eprintln!("{}", rebrand(&rendered, embedder));
+            if !is_self_reported(&report) {
+                // The `Error: ` prefix is the engine's own, not decoration:
+                // without it a pnpm-incumbent project's stderr differs from
+                // real pnpm's on every failure.
+                let rendered = format!("Error: {report:?}");
+                // A pnpm-incumbent project must see pnpm's own output verbatim.
+                if embedder.program_name == Embedder::PNPM.program_name {
+                    eprintln!("{rendered}");
+                } else {
+                    eprintln!("{}", rebrand(&rendered, embedder));
+                }
             }
             Ok(1)
         }

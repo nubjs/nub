@@ -4028,6 +4028,7 @@ dependencies = [
  "pathdiff",
  "pnpm-cli",
  "pnpm-config",
+ "pnpm-diagnostics",
  "pnpm-lockfile",
  "pnpm-package-manager",
  "rayon",
