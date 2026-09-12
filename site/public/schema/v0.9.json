@@ -297,6 +297,10 @@
         "minimumReleaseAgeExclude": {
           "$ref": "#/$defs/stringArray",
           "description": "Package patterns exempt from minimumReleaseAge."
+        },
+        "settings": {
+          "type": "object",
+          "description": "Any pnpm-workspace.yaml setting the keys above do not cover, spelled the way pnpm spells it."
         }
       }
     },

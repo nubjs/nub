@@ -59,6 +59,7 @@ pub(crate) const INSTALL_KEYS: &[&str] = &[
     "publicHoist",
     "minimumReleaseAge",
     "minimumReleaseAgeExclude",
+    "settings",
 ];
 pub(crate) const DLX_KEYS: &[&str] = &["consent"];
 
@@ -326,6 +327,10 @@ pub struct InstallConfig {
     pub public_hoist: Option<PublicHoist>,
     pub minimum_release_age: Option<Duration>,
     pub minimum_release_age_exclude: Option<Vec<String>>,
+    /// `install.settings` — any `pnpm-workspace.yaml` setting the keys above do
+    /// not cover, keyed by pnpm's own spelling. Held as the raw object: the
+    /// engine owns those settings' types, so it resolves and checks the values.
+    pub settings: Option<serde_json::Map<String, Value>>,
 }
 
 /// The layout, discriminated on `strategy`, carrying only the knob that layout
@@ -1600,7 +1605,71 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
         let p = child(path, "minimumReleaseAgeExclude");
         install.minimum_release_age_exclude = Some(as_string_array(v, &p)?);
     }
+    if let Some(v) = obj.get("settings") {
+        let p = child(path, "settings");
+        let settings = as_object(v, &p)?;
+        for key in settings.keys() {
+            if let Some(reason) = excluded_setting(key) {
+                return Err(ConfigError::Value {
+                    path: child(&p, key),
+                    message: reason.to_string(),
+                });
+            }
+        }
+        for (curated, equivalents) in CURATED_EQUIVALENTS {
+            if obj.contains_key(*curated)
+                && let Some(key) = settings.keys().find(|k| equivalents.contains(&k.as_str()))
+            {
+                return Err(ConfigError::Value {
+                    path: child(&p, key),
+                    message: format!(
+                        "sets the same thing as `install.{curated}`; keep one of the two"
+                    ),
+                });
+            }
+        }
+        install.settings = Some(settings.clone());
+    }
     Ok(install)
+}
+
+/// Each curated `install` key, with the `install.settings` names that set the
+/// same thing. Writing both leaves nothing to say which one the engine should
+/// believe, so the pair is refused rather than resolved by a precedence rule the
+/// author would have to know.
+const CURATED_EQUIVALENTS: &[(&str, &[&str])] = &[
+    (
+        "linker",
+        &["nodeLinker", "enableGlobalVirtualStore", "hoist", "hoistPattern"],
+    ),
+    ("publicHoist", &["publicHoistPattern", "shamefullyHoist"]),
+    ("minimumReleaseAge", &["minimumReleaseAge"]),
+    ("minimumReleaseAgeExclude", &["minimumReleaseAgeExclude"]),
+];
+
+/// Why `install.settings` refuses `key`, or `None` when it passes through.
+///
+/// The table takes a `pnpm-workspace.yaml` setting by its own name, but these
+/// name a file only pnpm reads, belong to the Node version Nub manages itself,
+/// or were replaced by a neutral `package.json` field.
+fn excluded_setting(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "pnpmfile" | "ignorePnpmfile" | "tryLoadDefaultPnpmfile" | "globalShims"
+        | "pnpmHomeDir" | "pnpmExecPath" => {
+            "is a pnpm file or directory setting, which a Nub project does not read"
+        }
+        "nodeVersion" | "executionEnv" | "useNodeVersion" => {
+            "is managed by Nub, which picks the Node version itself"
+        }
+        "onlyBuiltDependencies"
+        | "onlyBuiltDependenciesFile"
+        | "neverBuiltDependencies"
+        | "ignoredBuiltDependencies" => {
+            "is a deprecated build list; approve dependency scripts with `allowScripts` in package.json"
+        }
+        "packages" => "lists workspace projects; declare them with `workspaces` in package.json",
+        _ => return None,
+    })
 }
 
 fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
@@ -2143,6 +2212,61 @@ mod tests {
         assert_eq!(
             cfg.install.minimum_release_age_exclude,
             Some(vec!["@myorg/*".into()])
+        );
+    }
+
+    #[test]
+    fn install_settings_passes_a_pnpm_setting_through_by_its_own_name() {
+        let cfg = parse(
+            r#"{ "install": { "settings": { "strictPeerDependencies": true, "dedupePeers": false } } }"#,
+        );
+        let settings = cfg.install.settings.expect("the table is kept");
+        assert_eq!(settings.get("strictPeerDependencies"), Some(&Value::Bool(true)));
+        assert_eq!(settings.get("dedupePeers"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn install_settings_refuses_the_keys_nub_owns_or_replaced() {
+        for (key, needle) in [
+            ("pnpmfile", "pnpm"),
+            ("nodeVersion", "Node"),
+            ("onlyBuiltDependencies", "allowScripts"),
+            ("packages", "workspaces"),
+        ] {
+            let err = parse_project_config(&format!(
+                r#"{{ "install": {{ "settings": {{ "{key}": true }} }} }}"#
+            ))
+            .expect_err(&format!("`{key}` must be refused"));
+            match err.kind() {
+                ConfigError::Value { path, message } => {
+                    assert_eq!(path, &format!("install.settings.{key}"));
+                    assert!(message.contains(needle), "{key}: {message}");
+                }
+                other => panic!("{key}: expected Value error, got {other:?}"),
+            }
+        }
+    }
+
+    /// Only the pair is ambiguous: the passthrough spelling on its own is a
+    /// valid way to set the same thing.
+    #[test]
+    fn install_settings_refuses_a_setting_a_curated_key_already_sets() {
+        let err = parse_project_config(
+            r#"{ "install": { "linker": "hoisted", "settings": { "nodeLinker": "isolated" } } }"#,
+        )
+        .expect_err("two spellings of one setting must not both be written");
+        match err.kind() {
+            ConfigError::Value { path, message } => {
+                assert_eq!(path, "install.settings.nodeLinker");
+                assert!(message.contains("install.linker"), "{message}");
+            }
+            other => panic!("expected Value error, got {other:?}"),
+        }
+        assert!(
+            parse(r#"{ "install": { "settings": { "nodeLinker": "isolated" } } }"#)
+                .install
+                .settings
+                .is_some()
         );
     }
 

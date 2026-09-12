@@ -69,6 +69,9 @@ enum Shape {
     Linker,
     /// `{ ".ext": "loader" }`, written as a JSON object.
     Loader,
+    /// Any JSON object, taken verbatim (`install.settings`). What its entries
+    /// may hold is the parser's to check, not the shell grammar's.
+    Object,
 }
 
 /// One addressable field of `nub.jsonc`.
@@ -210,6 +213,12 @@ const FIELDS: &[Field] = &[
         address: "install.minimumReleaseAgeExclude",
         path: "install.minimumReleaseAgeExclude",
         shape: Shape::StrList,
+        global_only: false,
+    },
+    Field {
+        address: "install.settings",
+        path: "install.settings",
+        shape: Shape::Object,
         global_only: false,
     },
     Field {
@@ -442,7 +451,7 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
     let trimmed = raw.trim_start();
     let structured = match field.shape {
         Shape::StrList | Shape::EnvFile | Shape::Command => trimmed.starts_with('['),
-        Shape::Loader | Shape::Linker => trimmed.starts_with('{'),
+        Shape::Loader | Shape::Linker | Shape::Object => trimmed.starts_with('{'),
         Shape::Bool | Shape::Str | Shape::VerifyDeps => false,
     };
     if structured {
@@ -478,7 +487,7 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
             }
         },
         Shape::Str | Shape::Linker | Shape::Command => Value::String(raw.into()),
-        // The two shapes with no scalar spelling of their own: a bare shell
+        // The shapes with no scalar spelling of their own: a bare shell
         // string here is a missing pair of brackets or braces, not a value.
         Shape::StrList => {
             return Err(ConfigError::Value {
@@ -490,6 +499,13 @@ fn coerce(field: &Field, raw: &str) -> Result<Value, ConfigError> {
             return Err(ConfigError::Value {
                 path: field.path.into(),
                 message: r#"expected a JSON object (for example, {".graphql":"text"})"#.into(),
+            });
+        }
+        Shape::Object => {
+            return Err(ConfigError::Value {
+                path: field.path.into(),
+                message: r#"expected a JSON object (for example, {"strictPeerDependencies":true})"#
+                    .into(),
             });
         }
     })

@@ -3877,6 +3877,7 @@ mod tests {
             public_hoist: Some(vec!["@types/*".to_string()]),
             minimum_release_age: Some(std::time::Duration::from_secs(3600)),
             minimum_release_age_exclude: Some(vec!["@internal/*".to_string()]),
+            settings: None,
         }
     }
 

@@ -128,6 +128,7 @@ pub(crate) const PROJECT_INIT_TEMPLATE: &str = r#"{
   //   "publicHoist": ["@types/*"],
   //   "minimumReleaseAge": "3d", // <integer><s|m|h|d|w>
   //   "minimumReleaseAgeExclude": ["@company/*"],
+  //   "settings": { "strictPeerDependencies": true }, // any pnpm-workspace.yaml setting
   // },
 }
 "#;
@@ -163,6 +164,7 @@ pub(crate) const GLOBAL_INIT_TEMPLATE: &str = r#"{
   //   "publicHoist": ["@types/*"],
   //   "minimumReleaseAge": "3d", // <integer><s|m|h|d|w>
   //   "minimumReleaseAgeExclude": ["@company/*"],
+  //   "settings": { "strictPeerDependencies": true }, // any pnpm-workspace.yaml setting
   // },
 
   // temporary package runs
