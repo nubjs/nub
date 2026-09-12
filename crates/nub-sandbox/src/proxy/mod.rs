@@ -230,6 +230,55 @@ impl Drop for ActiveConnection {
     }
 }
 
+/// Blocking TLS needs timeout ticks absorbed below rustls, with teardown surfaced as a
+/// terminal error. Retrying `Interrupted` at the TLS layer can otherwise never finish.
+struct ShutdownIo {
+    socket: TcpStream,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl ShutdownIo {
+    fn new(socket: TcpStream, shutdown: Arc<AtomicBool>) -> io::Result<Self> {
+        socket.set_read_timeout(Some(SPLICE_POLL))?;
+        socket.set_write_timeout(Some(SPLICE_POLL))?;
+        Ok(Self { socket, shutdown })
+    }
+
+    fn retry<T>(
+        &mut self,
+        mut operation: impl FnMut(&mut TcpStream) -> io::Result<T>,
+    ) -> io::Result<T> {
+        loop {
+            if self.shutdown.load(Ordering::SeqCst) {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "egress proxy is shutting down",
+                ));
+            }
+            match operation(&mut self.socket) {
+                Err(e) if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Read for ShutdownIo {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.retry(|socket| socket.read(buf))
+    }
+}
+
+impl Write for ShutdownIo {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.retry(|socket| socket.write(buf))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.retry(Write::flush)
+    }
+}
+
 /// A running egress proxy bound to `127.0.0.1:<port>`. Dropping it stops accepting new
 /// connections (the parent owns this; it drops after the sandboxed child exits).
 pub struct EgressProxy {
@@ -462,8 +511,9 @@ fn handle_conn(
     let upstream = connect_upstream(&req.host, req.port, allow_private)?;
     active.track(&upstream)?;
     let mut up = upstream;
-    if !prelude.is_empty() {
-        up.write_all(&prelude)?;
+    up.set_write_timeout(Some(SPLICE_POLL))?;
+    if !prelude.is_empty() && !send_all(&mut up, &prelude, &shutdown) {
+        return Ok(());
     }
     // Both legs' read timeouts are owned by `pump` from here on (SPLICE_POLL).
     splice(stream, up, shutdown);
@@ -696,6 +746,118 @@ mod tests {
             target: NetTarget::Host(pat.to_string()),
             effect,
         }
+    }
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0)).unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        (listener.accept().unwrap().0, peer)
+    }
+
+    fn shutdown_io_cancels(
+        operation: impl FnOnce(&mut ShutdownIo) -> io::Result<()> + Send + 'static,
+    ) {
+        let (socket, peer) = socket_pair();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut stream = ShutdownIo::new(socket, shutdown.clone()).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done_tx.send(operation(&mut stream)).unwrap();
+        });
+        std::thread::sleep(SPLICE_POLL * 3);
+        let pending = done_rx.try_recv().is_err();
+        shutdown.store(true, Ordering::SeqCst);
+        let result = done_rx.recv_timeout(Duration::from_secs(3));
+        // Close the peer before joining, including on a failed cancellation assertion.
+        drop(peer);
+        worker.join().unwrap();
+        assert!(pending, "the peer has not supplied data or read it");
+        assert_eq!(
+            result.unwrap().unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+    }
+
+    #[test]
+    fn shutdown_io_cancels_a_pending_read_without_socket_shutdown() {
+        shutdown_io_cancels(|stream| stream.read_exact(&mut [0u8; 1]));
+    }
+
+    #[test]
+    fn shutdown_io_cancels_a_backpressured_write_without_socket_shutdown() {
+        shutdown_io_cancels(|stream| stream.write_all(&vec![0u8; 16 * 1024 * 1024]));
+    }
+
+    #[test]
+    fn dropping_proxy_reaps_a_stalled_terminated_request() {
+        use base64::Engine as _;
+        use rustls::pki_types::ServerName;
+
+        let configured = [CredentialBroker {
+            host: "localhost".into(),
+            env: vec!["API_TOKEN".into()],
+        }];
+        let session =
+            mitm::BrokerSession::from_policy(&configured, |_| Ok(Some("test-only".into())))
+                .unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let engine =
+            mitm::MitmEngine::new_for_test(session.into_brokers(), cert.cert.der().clone())
+                .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(engine.child_ca_der()).unwrap();
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let proxy = EgressProxy::start(
+            Arc::new(StaticDecider::new(net(
+                vec![host("localhost", Effect::Allow)],
+                Effect::Deny,
+            ))),
+            Some(engine),
+        )
+        .unwrap();
+        let mut socket = TcpStream::connect((IpAddr::from([127, 0, 0, 1]), proxy.port())).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:", proxy.token()));
+        write!(socket, "CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\nProxy-Authorization: Basic {auth}\r\n\r\n").unwrap();
+        let mut reply = Vec::new();
+        while !reply.ends_with(b"\r\n\r\n") {
+            let mut byte = [0u8; 1];
+            socket.read_exact(&mut byte).unwrap();
+            reply.push(byte[0]);
+            assert!(reply.len() < 4096);
+        }
+        assert!(reply.starts_with(b"HTTP/1.1 200"));
+        let conn = rustls::ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        let mut tls = rustls::StreamOwned::new(conn, socket);
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+            .unwrap();
+        tls.flush().unwrap();
+        std::thread::sleep(SPLICE_POLL * 3);
+        assert_eq!(proxy.active_sockets.lock().unwrap().len(), 1);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            drop(proxy);
+            done_tx.send(()).unwrap();
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(3));
+        drop(tls);
+        worker.join().unwrap();
+        result.expect("proxy Drop must not wait for the stalled TLS client to close");
     }
 
     #[test]
@@ -934,6 +1096,7 @@ mod tests {
             let request = String::from_utf8(request).unwrap();
             assert!(request.contains(&format!("Authorization: Bearer {SECRET}\r\n")));
             assert!(!request.contains(&marker_for_upstream));
+            std::thread::sleep(SPLICE_POLL * 3);
             tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .unwrap();
             tls.conn.send_close_notify();
@@ -974,6 +1137,10 @@ mod tests {
 
         let name = ServerName::try_from("localhost").unwrap();
         let mut conn = rustls::ClientConnection::new(Arc::new(child_config), name).unwrap();
+        while conn.is_handshaking() {
+            conn.complete_io(&mut socket).unwrap();
+        }
+        std::thread::sleep(SPLICE_POLL * 3);
         let mut tls = rustls::Stream::new(&mut conn, &mut socket);
         write!(
             tls,

@@ -349,18 +349,7 @@ pub(super) fn terminate(
     server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     let mut sconn = rustls::ServerConnection::new(Arc::new(server_config)).map_err(tls_err)?;
-    // No read timeout for the terminated leg: a client may legitimately pause between
-    // handshake and request, and rustls's blocking `Stream` treats a WouldBlock from the
-    // socket as a hard error rather than retrying, so the SPLICE_POLL tick the blind
-    // splice uses cannot simply be applied here.
-    //
-    // KNOWN GAP. That leaves this leg unbounded under `EgressProxy::drop`, which joins
-    // every handler: on Windows a `shutdown()` does not cancel a pending `recv()` (see
-    // `super::SPLICE_POLL`), so a child that terminates a brokered handshake and then
-    // stalls mid-request wedges teardown exactly as the blind splice used to. Closing it
-    // needs a retry-aware IO wrapper that absorbs the tick beneath rustls and surfaces
-    // only teardown as an error — tracked separately, not solved by the splice fix.
-    client.set_read_timeout(None)?;
+    let client = super::ShutdownIo::new(client, active.shutdown.clone())?;
     let mut client_io = ReplayIo::new(prelude, client);
     let mut client_tls = rustls::Stream::new(&mut sconn, &mut client_io);
 
@@ -380,7 +369,7 @@ pub(super) fn terminate(
         .map_err(|_| io::Error::other("invalid upstream server name for TLS termination"))?;
     let mut uconn = rustls::ClientConnection::new(engine.client_config.clone(), server_name)
         .map_err(tls_err)?;
-    let mut up_io = upstream_tcp;
+    let mut up_io = super::ShutdownIo::new(upstream_tcp, active.shutdown.clone())?;
     let mut upstream_tls = rustls::Stream::new(&mut uconn, &mut up_io);
     upstream_tls.write_all(&req.serialize())?;
     upstream_tls.flush()?;
@@ -403,12 +392,12 @@ fn tls_err(e: rustls::Error) -> io::Error {
 /// the live socket. rustls consumes the prelude as if it had just arrived on the wire.
 struct ReplayIo {
     prelude: io::Cursor<Vec<u8>>,
-    sock: TcpStream,
+    sock: super::ShutdownIo,
     prelude_done: bool,
 }
 
 impl ReplayIo {
-    fn new(prelude: Vec<u8>, sock: TcpStream) -> Self {
+    fn new(prelude: Vec<u8>, sock: super::ShutdownIo) -> Self {
         Self {
             prelude: io::Cursor::new(prelude),
             sock,
