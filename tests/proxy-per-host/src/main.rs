@@ -115,7 +115,10 @@ print(f"port={port} connected")"#;
     let prepared = match sandbox.prepare(CommandSpec::new("python3").args(["-c", script])) {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("retained proxy confined socket: preparation failed: {error}");
+            eprintln!(
+                "retained proxy confined socket: preparation failed, unavailable axes: {:?}",
+                error.lost
+            );
             return false;
         }
     };
