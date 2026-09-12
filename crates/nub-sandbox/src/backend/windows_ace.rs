@@ -677,6 +677,10 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
 
     grant_persistent(&station_object, sid.0)?;
     grant_persistent(&desktop_object, sid.0)?;
+    // A journal entry owns only its AppContainer SID.  The recovery must retain this independent
+    // principal even though it shares both old objects with the journaled grant.
+    grant_window_object(station_guard.raw, "S-1-15-2-2", WINSTA_GRANT)?;
+    grant_window_object(desktop_guard.raw, "S-1-15-2-2", DESKTOP_GRANT)?;
     revoke_persistent(&desktop_object, sid.0)?;
     revoke_persistent(&station_object, sid.0)?;
 
@@ -686,15 +690,17 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
     let desktop = open_recorded(&desktop_object)?.expect("test desktop disappeared");
     let station_removed = !window_object_has_sid(station.raw, "S-1-15-2-1")?;
     let desktop_removed = !window_object_has_sid(desktop.raw, "S-1-15-2-1")?;
+    let foreign_station_retained = window_object_has_sid(station.raw, "S-1-15-2-2")?;
+    let foreign_desktop_retained = window_object_has_sid(desktop.raw, "S-1-15-2-2")?;
     drop(desktop);
     drop(station);
     drop(desktop_guard);
     drop(station_guard);
-    if station_removed && desktop_removed {
+    if station_removed && desktop_removed && foreign_station_retained && foreign_desktop_retained {
         Ok(())
     } else {
         Err(io::Error::other(
-            "cleanup retained an ACE on a non-current window object",
+            "cleanup did not strip only its ACE from non-current window objects",
         ))
     }
 }
