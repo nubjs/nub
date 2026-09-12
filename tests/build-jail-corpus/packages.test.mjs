@@ -16,13 +16,13 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from 'node:path';
 const mode = process.env.FIXTURE_MODE;
 const name = process.env.CORPUS_CASE;
-const version = name === 'esbuild' ? '0.24.0' : '0.0.10';
+const version = name === 'esbuild' ? '0.24.0' : name === 'better-sqlite3' ? '11.8.1' : '0.0.10';
 const record = (kind, cwd, args) => appendFileSync(process.env.FIXTURE_EVENTS, JSON.stringify({kind, cwd, args}) + '\\n');
 const tree = (cwd) => {
   const pkg = join(cwd, 'node_modules', name);
   mkdirSync(pkg, { recursive: true });
   writeFileSync(join(pkg, 'package.json'), JSON.stringify({name, version}));
-  if (name === 'cpu-features') {
+  if (name === 'cpu-features' || name === 'better-sqlite3') {
     const jailed = JSON.parse(readFileSync(join(cwd, 'nub.jsonc'))).install.buildJail;
     mkdirSync(join(pkg, 'build'), { recursive: true });
     const variables = { ...process.config.variables };
@@ -58,6 +58,9 @@ cp.spawnSync = (file, args, options) => {
     assert.equal(readFileSync(join(cwd, 'pnpm-lock.yaml'), 'utf8'), 'frozen fixture lock');
     assert.ok(!existsSync(join(cwd, 'node_modules')), 'lifecycle materialization starts cold');
     tree(cwd);
+    if (mode === 'missing-prebuild-bin' && JSON.parse(readFileSync(join(cwd, 'nub.jsonc'))).install.buildJail) {
+      return ok("Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:/cache/store/v1/prebuild-install@7.1.3/node_modules/prebuild-install/bin.js'\\ngyp info ok");
+    }
     return ok('JAILDUMP pkg=Some("' + name + '") running without the build sandbox gyp info using node-gyp@12.4.0');
   }
   if (args[0] === process.env.CORPUS_OSV_SCREEN) {
@@ -138,6 +141,15 @@ test('source builds preserve runtime compiler settings before loading artifacts'
   const result = run(t, 'ok', true, 'cpu-features');
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.events.filter(e => e.kind === 'probe').length, 2);
+});
+
+test('missing prebuild bin fails even when source-build fallback returns success', t => {
+  const result = run(t, 'missing-prebuild-bin', true, 'better-sqlite3');
+  assert.notEqual(result.status, 0);
+  assert.equal(result.events.filter(e => e.kind === 'probe').length, 2, 'only default and source-build controls reach artifact probes');
+  const verdicts = JSON.parse(readFileSync(join(result.report, 'results.json')));
+  assert.deepEqual(verdicts.map(v => v.pass), [true, false, true, false]);
+  for (const verdict of verdicts.filter(v => !v.pass)) assert.match(verdict.error, /prebuild-install resolves/);
 });
 
 for (const mode of ['changed-gyp-config', 'missing-gyp-config']) {

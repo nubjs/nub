@@ -139,6 +139,7 @@ for (const [name, version, probe, source = false] of selected) {
     try {
       assert.ifError(install.error);
       assert.equal(install.status, 0, 'install succeeded');
+      assert.doesNotMatch(log, /Cannot find module ['"][^'"\r\n]*prebuild-install[^'"\r\n]*[\\/]bin\.js['"]/, 'prebuild-install resolves before any source-build fallback');
       if (screen) {
         const bound = spawnSync(process.execPath, [screen, '--tree', project, '--kind', `catalog-sanity-${label}-bound`, '--cache-dir', join(screenRoot, 'clearances'), '--out', join(base, 'bound-screen.json')], { env, encoding: 'utf8', timeout: 300_000 });
         writeFileSync(join(base, 'bound-screen.log'), `${bound.stdout}\n${bound.stderr}`);
