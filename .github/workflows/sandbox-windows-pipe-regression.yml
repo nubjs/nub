@@ -50,10 +50,12 @@ jobs:
           $fixture = (git rev-parse HEAD).Trim()
           $candidateRoot = Join-Path $env:RUNNER_TEMP 'nub-pipe-candidate'
           git worktree add --detach $candidateRoot $candidate
-          git -C $candidateRoot cherry-pick $fixture
+          $fixtures = @(git rev-list --reverse "748c22aa93225eb1b59894fc9dea691e977267fc..$fixture")
+          git -C $candidateRoot cherry-pick @fixtures
           New-Item -ItemType Directory -Force reports | Out-Null
           @{ fixtureCommit = $fixture; baseCommit = '748c22aa93225eb1b59894fc9dea691e977267fc';
-             candidateCommit = $candidate; candidateFixtureCommit = (git -C $candidateRoot rev-parse HEAD).Trim() } |
+             fixtureCommits = $fixtures; candidateCommit = $candidate;
+             candidateFixtureCommit = (git -C $candidateRoot rev-parse HEAD).Trim() } |
             ConvertTo-Json | Set-Content reports/revisions.json
       - name: Building and exercising both revisions
         id: regression
