@@ -1074,10 +1074,9 @@ fn interpreter_launch_block(prog: &str, rel_target_fwdslash: &str) -> String {
 /// Marker the POSIX shim writer stamps into every generated file so
 /// [`parse_posix_shim_target`] can unambiguously identify our shims and
 /// recover the `$basedir`-relative target path on uninstall. Any format
-/// change here must bump the version suffix so older shims stop being
-/// recognized (forcing a reinstall) rather than being silently
-/// misparsed.
-pub const POSIX_SHIM_MARKER_PREFIX: &str = "# aube-bin-shim v2 target=";
+/// change here must bump the version suffix. Decoders retain known older
+/// semantics rather than reinterpret already-installed wrappers.
+pub const POSIX_SHIM_MARKER_PREFIX: &str = "# aube-bin-shim v3 target=";
 
 /// Resolve the invoked shim through absolute and relative symlink hops before
 /// deriving `$basedir`. The 40-hop cap matches the Linux kernel's `ELOOP`
@@ -1134,15 +1133,21 @@ fn generate_posix_shim(
 }
 
 /// Recover the `$basedir`-relative target embedded by
-/// [`generate_posix_shim`]. Returns `None` for any content that lacks
-/// the [`POSIX_SHIM_MARKER_PREFIX`] marker — including shims written by
-/// other tools and older aube versions if the marker is ever bumped.
+/// [`generate_posix_shim`]. Recognizes current and lexical-basedir v2
+/// markers; returns `None` for other content.
 /// Lives in this module so the format contract stays in one file with
 /// its writer.
 pub fn parse_posix_shim_target(content: &str) -> Option<&str> {
+    parse_posix_shim(content).map(|(_, target)| target)
+}
+
+fn parse_posix_shim(content: &str) -> Option<(BinShimStyle, &str)> {
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix(POSIX_SHIM_MARKER_PREFIX) {
-            return Some(rest);
+            return Some((BinShimStyle::Posix, rest));
+        }
+        if let Some(rest) = line.strip_prefix("# aube-bin-shim v2 target=") {
+            return Some((BinShimStyle::LegacyPosix, rest));
         }
     }
     None
@@ -1156,6 +1161,7 @@ const MAX_BIN_SHIM_BYTES: u64 = 64 * 1024;
 #[derive(Clone, Copy)]
 enum BinShimStyle {
     Posix,
+    LegacyPosix,
     Cmd,
 }
 
@@ -1185,9 +1191,9 @@ pub fn resolve_bin_shim(path: &Path) -> io::Result<Option<ResolvedBinShim>> {
         return Ok(None);
     };
 
-    let parsed = if let Some(target) = parse_posix_shim_target(content) {
+    let parsed = if let Some((style, target)) = parse_posix_shim(content) {
         Some((
-            BinShimStyle::Posix,
+            style,
             target,
             content.lines().find_map(|line| {
                 line.strip_prefix("export NODE_PATH=\"")
@@ -1213,7 +1219,7 @@ pub fn resolve_bin_shim(path: &Path) -> io::Result<Option<ResolvedBinShim>> {
     #[cfg(unix)]
     let physical_parent = match style {
         BinShimStyle::Posix => std::fs::canonicalize(parent).ok(),
-        BinShimStyle::Cmd => None,
+        BinShimStyle::LegacyPosix | BinShimStyle::Cmd => None,
     };
     #[cfg(unix)]
     let parent = physical_parent.as_deref().unwrap_or(parent);
@@ -1290,7 +1296,7 @@ fn resolve_shim_relative_path(
         return None;
     }
     let relative = match style {
-        BinShimStyle::Posix => relative.to_string(),
+        BinShimStyle::Posix | BinShimStyle::LegacyPosix => relative.to_string(),
         BinShimStyle::Cmd => relative.replace('\\', std::path::MAIN_SEPARATOR_STR),
     };
     Some(normalize_path(&parent.join(relative)))
@@ -1299,11 +1305,11 @@ fn resolve_shim_relative_path(
 fn resolve_shim_node_path(parent: &Path, value: &str, style: BinShimStyle) -> Option<OsString> {
     // Windows extensionless shims use a semicolon-delimited NODE_PATH even
     // though their shell syntax otherwise resembles the POSIX wrapper.
-    if matches!(style, BinShimStyle::Posix) && value.contains(';') {
+    if !matches!(style, BinShimStyle::Cmd) && value.contains(';') {
         return None;
     }
     let (separator, prefix) = match style {
-        BinShimStyle::Posix => (':', "$basedir/"),
+        BinShimStyle::Posix | BinShimStyle::LegacyPosix => (':', "$basedir/"),
         BinShimStyle::Cmd => (';', "%~dp0"),
     };
     let paths = value
@@ -2309,7 +2315,7 @@ mod tests {
         let body = std::fs::read_to_string(&shim).unwrap();
         assert!(
             body.contains(
-                "# aube-bin-shim v2 target=../../../dep@1.0.0-bbbbbbbb/node_modules/dep/bin/dep"
+                "# aube-bin-shim v3 target=../../../dep@1.0.0-bbbbbbbb/node_modules/dep/bin/dep"
             ),
             "wrapper must be relative to its physical GVS directory:\n{body}"
         );
@@ -2588,6 +2594,39 @@ mod tests {
                 ])
                 .unwrap()
             )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_bin_shim_keeps_legacy_v2_paths_lexical_below_directory_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let physical = dir.path().join("store/host-hash/node_modules/.bin");
+        std::fs::create_dir_all(&physical).unwrap();
+        let surface = dir.path().join("project/node_modules/.store");
+        let target = surface.join("dep/bin.js");
+        let hidden = surface.join("node_modules");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(&target, "console.log('legacy');\n").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("store/host-hash"), surface.join("host"))
+            .unwrap();
+        let shim = surface.join("host/node_modules/.bin/tool");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\n\
+             # aube-bin-shim v2 target=../../../dep/bin.js\n\
+             basedir=$(dirname \"$0\")\n\
+             export NODE_PATH=\"$basedir/../../../node_modules\"\n\
+             exec node \"$basedir/../../../dep/bin.js\" \"$@\"\n",
+        )
+        .unwrap();
+        let decoded = resolve_bin_shim(&shim).unwrap().unwrap();
+        assert_eq!(decoded.target, target);
+        assert!(decoded.target.is_file());
+        assert_eq!(
+            decoded.node_path,
+            Some(std::env::join_paths([hidden]).unwrap())
         );
     }
 
