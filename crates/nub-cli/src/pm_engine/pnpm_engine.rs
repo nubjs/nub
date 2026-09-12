@@ -13,7 +13,16 @@ use anyhow::Result;
 use pnpm_config::Embedder;
 
 /// nub's naming for the files and directories the engine owns.
-const NUB: Embedder = Embedder { lockfile_basename: "nub.lock", virtual_store_dirname: ".store" };
+const NUB: Embedder = Embedder {
+    program_name: "nub",
+    program_version: env!("CARGO_PKG_VERSION"),
+    // nub provisions Node and pins its own version; the engine must not act
+    // on a packageManager pin or a devEngines.runtime entry on its behalf.
+    manage_package_manager_versions: false,
+    manage_runtimes: false,
+    lockfile_basename: "nub.lock",
+    virtual_store_dirname: ".store",
+};
 
 /// The engine profile selected for this invocation, if any.
 fn selected_profile() -> Option<Embedder> {
@@ -29,13 +38,29 @@ pub(crate) fn selected() -> bool {
     selected_profile().is_some()
 }
 
+/// Rebrand the engine's diagnostic codes for nub's users.
+///
+/// The engine declares ~800 `ERR_PNPM_*` codes as compile-time attributes,
+/// and two of its own code paths compare those strings literally, so the
+/// rename happens here, on the rendered report, rather than where the codes
+/// are constructed.
+fn rebrand_codes(rendered: &str) -> String {
+    rendered.replace("ERR_PNPM_", "ERR_NUB_").replace("WARN_PNPM_", "WARN_NUB_")
+}
+
 /// Run the engine on the process argv and return its exit status.
 pub(crate) fn run_process_argv() -> Result<i32> {
     let embedder = selected_profile().unwrap_or(Embedder::PNPM);
     match pnpm_cli::run(std::env::args_os().collect(), embedder) {
         Ok(()) => Ok(0),
         Err(report) => {
-            eprintln!("{report:?}");
+            let rendered = format!("{report:?}");
+            // A pnpm-incumbent project must see pnpm's own codes verbatim.
+            if embedder.program_name == Embedder::PNPM.program_name {
+                eprintln!("{rendered}");
+            } else {
+                eprintln!("{}", rebrand_codes(&rendered));
+            }
             Ok(1)
         }
     }
