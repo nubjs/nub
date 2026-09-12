@@ -20,6 +20,10 @@ const NUB: Embedder = Embedder {
     // on a packageManager pin or a devEngines.runtime entry on its behalf.
     manage_package_manager_versions: false,
     manage_runtimes: false,
+    // nub-incumbent projects declare their members in `package.json`, the
+    // neutral spelling every package manager reads; nub writes no
+    // `pnpm-workspace.yaml`.
+    workspaces_from_package_manifest: true,
     lockfile_basename: "nub.lock",
     virtual_store_dirname: ".store",
 };
