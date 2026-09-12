@@ -5,7 +5,7 @@ mod tool_msys;
 #[path = "common/tool_output.rs"]
 mod tool_output;
 
-use nub_sandbox::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
+use nub_sandbox::{compile, CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -56,9 +56,16 @@ fn msys_preserves_native_arguments_and_denied_file_paths() {
         "/not-a-native-path",
     ];
     for confined in [false, true] {
+        let executions = project.join(if confined {
+            "embedded-native-executions"
+        } else {
+            "unconfined-executions"
+        });
+        std::fs::create_dir(&executions).unwrap();
         let source = format!(
-            "const fs=require('fs');let denied=false;try{{fs.readFileSync({})}}catch(e){{if(!['EACCES','EPERM'].includes(e.code))throw e;denied=true}};console.log(JSON.stringify({{args:process.argv.slice(1),denied}}))",
-            serde_json::to_string(&canary).unwrap()
+            "const fs=require('fs');fs.writeFileSync(require('path').join({},process.pid+'.txt'),'one native execution');let denied=false;try{{fs.readFileSync({})}}catch(e){{if(!['EACCES','EPERM'].includes(e.code))throw e;denied=true}};console.log(JSON.stringify({{args:process.argv.slice(1),denied}}))",
+            serde_json::to_string(&executions).unwrap(),
+            serde_json::to_string(&canary).unwrap(),
         );
         let args = ["-e".to_owned(), source]
             .into_iter()
@@ -92,6 +99,17 @@ fn msys_preserves_native_arguments_and_denied_file_paths() {
         assert!(output.status.success(), "confined={confined}: {output:?}");
         let observed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(observed, json!({"args": expected, "denied": confined}));
+        let executions: Vec<_> = std::fs::read_dir(&executions)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let mode = if confined {
+            "embedded-native-adapter"
+        } else {
+            "unconfined"
+        };
+        eprintln!("MSYS_CONTRACT mode={mode} executions={executions:?}");
+        assert_eq!(executions.len(), 1, "confined={confined}: {executions:?}");
     }
     nub_sandbox::cleanup().unwrap();
 }

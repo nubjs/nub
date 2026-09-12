@@ -1,0 +1,135 @@
+name: Windows native MSYS reconciliation
+
+on:
+  push:
+    branches: [windows-native-reconcile]
+    paths:
+      - crates/nub-sandbox/**
+      - tests/sandbox-native-adapter/prepare-msys-aslr.ps1
+      - .github/workflows/sandbox-windows-native-reconcile.yml
+
+permissions:
+  contents: read
+
+jobs:
+  msys-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_OVERRIDE_HOST_TRIPLE: x86_64-pc-windows-msvc
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      RUSTFLAGS: -C target-feature=+crt-static
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: sandbox-msys-reconcile-${{ matrix.target }}
+          cache-on-failure: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.18.0'
+      - name: Recording candidate bindings
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports | Out-Null
+          git rev-parse HEAD | Set-Content reports/source-sha.txt
+          Get-FileHash .github/workflows/sandbox-windows-native-reconcile.yml -Algorithm SHA256 |
+            Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content reports/workflow-sha.json
+          @{ runner = $env:RUNNER_OS; architecture = $env:RUNNER_ARCH; rustc = (& rustc -Vv); node = (& node --version) } |
+            ConvertTo-Json | Set-Content reports/environment.json
+      - name: Building the exact MSYS contract artifact
+        id: compile
+        run: |
+          set -o pipefail
+          cargo clippy -p nub-sandbox --profile fast --all-targets --all-features -- -D warnings 2>&1 | tee reports/clippy.log
+          cargo test -p nub-sandbox --profile fast --test production_readiness_shell --no-run --message-format=json-render-diagnostics > reports/test-artifacts.jsonl
+      - name: Preparing the disposable all-images MSYS copy
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $gitExec = (& git --exec-path).Trim()
+          $source = Split-Path (Split-Path (Split-Path $gitExec))
+          & ./tests/sandbox-native-adapter/prepare-msys-aslr.ps1 -SourceRoot $source -IncludeExecutables
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path "$env:NUB_NATIVE_DYNAMICBASE_ALLIMAGES_GIT/usr/bin/bash.exe")) {
+            throw 'Disposable all-images MSYS Bash is missing'
+          }
+      - name: Discriminating installed and disposable MSYS contracts
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $artifacts = Get-Content reports/test-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
+          $test = @($artifacts | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'production_readiness_shell' -and $_.executable
+          })
+          if ($test.Count -ne 1) { throw "Expected one exact MSYS contract binary, got $($test.Count)" }
+          if (!(Test-Path $test[0].executable)) { throw "Missing contract binary: $($test[0].executable)" }
+          $binary = Get-FileHash $test[0].executable -Algorithm SHA256
+          @{ source = (Get-Content reports/source-sha.txt -Raw).Trim(); executable = $test[0].executable;
+             executableSha256 = $binary.Hash; target = '${{ matrix.target }}' } |
+            ConvertTo-Json | Set-Content reports/msys-contract-artifact.json
+
+          $gitExec = (& git --exec-path).Trim()
+          $installed = Split-Path (Split-Path (Split-Path $gitExec))
+          $copied = $env:NUB_NATIVE_DYNAMICBASE_ALLIMAGES_GIT
+          if (!(Test-Path "$installed/usr/bin/bash.exe") -or !(Test-Path "$copied/usr/bin/bash.exe")) {
+            throw 'Installed or disposable MSYS Bash is missing'
+          }
+          Get-FileHash "$installed/usr/bin/msys-2.0.dll", "$installed/usr/bin/bash.exe", "$installed/cmd/git.exe",
+                       "$copied/usr/bin/msys-2.0.dll", "$copied/usr/bin/bash.exe", "$copied/cmd/git.exe" -Algorithm SHA256 |
+            Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content reports/msys-image-hashes.json
+
+          $originalPath = $env:PATH
+          $results = @()
+          foreach ($case in @(
+            @{ name = 'installed'; root = $installed },
+            @{ name = 'disposable-dynamicbase-allimages'; root = $copied }
+          )) {
+            $env:NUB_SANDBOX_TOOL_MSYS_ROOT = $case.root
+            $env:PATH = "$($case.root)/cmd;$($case.root)/mingw64/bin;$($case.root)/usr/bin;$originalPath"
+            & $test[0].executable --ignored --exact msys_preserves_native_arguments_and_denied_file_paths --nocapture --test-threads=1 *>
+              "reports/msys-contract-$($case.name).log"
+            $exit = $LASTEXITCODE
+            $log = "reports/msys-contract-$($case.name).log"
+            $unconfined = (Select-String -Path $log -SimpleMatch 'MSYS_CONTRACT mode=unconfined executions=').Count -eq 1
+            $embedded = (Select-String -Path $log -SimpleMatch 'MSYS_CONTRACT mode=embedded-native-adapter executions=').Count -eq 1
+            $passed = (Select-String -Path $log -Pattern 'test result: ok\. 1 passed').Count -eq 1
+            $results += @{ mode = $case.name; root = $case.root; exit = $exit;
+              unconfined = $unconfined; embeddedNativeAdapter = $embedded; assertionsPassed = $passed }
+            Get-Content $log
+          }
+          $env:PATH = $originalPath
+          Remove-Item Env:NUB_SANDBOX_TOOL_MSYS_ROOT -ErrorAction SilentlyContinue
+          $results | ConvertTo-Json | Set-Content reports/msys-contract-results.json
+          if ($results | Where-Object {
+            $_.exit -ne 0 -or !$_.unconfined -or !$_.embeddedNativeAdapter -or !$_.assertionsPassed
+          }) { exit 1 }
+      - name: Rejecting an unbuilt or skipped discriminator
+        if: ${{ !cancelled() && steps.compile.outcome != 'success' }}
+        shell: pwsh
+        run: throw 'The MSYS discriminator did not run because its build or clippy gate failed'
+      - name: Preserving discriminator evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-msys-reconcile-${{ matrix.os }}
+          path: reports
