@@ -2,7 +2,7 @@ name: Sandbox datagram mediation
 
 on:
   push:
-    branches: [linux-datagram-mediation, sandbox-send-integration]
+    branches: [linux-datagram-mediation, sandbox-send-integration, linux-datagram-merged-repair]
     paths:
       - crates/nub-sandbox/src/backend/linux_supervisor.rs
       - crates/nub-sandbox/src/backend/mod.rs

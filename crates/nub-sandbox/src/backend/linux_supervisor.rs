@@ -2984,6 +2984,16 @@ mod lifecycle_tests {
         }
     }
 
+    /// This test owns the loopback listener and uses it as the one exact proxy endpoint the
+    /// production supervisor permits directly. It does not restore a general loopback grant.
+    fn loopback_proxy_endpoint_fixture_policy(port: u16) -> EgressPolicy {
+        EgressPolicy {
+            proxy_port: Some(port),
+            proxy_token: Some("fixture-only".to_string()),
+            ..policy("not-permitted.example")
+        }
+    }
+
     #[test]
     fn only_the_exact_v4_proxy_listener_skips_proxy_routing() {
         assert!(is_egress_proxy_endpoint(
@@ -3401,9 +3411,10 @@ mod lifecycle_tests {
             io::ErrorKind::WouldBlock
         );
 
-        // Fresh child-created sockets exercise the regular connected routes too: loopback TCP
-        // keeps its ordinary stream sendmsg behavior, and a port-53 UDP connect still reaches
-        // the resolver-bound path rather than being rejected as an addressed datagram.
+        // Fresh child-created sockets exercise the regular connected routes too. A raw loopback
+        // dial remains denied; the owned listener becomes the exact fixture proxy endpoint only
+        // for the positive stream/cancellation cases. The port-53 UDP child retains the normal
+        // deny policy and must still use the resolver-bound path.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let exe = std::env::current_exe().unwrap();
@@ -3420,8 +3431,30 @@ mod lifecycle_tests {
             ))
             .unwrap(),
         ];
-        let mut child = spawn_supervised(
+        let mut denied_child = spawn_supervised(
             policy("not-permitted.example"),
+            SupervisedLaunch {
+                argv: &argv,
+                envp: &tcp_env,
+                cwd: None,
+                ruleset_fd: -1,
+                seccomp_ceiling: None,
+                stdin: SupervisedStdio::Null,
+                stdout: SupervisedStdio::Null,
+                stderr: SupervisedStdio::Null,
+                inherited_fds: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(denied_child.wait().unwrap().code(), Some(92));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "the denied raw loopback dial must not reach the owned listener"
+        );
+
+        let mut child = spawn_supervised(
+            loopback_proxy_endpoint_fixture_policy(listener.local_addr().unwrap().port()),
             SupervisedLaunch {
                 argv: &argv,
                 envp: &tcp_env,
@@ -3490,7 +3523,7 @@ mod lifecycle_tests {
             .unwrap(),
         ];
         let mut child = spawn_supervised(
-            policy("not-permitted.example"),
+            loopback_proxy_endpoint_fixture_policy(listener.local_addr().unwrap().port()),
             SupervisedLaunch {
                 argv: &argv,
                 envp: &cancel_env,
