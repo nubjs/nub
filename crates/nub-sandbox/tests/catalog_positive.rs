@@ -60,8 +60,8 @@ fn declared_dependency_writes_follow_the_resolved_store_without_granting_sibling
     {
         let output = std::process::Command::new("cmd.exe")
             .args(["/d", "/c", "mklink", "/J"])
-            .arg(&link)
-            .arg(&declared)
+            .arg(link.to_string_lossy().replace('/', "\\"))
+            .arg(declared.to_string_lossy().replace('/', "\\"))
             .output()
             .unwrap();
         assert!(output.status.success(), "junction fixture: {output:?}");
