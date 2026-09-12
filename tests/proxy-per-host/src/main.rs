@@ -17,23 +17,40 @@
 use nub_sandbox::{
     apply, compile, CommandSpec, CompileCtx, Homes, SandboxPolicy, ScopeCapabilities,
 };
-use serde_json::{json, Value};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use serde_json::json;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 fn policy(surface: Value) -> SandboxPolicy {
+    let root = std::env::temp_dir();
     let homes = Homes {
-        home: "/tmp".into(),
-        tmp: "/tmp".into(),
-        cache: "/tmp".into(),
-        project: "/tmp".into(),
+        home: root.clone(),
+        tmp: root.clone(),
+        cache: root.clone(),
+        project: root.clone(),
     };
     let mut env = BTreeMap::new();
-    for key in ["PATH", "HOME"] {
+    // The Windows co-package helper receives the compiled environment rather than the parent
+    // environment. Keep only OS startup roots in this fixture; no secret-bearing ambient values
+    // are relevant to the proxy contract.
+    for key in [
+        "PATH",
+        "HOME",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+        "ComSpec",
+    ] {
         if let Ok(value) = std::env::var(key) {
             env.insert(key.to_string(), value);
         }
     }
-    let ctx = CompileCtx::new(homes, "/tmp".into(), ScopeCapabilities::approved(), env);
+    let ctx = CompileCtx::new(homes, root, ScopeCapabilities::approved(), env);
     compile(&surface, &ctx).expect("compile net policy")
 }
 
@@ -111,13 +128,77 @@ fn run() -> bool {
     coop_allow == 0 && coop_deny != 0 && noncoop_deny != 0 && noncoop_allow != 0 && noncoop_ip != 0
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn windows_curl(label: &str, policy: &SandboxPolicy, noproxy: bool, url: &str) -> i32 {
+    let mut spec = CommandSpec::new(r"C:\Windows\System32\curl.exe")
+        .args([
+            "-4",
+            "-sS",
+            "-o",
+            "NUL",
+            "--connect-timeout",
+            "8",
+            "--max-time",
+            "20",
+        ])
+        .cwd(r"C:\Windows\System32");
+    if noproxy {
+        spec = spec.args(["--noproxy", "*"]);
+    }
+    spec = spec.arg(url);
+    eprintln!(">>> {label}: curl {url} (noproxy={noproxy})");
+    let code = apply(policy, spec)
+        .expect("apply Windows host-filter policy with registered helper")
+        .status()
+        .expect("run confined Windows curl")
+        .code()
+        .unwrap_or(-1);
+    eprintln!("<<< {label}: exited {code}");
+    code
+}
+
+#[cfg(target_os = "windows")]
 fn run() -> bool {
-    eprintln!("per-host egress enforcement is Linux/macOS-only");
+    // Mirror the nub-cli embedder: the helper is this co-package binary's hidden re-entry. The
+    // same executable serves the proxy below, so this probes the actual registered-helper path
+    // rather than the library's intentionally fail-closed unregistered state.
+    nub_sandbox::set_windows_egress_helper_command(vec![
+        std::env::current_exe()
+            .expect("current proxy probe executable")
+            .into_os_string(),
+        "--windows-egress-helper".into(),
+    ]);
+    // Keep the filesystem axis relaxed so a failed curl cannot be misattributed to an absent file
+    // grant. The network axis is still an AppContainer funnel: the command has no Internet
+    // capability and can reach egress only through the same-SID helper's injected proxy.
+    let allow = policy(json!({ "fs": false, "net": ["example.com"] }));
+    let coop_allow = windows_curl("coop-allow  ", &allow, false, "https://example.com/");
+    let coop_deny = windows_curl("coop-deny   ", &allow, false, "https://www.google.com/");
+    // These deliberately ignore the helper-injected proxy environment. An allowlisted hostname
+    // still must not direct-dial, and an IP literal has no host rule to admit it.
+    let noncoop_allow = windows_curl("noncoop-allw", &allow, true, "https://example.com/");
+    let noncoop_ip = windows_curl("noncoop-ip  ", &allow, true, "https://1.1.1.1/");
+    println!();
+    println!("1 coop-allow   (helper proxy, GET example.com)  -> exit={coop_allow}   [want 0]");
+    println!("2 coop-deny    (helper proxy, GET google)       -> exit={coop_deny}   [want != 0]");
+    println!(
+        "3 noncoop-allw (--noproxy, GET example.com)    -> exit={noncoop_allow}   [want != 0]"
+    );
+    println!("4 noncoop-ip   (--noproxy, GET 1.1.1.1)         -> exit={noncoop_ip}   [want != 0]");
+    coop_allow == 0 && coop_deny != 0 && noncoop_allow != 0 && noncoop_ip != 0
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn run() -> bool {
+    eprintln!("per-host egress enforcement is unsupported on this OS");
     true
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    if std::env::args().nth(1).as_deref() == Some("--windows-egress-helper") {
+        nub_sandbox::serve_windows_egress_helper();
+    }
     let pass = run();
     println!("RESULT: {}", if pass { "PASS" } else { "FAIL" });
     std::process::exit(if pass { 0 } else { 1 });
