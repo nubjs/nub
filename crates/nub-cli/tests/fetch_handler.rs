@@ -18,6 +18,13 @@
 //! runs a fixture that another test proves does get served, so a green absence means
 //! the exclusion held rather than that the feature was never wired. Measured with the
 //! installer stubbed out: fifteen of these go red, and exactly those three stay green.
+//!
+//! One invariant this file deliberately does NOT test: that the detection pass never
+//! evaluates the entry ahead of the user's preloads. It cannot be tested here, because
+//! the ordering only becomes racy on the tier where nub's preload is itself an
+//! `--import`, so a single-Node run passes structurally whatever the code does.
+//! `version_tiers::cjs_preload_runs_once_after_hooks_on_both_tiers` is the guard —
+//! it runs the tier matrix, and it is what caught the regression.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
