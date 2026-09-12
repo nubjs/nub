@@ -2040,21 +2040,36 @@ function closeEntryChannel(entry) {
 // front of that application? An env-owner loader or a configured `prefix` runs
 // BEFORE Node in the spawn chain, and a Node-based one (`varlock` is a
 // `#!/usr/bin/env node` script) inherits nub's NODE_OPTIONS and so runs this very
-// preload; a bare flag was consumed there and never reached the application. The
-// marker carries the launcher's argv instead, and Node has already `path.resolve`d
-// `argv[1]` by the time a preload runs, so the same call over each token is an
-// exact test — no second resolver, and no path spelling Rust and Node could
-// disagree on. A wrapper's own `argv[1]` is its bin, which no launcher token names,
-// so it leaves the marker in place for its child. The raw comparison covers `-`
-// (stdin), which Node does not expand. No `argv[1]` at all — `-e`, the REPL — is
-// nothing to serve and nothing to forward, so it counts as this process and the
-// caller deletes the marker.
+// preload; a bare flag was consumed there and never reached the application.
+//
+// The marker carries the launcher's argv instead — Node flags, the entry, then the
+// application's arguments — and the application is the process whose own argv IS
+// that list from the entry on: `argv[1]` resolves to one token, and everything after
+// it is `argv.slice(2)` verbatim, since Node stops parsing at the entry and passes
+// the rest through untouched. Which token is the entry is not something Rust can
+// name (`nub --require x server.mjs` puts `x` first), but the tail length pins it
+// to exactly one position, so no other token is ever a candidate. That is what
+// keeps an argument from impersonating the entry: `nub server.mjs
+// node_modules/.bin/varlock` would otherwise let the wrapper — whose `argv[1]` IS
+// that bin — claim the marker and starve the application of it. A wrapper is
+// always handed the command it runs, so its argv tail is longer than the marker's
+// and the equality can never hold there.
+//
+// Node has already `path.resolve`d `argv[1]` by the time a preload runs, so the same
+// call is an exact test — no second resolver, and no path spelling Rust and Node
+// could disagree on. The raw comparison covers `-` (stdin), which Node does not
+// expand. No `argv[1]` at all — `-e`, the REPL — is nothing to serve and nothing to
+// forward, so it counts as this process and the caller deletes the marker.
 function markedEntryIsThisProcess(marker) {
   const main = process.argv[1];
   if (typeof main !== "string") return true;
-  return marker
-    .split(SERVE_ENTRY_SEPARATOR)
-    .some((token) => token !== "" && (token === main || pathResolve(token) === main));
+  const tokens = marker.split(SERVE_ENTRY_SEPARATOR);
+  const rest = process.argv.slice(2);
+  const at = tokens.length - rest.length - 1;
+  if (at < 0) return false;
+  const entry = tokens[at];
+  if (entry === "" || (entry !== main && pathResolve(entry) !== main)) return false;
+  return rest.every((arg, i) => arg === tokens[at + 1 + i]);
 }
 
 // Could a preload still run after nub's own? True whenever an `--import`/`--loader`

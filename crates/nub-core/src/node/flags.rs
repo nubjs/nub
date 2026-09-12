@@ -287,11 +287,14 @@ pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 /// (`varlock` is a `#!/usr/bin/env node` script) inherits nub's `NODE_OPTIONS` and
 /// so runs this preload itself. A bare flag was consumed there, by the wrapper, and
 /// the application it then launched never saw it. Carrying the argv lets the
-/// preload tell which process it is in: Node has already `path.resolve`d `argv[1]`
-/// by the time a preload runs, so the process whose `argv[1]` one of these tokens
-/// resolves to is the application, and every other one leaves the marker in place
-/// for its child. Rust names no token as THE entry — `nub --require x server.mjs`
-/// puts `x` first — because Node is the one that knows which one it picked.
+/// preload tell which process it is in: the application is the one whose own argv
+/// IS this list from the entry on — Node has already `path.resolve`d `argv[1]` by
+/// the time a preload runs, and everything after the entry reaches `process.argv`
+/// verbatim — and every other process leaves the marker in place for its child.
+/// Rust names no token as THE entry — `nub --require x server.mjs` puts `x` first —
+/// because Node is the one that knows which one it picked; the preload matches the
+/// whole tail rather than any one token, so an argument that happens to name the
+/// wrapper's own bin cannot make the wrapper claim it.
 ///
 /// The application's preload DELETES it before user code runs, which is what keeps
 /// one listener per launch: a `child_process` spawn or a `Worker` copies

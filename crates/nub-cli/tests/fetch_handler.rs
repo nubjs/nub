@@ -17,7 +17,7 @@
 //! cannot fail on its own. Their positive control is the rest of this file: each one
 //! runs a fixture that another test proves does get served, so a green absence means
 //! the exclusion held rather than that the feature was never wired. Measured with the
-//! installer stubbed out: seventeen of these go red, and exactly those three stay green.
+//! installer stubbed out: nineteen of these go red, and exactly those three stay green.
 //!
 //! One invariant this file deliberately does NOT test: that the detection pass never
 //! evaluates the entry ahead of the user's preloads. It cannot be tested here, because
@@ -614,6 +614,24 @@ fn a_watched_handler_behind_an_env_owner_loader_is_served() {
         &["watch", "server.mjs"],
         &[],
         "behind the loader, watched",
+    );
+    assert_eq!(get(&s, "/").body, "FROM_LOADER=yes");
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Only the entry identifies the application. An argument that happens to name the
+/// loader's own bin is just an argument: the loader — whose `argv[1]` IS that bin —
+/// must leave the signal for the application rather than claim it on that match.
+#[cfg(unix)]
+#[test]
+fn an_argument_naming_the_wrapper_does_not_consume_the_signal() {
+    let dir = wrapped_project("argv");
+    let s = launch(
+        &dir,
+        &["server.mjs", "node_modules/.bin/varlock"],
+        &[],
+        "behind the loader, naming it",
     );
     assert_eq!(get(&s, "/").body, "FROM_LOADER=yes");
     drop(s);
