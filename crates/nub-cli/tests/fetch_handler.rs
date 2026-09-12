@@ -620,22 +620,29 @@ fn a_watched_handler_behind_an_env_owner_loader_is_served() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Only the entry identifies the application. An argument that happens to name the
-/// loader's own bin is just an argument: the loader — whose `argv[1]` IS that bin —
-/// must leave the signal for the application rather than claim it on that match.
+/// Only the entry identifies the application, and an application argument is just
+/// an argument, whatever it holds. One that names the loader's own bin must not let
+/// the loader — whose `argv[1]` IS that bin — claim the signal on that match; and
+/// one carrying a control byte must not split the signal's record of the argv, which
+/// once put the entry at the wrong position and served nothing.
 #[cfg(unix)]
 #[test]
-fn an_argument_naming_the_wrapper_does_not_consume_the_signal() {
-    let dir = wrapped_project("argv");
-    let s = launch(
-        &dir,
-        &["server.mjs", "node_modules/.bin/varlock"],
-        &[],
-        "behind the loader, naming it",
-    );
-    assert_eq!(get(&s, "/").body, "FROM_LOADER=yes");
-    drop(s);
-    let _ = std::fs::remove_dir_all(&dir);
+fn an_application_argument_cannot_disturb_the_claim() {
+    for (tag, args) in [
+        ("argv", &["server.mjs", "node_modules/.bin/varlock"][..]),
+        ("bytes", &["server.mjs", "a\x1fb", "--", "c"][..]),
+    ] {
+        let dir = wrapped_project(tag);
+        let s = launch(
+            &dir,
+            args,
+            &[],
+            &format!("behind the loader, args {args:?}"),
+        );
+        assert_eq!(get(&s, "/").body, "FROM_LOADER=yes", "args {args:?}");
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // ── Address selection ───────────────────────────────────────────────

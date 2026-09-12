@@ -1880,11 +1880,10 @@ function installThreadpoolPolicy() {
 // it is gone, so a server entry that forks a worker pool does not hand every worker
 // its own listener — no `worker_threads` probe needed here to tell the realms apart.
 //
-// Its value is the launcher's argv, tokens joined by SERVE_ENTRY_SEPARATOR, and
-// that is what makes "the application's preload" a process this code can identify:
-// see `markedEntryIsThisProcess`.
+// Its value is the launcher's argv as a JSON array, and that is what makes "the
+// application's preload" a process this code can identify: see
+// `markedEntryIsThisProcess`.
 const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
-const SERVE_ENTRY_SEPARATOR = "\x1f";
 
 // The entry this process was marked to serve, from `claimServeEntry` on: the file as
 // Node resolved it, the URLs a load hook may see it under, whether a preload may
@@ -2068,13 +2067,31 @@ function closeEntryChannel(entry) {
 function markedEntryIsThisProcess(marker) {
   const main = process.argv[1];
   if (typeof main !== "string") return true;
-  const tokens = marker.split(SERVE_ENTRY_SEPARATOR);
+  const tokens = markerTokens(marker);
+  if (tokens === null) return false;
   const rest = process.argv.slice(2);
   const at = tokens.length - rest.length - 1;
   if (at < 0) return false;
   const entry = tokens[at];
   if (entry === "" || (entry !== main && pathResolve(entry) !== main)) return false;
   return rest.every((arg, i) => arg === tokens[at + 1 + i]);
+}
+
+// The launcher's argv out of the marker, or null for a value nub did not write. A
+// JSON array rather than a joined string because an argument may hold any byte but
+// NUL: ASCII unit separator was the join once, and one inside an argument split it
+// in two and moved the entry off its position. A value that does not parse is left
+// alone and claims nothing.
+function markerTokens(marker) {
+  let tokens;
+  try {
+    tokens = JSON.parse(marker);
+  } catch {
+    return null;
+  }
+  return Array.isArray(tokens) && tokens.every((token) => typeof token === "string")
+    ? tokens
+    : null;
 }
 
 // Could a preload still run after nub's own? True whenever an `--import`/`--loader`

@@ -281,7 +281,7 @@ pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 /// the listener.
 ///
 /// The value is the launcher's own argv — every token handed to Node after nub's
-/// injected flags, joined by [`SERVE_ENTRY_SEPARATOR`] — and not a bare `1`,
+/// injected flags, as a JSON array ([`serve_entry_marker`]) — and not a bare `1`,
 /// because the process nub spawns is not always the application. An env-owner
 /// loader or a configured `prefix` sits in FRONT of Node, and a Node-based one
 /// (`varlock` is a `#!/usr/bin/env node` script) inherits nub's `NODE_OPTIONS` and
@@ -313,22 +313,14 @@ pub const SERVE_ENTRY_ENV: &str = "__NUB_SERVE_ENTRY";
 /// re-exec of the artifact by its own program.
 pub const COMPILED_SERVE_ENTRY_ENV: &str = "__NUB_COMPILED_SERVE_ENTRY";
 
-/// Joins the tokens of a [`SERVE_ENTRY_ENV`] value. ASCII unit separator: it cannot
-/// appear in an argument a shell hands over, and unlike JSON it has no failure mode
-/// to guard on the reading side.
-pub const SERVE_ENTRY_SEPARATOR: char = '\x1f';
-
 /// The [`SERVE_ENTRY_ENV`] value for a launch whose Node argv (after nub's own
-/// flags) is `tokens`.
+/// flags) is `tokens`: a JSON array of them. An argument may hold any byte but NUL,
+/// so no separator is safe to reserve — ASCII unit separator was, and Node hands it
+/// through `process.argv` unchanged, where it split one argument into two and moved
+/// the entry off its position.
 pub fn serve_entry_marker<'a>(tokens: impl IntoIterator<Item = &'a str>) -> String {
-    let mut value = String::new();
-    for (i, token) in tokens.into_iter().enumerate() {
-        if i > 0 {
-            value.push(SERVE_ENTRY_SEPARATOR);
-        }
-        value.push_str(token);
-    }
-    value
+    serde_json::to_string(&tokens.into_iter().collect::<Vec<_>>())
+        .expect("a list of strings serializes")
 }
 
 /// Internal child-process signal carrying the matrix's runtime V8 flags — the
