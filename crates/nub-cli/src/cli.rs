@@ -4718,6 +4718,18 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         );
     }
 
+    // Default-export `fetch` handler: let the preload's deferred pass serve an entry
+    // whose default export is one. A plain `nub <file>` only — a bin launch
+    // (`exec_ua`) is running somebody else's tool, and the `node` hijack has to keep
+    // `node <file>` meaning what `node` means, so a script's `node server.js` never
+    // binds a port while `nub server.js` does. See `flags::SERVE_ENTRY_ENV`.
+    if !compat_mode && !exec_ua && !NODE_HIJACK.load(Ordering::Relaxed) {
+        env_vars.insert(
+            nub_core::node::flags::SERVE_ENTRY_ENV.to_string(),
+            "1".to_string(),
+        );
+    }
+
     // Dep-check dedup across processes (#252): once this process owns the
     // decision, mark the spawned child so a hijack-descendant `node` (a worker a
     // test runner forks) skips re-checking and the warning appears at most once.
@@ -7322,6 +7334,14 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Default-export `fetch` handler, same signal the direct-spawn path sets. Node's
+    // watch supervisor re-execs the child with this environment, so a restart rebinds
+    // the listener — which is the whole point of watching a server. `nub watch` has no
+    // `--node` form to exclude (it refuses compat outright), so the resolved
+    // `nodeCompat` from the project config is the only opt-out to honor.
+    if !compat_mode {
+        cmd.env(nub_core::node::flags::SERVE_ENTRY_ENV, "1");
+    }
     // Tell the preload to hide nub's argv-only V8 flags from `process.execArgv`, the same
     // signal the direct-spawn path sets. Node's watch supervisor re-execs the child with
     // this environment, so it survives every restart.

@@ -22,7 +22,7 @@ const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
 const module_ = getBuiltin("node:module");
 const { readdirSync, existsSync } = getBuiltin("node:fs");
 const { fileURLToPath, pathToFileURL } = getBuiltin("node:url");
-const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
+const { join, dirname, extname: pathExtname, resolve: pathResolve } = getBuiltin("node:path");
 
 // Hide nub's ARGV-only V8 flags from `process.execArgv`, FIRST — before any user
 // code, and before anything here can hand the array out.
@@ -1863,6 +1863,107 @@ function installThreadpoolPolicy() {
 // should load it (no second NODE_OPTIONS token exists in that case). Absent when
 // the chainer got its own `--import` — loading it in both places would run the
 // user's entries twice.
+// ── Default-export `fetch` handler (the auto-listener) ───────────────
+// An entry whose default export is an object with a `fetch` method is served over
+// HTTP rather than merely evaluated — the handler shape Cloudflare Workers, Bun,
+// Deno (`deno serve`) and Vercel converge on, so the same file runs on all of them
+// and under `nub <file>`. The shape of the user's own module is the whole gate: a
+// file without it runs and exits byte-for-byte as it does on plain Node, which is
+// what keeps this additive.
+//
+// The launcher sets SERVE_ENTRY_ENV for a top-level `nub <file>` and `nub watch`
+// only (never `--node`, never a bin launch, never the `node` hijack), and this
+// function DELETES it before any user code runs. That delete is the whole
+// containment: a `child_process` spawn or a Worker copies `process.env` after it is
+// gone, so a server entry that forks a worker pool does not hand every worker its own
+// listener — no `worker_threads` probe needed here to tell the realms apart.
+const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
+
+function installServeEntry() {
+  if (!process.env[SERVE_ENTRY_ENV]) return;
+  delete process.env[SERVE_ENTRY_ENV];
+  // Deferred, because the entry has not been evaluated yet — the preload runs
+  // first, by construction. One `setImmediate` is enough for a CommonJS entry
+  // (`Module.runMain` is synchronous, so it has finished by the check phase); an ES
+  // module entry may still be mid-evaluation, which is why the resolution below
+  // awaits Node's own module job instead of assuming anything has landed.
+  // `.unref()` is deliberately NOT called: a synchronous script must still reach
+  // this pass, or a server whose module body does nothing asynchronous would exit
+  // before it could bind.
+  setImmediate(() => {
+    serveEntryIfHandler().catch(() => {
+      // An entry that threw has already been reported by Node as an uncaught
+      // error; re-surfacing our own view of it would double the report, and
+      // leaving this promise unhandled would itself change the exit path.
+    });
+  });
+}
+
+async function serveEntryIfHandler() {
+  const file = mainEntryPath();
+  if (!file) return;
+  const handler = fetchHandler(await entryDefaultExport(file));
+  if (!handler) return;
+  // Required only now, so an ordinary file run never loads node:http at all.
+  require("./fetch-serve.cjs").serve(handler);
+}
+
+// The entry as Node itself resolved it: `resolveMainPath` is `Module._findPath` over
+// the absolute `argv[1]` with `isMain` true, so deferring to the same call inherits
+// every main-specific behavior — extension and index probing, a directory's
+// package `main`, and `--preserve-symlinks-main` — instead of reimplementing a
+// second resolver that could name a different file than the one Node loaded.
+function mainEntryPath() {
+  const main = process.argv[1];
+  // Absent for `--eval`/`--print` and the REPL; `-` is stdin, which has no module
+  // identity to inspect.
+  if (typeof main !== "string" || main === "" || main === "-") return null;
+  try {
+    const found = module_._findPath(pathResolve(main), null, true);
+    return typeof found === "string" && found !== "" ? found : null;
+  } catch {
+    return null;
+  }
+}
+
+// A CommonJS entry is already on `process.mainModule`, fully evaluated, so its
+// exports need no module-loader round trip. Anything else — an ES module entry, or a
+// CommonJS one the ESM loader owns on the `--import` compat tier — is reached through
+// `import()`, which returns the job Node already created for that URL. So the entry
+// evaluates exactly once whichever of us gets there first, and the promise settles
+// only after the entry's own top-level await does.
+//
+// Getting there first would cost the entry its `isEntryPoint` flag, and with it
+// `import.meta.main`. It cannot happen on the fast tier, where the `--require` preload
+// is synchronous, so Node's own entry import runs in the same macrotask that scheduled
+// this callback and the check phase cannot interleave. The compat tier's `--import`
+// preload does await, but that tier is Node ≤ 22.14, which has no `import.meta.main`
+// to lose. Measured `true` on the fast tier and `undefined` on 20.19 and 22.14, which
+// is what plain Node reports on each.
+async function entryDefaultExport(file) {
+  const main = process.mainModule;
+  if (main && main.loaded && main.filename === file) return main.exports;
+  return (await import(pathToFileURL(file).href)).default;
+}
+
+// The handler object, or null when the default export is not one. A `.ts` or `.js`
+// entry that resolves as CommonJS carries `export default` as
+// `{ __esModule: true, default: … }` after transpilation, and Node's interop hands
+// that whole object over as the namespace `default` — so unwrap exactly one level of
+// it. A CommonJS entry written as `module.exports = { fetch }` needs no unwrapping
+// and is accepted as it stands.
+function fetchHandler(value) {
+  let handler = value;
+  if (isPlainish(handler) && handler.__esModule === true && isPlainish(handler.default)) {
+    handler = handler.default;
+  }
+  return isPlainish(handler) && typeof handler.fetch === "function" ? handler : null;
+}
+
+function isPlainish(value) {
+  return typeof value === "object" && value !== null;
+}
+
 function userPreloadChain() {
   try {
     const chain = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}").preloadChain;
@@ -1911,6 +2012,9 @@ module.exports = {
   restoreCompileCacheEnv,
   installCompiledChildProcess,
   reenableUserCompileCache,
+  installServeEntry,
+  // Exported for the unit test that asserts which default-export shapes are served.
+  fetchHandler,
   requireUserPreloadChain,
   importUserPreloadChain,
 };

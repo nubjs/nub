@@ -174,6 +174,12 @@ if (core.sweepDue()) {
   });
 }
 
+// ── Default-export `fetch` handler ──────────────────────────────────
+// Arms the deferred pass that serves an entry whose default export is a `fetch`
+// handler. Tier-independent — the same call sits in preload.cjs — and a no-op
+// unless the launcher marked this process a top-level file run.
+common.installServeEntry();
+
 // ── User preloads (`nub.jsonc` `preload`) ───────────────────────────
 // LAST, so the user's entries observe a fully-augmented realm — hooks installed,
 // polyfills in place. Awaited, so a top-level `await` inside an entry settles before

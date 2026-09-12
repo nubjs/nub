@@ -35,6 +35,11 @@ const RUNTIME_FILES = [
   "pnp-util.cjs",
   "floor-builtin.mjs",
   "cache-evict.mjs",
+  // Reachable only through preload-common.cjs's lazy require, which the
+  // launcher-only serve signal gates — but it IS in the relative-import graph,
+  // and the closure rule above is what keeps a future reachability change from
+  // shipping a tarball that resolves to nothing.
+  "fetch-serve.cjs",
 ];
 
 const args = process.argv.slice(2);

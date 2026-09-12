@@ -270,6 +270,14 @@ if (core && core.sweepDue()) {
   });
 }
 
+// ── Default-export `fetch` handler (BOTH branches above) ────────────
+// Arms the deferred pass that serves an entry whose default export is a `fetch`
+// handler. Tier-independent — the same call sits in preload.mjs — and a no-op
+// unless the launcher marked this process a top-level file run. Placed after the
+// tier branches so the shape check runs on either, and after the eviction block for
+// the same reason it is: nothing here may touch the bootstrap module list.
+common.installServeEntry();
+
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────
 // The two ESM side-effect polyfills — the browser-shape Worker global
 // (worker-polyfill.mjs) and Web Locks (navigator-locks.mjs) — were previously

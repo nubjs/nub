@@ -267,6 +267,24 @@ pub const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 /// plain-Node user would have seen. Plumbing, not a user-facing option.
 pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 
+/// Internal child-process signal marking a spawn as a TOP-LEVEL file run, so the
+/// preload's deferred pass may serve an entry whose default export is a `fetch`
+/// handler (`installServeEntry`, preload-common.cjs). Plumbing, not a user-facing
+/// option: the feature's real gate is the shape of the user's own default export.
+///
+/// Set only by the two launchers a user reaches by typing `nub` — the plain
+/// `nub <file>` run and `nub watch <file>`. Deliberately NOT set for a bin launch
+/// (`nubx`, `nub exec`), for `--node`/`NODE_COMPAT`, or for the `node` PATH hijack:
+/// binding a port is a visible behavior change, and `node <file>` has to keep
+/// meaning what `node` means even inside a subtree the user opted into. A script that
+/// runs `node server.js` therefore gets Node's behavior, while `nub server.js` gets
+/// the listener.
+///
+/// The preload DELETES it before user code runs, which is what keeps one listener per
+/// launch: a `child_process` spawn or a `Worker` copies `process.env` after the delete,
+/// so a server that forks a worker pool does not give every worker its own port.
+pub const SERVE_ENTRY_ENV: &str = "__NUB_SERVE_ENTRY";
+
 /// Internal child-process signal carrying the matrix's runtime V8 flags — the
 /// [`super::feature_matrix::Mitigation::RuntimeV8Flag`] rows — for the preload to turn
 /// on with `v8.setFlagsFromString` the first time it loads a module that needs one.
