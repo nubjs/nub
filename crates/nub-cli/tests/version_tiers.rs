@@ -172,6 +172,61 @@ fn run_nub_args_against_node(
     Some((stdout.join().unwrap(), stderr.join().unwrap(), code))
 }
 
+/// Like `run_nub_args_against_node` for a process that is not expected to exit — a
+/// server. Waits for a stderr line containing `needle` (or the deadline), kills the
+/// process, and hands back whether the line came and everything stdout said.
+fn run_nub_args_until(
+    want: (u32, u32, u32),
+    fixture: &str,
+    args: &[&str],
+    needle: &str,
+    deadline: Duration,
+) -> Option<(bool, String)> {
+    let bin_dir = find_node_bin_dir(want)?;
+    let fixture_path = fixtures_dir().join(fixture);
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing));
+    let new_path = std::env::join_paths(paths).expect("join PATH");
+
+    let mut child = Command::new(nub_binary())
+        .args(args)
+        .current_dir(&fixture_path)
+        .env("PATH", new_path)
+        .env("PORT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn nub");
+    let stdout = slurp(child.stdout.take().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    let started = Instant::now();
+    let seen = loop {
+        let left = deadline.saturating_sub(started.elapsed());
+        match rx.recv_timeout(left) {
+            Ok(line) if line.contains(needle) => break true,
+            Ok(_) => continue,
+            Err(_) => break false,
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    Some((seen, stdout.join().unwrap()))
+}
+
 fn slurp<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -1057,12 +1112,13 @@ fn esm_preload_awaits_a_macrotask_before_the_entry_on_both_tiers() {
 }
 
 /// A foreign resolve hook that rewrites the entry's URL — a cache-busting query, the
-/// shape a hot-reload loader adds — means nub's own hooks never see the entry under
-/// a URL they track, so the fetch-handler pass falls through to `beforeExit`. The
-/// channel the loader worker would have announced the entry on must not hold the
-/// process open meanwhile: a plain script under such a hook has to exit, on the
-/// tiers whose hooks run in that worker. It did not, once — a referenced port kept
-/// every such process alive for good.
+/// shape a hot-reload loader adds — must neither hold the process open nor run the
+/// entry twice, on the tiers whose hooks run in a loader worker. Both happened once:
+/// the port that worker announces the entry on was referenced while the pass waited
+/// for an announcement that never came, so a finished plain script never exited; and
+/// the pass then imported the entry by its plain file URL, which the hook — keyed on
+/// the entry having no parent — left alone, so the file evaluated a second time as
+/// a different module. The exact stdout is what catches the second one.
 #[test]
 fn a_foreign_hook_rewriting_the_entry_url_does_not_hold_the_process() {
     for want in [(22, 13, 0), (20, 11, 0)] {
@@ -1086,10 +1142,44 @@ fn a_foreign_hook_rewriting_the_entry_url_does_not_hold_the_process() {
             "Node {maj}.{min}.{pat}: a plain script behind a URL-rewriting hook must exit \
              rather than hang: stdout={stdout:?} stderr={stderr:?}"
         );
-        // The rewrite has to have taken, or the run proved nothing about it.
+        // The rewrite has to have taken, or the run proved nothing about it — and it
+        // has to have run the entry exactly once.
         assert_eq!(
             stdout, "plain:?v=1\n",
-            "Node {maj}.{min}.{pat}: the hook must have rewritten the entry's URL"
+            "Node {maj}.{min}.{pat}: the hook must have rewritten the entry's URL, and the entry must evaluate once"
+        );
+    }
+}
+
+/// The same hook in front of a handler whose module holds the loop: the pass cannot
+/// wait for idleness, so it has to recognize the entry's load under the rewritten
+/// URL — matched without its query — and then import THAT URL, which is the job
+/// Node already made. Matched exactly, the announcement never came and the handler
+/// stayed unbound.
+#[test]
+fn a_rewritten_entry_that_holds_the_loop_is_still_served_once() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((listening, stdout)) = run_nub_args_until(
+            want,
+            "entry-url-rewrite",
+            &["--import", "./rewrite.mjs", "holds.mjs"],
+            "Listening on",
+            Duration::from_secs(60),
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+        assert!(
+            listening,
+            "Node {maj}.{min}.{pat}: a handler behind a URL-rewriting hook must still bind: stdout={stdout:?}"
+        );
+        assert_eq!(
+            stdout, "holds:?v=1\n",
+            "Node {maj}.{min}.{pat}: the entry must evaluate exactly once, under the rewritten URL"
         );
     }
 }

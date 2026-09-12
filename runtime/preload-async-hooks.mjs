@@ -90,6 +90,13 @@ export async function initialize(data) {
   }
 }
 
+// The tracked URLs carry no query or fragment; a foreign resolve hook ahead of this
+// one may have added either to the entry's (preload-common.cjs `entryUrls`).
+function withoutQuery(url) {
+  const cut = url.search(/[?#]/);
+  return cut < 0 ? url : url.slice(0, cut);
+}
+
 // ── Resolve hook ────────────────────────────────────────────────────
 export async function resolve(specifier, context, nextResolve) {
   const r = resolveSpec(specifier, context.parentURL);
@@ -111,7 +118,7 @@ export async function resolve(specifier, context, nextResolve) {
 // see transform-core `noteRuntimeV8FlagSource`. Awaited here because the
 // `nextLoad` branch of loadInner hands back a promise on this tier.
 export async function load(url, context, nextLoad) {
-  if (entryLoad !== null && entryLoad.urls.has(url)) {
+  if (entryLoad !== null && entryLoad.urls.has(withoutQuery(url))) {
     const { port } = entryLoad;
     entryLoad = null;
     port.postMessage(url);

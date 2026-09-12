@@ -1888,8 +1888,8 @@ const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
 // The entry this process was marked to serve, from `claimServeEntry` on: the file as
 // Node resolved it, the URLs a load hook may see it under, whether a preload may
 // still follow nub's own, and the state the late pass waits on — whether a hook has
-// seen Node start loading the entry, and what to run when one does. Null in every
-// process that is not the marked application.
+// seen Node start loading the entry, the URL it saw it under, and what to run when
+// one does. Null in every process that is not the marked application.
 let serveEntry = null;
 
 // FIRST in each preload entry, before any user code — the configured preload chain
@@ -1909,6 +1909,7 @@ function claimServeEntry() {
     mayFollow: anotherPreloadMayFollow(),
     taken: false,
     loadSeen: false,
+    loadUrl: null,
     onLoad: null,
     channel: null,
   };
@@ -1983,9 +1984,13 @@ function installServeEntry() {
   });
 }
 
-// The URLs a load hook may see the entry under. Node's ESM resolver hands the hook
-// the realpath unless symlinks are preserved, and `_findPath` has usually resolved it
-// already — so both spellings are watched rather than guessing which one applies.
+// The URLs a load hook may see the entry under, matched without query or fragment.
+// Node's ESM resolver hands the hook the realpath unless symlinks are preserved, and
+// `_findPath` has usually resolved it already — so both spellings are watched rather
+// than guessing which one applies. A foreign resolve hook may add a query — the
+// cache-busting `?v=…` a hot-reload loader appends — and that is still the entry;
+// one that points the entry at another file has made it a different module, and
+// no URL of ours will ever name it.
 function entryUrls(file) {
   const urls = new Set([pathToFileURL(file).href]);
   try {
@@ -1999,9 +2004,15 @@ function entryUrls(file) {
 // `loaderWorkerOptions` hands it. Free in every process but the marked application.
 function noteEntryLoad(url) {
   const entry = serveEntry;
-  if (entry === null || entry.loadSeen || !entry.urls.has(url)) return;
+  if (entry === null || entry.loadSeen || !entry.urls.has(withoutQuery(url))) return;
   entry.loadSeen = true;
+  entry.loadUrl = url;
   fireEntryLoad(entry);
+}
+
+function withoutQuery(url) {
+  const cut = url.search(/[?#]/);
+  return cut < 0 ? url : url.slice(0, cut);
 }
 
 function fireEntryLoad(entry) {
@@ -2133,7 +2144,11 @@ function anotherPreloadMayFollow() {
 // CommonJS one the ESM loader owns on the `--import` compat tier — is reached through
 // `import()`, which returns the job Node already created for that URL. So the entry
 // evaluates exactly once whichever of us gets there first, and the promise settles
-// only after the entry's own top-level await does. Getting there first would cost the
+// only after the entry's own top-level await does. The URL imported is the one a
+// load hook saw the entry under, when one did: a foreign resolve hook that rewrote
+// the entry for Node's own import — a cache-busting query keyed on the entry having
+// no parent, say — would not rewrite nub's, and importing the file's plain URL then
+// evaluates the entry a second time as a different module. Getting there first would cost the
 // entry its `isEntryPoint` flag, and with it `import.meta.main`; on the fast tier the
 // `--require` preload is synchronous, so Node's own import runs in the same macrotask
 // that scheduled the pass, and the compat tier is Node ≤ 22.14, which has no
@@ -2151,7 +2166,7 @@ async function serveEntryIfHandler(entry, mayImport) {
   entry.taken = true;
   let ns;
   try {
-    ns = await import(pathToFileURL(entry.file).href);
+    ns = await import(entry.loadUrl ?? pathToFileURL(entry.file).href);
   } catch {
     // The entry threw. Node has already reported that as an uncaught error, and this
     // is the same failure observed a second time, so it is dropped rather than
