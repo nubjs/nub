@@ -13,6 +13,14 @@
 //! one dials direct and Seatbelt denies it — for EVERY host, allowed or not (the accepted
 //! compatibility cost of having no transparent redirect on macOS). Arms 3+4 both fail ⇒
 //! non-cooperative egress is blocked regardless of host = never leaked (A1).
+//!
+//! MACOS + WINDOWS IP GRAMMAR. These arms use the public `compile` → `apply` path and the
+//! injected cooperative proxy to test a raw IPv4 CONNECT authority. They deliberately do not
+//! bind a host-local listener: an AppContainer generally cannot reach host loopback, so such a
+//! result would measure the venue rather than the matcher. The workflow first requires the same
+//! unconfined `1.1.1.1` request to succeed. An explicit address and its `/24` must pass; placing
+//! a matching negation after either allow must fail. This is IPv4-only coverage: unavailable IPv6
+//! routing is reported as a venue limitation, never treated as a grammar pass.
 
 #[cfg(target_os = "macos")]
 use nub_sandbox::Sandbox;
@@ -474,6 +482,26 @@ fn run() -> bool {
     let noncoop_deny = curl_in_session("noncoop-deny", &sandbox, true, "https://www.google.com/");
     let noncoop_allow = curl_in_session("noncoop-allw", &sandbox, true, "https://example.com/");
     let noncoop_ip = curl_in_session("noncoop-ip  ", &sandbox, true, "https://1.1.1.1/");
+    // `-k` keeps the endpoint certificate name out of this raw-IP matcher assertion. The proxy
+    // still opens the same TLS transport and decides the CONNECT authority first.
+    let explicit_ip = policy(json!({ "fs": true, "net": ["1.1.1.1"] }));
+    let explicit_ip_allow = curl("ip-allow     ", &explicit_ip, false, "-k https://1.1.1.1/");
+    let explicit_ip_deny = policy(json!({ "fs": true, "net": ["1.1.1.1", "!1.1.1.1"] }));
+    let explicit_ip_block = curl(
+        "ip-deny      ",
+        &explicit_ip_deny,
+        false,
+        "-k https://1.1.1.1/",
+    );
+    let explicit_cidr = policy(json!({ "fs": true, "net": ["1.1.1.0/24"] }));
+    let explicit_cidr_allow = curl("cidr-allow  ", &explicit_cidr, false, "-k https://1.1.1.1/");
+    let explicit_cidr_deny = policy(json!({ "fs": true, "net": ["1.1.1.0/24", "!1.1.1.1"] }));
+    let explicit_cidr_block = curl(
+        "cidr-deny   ",
+        &explicit_cidr_deny,
+        false,
+        "-k https://1.1.1.1/",
+    );
     println!();
     println!("0 retained proxy listener + Seatbelt socket -> passed={retained_proxy} [want true]");
     println!("1 fresh-allow  (one-shot proxy, GET example)  -> exit={fresh_allow}  [want 0]");
@@ -487,8 +515,17 @@ fn run() -> bool {
     println!("7 noncoop-deny (--noproxy, GET google)        -> exit={noncoop_deny}   [want != 0]");
     println!("8 noncoop-allw (--noproxy, GET example.com)   -> exit={noncoop_allow}   [want != 0]");
     println!("9 noncoop-ip   (--noproxy, GET 1.1.1.1)       -> exit={noncoop_ip}   [want != 0]");
+    println!("10 explicit IP 1.1.1.1 via proxy             -> exit={explicit_ip_allow}   [want 0]");
+    println!(
+        "11 IP allow then deny 1.1.1.1                  -> exit={explicit_ip_block}   [want != 0]"
+    );
+    println!(
+        "12 CIDR 1.1.1.0/24 via proxy                  -> exit={explicit_cidr_allow}   [want 0]"
+    );
+    println!("13 CIDR allow then deny 1.1.1.1                -> exit={explicit_cidr_block}   [want != 0]");
     // 1/5 vs 2/6: the proxy's per-host gate works on both public lifecycles. 7/8/9 all blocked:
-    // non-cooperative egress is denied regardless of host or DNS — never leaked.
+    // non-cooperative egress is denied regardless of host or DNS — never leaked. 10/12 versus
+    // 11/13 prove literal and CIDR matching reaches the proxy and retains authored ordering.
     retained_proxy
         && fresh_allow == 0
         && fresh_deny != 0
@@ -499,10 +536,20 @@ fn run() -> bool {
         && noncoop_deny != 0
         && noncoop_allow != 0
         && noncoop_ip != 0
+        && explicit_ip_allow == 0
+        && explicit_ip_block != 0
+        && explicit_cidr_allow == 0
+        && explicit_cidr_block != 0
 }
 
 #[cfg(target_os = "windows")]
-fn windows_curl(label: &str, policy: &SandboxPolicy, noproxy: bool, url: &str) -> i32 {
+fn windows_curl(
+    label: &str,
+    policy: &SandboxPolicy,
+    noproxy: bool,
+    insecure: bool,
+    url: &str,
+) -> i32 {
     let mut spec = CommandSpec::new(r"C:\Windows\System32\curl.exe")
         .args([
             "-4",
@@ -517,8 +564,11 @@ fn windows_curl(label: &str, policy: &SandboxPolicy, noproxy: bool, url: &str) -
     if noproxy {
         spec = spec.args(["--noproxy", "*"]);
     }
+    if insecure {
+        spec = spec.arg("-k");
+    }
     spec = spec.arg(url);
-    eprintln!(">>> {label}: curl {url} (noproxy={noproxy})");
+    eprintln!(">>> {label}: curl {url} (noproxy={noproxy}, insecure={insecure})");
     let code = apply(policy, spec)
         .expect("apply Windows host-filter policy with registered helper")
         .status()
@@ -544,12 +594,53 @@ fn run() -> bool {
     // grant. The network axis is still an AppContainer funnel: the command has no Internet
     // capability and can reach egress only through the same-SID helper's injected proxy.
     let allow = policy(json!({ "fs": true, "net": ["example.com"] }));
-    let coop_allow = windows_curl("coop-allow  ", &allow, false, "https://example.com/");
-    let coop_deny = windows_curl("coop-deny   ", &allow, false, "https://www.google.com/");
+    let coop_allow = windows_curl("coop-allow  ", &allow, false, false, "https://example.com/");
+    let coop_deny = windows_curl(
+        "coop-deny   ",
+        &allow,
+        false,
+        false,
+        "https://www.google.com/",
+    );
     // These deliberately ignore the helper-injected proxy environment. An allowlisted hostname
     // still must not direct-dial, and an IP literal has no host rule to admit it.
-    let noncoop_allow = windows_curl("noncoop-allw", &allow, true, "https://example.com/");
-    let noncoop_ip = windows_curl("noncoop-ip  ", &allow, true, "https://1.1.1.1/");
+    let noncoop_allow = windows_curl("noncoop-allw", &allow, true, false, "https://example.com/");
+    let noncoop_ip = windows_curl("noncoop-ip  ", &allow, true, true, "https://1.1.1.1/");
+    // AppContainer cannot generally reach a host-loopback listener. A public literal keeps this
+    // assertion on the cooperative proxy's `StaticDecider`, not that OS reachability boundary.
+    // `-k` isolates the raw-IP matcher from endpoint certificate-name validation.
+    let explicit_ip = policy(json!({ "fs": true, "net": ["1.1.1.1"] }));
+    let explicit_ip_allow = windows_curl(
+        "ip-allow     ",
+        &explicit_ip,
+        false,
+        true,
+        "https://1.1.1.1/",
+    );
+    let explicit_ip_deny = policy(json!({ "fs": true, "net": ["1.1.1.1", "!1.1.1.1"] }));
+    let explicit_ip_block = windows_curl(
+        "ip-deny      ",
+        &explicit_ip_deny,
+        false,
+        true,
+        "https://1.1.1.1/",
+    );
+    let explicit_cidr = policy(json!({ "fs": true, "net": ["1.1.1.0/24"] }));
+    let explicit_cidr_allow = windows_curl(
+        "cidr-allow  ",
+        &explicit_cidr,
+        false,
+        true,
+        "https://1.1.1.1/",
+    );
+    let explicit_cidr_deny = policy(json!({ "fs": true, "net": ["1.1.1.0/24", "!1.1.1.1"] }));
+    let explicit_cidr_block = windows_curl(
+        "cidr-deny   ",
+        &explicit_cidr_deny,
+        false,
+        true,
+        "https://1.1.1.1/",
+    );
     println!();
     println!("1 coop-allow   (helper proxy, GET example.com)  -> exit={coop_allow}   [want 0]");
     println!("2 coop-deny    (helper proxy, GET google)       -> exit={coop_deny}   [want != 0]");
@@ -557,7 +648,24 @@ fn run() -> bool {
         "3 noncoop-allw (--noproxy, GET example.com)    -> exit={noncoop_allow}   [want != 0]"
     );
     println!("4 noncoop-ip   (--noproxy, GET 1.1.1.1)         -> exit={noncoop_ip}   [want != 0]");
-    coop_allow == 0 && coop_deny != 0 && noncoop_allow != 0 && noncoop_ip != 0
+    println!("5 explicit IP 1.1.1.1 via proxy             -> exit={explicit_ip_allow}   [want 0]");
+    println!(
+        "6 IP allow then deny 1.1.1.1                  -> exit={explicit_ip_block}   [want != 0]"
+    );
+    println!(
+        "7 CIDR 1.1.1.0/24 via proxy                  -> exit={explicit_cidr_allow}   [want 0]"
+    );
+    println!(
+        "8 CIDR allow then deny 1.1.1.1                -> exit={explicit_cidr_block}   [want != 0]"
+    );
+    coop_allow == 0
+        && coop_deny != 0
+        && noncoop_allow != 0
+        && noncoop_ip != 0
+        && explicit_ip_allow == 0
+        && explicit_ip_block != 0
+        && explicit_cidr_allow == 0
+        && explicit_cidr_block != 0
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
