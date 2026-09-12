@@ -51,7 +51,7 @@ jobs:
           $candidateRoot = Join-Path $env:RUNNER_TEMP 'nub-pipe-candidate'
           git worktree add --detach $candidateRoot $candidate
           $fixtures = @(git rev-list --reverse "748c22aa93225eb1b59894fc9dea691e977267fc..$fixture")
-          git -C $candidateRoot cherry-pick @fixtures
+          git -C $candidateRoot cherry-pick $fixtures
           New-Item -ItemType Directory -Force reports | Out-Null
           @{ fixtureCommit = $fixture; baseCommit = '748c22aa93225eb1b59894fc9dea691e977267fc';
              fixtureCommits = $fixtures; candidateCommit = $candidate;

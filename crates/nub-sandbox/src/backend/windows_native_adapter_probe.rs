@@ -16,7 +16,7 @@ mod null_device_probe;
 
 fn private_object_permissions() -> std::io::Result<()> {
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-    use windows_sys::Win32::Foundation::{GENERIC_ALL, HANDLE_FLAG_INHERIT, SetHandleInformation};
+    use windows_sys::Win32::Foundation::GENERIC_ALL;
     use windows_sys::Win32::Security::{
         ACL, ACL_REVISION, AddAccessAllowedAce, DACL_SECURITY_INFORMATION, GetTokenInformation,
         InitializeAcl, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR, SetKernelObjectSecurity,
@@ -171,7 +171,7 @@ impl PipeSecurity {
 /// pipe by name.  It receives stdin/stdout by CreateProcess handle inheritance.
 fn inherited_pipe_roundtrip(security: PipeSecurity) -> std::io::Result<Vec<u8>> {
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-    use windows_sys::Win32::Foundation::GENERIC_ALL;
+    use windows_sys::Win32::Foundation::{GENERIC_ALL, HANDLE_FLAG_INHERIT, SetHandleInformation};
     use windows_sys::Win32::Security::{
         ACL, ACL_REVISION, AddAccessAllowedAce, GetTokenInformation, InitializeAcl,
         InitializeSecurityDescriptor, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
