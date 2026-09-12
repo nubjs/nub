@@ -3082,6 +3082,10 @@ mod lifecycle_tests {
             .unwrap_or(0);
         if mode == "cancel" {
             unsafe extern "C" fn signal_noop(_: libc::c_int) {}
+            let sync_fd = std::env::var("NUB_SUP_SENDMMSG_SYNC_FD")
+                .ok()
+                .and_then(|value| value.parse::<RawFd>().ok())
+                .unwrap_or(-1);
             let address = make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), second_port);
             let fd =
                 unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
@@ -3099,19 +3103,13 @@ mod lifecycle_tests {
             // The parent shrinks the accepted peer's receive window before releasing this
             // child.  That makes the following EAGAIN and cancelled replay deterministic
             // instead of relying on localhost's default autotuned receive buffer.
-            if unsafe { libc::write(libc::STDOUT_FILENO, b"R".as_ptr() as *const libc::c_void, 1) }
-                != 1
+            if sync_fd < 0
+                || unsafe { libc::write(sync_fd, b"R".as_ptr() as *const libc::c_void, 1) } != 1
             {
                 std::process::exit(90);
             }
             let mut release = 0u8;
-            if unsafe {
-                libc::read(
-                    libc::STDIN_FILENO,
-                    &mut release as *mut u8 as *mut libc::c_void,
-                    1,
-                )
-            } != 1
+            if unsafe { libc::read(sync_fd, &mut release as *mut u8 as *mut libc::c_void, 1) } != 1
             {
                 std::process::exit(89);
             }
@@ -3383,12 +3381,19 @@ mod lifecycle_tests {
             },
             0
         );
+        let (mut sync_parent, sync_child) = std::os::unix::net::UnixStream::pair().unwrap();
+        let inherited = [sync_child.as_raw_fd()];
         let cancel_env = [
             CString::new("NUB_SUP_SENDMMSG_MODE=cancel").unwrap(),
             CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
             CString::new(format!(
                 "NUB_SUP_SENDMMSG_SECOND_PORT={}",
                 listener.local_addr().unwrap().port()
+            ))
+            .unwrap(),
+            CString::new(format!(
+                "NUB_SUP_SENDMMSG_SYNC_FD={}",
+                sync_child.as_raw_fd()
             ))
             .unwrap(),
         ];
@@ -3400,15 +3405,16 @@ mod lifecycle_tests {
                 cwd: None,
                 ruleset_fd: -1,
                 seccomp_ceiling: None,
-                stdin: SupervisedStdio::Piped,
-                stdout: SupervisedStdio::Piped,
+                stdin: SupervisedStdio::Null,
+                stdout: SupervisedStdio::Null,
                 stderr: SupervisedStdio::Null,
-                inherited_fds: &[],
+                inherited_fds: &inherited,
             },
         )
         .unwrap();
+        drop(sync_child);
         let mut ready = [0u8; 1];
-        child.take_stdout().unwrap().read_exact(&mut ready).unwrap();
+        sync_parent.read_exact(&mut ready).unwrap();
         assert_eq!(ready, *b"R");
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let (blocked_peer, _) = loop {
@@ -3436,7 +3442,7 @@ mod lifecycle_tests {
             },
             0
         );
-        child.take_stdin().unwrap().write_all(b"G").unwrap();
+        sync_parent.write_all(b"G").unwrap();
         assert_eq!(child.wait().unwrap().code(), Some(0));
 
         let dns_env = [
