@@ -212,6 +212,8 @@ jobs:
             if ($case[0] -eq 'cargo') { $toolModes += @('msys-dynamicbase-allimages-plain', 'msys-dynamicbase-allimages-null-adapter') }
             if ($case[0] -eq 'cargo') { $toolModes += 'msys-dynamicbase-allimages-pid-null-adapter' }
             if ($case[0] -eq 'git-lfs') { $toolModes += 'dynamicbase-allimages-pid-null-adapter' }
+            if ($case[0] -eq 'cargo') { $toolModes += 'msys-dynamicbase-allimages-private-pid-null-adapter' }
+            if ($case[0] -eq 'git-lfs') { $toolModes += 'dynamicbase-allimages-private-pid-null-adapter' }
             if ($case[0] -eq 'bun132') { $toolModes += 'mount-query-adapter' }
             if ($env:NATIVE_FOCUSED_RUN) {
               $toolModes = @($toolModes | Where-Object { $_ -in @('plain', 'raw', 'embedded') -or $_.Contains('allimages-') })
@@ -240,7 +242,9 @@ jobs:
               Remove-Item Env:NUB_NATIVE_SYNC_DACL_PROBE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_NT_NULL_PROBE -ErrorAction SilentlyContinue
               Remove-Item Env:NUB_NATIVE_PID_LINK_PROBE -ErrorAction SilentlyContinue
+              Remove-Item Env:NUB_NATIVE_PRIVATE_ACL_PROBE -ErrorAction SilentlyContinue
               if ($mode.Contains('pid-null-adapter')) { $env:NUB_NATIVE_PID_LINK_PROBE = '1' }
+              if ($mode.Contains('private-pid-null-adapter')) { $env:NUB_NATIVE_PRIVATE_ACL_PROBE = '1' }
               if ($mode -in @('adapter', 'nodes-adapter', 'directory-mask-adapter', 'mount-query-adapter', 'relocation-root-adapter', 'relocation-tree-adapter', 'msys-relocation-tree-adapter', 'dynamicbase-adapter', 'msys-dynamicbase-adapter')) { $env:NUB_NATIVE_ADAPTER_PROBE_ENABLE = '1' }
               if ($mode.Contains('relocation-')) { $env:NUB_NATIVE_RELOCATION_PROBE = '1' }
               if ($mode.Contains('relocation-tree-')) { $env:NUB_NATIVE_RELOCATION_TREE_PROBE = '1' }
@@ -286,6 +290,7 @@ jobs:
           Remove-Item Env:NUB_NATIVE_SYNC_DACL_PROBE -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_NT_NULL_PROBE -ErrorAction SilentlyContinue
           Remove-Item Env:NUB_NATIVE_PID_LINK_PROBE -ErrorAction SilentlyContinue
+          Remove-Item Env:NUB_NATIVE_PRIVATE_ACL_PROBE -ErrorAction SilentlyContinue
           $results | ConvertTo-Json > reports/tool-results.json
           # Diagnostic DLL/ancestor/mask alternatives remain results, not production verdicts.
           if ($results | Where-Object { $_.mode -in @('plain', 'embedded', 'msys-plain', 'msys-embedded') -and $_.exit -ne 0 }) { exit 1 }

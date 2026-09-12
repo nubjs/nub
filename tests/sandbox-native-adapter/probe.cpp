@@ -29,6 +29,7 @@ struct Payload {
     BOOL sync_dacl_probe;
     BOOL nt_null_probe;
     BOOL pid_link_probe;
+    BOOL private_acl_probe;
 };
 static Payload state = {};
 
@@ -120,6 +121,7 @@ int wmain(int argc, wchar_t** argv) {
     state.sync_dacl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_SYNC_DACL_PROBE", nullptr, 0) != 0;
     state.nt_null_probe = GetEnvironmentVariableW(L"NUB_NATIVE_NT_NULL_PROBE", nullptr, 0) != 0;
     state.pid_link_probe = GetEnvironmentVariableW(L"NUB_NATIVE_PID_LINK_PROBE", nullptr, 0) != 0;
+    state.private_acl_probe = GetEnvironmentVariableW(L"NUB_NATIVE_PRIVATE_ACL_PROBE", nullptr, 0) != 0;
     DWORD pid = wcstoul(argv[1], nullptr, 10);
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
                                  PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
@@ -340,6 +342,41 @@ public:
     PackageAcl& operator=(const PackageAcl&) = delete;
     PACL get() const { return value_; }
 };
+
+class PackageDescriptor {
+    static PACL original_acl(PSECURITY_DESCRIPTOR descriptor) {
+        PACL acl = nullptr, sacl = nullptr;
+        BOOL present = FALSE, defaulted = FALSE, sacl_present = FALSE;
+        if (!descriptor || !GetSecurityDescriptorSacl(descriptor, &sacl_present, &sacl, &defaulted) ||
+            sacl_present || !GetSecurityDescriptorDacl(descriptor, &present, &acl, &defaulted) || !present)
+            return nullptr;
+        return acl;
+    }
+    PackageAcl acl_;
+    SECURITY_DESCRIPTOR descriptor_ = {};
+    bool valid_ = false;
+public:
+    explicit PackageDescriptor(PSECURITY_DESCRIPTOR original, DWORD access = GENERIC_ALL)
+        : acl_(original_acl(original), access) {
+        PSID owner = nullptr, group = nullptr;
+        BOOL owner_default = FALSE, group_default = FALSE, present = FALSE, defaulted = FALSE;
+        PACL dacl = nullptr;
+        SECURITY_DESCRIPTOR_CONTROL control = 0;
+        DWORD revision = 0;
+        const SECURITY_DESCRIPTOR_CONTROL flags = SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED;
+        valid_ = acl_.get() && GetSecurityDescriptorOwner(original, &owner, &owner_default) &&
+            GetSecurityDescriptorGroup(original, &group, &group_default) &&
+            GetSecurityDescriptorDacl(original, &present, &dacl, &defaulted) &&
+            GetSecurityDescriptorControl(original, &control, &revision) &&
+            InitializeSecurityDescriptor(&descriptor_, SECURITY_DESCRIPTOR_REVISION) &&
+            SetSecurityDescriptorOwner(&descriptor_, owner, owner_default) &&
+            SetSecurityDescriptorGroup(&descriptor_, group, group_default) &&
+            SetSecurityDescriptorDacl(&descriptor_, TRUE, acl_.get(), defaulted) &&
+            SetSecurityDescriptorControl(&descriptor_, flags, static_cast<SECURITY_DESCRIPTOR_CONTROL>(control & flags));
+    }
+    PSECURITY_DESCRIPTOR get() { return valid_ ? &descriptor_ : nullptr; }
+};
+static bool private_msys_object(HANDLE handle);
 using NtToken = NTSTATUS (NTAPI*)(HANDLE, TOKEN_INFORMATION_CLASS, PVOID, ULONG);
 using NtSecurity = NTSTATUS (NTAPI*)(HANDLE, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR);
 static NtToken true_set_token = nullptr;
@@ -365,7 +402,8 @@ static NTSTATUS NTAPI set_token(HANDLE token, TOKEN_INFORMATION_CLASS kind, PVOI
 }
 
 static NTSTATUS NTAPI set_security(HANDLE handle, SECURITY_INFORMATION kind, PSECURITY_DESCRIPTOR descriptor) {
-    if (kind != DACL_SECURITY_INFORMATION || GetProcessId(handle) != GetCurrentProcessId())
+    bool scoped = state.private_acl_probe && private_msys_object(handle);
+    if (kind != DACL_SECURITY_INFORMATION || (!scoped && GetProcessId(handle) != GetCurrentProcessId()))
         return true_set_security(handle, kind, descriptor);
     PACL original = nullptr;
     BOOL present = FALSE, defaulted = FALSE;
@@ -383,7 +421,10 @@ static NTSTATUS NTAPI set_security(HANDLE handle, SECURITY_INFORMATION kind, PSE
         !SetSecurityDescriptorDacl(&adapted, TRUE, acl.get(), defaulted) ||
         !SetSecurityDescriptorControl(&adapted, flags, static_cast<SECURITY_DESCRIPTOR_CONTROL>(control & flags)))
         return static_cast<NTSTATUS>(0xc0000079L);
-    return true_set_security(handle, kind, &adapted);
+    auto status = true_set_security(handle, kind, &adapted);
+    if (scoped) diagnostic("ADAPTER_PRIVATE_SET_SECURITY pid=%lu handle=%p status=%08lx\n",
+        GetCurrentProcessId(), handle, static_cast<ULONG>(status));
+    return status;
 }
 using NtDirectory = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
 static BOOL WINAPI anonymous_pipe(PHANDLE read, PHANDLE write, LPSECURITY_ATTRIBUTES security, DWORD size) {
@@ -499,6 +540,36 @@ static bool msys_section_root(POBJECT_ATTRIBUTES attrs, wchar_t (&root)[1024]) {
     return (!wcsncmp(leaf, L"msys-", 5) || !wcsncmp(leaf, L"cygwin-", 7)) && !wcschr(leaf, L'\\');
 }
 
+static bool private_msys_object(HANDLE handle) {
+    alignas(void*) BYTE info[4096];
+    ULONG needed = 0;
+    auto status = query_object(handle, 1, info, sizeof(info), &needed);
+    if (status < 0) return false;
+    auto name = reinterpret_cast<UNICODE_STRING*>(info);
+    if (!name->Buffer || !name->Length || name->Length % sizeof(wchar_t)) return false;
+    size_t split = name->Length / sizeof(wchar_t);
+    while (split && name->Buffer[split - 1] != L'\\') --split;
+    if (!split || split == name->Length / sizeof(wchar_t)) return false;
+    UNICODE_STRING parent = *name, leaf = *name;
+    parent.Length = USHORT((split - 1) * sizeof(wchar_t));
+    parent.MaximumLength = parent.Length;
+    leaf.Buffer += split;
+    leaf.Length -= USHORT(split * sizeof(wchar_t));
+    leaf.MaximumLength = leaf.Length;
+    OBJECT_ATTRIBUTES attrs = {};
+    attrs.Length = sizeof(attrs);
+    attrs.ObjectName = &parent;
+    HANDLE directory = nullptr;
+    status = true_open_directory(&directory, 1, &attrs);
+    if (status < 0) return false;
+    attrs.RootDirectory = directory;
+    attrs.ObjectName = &leaf;
+    wchar_t root[1024] = {};
+    bool scoped = msys_section_root(&attrs, root);
+    CloseHandle(directory);
+    return scoped;
+}
+
 static bool decimal_name(PUNICODE_STRING name, const wchar_t* prefix) {
     if (!name || !name->Buffer || name->Length % sizeof(wchar_t) ||
         name->MaximumLength < name->Length) return false;
@@ -521,26 +592,12 @@ static NTSTATUS NTAPI create_link(PHANDLE handle, ACCESS_MASK access, POBJECT_AT
         decimal_name(attrs->ObjectName, L"winpid.") && decimal_name(target, L"") &&
         attrs->SecurityDescriptor && GetSecurityDescriptorDacl(attrs->SecurityDescriptor,
             &present, &original, &defaulted) && present && original;
-    PackageAcl acl(candidate ? original : nullptr, 1 /* SYMBOLIC_LINK_QUERY */);
+    PackageDescriptor descriptor(candidate ? attrs->SecurityDescriptor : nullptr, 1 /* SYMBOLIC_LINK_QUERY */);
     OBJECT_ATTRIBUTES redirected = {};
-    SECURITY_DESCRIPTOR descriptor = {};
-    PSID owner = nullptr, group = nullptr;
-    BOOL owner_default = FALSE, group_default = FALSE;
-    SECURITY_DESCRIPTOR_CONTROL control = 0;
-    DWORD revision = 0;
-    const SECURITY_DESCRIPTOR_CONTROL flags = SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED;
-    bool adapted = candidate && acl.get() &&
-        GetSecurityDescriptorOwner(attrs->SecurityDescriptor, &owner, &owner_default) &&
-        GetSecurityDescriptorGroup(attrs->SecurityDescriptor, &group, &group_default) &&
-        GetSecurityDescriptorControl(attrs->SecurityDescriptor, &control, &revision) &&
-        InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) &&
-        SetSecurityDescriptorOwner(&descriptor, owner, owner_default) &&
-        SetSecurityDescriptorGroup(&descriptor, group, group_default) &&
-        SetSecurityDescriptorDacl(&descriptor, TRUE, acl.get(), defaulted) &&
-        SetSecurityDescriptorControl(&descriptor, flags, static_cast<SECURITY_DESCRIPTOR_CONTROL>(control & flags));
+    bool adapted = descriptor.get() != nullptr;
     if (adapted) {
         redirected = *attrs;
-        redirected.SecurityDescriptor = &descriptor;
+        redirected.SecurityDescriptor = descriptor.get();
     }
     auto status = true_create_link(handle, access, adapted ? &redirected : attrs, target);
     if (scoped) diagnostic("ADAPTER_PID_LINK_CREATE pid=%lu name=%.*ls target=%.*ls access=%08lx adapted=%d status=%08lx\n",
@@ -581,6 +638,9 @@ static NTSTATUS NTAPI create_section(PHANDLE handle, ACCESS_MASK access, POBJECT
         protection == PAGE_READWRITE && attributes == SEC_COMMIT;
     OBJECT_ATTRIBUTES redirected = {};
     if (adapted) { redirected = *attrs; redirected.SecurityDescriptor = &private_descriptor; }
+    PackageDescriptor descriptor(state.private_acl_probe && scoped && !file &&
+        protection == PAGE_READWRITE && attributes == SEC_COMMIT ? attrs->SecurityDescriptor : nullptr);
+    if (descriptor.get()) { adapted = true; redirected = *attrs; redirected.SecurityDescriptor = descriptor.get(); }
     NTSTATUS status = true_create_section(handle, access, adapted ? &redirected : attrs,
         maximum_size, protection, attributes, file);
     if (attrs && attrs->ObjectName && attrs->ObjectName->Buffer) diagnostic("ADAPTER_SECTION_CREATE pid=%lu root=%ls name=%.*ls access=%08lx protection=%08lx attributes=%08lx null_dacl=%d adapted=%d status=%08lx\n",
@@ -620,6 +680,9 @@ static void log_sync(const char* kind, POBJECT_ATTRIBUTES attrs, bool adapted, N
 static NTSTATUS NTAPI create_mutant(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs, BOOLEAN owner) {
     OBJECT_ATTRIBUTES redirected = {};
     bool adapted = private_sync_descriptor(attrs, redirected);
+    wchar_t root[1024] = {};
+    PackageDescriptor descriptor(state.private_acl_probe && msys_section_root(attrs, root) ? attrs->SecurityDescriptor : nullptr);
+    if (descriptor.get()) { adapted = true; redirected = *attrs; redirected.SecurityDescriptor = descriptor.get(); }
     auto status = true_create_mutant(handle, access, adapted ? &redirected : attrs, owner);
     log_sync("mutant", attrs, adapted, status);
     return status;
@@ -628,6 +691,9 @@ static NTSTATUS NTAPI create_mutant(PHANDLE handle, ACCESS_MASK access, POBJECT_
 static NTSTATUS NTAPI create_event(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs, ULONG kind, BOOLEAN initial) {
     OBJECT_ATTRIBUTES redirected = {};
     bool adapted = private_sync_descriptor(attrs, redirected);
+    wchar_t root[1024] = {};
+    PackageDescriptor descriptor(state.private_acl_probe && msys_section_root(attrs, root) ? attrs->SecurityDescriptor : nullptr);
+    if (descriptor.get()) { adapted = true; redirected = *attrs; redirected.SecurityDescriptor = descriptor.get(); }
     auto status = true_create_event(handle, access, adapted ? &redirected : attrs, kind, initial);
     log_sync("event", attrs, adapted, status);
     return status;
@@ -636,6 +702,9 @@ static NTSTATUS NTAPI create_event(PHANDLE handle, ACCESS_MASK access, POBJECT_A
 static NTSTATUS NTAPI create_semaphore(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBUTES attrs, LONG initial, LONG maximum) {
     OBJECT_ATTRIBUTES redirected = {};
     bool adapted = private_sync_descriptor(attrs, redirected);
+    wchar_t root[1024] = {};
+    PackageDescriptor descriptor(state.private_acl_probe && msys_section_root(attrs, root) ? attrs->SecurityDescriptor : nullptr);
+    if (descriptor.get()) { adapted = true; redirected = *attrs; redirected.SecurityDescriptor = descriptor.get(); }
     auto status = true_create_semaphore(handle, access, adapted ? &redirected : attrs, initial, maximum);
     log_sync("semaphore", attrs, adapted, status);
     return status;
