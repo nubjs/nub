@@ -20,6 +20,12 @@
 use std::io;
 use std::path::Path;
 use std::ptr::null_mut;
+#[cfg(test)]
+use std::sync::{
+    Arc, Barrier,
+    atomic::{AtomicBool, Ordering},
+};
+use std::sync::{Mutex, MutexGuard};
 use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ACCESS_MODE, ConvertSidToStringSidW, ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
@@ -42,6 +48,69 @@ const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
 const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
 const INHERITED_ACE_FLAG: u8 = 0x10;
 const WINDOW_OBJECT: &str = "<window-object>";
+
+// A process has exactly one current window station.  The journal may temporarily borrow it to
+// open a desktop in an old station, so every observation and child creation that depends on that
+// process-global value must share this in-process lock.  `OperationLock` remains necessary for
+// cross-process DACL read-modify-write; it cannot serialize threads in this process.
+static WINDOW_STATION_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+#[derive(Clone)]
+struct StationSwitchHook {
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+#[cfg(test)]
+static TEST_STATION_SWITCH_HOOK: Mutex<Option<StationSwitchHook>> = Mutex::new(None);
+
+#[cfg(test)]
+static TEST_FORCE_FOREIGN_SESSION_LIVE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn station_guard() -> MutexGuard<'static, ()> {
+    WINDOW_STATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+fn after_station_switch() {
+    let hook = TEST_STATION_SWITCH_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook.entered.wait();
+        hook.release.wait();
+    }
+}
+
+fn recorded_session_exists(session_id: u32) -> io::Result<bool> {
+    #[cfg(test)]
+    if TEST_FORCE_FOREIGN_SESSION_LIVE.load(Ordering::Relaxed) {
+        return Ok(true);
+    }
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SERVER_HANDLE, WTSEnumerateSessionsW, WTSFreeMemory,
+    };
+    let mut sessions = null_mut();
+    let mut count = 0;
+    if unsafe { WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut sessions, &mut count) }
+        == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let exists = if count == 0 {
+        false
+    } else {
+        unsafe { std::slice::from_raw_parts(sessions, count as usize) }
+            .iter()
+            .any(|session| session.SessionId == session_id)
+    };
+    unsafe { WTSFreeMemory(sessions.cast()) };
+    Ok(exists)
+}
 
 /// `WINSTA_ALL_ACCESS` (0x37F) — the union of the nine `WINSTA_*` rights, spelled here because
 /// `windows-sys` exports it only from a feature this crate does not otherwise need.
@@ -427,7 +496,7 @@ fn object_name(handle: HANDLE) -> io::Result<String> {
     Ok(String::from_utf16_lossy(&name[..len]))
 }
 
-pub(crate) fn current_objects() -> io::Result<Vec<WindowObject>> {
+fn current_objects_unlocked() -> io::Result<Vec<WindowObject>> {
     use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
     let mut session = 0;
     if unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } == 0 {
@@ -447,6 +516,11 @@ pub(crate) fn current_objects() -> io::Result<Vec<WindowObject>> {
             desktop: Some(desktop),
         },
     ])
+}
+
+pub(crate) fn current_objects() -> io::Result<Vec<WindowObject>> {
+    let _station = station_guard();
+    current_objects_unlocked()
 }
 
 struct WindowHandle {
@@ -470,31 +544,20 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
     use windows_sys::Win32::System::StationsAndDesktops::{
         OpenDesktopW, OpenWindowStationW, SetProcessWindowStation,
     };
-    let current = current_objects()?;
+    let _station = station_guard();
+    let current = current_objects_unlocked()?;
     if current[0].session != object.session {
-        use windows_sys::Win32::System::RemoteDesktop::{
-            WTS_CURRENT_SERVER_HANDLE, WTSEnumerateSessionsW, WTSFreeMemory,
-        };
-        let mut sessions = null_mut();
-        let mut count = 0;
-        if unsafe {
-            WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut sessions, &mut count)
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let exists = if count == 0 {
-            false
-        } else {
-            unsafe { std::slice::from_raw_parts(sessions, count as usize) }
-                .iter()
-                .any(|session| session.SessionId == object.session)
-        };
-        unsafe { WTSFreeMemory(sessions.cast()) };
+        let exists = recorded_session_exists(object.session)?;
         // A logged-off session no longer owns any station or desktop to revoke.
         if !exists {
             return Ok(None);
         }
+        // `OpenWindowStationW` resolves names in this process's session.  A live foreign session
+        // could contain the same name, so leave its record journaled rather than touching a
+        // current-session lookalike.
+        return Err(io::Error::other(
+            "sandbox window-object cleanup requires its recorded logon session and window station",
+        ));
     }
     const READ_CONTROL_WRITE_DAC: u32 = 0x0006_0000;
     let station_name: Vec<u16> = object
@@ -524,10 +587,9 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
     }
 
     // `OpenDesktopW` is documented to accept desktops only from the process's current station.
-    // Keep the station swap tightly scoped and always restore the borrowed current-station handle
-    // before returning.  The resource operation lock serializes this process-wide transition with
-    // every other Nub window-object mutation; only the explicitly opened recorded station is
-    // touched, never the caller's current station or desktop.
+    // Keep the station swap tightly scoped and restore the borrowed current-station handle before
+    // returning.  `WINDOW_STATION_LOCK` also covers confined CreateProcessW, so no Nub child can
+    // observe this temporary station. Only the explicitly opened recorded station is touched.
     let previous = unsafe { GetProcessWindowStation() };
     if previous.is_null() {
         return Err(io::Error::last_os_error());
@@ -535,20 +597,37 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
     if unsafe { SetProcessWindowStation(station_guard.raw) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    struct RestoreStation(HANDLE);
+    #[cfg(test)]
+    after_station_switch();
+    struct RestoreStation {
+        previous: HANDLE,
+        restored: bool,
+    }
+    impl RestoreStation {
+        fn restore(&mut self) -> io::Result<()> {
+            if self.restored {
+                return Ok(());
+            }
+            if unsafe { SetProcessWindowStation(self.previous) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            self.restored = true;
+            Ok(())
+        }
+    }
     impl Drop for RestoreStation {
         fn drop(&mut self) {
-            // SAFETY: this is the process's borrowed pre-switch station handle.  A failed restore
-            // is unrecoverable for this operation but must never be hidden by a different cleanup.
-            if unsafe {
-                windows_sys::Win32::System::StationsAndDesktops::SetProcessWindowStation(self.0)
-            } == 0
-            {
+            // Try to repair an early-error path. The normal return path calls `restore` explicitly
+            // and propagates its error, so a failed restore cannot retire the journal as success.
+            if !self.restored && self.restore().is_err() {
                 tracing::error!(error = ?io::Error::last_os_error(), "sandbox failed to restore its window station after cleanup");
             }
         }
     }
-    let _restore = RestoreStation(previous);
+    let mut restore = RestoreStation {
+        previous,
+        restored: false,
+    };
     let desktop_name: Vec<u16> = object
         .desktop
         .as_deref()
@@ -573,6 +652,9 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
         }
         return Err(error);
     }
+    // Restoration is a cleanup precondition, not diagnostics. Do this before handing the desktop
+    // back to the DACL caller so `RecoveryNeeded` retains the journal on failure.
+    restore.restore()?;
     Ok(Some(WindowHandle {
         raw,
         desktop: object.desktop.is_some(),
@@ -681,7 +763,78 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
     // principal even though it shares both old objects with the journaled grant.
     grant_window_object(station_guard.raw, "S-1-15-2-2", WINSTA_GRANT)?;
     grant_window_object(desktop_guard.raw, "S-1-15-2-2", DESKTOP_GRANT)?;
-    revoke_persistent(&desktop_object, sid.0)?;
+
+    // A live foreign terminal-services session cannot be named from this process.  Force that
+    // classification around a colliding current-session name and prove cleanup returns an error
+    // before opening or stripping either local object.
+    let foreign_session_object = WindowObject {
+        session: if station_object.session == 0 { 1 } else { 0 },
+        ..station_object.clone()
+    };
+    TEST_FORCE_FOREIGN_SESSION_LIVE.store(true, Ordering::Relaxed);
+    let foreign_result = revoke_persistent(&foreign_session_object, sid.0);
+    TEST_FORCE_FOREIGN_SESSION_LIVE.store(false, Ordering::Relaxed);
+    if foreign_result.is_ok()
+        || !window_object_has_sid(station_guard.raw, "S-1-15-2-1")?
+        || !window_object_has_sid(desktop_guard.raw, "S-1-15-2-1")?
+    {
+        return Err(io::Error::other(
+            "foreign-session cleanup reached a current-session name collision",
+        ));
+    }
+
+    // Hold recovery immediately after the process-wide switch. A competing station observation
+    // cannot finish until the desktop opener restores the original station and releases the same
+    // in-process mutex that confined CreateProcessW uses.
+    let before_station = current_objects()?[0].station.clone();
+    let hook = StationSwitchHook {
+        entered: Arc::new(Barrier::new(2)),
+        release: Arc::new(Barrier::new(2)),
+    };
+    *TEST_STATION_SWITCH_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook.clone());
+    let (recovered_tx, recovered_rx) = std::sync::mpsc::channel();
+    let desktop_for_recovery = desktop_object.clone();
+    let recovery = std::thread::spawn(move || {
+        let sid = OwnedSid::parse("S-1-15-2-1");
+        let result = sid.and_then(|sid| revoke_persistent(&desktop_for_recovery, sid.0));
+        let _ = recovered_tx.send(result);
+    });
+    hook.entered.wait();
+    let (observer_started_tx, observer_started_rx) = std::sync::mpsc::channel();
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        let _ = observer_started_tx.send(());
+        let _ = observed_tx.send(current_objects());
+    });
+    observer_started_rx
+        .recv()
+        .map_err(|_| io::Error::other("station observer did not start"))?;
+    let observation_blocked = observed_rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .is_err();
+    hook.release.wait();
+    let recovered = recovered_rx
+        .recv()
+        .map_err(|_| io::Error::other("station recovery worker exited without a result"))?;
+    recovery
+        .join()
+        .map_err(|_| io::Error::other("station recovery worker panicked"))?;
+    *TEST_STATION_SWITCH_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    let observed = observed_rx
+        .recv()
+        .map_err(|_| io::Error::other("station observer exited without a result"))??;
+    observer
+        .join()
+        .map_err(|_| io::Error::other("station observer panicked"))?;
+    if !observation_blocked || recovered.is_err() || observed[0].station != before_station {
+        return Err(io::Error::other(
+            "station recovery did not block observation and restore the caller station",
+        ));
+    }
     revoke_persistent(&station_object, sid.0)?;
 
     // Both lookups force the recovery machinery to target the old station, not the fixture's
