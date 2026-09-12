@@ -583,19 +583,18 @@ fn symlink_bin_target(link_parent: &Path, target: &Path) -> std::path::PathBuf {
 
 /// Pick the relative target a shell wrapper resolves from `$basedir`.
 ///
-/// A wrapper normally runs from its surface path, so the ordinary relative
-/// path remains portable. In the global virtual store, however, lifecycle
-/// execution deliberately canonicalizes the package directory. The wrapper
-/// then runs from its physical, graph-hashed `.bin/` directory; a target
-/// relative to the unhashed project surface dangles. Prefer the surface form
-/// when it resolves to the target, and otherwise anchor the wrapper at that
-/// physical directory.
+/// Keep the ordinary relative path when it resolves from the physical parent.
+/// Otherwise use the canonical store paths: project `.store` links can hide
+/// the graph-hashed entry names needed by shared wrappers.
 #[cfg(unix)]
 fn shim_bin_target(link_parent: &Path, target: &Path) -> String {
     let surface = relative_bin_target(link_parent, target);
-    let Ok(resolved) = std::fs::canonicalize(target) else {
-        // Generated output may appear only after a lifecycle script runs.
-        // Keep the existing surface-relative form for that case.
+    // Generated bins and hoisted module directories may not exist yet.
+    // Resolve their existing prefix without guessing future store entries.
+    let Some(resolved) = target.ancestors().find_map(|ancestor| {
+        let prefix = std::fs::canonicalize(ancestor).ok()?;
+        Some(prefix.join(target.strip_prefix(ancestor).ok()?))
+    }) else {
         return surface;
     };
     if std::fs::canonicalize(link_parent.join(&surface)).is_ok_and(|p| p == resolved) {
@@ -641,14 +640,15 @@ fn shim_node_path(
             rel.replace('\\', "/")
         }
     };
+    #[cfg(unix)]
+    let relative = shim_bin_target;
+    #[cfg(not(unix))]
+    let relative = relative_bin_target;
     let mut entries: Vec<String> = Vec::with_capacity(2);
-    let top = normalize(relative_bin_target(
-        link_parent,
-        bin_dir.parent().unwrap_or(bin_dir),
-    ));
+    let top = normalize(relative(link_parent, bin_dir.parent().unwrap_or(bin_dir)));
     entries.push(format!("{basedir_prefix}{basedir_suffix}{top}"));
     if let Some(hidden) = hidden_modules_dir {
-        let rel = normalize(relative_bin_target(link_parent, hidden));
+        let rel = normalize(relative(link_parent, hidden));
         entries.push(format!("{basedir_prefix}{basedir_suffix}{rel}"));
     }
     entries.join(list_sep)
@@ -1092,7 +1092,7 @@ while [ -L \"$link\" ] && [ \"$hops\" -lt 40 ]; do\n\
     *)  link=\"$(dirname \"$link\")/$target\" ;;\n\
   esac\n\
 done\n\
-basedir=$(dirname \"$link\")\n";
+basedir=$(CDPATH= cd -P \"$(dirname \"$link\")\" && pwd -P) || exit 1\n";
 
 /// POSIX shell-script shim used when `prefer_symlinked_executables=false`
 /// (so `extend_node_path` can actually inject `NODE_PATH`). Mirrors the
@@ -1209,6 +1209,14 @@ pub fn resolve_bin_shim(path: &Path) -> io::Result<Option<ResolvedBinShim>> {
     let Some((style, target, raw_node_path)) = parsed else {
         return Ok(None);
     };
+    // Match the POSIX wrapper's physical `$basedir` before collapsing `..`.
+    #[cfg(unix)]
+    let physical_parent = match style {
+        BinShimStyle::Posix => std::fs::canonicalize(parent).ok(),
+        BinShimStyle::Cmd => None,
+    };
+    #[cfg(unix)]
+    let parent = physical_parent.as_deref().unwrap_or(parent);
     let Some(target) = resolve_shim_relative_path(parent, target, style) else {
         return Ok(None);
     };
@@ -2257,7 +2265,11 @@ mod tests {
         std::fs::create_dir_all(&host_bin).unwrap();
         std::fs::create_dir_all(&dep_bin).unwrap();
         let real_target = dep_bin.join("dep");
-        std::fs::write(&real_target, "#!/bin/sh\necho shared-store-wrapper\n").unwrap();
+        std::fs::write(
+            &real_target,
+            "#!/usr/bin/env node\nconsole.log(require('hidden-peer'));\n",
+        )
+        .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&real_target, std::fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -2272,14 +2284,24 @@ mod tests {
 
         let bin_dir = surface_store.join("host@1.0.0/node_modules/.bin");
         let target = surface_store.join("dep@1.0.0/node_modules/dep/bin/dep");
+        let hidden = surface_store.join("node_modules");
         create_bin_shim(
             &bin_dir,
             "dep",
             &target,
             BinShimOptions {
                 prefer_symlinked_executables: Some(false),
-                ..Default::default()
+                extend_node_path: true,
+                hidden_modules_dir: Some(&hidden),
             },
+        )
+        .unwrap();
+
+        // Hoisting may populate NODE_PATH after the wrappers are generated.
+        std::fs::create_dir_all(hidden.join("hidden-peer")).unwrap();
+        std::fs::write(
+            hidden.join("hidden-peer/index.js"),
+            "module.exports = 'shared-store-wrapper';\n",
         )
         .unwrap();
 
@@ -2292,6 +2314,20 @@ mod tests {
             "wrapper must be relative to its physical GVS directory:\n{body}"
         );
         for path in [shim, surface_store.join("host@1.0.0/node_modules/.bin/dep")] {
+            let decoded = resolve_bin_shim(&path).unwrap().unwrap();
+            assert_eq!(
+                std::fs::canonicalize(&decoded.target).unwrap(),
+                std::fs::canonicalize(&real_target).unwrap()
+            );
+            assert_eq!(
+                std::env::split_paths(decoded.node_path.as_ref().unwrap())
+                    .map(|path| std::fs::canonicalize(path).unwrap())
+                    .collect::<Vec<_>>(),
+                vec![
+                    std::fs::canonicalize(host_bin.parent().unwrap()).unwrap(),
+                    std::fs::canonicalize(&hidden).unwrap(),
+                ]
+            );
             let output = std::process::Command::new(&path).output().unwrap();
             assert!(
                 output.status.success(),
@@ -2321,9 +2357,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn create_bin_shim_wrapper_keeps_a_surface_target_when_it_is_missing() {
-        // A lifecycle may create its declared bin after this link pass. Without
-        // a resolved target, the physical GVS anchor is unknowable, so retain
-        // the existing surface-relative wrapper form.
+        // A lifecycle may create its declared bin after this link pass.
+        // An ordinary project-local target stays relative to the wrapper.
         let dir = tempfile::tempdir().unwrap();
         let bin_dir = dir.path().join("node_modules/.bin");
         let target = dir.path().join("node_modules/gone/bin/gone");
@@ -2620,10 +2655,16 @@ mod tests {
             "expected two-entry NODE_PATH, got:\n{content}"
         );
         let resolved = resolve_bin_shim(&bin_dir.join("mycli")).unwrap().unwrap();
-        assert_eq!(resolved.target, script);
+        assert_eq!(resolved.target, std::fs::canonicalize(script).unwrap());
         assert_eq!(
             resolved.node_path,
-            Some(std::env::join_paths([dir.path().join("node_modules"), hidden]).unwrap())
+            Some(
+                std::env::join_paths([
+                    std::fs::canonicalize(dir.path().join("node_modules")).unwrap(),
+                    std::fs::canonicalize(hidden).unwrap(),
+                ])
+                .unwrap()
+            )
         );
     }
 
