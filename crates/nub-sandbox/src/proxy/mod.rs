@@ -525,7 +525,7 @@ fn handle_conn(
     if shutdown.load(Ordering::SeqCst) {
         return Ok(());
     }
-    let upstream = connect_upstream(&req.host, req.port, allow_private)?;
+    let upstream = connect_upstream(&req.host, req.port, allow_private, &shutdown)?;
     active.track(&upstream)?;
     let mut up = upstream;
     up.set_write_timeout(Some(SPLICE_POLL))?;
@@ -636,8 +636,8 @@ fn is_hard_blocked_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Connect to the upstream target with a timeout. A hostname is resolved here (the
-/// proxy owns DNS — a child-supplied IP for a hostname is never trusted).
+/// Connect to the upstream target with one total candidate-connect timeout. A hostname is
+/// resolved here (the proxy owns DNS — a child-supplied IP for a hostname is never trusted).
 ///
 /// ANTI-REBINDING PIN: the name is resolved exactly ONCE into a fixed address list, and
 /// each address is SSRF-classified and connected to as the SAME `SocketAddr` — there is
@@ -646,13 +646,48 @@ fn is_hard_blocked_ip(ip: IpAddr) -> bool {
 /// (fail-closed); a host that resolves ONLY to blocked addresses yields the block error.
 /// `allow_private` (derived from the policy's `<private>` opt-in) governs only the
 /// private-range tier; the metadata/link-local block is unconditional.
-fn connect_upstream(host: &Host, port: u16, allow_private: bool) -> io::Result<TcpStream> {
+///
+/// Shutdown is observed before resolution, between candidate attempts, and after a
+/// successful dial. `std::net` cannot interrupt system DNS or a single in-flight
+/// `connect_timeout`, so those retain their native blocking behavior; the fixed budget only
+/// prevents a multi-address result from receiving a fresh timeout per address.
+fn connect_upstream(
+    host: &Host,
+    port: u16,
+    allow_private: bool,
+    shutdown: &AtomicBool,
+) -> io::Result<TcpStream> {
+    if shutdown.load(Ordering::SeqCst) {
+        return Err(proxy_shutdown_error());
+    }
     let addrs: Vec<SocketAddr> = match host {
         Host::Ip(ip) => vec![SocketAddr::new(*ip, port)],
         Host::Name(name) => (name.as_str(), port).to_socket_addrs()?.collect(),
     };
+    let deadline = Instant::now() + UPSTREAM_TIMEOUT;
+    connect_candidates(
+        addrs,
+        allow_private,
+        shutdown,
+        deadline,
+        Instant::now,
+        TcpStream::connect_timeout,
+    )
+}
+
+fn connect_candidates(
+    addrs: impl IntoIterator<Item = SocketAddr>,
+    allow_private: bool,
+    shutdown: &AtomicBool,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut dial: impl FnMut(&SocketAddr, Duration) -> io::Result<TcpStream>,
+) -> io::Result<TcpStream> {
     let mut last_err = io::Error::other("no address resolved");
     for addr in addrs {
+        if shutdown.load(Ordering::SeqCst) {
+            return Err(proxy_shutdown_error());
+        }
         if is_blocked_egress_ip(addr.ip(), allow_private) {
             last_err = io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -660,12 +695,29 @@ fn connect_upstream(host: &Host, port: u16, allow_private: bool) -> io::Result<T
             );
             continue;
         }
-        match TcpStream::connect_timeout(&addr, UPSTREAM_TIMEOUT) {
+        let remaining = deadline.saturating_duration_since(now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "egress proxy upstream connection deadline elapsed",
+            ));
+        }
+        match dial(&addr, remaining) {
+            Ok(_stream) if shutdown.load(Ordering::SeqCst) => {
+                return Err(proxy_shutdown_error());
+            }
             Ok(s) => return Ok(s),
             Err(e) => last_err = e,
         }
     }
     Err(last_err)
+}
+
+fn proxy_shutdown_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "egress proxy is shutting down",
+    )
 }
 
 /// Blind bidirectional forward. One thread copies client→upstream; this thread copies
@@ -1060,23 +1112,134 @@ mod tests {
         // Negative control: an allowed (non-blocked) target actually connects.
         let echo = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0)).unwrap();
         let port = echo.local_addr().unwrap().port();
+        let shutdown = AtomicBool::new(false);
         std::thread::spawn(move || {
             let _ = echo.accept();
         });
         assert!(
-            connect_upstream(&Host::Ip(IpAddr::from([127, 0, 0, 1])), port, false).is_ok(),
+            connect_upstream(
+                &Host::Ip(IpAddr::from([127, 0, 0, 1])),
+                port,
+                false,
+                &shutdown,
+            )
+            .is_ok(),
             "loopback must still connect through the guard"
         );
 
         // Metadata is denied immediately (PermissionDenied), even with the private opt-in.
-        let err = connect_upstream(&Host::Ip("169.254.169.254".parse().unwrap()), 80, true)
-            .expect_err("metadata egress must be blocked even with <private>");
+        let err = connect_upstream(
+            &Host::Ip("169.254.169.254".parse().unwrap()),
+            80,
+            true,
+            &shutdown,
+        )
+        .expect_err("metadata egress must be blocked even with <private>");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
 
         // RFC1918 is denied without the opt-in, allowed with it.
-        let err = connect_upstream(&Host::Ip("192.168.1.1".parse().unwrap()), 80, false)
-            .expect_err("RFC1918 egress must be blocked by default");
+        let err = connect_upstream(
+            &Host::Ip("192.168.1.1".parse().unwrap()),
+            80,
+            false,
+            &shutdown,
+        )
+        .expect_err("RFC1918 egress must be blocked by default");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn candidate_connect_uses_one_budget_across_addresses() {
+        let start = Instant::now();
+        let mut moments = [start, start + Duration::from_secs(10)].into_iter();
+        let shutdown = AtomicBool::new(false);
+        let mut budgets = Vec::new();
+        let err = connect_candidates(
+            [
+                SocketAddr::from(([8, 8, 8, 8], 443)),
+                SocketAddr::from(([1, 1, 1, 1], 443)),
+            ],
+            false,
+            &shutdown,
+            start + UPSTREAM_TIMEOUT,
+            || moments.next().unwrap(),
+            |_, budget| {
+                budgets.push(budget);
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "test dial",
+                ))
+            },
+        )
+        .expect_err("both test dials must fail");
+
+        assert_eq!(budgets, [UPSTREAM_TIMEOUT, Duration::from_secs(5)]);
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[test]
+    fn connect_upstream_stops_before_resolution_after_shutdown() {
+        let shutdown = AtomicBool::new(true);
+        let err = connect_upstream(
+            &Host::Name("this-name-must-not-be-resolved.invalid".into()),
+            443,
+            false,
+            &shutdown,
+        )
+        .expect_err("shutdown must prevent DNS resolution");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn candidate_connect_stops_between_attempts_after_shutdown() {
+        let shutdown = AtomicBool::new(false);
+        let start = Instant::now();
+        let mut dials = 0;
+        let err = connect_candidates(
+            [
+                SocketAddr::from(([8, 8, 8, 8], 443)),
+                SocketAddr::from(([1, 1, 1, 1], 443)),
+            ],
+            false,
+            &shutdown,
+            start + UPSTREAM_TIMEOUT,
+            || start,
+            |_, _| {
+                dials += 1;
+                shutdown.store(true, Ordering::SeqCst);
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "test dial",
+                ))
+            },
+        )
+        .expect_err("shutdown must stop the next candidate attempt");
+
+        assert_eq!(dials, 1);
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn candidate_connect_discards_a_dial_completed_after_shutdown() {
+        let shutdown = AtomicBool::new(false);
+        let start = Instant::now();
+        let (stream, peer) = socket_pair();
+        let mut stream = Some(stream);
+        let err = connect_candidates(
+            [SocketAddr::from(([8, 8, 8, 8], 443))],
+            false,
+            &shutdown,
+            start + UPSTREAM_TIMEOUT,
+            || start,
+            |_, _| {
+                shutdown.store(true, Ordering::SeqCst);
+                Ok(stream.take().unwrap())
+            },
+        )
+        .expect_err("a dial that completes during shutdown must be discarded");
+        drop(peer);
+
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
     }
 
     #[test]

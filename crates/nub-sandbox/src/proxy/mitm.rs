@@ -362,8 +362,12 @@ pub(super) fn terminate(
     }
 
     // The upstream leg: REAL TLS to the REAL server, verified against REAL roots.
-    let upstream_tcp =
-        super::connect_upstream(&super::Host::Name(host.to_string()), port, allow_private)?;
+    let upstream_tcp = super::connect_upstream(
+        &super::Host::Name(host.to_string()),
+        port,
+        allow_private,
+        &active.shutdown,
+    )?;
     active.track(&upstream_tcp)?;
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|_| io::Error::other("invalid upstream server name for TLS termination"))?;
