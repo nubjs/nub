@@ -158,18 +158,30 @@ fn parse_client_hello(hs: &[u8]) -> SniScan {
     }
     // extensions: u16 total length + the extension list. A ClientHello with no
     // extensions block (legacy) has no SNI.
-    let Some(ext_total) = c.u16() else {
+    // TLS 1.2 and earlier permit the extensions field to be omitted, but a
+    // partial u16 is malformed rather than a legacy ClientHello.
+    if c.at_end() {
         return SniScan::NoSni;
+    }
+    let Some(ext_total) = c.u16() else {
+        return SniScan::Malformed;
     };
     let Some(exts) = c.take(ext_total as usize) else {
         return SniScan::Malformed;
     };
+    // The handshake length already bounded `hs`; bytes after the declared
+    // extensions vector cannot belong to this ClientHello.
+    if !c.at_end() {
+        return SniScan::Malformed;
+    }
     scan_extensions(exts)
 }
 
-/// Walk the extension list for `server_name`; return the host_name if present.
+/// Walk and validate the entire extension list, returning its single SNI if present.
 fn scan_extensions(exts: &[u8]) -> SniScan {
     let mut c = Cursor::new(exts);
+    let mut server_name = None;
+    let mut saw_server_name = false;
     while !c.at_end() {
         let (Some(ext_type), Some(ext_len)) = (c.u16(), c.u16()) else {
             return SniScan::Malformed;
@@ -178,13 +190,26 @@ fn scan_extensions(exts: &[u8]) -> SniScan {
             return SniScan::Malformed;
         };
         if ext_type == EXT_SERVER_NAME {
-            return parse_server_name(ext_data);
+            // RFC 6066/8446 allow at most one extension of a given type. We
+            // deliberately validate only the type this scanner interprets;
+            // unknown extensions remain forwards-compatible.
+            if saw_server_name {
+                return SniScan::Malformed;
+            }
+            saw_server_name = true;
+            match parse_server_name(ext_data) {
+                SniScan::Sni(host) => server_name = Some(host),
+                SniScan::NoSni => {}
+                SniScan::Malformed | SniScan::Incomplete | SniScan::NotTls => {
+                    return SniScan::Malformed;
+                }
+            }
         }
     }
-    SniScan::NoSni
+    server_name.map_or(SniScan::NoSni, SniScan::Sni)
 }
 
-/// Parse a `server_name` extension body for the first `host_name`.
+/// Parse and validate a `server_name` extension body.
 fn parse_server_name(data: &[u8]) -> SniScan {
     let mut c = Cursor::new(data);
     // server_name_list: u16 length prefix.
@@ -194,7 +219,12 @@ fn parse_server_name(data: &[u8]) -> SniScan {
     let Some(list) = c.take(list_len as usize) else {
         return SniScan::Malformed;
     };
+    if list.is_empty() || !c.at_end() {
+        return SniScan::Malformed;
+    }
     let mut lc = Cursor::new(list);
+    let mut seen_types = [false; 256];
+    let mut host_name = None;
     while !lc.at_end() {
         let Some(name_type) = lc.u8() else {
             return SniScan::Malformed;
@@ -205,15 +235,21 @@ fn parse_server_name(data: &[u8]) -> SniScan {
         let Some(name) = lc.take(name_len as usize) else {
             return SniScan::Malformed;
         };
+        if std::mem::replace(&mut seen_types[name_type as usize], true) {
+            return SniScan::Malformed;
+        }
         if name_type == SNI_NAME_TYPE_HOST {
             // SNI is ASCII (A-label) per RFC 6066; reject non-UTF-8 rather than guess.
-            return match std::str::from_utf8(name) {
-                Ok(s) if !s.is_empty() => SniScan::Sni(s.to_string()),
-                _ => SniScan::Malformed,
+            let Ok(host) = std::str::from_utf8(name) else {
+                return SniScan::Malformed;
             };
+            if host.is_empty() {
+                return SniScan::Malformed;
+            }
+            host_name = Some(host.to_string());
         }
     }
-    SniScan::NoSni
+    host_name.map_or(SniScan::NoSni, SniScan::Sni)
 }
 
 fn u16be(b: &[u8]) -> u16 {
@@ -281,29 +317,27 @@ mod tests {
     /// Build a minimal but well-formed TLS ClientHello record carrying `sni` (or none
     /// when empty). Single record, real field framing — the parser must accept it.
     fn client_hello(sni: Option<&str>) -> Vec<u8> {
+        let mut exts = Vec::new();
+        if let Some(host) = sni {
+            exts.extend_from_slice(&server_name_extension(&[host]));
+        }
+        client_hello_with_extensions(Some(&exts), &[])
+    }
+
+    /// Build a ClientHello with a supplied extension vector. `None` omits the
+    /// extensions field entirely, as legacy TLS ClientHellos may do.
+    fn client_hello_with_extensions(exts: Option<&[u8]>, trailing: &[u8]) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&[0x03, 0x03]); // legacy_version TLS1.2
         body.extend_from_slice(&[0u8; 32]); // random
         body.push(0); // session_id len 0
         body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher_suites: len2 + one suite
         body.extend_from_slice(&[0x01, 0x00]); // compression_methods: len1 + null
-
-        let mut exts = Vec::new();
-        if let Some(host) = sni {
-            let host = host.as_bytes();
-            let mut sn = Vec::new();
-            sn.push(SNI_NAME_TYPE_HOST);
-            sn.extend_from_slice(&(host.len() as u16).to_be_bytes());
-            sn.extend_from_slice(host);
-            let mut list = Vec::new();
-            list.extend_from_slice(&(sn.len() as u16).to_be_bytes());
-            list.extend_from_slice(&sn);
-            exts.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
-            exts.extend_from_slice(&(list.len() as u16).to_be_bytes());
-            exts.extend_from_slice(&list);
+        if let Some(exts) = exts {
+            body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+            body.extend_from_slice(exts);
         }
-        body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
-        body.extend_from_slice(&exts);
+        body.extend_from_slice(trailing);
 
         let mut hs = Vec::new();
         hs.push(HS_CLIENT_HELLO);
@@ -312,6 +346,21 @@ mod tests {
         hs.extend_from_slice(&body);
 
         framed_records(&hs, hs.len())
+    }
+
+    fn server_name_extension(hosts: &[&str]) -> Vec<u8> {
+        let mut list = Vec::new();
+        for host in hosts {
+            list.push(SNI_NAME_TYPE_HOST);
+            list.extend_from_slice(&(host.len() as u16).to_be_bytes());
+            list.extend_from_slice(host.as_bytes());
+        }
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
+        ext.extend_from_slice(&((list.len() + 2) as u16).to_be_bytes());
+        ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&list);
+        ext
     }
 
     /// Wrap handshake bytes into TLS records of at most `chunk` payload bytes each
@@ -372,6 +421,67 @@ mod tests {
     fn complete_client_hello_without_sni_is_nosni() {
         let rec = client_hello(None);
         assert_eq!(scan_client_hello(&rec), SniScan::NoSni);
+    }
+
+    #[test]
+    fn legacy_client_hello_without_extensions_is_nosni() {
+        let rec = client_hello_with_extensions(None, &[]);
+        assert_eq!(scan_client_hello(&rec), SniScan::NoSni);
+    }
+
+    #[test]
+    fn valid_unknown_extension_is_ignored() {
+        let unknown = [0xfe, 0x0d, 0x00, 0x03, 0xaa, 0xbb, 0xcc];
+        let rec = client_hello_with_extensions(Some(&unknown), &[]);
+        assert_eq!(scan_client_hello(&rec), SniScan::NoSni);
+    }
+
+    #[test]
+    fn trailing_byte_without_extension_length_is_malformed() {
+        // A legacy ClientHello may omit extensions completely, but cannot leave
+        // one byte of a u16 extension length behind.
+        let rec = client_hello_with_extensions(None, &[0]);
+        assert_eq!(scan_client_hello(&rec), SniScan::Malformed);
+    }
+
+    #[test]
+    fn bytes_after_declared_extension_block_are_malformed() {
+        let exts = server_name_extension(&["example.com"]);
+        let rec = client_hello_with_extensions(Some(&exts), &[0xff]);
+        assert_eq!(scan_client_hello(&rec), SniScan::Malformed);
+    }
+
+    #[test]
+    fn trailing_bytes_inside_server_name_extension_are_malformed() {
+        let mut exts = server_name_extension(&["example.com"]);
+        let length = u16be(&exts[2..4]) + 1;
+        exts[2..4].copy_from_slice(&length.to_be_bytes());
+        exts.push(0xff);
+        let rec = client_hello_with_extensions(Some(&exts), &[]);
+        assert_eq!(scan_client_hello(&rec), SniScan::Malformed);
+    }
+
+    #[test]
+    fn malformed_extension_after_sni_is_not_ignored() {
+        let mut exts = server_name_extension(&["example.com"]);
+        exts.extend_from_slice(&[0xfe, 0x0d, 0x00, 0x01]);
+        let rec = client_hello_with_extensions(Some(&exts), &[]);
+        assert_eq!(scan_client_hello(&rec), SniScan::Malformed);
+    }
+
+    #[test]
+    fn duplicate_server_name_extensions_are_malformed() {
+        let mut exts = server_name_extension(&["first.example"]);
+        exts.extend_from_slice(&server_name_extension(&["second.example"]));
+        let rec = client_hello_with_extensions(Some(&exts), &[]);
+        assert_eq!(scan_client_hello(&rec), SniScan::Malformed);
+    }
+
+    #[test]
+    fn duplicate_host_names_in_server_name_list_are_malformed() {
+        let exts = server_name_extension(&["first.example", "second.example"]);
+        let rec = client_hello_with_extensions(Some(&exts), &[]);
+        assert_eq!(scan_client_hello(&rec), SniScan::Malformed);
     }
 
     #[test]
