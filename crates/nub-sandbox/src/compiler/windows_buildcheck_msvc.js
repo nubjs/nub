@@ -5,7 +5,12 @@ const policy = __NUB_BUILDCHECK_MSVC_JSON__;
 const originalLoad = Module._load;
 
 function buildcheckToolchain() {
-  const arch = process.arch === 'ia32' ? 'x86' : process.arch;
+  // BuildCheck's source derives both the host and target from `process.arch`.
+  // Nub has native evidence only for its x64 branch (`Hostx64` / `amd64` MSBuild),
+  // so leave ARM and x86 on BuildCheck's ordinary discovery rather than inventing
+  // an x64-host cross-target layout.
+  if (process.arch !== 'x64') return [];
+  const arch = 'x64';
   const major = Number.parseInt(policy.version, 10);
   const details = new Map([
     [16, { year: 2019, toolset: 'v142' }],

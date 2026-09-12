@@ -82,6 +82,12 @@ for (const [name, version, probe, source = false] of selected) {
       if (isolatedEnvKeys.has(key.toLowerCase())) delete env[key];
     }
     if (source) env.npm_config_build_from_source = 'true';
+    // Keep the source-build control on the exact interpreter the jail selected.
+    // A passed control therefore rules out interpreter-version drift rather than merely
+    // showing that an unrelated host Python can build the addon.
+    if (source && !confined && process.env.CORPUS_CONTROL_PYTHON) {
+      env.npm_config_python = process.env.CORPUS_CONTROL_PYTHON;
+    }
     const install = spawnSync(binary, ['install'], { cwd: project, env, encoding: 'utf8', timeout: 300_000 });
     const log = `${install.stdout}\n${install.stderr}`;
     const installLog = join(base, 'install.log');

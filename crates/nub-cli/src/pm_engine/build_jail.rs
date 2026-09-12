@@ -97,6 +97,11 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // ambient-env capture; a build script never needs a non-UTF-8 var.
         let mut ambient = reconstruct_child_env(&spawn.env_delta);
 
+        // A dependency must never supply Python startup code to its own lifecycle. Windows
+        // GYP compatibility below may restore Nub's read-only startup directory, but an
+        // ambient spelling must never become lifecycle code.
+        ambient.retain(|key, _| !key.eq_ignore_ascii_case("PYTHONPATH"));
+
         // A dependency's lifecycle script runs on VANILLA Node — nub's augmentation is a
         // developer-facing feature for the user's own code, and a published postinstall
         // neither asked for it nor can rely on it. Unconditional, not set-if-absent: this
@@ -341,6 +346,18 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                     }
                 }
                 extra_reads.push(dir);
+            }
+            // CPython's non-strict `realpath('.')` falls back to a lexical trailing dot
+            // when an AppContainer cannot ask the mount manager for a DOS final path. GYP
+            // then derives an invalid parent dependency path. The startup file is Nub-owned
+            // and read-only to the child; raw and unconfined Python do not receive it.
+            #[cfg(windows)]
+            if let Some(startup) = windows_python_compat_dir(&spawn.project_root) {
+                ambient.insert(
+                    "PYTHONPATH".to_string(),
+                    startup.to_string_lossy().into_owned(),
+                );
+                extra_reads.push(startup);
             }
         }
 
@@ -2097,6 +2114,27 @@ fn python_path_front_dir(executable: &str, project_root: &std::path::Path) -> Op
 #[cfg(not(unix))]
 fn python_path_front_dir(_executable: &str, _project_root: &std::path::Path) -> Option<PathBuf> {
     None
+}
+
+/// A Nub-owned Python startup directory for the Windows GYP realpath compatibility adapter.
+///
+/// The lifecycle may read this cache entry but is never granted write access, so one dependency
+/// cannot replace startup code consumed by the next. It is deliberately absent from raw and
+/// unconfined execution; only a resolved node-gyp Python receives the explicit adapter.
+#[cfg(windows)]
+fn windows_python_compat_dir(project_root: &std::path::Path) -> Option<PathBuf> {
+    let dir = sandbox_homes(project_root)
+        .cache
+        .join("nub")
+        .join("pm")
+        .join("jail-python-compat");
+    std::fs::create_dir_all(&dir).ok()?;
+    let startup = dir.join("sitecustomize.py");
+    let source = nub_sandbox::windows_python_compat_source();
+    if std::fs::read_to_string(&startup).ok().as_deref() != Some(source) {
+        std::fs::write(&startup, source).ok()?;
+    }
+    startup.is_file().then_some(dir)
 }
 
 /// The spelling of the resolved interpreter to name in `npm_config_python`.
