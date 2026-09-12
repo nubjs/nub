@@ -82,8 +82,7 @@ struct SideEffectsMarker {
     output_hash: String,
 }
 
-/// The shell aube runs lifecycle scripts under when nothing replaces it.
-const PLATFORM_DEFAULT_SHELL_ID: &str = if cfg!(windows) { "cmd" } else { "sh" };
+use aube_scripts::PLATFORM_DEFAULT_SHELL_ID;
 
 /// Add the lifecycle shell to the engine key. A build run under a different
 /// shell can be WRONG, not merely stale: `cmd.exe` exits 0 while writing an

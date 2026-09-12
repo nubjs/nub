@@ -503,6 +503,25 @@ pub fn resolved_shell_id() -> String {
     shell_id(&resolve_shell(&script_settings()))
 }
 
+/// The shell aube runs script bodies under when nothing replaces it. A caller
+/// keying persisted state on the shell compares against this, so state written
+/// under the default keeps the identity it already had.
+pub const PLATFORM_DEFAULT_SHELL_ID: &str = if cfg!(windows) { "cmd" } else { "sh" };
+
+/// [`resolved_shell_id`] for a caller holding the two shell settings but no
+/// configured [`ScriptSettings`] — the install-freshness hash, which runs
+/// before the settings pass and before any script spawns.
+pub fn shell_id_for(
+    script_shell: Option<&Path>,
+    default_shell: Option<&aube_util::ScriptShell>,
+) -> String {
+    shell_id(&resolve_shell(&ScriptSettings {
+        script_shell: script_shell.map(Path::to_path_buf),
+        default_shell: default_shell.cloned(),
+        ..Default::default()
+    }))
+}
+
 fn shell_id(invocation: &ShellInvocation) -> String {
     let raw = match invocation {
         // A multi-call binary dispatches on its leading argument (busybox
@@ -2854,6 +2873,25 @@ mod shell_resolution_tests {
             })),
             "bash",
             "a user script-shell participates, keyed by name so its location may vary"
+        );
+    }
+
+    /// The install-freshness hash keys on the shell before the settings pass has
+    /// run, so it resolves the same identity from the two settings directly. If
+    /// this drifted from `resolved_shell_id`, a shell change would either never
+    /// invalidate a warm install or invalidate every one of them.
+    #[test]
+    fn the_hash_helper_and_the_spawn_agree_on_the_shell() {
+        assert_eq!(shell_id_for(None, None), PLATFORM_DEFAULT_SHELL_ID);
+        assert_eq!(
+            shell_id_for(None, Some(&busybox())),
+            "sh",
+            "an embedder default must be visible to the freshness hash"
+        );
+        assert_eq!(
+            shell_id_for(Some(Path::new("/usr/local/bin/bash")), Some(&busybox())),
+            "bash",
+            "the user's script-shell outranks the embedder default here too"
         );
     }
 
