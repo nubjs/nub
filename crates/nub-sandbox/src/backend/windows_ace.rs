@@ -328,11 +328,9 @@ fn rebuild_without_grant(
         return Ok(None);
     }
     if kept.is_empty() {
-        tracing::debug!(
-            "sandbox: window-object ace strip skipped — our aces are the only ones, and an \
-             empty DACL would deny everyone"
-        );
-        return Ok(None);
+        return Err(io::Error::other(
+            "sandbox window-object cleanup refused to replace an owned-only DACL with an empty DACL",
+        ));
     }
     kept.sort_by_key(|&(bucket, index, _, _)| (bucket, index));
 
@@ -457,6 +455,7 @@ fn window_object_has_grant(handle: HANDLE, sid: PSID, mask: u32) -> io::Result<b
     let mut found = false;
     walk_aces(read.acl, Path::new(WINDOW_OBJECT), |_i, header, ace| {
         if header.AceType == ACCESS_ALLOWED_ACE_TYPE
+            && header.AceFlags & INHERITED_ACE_FLAG == 0
             // SAFETY: type checked, so `SidStart` sits at the ACCESS_ALLOWED_ACE offset.
             && unsafe { EqualSid(sid_of(ace), sid) } != 0
             && ace_mask(ace) & mask == mask
@@ -752,6 +751,28 @@ pub(crate) fn has_persistent_grant(object: &WindowObject, sid: PSID) -> io::Resu
 #[cfg(test)]
 pub(crate) fn test_has_persistent_grant(object: &WindowObject, sid: PSID) -> io::Result<bool> {
     has_persistent_grant(object, sid)
+}
+
+#[cfg(test)]
+pub(crate) fn test_grant_narrow_desktop_ace(object: &WindowObject, sid: PSID) -> io::Result<()> {
+    let handle =
+        open_recorded(object)?.ok_or_else(|| io::Error::other("test window object disappeared"))?;
+    if !handle.desktop {
+        return Err(io::Error::other("test narrow ACE requires a desktop"));
+    }
+    let sid_string = unsafe { sid_to_string(sid) }?;
+    grant_window_object(handle.raw, &sid_string, DESKTOP_READOBJECTS)
+}
+
+#[cfg(test)]
+pub(crate) fn test_has_narrow_desktop_ace(object: &WindowObject, sid: PSID) -> io::Result<bool> {
+    let Some(handle) = open_recorded(object)? else {
+        return Ok(false);
+    };
+    if !handle.desktop {
+        return Ok(false);
+    }
+    window_object_has_grant(handle.raw, sid, DESKTOP_READOBJECTS)
 }
 
 /// Exercise the recovery path against a real, non-current station and desktop.  It runs only in

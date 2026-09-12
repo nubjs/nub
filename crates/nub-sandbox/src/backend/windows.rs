@@ -3592,7 +3592,7 @@ pub(super) mod launch {
     pub(crate) fn test_crash_transition(stage: &str, profile: &str, private_root: &Path) {
         if !matches!(
             std::env::var("__NUB_WINDOWS_CLEANUP_FIXTURE").as_deref(),
-            Ok("fault-acquire" | "fault-cleanup")
+            Ok("fault-acquire" | "fault-cleanup" | "window-witness-replacement-fault")
         ) || std::env::var("__NUB_WINDOWS_CLEANUP_FAULT").as_deref() != Ok(stage)
         {
             return;
@@ -3688,12 +3688,18 @@ pub(super) mod launch {
                 // ownership witness still present instead of confusing a prior partial cleanup
                 // with a same-name replacement object.
                 for object in &entry.window_objects {
-                    let retrying = super::windows_registry::begin_window_object_revoke(&entry, object)?;
-                    if !crate::backend::windows_ace::has_persistent_grant(object, sid)? {
-                        if retrying {
-                            // The durable intent predates this attempt. A missing witness now
-                            // means the previous process completed the revoke before it died, or
-                            // the object was replaced without Nub's grant; neither permits a DACL
+                    let witnessed = crate::backend::windows_ace::has_persistent_grant(object, sid)?;
+                    #[cfg(test)]
+                    test_crash_transition(
+                        "cleanup-window-object-witness-checked",
+                        &entry.profile_name,
+                        Path::new("."),
+                    );
+                    if !witnessed {
+                        if entry.window_object_revoke.as_ref() == Some(object) {
+                            // A durable intent predates this attempt. A missing witness now means
+                            // the previous process completed the revoke before it died, or the
+                            // object was replaced without Nub's grant; neither permits a DACL
                             // edit, so retire only this already-in-progress journal operation.
                             super::windows_registry::finish_window_object_revoke(&entry, object)?;
                             continue;
@@ -3702,6 +3708,11 @@ pub(super) mod launch {
                             "sandbox window-object cleanup ownership witness is absent for {object:?}"
                         )));
                     }
+                    // Persist progress only after establishing the ownership witness. If the
+                    // process dies before this point, retry must treat a now-missing or
+                    // same-name replacement object as fresh ambiguity, never as a completed
+                    // revoke.
+                    super::windows_registry::begin_window_object_revoke(&entry, object)?;
                     crate::backend::windows_ace::revoke_persistent(object, sid).map_err(
                         |error| acl_error(format!("revoke window object {object:?}"), error),
                     )?;
