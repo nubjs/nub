@@ -1632,7 +1632,7 @@ pub async fn run_script(
                 &cmd,
                 script_dir,
                 &scope,
-                verbatim_tail(script_cmd, &settings, jail.is_some()),
+                verbatim_tail(script_cmd, settings, jail.is_some()),
             );
             let _cancel = CancelLifecycleOnDrop(spawn.cancelled.clone());
             // The host sandbox owns a synchronous spawn+wait (nub-sandbox drives an outer
