@@ -8,6 +8,8 @@
 //! checkout. Root configuration may disable the jail globally or for a named package.
 //! The jail is enabled by default; `install.buildJail` controls the global switch.
 
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -96,6 +98,11 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         // dropped (nub-sandbox's env IR is `String`-keyed/valued), matching nub's other
         // ambient-env capture; a build script never needs a non-UTF-8 var.
         let mut ambient = reconstruct_child_env(&spawn.env_delta);
+
+        // A dependency must never supply Python startup code to its own lifecycle. Windows
+        // GYP compatibility below may restore Nub's read-only startup directory, but an
+        // ambient spelling must never become lifecycle code.
+        strip_pythonpath(&mut ambient);
 
         // A dependency's lifecycle script runs on VANILLA Node — nub's augmentation is a
         // developer-facing feature for the user's own code, and a published postinstall
@@ -342,6 +349,18 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                 }
                 extra_reads.push(dir);
             }
+            // CPython's non-strict `realpath('.')` falls back to a lexical trailing dot
+            // when an AppContainer cannot ask the mount manager for a DOS final path. GYP
+            // then derives an invalid parent dependency path. The startup file is Nub-owned
+            // and read-only to the child; raw and unconfined Python do not receive it.
+            #[cfg(windows)]
+            if let Some(startup) = windows_python_compat_dir(&spawn.project_root) {
+                ambient.insert(
+                    "PYTHONPATH".to_string(),
+                    startup.to_string_lossy().into_owned(),
+                );
+                extra_reads.push(startup);
+            }
         }
 
         let jail_cache = sandbox_homes(&spawn.project_root).cache;
@@ -357,6 +376,20 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
         #[cfg(windows)]
         if let Some(msvc) = super::jail_msvc::resolve(&ambient, &spawn, &probe) {
             msvc.stamp(&mut ambient);
+            // `cpu-features@0.0.10` invokes BuildCheck before node-gyp. BuildCheck repeats VS
+            // discovery through a COM-hosted PowerShell helper which an AppContainer may not
+            // activate; reuse only the toolchain Nub just resolved and validated for node-gyp.
+            // Raw and unconfined scripts never enter this path.
+            if is_buildcheck_compat_package(
+                spawn.package_name.as_deref(),
+                spawn.package_version.as_deref(),
+            ) && let (Some(options), Some(existing)) = (
+                msvc.buildcheck_node_options(),
+                ambient.get_mut("NODE_OPTIONS"),
+            ) {
+                existing.push(' ');
+                existing.push_str(&options);
+            }
             extra_reads.extend(msvc.reads);
         }
 
@@ -1419,6 +1452,18 @@ fn reconstruct_child_env(
     env.into_map()
 }
 
+/// Remove every Windows-equivalent spelling before installing Nub-owned startup code.
+fn strip_pythonpath(ambient: &mut BTreeMap<String, String>) {
+    ambient.retain(|key, _| !key.eq_ignore_ascii_case("PYTHONPATH"));
+}
+
+/// The one measured BuildCheck compatibility target. Keep this narrower than source-builds:
+/// unrelated packages retain their ordinary module resolution and VS discovery.
+#[cfg(any(windows, test))]
+fn is_buildcheck_compat_package(name: Option<&str>, version: Option<&str>) -> bool {
+    name == Some("cpu-features") && version == Some("0.0.10")
+}
+
 /// Accumulates the effective child env under the SPAWNING platform's name-equality rule.
 ///
 /// The rule is the whole point: on POSIX two spellings are two variables, on Windows they
@@ -2083,6 +2128,44 @@ fn python_path_front_dir(_executable: &str, _project_root: &std::path::Path) -> 
     None
 }
 
+/// A Nub-owned Python startup directory for the Windows GYP realpath compatibility adapter.
+///
+/// The normal build-jail policy grants this cache entry read-only, so one dependency cannot
+/// replace startup code consumed by the next. Explicit user-authored grants may be wider. It is
+/// deliberately absent from raw and unconfined execution; only a resolved node-gyp Python
+/// receives the explicit adapter.
+#[cfg(windows)]
+fn windows_python_compat_dir(project_root: &std::path::Path) -> Option<PathBuf> {
+    let parent = sandbox_homes(project_root)
+        .cache
+        .join("nub")
+        .join("pm")
+        .join("jail-python-compat");
+    publish_python_compat_dir(&parent, nub_sandbox::windows_python_compat_source())
+}
+
+/// Publish immutable Python startup source under its SHA-256, so concurrent lifecycle launches
+/// never import a half-written file and different Nub versions never overwrite each other.
+#[cfg(windows)]
+fn publish_python_compat_dir(parent: &std::path::Path, source: &str) -> Option<PathBuf> {
+    let key = hex::encode(Sha256::digest(source.as_bytes()));
+    let dir = parent.join(key);
+    let startup = dir.join("sitecustomize.py");
+    if std::fs::read_to_string(&startup).ok().as_deref() == Some(source) {
+        return Some(dir);
+    }
+    if std::fs::create_dir_all(parent).is_err() {
+        return None;
+    }
+    let staging = tempfile::TempDir::new_in(parent).ok()?;
+    std::fs::write(staging.path().join("sitecustomize.py"), source).ok()?;
+    let staged = staging.keep();
+    if std::fs::rename(&staged, &dir).is_err() {
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+    (std::fs::read_to_string(startup).ok().as_deref() == Some(source)).then_some(dir)
+}
+
 /// The spelling of the resolved interpreter to name in `npm_config_python`.
 ///
 /// ⛔ ON WINDOWS A SPACE IN THIS PATH BREAKS THE BUILD, AND NOT INSIDE NUB. node-gyp reads
@@ -2683,6 +2766,74 @@ fn symlink_hop_dirs(path: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pythonpath_scrub_removes_every_case_variant_without_touching_other_env() {
+        let mut ambient = BTreeMap::from([
+            ("PYTHONPATH".to_string(), "host-a".to_string()),
+            ("pythonpath".to_string(), "host-b".to_string()),
+            ("PythonPath".to_string(), "host-c".to_string()),
+            ("PYTHONHOME".to_string(), "keep".to_string()),
+        ]);
+        strip_pythonpath(&mut ambient);
+        assert!(
+            ambient
+                .keys()
+                .all(|key| !key.eq_ignore_ascii_case("PYTHONPATH")),
+            "an inherited spelling could execute dependency-supplied startup code"
+        );
+        assert_eq!(ambient.get("PYTHONHOME"), Some(&"keep".to_string()));
+    }
+
+    #[test]
+    fn buildcheck_adapter_is_exactly_scoped_to_the_measured_package_version() {
+        assert!(is_buildcheck_compat_package(
+            Some("cpu-features"),
+            Some("0.0.10")
+        ));
+        for target in [
+            (Some("cpu-features"), Some("0.0.9")),
+            (Some("cpu-features"), Some("0.0.11")),
+            (Some("cpu-features-fork"), Some("0.0.10")),
+            (None, Some("0.0.10")),
+        ] {
+            assert!(!is_buildcheck_compat_package(target.0, target.1));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn python_compat_publication_is_immutable_and_concurrent() {
+        let root = tempfile::tempdir().expect("temporary cache");
+        let parent = root.path().join("jail-python-compat");
+        let source = "adapter-v1";
+        let dirs = std::thread::scope(|scope| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+            let workers = (0..12)
+                .map(|_| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        publish_python_compat_dir(&parent, source)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("publisher thread").expect("published"))
+                .collect::<Vec<_>>()
+        });
+        assert!(dirs.iter().all(|dir| dir == &dirs[0]));
+        assert_eq!(
+            std::fs::read_to_string(dirs[0].join("sitecustomize.py")).unwrap(),
+            source
+        );
+        let changed = publish_python_compat_dir(&parent, "adapter-v2").expect("new source");
+        assert_ne!(
+            changed, dirs[0],
+            "source bytes choose the publication directory"
+        );
+    }
 
     /// The gate on the Windows stdio-shim stamp. Getting it wrong in the permissive
     /// direction does not degrade the repair, it aborts Node at startup for every lifecycle

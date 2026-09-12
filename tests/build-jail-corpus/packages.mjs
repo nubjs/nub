@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const binary = resolve(process.env.NUB_BIN);
 const root = mkdtempSync(join(tmpdir(), 'nub-jail-packages-'));
+const linkedProject = process.env.CORPUS_LINKED_PROJECT === '1';
 const reportRoot = process.env.CORPUS_REPORT ? resolve(process.env.CORPUS_REPORT) : null;
 if (reportRoot) mkdirSync(reportRoot, { recursive: true });
 const report = (source, destination) => {
@@ -59,12 +60,19 @@ report(provenance, 'provenance.json');
 
 for (const [name, version, probe, source = false] of selected) {
   for (const confined of [false, true]) {
-    const label = `${name.replaceAll('/', '-')}-${source ? 'source' : 'default'}-${confined ? 'jailed' : 'control'}`;
+    const label = `${name.replaceAll('/', '-')}-${source ? 'source' : 'default'}${linkedProject ? '-junction' : ''}-${confined ? 'jailed' : 'control'}`;
     const base = join(root, label);
     const project = join(base, 'project');
+    const projectTarget = join(base, 'project-target');
     const home = join(base, 'home');
     const temp = join(home, 'tmp');
-    mkdirSync(project, { recursive: true });
+    mkdirSync(projectTarget, { recursive: true });
+    if (linkedProject) {
+      symlinkSync(projectTarget, project, 'junction');
+      assert.ok(lstatSync(project).isSymbolicLink(), 'project is a junction');
+      assert.equal(realpathSync(project), realpathSync(projectTarget), 'junction resolves to project target');
+    }
+    else mkdirSync(project, { recursive: true });
     mkdirSync(temp, { recursive: true });
     writeFileSync(join(project, 'package.json'), JSON.stringify({
       name: 'jail-corpus-consumer', private: true, dependencies: { [name]: version },
@@ -82,11 +90,25 @@ for (const [name, version, probe, source = false] of selected) {
       if (isolatedEnvKeys.has(key.toLowerCase())) delete env[key];
     }
     if (source) env.npm_config_build_from_source = 'true';
+    // Keep the source-build control on the exact interpreter the jail selected.
+    // A passed control therefore rules out interpreter-version drift rather than merely
+    // showing that an unrelated host Python can build the addon.
+    if (source && !confined && process.env.CORPUS_CONTROL_PYTHON) {
+      env.npm_config_python = process.env.CORPUS_CONTROL_PYTHON;
+    }
     const install = spawnSync(binary, ['install'], { cwd: project, env, encoding: 'utf8', timeout: 300_000 });
     const log = `${install.stdout}\n${install.stderr}`;
     const installLog = join(base, 'install.log');
     writeFileSync(installLog, log);
     report(installLog, join('cases', label, 'install.log'));
+    // Native GYP inputs explain a failed source build without retaining a whole installed tree.
+    // They are copied before the assertion so the failure arm has the same evidence as a pass.
+    if (source) {
+      for (const file of ['buildcheck.gypi', 'build/config.gypi', 'build/cpufeatures.vcxproj', 'build/cpu_features.vcxproj']) {
+        const candidate = join(project, 'node_modules', name, file);
+        if (existsSync(candidate)) report(candidate, join('cases', label, file));
+      }
+    }
     try {
       assert.ifError(install.error);
       assert.equal(install.status, 0, 'install succeeded');

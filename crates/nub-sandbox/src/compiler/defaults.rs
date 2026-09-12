@@ -369,6 +369,13 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
         if key.eq_ignore_ascii_case("NODE_OPTIONS") {
             return true;
         }
+        // `build_jail.rs` first removes every ambient spelling, then restores this only for
+        // the normal confined node-gyp compatibility adapter. The exception stays in this
+        // Windows-only arm: a generic compiler caller must not turn `PYTHONPATH` into
+        // lifecycle code on another backend.
+        if key.eq_ignore_ascii_case("PYTHONPATH") {
+            return true;
+        }
         BUILD_JAIL_EXTRA_EXACT
             .iter()
             .any(|e| e.eq_ignore_ascii_case(key))
@@ -605,6 +612,41 @@ pub fn windows_build_jail_node_options(
 ) -> String {
     build_jail_node_options(package_name, package_version)
 }
+
+/// Explicit compatibility preload for `cpu-features@0.0.10`'s BuildCheck discovery.
+///
+/// BuildCheck repeats Visual Studio discovery through a PowerShell-hosted COM probe, even
+/// after Nub has already resolved and stamped the node-gyp toolchain. AppContainers cannot
+/// activate that COM server, so the caller supplies the same accepted toolchain metadata as a
+/// package-scoped compatibility adapter. It changes no raw or unconfined Node execution.
+#[cfg(windows)]
+pub fn windows_buildcheck_msvc_node_options(
+    vs_root: &str,
+    version: &str,
+    sdk_root: &str,
+    sdk_version: &str,
+) -> String {
+    let policy = serde_json::json!({
+        "vsRoot": vs_root,
+        "version": version,
+        "sdkRoot": sdk_root,
+        "sdkVersion": sdk_version,
+    });
+    let js = strip_js_comments(WINDOWS_BUILDCHECK_MSVC).replace(
+        BUILDCHECK_MSVC_PLACEHOLDER,
+        &serde_json::to_string(&policy).expect("a toolchain policy of strings always serializes"),
+    );
+    debug_assert!(
+        !js.contains(BUILDCHECK_MSVC_PLACEHOLDER),
+        "windows_buildcheck_msvc.js must contain its policy placeholder"
+    );
+    data_url_import(&js)
+}
+
+#[cfg(windows)]
+const WINDOWS_BUILDCHECK_MSVC: &str = include_str!("windows_buildcheck_msvc.js");
+#[cfg(windows)]
+const BUILDCHECK_MSVC_PLACEHOLDER: &str = "__NUB_BUILDCHECK_MSVC_JSON__";
 
 /// Explicit Node compatibility preloads for a Windows sandbox session.
 ///
@@ -1708,6 +1750,15 @@ mod tests {
                 "{key} must reach node-gyp or the Visual Studio pre-resolution is inert"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_python_adapter_reaches_the_jailed_child() {
+        assert!(
+            build_jail_env_allowed("PYTHONPATH"),
+            "the Nub-owned Python startup directory must reach confined node-gyp"
+        );
     }
 
     /// `NODE_EXECUTABLE` fails the same silent way, and its symptom is worse than inertness:

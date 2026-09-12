@@ -149,8 +149,9 @@ pub use compiler::{
 };
 #[cfg(windows)]
 pub use compiler::{
-    windows_build_jail_node_options, windows_native_realpath_shim_node_options,
-    windows_node_compat_options, windows_realpath_node_options,
+    windows_build_jail_node_options, windows_buildcheck_msvc_node_options,
+    windows_native_realpath_shim_node_options, windows_node_compat_options,
+    windows_realpath_node_options,
 };
 pub use matcher::Homes;
 
