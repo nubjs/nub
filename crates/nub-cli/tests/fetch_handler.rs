@@ -17,7 +17,7 @@
 //! cannot fail on its own. Their positive control is the rest of this file: each one
 //! runs a fixture that another test proves does get served, so a green absence means
 //! the exclusion held rather than that the feature was never wired. Measured with the
-//! installer stubbed out: fifteen of these go red, and exactly those three stay green.
+//! installer stubbed out: seventeen of these go red, and exactly those three stay green.
 //!
 //! One invariant this file deliberately does NOT test: that the detection pass never
 //! evaluates the entry ahead of the user's preloads. It cannot be tested here, because
@@ -76,9 +76,14 @@ impl Drop for Server {
 
 fn start(name: &str, env: &[(&str, &str)]) -> Server {
     let f = fixture(name);
+    launch(f.parent().unwrap(), &[f.to_str().unwrap()], env, name)
+}
+
+/// `nub <args…>` in `dir`, waited for until it reports its listener.
+fn launch(dir: &Path, args: &[&str], env: &[(&str, &str)], name: &str) -> Server {
     let mut cmd = Command::new(nub_binary());
-    cmd.arg(&f)
-        .current_dir(f.parent().unwrap())
+    cmd.args(args)
+        .current_dir(dir)
         .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -511,6 +516,78 @@ fn the_node_hijack_does_not_serve() {
         !stderr.contains("Listening on"),
         "`node <file>` must not bind a listener: {stderr:?}"
     );
+}
+
+// ── Behind a wrapper ────────────────────────────────────────────────
+
+/// A project whose environment an external loader owns: a `.env.schema` beside a
+/// `#!/usr/bin/env node` loader in `node_modules/.bin`, which is the shape `varlock`
+/// ships. Nub spawns the loader in FRONT of Node, and the loader — itself a Node
+/// process, running nub's inherited preload — copies its environment into the
+/// application. The handler echoes the variable the loader adds, so a matching
+/// response proves it was served from a process launched THROUGH the loader rather
+/// than from one nub spawned directly.
+#[cfg(unix)]
+fn wrapped_project(tag: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("nub-fetch-wrapped-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let bin = dir.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{ "name": "wrapped", "version": "1.0.0", "type": "module" }"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join(".env.schema"), "# ---\nA=1\n").unwrap();
+    std::fs::write(
+        dir.join("server.mjs"),
+        "export default {\n  fetch() {\n    return new Response(`FROM_LOADER=${process.env.FROM_LOADER ?? \"<unset>\"}`);\n  },\n};\n",
+    )
+    .unwrap();
+    let loader = bin.join("varlock");
+    std::fs::write(
+        &loader,
+        "#!/usr/bin/env node\n\
+         const { spawnSync } = require(\"node:child_process\");\n\
+         const argv = process.argv.slice(2);\n\
+         const cmd = argv.slice(argv.indexOf(\"--\") + 1);\n\
+         const res = spawnSync(cmd[0], cmd.slice(1), { stdio: \"inherit\", env: { ...process.env, FROM_LOADER: \"yes\" } });\n\
+         process.exit(res.status ?? 1);\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&loader, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+/// The serve signal names the application, not whatever process nub spawns. The
+/// loader in front of Node runs nub's preload too, and a signal it consumed there
+/// never reached the application, which then ran as a plain script.
+#[cfg(unix)]
+#[test]
+fn a_handler_behind_an_env_owner_loader_is_served() {
+    let dir = wrapped_project("run");
+    let s = launch(&dir, &["server.mjs"], &[], "behind the loader");
+    assert_eq!(get(&s, "/").body, "FROM_LOADER=yes");
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Same through `nub watch`, whose supervisor re-execs the child with the signal in
+/// its environment and the loader still in front.
+#[cfg(unix)]
+#[test]
+fn a_watched_handler_behind_an_env_owner_loader_is_served() {
+    let dir = wrapped_project("watch");
+    let s = launch(
+        &dir,
+        &["watch", "server.mjs"],
+        &[],
+        "behind the loader, watched",
+    );
+    assert_eq!(get(&s, "/").body, "FROM_LOADER=yes");
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ── Address selection ───────────────────────────────────────────────

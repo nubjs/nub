@@ -4722,11 +4722,13 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // whose default export is one. A plain `nub <file>` only — a bin launch
     // (`exec_ua`) is running somebody else's tool, and the `node` hijack has to keep
     // `node <file>` meaning what `node` means, so a script's `node server.js` never
-    // binds a port while `nub server.js` does. See `flags::SERVE_ENTRY_ENV`.
+    // binds a port while `nub server.js` does. Carries the argv rather than a flag so
+    // the preload can tell the application from a wrapper nub puts in front of it —
+    // see `flags::SERVE_ENTRY_ENV`.
     if !compat_mode && !exec_ua && !NODE_HIJACK.load(Ordering::Relaxed) {
         env_vars.insert(
             nub_core::node::flags::SERVE_ENTRY_ENV.to_string(),
-            "1".to_string(),
+            nub_core::node::flags::serve_entry_marker(args.iter().map(String::as_str)),
         );
     }
 
@@ -7340,7 +7342,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // `--node` form to exclude (it refuses compat outright), so the resolved
     // `nodeCompat` from the project config is the only opt-out to honor.
     if !compat_mode {
-        cmd.env(nub_core::node::flags::SERVE_ENTRY_ENV, "1");
+        cmd.env(
+            nub_core::node::flags::SERVE_ENTRY_ENV,
+            nub_core::node::flags::serve_entry_marker(
+                std::iter::once(file).chain(args.iter().map(String::as_str)),
+            ),
+        );
     }
     // Tell the preload to hide nub's argv-only V8 flags from `process.execArgv`, the same
     // signal the direct-spawn path sets. Node's watch supervisor re-execs the child with

@@ -280,10 +280,42 @@ pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 /// runs `node server.js` therefore gets Node's behavior, while `nub server.js` gets
 /// the listener.
 ///
-/// The preload DELETES it before user code runs, which is what keeps one listener per
-/// launch: a `child_process` spawn or a `Worker` copies `process.env` after the delete,
-/// so a server that forks a worker pool does not give every worker its own port.
+/// The value is the launcher's own argv — every token handed to Node after nub's
+/// injected flags, joined by [`SERVE_ENTRY_SEPARATOR`] — and not a bare `1`,
+/// because the process nub spawns is not always the application. An env-owner
+/// loader or a configured `prefix` sits in FRONT of Node, and a Node-based one
+/// (`varlock` is a `#!/usr/bin/env node` script) inherits nub's `NODE_OPTIONS` and
+/// so runs this preload itself. A bare flag was consumed there, by the wrapper, and
+/// the application it then launched never saw it. Carrying the argv lets the
+/// preload tell which process it is in: Node has already `path.resolve`d `argv[1]`
+/// by the time a preload runs, so the process whose `argv[1]` one of these tokens
+/// resolves to is the application, and every other one leaves the marker in place
+/// for its child. Rust names no token as THE entry — `nub --require x server.mjs`
+/// puts `x` first — because Node is the one that knows which one it picked.
+///
+/// The application's preload DELETES it before user code runs, which is what keeps
+/// one listener per launch: a `child_process` spawn or a `Worker` copies
+/// `process.env` after the delete, so a server that forks a worker pool does not
+/// give every worker its own port.
 pub const SERVE_ENTRY_ENV: &str = "__NUB_SERVE_ENTRY";
+
+/// Joins the tokens of a [`SERVE_ENTRY_ENV`] value. ASCII unit separator: it cannot
+/// appear in an argument a shell hands over, and unlike JSON it has no failure mode
+/// to guard on the reading side.
+pub const SERVE_ENTRY_SEPARATOR: char = '\x1f';
+
+/// The [`SERVE_ENTRY_ENV`] value for a launch whose Node argv (after nub's own
+/// flags) is `tokens`.
+pub fn serve_entry_marker<'a>(tokens: impl IntoIterator<Item = &'a str>) -> String {
+    let mut value = String::new();
+    for (i, token) in tokens.into_iter().enumerate() {
+        if i > 0 {
+            value.push(SERVE_ENTRY_SEPARATOR);
+        }
+        value.push_str(token);
+    }
+    value
+}
 
 /// Internal child-process signal carrying the matrix's runtime V8 flags — the
 /// [`super::feature_matrix::Mitigation::RuntimeV8Flag`] rows — for the preload to turn

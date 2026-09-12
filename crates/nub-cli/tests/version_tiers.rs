@@ -965,3 +965,38 @@ fn cjs_preload_runs_once_after_hooks_on_both_tiers() {
         );
     }
 }
+
+/// A configured ESM preload whose top-level `await` crosses an event-loop turn
+/// still finishes before the entry starts, on both tiers.
+///
+/// The tiers carry it differently, and each is its own way for something armed in
+/// nub's preload to slip between the user's `await` and the entry: the compat
+/// tier's `--import` preload awaits the chain itself, while the fast tier hands the
+/// chain its own `--import` token behind nub's `--require`. The fetch-handler
+/// detection pass did exactly that on the compat tier when it was armed ahead of the
+/// awaited chain — its `setImmediate` landed in the turn the preload's timer yielded,
+/// and its `import()` ran the entry there.
+#[test]
+fn esm_preload_awaits_a_macrotask_before_the_entry_on_both_tiers() {
+    for want in [(22, 13, 0), (22, 15, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) =
+            run_nub_against_node(want, "esm-preload-await", "main.mjs")
+        else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code, 0,
+            "Node {maj}.{min}.{pat}: an awaiting .mjs preload must run without aborting: stderr={stderr}"
+        );
+        assert_eq!(
+            stdout, "preload:start\npreload:done\nmain:done\n",
+            "Node {maj}.{min}.{pat}: the entry must not start until the preload's await settles"
+        );
+    }
+}

@@ -1872,12 +1872,17 @@ function installThreadpoolPolicy() {
 // what keeps this additive.
 //
 // The launcher sets SERVE_ENTRY_ENV for a top-level `nub <file>` and `nub watch`
-// only (never `--node`, never a bin launch, never the `node` hijack), and this
-// function DELETES it before any user code runs. That delete is the whole
-// containment: a `child_process` spawn or a Worker copies `process.env` after it is
-// gone, so a server entry that forks a worker pool does not hand every worker its own
-// listener — no `worker_threads` probe needed here to tell the realms apart.
+// only (never `--node`, never a bin launch, never the `node` hijack), and the
+// application's preload DELETES it before any user code runs. That delete is the
+// whole containment: a `child_process` spawn or a Worker copies `process.env` after
+// it is gone, so a server entry that forks a worker pool does not hand every worker
+// its own listener — no `worker_threads` probe needed here to tell the realms apart.
+//
+// Its value is the launcher's argv, tokens joined by SERVE_ENTRY_SEPARATOR, and
+// that is what makes "the application's preload" a process this code can identify:
+// see `markedEntryIsThisProcess`.
 const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
+const SERVE_ENTRY_SEPARATOR = "\x1f";
 
 // NEVER START THE ENTRY OURSELVES BEFORE NODE WOULD HAVE. The inspection below can
 // reach the entry through `import()`, and an `import()` that lands while a preload is
@@ -1901,7 +1906,9 @@ const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
 // Declining to serve is the right side to fail on: reordering a user's preloads is a
 // correctness break, and not binding a port is not.
 function installServeEntry() {
-  if (!process.env[SERVE_ENTRY_ENV]) return;
+  const marker = process.env[SERVE_ENTRY_ENV];
+  if (marker === undefined) return;
+  if (!markedEntryIsThisProcess(marker)) return;
   delete process.env[SERVE_ENTRY_ENV];
   const report = (err) => {
     // A throwing entry is handled inside, so nothing here is expected to reject and
@@ -1928,6 +1935,27 @@ function installServeEntry() {
       })
       .catch(report);
   });
+}
+
+// Is this process the application the launcher marked, or a wrapper it put in
+// front of that application? An env-owner loader or a configured `prefix` runs
+// BEFORE Node in the spawn chain, and a Node-based one (`varlock` is a
+// `#!/usr/bin/env node` script) inherits nub's NODE_OPTIONS and so runs this very
+// preload; a bare flag was consumed there and never reached the application. The
+// marker carries the launcher's argv instead, and Node has already `path.resolve`d
+// `argv[1]` by the time a preload runs, so the same call over each token is an
+// exact test — no second resolver, and no path spelling Rust and Node could
+// disagree on. A wrapper's own `argv[1]` is its bin, which no launcher token names,
+// so it leaves the marker in place for its child. The raw comparison covers `-`
+// (stdin), which Node does not expand. No `argv[1]` at all — `-e`, the REPL — is
+// nothing to serve and nothing to forward, so it counts as this process and the
+// caller deletes the marker.
+function markedEntryIsThisProcess(marker) {
+  const main = process.argv[1];
+  if (typeof main !== "string") return true;
+  return marker
+    .split(SERVE_ENTRY_SEPARATOR)
+    .some((token) => token !== "" && (token === main || pathResolve(token) === main));
 }
 
 // Could a preload still run after nub's own? True whenever an `--import`/`--loader`
