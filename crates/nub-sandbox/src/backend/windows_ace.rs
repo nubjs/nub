@@ -50,6 +50,16 @@ const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
 const INHERITED_ACE_FLAG: u8 = 0x10;
 const WINDOW_OBJECT: &str = "<window-object>";
 
+/// Whether a window-object grant is absent, was added by Nub, was already present, or requires no
+/// mutation. `NoMutation` intentionally creates no cleanup ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PersistentGrant {
+    Missing,
+    Added,
+    Existing,
+    NoMutation,
+}
+
 // A process has exactly one current window station.  The journal may temporarily borrow it to
 // open a desktop in an old station, so every observation and child creation that depends on that
 // process-global value must share this in-process lock.  `OperationLock` remains necessary for
@@ -71,6 +81,9 @@ static TEST_FORCE_FOREIGN_SESSION_LIVE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 static TEST_FAIL_STATION_RESTORE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static TEST_FORCE_NO_PERSISTENT_GRANT: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn station_guard() -> MutexGuard<'static, ()> {
     WINDOW_STATION_LOCK
@@ -410,7 +423,7 @@ fn set_window_dacl(handle: HANDLE, dacl: *const ACL) -> io::Result<()> {
 }
 
 /// Add an ALLOW ace for `sid` on a window-station or desktop HANDLE. Not inheritable.
-fn grant_window_object(handle: HANDLE, sid: &str, mask: u32) -> io::Result<()> {
+fn grant_window_object(handle: HANDLE, sid: &str, mask: u32) -> io::Result<PersistentGrant> {
     let sid = OwnedSid::parse(sid)?;
     let existing = ReadWindowDacl::open(handle)?;
 
@@ -422,7 +435,7 @@ fn grant_window_object(handle: HANDLE, sid: &str, mask: u32) -> io::Result<()> {
             "sandbox: window-object grant skipped — the object has a NULL DACL, so access is \
              already unrestricted"
         );
-        return Ok(());
+        return Ok(PersistentGrant::NoMutation);
     }
 
     let ea = explicit_access(sid.0, mask, GRANT_ACCESS, false);
@@ -433,7 +446,8 @@ fn grant_window_object(handle: HANDLE, sid: &str, mask: u32) -> io::Result<()> {
         return Err(win32_obj_err("SetEntriesInAclW", rc));
     }
     let _guard = LocalFreeGuard(new_dacl.cast());
-    set_window_dacl(handle, new_dacl)
+    set_window_dacl(handle, new_dacl)?;
+    Ok(PersistentGrant::Added)
 }
 
 /// Remove Nub's exact explicit ALLOW grant from a window station or desktop, leaving every other
@@ -464,6 +478,18 @@ fn window_object_has_grant(handle: HANDLE, sid: PSID, mask: u32) -> io::Result<b
         }
     })?;
     Ok(found)
+}
+
+fn window_object_grant_state(handle: HANDLE, sid: PSID, mask: u32) -> io::Result<PersistentGrant> {
+    let read = ReadWindowDacl::open(handle)?;
+    if read.acl.is_null() {
+        return Ok(PersistentGrant::NoMutation);
+    }
+    Ok(if window_object_has_grant(handle, sid, mask)? {
+        PersistentGrant::Existing
+    } else {
+        PersistentGrant::Missing
+    })
 }
 
 #[cfg(test)]
@@ -703,9 +729,11 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
     Ok(Some(desktop))
 }
 
-/// The registry journals the object before this mutation and owns the ACE until
-/// eviction. A command finishing must not revoke another process's shared SID.
-pub(crate) fn grant_persistent(object: &WindowObject, sid: PSID) -> io::Result<()> {
+/// Inspect whether this session object needs a new Nub grant without claiming cleanup ownership.
+pub(crate) fn persistent_grant_state(
+    object: &WindowObject,
+    sid: PSID,
+) -> io::Result<PersistentGrant> {
     let _lock = OperationLock::acquire("acl")?;
     let handle = open_recorded(object)?
         .ok_or_else(|| io::Error::other("sandbox window object disappeared"))?;
@@ -716,10 +744,30 @@ pub(crate) fn grant_persistent(object: &WindowObject, sid: PSID) -> io::Result<(
         WINSTA_GRANT
     };
     let owned = OwnedSid::parse(&sid)?;
-    if window_object_has_grant(handle.raw, owned.0, mask)? {
-        return Ok(());
+    #[cfg(test)]
+    if TEST_FORCE_NO_PERSISTENT_GRANT.load(Ordering::Relaxed) {
+        return Ok(PersistentGrant::NoMutation);
     }
-    grant_window_object(handle.raw, &sid, mask)
+    window_object_grant_state(handle.raw, owned.0, mask)
+}
+
+/// Add Nub's explicit ACE after acquisition has journaled an absent witness. A no-mutation result
+/// is returned to the caller rather than inventing cleanup ownership for a NULL DACL.
+pub(crate) fn grant_persistent(object: &WindowObject, sid: PSID) -> io::Result<PersistentGrant> {
+    let _lock = OperationLock::acquire("acl")?;
+    let handle = open_recorded(object)?
+        .ok_or_else(|| io::Error::other("sandbox window object disappeared"))?;
+    let sid = unsafe { sid_to_string(sid) }?;
+    let mask = if handle.desktop {
+        DESKTOP_GRANT
+    } else {
+        WINSTA_GRANT
+    };
+    let owned = OwnedSid::parse(&sid)?;
+    match window_object_grant_state(handle.raw, owned.0, mask)? {
+        PersistentGrant::Missing => grant_window_object(handle.raw, &sid, mask),
+        outcome => Ok(outcome),
+    }
 }
 
 pub(crate) fn revoke_persistent(object: &WindowObject, sid: PSID) -> io::Result<()> {
@@ -754,7 +802,11 @@ pub(crate) fn test_has_persistent_grant(object: &WindowObject, sid: PSID) -> io:
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // Reached by the cross-process cleanup fixture after name replacement.
+pub(crate) fn test_force_no_persistent_grant(force: bool) {
+    TEST_FORCE_NO_PERSISTENT_GRANT.store(force, Ordering::Relaxed);
+}
+
+#[cfg(test)]
 pub(crate) fn test_grant_narrow_desktop_ace(object: &WindowObject, sid: PSID) -> io::Result<()> {
     let handle =
         open_recorded(object)?.ok_or_else(|| io::Error::other("test window object disappeared"))?;
@@ -762,11 +814,10 @@ pub(crate) fn test_grant_narrow_desktop_ace(object: &WindowObject, sid: PSID) ->
         return Err(io::Error::other("test narrow ACE requires a desktop"));
     }
     let sid_string = unsafe { sid_to_string(sid) }?;
-    grant_window_object(handle.raw, &sid_string, DESKTOP_READOBJECTS)
+    grant_window_object(handle.raw, &sid_string, DESKTOP_READOBJECTS).map(|_| ())
 }
 
 #[cfg(test)]
-#[allow(dead_code)] // Reached by the cross-process cleanup fixture after name replacement.
 pub(crate) fn test_has_narrow_desktop_ace(object: &WindowObject, sid: PSID) -> io::Result<bool> {
     let Some(handle) = open_recorded(object)? else {
         return Ok(false);

@@ -287,7 +287,10 @@ fn windows_cleanup_fixture() {
         "cleanup-retry" => interrupted_cleanup(&root),
         "cleanup-window-retry" => interrupted_window_cleanup(&root),
         "cleanup-window-save-failure" => window_revoke_journal_save_failure(&root),
-        "window-witness-replacement-fault" => witness_before_intent_fault(&root),
+        "window-grant-no-mutation" => window_grant_no_mutation_does_not_journal(&root),
+        "window-witness-replacement-fault" => {
+            window_witness_crash_does_not_retire_a_replacement(&root)
+        }
         "cleanup-junction" => cleanup_junction(&root),
         other => panic!("unknown cleanup fixture mode {other}"),
     }
@@ -569,10 +572,30 @@ fn window_revoke_journal_save_failure(root: &Path) {
     assert_recovered(&profile, &private, root, &foreign);
 }
 
+/// A NULL-DACL/no-mutation outcome grants the confined child no new ACE to clean up. The
+/// acquisition journal must therefore stay empty instead of turning an unrelated permissive DACL
+/// into future cleanup authority.
+fn window_grant_no_mutation_does_not_journal(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    crate::backend::windows_ace::test_force_no_persistent_grant(true);
+    let resource = plan(root, "hold").acquire().unwrap();
+    crate::backend::windows_ace::test_force_no_persistent_grant(false);
+    let profile = resource.profile_name().to_string();
+    let entry = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("no-mutation acquisition lost its profile entry");
+    assert!(
+        entry.window_objects.is_empty(),
+        "a no-mutation window DACL outcome created cleanup ownership"
+    );
+    drop(resource);
+    cleanup_resources().unwrap();
+    assert!(windows_registry::test_entry(&profile).unwrap().is_none());
+}
+
 /// The witness is checked before progress is persisted. Crash at that boundary, recreate the
 /// recorded names with a narrower same-SID grant, and prove the later cleanup keeps both the
 /// replacement ACE and the ownership journal rather than treating absent witness as completion.
-#[allow(dead_code)] // The fixture dispatches this by its child-process mode string.
 fn witness_before_intent_fault(_root: &Path) {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -589,7 +612,6 @@ fn witness_before_intent_fault(_root: &Path) {
     panic!("cleanup did not reach witness-before-intent crash transition");
 }
 
-#[allow(dead_code)] // Invoked from the test harness after fixture-mode dispatch.
 fn window_witness_crash_does_not_retire_a_replacement(root: &Path) {
     let _cleanup = CleanupAfterTest;
     let (profile, _) = crash_owner(
@@ -626,8 +648,19 @@ fn window_witness_crash_does_not_retire_a_replacement(root: &Path) {
         .unwrap()
         .expect("fresh replacement incorrectly retired its journal");
     assert_eq!(retained.state, windows_registry::EntryState::RecoveryNeeded);
-    assert_eq!(retained.window_objects, vec![object]);
+    assert_eq!(retained.window_objects, vec![object.clone()]);
     assert!(retained.window_object_revoke.is_none());
+    let retry = cleanup_resources().expect_err("replacement must remain ambiguous on retry");
+    assert!(retry.to_string().contains("ownership witness is absent"));
+    let retried = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("retry incorrectly retired the replacement journal");
+    assert_eq!(retried.window_objects, vec![object.clone()]);
+    assert!(retried.window_object_revoke.is_none());
+    assert!(
+        crate::backend::windows_ace::test_has_narrow_desktop_ace(&object, sid.0).unwrap(),
+        "retry changed the same-SID replacement ACE"
+    );
     drop(replacement);
     windows_registry::test_remove_entry(&profile).unwrap();
 }
@@ -689,6 +722,11 @@ fn windows_cleanup_retries_after_window_revoke_before_journal_completion() {
 #[test]
 fn windows_cleanup_retries_after_window_revoke_journal_save_failure() {
     isolated_scenario("cleanup-window-save-failure");
+}
+
+#[test]
+fn windows_cleanup_does_not_journal_no_mutation_window_grants() {
+    isolated_scenario("window-grant-no-mutation");
 }
 
 #[test]

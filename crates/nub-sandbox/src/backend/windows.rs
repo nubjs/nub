@@ -2296,17 +2296,47 @@ pub(super) mod launch {
                     )?;
                 }
             }
-            // Window objects are session-local, whereas profiles are user-global.
-            // Journal each session's station/desktop before changing either DACL.
+            // Window objects are session-local, whereas profiles are user-global. Only a newly
+            // absent witness is Nub-owned: a pre-existing grant may belong to another process,
+            // and a NULL DACL permits access without any mutation to revoke later.
             for object in &window_objects {
-                acquisition_step(
-                    "window-journal",
-                    resource.record_window_object(object.clone()),
-                )?;
-                acquisition_step(
-                    "window-grant",
-                    crate::backend::windows_ace::grant_persistent(object, ac_sid),
-                )?;
+                let journaled = resource.entry.window_objects.contains(object);
+                match crate::backend::windows_ace::persistent_grant_state(object, ac_sid)? {
+                    crate::backend::windows_ace::PersistentGrant::NoMutation => {
+                        if journaled {
+                            return Err(io::Error::other(format!(
+                                "sandbox journaled window-object grant is absent for {object:?}"
+                            )));
+                        }
+                    }
+                    crate::backend::windows_ace::PersistentGrant::Existing => {
+                        // Retain only an entry that already established ownership. A full
+                        // same-SID grant discovered for the first time is not evidence Nub made
+                        // it and must never become a cleanup target.
+                    }
+                    crate::backend::windows_ace::PersistentGrant::Missing => {
+                        if journaled {
+                            return Err(io::Error::other(format!(
+                                "sandbox journaled window-object grant is absent for {object:?}"
+                            )));
+                        }
+                        acquisition_step(
+                            "window-journal",
+                            resource.record_window_object(object.clone()),
+                        )?;
+                        match acquisition_step(
+                            "window-grant",
+                            crate::backend::windows_ace::grant_persistent(object, ac_sid),
+                        )? {
+                            crate::backend::windows_ace::PersistentGrant::Added => {}
+                            outcome => {
+                                return Err(io::Error::other(format!(
+                                    "sandbox window-object grant changed to {outcome:?} after journaling"
+                                )));
+                            }
+                        }
+                    }
+                }
             }
 
             if resource.fresh {
