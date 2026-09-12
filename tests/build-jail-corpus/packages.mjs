@@ -12,6 +12,7 @@ const root = mkdtempSync(join(requestedTempRoot, 'nub-jail-packages-'));
 assert.equal(resolve(dirname(root)), requestedTempRoot, 'fixture root uses CORPUS_TEMP_ROOT');
 const linkedProject = process.env.CORPUS_LINKED_PROJECT === '1';
 const reportRoot = process.env.CORPUS_REPORT ? resolve(process.env.CORPUS_REPORT) : null;
+const requireRestrictedPolicy = process.env.CORPUS_REQUIRE_RESTRICTED_POLICY === '1';
 const screen = process.env.CORPUS_OSV_SCREEN ? resolve(process.env.CORPUS_OSV_SCREEN) : null;
 const screenRoot = reportRoot ?? join(root, 'security');
 // node-gyp serializes booleans in the generated build/config.gypi as "true" or "false".
@@ -153,8 +154,23 @@ for (const [name, version, probe, source = false] of selected) {
         assert.equal(bound.status, 0, 'installed closure remained screenable');
         assert.equal(JSON.parse(readFileSync(join(base, 'bound-screen.json'), 'utf8')).digest, preparedDigest, 'lifecycle used the screened frozen closure');
       }
-      if (confined) assert.ok(log.includes(`JAILDUMP pkg=Some("${name}")`), 'target lifecycle entered the jail');
-      else assert.match(log, /running without the build sandbox/, 'control opt-out engaged');
+      let resolvedFilesystemPolicy = 'disabled-control';
+      if (confined) {
+        assert.ok(log.includes(`JAILDUMP pkg=Some("${name}")`), 'target lifecycle entered the jail');
+        const policies = [...log.matchAll(/JAILDUMP fs default=(Allow|Deny) rules=(\d+)/g)];
+        assert.ok(policies.length, 'resolved lifecycle filesystem policies were retained');
+        assert.equal(policies.length, [...log.matchAll(/JAILDUMP pkg=/g)].length, 'every lifecycle retained its resolved filesystem policy');
+        // The Windows full-disk tier uses a plain token. With network also allowed it has
+        // no lost policy axes and emits no reduced-mode warning, so warning absence is not proof.
+        const fullDisk = process.platform === 'win32'
+          && policies.some(([, effect, rules]) => effect === 'Allow' && rules === '0');
+        resolvedFilesystemPolicy = fullDisk ? 'windows-full-disk-compatibility'
+          : policies.some(([, effect]) => effect === 'Allow') ? 'unrestricted-filesystem-policy'
+          : /sandbox running in reduced mode/.test(log) ? 'reduced' : 'restricted-filesystem-policy';
+        // Policy diagnostics exclude known compatibility fallbacks; separate runtime canaries
+        // establish enforcement. A log line alone does not attest to an OS token or profile.
+        if (requireRestrictedPolicy) assert.equal(resolvedFilesystemPolicy, 'restricted-filesystem-policy', 'native acceptance requires a restricted lifecycle filesystem policy');
+      } else assert.match(log, /running without the build sandbox/, 'control opt-out engaged');
       if (source) {
         assert.match(log, /gyp info using node-gyp@/, 'native compilation actually ran');
         const configFile = join(project, 'node_modules', name, 'build', 'config.gypi');
@@ -175,8 +191,8 @@ for (const [name, version, probe, source = false] of selected) {
       report(probeLog, join('cases', label, 'probe.log'));
       assert.ifError(check.error);
       assert.equal(check.status, 0, 'installed artifact works');
-      results.push({ label, pass: true });
-      console.log(`PASS ${label}`);
+      results.push({ label, pass: true, resolvedFilesystemPolicy });
+      console.log(`PASS ${label} (${resolvedFilesystemPolicy})`);
     } catch (error) {
       results.push({ label, pass: false, error: error.message });
       console.error(`FAIL ${label}: ${error.message}; logs: ${base}`);

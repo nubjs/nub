@@ -178,6 +178,24 @@ fn main() {
 
     let mut pass = true;
     for operation in ["truncate", "readonly-open-truncate"] {
+        for target in [&allowed_file, &readonly_file, &withheld_file] {
+            reset(target);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--payload")
+                .arg(operation)
+                .arg(target)
+                .output()
+                .expect("run unconfined control");
+            let size = std::fs::metadata(target)
+                .expect("control target survives")
+                .len();
+            pass &= output.status.success() && size == 0;
+            println!(
+                "unconfined {operation} target={} status={:?} size={size}",
+                target.display(),
+                output.status.code()
+            );
+        }
         pass &= check(
             &policy,
             "allowed writable package",

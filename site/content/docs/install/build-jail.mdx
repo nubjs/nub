@@ -12,7 +12,7 @@ nub install
 
 ## Operating-system support
 
-Nub checks the facilities required by a policy when it acquires the jail. Linux filesystem confinement requires [Landlock](https://docs.kernel.org/userspace-api/landlock.html); per-host networking and self-process metadata require additional seccomp facilities. macOS uses Seatbelt. Windows uses AppContainer and extended process startup.
+Nub checks the facilities required by a policy when it acquires the jail. Linux filesystem confinement requires [Landlock](https://docs.kernel.org/userspace-api/landlock.html) ABI 3 or newer, introduced in Linux 6.2, to enforce file truncation as well as ordinary writes. The ABI probe, not the kernel version string, determines availability. Per-host networking and self-process metadata require additional seccomp facilities. macOS uses Seatbelt. Windows uses AppContainer and extended process startup.
 
 Linux coverage includes Ubuntu 24.04 x86-64 on kernel `6.17.0-1022-azure`. macOS coverage includes macOS 14.8.9 arm64. Windows compatibility sequences run on Windows Server 2022 x64 and Windows 11 arm64. Older Linux and Windows floors are not established.
 
@@ -60,7 +60,7 @@ For `cpu-features@0.0.10` on x64, a package-specific adapter supplies BuildCheck
 
 Catalog networking is an allow/deny switch, not a hostname allowlist. Recorded download hosts do not restrict a script's connections. Packages without a matching catalog entry receive the baseline policy, which allows outbound networking; a catalog entry can deny it. On Windows, the coarse network allow covers public outbound connections, not unrestricted LAN or loopback access.
 
-The jail reduces exposure to malicious install scripts; it is not isolation for arbitrary untrusted code. On Windows, a full-disk catalog grant omits the AppContainer. That launch has no operating-system filesystem or network boundary, but environment filtering and process cleanup remain.
+The jail reduces exposure to malicious install scripts; it is not isolation for arbitrary untrusted code. On Windows, a full-disk catalog grant omits AppContainer and requires unrestricted network access. That launch has no operating-system filesystem or network boundary, but environment filtering and process cleanup remain. Combining full disk with a network restriction fails before launch.
 
 ### Automatic filesystem grants
 

@@ -15,6 +15,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const mode = process.env.FIXTURE_MODE;
+if (process.env.FIXTURE_PLATFORM) Object.defineProperty(process, 'platform', { value: process.env.FIXTURE_PLATFORM });
 const name = process.env.CORPUS_CASE;
 const version = name === 'esbuild' ? '0.24.0' : name === 'better-sqlite3' ? '11.8.1' : '0.0.10';
 const record = (kind, cwd, args) => appendFileSync(process.env.FIXTURE_EVENTS, JSON.stringify({kind, cwd, args}) + '\\n');
@@ -62,7 +63,10 @@ cp.spawnSync = (file, args, options) => {
     if (mode === 'missing-prebuild-bin' && JSON.parse(readFileSync(join(cwd, 'nub.jsonc'))).install.buildJail) {
       return ok("Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:/cache/store/v1/prebuild-install@7.1.3/node_modules/prebuild-install/bin.js'\\ngyp info ok");
     }
-    return ok('JAILDUMP pkg=Some("' + name + '") running without the build sandbox gyp info using node-gyp@12.4.0');
+    const fs = mode === 'missing-policy' ? '' : mode.startsWith('full-disk') ? 'JAILDUMP fs default=Allow rules=0' : 'JAILDUMP fs default=Deny rules=41';
+    const appended = mode === 'full-disk-spoof' ? '\\nJAILDUMP pkg=Some("' + name + '")\\nJAILDUMP fs default=Deny rules=41' : '';
+    const reduced = mode === 'reduced-policy' ? 'sandbox running in reduced mode — net not enforced' : '';
+    return ok('JAILDUMP pkg=Some("' + name + '") running without the build sandbox gyp info using node-gyp@12.4.0\\n' + fs + '\\n' + reduced + appended);
   }
   if (args[0] === process.env.CORPUS_OSV_SCREEN) {
     const value = (flag) => args[args.indexOf(flag) + 1];
@@ -81,7 +85,7 @@ cp.spawnSync = (file, args, options) => {
 syncBuiltinESMExports();
 `;
 
-function run(t, mode, report = true, name = 'esbuild') {
+function run(t, mode, report = true, name = 'esbuild', extraEnv = {}) {
   const root = mkdtempSync(join(tmpdir(), 'corpus-screen-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const patch = join(root, 'commands # preload.mjs');
@@ -90,7 +94,7 @@ function run(t, mode, report = true, name = 'esbuild') {
   writeFileSync(eventsFile, '');
   const env = { ...process.env, NUB_BIN: process.execPath, CORPUS_CASE: name,
     CORPUS_TEMP_ROOT: root, CORPUS_OSV_SCREEN: join(root, 'scanner.mjs'),
-    FIXTURE_MODE: mode, FIXTURE_EVENTS: eventsFile };
+    FIXTURE_MODE: mode, FIXTURE_EVENTS: eventsFile, CORPUS_REQUIRE_RESTRICTED_POLICY: '1', ...extraEnv };
   for (const prefix of ['npm_config_', 'npm_package_config_node_gyp_']) {
     for (const suffix of ['nodedir', 'disturl', 'dist_url', 'target', 'arch', 'target_arch', 'runtime', 'force_process_config']) {
       env[(prefix + suffix).toUpperCase()] = 'fixture-must-clear';
@@ -177,3 +181,28 @@ test('changed node-gyp serialized compiler settings fail before the artifact pro
   assert.deepEqual(verdicts.map(v => v.pass), [true, false]);
   assert.match(verdicts[1].error, /preserves runtime node_with_ltcg/);
 });
+
+for (const mode of ['full-disk', 'full-disk-spoof', 'reduced-policy', 'missing-policy']) {
+  test(`${mode} cannot count as restricted native acceptance`, t => {
+    const result = run(t, mode, true, 'cpu-features', { FIXTURE_PLATFORM: 'win32' });
+    assert.notEqual(result.status, 0);
+    const verdicts = JSON.parse(readFileSync(join(result.report, 'results.json')));
+    assert.deepEqual(verdicts.map(v => v.pass), [true, false]);
+    assert.equal(result.events.filter(e => e.kind === 'probe').length, 1, 'only the control reaches the artifact probe');
+  });
+}
+
+test('Windows full-disk compatibility is recorded even without a degradation warning', t => {
+  const result = run(t, 'full-disk', true, 'cpu-features', { FIXTURE_PLATFORM: 'win32', CORPUS_REQUIRE_RESTRICTED_POLICY: '0' });
+  assert.equal(result.status, 0, result.stderr);
+  const verdicts = JSON.parse(readFileSync(join(result.report, 'results.json')));
+  assert.deepEqual(verdicts.map(v => v.resolvedFilesystemPolicy), ['disabled-control', 'windows-full-disk-compatibility']);
+});
+
+for (const platform of ['linux', 'darwin']) {
+  test(`${platform} broad filesystem policy cannot count as confined native acceptance`, t => {
+    const result = run(t, 'full-disk', true, 'cpu-features', { FIXTURE_PLATFORM: platform });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.events.filter(e => e.kind === 'probe').length, 1);
+  });
+}
