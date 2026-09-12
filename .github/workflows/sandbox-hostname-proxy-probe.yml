@@ -2,7 +2,7 @@ name: Hostname proxy confinement probe
 
 on:
   push:
-    branches: [sandbox-hostname-proxy-probe]
+    branches: [sandbox-hostname-proxy-probe, sandbox-proxy-hardening]
     paths:
       - crates/nub-sandbox/**
       - tests/proxy-per-host/**
@@ -32,6 +32,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           shared-key: sandbox-hostname-proxy
@@ -59,6 +61,25 @@ jobs:
             --config 'profile.fast.package."*".opt-level=2' \
             > reports/proxy-per-host.log 2>&1
           cat reports/proxy-per-host.log
+          sha256sum target/fast/proxy-per-host* > reports/probe-binary.sha256
+      - name: Exercising parser and proxy shutdown
+        if: ${{ !cancelled() && github.ref_name == 'sandbox-proxy-hardening' }}
+        run: |
+          set -o pipefail
+          cargo clippy -p nub-sandbox --profile fast --lib --tests -- -D warnings > reports/clippy.log 2>&1
+          cargo test -p nub-sandbox --profile fast --lib proxy:: -- --nocapture --test-threads=1 2>&1 | tee reports/proxy-library.log
+      - name: Recording the prior TLS shutdown control
+        if: ${{ !cancelled() && github.ref_name == 'sandbox-proxy-hardening' }}
+        run: |
+          git fetch --no-tags --depth=1 origin 8e17950847ba28df1d344651e92ac1df9a01feb7
+          git checkout 8e17950847ba28df1d344651e92ac1df9a01feb7 -- crates/nub-sandbox/src/proxy/mitm.rs
+          git diff HEAD -- crates/nub-sandbox/src/proxy/mitm.rs > reports/control-reversion.diff
+          set +e
+          cargo test -p nub-sandbox --profile fast --lib proxy::tests::dropping_proxy_reaps_a_stalled_terminated_request -- --nocapture --test-threads=1 > reports/control-shutdown.log 2>&1
+          code=$?
+          set -e
+          echo "$code" > reports/control-shutdown-exit.txt
+          cat reports/control-shutdown.log
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
