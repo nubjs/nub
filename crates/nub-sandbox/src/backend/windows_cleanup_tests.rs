@@ -184,8 +184,15 @@ fn windows_cleanup_fixture() {
         }
         "station-recovery" => crate::backend::windows_ace::test_revoke_from_noncurrent_station()
             .expect("station-specific ACE recovery"),
+        "station-replacement" => {
+            crate::backend::windows_ace::test_revoke_rejects_same_name_desktop_replacement()
+                .expect("replacement desktop must not authorize cleanup")
+        }
+        "station-concurrent-launch" => concurrent_station_launch(&root),
         "crash-transitions" => crash_transitions(&root),
+        "station-journal-crash" => station_journal_crash(&root),
         "cleanup-retry" => interrupted_cleanup(&root),
+        "cleanup-window-retry" => interrupted_window_cleanup(&root),
         "cleanup-junction" => cleanup_junction(&root),
         other => panic!("unknown cleanup fixture mode {other}"),
     }
@@ -324,6 +331,68 @@ fn crash_transitions(root: &Path) {
     }
 }
 
+/// The owner process reaches the real AppContainer acquisition path, journals its current
+/// station/desktop grants, then exits without destructors. A later process must find and remove
+/// those grants through the durable registry, not a process-local cache.
+fn station_journal_crash(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    let caller = root.join("station-journal");
+    std::fs::create_dir(&caller).unwrap();
+    std::fs::write(caller.join("caller-owned.txt"), b"caller-owned").unwrap();
+    let foreign = ForeignProfileAce::grant(&caller);
+    let (profile, _private) = crash_owner(&caller, "fault-acquire", "acl-installed-before-ready");
+    let entry = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("crashed owner lost its station journal");
+    assert_eq!(entry.state, windows_registry::EntryState::Preparing);
+    assert!(
+        !entry.window_objects.is_empty(),
+        "the owner did not persist its window-object grants"
+    );
+    for object in &entry.window_objects {
+        assert!(
+            super::launch::test_profile_has_window_grant(&profile, object).unwrap(),
+            "owner's journaled grant was not present before later-process recovery: {object:?}"
+        );
+    }
+
+    cleanup_resources().unwrap();
+    assert!(windows_registry::test_entry(&profile).unwrap().is_none());
+    for object in &entry.window_objects {
+        assert!(
+            !super::launch::test_profile_has_window_grant(&profile, object).unwrap(),
+            "later-process recovery retained the journaled grant: {object:?}"
+        );
+    }
+    assert!(super::launch::test_profile_has_ace(&foreign.profile, &caller).unwrap());
+    assert_eq!(
+        std::fs::read(caller.join("caller-owned.txt")).unwrap(),
+        b"caller-owned"
+    );
+}
+
+/// Keep a real confined child launch behind the recovery station switch. The launch resource is
+/// acquired first so the measured wait is the production `CreateProcessW` station guard, not an
+/// earlier current-object observation.
+fn concurrent_station_launch(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    let resource = plan(root, "hold").acquire().unwrap();
+    crate::backend::windows_ace::test_spawn_blocks_during_noncurrent_recovery(|| {
+        let mut child = resource.spawn_with_stdio(
+            WindowsStdio::Null,
+            WindowsStdio::Null,
+            WindowsStdio::Null,
+        )?;
+        wait_for(&root.join(format!("ready-{}", child.id())));
+        child.kill()?;
+        child.wait()?;
+        Ok(())
+    })
+    .expect("AppContainer child launch must wait for station recovery");
+    drop(resource);
+    cleanup_resources().unwrap();
+}
+
 fn interrupted_cleanup(root: &Path) {
     let _cleanup = CleanupAfterTest;
     std::fs::write(root.join("caller-owned.txt"), b"caller-owned").unwrap();
@@ -342,6 +411,34 @@ fn interrupted_cleanup(root: &Path) {
     assert!(
         !removed.exists(),
         "fault did not occur after private deletion"
+    );
+    assert_recovered(&profile, &private, root, &foreign);
+}
+
+/// Crash between a successful native window-object revoke and its durable journal completion,
+/// then prove a later process consumes the persisted in-progress marker without touching a
+/// replacement DACL or replaying the already-removed grant.
+fn interrupted_window_cleanup(root: &Path) {
+    let _cleanup = CleanupAfterTest;
+    std::fs::write(root.join("caller-owned.txt"), b"caller-owned").unwrap();
+    let foreign = ForeignProfileAce::grant(root);
+    let resource = plan(root, "hold").acquire().unwrap();
+    let profile = resource.profile_name().to_string();
+    let private = resource.private_tmp().unwrap().to_path_buf();
+    drop(resource);
+    let (crashed_profile, _) = crash_owner(root, "fault-cleanup", "cleanup-window-object-revoked");
+    assert_eq!(crashed_profile, profile);
+    let entry = windows_registry::test_entry(&profile)
+        .unwrap()
+        .expect("interrupted window cleanup discarded ownership");
+    assert_eq!(entry.state, windows_registry::EntryState::Closing);
+    assert_eq!(entry.window_objects.len(), 2);
+    assert!(
+        entry
+            .recovery_error
+            .as_deref()
+            .is_some_and(|marker| marker.starts_with("window-object-revoking:")),
+        "window revoke intent was not durable before the native mutation"
     );
     assert_recovered(&profile, &private, root, &foreign);
 }
@@ -396,6 +493,11 @@ fn windows_cleanup_retries_after_abrupt_private_root_removal() {
 }
 
 #[test]
+fn windows_cleanup_retries_after_window_revoke_before_journal_completion() {
+    isolated_scenario("cleanup-window-retry");
+}
+
+#[test]
 fn windows_cleanup_never_follows_private_junction_into_caller_data() {
     isolated_scenario("cleanup-junction");
 }
@@ -407,6 +509,21 @@ fn windows_cleanup_recovers_aces_from_a_noncurrent_window_station() {
     // against the recorded objects.  This models successive SSH logons in session 0 without
     // allowing the test to perturb the libtest process's own desktop attachment.
     isolated_scenario("station-recovery");
+}
+
+#[test]
+fn windows_cleanup_rejects_same_name_window_object_replacement() {
+    isolated_scenario("station-replacement");
+}
+
+#[test]
+fn windows_cleanup_recovers_window_object_journal_from_later_process() {
+    isolated_scenario("station-journal-crash");
+}
+
+#[test]
+fn windows_cleanup_serializes_real_appcontainer_launch_with_station_recovery() {
+    isolated_scenario("station-concurrent-launch");
 }
 
 #[test]

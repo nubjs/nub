@@ -3612,6 +3612,15 @@ pub(super) mod launch {
     }
 
     #[cfg(test)]
+    pub(super) fn test_profile_has_window_grant(
+        profile: &str,
+        object: &super::windows_registry::WindowObject,
+    ) -> io::Result<bool> {
+        let sid = SidGuard(derive_appcontainer(profile)?);
+        crate::backend::windows_ace::test_has_persistent_grant(object, sid.0)
+    }
+
+    #[cfg(test)]
     pub(super) fn test_set_profile_ace(profile: &str, path: &Path, grant: bool) -> io::Result<()> {
         let sid = SidGuard(derive_appcontainer(profile)?);
         if grant {
@@ -3644,11 +3653,6 @@ pub(super) mod launch {
             let result = (|| {
                 let sid = derive_appcontainer(&entry.profile_name)?;
                 let _sid = SidGuard(sid);
-                for object in &entry.window_objects {
-                    crate::backend::windows_ace::revoke_persistent(object, sid).map_err(
-                        |error| acl_error(format!("revoke window object {object:?}"), error),
-                    )?;
-                }
                 for mutation in &entry.mutations {
                     revoke_recorded_ace(&entry, mutation, sid).map_err(|error| {
                         acl_error(
@@ -3678,6 +3682,42 @@ pub(super) mod launch {
                             Path::new(path),
                         );
                     }
+                }
+                // Keep the name-only window-object grants until every recoverable private-path
+                // step has completed. An interrupted private deletion then retries with its
+                // ownership witness still present instead of confusing a prior partial cleanup
+                // with a same-name replacement object.
+                for object in &entry.window_objects {
+                    let retrying = super::windows_registry::begin_window_object_revoke(&entry, object)?;
+                    if !crate::backend::windows_ace::has_persistent_grant(object, sid)? {
+                        if retrying {
+                            // The durable intent predates this attempt. A missing witness now
+                            // means the previous process completed the revoke before it died, or
+                            // the object was replaced without Nub's grant; neither permits a DACL
+                            // edit, so retire only this already-in-progress journal operation.
+                            super::windows_registry::finish_window_object_revoke(&entry, object)?;
+                            continue;
+                        }
+                        return Err(io::Error::other(format!(
+                            "sandbox window-object cleanup ownership witness is absent for {object:?}"
+                        )));
+                    }
+                    crate::backend::windows_ace::revoke_persistent(object, sid).map_err(
+                        |error| acl_error(format!("revoke window object {object:?}"), error),
+                    )?;
+                    #[cfg(test)]
+                    test_crash_transition(
+                        "cleanup-window-object-revoked",
+                        &entry.profile_name,
+                        Path::new("."),
+                    );
+                    super::windows_registry::finish_window_object_revoke(&entry, object)?;
+                    #[cfg(test)]
+                    test_crash_transition(
+                        "cleanup-window-object-removed",
+                        &entry.profile_name,
+                        Path::new("."),
+                    );
                 }
                 let name = to_wide(&entry.profile_name);
                 let hr = unsafe { DeleteAppContainerProfile(name.as_ptr()) };

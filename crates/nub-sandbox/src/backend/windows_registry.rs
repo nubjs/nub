@@ -796,6 +796,48 @@ pub(crate) fn finish_recovery(entry: &Entry, result: io::Result<()>) -> io::Resu
     save(&root, &file)
 }
 
+fn window_revoke_marker(object: &WindowObject) -> String {
+    format!(
+        "window-object-revoking:{}",
+        serde_json::to_string(object).expect("WindowObject serializes")
+    )
+}
+
+/// Durably record that cleanup is about to revoke one window-object grant. If the owner dies
+/// after the native DACL write but before the journal update, retry can distinguish that completed
+/// removal from a fresh, name-only lookup with no ownership witness.
+pub(crate) fn begin_window_object_revoke(entry: &Entry, object: &WindowObject) -> io::Result<bool> {
+    let root = registry_root()?;
+    let _lock = MutationLock::acquire(&root)?;
+    let mut file = load(&root)?;
+    let current = file
+        .entries
+        .get_mut(&entry.identity)
+        .ok_or_else(|| io::Error::other("sandbox registry lost a recovering entry"))?;
+    let marker = window_revoke_marker(object);
+    let retrying = current.recovery_error.as_deref() == Some(&marker);
+    current.recovery_error = Some(marker);
+    save(&root, &file)?;
+    Ok(retrying)
+}
+
+/// Remove a durably completed window-object revoke from the journal before the next object is
+/// attempted. A later failure therefore cannot make retry replay a known-completed mutation.
+pub(crate) fn finish_window_object_revoke(entry: &Entry, object: &WindowObject) -> io::Result<()> {
+    let root = registry_root()?;
+    let _lock = MutationLock::acquire(&root)?;
+    let mut file = load(&root)?;
+    let current = file
+        .entries
+        .get_mut(&entry.identity)
+        .ok_or_else(|| io::Error::other("sandbox registry lost a recovering entry"))?;
+    current.window_objects.retain(|recorded| recorded != object);
+    if current.recovery_error.as_deref() == Some(&window_revoke_marker(object)) {
+        current.recovery_error = None;
+    }
+    save(&root, &file)
+}
+
 fn release(root: &Path, identity: &str, lease: &str) -> io::Result<()> {
     let _lock = MutationLock::acquire(root)?;
     let mut file = load(root)?;

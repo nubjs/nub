@@ -12,8 +12,9 @@
 //! privileged dedicated-account tier that was removed with the curated import (epic 0.3), which
 //! is where this machinery happened to live. Only the window-object subgraph is kept: the
 //! AppContainer path journals [`grant_persistent`] mutations, and the DACL
-//! read-modify-write is a SID-keyed strip (never a snapshot restore) so concurrent runs on the
-//! process-global station cannot delete each other's still-live aces.
+//! read-modify-write removes only Nub's exact ALLOW grant (never a snapshot restore). This keeps
+//! concurrent runs' grants and unrelated edits for the same container SID intact, and makes a
+//! replacement object without the recorded grant fail recovery rather than retire its journal.
 
 #![cfg(target_os = "windows")]
 
@@ -132,6 +133,17 @@ const DESKTOP_GRANT: u32 = DESKTOP_READOBJECTS
     | DESKTOP_WRITEOBJECTS
     | DESKTOP_SWITCHDESKTOP
     | DESKTOP_READ_CONTROL;
+
+/// The object-specific portion survives Windows' standard-rights expansion when it materializes
+/// an ACL. It is still enough to distinguish Nub's complete station/desktop grant from an
+/// unrelated narrower same-SID edit.
+fn grant_witness_mask(desktop: bool) -> u32 {
+    if desktop {
+        DESKTOP_GRANT & 0x01ff
+    } else {
+        WINSTA_GRANT & 0x037f
+    }
+}
 
 /// The string (S-1-…) form of a container SID, needed to key its window-object ace. Shared with
 /// the AppContainer backend, which holds the SID as a raw `PSID`.
@@ -271,12 +283,21 @@ fn walk_aces(
     Ok(())
 }
 
-/// Rebuild `existing`'s ace list without any explicit ace for `sid`, in canonical order.
-/// `Ok(None)` means nothing matched and the caller must not write anything back.
-fn rebuild_without_sid(
+fn ace_mask(ace: *mut std::ffi::c_void) -> u32 {
+    // SAFETY: callers check ACCESS_ALLOWED_ACE_TYPE before reading the shared header layout.
+    unsafe { (*ace.cast::<ACCESS_ALLOWED_ACE>()).Mask }
+}
+
+/// Rebuild `existing` without one explicit, non-inherited ALLOW grant. A SID alone is not an
+/// ownership witness: another actor may add a distinct grant for the same AppContainer profile.
+/// The ACL API may preserve a grant as a superset, so ownership requires every required bit rather
+/// than byte-for-byte mask equality. `Ok(None)` means the grant was absent and the caller must not
+/// write anything back.
+fn rebuild_without_grant(
     path: &Path,
     existing: *mut ACL,
     sid: &OwnedSid,
+    mask: u32,
 ) -> io::Result<Option<Vec<u32>>> {
     let mut kept: Vec<(u8, u32, *const std::ffi::c_void, u32)> = Vec::new();
     let mut kept_bytes: u32 = 0;
@@ -285,12 +306,10 @@ fn rebuild_without_sid(
     walk_aces(existing, path, |i, header, ace| {
         let inherited = header.AceFlags & INHERITED_ACE_FLAG != 0;
         let is_ours = !inherited
-            && matches!(
-                header.AceType,
-                ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE
-            )
+            && header.AceType == ACCESS_ALLOWED_ACE_TYPE
             // SAFETY: layout checked above; `SidStart` is the first DWORD of the inline SID.
-            && unsafe { EqualSid(sid_of(ace), sid.0) } != 0;
+            && unsafe { EqualSid(sid_of(ace), sid.0) } != 0
+            && ace_mask(ace) & mask == mask;
 
         if is_ours {
             dropped += 1;
@@ -419,20 +438,36 @@ fn grant_window_object(handle: HANDLE, sid: &str, mask: u32) -> io::Result<()> {
     set_window_dacl(handle, new_dacl)
 }
 
-/// Remove every explicit ace naming `sid` from a window station or desktop, leaving every other
-/// ace where it was. A SID-keyed strip (never a snapshot restore): the station is process-global
-/// and a concurrent run's ace must survive this teardown.
-fn strip_window_object(handle: HANDLE, sid: &str) -> io::Result<()> {
+/// Remove Nub's exact explicit ALLOW grant from a window station or desktop, leaving every other
+/// ACE where it was. A SID-keyed strip would mutate concurrent or foreign edits sharing a profile
+/// SID; a snapshot restore would lose arbitrary DACL changes.
+fn strip_window_object(handle: HANDLE, sid: &str, mask: u32) -> io::Result<()> {
     let sid = OwnedSid::parse(sid)?;
     let read = ReadWindowDacl::open(handle)?;
-    let Some(rebuilt) = rebuild_without_sid(Path::new(WINDOW_OBJECT), read.acl, &sid)? else {
+    let Some(rebuilt) = rebuild_without_grant(Path::new(WINDOW_OBJECT), read.acl, &sid, mask)?
+    else {
         return Ok(());
     };
     set_window_dacl(handle, rebuilt.as_ptr().cast::<ACL>())
 }
 
-/// Does this window object's DACL currently carry an ALLOW ace for `sid`? The direct diagnostic
-/// question behind `NUB_JAIL_DUMP_POLICY`'s `station_ace=` field.
+/// Does this window object's DACL carry an ALLOW grant covering Nub's journaled rights for `sid`?
+fn window_object_has_grant(handle: HANDLE, sid: PSID, mask: u32) -> io::Result<bool> {
+    let read = ReadWindowDacl::open(handle)?;
+    let mut found = false;
+    walk_aces(read.acl, Path::new(WINDOW_OBJECT), |_i, header, ace| {
+        if header.AceType == ACCESS_ALLOWED_ACE_TYPE
+            // SAFETY: type checked, so `SidStart` sits at the ACCESS_ALLOWED_ACE offset.
+            && unsafe { EqualSid(sid_of(ace), sid) } != 0
+            && ace_mask(ace) & mask == mask
+        {
+            found = true;
+        }
+    })?;
+    Ok(found)
+}
+
+#[cfg(test)]
 fn window_object_has_sid(handle: HANDLE, sid: &str) -> io::Result<bool> {
     let sid = OwnedSid::parse(sid)?;
     let read = ReadWindowDacl::open(handle)?;
@@ -676,18 +711,16 @@ pub(crate) fn grant_persistent(object: &WindowObject, sid: PSID) -> io::Result<(
     let handle = open_recorded(object)?
         .ok_or_else(|| io::Error::other("sandbox window object disappeared"))?;
     let sid = unsafe { sid_to_string(sid) }?;
-    if window_object_has_sid(handle.raw, &sid)? {
+    let mask = if handle.desktop {
+        DESKTOP_GRANT
+    } else {
+        WINSTA_GRANT
+    };
+    let owned = OwnedSid::parse(&sid)?;
+    if window_object_has_grant(handle.raw, owned.0, mask)? {
         return Ok(());
     }
-    grant_window_object(
-        handle.raw,
-        &sid,
-        if handle.desktop {
-            DESKTOP_GRANT
-        } else {
-            WINSTA_GRANT
-        },
-    )
+    grant_window_object(handle.raw, &sid, mask)
 }
 
 pub(crate) fn revoke_persistent(object: &WindowObject, sid: PSID) -> io::Result<()> {
@@ -696,7 +729,29 @@ pub(crate) fn revoke_persistent(object: &WindowObject, sid: PSID) -> io::Result<
         return Ok(());
     };
     let sid = unsafe { sid_to_string(sid) }?;
-    strip_window_object(handle.raw, &sid)
+    let mask = grant_witness_mask(handle.desktop);
+    let owned = OwnedSid::parse(&sid)?;
+    if !window_object_has_grant(handle.raw, owned.0, mask)? {
+        return Err(io::Error::other(format!(
+            "sandbox window-object cleanup ownership witness is absent for {:?}",
+            object
+        )));
+    }
+    strip_window_object(handle.raw, &sid, mask)
+}
+
+/// Check Nub's conservative ownership witness without changing the DACL.
+pub(crate) fn has_persistent_grant(object: &WindowObject, sid: PSID) -> io::Result<bool> {
+    let Some(handle) = open_recorded(object)? else {
+        return Ok(false);
+    };
+    let mask = grant_witness_mask(handle.desktop);
+    window_object_has_grant(handle.raw, sid, mask)
+}
+
+#[cfg(test)]
+pub(crate) fn test_has_persistent_grant(object: &WindowObject, sid: PSID) -> io::Result<bool> {
+    has_persistent_grant(object, sid)
 }
 
 /// Exercise the recovery path against a real, non-current station and desktop.  It runs only in
@@ -754,7 +809,7 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
         raw: desktop,
         desktop: true,
     };
-    let sid = OwnedSid::parse("S-1-15-2-1")?;
+    let sid = OwnedSid::parse("S-1-15-2-42424242")?;
     let station_object = WindowObject {
         session: current_objects()?[0].session,
         station: station_name,
@@ -769,8 +824,8 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
     grant_persistent(&desktop_object, sid.0)?;
     // A journal entry owns only its AppContainer SID.  The recovery must retain this independent
     // principal even though it shares both old objects with the journaled grant.
-    grant_window_object(station_guard.raw, "S-1-15-2-2", WINSTA_GRANT)?;
-    grant_window_object(desktop_guard.raw, "S-1-15-2-2", DESKTOP_GRANT)?;
+    grant_window_object(station_guard.raw, "S-1-15-2-42424243", WINSTA_GRANT)?;
+    grant_window_object(desktop_guard.raw, "S-1-15-2-42424243", DESKTOP_GRANT)?;
 
     // A live foreign terminal-services session cannot be named from this process.  Force that
     // classification around a colliding current-session name and prove cleanup returns an error
@@ -783,8 +838,8 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
     let foreign_result = revoke_persistent(&foreign_session_object, sid.0);
     TEST_FORCE_FOREIGN_SESSION_LIVE.store(false, Ordering::Relaxed);
     if foreign_result.is_ok()
-        || !window_object_has_sid(station_guard.raw, "S-1-15-2-1")?
-        || !window_object_has_sid(desktop_guard.raw, "S-1-15-2-1")?
+        || !window_object_has_sid(station_guard.raw, "S-1-15-2-42424242")?
+        || !window_object_has_sid(desktop_guard.raw, "S-1-15-2-42424242")?
     {
         return Err(io::Error::other(
             "foreign-session cleanup reached a current-session name collision",
@@ -809,7 +864,7 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
         TEST_FAIL_STATION_RESTORE.store(false, Ordering::Relaxed);
         if failed_restore.err().and_then(|error| error.raw_os_error()) != Some(5)
             || current_objects()?[0].station != before_failure_station
-            || !window_object_has_sid(desktop_guard.raw, "S-1-15-2-1")?
+            || !window_object_has_sid(desktop_guard.raw, "S-1-15-2-42424242")?
             || handle_count()? != before_handles
         {
             return Err(io::Error::other(
@@ -832,7 +887,7 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
     let (recovered_tx, recovered_rx) = std::sync::mpsc::channel();
     let desktop_for_recovery = desktop_object.clone();
     let recovery = std::thread::spawn(move || {
-        let sid = OwnedSid::parse("S-1-15-2-1");
+        let sid = OwnedSid::parse("S-1-15-2-42424242");
         let result = sid.and_then(|sid| revoke_persistent(&desktop_for_recovery, sid.0));
         let _ = recovered_tx.send(result);
     });
@@ -876,10 +931,10 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
     // current one.  The original handles remain open solely to keep the test objects alive.
     let station = open_recorded(&station_object)?.expect("test station disappeared");
     let desktop = open_recorded(&desktop_object)?.expect("test desktop disappeared");
-    let station_removed = !window_object_has_sid(station.raw, "S-1-15-2-1")?;
-    let desktop_removed = !window_object_has_sid(desktop.raw, "S-1-15-2-1")?;
-    let foreign_station_retained = window_object_has_sid(station.raw, "S-1-15-2-2")?;
-    let foreign_desktop_retained = window_object_has_sid(desktop.raw, "S-1-15-2-2")?;
+    let station_removed = !window_object_has_sid(station.raw, "S-1-15-2-42424242")?;
+    let desktop_removed = !window_object_has_sid(desktop.raw, "S-1-15-2-42424242")?;
+    let foreign_station_retained = window_object_has_sid(station.raw, "S-1-15-2-42424243")?;
+    let foreign_desktop_retained = window_object_has_sid(desktop.raw, "S-1-15-2-42424243")?;
     drop(desktop);
     drop(station);
     drop(desktop_guard);
@@ -887,8 +942,222 @@ pub(crate) fn test_revoke_from_noncurrent_station() -> io::Result<()> {
     if station_removed && desktop_removed && foreign_station_retained && foreign_desktop_retained {
         Ok(())
     } else {
+        Err(io::Error::other(format!(
+            "cleanup did not strip only its ACE from non-current window objects \
+             (station_removed={station_removed}, desktop_removed={desktop_removed}, \
+             foreign_station_retained={foreign_station_retained}, \
+             foreign_desktop_retained={foreign_desktop_retained})"
+        )))
+    }
+}
+
+/// Prove that an old desktop name cannot authorize cleanup of a replacement desktop. Window
+/// objects have no documented durable object ID, so recovery uses the exact grant as a
+/// conservative witness: absence retains recovery work rather than editing the replacement.
+#[cfg(test)]
+pub(crate) fn test_revoke_rejects_same_name_desktop_replacement() -> io::Result<()> {
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        CreateDesktopW, CreateWindowStationW, SetProcessWindowStation,
+    };
+
+    const WINSTA_ALL_ACCESS: u32 = 0x000F_037F;
+    const DESKTOP_ALL_ACCESS: u32 = 0x000F_01FF;
+    let previous = unsafe { GetProcessWindowStation() };
+    if previous.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let station = unsafe { CreateWindowStationW(null_mut(), 0, WINSTA_ALL_ACCESS, null_mut()) };
+    if station.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let station_guard = WindowHandle {
+        raw: station,
+        desktop: false,
+    };
+    let station_name = object_name(station_guard.raw)?;
+    let desktop_name = format!("nub-replacement-{}", std::process::id());
+    let desktop_wide: Vec<u16> = desktop_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    if unsafe { SetProcessWindowStation(station_guard.raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let original = unsafe {
+        CreateDesktopW(
+            desktop_wide.as_ptr(),
+            null_mut(),
+            null_mut(),
+            0,
+            DESKTOP_ALL_ACCESS,
+            null_mut(),
+        )
+    };
+    if unsafe { SetProcessWindowStation(previous) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if original.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let original = WindowHandle {
+        raw: original,
+        desktop: true,
+    };
+    let sid = OwnedSid::parse("S-1-15-2-42424242")?;
+    let object = WindowObject {
+        session: current_objects()?[0].session,
+        station: station_name,
+        desktop: Some(desktop_name),
+    };
+    grant_persistent(&object, sid.0)?;
+    drop(original);
+
+    if unsafe { SetProcessWindowStation(station_guard.raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let replacement = unsafe {
+        CreateDesktopW(
+            desktop_wide.as_ptr(),
+            null_mut(),
+            null_mut(),
+            0,
+            DESKTOP_ALL_ACCESS,
+            null_mut(),
+        )
+    };
+    if unsafe { SetProcessWindowStation(previous) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if replacement.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let replacement = WindowHandle {
+        raw: replacement,
+        desktop: true,
+    };
+    // This is a distinct, deliberately narrower edit for the same SID. The former SID-wide
+    // cleanup would remove it from the replacement object before retiring the journal.
+    grant_window_object(replacement.raw, "S-1-15-2-42424242", DESKTOP_READOBJECTS)?;
+    let result = revoke_persistent(&object, sid.0);
+    let retained = window_object_has_grant(replacement.raw, sid.0, DESKTOP_READOBJECTS)?;
+    strip_window_object(replacement.raw, "S-1-15-2-42424242", DESKTOP_READOBJECTS)?;
+    drop(replacement);
+    drop(station_guard);
+
+    if result
+        .err()
+        .is_some_and(|error| error.to_string().contains("ownership witness is absent"))
+        && retained
+    {
+        Ok(())
+    } else {
         Err(io::Error::other(
-            "cleanup did not strip only its ACE from non-current window objects",
+            "same-name window-object replacement was treated as cleanup ownership",
         ))
     }
+}
+
+/// Exercise the production AppContainer `CreateProcessW` path while recovery has actually
+/// borrowed this process's station. The caller supplies an already-acquired launch so timing
+/// covers the launch lock rather than resource admission's independent station observation.
+#[cfg(test)]
+pub(crate) fn test_spawn_blocks_during_noncurrent_recovery(
+    spawn: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        CreateDesktopW, CreateWindowStationW, SetProcessWindowStation,
+    };
+
+    const WINSTA_ALL_ACCESS: u32 = 0x000F_037F;
+    const DESKTOP_ALL_ACCESS: u32 = 0x000F_01FF;
+    let previous = unsafe { GetProcessWindowStation() };
+    if previous.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let station = unsafe { CreateWindowStationW(null_mut(), 0, WINSTA_ALL_ACCESS, null_mut()) };
+    if station.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let station_guard = WindowHandle {
+        raw: station,
+        desktop: false,
+    };
+    let station_name = object_name(station_guard.raw)?;
+    let desktop_name = format!("nub-spawn-lock-{}", std::process::id());
+    let desktop_wide: Vec<u16> = desktop_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    if unsafe { SetProcessWindowStation(station_guard.raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let desktop = unsafe {
+        CreateDesktopW(
+            desktop_wide.as_ptr(),
+            null_mut(),
+            null_mut(),
+            0,
+            DESKTOP_ALL_ACCESS,
+            null_mut(),
+        )
+    };
+    if unsafe { SetProcessWindowStation(previous) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if desktop.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let desktop_guard = WindowHandle {
+        raw: desktop,
+        desktop: true,
+    };
+    let sid = OwnedSid::parse("S-1-15-2-42424242")?;
+    let object = WindowObject {
+        session: current_objects()?[0].session,
+        station: station_name,
+        desktop: Some(desktop_name),
+    };
+    grant_persistent(&object, sid.0)?;
+
+    let hook = StationSwitchHook {
+        entered: Arc::new(Barrier::new(2)),
+        release: Arc::new(Barrier::new(2)),
+    };
+    *TEST_STATION_SWITCH_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook.clone());
+    let recovery_object = object.clone();
+    let recovery = std::thread::spawn(move || {
+        let sid = OwnedSid::parse("S-1-15-2-42424242");
+        sid.and_then(|sid| revoke_persistent(&recovery_object, sid.0))
+    });
+    hook.entered.wait();
+    let release_hook = hook.clone();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        release_hook.release.wait();
+    });
+    let started = std::time::Instant::now();
+    let spawn_result = spawn();
+    let elapsed = started.elapsed();
+    releaser
+        .join()
+        .map_err(|_| io::Error::other("station launch releaser panicked"))?;
+    let recovery_result = recovery
+        .join()
+        .map_err(|_| io::Error::other("station launch recovery worker panicked"))?;
+    *TEST_STATION_SWITCH_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    drop(desktop_guard);
+    drop(station_guard);
+
+    spawn_result?;
+    recovery_result?;
+    if elapsed < std::time::Duration::from_millis(100) {
+        return Err(io::Error::other(
+            "AppContainer CreateProcessW did not wait for non-current station recovery",
+        ));
+    }
+    Ok(())
 }
