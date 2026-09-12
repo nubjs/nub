@@ -566,6 +566,19 @@ pub fn spawn_shell(script_cmd: &str) -> tokio::process::Command {
     spawn_shell_with_settings(script_cmd, &settings)
 }
 
+/// [`spawn_shell`] for a caller that sets more environment before it spawns.
+/// Build the command with this, set the environment, then add the body with
+/// [`append_shell_body`], so a casing-restoring shell re-binds those names too.
+pub fn shell_without_body() -> tokio::process::Command {
+    shell_command(&script_settings())
+}
+
+/// Add `script_cmd` to a command from [`shell_without_body`], after every `env`
+/// call.
+pub fn append_shell_body(cmd: &mut tokio::process::Command, script_cmd: &str) {
+    append_script_body(cmd, &script_settings(), script_cmd);
+}
+
 /// Spawn a resolved program directly, skipping the shell.
 ///
 /// The counterpart to [`spawn_shell`] for a script body that
