@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 
@@ -15,7 +15,7 @@ console.log(`Fixture root: ${root}`);
 
 function contains(root, child) {
   const rel = relative(root, child);
-  return rel === '' || (!rel.startsWith('..') && !rel.includes(`..${process.platform === 'win32' ? '\\' : '/'}`));
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`));
 }
 
 function gvsCell(path) {
@@ -132,7 +132,7 @@ for (const source of ['NUB_CACHE_DIR', '.npmrc global-virtual-store-dir']) {
       const proof = JSON.parse(readFileSync(proofPath, 'utf8'));
       assert.equal(proof.dependency, 'dependency-loaded', `cross-cell dependency was not loaded: ${JSON.stringify(proof)}`);
       assert.match(String(proof.canary), /^(EACCES|EPERM|ENOENT)$/, `the literal outside-store canary must be denied: ${JSON.stringify(proof)}`);
-      const expectedStore = isEnv ? join(cacheDir, 'store', 'v1') : join(explicitStore, 'v1');
+      const expectedStore = realpathSync(isEnv ? join(cacheDir, 'store', 'v1') : join(explicitStore, 'v1'));
       const targetPath = realpathSync(join(project, 'node_modules', target));
       assert.ok(contains(expectedStore, targetPath), `target escaped relocated global store: ${targetPath} not in ${expectedStore}`);
       assert.ok(contains(expectedStore, proof.dependencyPath), `dependency escaped relocated global store: ${proof.dependencyPath} not in ${expectedStore}`);

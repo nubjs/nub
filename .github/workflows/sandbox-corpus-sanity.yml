@@ -1,0 +1,119 @@
+name: Sandbox corpus sanity
+
+on:
+  push:
+    branches: [sandbox-corpus-sanity]
+    paths:
+      - crates/nub-sandbox/**
+      - crates/nub-cli/**
+      - vendor/aube/**
+      - tests/build-jail-corpus/**
+      - .github/workflows/sandbox-corpus-sanity.yml
+
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: build-jail-frameworks
+          cache-on-failure: true
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.2'
+      - name: Recording the source and runtime
+        run: |
+          mkdir -p reports
+          { git rev-parse HEAD; rustc -Vv; node --version; uname -a; } > reports/environment.txt
+          echo "NUB_BIN=$GITHUB_WORKSPACE/target/fast/nub${{ runner.os == 'Windows' && '.exe' || '' }}" >> "$GITHUB_ENV"
+      - name: Building the exact candidate
+        id: build
+        run: |
+          npm install --no-audit --no-fund --loglevel=error
+          (cd crates/nub-native && cargo build --profile fast)
+          mkdir -p runtime/addons
+          case "$RUNNER_OS" in
+            Windows)
+              cp target/fast/nub_native.dll runtime/addons/nub-native.node
+              echo '07bb1e5b095b00d68a695481f9240879f33c5724b40aa2308f999d54ed78f075  vendor/busybox-w32/busybox64.exe' | sha256sum -c -
+              cp vendor/busybox-w32/busybox64.exe target/fast/busybox.exe ;;
+            Linux) cp target/fast/libnub_native.so runtime/addons/nub-native.node ;;
+            macOS) cp target/fast/libnub_native.dylib runtime/addons/nub-native.node ;;
+          esac
+          cargo build -p nub-cli --profile fast
+          sha256sum "$NUB_BIN" > reports/candidate.sha256
+      - name: Checking the changed compiler and proxy
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo clippy -p nub-sandbox -p nub-cli --profile fast --all-targets -- -D warnings 2>&1 | tee reports/clippy.log
+          cargo test -p nub-sandbox --profile fast --lib -- --nocapture --test-threads=1 2>&1 | tee reports/library.log
+      - name: Exercising the relocated store and lifecycle controls
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          node --test --test-concurrency=1 tests/build-jail-corpus/relocated-store.mjs tests/build-jail-corpus/contract.mjs tests/build-jail-corpus/network.mjs 2>&1 | tee reports/install-contracts.log
+      - name: Recording the pre-fix relocated-store control
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          cp tests/build-jail-corpus/relocated-store.mjs reports/relocated-store-control.mjs
+          git fetch --no-tags --depth=1 origin 66d094771559a86642db4eef4a325b6c46f21ebe
+          git checkout --detach 66d094771559a86642db4eef4a325b6c46f21ebe
+          git rev-parse HEAD > reports/control-source.txt
+          cargo build -p nub-cli --profile fast
+          sha256sum "$NUB_BIN" > reports/control.sha256
+          set +e
+          node --test reports/relocated-store-control.mjs > reports/control-install.log 2>&1
+          code=$?
+          set -e
+          echo "$code" > reports/control-exit.txt
+          cat reports/control-install.log
+      - name: Collecting retained fixture logs
+        if: always()
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            for (const log of ["install-contracts.log", "control-install.log"]) {
+              const input = path.join("reports", log);
+              if (!fs.existsSync(input)) continue;
+              let index = 0;
+              for (const match of fs.readFileSync(input, "utf8").matchAll(/Fixture root: (.+)/g)) {
+                const root = match[1].trim();
+                for (const arm of ["env", "npmrc"]) {
+                  const source = path.join(root, arm, "install.log");
+                  if (fs.existsSync(source)) fs.copyFileSync(source, path.join("reports", log + "-" + index + "-" + arm + ".log"));
+                }
+                index++;
+              }
+            }
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sandbox-corpus-sanity-${{ matrix.os }}
+          path: reports
+          retention-days: 14
