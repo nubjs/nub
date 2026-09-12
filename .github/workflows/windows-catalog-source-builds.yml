@@ -110,7 +110,11 @@ jobs:
           NUB_BIN="$withheld" CORPUS_CASE=cpu-features CORPUS_REPORT="$GITHUB_WORKSPACE/reports/cpu-features-withheld-adapter" node tests/build-jail-corpus/packages.mjs 2>&1 | tee reports/cpu-features-withheld-adapter.log
           cpu_features_without_adapter=${PIPESTATUS[0]}
           set -e
-          test "$better_sqlite3" -eq 0 && test "$better_sqlite3_linked" -eq 0 && test "$esbuild" -eq 0 && test "$cpu_features" -eq 0 && test "$cpu_features_without_adapter" -ne 0
+          test "$better_sqlite3" -eq 0
+          test "$better_sqlite3_linked" -eq 0
+          test "$esbuild" -eq 0
+          test "$cpu_features" -eq 0
+          test "$cpu_features_without_adapter" -ne 0
           python - <<'PY'
           import json
           from pathlib import Path
