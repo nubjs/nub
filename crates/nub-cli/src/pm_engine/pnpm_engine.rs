@@ -1,29 +1,42 @@
 //! The pnpm 12 engine, embedded in-process (feature `pm-pnpm`).
 //!
-//! Selected by `NUB_PM_ENGINE=pnpm` while aube and pnpm coexist, so the
-//! default binary and every existing path stay untouched. The engine parses
-//! the process argv itself — nub's PM grammar is pnpm's, so `nub install …`
-//! is `pnpm install …` to it — and runs exactly as the standalone `pnpm`
-//! binary would. Identity (nub.lock, the Nub store, the rebrand) arrives with
-//! the embedder profile on the `nubjs/pnpm` fork; until then this is the
-//! proof that the git-dependency build produces a working engine.
-
-use std::process::ExitCode;
+//! Selected by `NUB_PM_ENGINE` while aube and pnpm coexist, so the default
+//! binary and every existing path stay untouched. nub's PM grammar is pnpm's,
+//! so `nub install …` is `pnpm install …` to the engine's parser.
+//!
+//! `NUB_PM_ENGINE=pnpm` runs the engine under pnpm's own naming, and
+//! `NUB_PM_ENGINE=pnpm-nub` under nub's (`nub.lock`, `node_modules/.store`).
+//! Both are internal switches that project identity replaces once it routes
+//! the PM verbs.
 
 use anyhow::Result;
+use pnpm_config::Embedder;
+
+/// nub's naming for the files and directories the engine owns.
+const NUB: Embedder = Embedder { lockfile_basename: "nub.lock", virtual_store_dirname: ".store" };
+
+/// The engine profile selected for this invocation, if any.
+fn selected_profile() -> Option<Embedder> {
+    match std::env::var_os("NUB_PM_ENGINE")?.to_str()? {
+        "pnpm" => Some(Embedder::PNPM),
+        "pnpm-nub" => Some(NUB),
+        _ => None,
+    }
+}
 
 /// Whether the pnpm engine is selected for this invocation.
 pub(crate) fn selected() -> bool {
-    std::env::var_os("NUB_PM_ENGINE").is_some_and(|v| v == "pnpm")
+    selected_profile().is_some()
 }
 
 /// Run the engine on the process argv and return its exit status.
-///
-/// `pnpm_cli::main` reads `std::env::args_os()` directly, and nub's argv for
-/// a PM verb is `nub <verb> [args]`, which pnpm's parser reads as its own
-/// `<verb> [args]`. `ExitCode` exposes no accessor, so the status is
-/// recovered by comparison.
 pub(crate) fn run_process_argv() -> Result<i32> {
-    let code = pnpm_cli::main();
-    Ok(if code == ExitCode::SUCCESS { 0 } else { 1 })
+    let embedder = selected_profile().unwrap_or(Embedder::PNPM);
+    match pnpm_cli::run(std::env::args_os().collect(), embedder) {
+        Ok(()) => Ok(0),
+        Err(report) => {
+            eprintln!("{report:?}");
+            Ok(1)
+        }
+    }
 }
