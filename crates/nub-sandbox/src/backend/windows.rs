@@ -57,6 +57,28 @@ use crate::policy::SandboxPolicy;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+// `NUB_JAIL_DUMP_POLICY` is an internal, opt-in probe switch. A delayed sample is useful only
+// after a normal lifecycle has had time to finish; the cadence is deliberately bounded because a
+// native wait polls every 5 ms.
+const PENDING_WAIT_DUMP_INTERVAL: Duration = Duration::from_secs(30);
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn pending_wait_dump_elapsed(
+    started: Instant,
+    last_dump: Option<Instant>,
+    now: Instant,
+) -> Option<Duration> {
+    let elapsed = now.saturating_duration_since(started);
+    if elapsed < PENDING_WAIT_DUMP_INTERVAL
+        || last_dump
+            .is_some_and(|last| now.saturating_duration_since(last) < PENDING_WAIT_DUMP_INTERVAL)
+    {
+        return None;
+    }
+    Some(elapsed)
+}
 
 // Kept beside the native launcher rather than exported through `backend`: this is
 // Windows host-state ownership, not a cross-platform policy surface.  The pure
@@ -1266,7 +1288,10 @@ pub fn windows_publish_appcontainer_read(dir: &std::path::Path) -> std::io::Resu
 
 #[cfg(target_os = "windows")]
 pub(super) mod launch {
-    use super::{AppContainerLaunch, PlainLaunch, WindowsStdio, dedupe_windows_env_pairs};
+    use super::{
+        AppContainerLaunch, PlainLaunch, WindowsStdio, dedupe_windows_env_pairs,
+        pending_wait_dump_elapsed,
+    };
     use std::collections::BTreeMap;
     use std::io;
     use std::io::Write as _;
@@ -1276,6 +1301,7 @@ pub(super) mod launch {
     use std::path::{Path, PathBuf};
     use std::process::ExitStatus;
     use std::sync::Arc;
+    use std::time::Instant;
     use windows_sys::Win32::Foundation::{
         CloseHandle, FILETIME, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
         SetHandleInformation, WAIT_OBJECT_0,
@@ -2832,6 +2858,9 @@ pub(super) mod launch {
                 status: None,
                 tracked: Vec::new(),
                 last_exit: None,
+                dump_pending_wait: std::env::var_os("NUB_JAIL_DUMP_POLICY").is_some(),
+                pending_wait_started: Instant::now(),
+                last_pending_wait_dump: None,
             };
             before_resume(child.pid)?;
             if let Some(path) = self
@@ -3293,6 +3322,12 @@ pub(super) mod launch {
         status: Option<ExitStatus>,
         tracked: Vec<(u32, HandleGuard)>,
         last_exit: Option<(u64, u32)>,
+        // Reuse the build jail's existing internal policy-dump switch. Delayed periodic snapshots
+        // make a host-side timeout actionable without changing the full-Job lifetime contract or
+        // producing one line per 5 ms wait poll.
+        dump_pending_wait: bool,
+        pending_wait_started: Instant,
+        last_pending_wait_dump: Option<Instant>,
     }
 
     impl WindowsChild {
@@ -3369,6 +3404,64 @@ pub(super) mod launch {
             Ok(())
         }
 
+        fn dump_pending_wait_if_due(&mut self, root_signalled: bool) {
+            if !self.dump_pending_wait {
+                return;
+            }
+            let now = Instant::now();
+            let Some(elapsed) = pending_wait_dump_elapsed(
+                self.pending_wait_started,
+                self.last_pending_wait_dump,
+                now,
+            ) else {
+                return;
+            };
+            self.last_pending_wait_dump = Some(now);
+
+            // This intentionally uses only the root and descendant handles already held by the
+            // launcher, plus the Job handle which `try_wait` already owns. It is a diagnosis of
+            // why this wait remains pending, not a new process-inspection capability.
+            let active_processes = {
+                let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION =
+                    unsafe { std::mem::zeroed() };
+                if unsafe {
+                    QueryInformationJobObject(
+                        self.job.0,
+                        JobObjectBasicAccountingInformation,
+                        std::ptr::from_mut(&mut accounting).cast(),
+                        std::mem::size_of_val(&accounting) as u32,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    format!("error:{:?}", io::Error::last_os_error().raw_os_error())
+                } else {
+                    accounting.ActiveProcesses.to_string()
+                }
+            };
+            let tracked = self
+                .tracked
+                .iter()
+                .map(|(pid, process)| {
+                    let state = match unsafe { WaitForSingleObject(process.0, 0) } {
+                        WAIT_OBJECT_0 => "signalled",
+                        windows_sys::Win32::Foundation::WAIT_TIMEOUT => "pending",
+                        _ => "wait-error",
+                    };
+                    format!("{pid}:{state}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "JAILDUMP child-wait elapsed_ms={} root_pid={} root_signalled={} active_processes={} tracked=[{}]",
+                elapsed.as_millis(),
+                self.pid,
+                root_signalled,
+                active_processes,
+                tracked
+            );
+        }
+
         pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
             if let Some(status) = self.status {
                 return Ok(Some(status));
@@ -3378,7 +3471,10 @@ pub(super) mod launch {
             self.track_job_members()?;
             match unsafe { WaitForSingleObject(self.process.0, 0) } {
                 WAIT_OBJECT_0 => {}
-                windows_sys::Win32::Foundation::WAIT_TIMEOUT => return Ok(None),
+                windows_sys::Win32::Foundation::WAIT_TIMEOUT => {
+                    self.dump_pending_wait_if_due(false);
+                    return Ok(None);
+                }
                 _ => return Err(io::Error::last_os_error()),
             }
             let mut error = None;
@@ -3428,6 +3524,7 @@ pub(super) mod launch {
                 return Err(io::Error::last_os_error());
             }
             if accounting.ActiveProcesses != 0 || !self.tracked.is_empty() {
+                self.dump_pending_wait_if_due(true);
                 return Ok(None);
             }
             let mut code = 0;
@@ -4562,6 +4659,40 @@ pub(super) mod launch {
 mod tests {
     use super::*;
     use crate::policy::{CanonGlob, FsOrigin, FsRule, FsRuleSet, TmpMode};
+
+    #[test]
+    fn pending_wait_dump_schedule_skips_initial_polls_then_repeats() {
+        let started = Instant::now();
+        let first = started + PENDING_WAIT_DUMP_INTERVAL;
+        assert_eq!(
+            pending_wait_dump_elapsed(
+                started,
+                None,
+                started + PENDING_WAIT_DUMP_INTERVAL - Duration::from_millis(1),
+            ),
+            None,
+            "normal initial polls must not emit a wait snapshot"
+        );
+        assert_eq!(
+            pending_wait_dump_elapsed(started, None, first),
+            Some(PENDING_WAIT_DUMP_INTERVAL),
+            "the first long wait emits at the interval"
+        );
+        assert_eq!(
+            pending_wait_dump_elapsed(
+                started,
+                Some(first),
+                first + PENDING_WAIT_DUMP_INTERVAL - Duration::from_millis(1),
+            ),
+            None,
+            "the 5 ms wait loop must not emit between interval boundaries"
+        );
+        assert_eq!(
+            pending_wait_dump_elapsed(started, Some(first), first + PENDING_WAIT_DUMP_INTERVAL,),
+            Some(PENDING_WAIT_DUMP_INTERVAL * 2),
+            "a still-pending wait emits a later bounded sample"
+        );
+    }
 
     /// A dependency lifecycle script on Windows is a cmd.exe invocation, and cmd.exe
     /// REFUSES an extended-length working directory — it prints "UNC paths are not
