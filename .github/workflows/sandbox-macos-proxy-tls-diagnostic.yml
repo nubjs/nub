@@ -1,4 +1,4 @@
-name: macOS proxy TLS boundary diagnostic
+name: macOS proxy TLS availability sample
 
 on:
   push:
@@ -42,7 +42,7 @@ jobs:
             curl --version | head -1
             /usr/bin/env -u https_proxy -u HTTPS_PROXY -u http_proxy -u HTTP_PROXY -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY curl -4 -sS -o /dev/null --connect-timeout 8 --max-time 20 https://example.com/
           } > reports/environment.txt 2>&1
-      - name: Locating the proxy TLS boundary
+      - name: Sampling the proxy TLS boundary
         run: |
           set -euo pipefail
           cargo build --manifest-path tests/proxy-per-host/Cargo.toml --profile fast \

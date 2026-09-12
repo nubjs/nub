@@ -35,24 +35,27 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 #[cfg(target_os = "macos")]
 use std::net::TcpStream;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::net::ToSocketAddrs;
 #[cfg(target_os = "linux")]
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream};
 #[cfg(target_os = "linux")]
 use std::thread;
 
 /// An endpoint-level diagnostic, not a listener-liveness check. The direct and confined arms use
-/// the same IPv4 `example.com:443` target. The confined arm reads the injected proxy URL but never
-/// prints its bearer: it records only the CONNECT status and the TLS byte counts. A `200` followed
-/// by no upstream TLS bytes places a timeout after the target gate, rather than calling it a
-/// grammar result.
+/// one caller-resolved IPv4 `example.com:443` target. The confined arm reads the injected proxy URL
+/// but never prints its bearer: it records only the CONNECT status and the TLS byte counts. A `200`
+/// followed by no upstream TLS bytes places a timeout after the target gate, rather than calling it
+/// a grammar result.
 #[cfg(target_os = "macos")]
 const TLS_BOUNDARY_SCRIPT: &str = r#"import base64, os, socket, ssl, sys, time, urllib.parse
 
-TARGET = ("example.com", 443)
+MODE, TARGET_IP = sys.argv[1:3]
+TARGET = (TARGET_IP, 443)
+SNI_NAME = "example.com"
 TIMEOUT = 8
 
-def ipv4_socket(host, port):
-    address = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)[0][4]
+def ipv4_socket(address):
     stream = socket.create_connection(address, timeout=TIMEOUT)
     stream.settimeout(TIMEOUT)
     return stream
@@ -67,9 +70,10 @@ def read_headers(stream):
     return reply
 
 def handshake(stream):
+    started = time.monotonic()
     context = ssl.create_default_context()
     incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
-    tls = context.wrap_bio(incoming, outgoing, server_hostname=TARGET[0])
+    tls = context.wrap_bio(incoming, outgoing, server_hostname=SNI_NAME)
     sent = received = 0
     while True:
         try:
@@ -95,26 +99,36 @@ def handshake(stream):
     if pending:
         stream.sendall(pending)
         sent += len(pending)
-    print(f"tls_handshake=complete client_bytes={sent} upstream_bytes={received}")
+    elapsed_ms = round((time.monotonic() - started) * 1000)
+    print(f"tls_handshake=complete client_bytes={sent} upstream_bytes={received} tls_ms={elapsed_ms}")
 
 try:
-    proxy = os.environ.get("HTTPS_PROXY")
-    if proxy:
+    if MODE == "direct":
+        stream = ipv4_socket(TARGET)
+        print(f"direct_connect=complete target={TARGET_IP}")
+        handshake(stream)
+    else:
+        proxy = os.environ.get("HTTPS_PROXY")
+        if not proxy:
+            raise ConnectionError("missing injected HTTPS_PROXY")
         parsed = urllib.parse.urlsplit(proxy)
-        stream = ipv4_socket(parsed.hostname, parsed.port)
+        stream = ipv4_socket((parsed.hostname, parsed.port))
         user = urllib.parse.unquote(parsed.username or "")
         auth = base64.b64encode(f"{user}:".encode()).decode()
+        authority = "www.google.com:443" if MODE == "negative" else f"{TARGET[0]}:{TARGET[1]}"
         stream.sendall(
-            f"CONNECT {TARGET[0]}:{TARGET[1]} HTTP/1.1\r\nHost: {TARGET[0]}:{TARGET[1]}\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode()
+            f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode()
         )
         status = read_headers(stream).split(b"\r\n", 1)[0].decode("ascii", "replace")
-        print(f"proxy_connect={status}")
-        if status != "HTTP/1.1 200 Connection established":
-            raise ConnectionError("proxy did not acknowledge CONNECT")
-    else:
-        stream = ipv4_socket(*TARGET)
-        print("direct_connect=complete")
-    handshake(stream)
+        if MODE == "negative":
+            print(f"proxy_negative={status}")
+            if status != "HTTP/1.1 403 Forbidden":
+                raise ConnectionError("proxy negative did not reach target gate")
+        else:
+            print(f"proxy_connect={status} target={TARGET_IP}")
+            if status != "HTTP/1.1 200 Connection established":
+                raise ConnectionError("proxy did not acknowledge CONNECT")
+            handshake(stream)
 except Exception as error:
     print(f"failure={type(error).__name__}:{error}")
     sys.exit(1)
@@ -348,79 +362,171 @@ sys.exit(0 if reply == b"HTTP/1.1 407 Proxy Authentication Required" else 1)"#;
     output.status.success() && detail.ends_with("reply=HTTP/1.1 407 Proxy Authentication Required")
 }
 
-/// Execute the same IPv4 TLS handshake direct and through one live public sandbox session. The
-/// direct control removes every proxy spelling, while the confined arm must use exactly the
-/// injected loopback endpoint. Output contains status/timing boundaries but never proxy credentials.
+/// Execute twelve independent public sandbox sessions against one pre-resolved IPv4 endpoint. Each
+/// sample runs a direct TLS control, a confined TLS handshake, and a denied CONNECT on its own
+/// proxy. The direct control removes every proxy spelling; output contains stage timing and byte
+/// boundaries but never proxy credentials. Samples do not retry and continue after errors so a
+/// transient venue failure cannot become a grammar result.
 #[cfg(target_os = "macos")]
 fn macos_tls_boundary_probe() -> bool {
-    fn capture(label: &str, output: std::io::Result<std::process::Output>) -> bool {
+    const SAMPLES: usize = 12;
+
+    fn capture(
+        sample: usize,
+        stage: &str,
+        expected: &str,
+        started: std::time::Instant,
+        output: std::io::Result<std::process::Output>,
+    ) -> bool {
         let Ok(output) = output else {
-            eprintln!("{label}: process launch failed");
+            eprintln!(
+                "tls sample {sample:02} {stage}: process launch failed elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
             return false;
         };
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        eprintln!("{label}: exited {}", output.status);
+        eprintln!(
+            "tls sample {sample:02} {stage}: exited {} elapsed_ms={}",
+            output.status,
+            started.elapsed().as_millis()
+        );
         if !stdout.is_empty() {
-            eprintln!("{label}: {stdout}");
+            eprintln!("tls sample {sample:02} {stage}: {stdout}");
         }
         if !stderr.is_empty() {
-            eprintln!("{label}: stderr {stderr}");
+            eprintln!("tls sample {sample:02} {stage}: stderr {stderr}");
         }
-        output.status.success() && stdout.contains("tls_handshake=complete")
+        output.status.success() && stdout.contains(expected)
     }
 
-    let direct = capture(
-        "tls direct",
-        std::process::Command::new("/usr/bin/env")
-            .args([
-                "-u",
-                "https_proxy",
-                "-u",
-                "HTTPS_PROXY",
-                "-u",
-                "http_proxy",
-                "-u",
-                "HTTP_PROXY",
-                "-u",
-                "all_proxy",
-                "-u",
-                "ALL_PROXY",
-                "-u",
-                "no_proxy",
-                "-u",
-                "NO_PROXY",
-                "python3",
-                "-c",
-                TLS_BOUNDARY_SCRIPT,
-            ])
-            .output(),
-    );
-    let allow = policy(json!({ "fs": true, "net": ["example.com"] }));
-    let sandbox = match Sandbox::new(&allow) {
-        Ok(sandbox) => sandbox,
+    let target = match ("example.com", 443)
+        .to_socket_addrs()
+        .map(|addresses| addresses.filter(|address| address.is_ipv4()).next())
+    {
+        Ok(Some(address)) => address.ip().to_string(),
+        Ok(None) => {
+            eprintln!("tls samples: example.com did not resolve an IPv4 endpoint");
+            return false;
+        }
         Err(error) => {
-            eprintln!(
-                "tls proxy: acquisition failed, unavailable axes: {:?}",
-                error.lost
-            );
+            eprintln!("tls samples: resolving example.com failed: {error}");
             return false;
         }
     };
-    let prepared =
-        match sandbox.prepare(CommandSpec::new("python3").args(["-c", TLS_BOUNDARY_SCRIPT])) {
-            Ok(prepared) => prepared,
+    println!("TLS samples endpoint={target}:443 samples={SAMPLES}");
+
+    let mut passed = 0;
+    for sample in 1..=SAMPLES {
+        let direct_started = std::time::Instant::now();
+        let direct = capture(
+            sample,
+            "direct",
+            "tls_handshake=complete",
+            direct_started,
+            std::process::Command::new("/usr/bin/env")
+                .args([
+                    "-u",
+                    "https_proxy",
+                    "-u",
+                    "HTTPS_PROXY",
+                    "-u",
+                    "http_proxy",
+                    "-u",
+                    "HTTP_PROXY",
+                    "-u",
+                    "all_proxy",
+                    "-u",
+                    "ALL_PROXY",
+                    "-u",
+                    "no_proxy",
+                    "-u",
+                    "NO_PROXY",
+                    "python3",
+                    "-c",
+                    TLS_BOUNDARY_SCRIPT,
+                    "direct",
+                    &target,
+                ])
+                .output(),
+        );
+
+        let acquisition_started = std::time::Instant::now();
+        let sandbox = match Sandbox::new(&policy(json!({
+            "fs": true,
+            "net": ["example.com", &target],
+        }))) {
+            Ok(sandbox) => {
+                eprintln!(
+                    "tls sample {sample:02} proxy_acquire: complete elapsed_ms={}",
+                    acquisition_started.elapsed().as_millis()
+                );
+                sandbox
+            }
             Err(error) => {
                 eprintln!(
-                    "tls proxy: preparation failed, unavailable axes: {:?}",
+                    "tls sample {sample:02} proxy_acquire: failed elapsed_ms={} unavailable_axes={:?}",
+                    acquisition_started.elapsed().as_millis(),
                     error.lost
                 );
-                return false;
+                continue;
             }
         };
-    let confined = capture("tls proxy", prepared.output());
-    println!("TLS boundary direct={direct} proxy={confined} [want true true]");
-    direct && confined
+        let positive_started = std::time::Instant::now();
+        let positive = match sandbox.prepare(CommandSpec::new("python3").args([
+            "-c",
+            TLS_BOUNDARY_SCRIPT,
+            "proxy",
+            &target,
+        ])) {
+            Ok(prepared) => capture(
+                sample,
+                "proxy_positive",
+                "tls_handshake=complete",
+                positive_started,
+                prepared.output(),
+            ),
+            Err(error) => {
+                eprintln!(
+                    "tls sample {sample:02} proxy_positive: preparation failed elapsed_ms={} unavailable_axes={:?}",
+                    positive_started.elapsed().as_millis(),
+                    error.lost
+                );
+                false
+            }
+        };
+        let negative_started = std::time::Instant::now();
+        let negative = match sandbox.prepare(CommandSpec::new("python3").args([
+            "-c",
+            TLS_BOUNDARY_SCRIPT,
+            "negative",
+            &target,
+        ])) {
+            Ok(prepared) => capture(
+                sample,
+                "proxy_negative",
+                "proxy_negative=HTTP/1.1 403 Forbidden",
+                negative_started,
+                prepared.output(),
+            ),
+            Err(error) => {
+                eprintln!(
+                    "tls sample {sample:02} proxy_negative: preparation failed elapsed_ms={} unavailable_axes={:?}",
+                    negative_started.elapsed().as_millis(),
+                    error.lost
+                );
+                false
+            }
+        };
+        let sample_passed = direct && positive && negative;
+        println!(
+            "TLS sample {sample:02} direct={direct} proxy_positive={positive} proxy_negative={negative} [want true true true]"
+        );
+        passed += usize::from(sample_passed);
+    }
+    println!("TLS samples passed={passed}/{SAMPLES} [want {SAMPLES}/{SAMPLES}]");
+    passed == SAMPLES
 }
 
 #[cfg(target_os = "macos")]
