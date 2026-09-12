@@ -77,6 +77,15 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin 8e17950847ba28df1d344651e92ac1df9a01feb7
           git checkout 8e17950847ba28df1d344651e92ac1df9a01feb7 -- crates/nub-sandbox/src/proxy/mitm.rs
+          # Retain the current dial API while reverting only the TLS transport wrapper.
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('crates/nub-sandbox/src/proxy/mitm.rs')
+          source = path.read_text()
+          old = 'super::connect_upstream(&super::Host::Name(host.to_string()), port, allow_private)?'
+          assert source.count(old) == 1, 'the targeted control call site changed'
+          path.write_text(source.replace(old, 'super::connect_upstream(&super::Host::Name(host.to_string()), port, allow_private, &active.shutdown)?'))
+          PY
           git diff HEAD -- crates/nub-sandbox/src/proxy/mitm.rs > reports/control-reversion.diff
           set +e
           cargo test -p nub-sandbox --profile fast --lib proxy::tests::dropping_proxy_reaps_a_stalled_terminated_request -- --nocapture --test-threads=1 > reports/control-shutdown.log 2>&1
@@ -84,6 +93,7 @@ jobs:
           set -e
           echo "$code" > reports/control-shutdown-exit.txt
           cat reports/control-shutdown.log
+          grep -q 'running 1 test' reports/control-shutdown.log
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
