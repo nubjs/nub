@@ -54,18 +54,20 @@ jobs:
       - name: Exercising hostname proxy contract
         run: |
           set -o pipefail
-          cargo run --manifest-path tests/proxy-per-host/Cargo.toml --profile fast \
+          cargo build --manifest-path tests/proxy-per-host/Cargo.toml --profile fast \
             --config 'profile.fast.inherits="dev"' \
             --config 'profile.fast.debug="line-tables-only"' \
             --config 'profile.fast.codegen-units=256' \
             --config 'profile.fast.package."*".opt-level=2' \
-            > reports/proxy-per-host.log 2>&1
-          cat reports/proxy-per-host.log
+            > reports/probe-build.log 2>&1
           if [ "$RUNNER_OS" = macOS ]; then
             shasum -a 256 target/fast/proxy-per-host-probe > reports/probe-binary.sha256
           else
             sha256sum target/fast/proxy-per-host-probe${{ runner.os == 'Windows' && '.exe' || '' }} > reports/probe-binary.sha256
           fi
+          target/fast/proxy-per-host-probe${{ runner.os == 'Windows' && '.exe' || '' }} \
+            > reports/proxy-per-host.log 2>&1
+          cat reports/proxy-per-host.log
       - name: Exercising parser and proxy shutdown
         if: ${{ !cancelled() && github.ref_name == 'sandbox-proxy-hardening' }}
         run: |
