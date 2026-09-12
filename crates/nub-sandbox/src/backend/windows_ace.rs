@@ -520,13 +520,7 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
     };
 
     if object.desktop.is_none() {
-        // Transfer the owned station handle to the returned object.
-        let raw = station_guard.raw;
-        std::mem::forget(station_guard);
-        return Ok(Some(WindowHandle {
-            raw,
-            desktop: false,
-        }));
+        return Ok(Some(station_guard));
     }
 
     // `OpenDesktopW` is documented to accept desktops only from the process's current station.
