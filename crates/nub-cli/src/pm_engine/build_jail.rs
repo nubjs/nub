@@ -386,7 +386,7 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
             interpreter,
             extra_reads,
             ambient,
-            spawn.global_virtual_store_dir,
+            spawn.global_virtual_store_dir.clone(),
         )
         .map_err(|e| {
             std::io::Error::other(format!("compiling build-jail for lifecycle script: {e}"))
