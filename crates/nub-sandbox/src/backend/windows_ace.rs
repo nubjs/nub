@@ -50,11 +50,18 @@ const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
 const INHERITED_ACE_FLAG: u8 = 0x10;
 const WINDOW_OBJECT: &str = "<window-object>";
 
-/// Whether a window-object grant is absent, was added by Nub, was already present, or requires no
-/// mutation. `NoMutation` intentionally creates no cleanup ownership.
+/// The observable state of a window-object grant before acquisition decides whether Nub may claim
+/// cleanup ownership. `NoMutation` intentionally creates none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PersistentGrantState {
+    Missing,
+    Existing,
+    NoMutation,
+}
+
+/// The result of attempting a grant after `PersistentGrantState::Missing` was journaled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PersistentGrant {
-    Missing,
     Added,
     Existing,
     NoMutation,
@@ -83,7 +90,7 @@ static TEST_FORCE_FOREIGN_SESSION_LIVE: AtomicBool = AtomicBool::new(false);
 static TEST_FAIL_STATION_RESTORE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-static TEST_FORCE_NO_PERSISTENT_GRANT: AtomicBool = AtomicBool::new(false);
+static TEST_CURRENT_OBJECTS: Mutex<Option<Vec<WindowObject>>> = Mutex::new(None);
 
 pub(crate) fn station_guard() -> MutexGuard<'static, ()> {
     WINDOW_STATION_LOCK
@@ -480,15 +487,19 @@ fn window_object_has_grant(handle: HANDLE, sid: PSID, mask: u32) -> io::Result<b
     Ok(found)
 }
 
-fn window_object_grant_state(handle: HANDLE, sid: PSID, mask: u32) -> io::Result<PersistentGrant> {
+fn window_object_grant_state(
+    handle: HANDLE,
+    sid: PSID,
+    mask: u32,
+) -> io::Result<PersistentGrantState> {
     let read = ReadWindowDacl::open(handle)?;
     if read.acl.is_null() {
-        return Ok(PersistentGrant::NoMutation);
+        return Ok(PersistentGrantState::NoMutation);
     }
     Ok(if window_object_has_grant(handle, sid, mask)? {
-        PersistentGrant::Existing
+        PersistentGrantState::Existing
     } else {
-        PersistentGrant::Missing
+        PersistentGrantState::Missing
     })
 }
 
@@ -583,6 +594,14 @@ fn current_objects_unlocked() -> io::Result<Vec<WindowObject>> {
 
 pub(crate) fn current_objects() -> io::Result<Vec<WindowObject>> {
     let _station = station_guard();
+    #[cfg(test)]
+    if let Some(objects) = TEST_CURRENT_OBJECTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return Ok(objects);
+    }
     current_objects_unlocked()
 }
 
@@ -733,7 +752,7 @@ fn open_recorded(object: &WindowObject) -> io::Result<Option<WindowHandle>> {
 pub(crate) fn persistent_grant_state(
     object: &WindowObject,
     sid: PSID,
-) -> io::Result<PersistentGrant> {
+) -> io::Result<PersistentGrantState> {
     let _lock = OperationLock::acquire("acl")?;
     let handle = open_recorded(object)?
         .ok_or_else(|| io::Error::other("sandbox window object disappeared"))?;
@@ -744,10 +763,6 @@ pub(crate) fn persistent_grant_state(
         WINSTA_GRANT
     };
     let owned = OwnedSid::parse(&sid)?;
-    #[cfg(test)]
-    if TEST_FORCE_NO_PERSISTENT_GRANT.load(Ordering::Relaxed) {
-        return Ok(PersistentGrant::NoMutation);
-    }
     window_object_grant_state(handle.raw, owned.0, mask)
 }
 
@@ -765,8 +780,9 @@ pub(crate) fn grant_persistent(object: &WindowObject, sid: PSID) -> io::Result<P
     };
     let owned = OwnedSid::parse(&sid)?;
     match window_object_grant_state(handle.raw, owned.0, mask)? {
-        PersistentGrant::Missing => grant_window_object(handle.raw, &sid, mask),
-        outcome => Ok(outcome),
+        PersistentGrantState::Missing => grant_window_object(handle.raw, &sid, mask),
+        PersistentGrantState::Existing => Ok(PersistentGrant::Existing),
+        PersistentGrantState::NoMutation => Ok(PersistentGrant::NoMutation),
     }
 }
 
@@ -802,8 +818,17 @@ pub(crate) fn test_has_persistent_grant(object: &WindowObject, sid: PSID) -> io:
 }
 
 #[cfg(test)]
-pub(crate) fn test_force_no_persistent_grant(force: bool) {
-    TEST_FORCE_NO_PERSISTENT_GRANT.store(force, Ordering::Relaxed);
+pub(crate) fn test_set_current_objects(objects: Option<Vec<WindowObject>>) {
+    *TEST_CURRENT_OBJECTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = objects;
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_null_window_dacl(object: &WindowObject) -> io::Result<()> {
+    let handle =
+        open_recorded(object)?.ok_or_else(|| io::Error::other("test window object disappeared"))?;
+    set_window_dacl(handle.raw, std::ptr::null())
 }
 
 #[cfg(test)]

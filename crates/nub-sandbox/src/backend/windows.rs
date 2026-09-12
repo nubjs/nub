@@ -2302,19 +2302,19 @@ pub(super) mod launch {
             for object in &window_objects {
                 let journaled = resource.entry.window_objects.contains(object);
                 match crate::backend::windows_ace::persistent_grant_state(object, ac_sid)? {
-                    crate::backend::windows_ace::PersistentGrant::NoMutation => {
+                    crate::backend::windows_ace::PersistentGrantState::NoMutation => {
                         if journaled {
                             return Err(io::Error::other(format!(
                                 "sandbox journaled window-object grant is absent for {object:?}"
                             )));
                         }
                     }
-                    crate::backend::windows_ace::PersistentGrant::Existing => {
+                    crate::backend::windows_ace::PersistentGrantState::Existing => {
                         // Retain only an entry that already established ownership. A full
                         // same-SID grant discovered for the first time is not evidence Nub made
                         // it and must never become a cleanup target.
                     }
-                    crate::backend::windows_ace::PersistentGrant::Missing => {
+                    crate::backend::windows_ace::PersistentGrantState::Missing => {
                         if journaled {
                             return Err(io::Error::other(format!(
                                 "sandbox journaled window-object grant is absent for {object:?}"

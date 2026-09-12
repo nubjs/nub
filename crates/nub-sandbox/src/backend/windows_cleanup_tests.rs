@@ -28,6 +28,18 @@ struct TestWindowObjects {
     object: windows_registry::WindowObject,
 }
 
+impl TestWindowObjects {
+    fn journal_objects(&self) -> [windows_registry::WindowObject; 2] {
+        [
+            windows_registry::WindowObject {
+                desktop: None,
+                ..self.object.clone()
+            },
+            self.object.clone(),
+        ]
+    }
+}
+
 impl Drop for TestWindowObjects {
     fn drop(&mut self) {
         unsafe {
@@ -577,9 +589,22 @@ fn window_revoke_journal_save_failure(root: &Path) {
 /// into future cleanup authority.
 fn window_grant_no_mutation_does_not_journal(root: &Path) {
     let _cleanup = CleanupAfterTest;
-    crate::backend::windows_ace::test_force_no_persistent_grant(true);
-    let resource = plan(root, "hold").acquire().unwrap();
-    crate::backend::windows_ace::test_force_no_persistent_grant(false);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let objects = create_test_window_objects(
+        &format!("nub-null-dacl-station-{}-{stamp}", std::process::id()),
+        &format!("nub-null-dacl-desktop-{}-{stamp}", std::process::id()),
+    )
+    .unwrap();
+    let [station, desktop] = objects.journal_objects();
+    crate::backend::windows_ace::test_set_null_window_dacl(&station).unwrap();
+    crate::backend::windows_ace::test_set_null_window_dacl(&desktop).unwrap();
+    crate::backend::windows_ace::test_set_current_objects(Some(vec![station, desktop]));
+    let acquired = plan(root, "hold").acquire();
+    crate::backend::windows_ace::test_set_current_objects(None);
+    let resource = acquired.unwrap();
     let profile = resource.profile_name().to_string();
     let entry = windows_registry::test_entry(&profile)
         .unwrap()
