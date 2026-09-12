@@ -31,8 +31,8 @@
 pub enum SniScan {
     /// A complete ClientHello carrying this `server_name`.
     Sni(String),
-    /// A complete ClientHello with no `server_name` extension. No cross-routing is
-    /// possible without an SNI, so the caller admits by the CONNECT/SOCKS target.
+    /// A complete ClientHello with no `server_name` extension. The caller decides
+    /// by the CONNECT/SOCKS target; encrypted application routing is not inspected.
     NoSni,
     /// Not enough bytes yet to decide — read more (caller bounds this by cap + time).
     Incomplete,

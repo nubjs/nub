@@ -188,6 +188,8 @@ Network filtering is independent of filesystem access:
 
 Network entries accept host patterns and CIDRs. Unlike filesystem grants, network rules retain ordered allow/deny matching. A host grant is not an HTTP-method restriction and does not prevent uploads to that host. The boolean `false` denies egress; `true` disables Nub's network filtering. Windows AppContainer capabilities still constrain networking even without a Nub host filter.
 
+The proxy checks the CONNECT/SOCKS destination and the visible TLS server name (SNI). Without TLS termination, it cannot inspect encrypted HTTP host headers or an Encrypted ClientHello's inner name. An allowed service can relay traffic elsewhere. Host filtering restricts connections; it is not a guarantee about every application-level destination or the data sent to an allowed host.
+
 ### Network rules
 
 A network rule is a literal host, a CIDR, `*`, or `*.suffix`. The suffix wildcard excludes its apex, and the last matching entry wins.

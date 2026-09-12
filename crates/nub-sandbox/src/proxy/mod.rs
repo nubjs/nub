@@ -1,5 +1,6 @@
-//! The localhost egress proxy (design.md §2.5): the per-host policy engine for the
-//! net axis. NO MITM.
+//! The localhost egress proxy: the per-host policy engine for the net axis.
+//! Connection-tier rules inspect the cleartext ClientHello without terminating TLS;
+//! credential-broker rules can select the separate TLS-termination engine.
 //!
 //! MECHANISM. The OS deny-layer (each backend) forces the sandboxed child's egress
 //! to reach ONLY this proxy on loopback; direct external egress is blocked at the
@@ -10,11 +11,11 @@
 //! [`sni`], no key, no CA. An allowed tunnel is blind-forwarded byte-for-byte; a
 //! denied one is dropped before the upstream socket is ever opened.
 //!
-//! FAIL-CLOSED. The decision is a [`GrantDecider`] seam (`Fn(&Host) -> Decision`) —
-//! wired to the STATIC policy here ([`StaticDecider`]); the build-jail thread later
-//! swaps in an interactive prompt without touching this file. A TLS tunnel whose
-//! ClientHello is malformed, or stalls without a checkable SNI, is DENIED — a
-//! stall-then-send-denied-SNI cannot slip past (see [`read_and_check_sni`]).
+//! FAIL-CLOSED. The [`GrantDecider`] seam is wired to the static policy through
+//! [`StaticDecider`]. A malformed or incomplete TLS ClientHello is denied. A complete
+//! hello without SNI, or a non-TLS stream, is decided by the tunnel target alone.
+//! Blind forwarding cannot inspect encrypted HTTP authority, ECH inner names or
+//! application-level relaying by an allowed destination.
 //!
 //! LIFECYCLE. Thread-per-connection over `std::net` — NO async runtime, NO new
 //! dependency. The proxy runs in the nub PARENT process and outlives the child:
@@ -54,8 +55,7 @@ pub enum Decision {
 }
 
 /// The egress grant seam. The proxy consults it for the CONNECT/SOCKS target AND for
-/// the TLS SNI; both must be [`Decision::Allow`]. This epic wires it to the static
-/// policy ([`StaticDecider`]); the build-jail thread swaps in an interactive prompt.
+/// the TLS SNI when present; both must be [`Decision::Allow`].
 pub trait GrantDecider: Send + Sync + 'static {
     fn decide(&self, host: &Host) -> Decision;
 
@@ -474,8 +474,8 @@ fn handle_conn(
 /// (to replay), whether the tunnel is allowed, and the SNI hostname when one was present.
 ///
 /// The rule closes the SNI-evasion vectors: a complete ClientHello's SNI is checked;
-/// a ClientHello with no SNI, or a non-TLS stream, admits (the target host already
-/// passed gate 1, and without an SNI a shared-IP host cannot cross-route); a TLS
+/// a ClientHello with no SNI, or a non-TLS stream, admits by the target host that
+/// passed gate 1. Application-layer routing remains opaque to this gate. A TLS
 /// ClientHello that is malformed, oversize, or stalls without completing (incl. the
 /// client ACKing then sending nothing) FAILS CLOSED — so a "send a partial hello, then
 /// send a denied SNI after we splice" attack cannot bypass gate 2.
@@ -495,7 +495,7 @@ fn read_and_check_sni(
                         let ok = decider.decide(&Host::Name(host.clone())) == Decision::Allow;
                         return Ok((buf, ok, Some(host)));
                     }
-                    // Admitted target + no SNI to cross-route on → allow.
+                    // No visible SNI: authorize only by the admitted target.
                     SniScan::NoSni | SniScan::NotTls => return Ok((buf, true, None)),
                     // TLS-shaped but broken → fail closed.
                     SniScan::Malformed => return Ok((buf, false, None)),
