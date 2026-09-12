@@ -1327,11 +1327,8 @@ pub fn compile_build_jail_with_global_virtual_store(
     // that one package is not the count but CPython's documented fallback to compiling in
     // memory — bytecode is a cache, so its absence cannot change an outcome.
     //
-    // ⛔ THIS LIVED ONLY IN THE OVERRIDE UNTIL NOW, i.e. the mechanism the doc comment on
-    // `catalog_v2::BaselineEnv` describes was INERT in every shipped build:
-    // `catalog_override::baseline_env()` reads `active_v2()`, the compiled-in catalog declares
-    // no env at all, and the whole path is behind `build-jail-catalog-override`. The override
-    // loop still runs after this and still wins, so a v2 catalog can change or extend it.
+    // The fixed runtime baseline applies even when a development catalog omits its env table.
+    // The active catalog can override these values in the following loop.
     for (name, value) in BUILD_JAIL_BASELINE_ENV {
         defaults::insert_env(
             &mut policy.env.constructed,

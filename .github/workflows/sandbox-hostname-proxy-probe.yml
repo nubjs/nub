@@ -79,6 +79,21 @@ jobs:
           set -o pipefail
           cargo clippy -p nub-sandbox --profile fast --lib --tests -- -D warnings > reports/clippy.log 2>&1
           cargo test -p nub-sandbox --profile fast --lib proxy:: -- --nocapture --test-threads=1 2>&1 | tee reports/proxy-library.log
+      - name: Exercising the baked catalog environment without development overrides
+        if: ${{ !cancelled() && github.ref_name == 'sandbox-proxy-hardening' }}
+        run: |
+          set -euo pipefail
+          cargo test -p nub-sandbox --profile fast --test catalog_positive --no-run --message-format=json > reports/catalog-artifacts.jsonl
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          artifacts = [json.loads(line) for line in Path('reports/catalog-artifacts.jsonl').read_text().splitlines()]
+          binaries = [item['executable'] for item in artifacts if item.get('reason') == 'compiler-artifact' and item.get('target', {}).get('name') == 'catalog_positive' and item.get('executable')]
+          assert len(binaries) == 1, binaries
+          Path('reports/catalog-binary.sha256').write_text(hashlib.sha256(Path(binaries[0]).read_bytes()).hexdigest() + '  ' + binaries[0] + '\n')
+          PY
+          cargo test -p nub-sandbox --profile fast --test catalog_positive -- --nocapture --test-threads=1 2>&1 | tee reports/catalog-environment.log
+          cargo test -p nub-sandbox --profile fast --lib catalog_baseline_env -- --nocapture --test-threads=1 2>&1 | tee reports/catalog-baseline.log
       - name: Recording the prior TLS shutdown control
         if: ${{ !cancelled() && github.ref_name == 'sandbox-proxy-hardening' }}
         run: |
