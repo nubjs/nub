@@ -16,7 +16,7 @@ mod null_device_probe;
 
 fn private_object_permissions() -> std::io::Result<()> {
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-    use windows_sys::Win32::Foundation::GENERIC_ALL;
+    use windows_sys::Win32::Foundation::{GENERIC_ALL, HANDLE_FLAG_INHERIT, SetHandleInformation};
     use windows_sys::Win32::Security::{
         ACL, ACL_REVISION, AddAccessAllowedAce, DACL_SECURITY_INFORMATION, GetTokenInformation,
         InitializeAcl, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR, SetKernelObjectSecurity,
@@ -241,6 +241,8 @@ fn inherited_pipe_roundtrip(security: PipeSecurity) -> std::io::Result<Vec<u8>> 
     };
     let (child_stdin, mut parent_stdin) = pipe(attributes)?;
     let (mut parent_stdout, child_stdout) = pipe(attributes)?;
+    check(unsafe { SetHandleInformation(parent_stdin.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) })?;
+    check(unsafe { SetHandleInformation(parent_stdout.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) })?;
     let mut child = Command::new(std::env::current_exe()?)
         .args(["--exact", CHILD, "--nocapture"])
         .env("NUB_ADAPTER_PIPE_ROUNDTRIP", security.label())
