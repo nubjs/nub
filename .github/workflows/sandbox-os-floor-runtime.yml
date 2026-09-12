@@ -1,0 +1,68 @@
+name: Sandbox OS-floor runtime probes
+
+on:
+  push:
+    branches: [sandbox-os-floor-runtime]
+    paths:
+      - crates/nub-sandbox/**
+      - .github/workflows/sandbox-os-floor-runtime.yml
+
+permissions:
+  contents: read
+
+jobs:
+  macos-14-arm64:
+    name: macOS 14 arm64 contract floor
+    runs-on: macos-14
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      SANDBOX_PARENT_SECRET: synthetic-parent-canary
+      WITHHELD_AMBIENT_SECRET: synthetic-procfs-canary
+      RUST_BACKTRACE: '1'
+      CARGO_BUILD_TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: sandbox-os-floor-macos14-aarch64
+          cache-on-failure: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.18.0'
+      - name: Recording OS and artifact prerequisites
+        run: |
+          mkdir -p reports
+          {
+            git rev-parse HEAD
+            uname -a
+            sw_vers
+            sysctl -n hw.optional.arm64 2>/dev/null || true
+            rustc -Vv
+            xcodebuild -version
+          } > reports/environment.txt
+      - name: Compiling the macOS readiness target
+        run: |
+          set -o pipefail
+          cargo test -p nub-sandbox --profile fast --test production_readiness_macos --no-run \
+            --message-format=json-render-diagnostics > reports/test-artifacts.jsonl
+      - name: Exercising Seatbelt and hostname-proxy contracts
+        run: |
+          set -o pipefail
+          cargo test -p nub-sandbox --profile fast --test production_readiness_macos -- \
+            --nocapture --test-threads=1 2>&1 | tee reports/contracts.log
+      - name: Preserving OS-floor evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-os-floor-macos-14-arm64
+          path: reports
