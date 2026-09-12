@@ -392,10 +392,6 @@ fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn node_gyp_option_name_eq(candidate: &str, option: &str) -> bool {
-    // node-gyp reads both `opts.disturl` and `opts['dist-url']` for legacy npm config.
-    if option == "dist-url" && candidate.eq_ignore_ascii_case("disturl") {
-        return true;
-    }
     candidate.len() == option.len()
         && candidate
             .bytes()
@@ -408,13 +404,19 @@ fn node_gyp_option_name_eq(candidate: &str, option: &str) -> bool {
 /// Refuse a synthetic header tree only when an effective user setting selects a different
 /// runtime. An explicit host-equivalent `target`/`arch` remains compatible with the staged
 /// runtime, so it keeps the offline path instead of breaking an ordinary explicit invocation.
+/// This is intentionally an environment-only decision: lifecycle scripts are arbitrary shell
+/// programs, and Nub does not parse their `node-gyp --nodedir`/`--dist-url` arguments here.
 fn node_gyp_header_selection(
     ambient: &BTreeMap<String, String>,
     facts: Option<&NodeFacts>,
 ) -> NodeGypHeaderSelection {
     let nonempty = |option| node_gyp_option(ambient, option).filter(|value| !value.is_empty());
-    let explicit_header_root = nonempty("nodedir").is_some();
-    let custom_dist = nonempty("dist-url").is_some();
+    // An explicit empty nodedir is still user-owned. Inserting a direct npm config value would
+    // otherwise override node-gyp's command-line input, so preserve the old set-if-absent rule.
+    let explicit_header_root = node_gyp_option(ambient, "nodedir").is_some();
+    // node-gyp retains these as distinct options (`opts.disturl || opts['dist-url']`), so package
+    // config for one must not mask a direct value for the other.
+    let custom_dist = nonempty("disturl").is_some() || nonempty("dist-url").is_some();
     let custom_runtime =
         nonempty("runtime").is_some_and(|runtime| !runtime.eq_ignore_ascii_case("node"));
     let target_matches = nonempty("target").is_none_or(|target| {
@@ -1618,14 +1620,34 @@ mod tests {
             );
         }
 
-        let package_empty_overrides_direct = BTreeMap::from([
+        let empty_package_nodedir_remains_user_owned = BTreeMap::from([
             ("npm_config_nodedir".to_string(), "/custom/node".to_string()),
             (
                 "npm_package_config_node_gyp_nodedir".to_string(),
                 String::new(),
             ),
         ]);
-        assert!(node_gyp_header_selection(&package_empty_overrides_direct, None).synthesize);
+        assert!(
+            !node_gyp_header_selection(&empty_package_nodedir_remains_user_owned, None).synthesize
+        );
+
+        let empty_direct_nodedir_remains_user_owned =
+            BTreeMap::from([("npm_config_nodedir".to_string(), String::new())]);
+        assert!(
+            !node_gyp_header_selection(&empty_direct_nodedir_remains_user_owned, None).synthesize
+        );
+
+        let cross_source_dist_aliases = BTreeMap::from([
+            (
+                "npm_config_disturl".to_string(),
+                "https://custom.example".to_string(),
+            ),
+            (
+                "npm_package_config_node_gyp_dist_url".to_string(),
+                String::new(),
+            ),
+        ]);
+        assert!(!node_gyp_header_selection(&cross_source_dist_aliases, None).synthesize);
     }
 
     #[test]
