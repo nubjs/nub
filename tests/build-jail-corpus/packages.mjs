@@ -22,6 +22,7 @@ const report = (source, destination) => {
 };
 const isolatedEnvKeys = new Set([
   'npm_config_nodedir',
+  'npm_config_python',
   'npm_config_build_from_source',
   'nub_cache_dir',
   'aube_cache_dir',
@@ -58,6 +59,7 @@ console.log(`Fixture root: ${root}`);
 const provenance = join(root, 'provenance.json');
 writeFileSync(provenance, JSON.stringify({
   binary, sha256: createHash('sha256').update(readFileSync(binary)).digest('hex'), fixtureBase,
+  controlPython: process.env.CORPUS_CONTROL_PYTHON || null,
   node: process.execPath, version: process.version, platform: process.platform, arch: process.arch,
 }, null, 2));
 report(provenance, 'provenance.json');
@@ -87,6 +89,12 @@ for (const [name, version, probe, source = false] of selected) {
       if (isolatedEnvKeys.has(key.toLowerCase())) delete env[key];
     }
     if (source) env.npm_config_build_from_source = 'true';
+    // Keep the source-build control on the exact interpreter the jail selected.
+    // A passed control therefore rules out interpreter-version drift rather than merely
+    // showing that an unrelated host Python can build the addon.
+    if (source && !confined && process.env.CORPUS_CONTROL_PYTHON) {
+      env.npm_config_python = process.env.CORPUS_CONTROL_PYTHON;
+    }
     const install = spawnSync(binary, ['install'], { cwd: project, env, encoding: 'utf8', timeout: 300_000 });
     const log = `${install.stdout}\n${install.stderr}`;
     const installLog = join(base, 'install.log');

@@ -56,6 +56,7 @@ jobs:
       - name: Comparing short-root source builds with controls
         env:
           CORPUS_TEMP_ROOT: C:/p
+          CORPUS_CONTROL_PYTHON: C:/hostedtoolcache/windows/Python/3.12.10/x64/python.exe
           NUB_BUILD_JAIL_CATALOG: ${{ github.workspace }}/corpus-input/catalog-v2.json
           NUB_JAIL_DUMP_POLICY: '1'
         run: |
