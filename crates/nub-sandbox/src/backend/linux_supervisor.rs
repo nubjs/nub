@@ -896,6 +896,14 @@ fn proxy_connect_tcp(
     }
 }
 
+/// The egress proxy is the one loopback peer that a fine-grained policy may dial without
+/// re-entering the proxy path. Keep this intentionally narrower than a general loopback test:
+/// a sibling service at another `127/8` address or port is still an egress destination and must
+/// receive the proxy's target and SNI checks.
+fn is_egress_proxy_endpoint(fam: i32, addr: &[u8], port: u16, proxy_port: u16) -> bool {
+    fam == libc::AF_INET && addr == [127, 0, 0, 1] && port == proxy_port
+}
+
 fn upstream_resolver() -> u32 {
     std::fs::read_to_string("/etc/resolv.conf")
         .ok()
@@ -1789,22 +1797,25 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                 suplog!("SUP DENY UDP {ip}:{port}");
             }
         } else if typ == libc::SOCK_STREAM {
-            let loopback = fam == libc::AF_INET && addr[0] == 127;
             let name = {
                 let st = &state;
                 st.lookup(fam, &addr[..n])
             };
             // The proxy config, copied from `EgressPolicy` before the fork (epic 5.1). `Some` ⇒ a
-            // loopback SNI-inspecting proxy is running and is authoritative for a NON-loopback
-            // connect; `None` ⇒ the coarse observed-name allowlist decides (epic 1.5). Loopback is
-            // always dialed directly — the proxy is itself loopback, so routing loopback through it
-            // would loop, and the child reaching its own loopback services is not egress.
+            // loopback SNI-inspecting proxy is authoritative for EVERY child connect except a dial
+            // of its own exact `127.0.0.1:<port>` listener. That narrow exception prevents proxy
+            // recursion; a general loopback carve-out would let a sibling relay carry a denied host
+            // past the hostname policy. `None` ⇒ the coarse observed-name allowlist decides (epic
+            // 1.5).
             let proxy = {
                 let st = &state;
                 st.proxy_port
                     .map(|p| (p, st.proxy_token.clone().unwrap_or_default()))
             };
-            if let (false, Some((pport, ptoken))) = (loopback, proxy) {
+            let proxy_endpoint = proxy
+                .as_ref()
+                .is_some_and(|(pport, _)| is_egress_proxy_endpoint(fam, &addr[..n], port, *pport));
+            if let (false, Some((pport, ptoken))) = (proxy_endpoint, proxy) {
                 // Transparent redirect: dial the loopback proxy and speak the cooperative HTTP
                 // CONNECT on the child's behalf. The authority is the observed name when known
                 // (exact for the common one-host-per-IP case), else the IP literal (the proxy's
@@ -1827,7 +1838,7 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                     let st = &state;
                     st.allowed(name.as_deref())
                 };
-                if loopback || allow {
+                if allow {
                     s = unsafe { libc::socket(fam, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
                     if unsafe {
                         connect_interruptible(
@@ -1841,11 +1852,7 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                         verdict_err = 0;
                         suplog!(
                             "SUP ALLOW {ip}:{port} name={}",
-                            name.as_deref().unwrap_or(if loopback {
-                                "(loopback)"
-                            } else {
-                                "(none)"
-                            })
+                            name.as_deref().unwrap_or("(none)")
                         );
                     } else {
                         verdict_err = -errno();
@@ -2590,6 +2597,31 @@ mod lifecycle_tests {
             write_policy: None,
             proxy_port: None,
             proxy_token: None,
+        }
+    }
+
+    #[test]
+    fn only_the_exact_v4_proxy_listener_skips_proxy_routing() {
+        assert!(is_egress_proxy_endpoint(
+            libc::AF_INET,
+            &[127, 0, 0, 1],
+            1234,
+            1234
+        ));
+        for (family, address, port, proxy_port) in [
+            (libc::AF_INET, vec![127, 0, 0, 2], 1234, 1234),
+            (libc::AF_INET, vec![127, 0, 0, 1], 1235, 1234),
+            (
+                libc::AF_INET6,
+                vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                1234,
+                1234,
+            ),
+        ] {
+            assert!(
+                !is_egress_proxy_endpoint(family, &address, port, proxy_port),
+                "{address:?}:{port} must remain proxy-routed"
+            );
         }
     }
 

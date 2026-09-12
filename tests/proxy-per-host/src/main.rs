@@ -15,11 +15,11 @@
 //! non-cooperative egress is blocked regardless of host = never leaked (A1).
 
 use nub_sandbox::{
-    apply, compile, CommandSpec, CompileCtx, Homes, SandboxPolicy, ScopeCapabilities,
+    CommandSpec, CompileCtx, Homes, SandboxPolicy, ScopeCapabilities, apply, compile,
 };
+use serde_json::Value;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use serde_json::json;
-use serde_json::Value;
 use std::collections::BTreeMap;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Write};
@@ -60,13 +60,28 @@ fn policy(surface: Value) -> SandboxPolicy {
     compile(&surface, &ctx).expect("compile net policy")
 }
 
-/// Run `curl` under `policy`, return its exit code. `noproxy` adds `--noproxy '*'` so curl dials
-/// the destination DIRECTLY, ignoring any proxy env — the non-cooperative case.
+/// Run `curl` under `policy`, return its exit code. `noproxy` removes every common proxy variable
+/// and adds `--noproxy '*'`, so curl dials the destination DIRECTLY — the non-cooperative case.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn curl(label: &str, policy: &SandboxPolicy, noproxy: bool, curl_args: &str) -> i32 {
-    let np = if noproxy { "--noproxy '*'" } else { "" };
+    curl_family(label, policy, noproxy, "-4", curl_args)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn curl_family(
+    label: &str,
+    policy: &SandboxPolicy,
+    noproxy: bool,
+    family: &str,
+    curl_args: &str,
+) -> i32 {
+    let curl = if noproxy {
+        "env -u https_proxy -u HTTPS_PROXY -u http_proxy -u HTTP_PROXY -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY curl --noproxy '*'"
+    } else {
+        "curl"
+    };
     let script =
-        format!("curl -4 -sS {np} -o /dev/null --connect-timeout 8 --max-time 20 {curl_args}");
+        format!("{curl} {family} -sS -o /dev/null --connect-timeout 8 --max-time 20 {curl_args}");
     eprintln!(">>> {label}: sh -c {script:?}");
     let spec = CommandSpec::new("/bin/sh").arg("-c").arg(&script);
     let code = apply(policy, spec)
@@ -80,31 +95,53 @@ fn curl(label: &str, policy: &SandboxPolicy, noproxy: bool, curl_args: &str) -> 
 }
 
 #[cfg(target_os = "linux")]
-fn loopback_relay(policy: &SandboxPolicy) -> bool {
+fn loopback_probe(
+    policy: &SandboxPolicy,
+    bind: &str,
+    url: &str,
+    family: &str,
+    relay: bool,
+) -> bool {
     // A host-local service is a separate egress channel from the proxy. This listener is the
     // positive control: only reply with its canary after it has opened a TCP connection to the
     // denied host. A confined curl reaching it therefore proves a local relay can cross the
     // hostname policy; it is not merely a test that loopback sockets exist.
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback relay control");
-    let port = listener
-        .local_addr()
-        .expect("loopback relay address")
-        .port();
+    let listener = TcpListener::bind(bind).expect("bind loopback probe control");
+    let addr = listener.local_addr().expect("loopback probe address");
+    let url = url.replace("{port}", &addr.port().to_string());
     let relay = thread::spawn(move || {
-        let (mut client, _) = listener.accept().expect("accept confined relay request");
+        listener
+            .set_nonblocking(true)
+            .expect("make loopback control nonblocking");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut client = loop {
+            match listener.accept() {
+                Ok((client, _)) => break client,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept confined loopback request: {error}"),
+            }
+        };
         let mut request = [0_u8; 1024];
         let _ = client.read(&mut request);
-        let upstream = "www.google.com:443"
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut addrs| addrs.next())
-            .is_some_and(|addr| {
-                TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(8)).is_ok()
-            });
+        let upstream = relay
+            && "www.google.com:443"
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .is_some_and(|addr| {
+                    TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(8)).is_ok()
+                });
         let body = if upstream {
             "RELAY_CANARY"
-        } else {
+        } else if relay {
             "UPSTREAM_UNREACHABLE"
+        } else {
+            "LOCAL_CANARY"
         };
         write!(
             client,
@@ -112,12 +149,11 @@ fn loopback_relay(policy: &SandboxPolicy) -> bool {
             body.len()
         )
         .expect("write loopback relay response");
-        upstream
+        !relay || upstream
     });
-    let relay_url = format!("http://127.0.0.1:{port}/");
-    let client = curl("loopback-relay", policy, true, &relay_url);
-    let upstream = relay.join().expect("join loopback relay");
-    client == 0 && upstream
+    let client = curl_family("loopback-probe", policy, true, family, &url);
+    let served = relay.join().expect("join loopback probe");
+    client == 0 && served
 }
 
 #[cfg(target_os = "linux")]
@@ -139,7 +175,48 @@ fn run() -> bool {
         true,
         "--connect-to example.com:443:example.com:443 https://example.com/",
     );
-    let loopback_relay = loopback_relay(&allow);
+    let loopback_relay_v4 = loopback_probe(
+        &allow,
+        "127.0.0.1:0",
+        "http://127.0.0.1:{port}/",
+        "-4",
+        true,
+    );
+    let loopback_relay_alias = loopback_probe(
+        &allow,
+        "127.0.0.2:0",
+        "http://127.0.0.2:{port}/",
+        "-4",
+        true,
+    );
+    let loopback_relay_v6 = loopback_probe(&allow, "[::1]:0", "http://[::1]:{port}/", "-6", true);
+    let explicit_v4 = policy(json!({ "fs": true, "net": ["127.0.0.1"] }));
+    let explicit_v4_ok = loopback_probe(
+        &explicit_v4,
+        "127.0.0.1:0",
+        "http://127.0.0.1:{port}/",
+        "-4",
+        false,
+    );
+    let explicit_cidr = policy(json!({ "fs": true, "net": ["127.0.0.0/8"] }));
+    let explicit_cidr_ok = loopback_probe(
+        &explicit_cidr,
+        "127.0.0.2:0",
+        "http://127.0.0.2:{port}/",
+        "-4",
+        false,
+    );
+    let explicit_v6 = policy(json!({ "fs": true, "net": ["::1"] }));
+    let explicit_v6_ok =
+        loopback_probe(&explicit_v6, "[::1]:0", "http://[::1]:{port}/", "-6", false);
+    let localhost = policy(json!({ "fs": true, "net": ["localhost"] }));
+    let localhost_is_distinct = !loopback_probe(
+        &localhost,
+        "127.0.0.1:0",
+        "http://localhost:{port}/",
+        "-4",
+        false,
+    );
     println!();
     println!("1 compat      (allow example.com, GET example.com)  -> exit={compat}   [want 0]");
     println!(
@@ -152,9 +229,37 @@ fn run() -> bool {
         "4 control-sni (example.com IP, SNI=example.com)     -> exit={control_sni}   [want 0]"
     );
     println!(
-        "5 loopback relay (denied google via 127.0.0.1)      -> reached={loopback_relay} [want false]"
+        "5 loopback relay (denied google via 127.0.0.1)      -> reached={loopback_relay_v4} [want false]"
     );
-    compat == 0 && attack_deny != 0 && attack_sni != 0 && control_sni == 0 && !loopback_relay
+    println!(
+        "6 loopback relay (denied google via 127.0.0.2)      -> reached={loopback_relay_alias} [want false]"
+    );
+    println!(
+        "7 loopback relay (denied google via ::1)            -> reached={loopback_relay_v6} [want false]"
+    );
+    println!(
+        "8 explicit IP 127.0.0.1 local service            -> reached={explicit_v4_ok} [want true]"
+    );
+    println!(
+        "9 explicit CIDR 127/8 local service               -> reached={explicit_cidr_ok} [want true]"
+    );
+    println!(
+        "10 explicit IP ::1 local service                  -> reached={explicit_v6_ok} [want true]"
+    );
+    println!(
+        "11 hostname localhost is distinct from 127.0.0.1  -> blocked={localhost_is_distinct} [want true]"
+    );
+    compat == 0
+        && attack_deny != 0
+        && attack_sni != 0
+        && control_sni == 0
+        && !loopback_relay_v4
+        && !loopback_relay_alias
+        && !loopback_relay_v6
+        && explicit_v4_ok
+        && explicit_cidr_ok
+        && explicit_v6_ok
+        && localhost_is_distinct
 }
 
 #[cfg(target_os = "macos")]
