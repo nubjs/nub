@@ -3141,10 +3141,19 @@ mod lifecycle_tests {
             let error = errno();
             wake.join().unwrap();
             unsafe { libc::close(fd) };
+            // Keep the failure classes distinct in the parent assertion: the integration test
+            // needs to distinguish an unexpected successful replay from a kernel error that did
+            // not reflect the signal cancellation.
             std::process::exit(if result == -1 && error == libc::EINTR {
                 0
-            } else {
+            } else if result >= 0 {
                 96
+            } else if error == libc::EAGAIN || error == libc::EWOULDBLOCK {
+                97
+            } else if error == libc::ECANCELED {
+                98
+            } else {
+                99
             });
         }
         if mode == "tcp" || mode == "dns" {
