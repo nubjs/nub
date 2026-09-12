@@ -1,10 +1,10 @@
 //! Proves PER-HOST egress through the loopback SNI-inspecting proxy (epic 5.1), driving
-//! nub-sandbox's REAL public API (`compile` → `apply` → `status`) on both enforcement OSes. A
+//! nub-sandbox's REAL public API (`compile` → `apply` → `status`) on all three OSes. A
 //! fine-grained `net` allowlist derives `ProxyMode::Auto`, so `apply` starts the proxy; how the
 //! child reaches it differs by OS, so the arms do too:
 //!
 //! LINUX (transparent redirect). The child is NON-cooperative — no `HTTP_PROXY`, `--noproxy '*'`
-//! besides — and the seccomp supervisor redirects every non-loopback connect through the proxy by
+//! besides — and the seccomp supervisor redirects every TCP connect except its own proxy endpoint by
 //! speaking the cooperative CONNECT on its behalf. A block is the OS interception, never client
 //! good-behavior. The SNI gate is isolated by a same-IP discriminator (arms 3 vs 4).
 //!
@@ -204,13 +204,24 @@ fn fresh_proxy_startup_sweep(policy: &SandboxPolicy) -> bool {
 /// being recorded as a green request.
 #[cfg(target_os = "macos")]
 fn unauthenticated_proxy_cannot_read_green(sandbox: &Sandbox) -> bool {
-    let script = r#"import os, socket, sys, urllib.parse
+    let script = r#"import os, socket, sys, time, urllib.parse
 port = urllib.parse.urlsplit(os.environ["HTTPS_PROXY"]).port
 try:
     with socket.create_connection(("127.0.0.1", port), timeout=2) as stream:
         stream.settimeout(2)
         stream.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
-        reply = stream.recv(128).split(b"\r\n", 1)[0]
+        deadline = time.monotonic() + 2
+        reply = b""
+        while b"\r\n" not in reply and len(reply) < 128:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("proxy response deadline")
+            stream.settimeout(remaining)
+            part = stream.recv(128 - len(reply))
+            if not part:
+                break
+            reply += part
+        reply = reply.split(b"\r\n", 1)[0]
 except OSError as error:
     print(f"port={port} raw_os_error={error.errno}")
     sys.exit(1)
