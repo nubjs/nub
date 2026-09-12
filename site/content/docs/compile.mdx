@@ -947,6 +947,8 @@ A compiled Windows executable is not Authenticode-signed. Windows runs unsigned 
 
 The embedded or provisioned runtime is official, unpatched Node. The launcher starts it with a fixed internal CommonJS bootstrap, version-appropriate flags, and the bundled preamble. The inherited `NODE_OPTIONS` value is passed to Node unchanged, so supported Node flags keep their normal behavior.
 
+An artifact reproduces what `nub <file>` does rather than what `node <file>` does, so an entry whose default export has a `fetch` method is [served over HTTP](/docs/runtime/fetch-handler) by the executable too.
+
 ### Process identity
 
 The application sees the outer artifact as its executable while retaining Node's native process name:

@@ -102,6 +102,15 @@ $ nub watch server.ts
 Listening on http://localhost:3000
 ```
 
+## Compiled executables
+
+[`nub compile`](/docs/compile) carries the handler into the executable it builds, so the compiled server binds a port on launch the way the source file does:
+
+```console
+$ ./server
+Listening on http://localhost:3000
+```
+
 ## Plain Node
 
 Passing [`--node`](/docs/node) runs the file on stock Node, where a default-exported `fetch` means nothing and the process exits once the module has evaluated.
