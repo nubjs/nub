@@ -2,7 +2,7 @@ name: Hostname proxy confinement probe
 
 on:
   push:
-    branches: [sandbox-hostname-proxy-probe, sandbox-proxy-hardening, sandbox-cross-os-network-grammar]
+    branches: [sandbox-hostname-proxy-probe, sandbox-proxy-hardening]
     paths:
       - crates/nub-sandbox/**
       - tests/proxy-per-host/**
