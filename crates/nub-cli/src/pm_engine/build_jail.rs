@@ -2150,13 +2150,13 @@ fn windows_python_compat_dir(project_root: &std::path::Path) -> Option<PathBuf> 
 /// never import a half-written file and different Nub versions never overwrite each other.
 #[cfg(windows)]
 fn publish_python_compat_dir(parent: &std::path::Path, source: &str) -> Option<PathBuf> {
-    let key = format!("{:x}", Sha256::digest(source.as_bytes()));
+    let key = hex::encode(Sha256::digest(source.as_bytes()));
     let dir = parent.join(key);
     let startup = dir.join("sitecustomize.py");
     if std::fs::read_to_string(&startup).ok().as_deref() == Some(source) {
         return Some(dir);
     }
-    if dir.exists() || std::fs::create_dir_all(parent).is_err() {
+    if std::fs::create_dir_all(parent).is_err() {
         return None;
     }
     let staging = tempfile::TempDir::new_in(parent).ok()?;
@@ -2810,8 +2810,18 @@ mod tests {
         let parent = root.path().join("jail-python-compat");
         let source = "adapter-v1";
         let dirs = std::thread::scope(|scope| {
-            (0..12)
-                .map(|_| scope.spawn(|| publish_python_compat_dir(&parent, source)))
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+            let workers = (0..12)
+                .map(|_| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        publish_python_compat_dir(&parent, source)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
                 .map(|worker| worker.join().expect("publisher thread").expect("published"))
                 .collect::<Vec<_>>()
         });

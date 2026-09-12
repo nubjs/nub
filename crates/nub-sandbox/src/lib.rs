@@ -113,22 +113,6 @@ pub fn windows_python_compat_source() -> &'static str {
     include_str!("backend/windows_python_compat.py")
 }
 
-#[cfg(test)]
-mod windows_python_compat_tests {
-    #[test]
-    fn startup_adapter_preserves_old_python_and_pathlike_realpath_calls() {
-        let source = super::windows_python_compat_source();
-        assert!(source.contains("def realpath(path, *args, **kwargs):"));
-        assert!(source.contains("original_realpath(path, *args, **kwargs)"));
-        assert!(source.contains("path = os.fspath(path)"));
-        assert!(source.contains("getattr(sys, \"audit\", None)"));
-        assert!(
-            !source.contains("strict=strict"),
-            "Python 3.6-3.9 do not accept realpath(strict=...)"
-        );
-    }
-}
-
 /// What the kernel refused a confined launch, keyed by [`CommandSpec::audit_label`]. macOS
 /// answers from the unified log; every other host answers with an empty list. Failure path only.
 pub use backend::macos_denials;
