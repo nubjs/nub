@@ -711,13 +711,19 @@ const MAX_SEND_MMSG: usize = 1024;
 const MAX_SEND_IOV: usize = 1024;
 const MAX_SEND_BYTES: usize = 16 * 1024 * 1024;
 
-/// A connected send, copied out of target memory.  Addressed messages and ancillary data are
-/// rejected before any send in a batch: there is no safe way to replay SCM_RIGHTS (the numbers
-/// name the target's fd table) and the egress policy denies explicitly addressed IP sends.
-#[derive(Debug)]
+/// A send copied out of target memory.  `rights` pins supervisor duplicates named by an
+/// `SCM_RIGHTS` control message until `sendmsg` consumes their numeric entries in `control`.
+/// This is required even for AF_UNIX: CONTINUE would re-resolve the target's fd number after we
+/// classified it, so a concurrent `dup2` could turn a benign socketpair send into IP egress.
 struct SendSnapshot {
     bytes: Vec<u8>,
+    name: Option<Vec<u8>>,
+    control: Vec<u8>,
+    rights: Vec<OwnedFd>,
 }
+
+const MAX_SEND_NAME: usize = size_of::<libc::sockaddr_storage>();
+const MAX_SEND_CONTROL: usize = 64 * 1024;
 
 /// Keep a `/proc/<tid>/mem` description open from the first ID check through every read.  This
 /// binds reads to the notified address space even if a dead TID is quickly reused; the final
@@ -756,15 +762,145 @@ fn child_struct<T: Copy>(mem: RawFd, off: u64) -> Result<T, i32> {
     Ok(unsafe { value.assume_init() })
 }
 
-fn snapshot_msghdr(mem: RawFd, hdr: libc::msghdr) -> Result<SendSnapshot, i32> {
-    // The existing policy rejects any non-NULL name, including a zero-length one.  Keep that
-    // contract, rather than treating a malformed supplied address as a connected send.
-    if !hdr.msg_name.is_null() {
-        return Err(libc::EPERM);
+fn snapshot_bytes(
+    mem: RawFd,
+    ptr: *const libc::c_void,
+    len: usize,
+    cap: usize,
+) -> Result<Vec<u8>, i32> {
+    if len > cap {
+        return Err(libc::EMSGSIZE);
     }
-    if !hdr.msg_control.is_null() || hdr.msg_controllen != 0 {
-        return Err(libc::EPERM);
+    if len != 0 && ptr.is_null() {
+        return Err(libc::EFAULT);
     }
+    let mut bytes = vec![0; len];
+    if len != 0 {
+        child_pread(mem, ptr as u64, &mut bytes)?;
+    }
+    Ok(bytes)
+}
+
+fn cmsg_align(len: usize) -> Option<usize> {
+    len.checked_add(size_of::<usize>() - 1)
+        .map(|value| value & !(size_of::<usize>() - 1))
+}
+
+fn control_word<T: Copy>(control: &[u8], offset: usize) -> Result<T, i32> {
+    let end = offset.checked_add(size_of::<T>()).ok_or(libc::EINVAL)?;
+    if end > control.len() {
+        return Err(libc::EINVAL);
+    }
+    Ok(unsafe { std::ptr::read_unaligned(control[offset..].as_ptr().cast::<T>()) })
+}
+
+fn write_control_word<T: Copy>(control: &mut [u8], offset: usize, value: T) -> Result<(), i32> {
+    let end = offset.checked_add(size_of::<T>()).ok_or(libc::EINVAL)?;
+    if end > control.len() {
+        return Err(libc::EINVAL);
+    }
+    unsafe { std::ptr::write_unaligned(control[offset..].as_mut_ptr().cast::<T>(), value) };
+    Ok(())
+}
+
+fn duplicate_child_fd(tgid: u32, fd: RawFd) -> Result<OwnedFd, i32> {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, tgid, 0) } as RawFd;
+    if pidfd < 0 {
+        return Err(errno());
+    }
+    let copy = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd, fd, 0) } as RawFd;
+    unsafe { libc::close(pidfd) };
+    if copy < 0 {
+        Err(errno())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+    }
+}
+
+/// Copy control data and replace target SCM_RIGHTS integers with supervisor duplicates.  Other
+/// cmsgs are bytes, not pointers, so their copied representation is stable.  Credentials are
+/// deliberately rejected: replaying them would assert the supervisor's credentials, not the
+/// child's, and therefore cannot preserve the AF_UNIX contract.
+fn snapshot_control(
+    mem: RawFd,
+    hdr: &libc::msghdr,
+    tgid: u32,
+) -> Result<(Vec<u8>, Vec<OwnedFd>), i32> {
+    if hdr.msg_controllen == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut control = snapshot_bytes(mem, hdr.msg_control, hdr.msg_controllen, MAX_SEND_CONTROL)?;
+    let mut rights = Vec::new();
+    let header = size_of::<libc::cmsghdr>();
+    let mut offset = 0usize;
+    while offset < control.len() {
+        let len: usize = control_word(
+            &control,
+            offset + std::mem::offset_of!(libc::cmsghdr, cmsg_len),
+        )?;
+        if len < header || len > control.len() - offset {
+            return Err(libc::EINVAL);
+        }
+        let level: i32 = control_word(
+            &control,
+            offset + std::mem::offset_of!(libc::cmsghdr, cmsg_level),
+        )?;
+        let kind: i32 = control_word(
+            &control,
+            offset + std::mem::offset_of!(libc::cmsghdr, cmsg_type),
+        )?;
+        let payload = offset + header;
+        if level == libc::SOL_SOCKET && kind == libc::SCM_CREDENTIALS {
+            return Err(libc::EPERM);
+        }
+        if level == libc::SOL_SOCKET && kind == libc::SCM_RIGHTS {
+            let bytes = len - header;
+            if bytes % size_of::<RawFd>() != 0 {
+                return Err(libc::EINVAL);
+            }
+            for index in 0..bytes / size_of::<RawFd>() {
+                let at = payload + index * size_of::<RawFd>();
+                let child_fd: RawFd = control_word(&control, at)?;
+                let duplicate = duplicate_child_fd(tgid, child_fd)?;
+                write_control_word(&mut control, at, duplicate.as_raw_fd())?;
+                rights.push(duplicate);
+            }
+        }
+        if len == control.len() - offset {
+            break;
+        }
+        offset = cmsg_align(len).ok_or(libc::EINVAL)?;
+        // `offset` above was relative to this cmsg, not the buffer.
+        offset = offset.checked_add(payload - header).ok_or(libc::EINVAL)?;
+        if offset > control.len() {
+            return Err(libc::EINVAL);
+        }
+    }
+    Ok((control, rights))
+}
+
+fn snapshot_msghdr(
+    mem: RawFd,
+    hdr: libc::msghdr,
+    tgid: u32,
+    deny_named_ip_send: bool,
+) -> Result<SendSnapshot, i32> {
+    let name = if hdr.msg_name.is_null() {
+        if hdr.msg_namelen != 0 {
+            return Err(libc::EFAULT);
+        }
+        None
+    } else {
+        if deny_named_ip_send {
+            return Err(libc::EPERM);
+        }
+        Some(snapshot_bytes(
+            mem,
+            hdr.msg_name,
+            hdr.msg_namelen as usize,
+            MAX_SEND_NAME,
+        )?)
+    };
     let count = hdr.msg_iovlen;
     if count > MAX_SEND_IOV {
         return Err(libc::EINVAL);
@@ -799,14 +935,21 @@ fn snapshot_msghdr(mem: RawFd, hdr: libc::msghdr) -> Result<SendSnapshot, i32> {
         payload.resize(begin + iov.iov_len, 0);
         child_pread(mem, iov.iov_base as u64, &mut payload[begin..])?;
     }
-    Ok(SendSnapshot { bytes: payload })
+    let (control, rights) = snapshot_control(mem, &hdr, tgid)?;
+    Ok(SendSnapshot {
+        bytes: payload,
+        name,
+        control,
+        rights,
+    })
 }
 
-fn snapshot_sendto(mem: RawFd, req: &SeccompNotif) -> Result<SendSnapshot, i32> {
-    // sendto(fd, buf, len, flags, dest_addr, addrlen): no destination is the connected form.
-    if req.data.args[4] != 0 {
-        return Err(libc::EPERM);
-    }
+fn snapshot_sendto(
+    mem: RawFd,
+    req: &SeccompNotif,
+    deny_named_ip_send: bool,
+) -> Result<SendSnapshot, i32> {
+    // sendto(fd, buf, len, flags, dest_addr, addrlen): a null destination is the connected form.
     let len = usize::try_from(req.data.args[2]).map_err(|_| libc::EFAULT)?;
     if len > MAX_SEND_BYTES {
         return Err(libc::EMSGSIZE);
@@ -818,10 +961,37 @@ fn snapshot_sendto(mem: RawFd, req: &SeccompNotif) -> Result<SendSnapshot, i32> 
     if len != 0 {
         child_pread(mem, req.data.args[1], &mut bytes)?;
     }
-    Ok(SendSnapshot { bytes })
+    let name = if req.data.args[4] == 0 {
+        if req.data.args[5] != 0 {
+            return Err(libc::EFAULT);
+        }
+        None
+    } else {
+        if deny_named_ip_send {
+            return Err(libc::EPERM);
+        }
+        Some(snapshot_bytes(
+            mem,
+            req.data.args[4] as *const libc::c_void,
+            usize::try_from(req.data.args[5]).map_err(|_| libc::EFAULT)?,
+            MAX_SEND_NAME,
+        )?)
+    };
+    Ok(SendSnapshot {
+        bytes,
+        name,
+        control: Vec::new(),
+        rights: Vec::new(),
+    })
 }
 
-fn snapshot_mmsgs(mem: RawFd, base: u64, count: usize) -> Result<Vec<SendSnapshot>, i32> {
+fn snapshot_mmsgs(
+    mem: RawFd,
+    base: u64,
+    count: usize,
+    tgid: u32,
+    deny_named_ip_send: bool,
+) -> Result<Vec<SendSnapshot>, i32> {
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -836,7 +1006,7 @@ fn snapshot_mmsgs(mem: RawFd, base: u64, count: usize) -> Result<Vec<SendSnapsho
             .and_then(|offset| base.checked_add(offset as u64))
             .ok_or(libc::EFAULT)?;
         let snapshot = child_struct::<libc::mmsghdr>(mem, offset)
-            .and_then(|msg| snapshot_msghdr(mem, msg.msg_hdr))?;
+            .and_then(|msg| snapshot_msghdr(mem, msg.msg_hdr, tgid, deny_named_ip_send))?;
         total = total
             .checked_add(snapshot.bytes.len())
             .ok_or(libc::EMSGSIZE)?;
@@ -858,16 +1028,7 @@ fn notification_is_live(nfd: RawFd, id: u64) -> bool {
 /// file description after another target thread closes or reuses its numeric fd, so replay uses
 /// the identity the supervisor observed, not a later target-table occupant.
 fn duplicate_child_socket(tgid: u32, fd: RawFd) -> Result<(OwnedFd, i32, i32), i32> {
-    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, tgid, 0) } as RawFd;
-    if pidfd < 0 {
-        return Err(errno());
-    }
-    let copy = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd, fd, 0) } as RawFd;
-    unsafe { libc::close(pidfd) };
-    if copy < 0 {
-        return Err(errno());
-    }
-    let copy = unsafe { OwnedFd::from_raw_fd(copy) };
+    let copy = duplicate_child_fd(tgid, fd)?;
     let mut domain = -1;
     let mut kind = -1;
     let mut size = size_of::<i32>() as libc::socklen_t;
@@ -903,7 +1064,7 @@ fn duplicate_child_socket(tgid: u32, fd: RawFd) -> Result<(OwnedFd, i32, i32), i
 fn send_snapshot(
     control: &WorkerControl,
     fd: RawFd,
-    bytes: &[u8],
+    snapshot: &SendSnapshot,
     flags: i32,
 ) -> Result<isize, i32> {
     let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -917,14 +1078,26 @@ fn send_snapshot(
         } else {
             flags | libc::MSG_DONTWAIT
         };
-        let result = unsafe {
-            libc::send(
-                fd,
-                bytes.as_ptr() as *const libc::c_void,
-                bytes.len(),
-                call_flags,
-            )
+        let mut iov = libc::iovec {
+            iov_base: snapshot.bytes.as_ptr() as *mut libc::c_void,
+            iov_len: snapshot.bytes.len(),
         };
+        let mut hdr = libc::msghdr {
+            msg_name: snapshot.name.as_ref().map_or(std::ptr::null_mut(), |name| {
+                name.as_ptr() as *mut libc::c_void
+            }),
+            msg_namelen: snapshot.name.as_ref().map_or(0, |name| name.len()) as libc::socklen_t,
+            msg_iov: &mut iov,
+            msg_iovlen: 1,
+            msg_control: if snapshot.control.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                snapshot.control.as_ptr() as *mut libc::c_void
+            },
+            msg_controllen: snapshot.control.len(),
+            msg_flags: 0,
+        };
+        let result = unsafe { libc::sendmsg(fd, &mut hdr, call_flags) };
         if result >= 0 {
             return Ok(result);
         }
@@ -1847,19 +2020,18 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             continue;
         }
 
-        // send*: IP sockets are replayed from supervisor-owned snapshots.  In particular,
-        // CONTINUE is NOT safe after reading a null msg_name: the kernel would reread mutable
-        // target memory after the response and a second thread could turn it into an addressed
-        // UDP send.  Non-IP sockets are intentionally continued after FD classification: the
-        // network policy has no authority over an AF_UNIX socketpair's SCM_RIGHTS semantics.
+        // send*: replay every socket from supervisor-owned snapshots.  CONTINUE is unsafe even
+        // for an AF_UNIX socketpair: after classification another target thread can `dup2` an IP
+        // socket over this numeric fd before the kernel resolves it.  SCM_RIGHTS is translated to
+        // pinned supervisor duplicates so normal Unix IPC retains its target-fd semantics.
         if nr == libc::SYS_sendto || nr == libc::SYS_sendmsg || nr == libc::SYS_sendmmsg {
             let tgid = tgid_of(req.pid);
             let (socket, domain, kind) = match duplicate_child_socket(tgid, cfd) {
                 Ok(socket) => socket,
-                // A non-socket retains normal kernel behavior (normally ENOTSOCK).  An inability
-                // to duplicate a socket is fail-closed: continuing would lose its stable identity.
+                // Emulate the observed non-socket result instead of continuing a mutable numeric
+                // fd that could be replaced with an egress socket before the kernel runs it.
                 Err(libc::ENOTSOCK) => {
-                    reply_continue(nfd, req.id);
+                    reply(nfd, req.id, -libc::ENOTSOCK);
                     continue;
                 }
                 Err(error) => {
@@ -1868,14 +2040,8 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                     continue;
                 }
             };
-            if domain != libc::AF_INET && domain != libc::AF_INET6 {
-                // AF_UNIX socketpairs and inherited non-IP IPC preserve their native sendmsg
-                // (including SCM_RIGHTS) contract.  The socket-family ceiling prevents these
-                // families from being created as egress alternatives in a confined launch.
-                reply_continue(nfd, req.id);
-                continue;
-            }
-            if kind != libc::SOCK_DGRAM && kind != libc::SOCK_STREAM {
+            let ip_socket = domain == libc::AF_INET || domain == libc::AF_INET6;
+            if ip_socket && kind != libc::SOCK_DGRAM && kind != libc::SOCK_STREAM {
                 reply(nfd, req.id, -libc::EPERM);
                 continue;
             }
@@ -1888,21 +2054,23 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                 }
             };
             let snapshots = if nr == libc::SYS_sendto {
-                snapshot_sendto(mem.as_raw_fd(), &req).map(|snapshot| vec![snapshot])
+                snapshot_sendto(mem.as_raw_fd(), &req, ip_socket).map(|snapshot| vec![snapshot])
             } else if nr == libc::SYS_sendmsg {
                 child_struct::<libc::msghdr>(mem.as_raw_fd(), req.data.args[1])
-                    .and_then(|hdr| snapshot_msghdr(mem.as_raw_fd(), hdr))
+                    .and_then(|hdr| snapshot_msghdr(mem.as_raw_fd(), hdr, tgid, ip_socket))
                     .map(|snapshot| vec![snapshot])
             } else {
                 // `sendmmsg` itself caps `vlen` at UIO_MAXIOV; mirror that rather than turning
                 // an otherwise-valid oversized request into a policy error.
                 let count = (req.data.args[2] as u32 as usize).min(MAX_SEND_MMSG);
-                snapshot_mmsgs(mem.as_raw_fd(), req.data.args[1], count)
+                snapshot_mmsgs(mem.as_raw_fd(), req.data.args[1], count, tgid, ip_socket)
             };
             let snapshots = match snapshots {
                 Ok(snapshots) => snapshots,
                 Err(libc::EPERM) => {
-                    suplog!("SUP DENY IP send*: addressed or ancillary message -> EPERM");
+                    suplog!(
+                        "SUP DENY send*: named IP destination or unreplayable credentials -> EPERM"
+                    );
                     reply(nfd, req.id, -libc::EPERM);
                     continue;
                 }
@@ -1930,7 +2098,7 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             let mut completed = 0usize;
             let mut first_error = None;
             for (index, snapshot) in snapshots.iter().enumerate() {
-                match send_snapshot(&control, socket.as_raw_fd(), &snapshot.bytes, flags) {
+                match send_snapshot(&control, socket.as_raw_fd(), snapshot, flags) {
                     Ok(sent) => {
                         if nr == libc::SYS_sendmmsg
                             && let Err(error) = write_mmsg_len(
@@ -2512,6 +2680,9 @@ pub(super) struct SupervisedLaunch<'a> {
     pub stdin: SupervisedStdio,
     pub stdout: SupervisedStdio,
     pub stderr: SupervisedStdio,
+    /// Internal callers normally pass an empty slice.  Tests use an explicit inherited socket to
+    /// exercise post-exec notification handling; every other inherited descriptor stays CLOEXEC.
+    pub inherited_fds: &'a [RawFd],
 }
 
 #[derive(Clone, Copy)]
@@ -2681,6 +2852,12 @@ pub(super) fn spawn_supervised_with_ready(
             // harmless — each stays usable until the explicit close before `execve`.
             if mark_inherited_fds_cloexec().is_err() {
                 libc::_exit(12);
+            }
+            for fd in launch.inherited_fds {
+                let flags = libc::fcntl(*fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    libc::_exit(12);
+                }
             }
             // Gates Landlock and seccomp, both of which refuse a caller that could still gain
             // privileges through a setuid `execve`.
@@ -3044,9 +3221,263 @@ mod lifecycle_tests {
         // any send, so the later recipient yields an atomic EPERM rather than a partial batch.
         let mem = open_child_mem(std::process::id()).unwrap();
         assert_eq!(
-            snapshot_mmsgs(mem.as_raw_fd(), control.as_ptr() as u64, control.len(),).unwrap_err(),
+            snapshot_mmsgs(
+                mem.as_raw_fd(),
+                control.as_ptr() as u64,
+                control.len(),
+                std::process::id(),
+                true,
+            )
+            .unwrap_err(),
             libc::EPERM
         );
+    }
+
+    /// The child side of [`native_supervisor_replays_or_rejects_every_mmsg`].  Keeping this in
+    /// the test binary makes the regression run after an actual `execve` with the real notifier,
+    /// rather than only exercising the snapshot helper in the unconfined test process.
+    #[test]
+    fn supervised_sendmmsg_child() {
+        let Ok(mode) = std::env::var("NUB_SUP_SENDMMSG_MODE") else {
+            return;
+        };
+        let fd = std::env::var("NUB_SUP_SENDMMSG_FD")
+            .ok()
+            .and_then(|value| value.parse::<RawFd>().ok())
+            .unwrap_or(-1);
+        let second_port = std::env::var("NUB_SUP_SENDMMSG_SECOND_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(0);
+        if mode == "tcp" || mode == "dns" {
+            let address = if mode == "tcp" {
+                make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), second_port)
+            } else {
+                make_sockaddr_in(u32::from_ne_bytes([8, 8, 8, 8]), 53)
+            };
+            let fd = unsafe {
+                libc::socket(
+                    libc::AF_INET,
+                    if mode == "tcp" {
+                        libc::SOCK_STREAM
+                    } else {
+                        libc::SOCK_DGRAM
+                    } | libc::SOCK_CLOEXEC,
+                    0,
+                )
+            };
+            if fd < 0
+                || unsafe {
+                    libc::connect(
+                        fd,
+                        &address as *const _ as *const libc::sockaddr,
+                        size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                } < 0
+            {
+                std::process::exit(92);
+            }
+            let query = if mode == "dns" {
+                // Synthetic DNS A query for `example.com`; the assertion is only that the
+                // resolver-bound connected datagram accepts a normal sendmsg.
+                b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01".as_slice()
+            } else {
+                b"supervised-tcp".as_slice()
+            };
+            let mut iov = libc::iovec {
+                iov_base: query.as_ptr() as *mut libc::c_void,
+                iov_len: query.len(),
+            };
+            let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_iov = &mut iov;
+            hdr.msg_iovlen = 1;
+            let sent = unsafe { libc::sendmsg(fd, &mut hdr, 0) };
+            unsafe { libc::close(fd) };
+            std::process::exit(if sent == query.len() as isize { 0 } else { 93 });
+        }
+        let first = b"supervised-first";
+        let second = b"supervised-second";
+        let mut iov = [
+            libc::iovec {
+                iov_base: first.as_ptr() as *mut libc::c_void,
+                iov_len: first.len(),
+            },
+            libc::iovec {
+                iov_base: second.as_ptr() as *mut libc::c_void,
+                iov_len: second.len(),
+            },
+        ];
+        let second_addr = make_sockaddr_in(u32::from_ne_bytes([127, 0, 0, 1]), second_port);
+        let mut messages: [libc::mmsghdr; 2] = unsafe { std::mem::zeroed() };
+        for (index, msg) in messages.iter_mut().enumerate() {
+            msg.msg_hdr.msg_iov = &mut iov[index];
+            msg.msg_hdr.msg_iovlen = 1;
+        }
+        if mode == "mixed" {
+            messages[1].msg_hdr.msg_name = &second_addr as *const _ as *mut libc::c_void;
+            messages[1].msg_hdr.msg_namelen = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        }
+        let result = unsafe { libc::sendmmsg(fd, messages.as_mut_ptr(), messages.len() as u32, 0) };
+        let correct = if mode == "mixed" {
+            result == -1 && errno() == libc::EPERM
+        } else {
+            result == 2
+                && messages[0].msg_len == first.len() as u32
+                && messages[1].msg_len == second.len() as u32
+        };
+        std::process::exit(if correct { 0 } else { 91 });
+    }
+
+    #[test]
+    #[ignore = "requires a Linux runner permitting unprivileged seccomp notification and pidfd_getfd"]
+    fn native_supervisor_replays_or_rejects_every_mmsg() {
+        fn launch(mode: &str) -> (std::net::UdpSocket, std::net::UdpSocket, SupervisedChild) {
+            let first = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let second = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            first
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            second
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            sender.connect(first.local_addr().unwrap()).unwrap();
+            // This checks the replay's nonblocking branch on a real post-exec child; ordinary
+            // sends remain immediately writable while the parent owns the receiver.
+            sender.set_nonblocking(true).unwrap();
+            let exe = std::env::current_exe().unwrap();
+            let argv = [
+                CString::new(exe.as_os_str().as_encoded_bytes()).unwrap(),
+                CString::new("supervised_sendmmsg_child").unwrap(),
+            ];
+            let envp = [
+                CString::new(format!("NUB_SUP_SENDMMSG_MODE={mode}")).unwrap(),
+                CString::new(format!("NUB_SUP_SENDMMSG_FD={}", sender.as_raw_fd())).unwrap(),
+                CString::new(format!(
+                    "NUB_SUP_SENDMMSG_SECOND_PORT={}",
+                    second.local_addr().unwrap().port()
+                ))
+                .unwrap(),
+            ];
+            let inherited = [sender.as_raw_fd()];
+            let child = spawn_supervised(
+                policy("not-permitted.example"),
+                SupervisedLaunch {
+                    argv: &argv,
+                    envp: &envp,
+                    cwd: None,
+                    ruleset_fd: -1,
+                    seccomp_ceiling: None,
+                    stdin: SupervisedStdio::Null,
+                    stdout: SupervisedStdio::Null,
+                    stderr: SupervisedStdio::Null,
+                    inherited_fds: &inherited,
+                },
+            )
+            .unwrap();
+            (first, second, child)
+        }
+
+        let (first, second, mut child) = launch("ordinary");
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+        let mut bytes = [0u8; 64];
+        let (len, _) = first.recv_from(&mut bytes).unwrap();
+        assert_eq!(&bytes[..len], b"supervised-first");
+        let (len, _) = first.recv_from(&mut bytes).unwrap();
+        assert_eq!(&bytes[..len], b"supervised-second");
+        assert_eq!(
+            second.recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        let (first, second, mut child) = launch("mixed");
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+        assert_eq!(
+            first.recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            second.recv_from(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        // Fresh child-created sockets exercise the regular connected routes too: loopback TCP
+        // keeps its ordinary stream sendmsg behavior, and a port-53 UDP connect still reaches
+        // the resolver-bound path rather than being rejected as an addressed datagram.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let argv = [
+            CString::new(exe.as_os_str().as_encoded_bytes()).unwrap(),
+            CString::new("supervised_sendmmsg_child").unwrap(),
+        ];
+        let tcp_env = [
+            CString::new("NUB_SUP_SENDMMSG_MODE=tcp").unwrap(),
+            CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
+            CString::new(format!(
+                "NUB_SUP_SENDMMSG_SECOND_PORT={}",
+                listener.local_addr().unwrap().port()
+            ))
+            .unwrap(),
+        ];
+        let mut child = spawn_supervised(
+            policy("not-permitted.example"),
+            SupervisedLaunch {
+                argv: &argv,
+                envp: &tcp_env,
+                cwd: None,
+                ruleset_fd: -1,
+                seccomp_ceiling: None,
+                stdin: SupervisedStdio::Null,
+                stdout: SupervisedStdio::Null,
+                stderr: SupervisedStdio::Null,
+                inherited_fds: &[],
+            },
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(value) => break value,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "TCP child did not connect"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("TCP listener failed: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut tcp = [0u8; 32];
+        let len = stream.read(&mut tcp).unwrap();
+        assert_eq!(&tcp[..len], b"supervised-tcp");
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+
+        let dns_env = [
+            CString::new("NUB_SUP_SENDMMSG_MODE=dns").unwrap(),
+            CString::new("NUB_SUP_SENDMMSG_FD=-1").unwrap(),
+            CString::new("NUB_SUP_SENDMMSG_SECOND_PORT=0").unwrap(),
+        ];
+        let mut child = spawn_supervised(
+            policy("not-permitted.example"),
+            SupervisedLaunch {
+                argv: &argv,
+                envp: &dns_env,
+                cwd: None,
+                ruleset_fd: -1,
+                seccomp_ceiling: None,
+                stdin: SupervisedStdio::Null,
+                stdout: SupervisedStdio::Null,
+                stderr: SupervisedStdio::Null,
+                inherited_fds: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(0));
     }
 
     #[test]
@@ -3118,6 +3549,7 @@ mod lifecycle_tests {
             stdin: SupervisedStdio::Null,
             stdout: SupervisedStdio::Null,
             stderr: SupervisedStdio::Null,
+            inherited_fds: &[],
         };
         let result = spawn_supervised_with_ready(policy("example.test"), launch, |_| {
             Err(io::Error::other("ready callback rejected launch"))
@@ -3143,6 +3575,7 @@ mod lifecycle_tests {
                 stdin: SupervisedStdio::Piped,
                 stdout: SupervisedStdio::Piped,
                 stderr: SupervisedStdio::Piped,
+                inherited_fds: &[],
             };
             let mut child = spawn_supervised(policy("example.test"), launch).unwrap();
             child.take_stdin().unwrap().write_all(b"hello\n").unwrap();
