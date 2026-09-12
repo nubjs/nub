@@ -45,13 +45,13 @@ The standard cache roots are `XDG_CACHE_HOME` or `~/.cache` on Linux, `~/Library
 
 The array form `{"fs":["./","$tooldirs","$tmp"]}` means read-write. The object form makes access explicit. Private temp accepts `"rw"` or `true`; `false` requests no temp access. It rejects read-only access and suffixes such as `$tmp/work`. The tool-directory set also takes no suffix.
 
-A whole-home grant is literal:
+Broad home reads can be combined with writes limited to the project and private temporary storage:
 
 ```json
-{"fs":{"$home":"rw","$tmp":"rw"}}
+{"fs":{"$home":"r","./":"rw","$tmp":"rw"}}
 ```
 
-It includes SSH keys, package-manager credentials and other readable home files. Neither home grants nor tool-directory grants promise secret-free contents.
+A home grant is literal: it includes SSH keys, package-manager credentials and other readable home files. Changing `$home` to `"rw"` also permits writes throughout home. Neither home grants nor tool-directory grants promise secret-free contents.
 
 ### Unix directory listing
 
