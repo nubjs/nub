@@ -715,6 +715,7 @@ const MAX_SEND_BYTES: usize = 16 * 1024 * 1024;
 /// `SCM_RIGHTS` control message until `sendmsg` consumes their numeric entries in `control`.
 /// This is required even for AF_UNIX: CONTINUE would re-resolve the target's fd number after we
 /// classified it, so a concurrent `dup2` could turn a benign socketpair send into IP egress.
+#[derive(Debug)]
 struct SendSnapshot {
     bytes: Vec<u8>,
     name: Option<Vec<u8>>,
