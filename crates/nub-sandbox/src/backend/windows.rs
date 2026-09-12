@@ -832,8 +832,20 @@ pub(crate) fn apply(
         spec.cwd = Some(strip_verbatim_prefix(effective_cwd));
     }
     if policy.build_jail && !confine_fs {
+        if policy.net.enforce {
+            return Err(Degradation {
+                lost: vec!["net".to_string()],
+                reason: Some(
+                    "Windows cannot enforce restricted network access for a full-disk \
+                     build-jail grant: the plain-process compatibility path has no \
+                     AppContainer network boundary. Use positive filesystem grants so the \
+                     AppContainer can enforce the network policy"
+                        .to_string(),
+                ),
+            });
+        }
         let mut deg = Degradation::full();
-        let mut command = plain_command(
+        let command = plain_command(
             policy,
             spec.clone(),
             proxy_port,
@@ -841,25 +853,6 @@ pub(crate) fn apply(
             ca_bundle,
             tmp_dir,
         );
-        if policy.net.enforce {
-            deg.lost.push("net".to_string());
-            deg.reason = Some(
-                "a full-disk build-jail grant cannot run inside an AppContainer on Windows \
-                 (the allowlist has no spelling for the whole filesystem), and egress is an \
-                 AppContainer capability — so this package's network access is not confined \
-                 by the OS. nub's userland gate still applies inside Node, but it does not \
-                 stop a native addon opening a raw socket"
-                    .to_string(),
-            );
-            // ⛔ GATED ON THE NET AXIS, WHICH IS INVERTED FROM THE OBVIOUS READING. A coarse
-            // ALLOW compiles to `enforce == false` (see `preset::build_jail_net`) — it is the
-            // only spelling that reaches `internetClient` — so `enforce` is true exactly when
-            // the package is DENIED egress. Every catalogued full-disk cell is network-allowed
-            // today, so blackholing unconditionally here would break all of them.
-            if proxy_port.is_none() {
-                super::set_proxy_blackhole(&mut command);
-            }
-        }
         if let Some(axis) = tmp_lost {
             deg.lost.push(axis.to_string());
         }
@@ -5292,6 +5285,78 @@ mod tests {
                 .unwrap_or_default()
                 .contains("unprivileged egress helper")
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn apply_windows_full_disk_build_jail_rejects_restricted_network() {
+        use crate::policy::{CredentialBroker, NetPolicy, NetRule, NetTarget};
+        let full_disk = |net: NetPolicy| SandboxPolicy {
+            // An allow-base with no entries is the full-disk compatibility tier: it
+            // intentionally bypasses the AppContainer because arbitrary existing ACLs
+            // do not grant the fresh AppContainer SID.
+            fs: fs(Effect::Allow, vec![]),
+            net,
+            build_jail: true,
+            ..Default::default()
+        };
+        let assert_rejected = |net: NetPolicy| {
+            let result = apply(
+                &full_disk(net),
+                crate::CommandSpec::new("cmd.exe"),
+                None,
+                None,
+                None,
+                None,
+            );
+            let Err(error) = result else {
+                panic!("a full-disk build-jail launch must fail closed when net is restricted");
+            };
+            assert_eq!(error.lost, vec!["net".to_string()]);
+            assert!(
+                error
+                    .reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("AppContainer network boundary")
+            );
+        };
+
+        // All enforcement forms share the unsafe plain-process path: deny-all,
+        // a finite allowlist, and the broker-derived TLS-inspection tier.
+        assert_rejected(NetPolicy {
+            enforce: true,
+            ..Default::default()
+        });
+        assert_rejected(NetPolicy {
+            enforce: true,
+            rules: vec![NetRule {
+                target: NetTarget::Host("registry.npmjs.org".to_string()),
+                effect: Effect::Allow,
+            }],
+            ..Default::default()
+        });
+        assert_rejected(NetPolicy {
+            enforce: true,
+            inspection: Inspection::TlsInspect,
+            brokers: vec![CredentialBroker {
+                host: "registry.example".to_string(),
+                env: vec!["REGISTRY_TOKEN".to_string()],
+            }],
+            ..Default::default()
+        });
+
+        let prepared = apply(
+            &full_disk(NetPolicy::default()),
+            crate::CommandSpec::new("cmd.exe"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("unrestricted network remains supported by the full-disk compatibility tier");
+        assert_eq!(prepared.degradation, Degradation::full());
+        assert!(prepared.launch.is_some());
     }
 }
 
