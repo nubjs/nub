@@ -577,7 +577,7 @@ fn witness_before_intent_fault(root: &Path) {
     let station_name = format!("nub-witness-station-{}-{stamp}", std::process::id());
     let desktop_name = format!("nub-witness-desktop-{}-{stamp}", std::process::id());
     let objects = create_test_window_objects(&station_name, &desktop_name).unwrap();
-    let sid = SidGuard(derive_appcontainer(&profile).unwrap());
+    let sid = super::launch::SidGuard(super::launch::derive_appcontainer(&profile).unwrap());
     crate::backend::windows_ace::grant_persistent(&objects.object, sid.0).unwrap();
     windows_registry::test_insert_window_object_recovery(&profile, objects.object.clone()).unwrap();
     cleanup_resources().unwrap();
@@ -598,15 +598,16 @@ fn window_witness_crash_does_not_retire_a_replacement(root: &Path) {
         entry.window_object_revoke.is_none(),
         "witness-boundary crash persisted revoke authority before ownership was established"
     );
-    let object = entry
-        .window_objects
-        .single()
-        .cloned()
-        .expect("fixture must journal exactly one replacement candidate");
+    assert_eq!(
+        entry.window_objects.len(),
+        1,
+        "fixture must journal exactly one replacement candidate"
+    );
+    let object = entry.window_objects[0].clone();
     let replacement =
         create_test_window_objects(&object.station, object.desktop.as_deref().unwrap())
             .expect("same-name replacement window objects");
-    let sid = SidGuard(derive_appcontainer(&profile).unwrap());
+    let sid = super::launch::SidGuard(super::launch::derive_appcontainer(&profile).unwrap());
     crate::backend::windows_ace::test_grant_narrow_desktop_ace(&object, sid.0).unwrap();
 
     let error = cleanup_resources().expect_err("fresh replacement must retain the journal");

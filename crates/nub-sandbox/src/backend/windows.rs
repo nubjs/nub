@@ -3497,7 +3497,7 @@ pub(super) mod launch {
     /// Derive the stable SID for an already-created policy-named profile.  This is
     /// the documented AppContainer reopen path (and Chromium uses the same split);
     /// profile existence itself remains backed by the durable ownership journal.
-    fn derive_appcontainer(name: &str) -> io::Result<PSID> {
+    pub(super) fn derive_appcontainer(name: &str) -> io::Result<PSID> {
         let name = to_wide(name);
         let mut sid: PSID = std::ptr::null_mut();
         let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
@@ -3570,7 +3570,7 @@ pub(super) mod launch {
     /// A profile SID returned by create/derive is separately allocated from the
     /// persistent profile registration.  Closing this guard therefore cannot remove
     /// an identity another nub process is actively using.
-    struct SidGuard(PSID);
+    pub(super) struct SidGuard(pub(super) PSID);
     // SAFETY: the SID allocation is immutable until its sole owner's Drop.
     unsafe impl Send for SidGuard {}
     unsafe impl Sync for SidGuard {}
