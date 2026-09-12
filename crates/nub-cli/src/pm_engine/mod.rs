@@ -68,6 +68,8 @@ pub mod platform_flags;
 #[cfg(feature = "pm-pnpm")]
 mod pnpm_engine;
 #[cfg(feature = "pm-pnpm")]
+mod project_identity;
+#[cfg(feature = "pm-pnpm")]
 pub(crate) use pnpm_engine::{run_process_argv as run_pnpm_engine, selected as pnpm_engine_selected};
 pub mod present;
 pub mod publish_family;
