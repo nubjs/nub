@@ -37,6 +37,13 @@ jobs:
           echo '3499bc20eaa37126a4ea8b8ac10c2102675077bc3cd5ad3de9ebbf481beeefef  corpus-input/catalog-v2.json' | sha256sum -c -
           sha256sum corpus-input/catalog-v2.json > reports-catalog.sha256
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: windows-catalog-source-builds-fast
+          cache-on-failure: true
+          workspaces: |
+            .
+            crates/nub-native
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22.23.2
