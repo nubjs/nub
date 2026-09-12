@@ -272,7 +272,7 @@ fn walk_exports(
         Value::String(s) => push(s, kind, out, seen),
         Value::Object(map) => {
             for (k, child) in map {
-                if k == "types" || k == "typings" || is_vendor_source_branch(k, child) {
+                if k == "types" || k == "typings" {
                     continue;
                 }
                 walk_exports(child, kind, out, seen, push);
@@ -285,31 +285,6 @@ fn walk_exports(
         }
         _ => {}
     }
-}
-
-/// A vendor's private source condition: a condition name outside the portable
-/// charset Node recommends (alphanumerics separated by `:`, `-` or `=`) whose
-/// leaf is unbuilt TypeScript source. Node itself accepts almost any name, so
-/// the charset alone proves nothing; it is the PAIR that identifies the shape.
-/// `@tanstack/custom-condition` and `@nx/nx-source` both map to `./src/index.ts`
-/// for the vendor's own monorepo, where the file's imports are the vendor's
-/// devDependencies and the shipped bundle inlines them. Walking that branch
-/// charged `@tanstack/query-devtools` with eleven Solid phantoms it never loads
-/// and ejected it from the global virtual store in every TanStack Query project.
-/// A consumer who opts into the condition is running the vendor's source tree,
-/// which no install or layout satisfies for them either way. A non-portable
-/// name pointing at built JS, or a nested condition map, is still walked.
-fn is_vendor_source_branch(key: &str, node: &Value) -> bool {
-    let portable = !key.is_empty()
-        && key
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'-' | b'=' | b'_'));
-    !portable && node.as_str().is_some_and(is_ts_source)
-}
-
-/// An unbuilt TypeScript source file (not a `.d.ts` declaration).
-fn is_ts_source(path: &str) -> bool {
-    !is_dts_like(path) && matches!(extension(path), Some("ts" | "tsx" | "mts" | "cts"))
 }
 
 /// Strip a leading `./` and collapse a leading `/`; entry paths are relative to
@@ -586,47 +561,6 @@ mod tests {
             super::EntryKind::Types
         );
         assert!(!m.entry_points.iter().any(|e| e.path == "index.d.ts"));
-    }
-
-    #[test]
-    fn vendor_source_conditions_do_not_seed_the_walk() {
-        // `@tanstack/query-devtools` exports its unbuilt `src/index.ts` under
-        // `@tanstack/custom-condition`, and the built entries inline every import
-        // that file makes. Only that PAIR — a non-portable condition name AND a
-        // TypeScript source leaf — is skipped. Node accepts `@vendor/alt` as a
-        // condition too, so a non-portable name pointing at built JS is walked
-        // (the positive control), as is a portable name pointing at TS source.
-        let raw = br#"{
-            "name": "pkg",
-            "exports": {
-                ".": {
-                    "@tanstack/custom-condition": "./src/index.ts",
-                    "@vendor/alt": "./dist/alt.js",
-                    "source": "./src/portable.ts",
-                    "react-native": "./build/index.native.js",
-                    "development": { "import": "./build/dev.js" },
-                    "import": "./build/index.js"
-                }
-            }
-        }"#;
-        let m = Manifest::parse(raw).unwrap();
-        let paths: Vec<&str> = m.entry_points.iter().map(|e| e.path.as_str()).collect();
-        assert!(
-            !paths.contains(&"src/index.ts"),
-            "vendor source condition seeded the walk: {paths:?}"
-        );
-        for p in [
-            "dist/alt.js",
-            "src/portable.ts",
-            "build/index.native.js",
-            "build/dev.js",
-            "build/index.js",
-        ] {
-            assert!(
-                paths.contains(&p),
-                "selectable branch {p} missing: {paths:?}"
-            );
-        }
     }
 
     #[test]
