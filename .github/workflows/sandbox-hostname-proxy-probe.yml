@@ -61,7 +61,7 @@ jobs:
             --config 'profile.fast.package."*".opt-level=2' \
             > reports/proxy-per-host.log 2>&1
           cat reports/proxy-per-host.log
-          sha256sum target/fast/proxy-per-host* > reports/probe-binary.sha256
+          sha256sum target/fast/proxy-per-host-probe${{ runner.os == 'Windows' && '.exe' || '' }} > reports/probe-binary.sha256
       - name: Exercising parser and proxy shutdown
         if: ${{ !cancelled() && github.ref_name == 'sandbox-proxy-hardening' }}
         run: |

@@ -36,7 +36,7 @@ use std::net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, T
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A host the proxy makes an egress decision about. The seam type of [`GrantDecider`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,13 +235,18 @@ impl Drop for ActiveConnection {
 struct ShutdownIo {
     socket: TcpStream,
     shutdown: Arc<AtomicBool>,
+    deadline: Option<Instant>,
 }
 
 impl ShutdownIo {
     fn new(socket: TcpStream, shutdown: Arc<AtomicBool>) -> io::Result<Self> {
         socket.set_read_timeout(Some(SPLICE_POLL))?;
         socket.set_write_timeout(Some(SPLICE_POLL))?;
-        Ok(Self { socket, shutdown })
+        Ok(Self {
+            socket,
+            shutdown,
+            deadline: None,
+        })
     }
 
     fn retry<T>(
@@ -253,6 +258,15 @@ impl ShutdownIo {
                 return Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
                     "egress proxy is shutting down",
+                ));
+            }
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "egress proxy handshake timed out",
                 ));
             }
             match operation(&mut self.socket) {
@@ -441,14 +455,15 @@ fn mint_token() -> String {
 /// SNI, then EITHER blind-splice (connection tier) OR terminate + inject (MITM tier).
 /// Returns `Ok(())` on any clean refusal.
 fn handle_conn(
-    mut stream: TcpStream,
+    stream: TcpStream,
     decider: Arc<dyn GrantDecider>,
     mitm: Option<Arc<mitm::MitmEngine>>,
     token: &str,
     shutdown: Arc<AtomicBool>,
     active: ActiveConnection,
 ) -> io::Result<()> {
-    stream.set_read_timeout(Some(CLIENT_HELLO_TIMEOUT))?;
+    let mut stream = ShutdownIo::new(stream, shutdown.clone())?;
+    stream.deadline = Some(Instant::now() + CLIENT_HELLO_TIMEOUT);
     // Whether the policy opted into private-range egress (governs the SSRF guard's
     // private tier only). Computed once per connection from the static decider.
     let allow_private = decider.allows_private();
@@ -465,10 +480,12 @@ fn handle_conn(
     reply_success(&mut stream, req.proto)?;
 
     // Gate 2 — the TLS SNI, read no-MITM from the client's first bytes.
+    stream.deadline = Some(Instant::now() + CLIENT_HELLO_TIMEOUT);
     let (prelude, allowed, sni_host) = read_and_check_sni(&mut stream, decider.as_ref())?;
     if !allowed {
         return Ok(()); // drop — the client sees a reset tunnel
     }
+    let stream = stream.socket;
 
     // The host the leaf is minted for + the broker is matched on: the SNI the client
     // asked for (so its TLS hostname check passes), else the CONNECT/SOCKS authority.
@@ -530,7 +547,7 @@ fn handle_conn(
 /// client ACKing then sending nothing) FAILS CLOSED — so a "send a partial hello, then
 /// send a denied SNI after we splice" attack cannot bypass gate 2.
 fn read_and_check_sni(
-    stream: &mut TcpStream,
+    stream: &mut impl Read,
     decider: &dyn GrantDecider,
 ) -> io::Result<(Vec<u8>, bool, Option<String>)> {
     let mut buf = Vec::new();
@@ -765,13 +782,16 @@ mod tests {
             done_tx.send(operation(&mut stream)).unwrap();
         });
         std::thread::sleep(SPLICE_POLL * 3);
-        let pending = done_rx.try_recv().is_err();
+        let early_result = done_rx.try_recv();
         shutdown.store(true, Ordering::SeqCst);
         let result = done_rx.recv_timeout(Duration::from_secs(3));
         // Close the peer before joining, including on a failed cancellation assertion.
         drop(peer);
         worker.join().unwrap();
-        assert!(pending, "the peer has not supplied data or read it");
+        assert!(
+            early_result.is_err(),
+            "operation finished without peer IO: {early_result:?}"
+        );
         assert_eq!(
             result.unwrap().unwrap_err().kind(),
             io::ErrorKind::ConnectionAborted
@@ -785,7 +805,77 @@ mod tests {
 
     #[test]
     fn shutdown_io_cancels_a_backpressured_write_without_socket_shutdown() {
-        shutdown_io_cancels(|stream| stream.write_all(&vec![0u8; 16 * 1024 * 1024]));
+        shutdown_io_cancels(|stream| {
+            loop {
+                stream.write_all(&[0u8; 4096])?;
+            }
+        });
+    }
+
+    #[test]
+    fn handshake_deadline_survives_partial_reads() {
+        let (socket, mut peer) = socket_pair();
+        let mut stream = ShutdownIo::new(socket, Arc::new(AtomicBool::new(false))).unwrap();
+        let deadline = Instant::now() + SPLICE_POLL * 2;
+        stream.deadline = Some(deadline);
+        peer.write_all(b"prefix").unwrap();
+        let mut prefix = [0u8; 6];
+        stream.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"prefix");
+        let error = stream.read_exact(&mut [0u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(Instant::now() >= deadline);
+    }
+
+    #[test]
+    fn dropping_proxy_reaps_partial_connect_socks_and_client_hello() {
+        use base64::Engine as _;
+        for stage in ["connect", "socks", "hello"] {
+            let proxy = EgressProxy::start(
+                Arc::new(StaticDecider::new(net(
+                    vec![host("localhost", Effect::Allow)],
+                    Effect::Deny,
+                ))),
+                None,
+            )
+            .unwrap();
+            let mut peer =
+                TcpStream::connect((IpAddr::from([127, 0, 0, 1]), proxy.port())).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            match stage {
+                "connect" => peer.write_all(b"CO").unwrap(),
+                "socks" => {
+                    peer.write_all(&[5, 1, 2]).unwrap();
+                    let mut reply = [0u8; 2];
+                    peer.read_exact(&mut reply).unwrap();
+                    assert_eq!(reply, [5, 2]);
+                }
+                _ => {
+                    let auth = base64::engine::general_purpose::STANDARD
+                        .encode(format!("{}:", proxy.token()));
+                    write!(peer, "CONNECT localhost:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n").unwrap();
+                    let mut reply = Vec::new();
+                    while !reply.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0u8; 1];
+                        peer.read_exact(&mut byte).unwrap();
+                        reply.push(byte[0]);
+                        assert!(reply.len() < 4096);
+                    }
+                    assert!(reply.starts_with(b"HTTP/1.1 200"));
+                }
+            }
+            std::thread::sleep(SPLICE_POLL * 3);
+            assert_eq!(proxy.active_sockets.lock().unwrap().len(), 1, "{stage}");
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                drop(proxy);
+                done_tx.send(()).unwrap();
+            });
+            let result = done_rx.recv_timeout(Duration::from_secs(3));
+            drop(peer);
+            worker.join().unwrap();
+            result.unwrap_or_else(|e| panic!("{stage} teardown: {e}"));
+        }
     }
 
     #[test]
