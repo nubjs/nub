@@ -30,16 +30,21 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: busybox-lifecycle-probe
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: 24
-          cache: 'npm'
       # Root deps + the nub-native addon, mirroring ci.yml's Windows test leg —
-      # the install path resolves the augmentation preload through them.
-      - run: npm ci
+      # the install path resolves the augmentation preload through them. The
+      # root is nub-identity (nub.lock), so a released nub installs it;
+      # `hoisted` because nub-core's build script copies real directories out
+      # of node_modules and rejects a symlinked store.
+      - uses: ./setup
+        with:
+          cache: 'true'
+      - run: nub install --frozen-lockfile --node-linker hoisted
       - name: Build nub-native addon
         shell: bash
         run: |
