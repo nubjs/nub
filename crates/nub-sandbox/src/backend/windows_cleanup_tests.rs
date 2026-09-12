@@ -568,7 +568,8 @@ fn window_revoke_journal_save_failure(root: &Path) {
 /// The witness is checked before progress is persisted. Crash at that boundary, recreate the
 /// recorded names with a narrower same-SID grant, and prove the later cleanup keeps both the
 /// replacement ACE and the ownership journal rather than treating absent witness as completion.
-fn witness_before_intent_fault(root: &Path) {
+#[allow(dead_code)] // The fixture dispatches this by its child-process mode string.
+fn witness_before_intent_fault(_root: &Path) {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -584,6 +585,7 @@ fn witness_before_intent_fault(root: &Path) {
     panic!("cleanup did not reach witness-before-intent crash transition");
 }
 
+#[allow(dead_code)] // Invoked from the test harness after fixture-mode dispatch.
 fn window_witness_crash_does_not_retire_a_replacement(root: &Path) {
     let _cleanup = CleanupAfterTest;
     let (profile, _) = crash_owner(

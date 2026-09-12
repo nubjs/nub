@@ -754,6 +754,7 @@ pub(crate) fn test_has_persistent_grant(object: &WindowObject, sid: PSID) -> io:
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // Reached by the cross-process cleanup fixture after name replacement.
 pub(crate) fn test_grant_narrow_desktop_ace(object: &WindowObject, sid: PSID) -> io::Result<()> {
     let handle =
         open_recorded(object)?.ok_or_else(|| io::Error::other("test window object disappeared"))?;
@@ -765,6 +766,7 @@ pub(crate) fn test_grant_narrow_desktop_ace(object: &WindowObject, sid: PSID) ->
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // Reached by the cross-process cleanup fixture after name replacement.
 pub(crate) fn test_has_narrow_desktop_ace(object: &WindowObject, sid: PSID) -> io::Result<bool> {
     let Some(handle) = open_recorded(object)? else {
         return Ok(false);

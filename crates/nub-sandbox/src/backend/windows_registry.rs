@@ -1381,6 +1381,7 @@ pub(crate) fn test_insert_window_object_recovery(
 }
 
 #[cfg(all(test, windows))]
+#[allow(dead_code)] // The child fixture retains this entry until its parent validates recovery.
 pub(crate) fn test_remove_entry(profile_name: &str) -> io::Result<()> {
     let root = registry_root()?;
     let _lock = MutationLock::acquire(&root)?;
