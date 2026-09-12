@@ -24,6 +24,8 @@ This setting belongs in project or user `nub.jsonc`. Project configuration takes
 
 The integration lives in [[crates/nub-cli/src/pm_engine/build_jail.rs#NubBuildJail]]. It owns lifecycle confinement instead of applying a second sandbox around Aube's standalone implementation. Package-manager approvals and script scheduling remain in the vendored engine.
 
+Windows dependency builds can receive compatibility adapters after toolchain resolution. The Python startup adapter preserves AppContainer access to private directories and repairs GYP's current-directory path fallback. Its content-addressed startup file belongs to the shared package-manager cache; inherited `PYTHONPATH` is removed. A version-scoped BuildCheck adapter for `cpu-features@0.0.10` supplies the resolved x64 Visual Studio toolchain without repeating its COM discovery. Neither adapter expands filesystem or network grants, and unconfined builds do not receive them.
+
 ## Shared engine
 
 The engine compiles policy separately from launching a process. The package manager supplies paths and configuration provenance; enforcement does not discover configuration itself.

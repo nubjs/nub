@@ -327,10 +327,14 @@ std::fs::write(startup.join("sitecustomize.py"), nub_sandbox::windows_python_com
 
 The adapter retains Python's protected owner/admin/system permissions and adds only the current package SID. It changes `os.mkdir(..., 0o700)` inside AppContainer; other modes and ordinary Python processes are unchanged.
 
+It also repairs CPython's non-strict current-directory `realpath` fallback when AppContainer returns a path ending in `\\.`. Empty and equivalent dot paths become canonical directory paths; drive roots keep their separator. Other input paths and strict calls retain CPython's behavior. This prevents GYP from adding an extra parent component to native dependency include paths.
+
 - The embedder owns the startup directory, grants it read access and composes its contents with any existing startup hooks.
 - Python's isolated mode, `-S`, or a replaced `PYTHONPATH` can prevent this hook from loading.
 - The adapter grants no additional filesystem paths. It cannot repair native subprocesses' `NUL` device or named-pipe access.
 - The sandbox's OS enforcement remains in force whether or not the adapter loads.
+
+The Windows build jail supplies this startup file when it resolves Python for a dependency build. It removes inherited `PYTHONPATH` values and grants read access to a content-addressed file in the shared package-manager cache. That file follows the shared cache's lifetime, not an individual sandbox session's cleanup.
 
 ### Explicit Windows Node compatibility
 

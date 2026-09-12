@@ -50,6 +50,14 @@ Each script receives access to its package directory and the tools needed to bui
 - Scripts receive a build-specific home and temporary directory.
 - Root-project scripts, such as `prepare`, run with the project's ordinary permissions.
 
+### Windows native builds
+
+Nub resolves the native toolchain before launching a confined build. When Python is needed, Nub supplies a read-only startup adapter for AppContainer-compatible private directories and GYP current-directory paths. Inherited `PYTHONPATH` values are removed rather than loaded as startup code.
+
+For `cpu-features@0.0.10` on x64, a package-specific adapter supplies BuildCheck with the Visual Studio and Windows SDK information already resolved for node-gyp. It avoids repeating Visual Studio discovery through a COM server unavailable inside AppContainer. These adapters do not grant extra filesystem or network access, and builds that disable the jail do not receive them.
+
+### Network and confinement limits
+
 Catalog networking is an allow/deny switch, not a hostname allowlist. Recorded download hosts do not restrict a script's connections. Packages without a matching catalog entry receive the baseline policy, which allows outbound networking; a catalog entry can deny it. On Windows, the coarse network allow covers public outbound connections, not unrestricted LAN or loopback access.
 
 The jail reduces exposure to malicious install scripts; it is not isolation for arbitrary untrusted code. On Windows, a full-disk catalog grant omits the AppContainer. That launch has no operating-system filesystem or network boundary, but environment filtering and process cleanup remain.
