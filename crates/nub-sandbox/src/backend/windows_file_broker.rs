@@ -534,7 +534,11 @@ mod tests {
         let root = std::path::PathBuf::from(root);
         let allowed = std::env::var("NUB_FILE_BROKER_TEST_MODE").unwrap() != "raw";
         unsafe extern "C" {
-            fn sandbox_file_broker_test_four_calls(path: *const u16, allowed: i32) -> u32;
+            fn sandbox_file_broker_test_four_calls(
+                path: *const u16,
+                allowed: i32,
+                statuses: *mut i32,
+            ) -> u32;
         }
         for name in ["existing.json", "near.txt"] {
             let path: Vec<u16> = root
@@ -550,6 +554,7 @@ mod tests {
                 sandbox_file_broker_test_four_calls(
                     path.as_ptr(),
                     i32::from(allowed && name.ends_with("json")),
+                    std::ptr::null_mut(),
                 )
             };
             assert_eq!(error, 0, "four-call failure bits for {name}: {error:#x}");
@@ -665,7 +670,11 @@ mod tests {
         // Unconfined positive control uses the same native entrypoints and
         // original fixture files before any sandbox acquires permissions.
         unsafe extern "C" {
-            fn sandbox_file_broker_test_four_calls(path: *const u16, allowed: i32) -> u32;
+            fn sandbox_file_broker_test_four_calls(
+                path: *const u16,
+                allowed: i32,
+                statuses: *mut i32,
+            ) -> u32;
             fn sandbox_file_broker_test_loader(path: *const u16, allowed: i32) -> u32;
         }
         for name in ["existing.json", "near.txt"] {
@@ -677,9 +686,13 @@ mod tests {
                 .chain([0])
                 .collect();
             // SAFETY: native fixture owns every temporary handle.
+            let mut statuses = [0; 4];
+            let result = unsafe {
+                sandbox_file_broker_test_four_calls(path.as_ptr(), 1, statuses.as_mut_ptr())
+            };
             assert_eq!(
-                unsafe { sandbox_file_broker_test_four_calls(path.as_ptr(), 1) },
-                0
+                result, 0,
+                "unconfined four-call failure bits: {result:#x}; raw statuses: {statuses:x?}"
             );
         }
         if dll.is_some() {

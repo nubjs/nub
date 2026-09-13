@@ -3,6 +3,29 @@
 // Included only in the injected adapter, after its true CreateFileW trampoline.
 static thread_local bool file_broker_active = false;
 
+enum FileBrokerDiagnosticStage : DWORD {
+    FileBrokerCapture = 1,
+    FileBrokerExchange = 2,
+    FileBrokerResponse = 3,
+};
+
+static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status) {
+    wchar_t value[2];
+    if (!GetEnvironmentVariableW(L"NUB_JAIL_DUMP_POLICY", value, _countof(value))) return;
+    // One fixed-size numeric record per failing stage; never print a path,
+    // endpoint, handle, policy, credential, or process identity.
+    static volatile LONG seen = 0;
+    LONG bit = 1L << static_cast<LONG>(stage);
+    if (!(InterlockedOr(&seen, bit) & bit)) {
+        char message[72];
+        int length = sprintf_s(message, "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx\r\n",
+                               static_cast<DWORD>(stage), status);
+        DWORD written = 0;
+        if (length > 0) WriteFile(GetStdHandle(STD_ERROR_HANDLE), message,
+                                  static_cast<DWORD>(length), &written, nullptr);
+    }
+}
+
 static bool capture_file_request(nub_sandbox::file_broker::Request& request,
                                  POBJECT_ATTRIBUTES attrs) {
     using namespace nub_sandbox::file_broker;
@@ -26,9 +49,13 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
 }
 
 static bool exchange_file_request(const nub_sandbox::file_broker::Request& request,
-                                  nub_sandbox::file_broker::Response& response) {
+                                  nub_sandbox::file_broker::Response& response,
+                                  DWORD& failure) {
     using namespace nub_sandbox;
-    if (!state.file_broker[0] || file_broker_active) return false;
+    if (!state.file_broker[0] || file_broker_active) {
+        failure = ERROR_INVALID_STATE;
+        return false;
+    }
     file_broker_active = true;
     DWORD saved_error = GetLastError();
     HANDLE pipe = INVALID_HANDLE_VALUE;
@@ -45,16 +72,28 @@ static bool exchange_file_request(const nub_sandbox::file_broker::Request& reque
     } while (true);
     HANDLE event = nullptr;
     bool ok = false;
-    if (pipe != INVALID_HANDLE_VALUE) {
+    if (pipe == INVALID_HANDLE_VALUE) {
+        failure = GetLastError();
+    } else {
         DWORD server = 0, mode = PIPE_READMODE_MESSAGE;
-        if (GetNamedPipeServerProcessId(pipe, &server) && server == state.file_broker_pid &&
-            SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr)) {
+        if (!GetNamedPipeServerProcessId(pipe, &server)) {
+            failure = GetLastError();
+        } else if (server != state.file_broker_pid) {
+            failure = ERROR_ACCESS_DENIED;
+        } else if (!SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr)) {
+            failure = GetLastError();
+        } else {
             event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            if (event && socket_broker::transfer(pipe, event, nullptr,
-                const_cast<file_broker::Request*>(&request), sizeof(request), true) &&
-                socket_broker::transfer(pipe, event, nullptr, &response, sizeof(response), false)) {
+            if (!event) {
+                failure = GetLastError();
+            } else if (!socket_broker::transfer(pipe, event, nullptr,
+                const_cast<file_broker::Request*>(&request), sizeof(request), true) ||
+                !socket_broker::transfer(pipe, event, nullptr, &response, sizeof(response), false)) {
+                failure = GetLastError();
+            } else {
                 ok = response.version == file_broker::kVersion && response.size == sizeof(response) &&
                     !response.reserved && !response.padding && response.status <= 0;
+                if (!ok) failure = ERROR_INVALID_DATA;
             }
         }
     }
@@ -70,11 +109,24 @@ static NTSTATUS broker_file_open(DWORD operation, PHANDLE handle, ACCESS_MASK ac
     ULONG options, ULONG attributes) {
     using namespace nub_sandbox::file_broker;
     Request request = {kVersion, sizeof(Request), operation, access, share, disposition, options, attributes};
-    if (!state.file_broker[0] || !capture_file_request(request, attrs)) return kDenied;
+    if (!state.file_broker[0] || !capture_file_request(request, attrs)) {
+        diagnose_file_broker(FileBrokerCapture, ERROR_INVALID_PARAMETER);
+        return kDenied;
+    }
     Response response = {};
-    if (!exchange_file_request(request, response)) return kDenied;
-    if (response.status) return response.status;
-    if (!response.handle) return kDenied;
+    DWORD failure = ERROR_GEN_FAILURE;
+    if (!exchange_file_request(request, response, failure)) {
+        diagnose_file_broker(FileBrokerExchange, failure);
+        return kDenied;
+    }
+    if (response.status) {
+        diagnose_file_broker(FileBrokerResponse, static_cast<DWORD>(response.status));
+        return response.status;
+    }
+    if (!response.handle) {
+        diagnose_file_broker(FileBrokerResponse, ERROR_INVALID_HANDLE);
+        return kDenied;
+    }
     HANDLE received = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(response.handle));
     __try {
         *handle = received;
@@ -104,11 +156,24 @@ static NtQueryFileAttributes true_query_full_attributes = nullptr;
 static NTSTATUS broker_file_attributes(DWORD operation, POBJECT_ATTRIBUTES attrs, PVOID output) {
     using namespace nub_sandbox::file_broker;
     Request request = {kVersion, sizeof(Request), operation};
-    if (!capture_file_request(request, attrs)) return kDenied;
+    if (!capture_file_request(request, attrs)) {
+        diagnose_file_broker(FileBrokerCapture, ERROR_INVALID_PARAMETER);
+        return kDenied;
+    }
     Response response = {};
-    if (!exchange_file_request(request, response)) return kDenied;
-    if (response.status) return response.status;
-    if (response.handle || response.information) return kDenied;
+    DWORD failure = ERROR_GEN_FAILURE;
+    if (!exchange_file_request(request, response, failure)) {
+        diagnose_file_broker(FileBrokerExchange, failure);
+        return kDenied;
+    }
+    if (response.status) {
+        diagnose_file_broker(FileBrokerResponse, static_cast<DWORD>(response.status));
+        return response.status;
+    }
+    if (response.handle || response.information) {
+        diagnose_file_broker(FileBrokerResponse, ERROR_INVALID_DATA);
+        return kDenied;
+    }
     __try {
         if (operation == Basic) {
             BrokerBasicInformation info = {};

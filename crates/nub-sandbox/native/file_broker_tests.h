@@ -82,7 +82,10 @@ extern "C" DWORD sandbox_file_broker_test_foreign_client(const wchar_t* name) {
 }
 
 // Called in the real test child, so GetProcAddress observes installed Detours.
-extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL allowed) {
+// `statuses` is an optional fixed-size diagnostic sink used by the parent-side
+// control. It records raw NTSTATUS values without changing the child verdict.
+extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL allowed,
+                                                      NTSTATUS* statuses) {
     using namespace nub_sandbox::file_broker;
     wchar_t native[kPath + 4];
     if (swprintf_s(native, L"\\??\\%s", path) < 0) return 1;
@@ -104,7 +107,7 @@ extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL a
     IO_STATUS_BLOCK io = {};
     Handle first, second;
     alignas(8) BYTE metadata[56] = {};
-    NTSTATUS statuses[] = {
+    NTSTATUS results[] = {
         open(&first.value, GENERIC_READ, &attrs, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
              FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT),
         create(&second.value, GENERIC_READ, &attrs, &io, nullptr, 0,
@@ -112,9 +115,10 @@ extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL a
             FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0),
         basic(&attrs, metadata), full(&attrs, metadata),
     };
+    if (statuses) memcpy(statuses, results, sizeof(results));
     DWORD failures = 0;
-    for (DWORD i = 0; i < std::size(statuses); ++i) {
-        if (allowed ? statuses[i] != 0 : statuses[i] != kDenied) failures |= 1u << (i + 4);
+    for (DWORD i = 0; i < std::size(results); ++i) {
+        if (allowed ? results[i] != 0 : results[i] != kDenied) failures |= 1u << (i + 4);
     }
     return failures;
 }
