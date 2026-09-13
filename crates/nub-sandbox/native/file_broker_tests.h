@@ -384,9 +384,9 @@ extern "C" DWORD sandbox_file_broker_test_exclusive_overwrite_metadata_fixture(c
         {L"system-overwrite.json", FILE_ATTRIBUTE_SYSTEM},
     };
     for (const auto& entry : entries) {
-        wchar_t path[kPath] = {};
-        if (swprintf_s(path, L"%s\\%s", root, entry.leaf) < 0 ||
-            !SetFileAttributesW(path, entry.attributes)) return GetLastError();
+        wchar_t path[nub_sandbox::file_broker::kPath] = {};
+        if (swprintf_s(path, L"%s\\%s", root, entry.leaf) < 0) return ERROR_INVALID_NAME;
+        if (!SetFileAttributesW(path, entry.attributes)) return GetLastError();
     }
     return 0;
 }
