@@ -214,6 +214,14 @@ pub(super) struct SourceIndex {
     /// does not build. Snapshotted for the same reason `ci` is: it keeps the
     /// layout decision a pure function of this struct rather than of the
     /// ambient engine selection, which no test could then vary.
+    /// The declared framework whose resolver cannot reach a shared store, when
+    /// this engine is the one that has to decide that itself. `None` under the
+    /// vendored engine, which is handed the candidate names as a setting and
+    /// matches them against [`Self::declared_packages`] instead — the two
+    /// routes read one definition ([`super::store_locality_breaker`]), so the
+    /// row cannot name a framework the install ignored, or stay silent about
+    /// one it acted on.
+    store_locality_breaker: Option<&'static str>,
     derives_store_optouts: bool,
 }
 
@@ -273,6 +281,9 @@ impl SourceIndex {
                 super::config_read::branded_yaml_layout_dropped(&root),
             ),
             ci: std::env::var_os("CI").is_some(),
+            store_locality_breaker: (!derives_store_optouts)
+                .then(|| super::store_locality_breaker(&root, &super::workspace_members(&root)))
+                .flatten(),
             derives_store_optouts,
         }
     }
@@ -643,6 +654,15 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
         if let Some(name) = gvs_incompatible_package(index) {
             return isolated(Some(Source::IncompatiblePackage(name)));
         }
+    } else if let Some(name) = &index.store_locality_breaker {
+        // The same opt-out under the other engine, reached through the
+        // predicate rather than the setting. There is no
+        // `disableGlobalVirtualStoreForPackages` for this engine to read, so
+        // the match happens in nub and the install acts on the answer
+        // directly ([`super::host_settings`]); a report that still asked the
+        // setting would say `global-virtual-store` for exactly the projects
+        // the install now keeps project-local.
+        return isolated(Some(Source::IncompatiblePackage((*name).to_string())));
     }
     ("global-virtual-store".to_string(), None)
 }
@@ -1012,6 +1032,7 @@ mod tests {
             user_npmrc: Vec::new(),
             embedder_defaults: Vec::new(),
             declared_packages: Vec::new(),
+            store_locality_breaker: None,
             branded_layout_ignored: false,
             ci: false,
             derives_store_optouts: true,
@@ -1309,11 +1330,17 @@ mod tests {
         );
     }
 
-    /// The two whole-install store opt-outs the layout row DERIVES belong to the
-    /// vendored engine alone. pnpm 12 declares neither setting as a field of the
-    /// settings struct nub hands it and nub's own settings layer pushes neither
-    /// value, so a row telling that install's reader the store went project-local
-    /// "in Next projects" would name a tree it does not build.
+    /// The two whole-install store opt-outs the layout row DERIVES FROM
+    /// SETTINGS belong to the vendored engine alone. pnpm 12 declares neither
+    /// setting as a field of the settings struct nub hands it, so a row reading
+    /// them under that engine would answer from values nothing consumes.
+    ///
+    /// The framework opt-out itself did not go away with the setting — it moved.
+    /// Nub does the matching now and the install acts on the answer, so the row
+    /// reads the same verdict the install did
+    /// ([`SourceIndex::store_locality_breaker`]) rather than re-deriving it
+    /// from a setting. What the engine arm below pins is that the SETTING is
+    /// inert there, not that the behaviour is.
     #[test]
     fn the_derived_store_optouts_are_the_vendored_engines_alone() {
         let vendored = SourceIndex {
@@ -1357,6 +1384,25 @@ mod tests {
         assert_eq!(
             layout_row(&in_ci),
             ("isolated".to_string(), Some(Source::Ci))
+        );
+
+        // And the route the framework opt-out takes NOW: the same declared
+        // `next`, with the verdict already resolved for the install rather
+        // than read off a setting. The row follows the install.
+        let resolved = SourceIndex {
+            derives_store_optouts: false,
+            store_locality_breaker: Some("next"),
+            embedder_defaults: named(&[("nodeLinker", "isolated")]),
+            ..empty_index()
+        };
+        assert_eq!(
+            layout_row(&resolved),
+            (
+                "isolated".to_string(),
+                Some(Source::IncompatiblePackage("next".to_string()))
+            ),
+            "the row must follow the install's own store decision, and name \
+             the framework that forced it"
         );
     }
 
