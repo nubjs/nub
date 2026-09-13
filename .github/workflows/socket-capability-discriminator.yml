@@ -30,7 +30,7 @@ jobs:
           if errorlevel 1 exit /b 1
           cl /nologo /std:c++17 /W4 /MT /EHsc tests\socket-capability-discriminator\probe.cpp /Fe:out\probe.exe /link advapi32.lib userenv.lib ws2_32.lib
           "@ | Set-Content out/build.cmd
-          cmd /c out/build.cmd *> reports/build.log
+          cmd /c out\build.cmd *> reports/build.log
           if ($LASTEXITCODE -ne 0) { Get-Content reports/build.log; exit $LASTEXITCODE }
           Copy-Item out/probe.exe reports/binaries
           Get-FileHash reports/binaries/* -Algorithm SHA256 | ConvertTo-Json | Set-Content reports/binary-hashes.json
