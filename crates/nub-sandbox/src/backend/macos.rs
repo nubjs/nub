@@ -715,8 +715,9 @@ fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut
         // the policy's own denies and re-open, say, `$TMPDIR/work/.env` on a policy that still
         // carries the secret floor. So each re-grant is followed by a replay of every deny that
         // matches at or under the same root, restoring last-match-wins, and the write arm
-        // re-applies `is_dangerous_write_root` — `emit_fs` guards its write grants with it, and
-        // skipping it here would hand out `(allow file-write* (subpath "/private/tmp"))`.
+        // preserves the access that the policy actually authored. Positive grants are a union:
+        // an explicit broad root is valid, and must not become an implicit narrower subset only
+        // because this re-grant happens after the shared-tmp deny.
         let mut regranted = false;
         for rule in &policy.fs.rules.entries {
             if rule.effect != Effect::Allow || !grant_is_under(rule.matcher.as_str(), &roots) {
@@ -726,7 +727,7 @@ fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut
             let term = emit_term(&m);
             out.push_str(&format!("(allow file-read* {term})\n"));
             out.push_str(&format!("(allow file-map-executable {term})\n"));
-            if rule.access == FsAccess::ReadWrite && !is_dangerous_write_root(&m) {
+            if rule.access == FsAccess::ReadWrite {
                 out.push_str(&format!("(allow file-write* {term})\n"));
             }
             regranted = true;
@@ -889,13 +890,9 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
         let term = emit_term(&m);
         match (rule.effect, rule.access) {
             (Effect::Allow, FsAccess::ReadWrite) => {
-                // Refuse a write grant that resolves to a dangerous top-level root
-                // (a `..` in a surface path can collapse a grant up to `/private`
-                // etc. — an accidental filesystem-wide write hole). Fail-safe: drop
-                // the over-broad grant rather than emit it.
-                if is_dangerous_write_root(&m) {
-                    continue;
-                }
+                // Every write capability originates in an explicit ReadWrite allow. Do not
+                // narrow an authored root here: the policy is positive-only and its matching
+                // grants compose by union on every backend.
                 out.push_str(&format!("(allow file-write* {term})\n"));
             }
             // AN ALLOW NEVER SUBTRACTS. A read-only Allow grants read and takes nothing
@@ -1022,8 +1019,8 @@ fn regex_literal_dir_prefix(glob: &str) -> Option<String> {
     (prefix.len() > 1 && prefix.starts_with('/')).then(|| prefix.to_string())
 }
 
-/// The write-granted subpath roots: every rw Allow that survives the dangerous-root
-/// guard, plus the confstr scratch dirs (also `(allow file-write* (subpath …))` grants).
+/// The write-granted subpath roots: every rw Allow plus the confstr scratch dirs
+/// (also `(allow file-write* (subpath …))` grants).
 /// A directory rename can only relocate a secret when the container is writable, so these
 /// roots bound how far up the ancestor move-block must reach.
 fn write_grant_roots(policy: &SandboxPolicy) -> Vec<String> {
@@ -1031,9 +1028,6 @@ fn write_grant_roots(policy: &SandboxPolicy) -> Vec<String> {
     for rule in &policy.fs.rules.entries {
         if let (Effect::Allow, FsAccess::ReadWrite) = (rule.effect, rule.access) {
             let m = to_match_term(rule.matcher.as_str());
-            if is_dangerous_write_root(&m) {
-                continue;
-            }
             // `Subpath` only: these roots bound how far the ancestor move-block walks, and
             // the thing that makes a rename possible is a writable CONTAINER. A `Literal`
             // rw grant is the node alone and contains nothing. The subtree pair still
@@ -1087,44 +1081,6 @@ fn parent_dir(p: &str) -> Option<&str> {
         .parent()
         .and_then(Path::to_str)
         .filter(|s| !s.is_empty())
-}
-
-/// Top-level roots a write grant must never cover — a `..`-collapsed surface path
-/// (`/tmp/..` → `/private`) would otherwise open filesystem-wide write. Reads are
-/// exempt (a generous `(subpath "/")` read is the legitimate default posture).
-///
-/// The matcher reaching here is already firmlink-CANONICALIZED, so the entries must
-/// be the canonical forms the guard actually sees: `/var`/`/etc`/`/tmp` resolve to
-/// `/private/var`/`/private/etc`/`/private/tmp`. The firmlink spellings are kept
-/// too (harmless, self-documenting); `/private/tmp` is deliberately absent — it is
-/// the legitimate temp firmlink target, not a broad system root.
-fn is_dangerous_write_root(term: &MatchTerm) -> bool {
-    // `Literal` is checked alongside `Subpath` because a subtree arrives as the PAIR
-    // `[P, P/**]` and only the second half classifies as `Subpath` — guarding one half
-    // would hand out `(allow file-write* (literal "/private"))`, i.e. permission to
-    // rename or unlink the root itself.
-    let (MatchTerm::Literal(p) | MatchTerm::Subpath(p)) = term else {
-        return false;
-    };
-    matches!(
-        p.as_str(),
-        "/" | "/private"
-            | "/private/var"
-            | "/private/etc"
-            | "/System"
-            | "/Users"
-            | "/usr"
-            | "/bin"
-            | "/sbin"
-            | "/etc"
-            | "/var"
-            | "/opt"
-            | "/Library"
-            | "/Applications"
-            | "/Volumes"
-            | "/Network"
-            | "/cores"
-    )
 }
 
 /// Best-effort read/map grant for the target program FILE so read-confine can exec
@@ -2879,10 +2835,9 @@ mod tests {
         );
     }
 
-    /// The re-grant's write arm must apply the same dangerous-root guard `emit_fs` does,
-    /// or a `/private/tmp` rw grant becomes a filesystem-wide write hole under Private.
+    /// The re-grant preserves an explicit broad positive write grant under private tmp.
     #[test]
-    fn the_tmp_regrant_still_refuses_a_dangerous_write_root() {
+    fn the_tmp_regrant_preserves_an_explicit_broad_write_root() {
         let mut p = fs_policy(
             Effect::Deny,
             vec![
@@ -2892,17 +2847,15 @@ mod tests {
         );
         p.fs.tmp = TmpMode::Private;
         let private = build_profile(&p, &spec(), None, None, None);
-        // The DIFFERENTIAL is the point: `Shared` skips `emit_tmp` entirely, so whatever it
-        // emits is `emit_fs`'s pre-existing behavior. The re-grant must not add a write that
-        // `emit_fs` did not already allow — this pins the re-grant specifically, not the
-        // dangerous-root policy in general (`/private/tmp` is deliberately NOT on that list).
+        // The differential pins the re-grant specifically: `Shared` skips `emit_tmp`, so
+        // both profiles must retain the same authored write capability.
         p.fs.tmp = TmpMode::Shared;
         let shared = build_profile(&p, &spec(), None, None, None);
         let w = "(allow file-write* (subpath \"/private/tmp\"))";
         assert_eq!(
             private.matches(w).count(),
             shared.matches(w).count(),
-            "the tmp re-grant must not add a write grant emit_fs did not already emit"
+            "the tmp re-grant must preserve the authored broad write grant"
         );
     }
 
@@ -2926,9 +2879,9 @@ mod tests {
     }
 
     #[test]
-    fn dangerous_write_roots_are_dropped() {
-        // A `..`-collapsed grant that resolves to a top-level root must not emit a
-        // write allow (filesystem-wide write hole). Read of `/` stays legal.
+    fn explicit_broad_write_roots_are_emitted() {
+        // Broad filesystem access remains opt-in: it is emitted only for an authored rw
+        // allow, and must match the same positive-union grammar as the other backends.
         let p = fs_policy(
             Effect::Deny,
             vec![
@@ -2937,37 +2890,8 @@ mod tests {
             ],
         );
         let prof = build_profile(&p, &spec(), None, None, None);
-        assert!(!prof.contains("(allow file-write* (subpath \"/private\"))"));
-        // The pair's node half too: a `(literal)` write grant on a top-level root permits
-        // renaming or unlinking the root itself, so both halves of the pair must be dropped.
-        assert!(!prof.contains("(allow file-write* (literal \"/private\"))"));
-        assert!(is_dangerous_write_root(&MatchTerm::Subpath(
-            "/private".to_string()
-        )));
-        assert!(is_dangerous_write_root(&MatchTerm::Literal(
-            "/private".to_string()
-        )));
-        // The canonical forms of firmlink roots (`/var`→`/private/var`) — what the
-        // guard actually sees after the matcher's canonicalization — must be caught.
-        assert!(is_dangerous_write_root(&MatchTerm::Subpath(
-            "/private/var".to_string()
-        )));
-        assert!(is_dangerous_write_root(&MatchTerm::Subpath(
-            "/private/etc".to_string()
-        )));
-        assert!(is_dangerous_write_root(&MatchTerm::Subpath(
-            "/Volumes".to_string()
-        )));
-        // A real project dir under a guarded root is NOT over-blocked (exact match).
-        assert!(!is_dangerous_write_root(&MatchTerm::Subpath(
-            "/proj".to_string()
-        )));
-        assert!(!is_dangerous_write_root(&MatchTerm::Subpath(
-            "/Users/me/proj".to_string()
-        )));
-        assert!(!is_dangerous_write_root(&MatchTerm::Subpath(
-            "/private/tmp/scratch".to_string()
-        )));
+        assert!(prof.contains("(allow file-write* (subpath \"/private\"))"));
+        assert!(prof.contains("(allow file-write* (literal \"/private\"))"));
     }
 
     #[test]
