@@ -101,6 +101,7 @@ pub(super) fn configured_eject_names() -> Vec<String> {
         .clone();
     NUB_INTERNAL_DISK_MATERIALIZE_SEED
         .iter()
+        .chain(NUB_PROJECT_CONTEXT_EJECT)
         .map(|name| (*name).to_owned())
         .chain(configured)
         .collect()

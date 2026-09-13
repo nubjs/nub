@@ -89,7 +89,7 @@ impl MaterializePolicy for EjectPhantomImporters {
         }
         let mut keep: HashSet<String> = resolved
             .iter()
-            .filter(|package| self.seeds.iter().any(|seed| names(package.id, seed)))
+            .filter(|package| self.seeded(package.id))
             .map(|package| package.id.to_owned())
             .collect();
         keep.extend(self.flagged(resolved));
@@ -98,6 +98,28 @@ impl MaterializePolicy for EjectPhantomImporters {
 }
 
 impl EjectPhantomImporters {
+    /// Whether one of the seed names claims this package before any scan.
+    ///
+    /// `vite` is the one name answered from the concrete VERSION rather than
+    /// the name alone, and here is the first point that has one: from 8.1 vite
+    /// reads the virtual store's location out of `node_modules/.modules.yaml`
+    /// itself, so it is served correctly from the shared store and ejecting it
+    /// would drag vite and its whole ancestor closure project-local for
+    /// nothing. Below 8.1 the eject is what puts a writable copy where the
+    /// backported sniff can be applied, so those still move — every copy in
+    /// the graph, embedded ones included, which is the case a name seed alone
+    /// cannot distinguish.
+    ///
+    /// Deliberately blind to where the seed came from, as the other engine
+    /// has it: a project naming `vite` in its own eject list gets the same
+    /// answer, because a vite that needs no eject is already working.
+    fn seeded(&self, package_id: &str) -> bool {
+        if let Some(version) = package_id.strip_prefix("vite@") {
+            return super::vite_compat::vite_lt_8_1(version);
+        }
+        self.seeds.iter().any(|seed| names(package_id, seed))
+    }
+
     /// The packages whose own code imports something undeclared.
     ///
     /// A package with no store row to read is skipped rather than ejected: a
@@ -116,17 +138,77 @@ impl EjectPhantomImporters {
         let Ok(index) = StoreIndex::open_in(&store) else {
             return Vec::new();
         };
+        // The names a project depends on directly. Under the shared store a
+        // package's own resolution walk reaches only its siblings, so the
+        // project's top level is the one place an eject changes what an
+        // undeclared import can see.
+        let top_level: HashSet<&str> = resolved
+            .iter()
+            .filter(|package| package.root_direct)
+            .filter_map(|package| package_name(package.id))
+            .collect();
         resolved
             .iter()
             .filter(|package| {
-                let v = package
+                let Some(scan) = package
                     .index_key
-                    .and_then(|key| verdict(&index, &store, cache_dir, key));
-                v.is_some_and(|scan| scan.has_unguarded_phantom)
+                    .and_then(|key| verdict(&index, &store, cache_dir, key))
+                else {
+                    return false;
+                };
+                if !scan.has_unguarded_phantom {
+                    return false;
+                }
+                let siblings: HashSet<&str> =
+                    package.dependencies.iter().filter_map(|id| package_name(id)).collect();
+                should_seed(&scan.targets, &siblings, &top_level)
             })
             .map(|package| package.id.to_owned())
             .collect()
     }
+}
+
+/// Whether a package the scan flagged must actually be kept out of the
+/// shared store.
+///
+/// The default is YES, and a flag is downgraded only when every undeclared
+/// target can be PROVEN to resolve identically either way: a target that is
+/// both a direct sibling of the flagged package and absent from the
+/// project's top level is reachable from the shared copy and unreachable
+/// from a project-local one, so moving the package changes nothing for it.
+///
+/// The asymmetry is deliberate and it is the whole safety story: a wrong
+/// SKIP is a real import failure at runtime, while a redundant eject costs
+/// only disk. So every uncertainty — no targets recorded, a target that is
+/// not a direct sibling, a target the project itself depends on — keeps the
+/// eject.
+fn should_seed(
+    targets: &[nub_phantom_scan::PhantomTarget],
+    siblings: &HashSet<&str>,
+    top_level: &HashSet<&str>,
+) -> bool {
+    if targets.is_empty() {
+        return true;
+    }
+    !targets
+        .iter()
+        .all(|target| {
+            siblings.contains(target.name.as_str()) && !top_level.contains(target.name.as_str())
+        })
+}
+
+/// The package name inside an install identifier, which spells a registry
+/// package `name@version` — with the name's own leading `@` for a scoped
+/// one, so the separator is the LAST `@` rather than the first. The peer
+/// suffix is already stripped by the time an identifier reaches here.
+///
+/// A non-registry resolution is identified by its bare resolution id
+/// instead, carrying no name at all, so this answers nothing usable for
+/// one. That is the safe direction: a name that matches no target leaves
+/// the eject in place.
+fn package_name(package_id: &str) -> Option<&str> {
+    let at = package_id.rfind('@').filter(|at| *at > 0)?;
+    Some(&package_id[..at])
 }
 
 /// The verdict for one stored package: its cached sidecar, or a scan run now
