@@ -60,11 +60,7 @@ if ($repairIgnored.Count -ne 6 -or $repairIgnored[1].filter -ne 'backend::window
 foreach ($run in $repair) {
     $arguments = Test-Arguments $run.filter ([bool]$run.exact) ([bool]$run.ignored)
     if ($run.exact -and $arguments -notcontains '--exact') { throw "Native repair exact arguments omitted --exact: $($run.label)" }
-    $namespaceFilter = $run.filter -in @(
-        'backend::windows_file_broker::tests::file_broker_native_namespace_with_raw_control',
-        'backend::windows_file_broker::tests::file_broker_cancels_namespace_before_mutation'
-    )
-    if ($run.exact -and !$namespaceFilter) {
+    if ($run.exact) {
         $parts = $run.filter -split '::'
         $source = if ($parts.Length -eq 1) { 'tests/windows_native_full_network.rs' } else { "src/backend/$($parts[1]).rs" }
         $text = Get-Content -Raw (Join-Path $PSScriptRoot "../../crates/nub-sandbox/$source")
