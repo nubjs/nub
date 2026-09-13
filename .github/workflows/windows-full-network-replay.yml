@@ -2,7 +2,7 @@ name: Windows full-network artifact replay
 
 on:
   push:
-    branches: [windows-full-network-replay]
+    branches: [windows-seven-artifact-replay]
     paths:
       - '.github/workflows/windows-full-network-replay.yml'
       - 'tests/sandbox-native-adapter/run-full-network-standard-user.ps1'
@@ -31,12 +31,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # These placeholders deliberately fail closed until the owner pins the
-          # completed diagnostic run and the source revision it recorded.
-          $buildRun = 'REPLACE_WITH_COMPLETED_OWNER_DIAGNOSTIC_RUN'
-          $buildHead = 'REPLACE_WITH_EXACT_OWNER_DIAGNOSTIC_HEAD'
+          $buildRun = '34742445221'
+          $buildHead = 'd7a10f6c92da79543d7d7b023faac0350b829019'
           if ($buildRun -notmatch '^[1-9][0-9]*$') { throw 'A completed numeric build_run input is required' }
           if ($buildHead -notmatch '^[0-9a-f]{40}$') { throw 'A full lowercase build_head input is required' }
+          $run = (& gh run view $buildRun --repo nubjs/nub --json status,conclusion,headSha) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -ne 'completed' -or $run.conclusion -ne 'success' -or $run.headSha -ne $buildHead) { throw 'Expected the completed successful exact-head diagnostic' }
           & git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer $env:GH_TOKEN" fetch --depth=1 origin $buildHead
           if ($LASTEXITCODE -ne 0) { throw 'Exact build revision is unavailable from origin' }
           $allowed = @('.github/workflows/windows-full-network-replay.yml', 'tests/sandbox-native-adapter/run-full-network-standard-user.ps1', 'tests/sandbox-native-adapter/test-full-network-runner.ps1')
@@ -47,6 +47,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $source = Get-Content retained/source-runtimeenv.json -Raw | ConvertFrom-Json
           if ($source.source -ne $buildHead -or $source.runner -ne '${{ matrix.runner }}') { throw 'Retained source or platform mismatch' }
+          if (@($source.sourceStatus).Count -ne 0) { throw 'Retained source was not clean' }
           New-Item -ItemType Directory -Force reports, reports/binaries | Out-Null
           $requiredArtifacts = @('native-full-network.exe', 'nub_sandbox_lib.exe', 'windows_tmp_policy.exe', 'production_readiness_windows.exe', 'windows_native_full_network.exe', 'windows_relay_fixture.exe', 'file-broker-fixture.dll')
           $records = @((Get-Content retained/binary-sha256.json -Raw | ConvertFrom-Json))
