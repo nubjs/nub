@@ -16,6 +16,10 @@ mod session;
 mod session_tests;
 
 #[cfg(test)]
+#[path = "linux_projection/acl_tests.rs"]
+mod acl_tests;
+
+#[cfg(test)]
 #[path = "linux_projection/namespace_tests.rs"]
 mod namespace_tests;
 

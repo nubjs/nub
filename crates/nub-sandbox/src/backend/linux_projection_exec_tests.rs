@@ -13,6 +13,7 @@ use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule};
 use std::ffi::{CStr, CString};
 use std::io::{BufReader, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::OpenOptionsExt;
 
 const EXEC_A: &[u8; 6] = b"EXEC_A";
@@ -61,8 +62,17 @@ fn compile_payloads(root: &Path) -> Payloads {
         &src,
         r#"#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
-int main(void) { puts("EXEC_A"); fflush(stdout); if (getenv("NUB_EXEC_HOLD")) { puts("READY"); fflush(stdout); char x; read(0,&x,1); } return 0; }
+int main(int argc, char **argv) {
+  if (getenv("NUB_EXEC_FD_CONTEXT")) {
+    if (argc != 3 || strcmp(argv[1], "fd-context") || strcmp(argv[2], "original argument") || strcmp(getenv("NUB_EXEC_FD_CONTEXT"), "forwarded")) return 42;
+    printf("FD_EXEC_CONTEXT_OK pid=%d\n", getpid());
+  }
+  puts("EXEC_A"); fflush(stdout);
+  if (getenv("NUB_EXEC_HOLD")) { puts("READY"); fflush(stdout); char x; read(0,&x,1); }
+  return 0;
+}
 "#,
     )
     .unwrap();
@@ -354,7 +364,9 @@ fn child_output(mut cmd: Command, label: &str) -> Result<String, io::Error> {
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = cmd.output()?;
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    let output = child.wait_with_output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "{label} exit {:?}: {}",
@@ -362,11 +374,111 @@ fn child_output(mut cmd: Command, label: &str) -> Result<String, io::Error> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    Ok(String::from_utf8(output.stdout).unwrap())
+    let text = String::from_utf8(output.stdout).unwrap();
+    if label == "exec" && std::env::var_os("NUB_EXEC_FD_PROBE").is_some() {
+        assert!(
+            text.lines()
+                .any(|line| line == format!("FD_EXEC_CONTEXT_OK pid={pid}")),
+            "fd execution did not preserve PID/argv/env: {text}"
+        );
+    }
+    Ok(text)
 }
 
 fn exec_marker(path: &Path) -> Result<String, io::Error> {
-    child_output(Command::new(path), "exec")
+    child_output(exec_command(path, false), "exec")
+}
+
+/// A cooperating-process discriminator, not transparent pathname execution.
+/// The pre-exec hook runs in the already-confined fork and opens through the
+/// normal native-open notification path; no descriptor is injected by the test.
+fn exec_command(path: &Path, hold: bool) -> Command {
+    let mut command = Command::new(path);
+    if hold {
+        command.env("NUB_EXEC_HOLD", "1");
+    }
+    if std::env::var_os("NUB_EXEC_FD_PROBE").is_none() {
+        return command;
+    }
+    let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    command.args(["fd-context", "original argument"]);
+    command.env("NUB_EXEC_FD_CONTEXT", "forwarded");
+    let arguments = [
+        path.clone(),
+        c"fd-context".to_owned(),
+        c"original argument".to_owned(),
+    ];
+    let expected_dev: u64 = std::env::var("NUB_EXEC_EXPECT_DEV")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let expected_ino: u64 = std::env::var("NUB_EXEC_EXPECT_INO")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut environment: Vec<CString> = std::env::vars_os()
+        .filter(|(key, _)| key != "NUB_EXEC_HOLD" && key != "NUB_EXEC_FD_CONTEXT")
+        .map(|(key, value)| {
+            let mut entry = key.into_vec();
+            entry.push(b'=');
+            entry.extend(value.into_vec());
+            CString::new(entry).unwrap()
+        })
+        .collect();
+    environment.push(c"NUB_EXEC_FD_CONTEXT=forwarded".to_owned());
+    if hold {
+        environment.push(c"NUB_EXEC_HOLD=1".to_owned());
+    }
+    // Everything allocating is prepared before fork. Fixed arrays and syscalls
+    // alone run in the hook. The ELF receives the original command arguments.
+    unsafe {
+        command.pre_exec(move || {
+            let fd = libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut stat: libc::stat = std::mem::zeroed();
+            let mut filesystem: libc::statfs = std::mem::zeroed();
+            let result = (|| {
+                if libc::fstat(fd, &mut stat) < 0 || libc::fstatfs(fd, &mut filesystem) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if stat.st_dev != expected_dev
+                    || stat.st_ino != expected_ino
+                    || filesystem.f_type as libc::c_long == FUSE_SUPER_MAGIC
+                {
+                    return Err(io::Error::from_raw_os_error(libc::EXDEV));
+                }
+                let argv = [
+                    arguments[0].as_ptr(),
+                    arguments[1].as_ptr(),
+                    arguments[2].as_ptr(),
+                    std::ptr::null(),
+                ];
+                // The fixture's environment is bounded independently of host
+                // environment size; refuse instead of truncating it.
+                let mut envp = [std::ptr::null(); 512];
+                if environment.len() >= envp.len() {
+                    return Err(io::Error::from_raw_os_error(libc::E2BIG));
+                }
+                for (slot, value) in envp.iter_mut().zip(&environment) {
+                    *slot = value.as_ptr();
+                }
+                libc::syscall(
+                    libc::SYS_execveat,
+                    fd,
+                    c"".as_ptr(),
+                    argv.as_ptr(),
+                    envp.as_ptr(),
+                    libc::AT_EMPTY_PATH,
+                );
+                Err(io::Error::last_os_error())
+            })();
+            libc::close(fd);
+            result
+        });
+    }
+    command
 }
 
 fn loader_marker(exe: &Path, root: &Path, dso: &Path) -> Result<String, io::Error> {
@@ -394,13 +506,18 @@ fn loader() {
 }
 
 fn held_exec(path: &Path) -> Child {
-    let mut child = Command::new(path)
-        .env("NUB_EXEC_HOLD", "1")
+    let mut child = exec_command(path, true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("EXEC_ERR {}: {e}", path.display()));
     let mut out = BufReader::new(child.stdout.take().unwrap());
+    if std::env::var_os("NUB_EXEC_FD_PROBE").is_some() {
+        assert_eq!(
+            event(&mut out, ""),
+            format!("FD_EXEC_CONTEXT_OK pid={}", child.id())
+        );
+    }
     assert_eq!(event(&mut out, ""), "EXEC_A");
     assert_eq!(event(&mut out, ""), "READY");
     child.stdout = Some(out.into_inner());
@@ -427,7 +544,7 @@ fn open_writer_rw(path: &Path) -> io::Result<File> {
 }
 
 fn exec_error(path: &Path) -> Option<i32> {
-    match Command::new(path).spawn() {
+    match exec_command(path, false).spawn() {
         Ok(mut child) => {
             assert!(wait(&mut child).success(), "unexpected child failure");
             None
@@ -755,11 +872,19 @@ fn native_provider(root: &Path) {
         CString::new("--nocapture").unwrap(),
         CString::new("--test-threads=1").unwrap(),
     ];
-    let env = [
+    let mut env = vec![
         CString::new("PATH=/usr/bin:/bin").unwrap(),
         CString::new(format!("{ROLE}=exec-native-command")).unwrap(),
         CString::new("NUB_PROJECTION_TEST_ROOT=/").unwrap(),
     ];
+    if std::env::var_os("NUB_EXEC_FD_PROBE").is_some() {
+        let metadata = fs::metadata(raw.join("app/exec-r")).unwrap();
+        env.extend([
+            c"NUB_EXEC_FD_PROBE=1".to_owned(),
+            CString::new(format!("NUB_EXEC_EXPECT_DEV={}", metadata.dev())).unwrap(),
+            CString::new(format!("NUB_EXEC_EXPECT_INO={}", metadata.ino())).unwrap(),
+        ]);
+    }
     let launch = SupervisedLaunch {
         argv: &exe,
         envp: &env,
@@ -813,7 +938,7 @@ fn native_provider(root: &Path) {
     assert!(status.success(), "native arm {status:?}");
 }
 
-fn supervisor(root: &Path) {
+fn supervisor(root: &Path, fd_probe: bool) {
     unsafe {
         libc::alarm(180);
     }
@@ -826,6 +951,9 @@ fn supervisor(root: &Path) {
         ("fuse", "exec-fuse-provider", false),
         ("native", "exec-native-provider", true),
     ] {
+        if fd_probe && name == "fuse" {
+            continue;
+        }
         println!("EXEC_ARM_START {name}");
         io::stdout().flush().unwrap();
         let case = root.join(name);
@@ -837,6 +965,9 @@ fn supervisor(root: &Path) {
         } else {
             helper(&exe, role, &case)
         };
+        if fd_probe && name == "native" {
+            cmd.env("NUB_EXEC_FD_PROBE", "1");
+        }
         if role != "exec-raw" {
             namespace_launch(&mut cmd);
         }
@@ -949,12 +1080,20 @@ fn supervisor(root: &Path) {
         parity_failures.is_empty(),
         "LINUX_EXEC_ACCEPTANCE_PARITY_FAIL {parity_failures:?}"
     );
-    println!("LINUX_EXEC_ACCEPTANCE_COMPLETE");
+    println!(
+        "{}",
+        if fd_probe {
+            "LINUX_NATIVE_FD_EXEC_DISCRIMINATOR_OK"
+        } else {
+            "LINUX_EXEC_ACCEPTANCE_COMPLETE"
+        }
+    );
 }
 
 pub(super) fn run_role(role: &str, root: &Path) -> bool {
     match role {
-        "exec-supervisor" => supervisor(root),
+        "exec-supervisor" => supervisor(root, false),
+        "exec-fd-supervisor" => supervisor(root, true),
         "exec-raw" => client("raw", root, false),
         "exec-fuse-provider" => fuse_provider(root),
         "exec-fuse-command" => client("fuse", root, true),

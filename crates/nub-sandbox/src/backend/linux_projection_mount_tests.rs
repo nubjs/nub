@@ -885,6 +885,15 @@ fn mounted_projection_exec_and_dlopen_acceptance() {
     run_mount_probe("exec-supervisor", "LINUX_EXEC_ACCEPTANCE_COMPLETE");
 }
 
+#[test]
+#[ignore = "requires an ordinary Linux user, /dev/fuse, and a C compiler on the remote fixture host"]
+fn mounted_native_fd_exec_discriminator() {
+    run_mount_probe(
+        "exec-fd-supervisor",
+        "LINUX_NATIVE_FD_EXEC_DISCRIMINATOR_OK",
+    );
+}
+
 fn run_mount_probe(role: &str, marker: &str) {
     let root = tempfile::tempdir().unwrap();
     let log = root.path().join("probe.log");
