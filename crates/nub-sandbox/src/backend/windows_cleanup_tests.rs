@@ -9,10 +9,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::System::StationsAndDesktops::{
-    CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW,
-    GetProcessWindowStation, SetProcessWindowStation,
-};
+use windows_sys::Win32::System::StationsAndDesktops::{CloseDesktop, CreateDesktopW};
 
 const FIXTURE: &str = "backend::windows::windows_cleanup_tests::windows_cleanup_fixture";
 const MODE: &str = "__NUB_WINDOWS_CLEANUP_FIXTURE";
@@ -20,33 +17,16 @@ const ROOT: &str = "__NUB_WINDOWS_CLEANUP_ROOT";
 const FAULT: &str = "__NUB_WINDOWS_CLEANUP_FAULT";
 const TMP_POSTURE: &str = "__NUB_WINDOWS_CLEANUP_TMP_POSTURE";
 
-const WINSTA_ALL_ACCESS: u32 = 0x000F_037F;
 const DESKTOP_ALL_ACCESS: u32 = 0x000F_01FF;
 
-struct TestWindowObjects {
-    station: HANDLE,
+struct TestDesktopObject {
     desktop: HANDLE,
     object: windows_registry::WindowObject,
 }
 
-impl TestWindowObjects {
-    fn journal_objects(&self) -> [windows_registry::WindowObject; 2] {
-        [
-            windows_registry::WindowObject {
-                desktop: None,
-                ..self.object.clone()
-            },
-            self.object.clone(),
-        ]
-    }
-}
-
-impl Drop for TestWindowObjects {
+impl Drop for TestDesktopObject {
     fn drop(&mut self) {
-        unsafe {
-            CloseDesktop(self.desktop);
-            CloseWindowStation(self.station);
-        }
+        unsafe { CloseDesktop(self.desktop) };
     }
 }
 
@@ -54,33 +34,18 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Build an independently named station/desktop pair so a child can leave a journaled object
-/// behind and its parent can recreate precisely those names. The explicit handles keep each
-/// generation alive only for the test that owns it.
-fn create_test_window_objects(
-    station_name: &str,
-    desktop_name: &str,
-) -> std::io::Result<TestWindowObjects> {
-    let session = crate::backend::windows_ace::current_objects()?[0].session;
-    let previous = unsafe { GetProcessWindowStation() };
-    if previous.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    let station_wide = wide(station_name);
-    let station = unsafe {
-        CreateWindowStationW(
-            station_wide.as_ptr(),
-            0,
-            WINSTA_ALL_ACCESS,
-            std::ptr::null_mut(),
-        )
-    };
-    if station.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { SetProcessWindowStation(station) } == 0 {
-        unsafe { CloseWindowStation(station) };
-        return Err(std::io::Error::last_os_error());
+/// Create an owned desktop in the process's existing station. Named window stations require
+/// Administrators, and the fixture needs only the desktop ownership witness; it must never alter
+/// the shared station DACL merely to manufacture a disposable test object.
+fn create_test_desktop_object(desktop_name: &str) -> std::io::Result<TestDesktopObject> {
+    let station = crate::backend::windows_ace::current_objects()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::other("process has no current window station"))?;
+    if station.desktop.is_some() {
+        return Err(std::io::Error::other(
+            "current window-object list does not start with a station",
+        ));
     }
     let desktop_wide = wide(desktop_name);
     let desktop = unsafe {
@@ -93,24 +58,14 @@ fn create_test_window_objects(
             std::ptr::null_mut(),
         )
     };
-    let restored = unsafe { SetProcessWindowStation(previous) };
     if desktop.is_null() {
-        unsafe { CloseWindowStation(station) };
         return Err(std::io::Error::last_os_error());
     }
-    if restored == 0 {
-        unsafe {
-            CloseDesktop(desktop);
-            CloseWindowStation(station);
-        }
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(TestWindowObjects {
-        station,
+    Ok(TestDesktopObject {
         desktop,
         object: windows_registry::WindowObject {
-            session,
-            station: station_name.to_string(),
+            session: station.session,
+            station: station.station,
             desktop: Some(desktop_name.to_string()),
         },
     })
@@ -617,15 +572,11 @@ fn window_grant_no_mutation_does_not_journal(root: &Path) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let objects = create_test_window_objects(
-        &format!("nub-null-dacl-station-{}-{stamp}", std::process::id()),
-        &format!("nub-null-dacl-desktop-{}-{stamp}", std::process::id()),
-    )
-    .unwrap();
-    let [station, desktop] = objects.journal_objects();
-    crate::backend::windows_ace::test_set_null_window_dacl(&station).unwrap();
+    let desktop_name = format!("nub-null-dacl-desktop-{}-{stamp}", std::process::id());
+    let objects = create_test_desktop_object(&desktop_name).unwrap();
+    let desktop = objects.object.clone();
     crate::backend::windows_ace::test_set_null_window_dacl(&desktop).unwrap();
-    crate::backend::windows_ace::test_set_current_objects(Some(vec![station, desktop]));
+    crate::backend::windows_ace::test_set_current_objects(Some(vec![desktop]));
     let acquired = plan(root, "hold").acquire();
     crate::backend::windows_ace::test_set_current_objects(None);
     let resource = acquired.unwrap();
@@ -651,9 +602,8 @@ fn witness_before_intent_fault(_root: &Path) {
         .unwrap()
         .as_nanos();
     let profile = format!("nub-test-window-witness-{}-{stamp}", std::process::id());
-    let station_name = format!("nub-witness-station-{}-{stamp}", std::process::id());
     let desktop_name = format!("nub-witness-desktop-{}-{stamp}", std::process::id());
-    let objects = create_test_window_objects(&station_name, &desktop_name).unwrap();
+    let objects = create_test_desktop_object(&desktop_name).unwrap();
     let sid = super::launch::SidGuard(super::launch::derive_appcontainer(&profile).unwrap());
     crate::backend::windows_ace::grant_persistent(&objects.object, sid.0).unwrap();
     windows_registry::test_insert_window_object_recovery(&profile, objects.object.clone()).unwrap();
@@ -681,9 +631,12 @@ fn window_witness_crash_does_not_retire_a_replacement(root: &Path) {
         "fixture must journal exactly one replacement candidate"
     );
     let object = entry.window_objects[0].clone();
-    let replacement =
-        create_test_window_objects(&object.station, object.desktop.as_deref().unwrap())
-            .expect("same-name replacement window objects");
+    let current = crate::backend::windows_ace::current_objects().unwrap();
+    let station = current.first().expect("current window station");
+    assert_eq!(station.session, object.session);
+    assert_eq!(station.station, object.station);
+    let replacement = create_test_desktop_object(object.desktop.as_deref().unwrap())
+        .expect("same-name replacement desktop in the journaled station");
     let sid = super::launch::SidGuard(super::launch::derive_appcontainer(&profile).unwrap());
     crate::backend::windows_ace::test_grant_narrow_desktop_ace(&object, sid.0).unwrap();
 

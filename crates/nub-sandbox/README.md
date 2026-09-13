@@ -47,7 +47,7 @@ The standard cache roots are `XDG_CACHE_HOME` or `~/.cache` on Linux, `~/Library
 
 The array form `{"fs":["./","$tooldirs","$tmp"]}` means read-write. The object form makes access explicit. Private temp accepts `"rw"` or `true`; `false` adds no temporary-storage grant. Neither mode subtracts from explicit filesystem grants: a read grant for `/` still includes host temp. Neither mode grants the entire host temporary directory. The temp convenience rejects read-only access and suffixes such as `$tmp/work`. The tool-directory set also takes no suffix.
 
-On macOS, private temp also permits Apple's `xcrun_db` lookup-cache files in the system-selected scratch directory; those files do not follow `TMPDIR`. Windows currently rejects `$tmp: false` before launch because its backend does not implement withholding implicit profile storage.
+On macOS, private temp also permits Apple's `xcrun_db` lookup-cache files in the system-selected scratch directory; those files do not follow `TMPDIR`. On Windows, disabling the implicit temporary grant withholds the AppContainer's private profile storage; explicit filesystem grants still apply.
 
 Broad home reads can be combined with writes limited to the project and private temporary storage:
 
