@@ -66,6 +66,15 @@ fn namespace_fixture(root: &Path, exe: &Path) -> FsRuleSet {
             "/app/namespace/directory-renamed.dir/*.json",
             FsAccess::ReadWrite,
         ),
+        rule(
+            "/app/namespace/creation-target.dir/*.json",
+            FsAccess::ReadWrite,
+        ),
+        rule("/app/namespace/creation-hop.dir", FsAccess::Read),
+        rule(
+            "/app/namespace/creation-denied.dir/canary.json",
+            FsAccess::Read,
+        ),
         rule("/app/namespace/read-only.locked", FsAccess::Read),
         rule("/app/namespace/metadata-read.locked", FsAccess::Read),
         // `/app` remains traversal-only: this exact future leaf must not grant
@@ -74,6 +83,13 @@ fn namespace_fixture(root: &Path, exe: &Path) -> FsRuleSet {
     ]);
     let namespace = root.join("raw/app/namespace");
     fs::create_dir(&namespace).unwrap();
+    for name in [
+        "creation-target.dir",
+        "creation-hop.dir",
+        "creation-denied.dir",
+    ] {
+        fs::create_dir(namespace.join(name)).unwrap();
+    }
     for (name, bytes) in [
         ("rename-source.json", b"rename-source".as_slice()),
         ("noreplace-source.json", b"noreplace-source".as_slice()),
@@ -90,6 +106,10 @@ fn namespace_fixture(root: &Path, exe: &Path) -> FsRuleSet {
         ("metadata-read.locked", b"metadata-read".as_slice()),
         ("nearest.txt", b"nearest-canary".as_slice()),
         ("directory-neighbor.txt", b"directory-canary".as_slice()),
+        (
+            "creation-denied.dir/canary.json",
+            b"denied-canary".as_slice(),
+        ),
     ] {
         fs::write(namespace.join(name), bytes).unwrap();
     }
@@ -121,6 +141,21 @@ fn assert_errno<T>(result: io::Result<T>, expected: i32, label: &str) {
 fn create(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)
+}
+
+fn open_with_flags(path: &Path, flags: i32) -> io::Result<File> {
+    let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let fd = unsafe { libc::open(path.as_ptr(), flags, 0o640) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+}
+
+fn create_with_flags(path: &Path, bytes: &[u8]) {
+    let mut file = open_with_flags(path, libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC).unwrap();
+    file.write_all(bytes).unwrap();
 }
 
 fn renameat2(old: &Path, new: &Path, flags: u32) -> io::Result<()> {
@@ -493,6 +528,89 @@ fn namespace_xattrs(namespace: &Path, projected: bool) {
     case_marker("xattr", projected);
 }
 
+fn namespace_creation_symlink_contract(namespace: &Path, projected: bool) {
+    let target = namespace.join("creation-target.dir");
+    let denied = namespace.join("creation-denied.dir/denied-created.json");
+    let cases = [
+        (
+            "creation-cross-link.json",
+            "creation-target.dir/cross-created.json",
+            target.join("cross-created.json"),
+            b"cross".as_slice(),
+        ),
+        (
+            "creation-chain-first.json",
+            "creation-chain-second.json",
+            target.join("chain-created.json"),
+            b"chain".as_slice(),
+        ),
+        (
+            "creation-dotdot-link.json",
+            "creation-hop.dir/../creation-target.dir/dotdot-created.json",
+            target.join("dotdot-created.json"),
+            b"dotdot".as_slice(),
+        ),
+    ];
+    symlink(cases[0].1, namespace.join(cases[0].0)).unwrap();
+    symlink(
+        "creation-target.dir/chain-created.json",
+        namespace.join(cases[1].1),
+    )
+    .unwrap();
+    symlink(cases[1].1, namespace.join(cases[1].0)).unwrap();
+    symlink(cases[2].1, namespace.join(cases[2].0)).unwrap();
+    for (link, spelling, final_path, bytes) in cases {
+        let path = namespace.join(link);
+        create_with_flags(&path, bytes);
+        assert_eq!(fs::read(&final_path).unwrap(), bytes);
+        assert_eq!(fs::read_link(&path).unwrap(), Path::new(spelling));
+    }
+
+    let literal = namespace.join("creation-literal.json");
+    create_with_flags(&literal, b"literal");
+    assert_eq!(fs::read(&literal).unwrap(), b"literal");
+
+    let denied_link = namespace.join("creation-denied-link.json");
+    symlink("creation-denied.dir/denied-created.json", &denied_link).unwrap();
+    if projected {
+        assert_errno(
+            open_with_flags(
+                &denied_link,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+            ),
+            libc::EACCES,
+            "denied final symlink create",
+        );
+        assert!(!denied.exists(), "denied final target was created");
+    } else {
+        create_with_flags(&denied_link, b"raw-denied-control");
+        assert_eq!(fs::read(&denied).unwrap(), b"raw-denied-control");
+    }
+    assert_eq!(
+        fs::read_link(&denied_link).unwrap(),
+        Path::new("creation-denied.dir/denied-created.json")
+    );
+
+    let control = namespace.join("creation-control-link.json");
+    symlink("creation-target.dir/control-created.json", &control).unwrap();
+    assert_errno(
+        open_with_flags(&control, libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW),
+        libc::ELOOP,
+        "O_NOFOLLOW final symlink control",
+    );
+    assert_errno(
+        open_with_flags(&control, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL),
+        libc::EEXIST,
+        "O_CREAT|O_EXCL final symlink control",
+    );
+    assert!(!target.join("control-created.json").exists());
+    assert_eq!(
+        fs::read_link(&control).unwrap(),
+        Path::new("creation-target.dir/control-created.json")
+    );
+    case_marker("creation_symlink_contract", projected);
+}
+
 fn namespace_command(root: &Path, projected: bool) {
     let app = root.join("app");
     let namespace = app.join("namespace");
@@ -519,6 +637,8 @@ fn namespace_command(root: &Path, projected: bool) {
         );
     }
     case_marker("symlink_authority", projected);
+
+    namespace_creation_symlink_contract(&namespace, projected);
 
     let shared = namespace.join("shared.json");
     fs::hard_link(&future, &shared).unwrap();
@@ -779,6 +899,58 @@ fn verify_backing(
     assert_eq!(
         fs::read_link(namespace.join("denied-target.json")).unwrap(),
         Path::new("nearest.txt")
+    );
+    for (link, spelling, name, bytes) in [
+        (
+            "creation-cross-link.json",
+            "creation-target.dir/cross-created.json",
+            "cross-created.json",
+            b"cross".as_slice(),
+        ),
+        (
+            "creation-chain-first.json",
+            "creation-chain-second.json",
+            "chain-created.json",
+            b"chain".as_slice(),
+        ),
+        (
+            "creation-dotdot-link.json",
+            "creation-hop.dir/../creation-target.dir/dotdot-created.json",
+            "dotdot-created.json",
+            b"dotdot".as_slice(),
+        ),
+    ] {
+        assert_eq!(
+            fs::read_link(namespace.join(link)).unwrap(),
+            Path::new(spelling)
+        );
+        assert_eq!(
+            fs::read(namespace.join("creation-target.dir").join(name)).unwrap(),
+            bytes
+        );
+    }
+    assert_eq!(
+        fs::read_link(namespace.join("creation-chain-second.json")).unwrap(),
+        Path::new("creation-target.dir/chain-created.json")
+    );
+    assert_eq!(
+        fs::read(namespace.join("creation-literal.json")).unwrap(),
+        b"literal"
+    );
+    assert_eq!(
+        fs::read_link(namespace.join("creation-denied-link.json")).unwrap(),
+        Path::new("creation-denied.dir/denied-created.json")
+    );
+    let denied_created = namespace.join("creation-denied.dir/denied-created.json");
+    if projected {
+        assert!(!denied_created.exists(), "denied final target was created");
+    } else {
+        assert_eq!(fs::read(denied_created).unwrap(), b"raw-denied-control");
+    }
+    assert!(
+        !namespace
+            .join("creation-target.dir/control-created.json")
+            .exists()
     );
     let target = namespace.join("target.json");
     assert_eq!(xattr_get(&target, XATTR_RW).unwrap(), b"rw-final");
