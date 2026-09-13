@@ -105,7 +105,7 @@ jobs:
             @{file='windows_tmp_policy.exe';label='tmp-policy';filter=@('--nocapture','--test-threads=1');env=@{};marker='appcontainer_tmp_false_denies_owned_profile_storage_and_preserves_project_grant'},
             @{file='nub_sandbox_lib.exe';label='windows-cleanup';filter=@('backend::windows::windows_cleanup_tests','--nocapture','--test-threads=1');env=@{};marker='test result: ok.'},
             @{file='nub_sandbox_lib.exe';label='windows-native-child';filter=@('backend::windows::native_child_tests','--nocapture','--test-threads=1');env=@{};marker='test result: ok.'},
-            @{file='nub_sandbox_lib.exe';label='windows-registry';filter=@('backend::windows_registry::tests','--nocapture','--test-threads=1');env=@{};marker='test result: ok.'},
+            @{file='nub_sandbox_lib.exe';label='windows-registry';filter=@('backend::windows::windows_registry::tests','--nocapture','--test-threads=1');env=@{};marker='test result: ok.'},
             @{file='nub_sandbox_lib.exe';label='embedded-native-adapter';filter=@('backend::windows_native_adapter_probe::embedded_native_adapter_primitives_with_raw_and_plain_controls','--nocapture','--test-threads=1');env=@{NUB_NATIVE_EMBEDDED_ADAPTER='1'};marker='test result: ok.'}
           )
           $failed = $false
@@ -113,7 +113,7 @@ jobs:
             $result=Run-Fixture $run.file $run.label $run.filter $run.env
             foreach($path in @($result.out,$result.err)) { if (Test-Path $path) { [IO.File]::Copy($path,[IO.Path]::Combine($Stage,[IO.Path]::GetFileName($path)),$true); [Console]::Out.WriteLine([IO.File]::ReadAllText($path)) } }
             Write-Host "STANDARD_USER_FILTER_EXIT=$($run.label):$($result.code)"
-            if ($result.code -ne 0 -or !$result.text.Contains($run.marker)) { $failed = $true }
+            if ($result.code -ne 0 -or !$result.text.Contains($run.marker) -or $result.text -notmatch 'running [1-9][0-9]* test(s)?') { $failed = $true }
           }
           if ($failed) { exit 1 }
           '@ | Set-Content -Encoding ascii (Join-Path $stage 'run-tmp-policy.ps1')
