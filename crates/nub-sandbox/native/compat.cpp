@@ -1,6 +1,9 @@
 // Optional native compatibility. AppContainer remains the security boundary.
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <mswsock.h>
 #include <windows.h>
+#include <sddl.h>
 #include <winternl.h>
 #include <securityappcontainer.h>
 #include <cstdio>
@@ -9,9 +12,11 @@
 #include <cstring>
 #include <cstdint>
 #include <initializer_list>
+#include <new>
 #include "detours.h"
 #include "mount_query.h"
 #include "null_device.h"
+#include "socket_broker.h"
 
 static const GUID payload_id = {0x19c47458, 0xe2ad, 0x421d, {0x81, 0x37, 0x52, 0xa1, 0x85, 0xf7, 0xb8, 0x15}};
 struct Payload {
@@ -21,6 +26,8 @@ struct Payload {
     DWORD user_sid[SECURITY_MAX_SID_SIZE / sizeof(DWORD)];
     DWORD package_sid[SECURITY_MAX_SID_SIZE / sizeof(DWORD)];
     BOOL identities_captured;
+    wchar_t socket_broker[128];
+    DWORD socket_broker_pid;
 };
 static Payload state = {};
 
@@ -88,8 +95,14 @@ static BOOL inject(HANDLE process, const Payload& source) {
 }
 
 #ifdef SANDBOX_COMPAT_HOST
-extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory) {
+#include "socket_broker_tests.h"
+extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory,
+                                       const wchar_t* socket_broker) {
     Payload state = {};
+    if (socket_broker) {
+        if (wcscpy_s(state.socket_broker, socket_broker)) return ERROR_INVALID_NAME;
+        state.socket_broker_pid = GetCurrentProcessId();
+    }
     state.null_device = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -110,12 +123,106 @@ extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory)
     CloseHandle(state.null_device);
     return ok ? ERROR_SUCCESS : error;
 }
+extern "C" DWORD sandbox_socket_broker_start(HANDLE process, HANDLE job, const wchar_t* name,
+                                             nub_sandbox::socket_broker::Broker** broker) {
+    Payload identities = {};
+    if (!capture_identities(process, identities)) return GetLastError();
+    return nub_sandbox::socket_broker::start(job, name, identities.user_sid,
+                                            identities.package_sid, broker);
+}
+extern "C" void sandbox_socket_broker_stop(nub_sandbox::socket_broker::Broker* broker) {
+    delete broker;
+}
+extern "C" int sandbox_socket_broker_validate(const nub_sandbox::socket_broker::Request* request) {
+    return nub_sandbox::socket_broker::validate(*request);
+}
 #else
 static auto true_create_file = CreateFileW;
 static auto true_create_file_a = CreateFileA;
 static auto true_final_path = GetFinalPathNameByHandleW;
 static auto true_create_process = CreateProcessW;
 static auto true_anonymous_pipe = CreatePipe;
+static auto true_socket = socket;
+static auto true_wsa_socket_w = WSASocketW;
+static auto true_wsa_socket_a = WSASocketA;
+
+static SOCKET broker_socket(int family, int type, int protocol, DWORD flags) {
+    using namespace nub_sandbox::socket_broker;
+    Request request = {kVersion, family, type, protocol, flags};
+    int error = validate(request);
+    if (error) { WSASetLastError(error); return INVALID_SOCKET; }
+    // Open a fresh connection in the requesting process, never inherit a shared
+    // client handle whose kernel-recorded PID belongs to a different descendant.
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    ULONGLONG deadline = GetTickCount64() + kTimeout;
+    do {
+        pipe = true_create_file(state.socket_broker,
+            FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES |
+                READ_CONTROL | SYNCHRONIZE,
+            0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
+                SECURITY_IDENTIFICATION, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE || GetLastError() != ERROR_PIPE_BUSY) break;
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline || !WaitNamedPipeW(state.socket_broker, DWORD(deadline - now))) break;
+    } while (true);
+    if (pipe == INVALID_HANDLE_VALUE) { WSASetLastError(WSAEACCES); return INVALID_SOCKET; }
+    DWORD server = 0, mode = PIPE_READMODE_MESSAGE;
+    if (!GetNamedPipeServerProcessId(pipe, &server) || server != state.socket_broker_pid ||
+        !SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr)) {
+        CloseHandle(pipe);
+        WSASetLastError(WSAEACCES);
+        return INVALID_SOCKET;
+    }
+    HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    Response response = {};
+    SOCKET result = INVALID_SOCKET;
+    error = WSAETIMEDOUT;
+    if (event && transfer(pipe, event, nullptr, &request, sizeof(request), true) &&
+        transfer(pipe, event, nullptr, &response, sizeof(response), false)) {
+        error = response.version == kVersion ? response.error : WSAEINVAL;
+        if (!error) {
+            result = true_wsa_socket_w(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
+                                       &response.info, 0, flags);
+            error = result == INVALID_SOCKET ? WSAGetLastError() : 0;
+            DWORD acknowledgement = result == INVALID_SOCKET ? 0 : kVersion;
+            if (!transfer(pipe, event, nullptr, &acknowledgement, sizeof(acknowledgement), true)) {
+                if (result != INVALID_SOCKET) closesocket(result);
+                result = INVALID_SOCKET;
+                error = WSAETIMEDOUT;
+            }
+        }
+    }
+    if (event) CloseHandle(event);
+    CloseHandle(pipe);
+    WSASetLastError(error);
+    return result;
+}
+
+static bool broker_family(int family) {
+    return state.socket_broker[0] && (family == AF_INET || family == AF_INET6);
+}
+static SOCKET WSAAPI create_socket(int family, int type, int protocol) {
+    if (!broker_family(family)) return true_socket(family, type, protocol);
+    int open_type = 0, size = sizeof(open_type);
+    // socket(), unlike WSASocket(), observes this per-thread default.
+    if (getsockopt(INVALID_SOCKET, SOL_SOCKET, SO_OPENTYPE,
+                   reinterpret_cast<char*>(&open_type), &size) == SOCKET_ERROR) return INVALID_SOCKET;
+    return broker_socket(family, type, protocol, open_type ? 0 : WSA_FLAG_OVERLAPPED);
+}
+static SOCKET WSAAPI create_wsa_socket_w(int family, int type, int protocol,
+                                        LPWSAPROTOCOL_INFOW info, GROUP group, DWORD flags) {
+    // Existing socket transfers (including libuv IPC) must reconstruct the
+    // supplied descriptor, not manufacture a new unrelated socket.
+    if (!broker_family(family) || info || group)
+        return true_wsa_socket_w(family, type, protocol, info, group, flags);
+    return broker_socket(family, type, protocol, flags);
+}
+static SOCKET WSAAPI create_wsa_socket_a(int family, int type, int protocol,
+                                        LPWSAPROTOCOL_INFOA info, GROUP group, DWORD flags) {
+    if (!broker_family(family) || info || group)
+        return true_wsa_socket_a(family, type, protocol, info, group, flags);
+    return broker_socket(family, type, protocol, flags);
+}
 static SECURITY_DESCRIPTOR private_descriptor;
 alignas(ACL) static BYTE private_acl[512];
 
@@ -769,6 +876,11 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     DetourAttach(reinterpret_cast<PVOID*>(&true_final_path), final_path);
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_process), create_process);
     DetourAttach(reinterpret_cast<PVOID*>(&true_anonymous_pipe), anonymous_pipe);
+    if (state.socket_broker[0]) {
+        DetourAttach(reinterpret_cast<PVOID*>(&true_socket), create_socket);
+        DetourAttach(reinterpret_cast<PVOID*>(&true_wsa_socket_w), create_wsa_socket_w);
+        DetourAttach(reinterpret_cast<PVOID*>(&true_wsa_socket_a), create_wsa_socket_a);
+    }
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_directory), create_directory);
     DetourAttach(reinterpret_cast<PVOID*>(&true_open_directory), open_directory);
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_pipe), create_pipe);

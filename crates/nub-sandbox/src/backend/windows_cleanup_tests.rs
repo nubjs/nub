@@ -111,6 +111,7 @@ fn plan(root: &Path, mode: &str) -> AppContainerLaunch {
             crate::policy::TmpMode::Private
         },
         native_compat: std::env::var_os("NUB_NATIVE_EMBEDDED_ADAPTER").is_some(),
+        native_full_network: false,
         stdout: WindowsStdio::Null,
         stderr: WindowsStdio::Null,
     }

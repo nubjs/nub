@@ -108,6 +108,15 @@ impl PolicyIdentity {
         self
     }
 
+    pub(crate) fn with_native_full_network(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.canonical
+                .push_str("\nnative-full-network=socket-broker-v1");
+            self.hash = hex(&Sha256::digest(self.canonical.as_bytes()));
+        }
+        self
+    }
+
     /// Retained leases stay keyed by policy; only a new acquisition resolves a new
     /// resource incarnation. File contents and timestamps do not affect identity.
     pub(crate) fn with_objects(
@@ -1400,6 +1409,19 @@ pub(crate) fn test_remove_entry(profile_name: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_full_network_does_not_share_a_deny_network_identity() {
+        let identity = super::PolicyIdentity::new([], [], [], None, false, false)
+            .unwrap()
+            .with_native_compat(Some("adapter-one"));
+        assert_eq!(identity, identity.clone().with_native_full_network(false));
+        assert_ne!(identity, identity.clone().with_native_full_network(true));
+        assert_eq!(
+            identity.clone().with_native_full_network(true),
+            identity.with_native_full_network(true)
+        );
+    }
+
     #[test]
     fn native_adapter_version_participates_in_policy_identity() {
         let identity = super::PolicyIdentity::new([], [], [], None, false, false).unwrap();

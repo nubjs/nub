@@ -45,6 +45,7 @@ pub(super) fn plan(root: &Path, mode: &str) -> AppContainerLaunch {
         proxy_context: None,
         tmp_mode: crate::policy::TmpMode::Shared,
         native_compat: std::env::var_os("NUB_NATIVE_EMBEDDED_ADAPTER").is_some(),
+        native_full_network: false,
         stdout: WindowsStdio::Piped,
         stderr: WindowsStdio::Piped,
     }

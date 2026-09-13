@@ -144,8 +144,31 @@ pub(crate) struct AppContainerLaunch {
     /// withholds all implicit profile-storage access without subtracting explicit fs grants.
     tmp_mode: crate::policy::TmpMode,
     pub(super) native_compat: bool,
+    native_full_network: bool,
     stdout: WindowsStdio,
     stderr: WindowsStdio,
+}
+
+impl AppContainerLaunch {
+    #[cfg(windows)]
+    pub(super) fn enable_native_compat(&mut self, net: &NetPolicy) -> bool {
+        self.native_compat = true;
+        self.native_full_network = native_full_network(net)
+            && self.allow_internet
+            && self.egress_funnel.is_none()
+            && self.proxy_context.is_none();
+        if self.native_full_network {
+            self.allow_internet = false;
+        }
+        self.native_full_network
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn native_full_network(net: &NetPolicy) -> bool {
+    // Do not infer broad socket authority from a coarse capability or a proxy's
+    // presence. Mixed/hand-authored policies with rules or secrets fail closed.
+    !net.enforce && net.rules.is_empty() && net.brokers.is_empty()
 }
 
 /// Native command stream configuration; pipes remain owned by the submitting caller.
@@ -1010,6 +1033,7 @@ pub(crate) fn apply(
         proxy_context: None,
         tmp_mode: policy.fs.tmp,
         native_compat: false,
+        native_full_network: false,
         stdout: if spec.redact_stdout {
             WindowsStdio::Piped
         } else {
@@ -2157,6 +2181,7 @@ pub(super) mod launch {
         plan: PlainLaunch,
         state: Option<Arc<ResourceState>>,
         allow_internet: bool,
+        native_full_network: bool,
         egress_funnel: Option<super::NetPolicy>,
         proxy_context: Option<crate::proxy::ProxyContext>,
     }
@@ -2575,6 +2600,7 @@ pub(super) mod launch {
                     stderr: self.stderr,
                 },
                 allow_internet: self.allow_internet,
+                native_full_network: self.native_full_network,
                 egress_funnel: self.egress_funnel,
                 proxy_context: self.proxy_context,
                 state: Some(state),
@@ -2588,6 +2614,7 @@ pub(super) mod launch {
                 plan,
                 state: None,
                 allow_internet: false,
+                native_full_network: false,
                 egress_funnel: None,
                 proxy_context: None,
             }
@@ -2957,6 +2984,7 @@ pub(super) mod launch {
                 stderr: stdio.stderr.take(),
                 relays: relay_threads,
                 helper: _egress_helper,
+                socket_broker: None,
                 _resource: self.state.clone(),
                 status: None,
                 tracked: Vec::new(),
@@ -2971,7 +2999,18 @@ pub(super) mod launch {
                 .as_ref()
                 .and_then(|state| state.native_compat.as_deref())
             {
-                crate::backend::windows_native_compat::inject(child.process.0, path)?;
+                if self.native_full_network {
+                    child.socket_broker =
+                        Some(crate::backend::windows_native_compat::SocketBroker::start(
+                            child.process.0,
+                            child.job.0,
+                        )?);
+                }
+                crate::backend::windows_native_compat::inject(
+                    child.process.0,
+                    path,
+                    child.socket_broker.as_ref(),
+                )?;
             }
             if unsafe { ResumeThread(thread.0) } == u32::MAX {
                 let error = io::Error::last_os_error();
@@ -3421,6 +3460,7 @@ pub(super) mod launch {
         stderr: Option<std::process::ChildStderr>,
         relays: Vec<std::thread::JoinHandle<()>>,
         helper: Option<HelperGuard>,
+        socket_broker: Option<crate::backend::windows_native_compat::SocketBroker>,
         _resource: Option<Arc<ResourceState>>,
         status: Option<ExitStatus>,
         tracked: Vec<(u32, HandleGuard)>,
@@ -3453,6 +3493,7 @@ pub(super) mod launch {
             }
             // Keep synchronization handles before termination removes members
             // from the Job's active list. Termination itself is asynchronous.
+            self.socket_broker.take();
             let snapshot = self.track_job_members();
             if let Some(helper) = &self.helper {
                 helper.terminate();
@@ -3641,6 +3682,7 @@ pub(super) mod launch {
                 helper.terminate();
             }
             let status = ExitStatus::from_raw(code);
+            self.socket_broker.take();
             self.status = Some(status);
             Ok(Some(status))
         }
@@ -3714,11 +3756,14 @@ pub(super) mod launch {
         )?
         .with_network(launch.egress_funnel.as_ref())
         .map(|identity| {
-            identity.with_tmp_mode(launch.tmp_mode).with_native_compat(
-                launch
-                    .native_compat
-                    .then(crate::backend::windows_native_compat::version),
-            )
+            identity
+                .with_tmp_mode(launch.tmp_mode)
+                .with_native_compat(
+                    launch
+                        .native_compat
+                        .then(crate::backend::windows_native_compat::version),
+                )
+                .with_native_full_network(launch.native_full_network)
         })
     }
 
@@ -5120,6 +5165,79 @@ pub(super) mod launch {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_socket_authority_requires_unrestricted_network_without_rules_or_brokers() {
+        use crate::policy::{CredentialBroker, NetRule, NetTarget};
+        assert!(super::native_full_network(&NetPolicy::default()));
+        assert!(!super::native_full_network(&NetPolicy {
+            enforce: true,
+            ..Default::default()
+        }));
+        for target in [
+            NetTarget::Host("example.com".into()),
+            NetTarget::Cidr("10.0.0.0/8".parse().unwrap()),
+        ] {
+            for enforce in [false, true] {
+                assert!(!super::native_full_network(&NetPolicy {
+                    enforce,
+                    rules: vec![NetRule {
+                        target: target.clone(),
+                        effect: Effect::Allow
+                    }],
+                    ..Default::default()
+                }));
+            }
+        }
+        for enforce in [false, true] {
+            assert!(!super::native_full_network(&NetPolicy {
+                enforce,
+                brokers: vec![CredentialBroker {
+                    host: "example.com".into(),
+                    env: vec!["TOKEN".into()],
+                }],
+                ..Default::default()
+            }));
+        }
+    }
+
+    #[cfg(all(windows, target_env = "msvc"))]
+    #[test]
+    fn native_full_network_preparation_keeps_appcontainer_without_capabilities() {
+        let mut policy = SandboxPolicy::default();
+        policy.env = crate::policy::EnvPolicy::resolved(Default::default());
+        let cwd = tempfile::tempdir().unwrap();
+        let command = || crate::CommandSpec::new(std::env::current_exe().unwrap()).cwd(cwd.path());
+        assert!(
+            crate::Sandbox::new(&policy)
+                .unwrap()
+                .prepare(command())
+                .is_err()
+        );
+        let sandbox = crate::Sandbox::with_windows_native_compat(&policy).unwrap();
+        let prepared = sandbox.prepare(command()).unwrap();
+        assert!(prepared.degradation.is_full());
+        let Some(WindowsLaunch::AppContainer(plan)) = prepared.launch else {
+            panic!("native networking must not leave filesystem confinement");
+        };
+        assert!(plan.native_compat);
+        assert!(plan.native_full_network);
+        assert!(!plan.allow_internet);
+        assert!(plan.egress_funnel.is_none());
+        assert!(plan.proxy_context.is_none());
+
+        policy.net.enforce = true;
+        let prepared = crate::Sandbox::with_windows_native_compat(&policy)
+            .unwrap()
+            .prepare(command())
+            .unwrap();
+        let Some(WindowsLaunch::AppContainer(plan)) = prepared.launch else {
+            panic!("deny-network adapter must remain confined");
+        };
+        assert!(plan.native_compat);
+        assert!(!plan.native_full_network);
+        assert!(!plan.allow_internet);
+    }
+
     use super::*;
     use crate::policy::{CanonGlob, FsOrigin, FsRule, FsRuleSet, TmpMode};
 
