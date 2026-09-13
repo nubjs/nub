@@ -141,6 +141,9 @@ inline NTSTATUS validate(const Request& request) {
 using Authorize = DWORD (*)(const void*, const wchar_t*, DWORD);
 using NtCreate = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
     PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+using NtSetInformation = NTSTATUS (NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+using NtQueryInformation = NTSTATUS (NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+struct EaInformation { ULONG size; };
 struct Handle {
     HANDLE value = nullptr;
     Handle() = default;
@@ -296,10 +299,63 @@ inline NTSTATUS resolve(const Request& request, HANDLE process, HANDLE stop,
         // collision-rejecting FILE_CREATE below; never change it before auth.
         missing_open_if = true;
     }
-    Handle pin;
-    DWORD disposition = missing_open_if ? FILE_CREATE : request.disposition;
     bool metadata = request.operation == Basic || request.operation == Full;
     DWORD access = metadata ? FILE_READ_ATTRIBUTES : access_mask(request.access);
+    // A data pin rejects a later exclusive overwrite, while an attributes-only
+    // pin permits POSIX replacement. Hold the caller's eventual file object
+    // instead: it is nondestructive until authorization and preserves the
+    // caller's no-delete-sharing contract through the truncate.
+    bool same_handle_overwrite = request.operation == Create &&
+        (request.disposition == FILE_OVERWRITE || request.disposition == FILE_OVERWRITE_IF) &&
+        !(request.options & FILE_DIRECTORY_FILE) && !(request.share & FILE_SHARE_DELETE) &&
+        request.attributes == FILE_ATTRIBUTE_NORMAL && (access & FILE_WRITE_DATA);
+    bool missing_same_handle_overwrite_if = false;
+    if (same_handle_overwrite) {
+        status = open_relative(api, parent.handle(), path + leaf, request.length - leaf,
+            transferred_access(access, false) | SYNCHRONIZE, request.share, FILE_OPEN,
+            (request.options & ~kBackupIntent) | FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+            request.attributes, result, io);
+        if (status == static_cast<NTSTATUS>(0xc0000034) && request.disposition == FILE_OVERWRITE_IF) {
+            result.value = nullptr;
+            missing_same_handle_overwrite_if = true;
+        } else {
+            if (status) return status;
+            wchar_t canonical[kPath] = {};
+            DWORD length = 0;
+            BY_HANDLE_FILE_INFORMATION info = {};
+            if (!regular(result.value, false) || !GetFileInformationByHandle(result.value, &info) ||
+                (info.dwFileAttributes != FILE_ATTRIBUTE_NORMAL &&
+                    (info.dwFileAttributes & ~FILE_ATTRIBUTE_ARCHIVE)) ||
+                !final_name(result.value, canonical, length)) return kDenied;
+            // FILE_OVERWRITE can apply requested attributes and honor existing
+            // EAs; EOF truncation cannot. The broker protocol has no EA buffer,
+            // and this path accepts only ordinary attributes with no stored EAs.
+            auto query = reinterpret_cast<NtQueryInformation>(
+                GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationFile"));
+            EaInformation ea = {};
+            if (!query || query(result.value, &io, &ea, sizeof(ea),
+                static_cast<FILE_INFORMATION_CLASS>(7)) != 0 || ea.size) return kDenied;
+            DWORD rights = authorize(context, canonical, length);
+            if (!(rights & 1) || !(rights & 2)) return kDenied;
+            // Authorization may block until cancellation kills the command Job.
+            if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT ||
+                WaitForSingleObject(process, 0) != WAIT_TIMEOUT) return kDenied;
+            auto set = reinterpret_cast<NtSetInformation>(
+                GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetInformationFile"));
+            if (!set) return kDenied;
+            // FileEndOfFileInformation receives one LARGE_INTEGER end offset.
+            LARGE_INTEGER end = {};
+            status = set(result.value, &io, &end, sizeof(end),
+                         static_cast<FILE_INFORMATION_CLASS>(20));
+            if (status) return status > 0 ? kDenied : status;
+            response.information = FILE_OVERWRITTEN;
+            response.attributes = FILE_ATTRIBUTE_NORMAL;
+            return 0;
+        }
+    }
+    Handle pin;
+    DWORD disposition = missing_open_if || missing_same_handle_overwrite_if
+        ? FILE_CREATE : request.disposition;
     bool directory = (request.options & FILE_DIRECTORY_FILE) != 0;
     wchar_t canonical[kPath] = {};
     DWORD length = 0;
@@ -368,7 +424,6 @@ inline bool same_file(HANDLE left, HANDLE right) {
         a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow;
 }
 
-using NtSetInformation = NTSTATUS (NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
 struct NameInformation {
     BOOLEAN replace;
     HANDLE root;
