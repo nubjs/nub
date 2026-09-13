@@ -295,34 +295,78 @@ fn rebrand(rendered: &str, embedder: Embedder) -> String {
 /// alone here would point the user at a command that does something else.
 const SUGGESTION_RENAMES: [(&str, &str); 1] = [("self-update", "upgrade")];
 
-/// Rewrite the commands a rendered report tells the user to run.
+/// Put the running program's name where the engine wrote its own.
 ///
-/// The engine writes them `pnpm <verb>`, always inside quotes or
-/// backticks, and nub serves nearly every verb it names under the same
-/// spelling — so the program name is substituted and the verb kept, except
-/// for the few [`SUGGESTION_RENAMES`] respells. The quoting is what keeps
-/// this off ordinary prose, where `pnpm` is the subject of a sentence
-/// rather than a command to type.
+/// Every occurrence of the bare WORD is substituted, not just a quoted
+/// command. Under nub's identity the engine IS nub's package manager, so a
+/// sentence about what it requires, refuses or has not implemented is a
+/// sentence about nub — and the reader has no other package manager to
+/// attach the name to. Narrower drafts of this rewrote only a command
+/// inside quotes or backticks, on the reasoning that ordinary prose used
+/// the name as a subject and should be left alone; that left 71 diagnostic
+/// sites naming pnpm to a nub user, most of them commands written in some
+/// other quoting style (`(e.g., pnpm access …)`, `'pnpm dlx' requires …`,
+/// `Run pnpm dedupe to …`).
+///
+/// What is NOT substituted is anything where `pnpm` is part of a larger
+/// token rather than the program's name: a file (`pnpm-lock.yaml`,
+/// `.pnpmfile.cjs`), a path segment (`node_modules/.pnpm`,
+/// `~/Library/pnpm/store`) and a host (`pnpm.io`). Those name real things
+/// on disk and on the network that keep their names whoever is running, so
+/// rewriting one would produce a path that does not exist. That is the
+/// whole reason this is a word-boundary walk rather than a replace.
+///
+/// A pnpm-incumbent project never reaches here: its reports go out
+/// verbatim, which is what makes them pnpm's own.
 fn rewrite_suggestions(rendered: &str, program: &str) -> String {
+    /// Whether `pnpm` sitting at `at` is the program's name rather than
+    /// part of a filename, a path segment or a hostname.
+    fn is_the_program_name(rendered: &str, at: usize) -> bool {
+        let joins = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'/');
+        let bytes = rendered.as_bytes();
+        if at > 0 && (joins(bytes[at - 1]) || bytes[at - 1] == b'.') {
+            return false;
+        }
+        match bytes.get(at + "pnpm".len()) {
+            None => true,
+            Some(&next) if joins(next) => false,
+            // A trailing dot ends a sentence unless something follows it,
+            // which makes it a hostname (`pnpm.io`) or a filename.
+            Some(b'.') => !bytes
+                .get(at + "pnpm.".len())
+                .is_some_and(|c| c.is_ascii_alphanumeric()),
+            Some(_) => true,
+        }
+    }
+
     let mut out = String::with_capacity(rendered.len());
     let mut rest = rendered;
-    while let Some(at) = rest.find("pnpm ") {
+    let mut consumed = 0;
+    while let Some(at) = rest.find("pnpm") {
         let (before, from) = rest.split_at(at);
         out.push_str(before);
-        rest = &from["pnpm ".len()..];
-        if !before.ends_with(['"', '`']) {
-            out.push_str("pnpm ");
+        rest = &from["pnpm".len()..];
+        if !is_the_program_name(rendered, consumed + at) {
+            out.push_str("pnpm");
+            consumed += at + "pnpm".len();
             continue;
         }
         out.push_str(program);
-        out.push(' ');
-        let verb = rest
+        consumed += at + "pnpm".len();
+        // A respelled verb only follows the name as a command would: one
+        // space, then the verb itself.
+        let Some(tail) = rest.strip_prefix(' ') else {
+            continue;
+        };
+        let verb = tail
             .split(|c: char| !c.is_ascii_lowercase() && c != '-')
             .next()
             .unwrap_or_default();
         if let Some((_, respelled)) = SUGGESTION_RENAMES.iter().find(|(named, _)| *named == verb) {
+            out.push(' ');
             out.push_str(respelled);
-            rest = &rest[verb.len()..];
+            rest = &tail[verb.len()..];
+            consumed += " ".len() + verb.len();
         }
     }
     out.push_str(rest);
@@ -561,22 +605,94 @@ fn pending_migration(
 mod tests {
     use super::{host_compat_rules, rewrite_suggestions};
 
-    /// Only a quoted command is a command to type. The engine's prose uses
-    /// its own name as a subject too, and rewriting that would say nub does
-    /// things the sentence is not about.
+    /// The name is substituted wherever it is the PROGRAM's, in prose as
+    /// much as in a quoted command. A nub user has no other package manager
+    /// to attach it to, and the engine is the one running, so a sentence
+    /// about what it requires is a sentence about nub.
     #[test]
-    fn only_a_quoted_command_is_rewritten() {
+    fn the_program_name_is_substituted_wherever_it_is_the_program() {
+        for (engine, nub) in [
+            (
+                r#"Run "pnpm approve-builds" to pick."#,
+                r#"Run "nub approve-builds" to pick."#,
+            ),
+            (
+                "run `pnpm clean --lockfile` and `pnpm install`.",
+                "run `nub clean --lockfile` and `nub install`.",
+            ),
+            // The four shapes the quoted-only rule left behind, which are
+            // what made this 71 sites rather than a handful.
+            (
+                "pnpm requires one wheel per package",
+                "nub requires one wheel per package",
+            ),
+            (
+                "Package name is required (e.g., pnpm access get status @scope/pkg)",
+                "Package name is required (e.g., nub access get status @scope/pkg)",
+            ),
+            (
+                "'pnpm dlx' requires a command to run",
+                "'nub dlx' requires a command to run",
+            ),
+            (
+                "Run pnpm dedupe to apply the changes above.",
+                "Run nub dedupe to apply the changes above.",
+            ),
+            // The sentence-final form: a dot ends it, so the name is still
+            // the program's.
+            (
+                "not yet implemented in pnpm.",
+                "not yet implemented in nub.",
+            ),
+        ] {
+            assert_eq!(rewrite_suggestions(engine, "nub"), nub, "input: {engine}");
+        }
+    }
+
+    /// A file, a path segment and a host keep their names whoever is
+    /// running: they are real things on disk and on the network, and
+    /// rewriting one produces a path that does not exist. This is the
+    /// assertion that makes the substitution a word-boundary walk rather
+    /// than a replace.
+    #[test]
+    fn a_name_that_is_not_the_program_is_left_alone() {
+        for untouched in [
+            "Resolve the merge conflict in pnpm-lock.yaml, then run pnpm import again.",
+            "The pnpm-workspace.yaml is not read here",
+            "ignoring .pnpmfile.cjs and .pnpmrc",
+            "linked from node_modules/.pnpm/is-odd@1.0.0",
+            "the store at ~/Library/pnpm/store/v11 is shared",
+            "see https://pnpm.io/errors for the list",
+        ] {
+            let rewritten = rewrite_suggestions(untouched, "nub");
+            for token in [
+                "pnpm-lock.yaml",
+                "pnpm-workspace.yaml",
+                ".pnpmfile.cjs",
+                ".pnpmrc",
+                "node_modules/.pnpm/",
+                "Library/pnpm/store",
+                "pnpm.io",
+            ] {
+                assert!(
+                    !untouched.contains(token) || rewritten.contains(token),
+                    "{token} must survive verbatim: {rewritten}"
+                );
+            }
+        }
+        // ...and the one case that mixes both, which is the whole point: the
+        // FILE keeps its name while the COMMAND beside it takes nub's. A
+        // merge conflict is in that file under that name, so renaming it
+        // would send the reader to a path that does not exist. (That a
+        // nub-identity project is told about a `pnpm-lock.yaml` at all is a
+        // separate defect, already recorded: the filenames inside these
+        // diagnostics want `lockfile_basename` threaded through on the fork.)
         assert_eq!(
-            rewrite_suggestions(r#"Run "pnpm approve-builds" to pick."#, "nub"),
-            r#"Run "nub approve-builds" to pick."#
-        );
-        assert_eq!(
-            rewrite_suggestions("run `pnpm clean --lockfile` and `pnpm install`.", "nub"),
-            "run `nub clean --lockfile` and `nub install`."
-        );
-        assert_eq!(
-            rewrite_suggestions("pnpm requires one wheel per package", "nub"),
-            "pnpm requires one wheel per package"
+            rewrite_suggestions(
+                "Resolve the conflict in pnpm-lock.yaml, then run pnpm import.",
+                "nub"
+            ),
+            "Resolve the conflict in pnpm-lock.yaml, then run nub import."
         );
     }
 
