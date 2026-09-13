@@ -221,12 +221,21 @@ bool child(const std::wstring& root, const std::wstring& image_exe, const std::w
   Handle exe_section(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(exe_section_raw)));
   Handle dll_section(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(dll_section_raw)));
   char read_text[64] = {}; DWORD read_count = 0;
-  if (!ReadFile(read.value, read_text, sizeof(read_text) - 1, &read_count, nullptr) || std::strcmp(read_text, "existing-readable\n") != 0) return false;
+  if (!ReadFile(read.value, read_text, sizeof(read_text) - 1, &read_count, nullptr) ||
+      (std::strcmp(read_text, "existing-readable\n") != 0 && std::strcmp(read_text, "existing-readable\r\n") != 0)) {
+    std::printf("TRANSFERRED_EXISTING_READ=FAIL error=%lu bytes=%lu text=%s\n", GetLastError(), read_count, read_text);
+    std::fflush(stdout);
+    return false;
+  }
   std::printf("TRANSFERRED_EXISTING_READ=OK bytes=%lu\n", read_count);
   const std::wstring future = join(join(root, L"output"), L"future.json");
   if (!raw_nt_open_denied(api, L"RAW_NT_FUTURE_OPEN", future)) return false;
   const char payload[] = "brokered-write\n"; DWORD written = 0;
-  if (!WriteFile(write.value, payload, sizeof(payload) - 1, &written, nullptr) || written != sizeof(payload) - 1 || !FlushFileBuffers(write.value)) return false;
+  if (!WriteFile(write.value, payload, sizeof(payload) - 1, &written, nullptr) || written != sizeof(payload) - 1 || !FlushFileBuffers(write.value)) {
+    std::printf("TRANSFERRED_FUTURE_WRITE=FAIL error=%lu bytes=%lu\n", GetLastError(), written);
+    std::fflush(stdout);
+    return false;
+  }
   std::printf("TRANSFERRED_FUTURE_WRITE=OK bytes=%lu\n", written);
   if (!image_section_from_file(api, exe_file.value, L"EXE_FILE_SEC_IMAGE") || !image_section_from_file(api, dll_file.value, L"DLL_FILE_SEC_IMAGE") ||
       !map_image(api, exe_section.value, L"EXE_SECTION_MAP") || !map_image(api, dll_section.value, L"DLL_SECTION_MAP")) return false;
