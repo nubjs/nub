@@ -35,6 +35,8 @@ const NUB: Embedder = Embedder {
     workspace_settings: None,
     compat_package_extensions: None,
     allow_builds_writer: Some(record_allow_scripts),
+    extract_observer: Some(super::phantom_hooks::extract_observer),
+    materialize_policy: Some(super::phantom_hooks::materialize_policy),
 };
 
 /// What this process answers the engine with when it asks for the host's
@@ -59,6 +61,20 @@ fn host_workspace_settings(
     *HOST_SETTINGS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The store this run reads and writes, as the engine resolves it.
+///
+/// Taken from the settings published above rather than re-derived, so a
+/// project that sets `storeDir` in its `.npmrc` or `install.settings` is
+/// answered with the store the engine will actually use. Absent until a
+/// profile has been built, and absent under pnpm's own identity, which
+/// resolves its store itself.
+pub(crate) fn host_store_dir() -> Option<std::path::PathBuf> {
+    host_workspace_settings(std::path::Path::new(""))?
+        .store_dir
+        .as_deref()
+        .map(std::path::PathBuf::from)
 }
 
 /// Answer with `settings` from here on. Leaked because the engine holds its

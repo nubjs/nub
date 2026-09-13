@@ -91,6 +91,21 @@ pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
 static NATIVE_CONFIG_SEED: LazyLock<RwLock<Vec<String>>> =
     LazyLock::new(|| RwLock::new(Vec::new()));
 
+/// The package NAMES this project ejects before any scan: what it asked for
+/// in its own configuration, plus the ones nub always ejects.
+#[cfg(feature = "pm-pnpm")]
+pub(super) fn configured_eject_names() -> Vec<String> {
+    let configured = NATIVE_CONFIG_SEED
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    NUB_INTERNAL_DISK_MATERIALIZE_SEED
+        .iter()
+        .map(|name| (*name).to_owned())
+        .chain(configured)
+        .collect()
+}
+
 pub(super) fn set_native_config_seed(seed: Vec<String>) {
     *NATIVE_CONFIG_SEED
         .write()

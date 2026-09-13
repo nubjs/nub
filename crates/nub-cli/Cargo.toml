@@ -23,7 +23,7 @@ embed-runtime = ["nub-core/embed-runtime"]
 # The pnpm 12 engine (pacquet), consumed as a git dependency on the nubjs/pnpm
 # fork that carries the embedder seam. Opt-in while aube and pnpm coexist; the
 # flag goes away when vendor/aube is removed.
-pm-pnpm = ["dep:indexmap", "dep:pnpm-cli", "dep:pnpm-config", "dep:pnpm-diagnostics", "dep:pnpm-lockfile", "dep:pnpm-package-manager"]
+pm-pnpm = ["dep:indexmap", "dep:pnpm-cli", "dep:pnpm-config", "dep:pnpm-diagnostics", "dep:pnpm-lockfile", "dep:pnpm-package-manager", "dep:pnpm-store-dir"]
 # `nub compile` (spike): the in-process Rolldown bundler + Mach-O section
 # injection/signing (libsui) + zstd-19 Node compression. OFF by default — these
 # are large, compile-time-only deps, so the everyday build and CI cheap gates
@@ -213,11 +213,12 @@ aube-store = { path = "../../vendor/aube/crates/aube-store" }
 # branch (v12.4.1 plus the embedder patches). Move `rev` to re-pin.
 # The engine takes its compatibility rules as an `IndexMap`, so the host names the type.
 indexmap = { version = "2", optional = true }
-pnpm-cli = { git = "https://github.com/nubjs/pnpm", rev = "ae8dc9e1df28bc82f61368fbfc79fa8c0a104d65", optional = true }
-pnpm-config = { git = "https://github.com/nubjs/pnpm", rev = "ae8dc9e1df28bc82f61368fbfc79fa8c0a104d65", optional = true }
-pnpm-diagnostics = { git = "https://github.com/nubjs/pnpm", rev = "ae8dc9e1df28bc82f61368fbfc79fa8c0a104d65", optional = true }
-pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "ae8dc9e1df28bc82f61368fbfc79fa8c0a104d65", optional = true }
-pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "ae8dc9e1df28bc82f61368fbfc79fa8c0a104d65", optional = true }
+pnpm-cli = { git = "https://github.com/nubjs/pnpm", rev = "e588057440b4023d2b6fb2d2d8373e594c03736a", optional = true }
+pnpm-config = { git = "https://github.com/nubjs/pnpm", rev = "e588057440b4023d2b6fb2d2d8373e594c03736a", optional = true }
+pnpm-diagnostics = { git = "https://github.com/nubjs/pnpm", rev = "e588057440b4023d2b6fb2d2d8373e594c03736a", optional = true }
+pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "e588057440b4023d2b6fb2d2d8373e594c03736a", optional = true }
+pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "e588057440b4023d2b6fb2d2d8373e594c03736a", optional = true }
+pnpm-store-dir = { git = "https://github.com/nubjs/pnpm", rev = "e588057440b4023d2b6fb2d2d8373e594c03736a", optional = true }
 # Same major + `fancy` as vendor/aube — present.rs renders the engine's
 # miette::Report exactly as aube's own cli_main would, then rewrites it.
 miette = { version = "7", features = ["fancy"] }

@@ -163,8 +163,21 @@ pub fn register() {
 /// nub-cli, deserializes it into the typed `ScanResult` (no cross-fork string
 /// coupling) to seed the disk-materialize closure.
 fn scan_and_cache(dir: &Path, index: &PackageIndex) {
-    let fingerprint = index_content_fingerprint(index);
-    let sidecar = sidecar_path(dir, &fingerprint);
+    // `StoredFile.store_path` is the absolute CAS blob; the scanner resolves
+    // the reachable graph over the relpath key set and reads the blobs.
+    let files: Vec<(String, PathBuf)> = index
+        .iter()
+        .map(|(rel, file)| (rel.clone(), file.store_path.clone()))
+        .collect();
+    scan_and_cache_files(dir, &index_content_fingerprint(index), &files);
+}
+
+/// [`scan_and_cache`] with the store already reduced to what the scanner
+/// reads: each file's path inside the package and the content-addressed blob
+/// holding it. Both engines produce that pair, so this half of the producer
+/// is the same for either one.
+pub(crate) fn scan_and_cache_files(dir: &Path, fingerprint: &str, files: &[(String, PathBuf)]) {
+    let sidecar = sidecar_path(dir, fingerprint);
     // Cross-process / warm cache hit: this exact content was already scanned
     // UNDER THE CURRENT SCANNER VERSION (the version is in `sidecar`'s path, so a
     // scanner bump makes this `exists()` false and forces a re-scan). The verdict
@@ -173,9 +186,33 @@ fn scan_and_cache(dir: &Path, index: &PackageIndex) {
     if sidecar.exists() {
         return;
     }
-    if let Some(result) = scan_of_index(index) {
-        write_sidecar_atomic(&sidecar, &fingerprint, &result);
+    if let Some(result) = scan_of_files(files) {
+        write_sidecar_atomic(&sidecar, fingerprint, &result);
     }
+}
+
+/// A content fingerprint over what the store says a package holds: each
+/// file's path, the digest of its contents, and whether it is executable.
+///
+/// The scheme matches the one aube's store computes, but the digests do not
+/// — the two engines hash contents differently — so the same package under
+/// each engine keys a different sidecar. That costs a cold scan once and
+/// nothing else: a verdict is a pure function of the bytes, and the two
+/// engines do not share a store to begin with.
+#[cfg(feature = "pm-pnpm")]
+pub(crate) fn content_fingerprint<'a>(
+    entries: impl Iterator<Item = (&'a str, &'a str, bool)>,
+) -> String {
+    let mut entries: Vec<(&str, &str, bool)> = entries.collect();
+    entries.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for (path, digest, executable) in entries {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(digest.as_bytes());
+        hasher.update(if executable { b"\x01" } else { b"\x00" });
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 /// Read a package's cached phantom verdict, or SCAN it on-demand (and cache the
@@ -202,13 +239,33 @@ pub(crate) fn cached_or_scan_verdict(
     read_fallback_dir: Option<&Path>,
     index: &PackageIndex,
 ) -> Option<ScanResult> {
-    let fingerprint = index_content_fingerprint(index);
-    let sidecar = sidecar_path(dir, &fingerprint);
+    let files: Vec<(String, PathBuf)> = index
+        .iter()
+        .map(|(rel, file)| (rel.clone(), file.store_path.clone()))
+        .collect();
+    cached_or_scan_verdict_files(
+        dir,
+        read_fallback_dir,
+        &index_content_fingerprint(index),
+        &files,
+    )
+}
+
+/// [`cached_or_scan_verdict`] over the file list both engines produce, which
+/// is the whole of what the scan reads. The engine-shaped half is the
+/// caller's.
+pub(crate) fn cached_or_scan_verdict_files(
+    dir: &Path,
+    read_fallback_dir: Option<&Path>,
+    fingerprint: &str,
+    files: &[(String, PathBuf)],
+) -> Option<ScanResult> {
+    let sidecar = sidecar_path(dir, fingerprint);
     // `read_fallback_dir` is the global store's sidecar tier when installs
     // are writing a project-local store: its verdicts are read, never
     // written, the same layering the CAS itself uses.
     let cached = std::iter::once(sidecar.clone())
-        .chain(read_fallback_dir.map(|dir| sidecar_path(dir, &fingerprint)));
+        .chain(read_fallback_dir.map(|dir| sidecar_path(dir, fingerprint)));
     for candidate in cached {
         if let Ok(bytes) = std::fs::read(&candidate)
             && let Ok(result) = serde_json::from_slice::<ScanResult>(&bytes)
@@ -218,12 +275,15 @@ pub(crate) fn cached_or_scan_verdict(
     }
     // No (or unreadable) sidecar → scan the already-loaded index now, cache it,
     // and use the verdict for this install's eject decision.
-    let result = scan_of_index(index)?;
-    write_sidecar_atomic(&sidecar, &fingerprint, &result);
+    let result = scan_of_files(files)?;
+    write_sidecar_atomic(&sidecar, fingerprint, &result);
     Some(result)
 }
 
-/// Scan a package's CAS-backed index into a [`ScanResult`], panic-guarded.
+/// Scan a package into a [`ScanResult`], panic-guarded, over the file list
+/// both engines produce — each file's path inside the package and the
+/// content-addressed blob holding it, which is the whole of what the scan
+/// reads.
 ///
 /// Panic-safety rests on the scan being panic-free BY CONSTRUCTION, not on the
 /// `catch_unwind`: oxc reports an unparseable/hostile file via a return flag (not
@@ -232,14 +292,8 @@ pub(crate) fn cached_or_scan_verdict(
 /// The `catch_unwind` is a redundant guard that only engages under an unwinding
 /// profile (dev/test); the shipped release profile is `panic = "abort"`, where it
 /// is inert. Do not treat it as a production safety net.
-fn scan_of_index(index: &PackageIndex) -> Option<ScanResult> {
-    // `StoredFile.store_path` is the absolute CAS blob; the scanner resolves the
-    // reachable graph over the relpath key set and reads content from the blobs.
-    let files: Vec<(String, PathBuf)> = index
-        .iter()
-        .map(|(rel, file)| (rel.clone(), file.store_path.clone()))
-        .collect();
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_index(&files)))
+fn scan_of_files(files: &[(String, PathBuf)]) -> Option<ScanResult> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scan_index(files)))
         .ok()
         .flatten()
 }
