@@ -1,0 +1,67 @@
+name: Windows full-network artifact replay
+
+on:
+  push:
+    branches: [windows-full-network-replay]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-11-arm]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 64
+          persist-credentials: false
+      - name: Checking source binding and retaining built artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildHead = 'dd17de17525697c0d9d50cbbaded0a87e89ead75'
+          $allowed = @('.github/workflows/windows-full-network-replay.yml', 'tests/sandbox-native-adapter/run-full-network-standard-user.ps1', 'tests/sandbox-native-adapter/test-full-network-runner.ps1')
+          $changed = @(git diff --name-only $buildHead HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Build revision unavailable' }
+          foreach ($path in $changed) { if ($path -notin $allowed) { throw "Unbuilt source change: $path" } }
+          & gh run download 34738677262 --repo nubjs/nub --name 'windows-full-network-gate-${{ matrix.runner }}' --dir retained
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $source = Get-Content retained/source-runtimeenv.json -Raw | ConvertFrom-Json
+          if ($source.source -ne $buildHead -or $source.runner -ne '${{ matrix.runner }}') { throw 'Retained source or platform mismatch' }
+          New-Item -ItemType Directory -Force reports, reports/binaries | Out-Null
+          Copy-Item retained/binaries/*.exe reports/binaries
+          Copy-Item retained/binary-sha256.json reports/binary-sha256.json
+          foreach ($record in (Get-Content reports/binary-sha256.json -Raw | ConvertFrom-Json)) {
+            $path = Join-Path 'reports/binaries' ([IO.Path]::GetFileName($record.Path))
+            if ((Get-FileHash -Algorithm SHA256 $path).Hash -ne $record.Hash) { throw "Retained binary hash mismatch: $path" }
+          }
+          if (@(Get-ChildItem reports/binaries/*.exe).Count -ne 5) { throw 'Expected five retained executables' }
+          @{ replaySource=(git rev-parse HEAD); binarySource=$buildHead; buildRun=34738677262; runner='${{ matrix.runner }}'; sourceDelta=$changed; runtime=[Environment]::OSVersion.VersionString } | ConvertTo-Json -Depth 4 | Set-Content reports/replay-binding.json
+      - name: Checking runner argument construction
+        shell: powershell
+        run: ./tests/sandbox-native-adapter/test-full-network-runner.ps1
+      - name: Running native network controls as an ordinary user
+        shell: pwsh
+        run: |
+          & ./tests/sandbox-native-adapter/run-full-network-standard-user.ps1 -FixtureBinary (Join-Path $PWD 'reports/binaries/native-full-network.exe') -LibraryBinary (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe') -TmpBinary (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe') -NetworkBinary (Join-Path $PWD 'reports/binaries/windows_native_full_network.exe') -BinaryManifest (Join-Path $PWD 'reports/binary-sha256.json') -ReportDirectory reports/full-network-standard-user
+          exit $LASTEXITCODE
+      - name: Running lifecycle controls as an ordinary user
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          if (!(Test-Path reports/binaries/production_readiness_windows.exe)) { throw 'Missing lifecycle artifact' }
+          & ./tests/sandbox-native-adapter/run-standard-user.ps1 -TestBinary (Join-Path $PWD 'reports/binaries/production_readiness_windows.exe') -ReportDirectory reports/lifecycle-standard-user
+          exit $LASTEXITCODE
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-full-network-replay-${{ matrix.runner }}
+          path: reports/
