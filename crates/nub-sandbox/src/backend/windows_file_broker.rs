@@ -1481,6 +1481,7 @@ mod tests {
                 );
             }
             println!("FILE_BROKER_NATIVE_MODE={mode}\n{stdout}");
+            eprintln!("FILE_BROKER_NATIVE_MODE={mode}\n{stderr}");
             drop(child);
             drop(resource);
             drop(prepared);
