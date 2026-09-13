@@ -402,8 +402,8 @@ fn build_supervised_plan(
     // Allow-only FS boundary: build the same Landlock ruleset the build-jail path uses, granting
     // the authored allow-set plus the system read floor plus the entry program. `None` when the
     // policy does not confine the filesystem (a pure net/env policy) — the child then skips
-    // `restrict_self`. The Landlock UNION cannot subtract, so a Deny rule INSIDE a granted
-    // subtree (`.git/hooks`, `.git/config`, the policy file) is carried by the write broker below.
+    // `restrict_self`. Landlock cannot subtract a deny inside a granted subtree;
+    // legacy deny policies are carried below and refused at supervised admission.
     let ruleset = if fs_confines(&policy.fs) {
         Some(
             super::linux_landlock::build(policy, tmp_dir, Some(&program_abs), &retained.0)
@@ -415,10 +415,9 @@ fn build_supervised_plan(
     } else {
         None
     };
-    // Landlock's allow-only ruleset is authoritative for a positive policy. The expensive
-    // userspace write broker exists solely for legacy explicit deny-inside-allow carve-outs;
-    // arming it for every positive write would trap ordinary filesystem operations and leave
-    // cancellation vulnerable to a deliberately blocking legacy broker operation.
+    // Landlock's allow-only ruleset is authoritative for a positive policy. Only
+    // legacy explicit denies select the write-policy field, which supervised
+    // admission rejects. Positive writes must not enter that legacy broker.
     let has_explicit_deny = has_explicit_fs_deny(policy);
     let write_policy = if ruleset.is_some() && has_explicit_deny {
         Some(

@@ -2314,10 +2314,9 @@ pub struct EgressPolicy {
     pub self_proc: BTreeSet<SelfProcFile>,
     pub allow_all: bool,
     pub allow: Vec<String>,
-    /// `Some` ⇒ arm the write broker as THE write-intent authority, enforcing this whole fs
-    /// policy (allow-only base + deny carve-outs). `None` ⇒ no filesystem confinement on this
-    /// launch, so the filter traps no write-intent syscall (the build jail's coarse path, and any
-    /// net-only policy).
+    /// Legacy deny-inside-allow policy. Launch refuses `Some`: the old broker does not
+    /// establish authority before all filesystem side effects. Positive policies use
+    /// Landlock and leave this `None`; `None` does not mean the filesystem is unconfined.
     pub write_policy: Option<FsRuleSet>,
     /// `Some` ⇒ a loopback SNI-inspecting egress proxy is running; the connect-notifier redirects
     /// an allowed TCP connect THROUGH it (speaking the cooperative `CONNECT` handshake on the
@@ -2617,8 +2616,18 @@ pub(super) fn spawn_supervised_with_ready(
     launch: SupervisedLaunch,
     ready: impl FnOnce(i32) -> io::Result<()>,
 ) -> io::Result<SupervisedChild> {
+    // Do not revive the legacy write broker for a new filesystem backend. Its
+    // post-open path check cannot undo O_TRUNC/O_CREAT side effects. The approved
+    // positive-only grammar never needs this path; reject before starting an owner
+    // or child, rather than running with a weaker policy.
+    if policy.write_broker() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "legacy filesystem deny-rule brokering is not supported",
+        ));
+    }
     // Built in the PARENT and copied into the child by `fork`; the child installs it without
-    // allocating. The write-intent dispatch is present only when the policy carries carve-outs.
+    // allocating. Accepted policies leave the legacy write-intent dispatch disabled.
     let filter = notifier_program(policy.write_broker(), !policy.self_proc.is_empty());
     let state = SupState::new(policy);
     let control = Arc::new(WorkerControl::new()?);
@@ -3632,6 +3641,39 @@ mod lifecycle_tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn legacy_write_policy_is_refused_before_command_admission() {
+        let mut legacy = policy("example.test");
+        legacy.write_policy = Some(FsRuleSet {
+            entries: Vec::new(),
+            default_effect: Effect::Deny,
+        });
+        let argv = [CString::new("/must-not-be-started").unwrap()];
+        let launch = SupervisedLaunch {
+            argv: &argv,
+            envp: &[],
+            cwd: None,
+            ruleset_fd: -1,
+            seccomp_ceiling: None,
+            stdin: SupervisedStdio::Null,
+            stdout: SupervisedStdio::Null,
+            stderr: SupervisedStdio::Null,
+            inherited_fds: &[],
+        };
+        let mut ready_called = false;
+        let result = spawn_supervised_with_ready(legacy, launch, |_| {
+            ready_called = true;
+            Ok(())
+        });
+        assert!(!ready_called);
+        let error = result.err().expect("legacy write policy must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            error.to_string(),
+            "legacy filesystem deny-rule brokering is not supported"
+        );
     }
 
     #[test]
