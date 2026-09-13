@@ -3,8 +3,8 @@
 //! SECURITY POSTURE (proposal §5 + the U5 dispatch requirements) — the invariants this
 //! module exists to hold:
 //!
-//! - **Per-run + ephemeral.** The CA is minted when the proxy starts and gone when it
-//!   drops. Nothing survives the run; no cross-run artifact exists.
+//! - **Per-acquired-session + ephemeral.** Commands share their session's CA. The last
+//!   session/command owner removes the public bundle; no reusable identity stores it.
 //! - **The CA private key NEVER leaves this process's memory.** It is held only in
 //!   [`MitmCa::ca_key`] and used only to sign leaves in-process — it is NEVER written to
 //!   disk (stronger than SRT, which writes the key to a temp dir). Only the CA
@@ -12,7 +12,7 @@
 //! - **The OS trust store is NEVER touched.** No `security add-trusted-cert`, no
 //!   `/etc/ssl` write. Trust reaches the child ONLY through the constructed child env: a
 //!   CA-bundle file the CA-env vars point at (see `backend::set_ca_env`), scoped to the
-//!   child, invisible to every other process, removed when this value drops.
+//!   child. The file contains only public certificates and is removed when this value drops.
 //! - **The bundle is CA cert + the platform's REAL roots**, never CA-alone — the
 //!   `SSL_CERT_FILE`-class vars REPLACE a tool's store, so a CA-only file would break
 //!   verification of every blind-tunneled (non-terminated) host.

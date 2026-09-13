@@ -318,7 +318,7 @@ impl ProxyContext {
 /// connections and joins the active handlers.
 pub struct EgressProxy {
     port: u16,
-    /// The per-session bearer every client must present (HTTP `Proxy-Authorization` /
+    /// The per-listener bearer every client must present (HTTP `Proxy-Authorization` /
     /// SOCKS5 user-pass) — the defense-in-depth guard against a co-resident same-user
     /// process borrowing the child's loopback egress hole. Minted per [`start`] from the
     /// OS CSPRNG; delivered to the child as the `HTTP_PROXY` URL userinfo.
@@ -371,7 +371,7 @@ impl EgressProxy {
         self.port
     }
 
-    /// The per-session bearer token the child presents to the proxy — delivered via the
+    /// The per-listener bearer token the child presents to the proxy — delivered via the
     /// `HTTP_PROXY` URL userinfo so ordinary proxy-honoring clients send it automatically.
     pub fn token(&self) -> &str {
         &self.token
