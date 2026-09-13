@@ -314,7 +314,7 @@ pub(super) fn handle(
         }
         let pending = client.submit_cancellable(
             request,
-            || control.cancelled(),
+            || control.cancelled() || !notification_is_live(nfd, req.id),
             |capacity| control.wait(capacity, libc::POLLIN, None),
         )?;
         if !control.wait(pending.readiness_fd(), libc::POLLIN, None)? {
