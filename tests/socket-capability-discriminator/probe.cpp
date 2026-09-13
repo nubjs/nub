@@ -79,7 +79,7 @@ bool run(int mode,int op,PSID sid,const std::wstring& exe) {
   bool assigned=launched && AssignProcessToJobObject(job,pi.hProcess); bool duplicated=mode!=2 || (launched && WSADuplicateSocketW(source,pi.dwProcessId,&p.info)==0);
   int duplicate_error=duplicated?0:WSAGetLastError(); if(source!=INVALID_SOCKET) closesocket(source);
   CloseHandle(inR);CloseHandle(outW);DeleteProcThreadAttributeList(attrs);
-  Result first={},last={}; bool wire=false;
+  Result first={},last={}; bool wire=false, peer_connected=false, peer_payload=false;
   if(assigned && duplicated) {
     transfer(inW,&p,sizeof(p),true); ResumeThread(pi.hThread);
     wire=transfer(outR,&first,sizeof(first),false);
@@ -91,20 +91,21 @@ bool run(int mode,int op,PSID sid,const std::wstring& exe) {
       last=first;last.ok=dead&&closed;
       std::printf("OWNER_HANDLE_LOSS child_exited=%d listener_closed=%d\n",dead,closed);
     } else if(wire && first.ok) {
-      if(op==3) { peer=socket(AF_INET,SOCK_STREAM,0);a=addr(first.port);connect(peer,(sockaddr*)&a,sizeof(a)); }
-      else if(op==1 || (op==0 && mode!=2)) peer=ready(host)?accept(host,nullptr,nullptr):INVALID_SOCKET;
+      if(op==3) { peer=socket(AF_INET,SOCK_STREAM,0);a=addr(first.port);peer_connected=connect(peer,(sockaddr*)&a,sizeof(a))==0; }
+      else if(op==1 || (op==0 && mode!=2)) { peer=ready(host)?accept(host,nullptr,nullptr):INVALID_SOCKET;peer_connected=peer!=INVALID_SOCKET; }
+      else if(op==0) peer_connected=peer!=INVALID_SOCKET;
       char c=0;
-      if(op==2) { int n=sizeof(a); if(ready(host) && recvfrom(host,&c,1,0,(sockaddr*)&a,&n)==1 && c=='Q') sendto(host,"R",1,0,(sockaddr*)&a,n); }
-      else if(peer!=INVALID_SOCKET) { timeout(peer);send(peer,"R",1,0);recv(peer,&c,1,0); }
+      if(op==2) { int n=sizeof(a); peer_payload=ready(host) && recvfrom(host,&c,1,0,(sockaddr*)&a,&n)==1 && c=='Q';if(peer_payload) sendto(host,"R",1,0,(sockaddr*)&a,n); }
+      else if(peer_connected) { timeout(peer);send(peer,"R",1,0);peer_payload=recv(peer,&c,1,0)==1 && c=='Q'; }
     }
     if(op!=4) wire=wire && transfer(outR,&last,sizeof(last),false);
   }
   bool token=wire && first.app==(mode?1u:0u) && !first.admin && !first.caps;
-  bool expected=mode==1 ? (!first.ok && first.error==WSAEACCES) : last.ok!=0;
+  bool expected=mode==1 ? (!last.ok && !peer_connected && !peer_payload) : (last.ok && (op==4 || peer_payload));
   bool ok=assigned && duplicated && token && expected;
   if(launched) { if(WaitForSingleObject(pi.hProcess,5000)!=WAIT_OBJECT_0) {TerminateJobObject(job,99);ok=false;} CloseHandle(pi.hThread);CloseHandle(pi.hProcess); }
   if(job)CloseHandle(job);CloseHandle(inW);CloseHandle(outR);closesocket(host);if(peer!=INVALID_SOCKET)closesocket(peer);
-  std::printf("CASE mode=%d op=%d launched=%d assigned=%d duplicate=%d duplicate_error=%d app=%lu caps=%lu admin=%lu initial_ok=%d initial_error=%d io_ok=%d io_error=%d RESULT=%s\n",mode,op,launched,assigned,duplicated,duplicate_error,first.app,first.caps,first.admin,first.ok,first.error,last.ok,last.error,ok?"PASS":"FAIL"); fflush(stdout); return ok;
+  std::printf("CASE mode=%d op=%d launched=%d assigned=%d duplicate=%d duplicate_error=%d app=%lu caps=%lu admin=%lu initial_ok=%d initial_error=%d io_ok=%d io_error=%d peer_connected=%d peer_payload=%d RESULT=%s\n",mode,op,launched,assigned,duplicated,duplicate_error,first.app,first.caps,first.admin,first.ok,first.error,last.ok,last.error,peer_connected,peer_payload,ok?"PASS":"FAIL"); fflush(stdout); return ok;
 }
 int wmain(int argc,wchar_t**) {
   WSADATA w={};if(WSAStartup(MAKEWORD(2,2),&w))return 2;if(argc>1)return child();
