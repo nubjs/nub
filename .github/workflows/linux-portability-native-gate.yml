@@ -133,13 +133,14 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cross test -p nub-sandbox --tests --target "${{ matrix.target }}" --no-run --message-format=json-render-diagnostics > reports/musl-test-artifacts.jsonl
+          cross test -p nub-sandbox --tests --target "${{ matrix.target }}" --no-run
           python3 - <<'PY'
-          import hashlib, json
+          import hashlib
+          import os
           from pathlib import Path
 
-          artifacts = [json.loads(line) for line in Path("reports/musl-test-artifacts.jsonl").read_text().splitlines()]
-          binaries = [Path(item["executable"]) for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("profile", {}).get("test") and item.get("executable")]
+          deps = Path("target") / "${{ matrix.target }}" / "debug" / "deps"
+          binaries = [binary for binary in deps.glob("nub_sandbox-*") if binary.is_file() and os.access(binary, os.X_OK)]
           assert binaries, "No test binaries recorded"
           lines = [f"{hashlib.sha256(binary.read_bytes()).hexdigest()}  {binary}" for binary in binaries]
           Path("reports/musl-test-binaries.sha256").write_text("\n".join(lines) + "\n")
