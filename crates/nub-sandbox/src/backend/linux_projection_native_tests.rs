@@ -770,6 +770,24 @@ fn native_concurrent_client(root: &Path) {
     println!("NATIVE_CONCURRENT_OK");
 }
 
+fn native_cancelled_create_client(root: &Path) {
+    audit_command();
+    println!("NATIVE_CANCELLED_CREATE_READY");
+    io::stdout().flush().unwrap();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "go");
+    let result = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("app/native-queue-cancelled-create"));
+    assert!(
+        result.is_err(),
+        "cancelled create unexpectedly reached the projected filesystem"
+    );
+}
+
 fn native_request(path: &CStr, flags: i32, mode: u64) -> NativeOpenRequest {
     NativeOpenRequest {
         path: path.to_owned(),
@@ -937,11 +955,11 @@ fn native_simultaneous_command_contract(service: &NativeOpenService, view: &CStr
         gate = Some(service.block_next_path(c"/app/native-concurrent")?);
         first_input.write_all(b"go\n")?;
         gate.as_ref()
-            .expect("first command gate remains armed")
+            .ok_or_else(|| io::Error::other("first command gate was not armed"))?
             .wait_until_active()?;
         second_input.write_all(b"go\n")?;
         gate.take()
-            .expect("first command gate releases once")
+            .ok_or_else(|| io::Error::other("first command gate was released twice"))?
             .release()?;
         native_event(&mut first_output, "NATIVE_CONCURRENT_OK")?;
         native_event(&mut second_output, "NATIVE_CONCURRENT_OK")?;
@@ -1068,6 +1086,126 @@ fn native_shared_service_cancellation_contract(service: &NativeOpenService, view
     }
 }
 
+fn native_admission_cancellation_contract(service: &NativeOpenService, view: &CString, raw: &Path) {
+    let mut first = spawn_native_command("native-concurrent", view, service.client());
+    let mut second = spawn_native_command("native-concurrent", view, service.client());
+    let mut cancelled = spawn_native_command("native-cancelled-create", view, service.client());
+    let mut first_output = BufReader::new(first.take_stdout().unwrap());
+    let mut second_output = BufReader::new(second.take_stdout().unwrap());
+    let mut cancelled_output = BufReader::new(cancelled.take_stdout().unwrap());
+    let first_stderr = first.take_stderr().unwrap();
+    let second_stderr = second.take_stderr().unwrap();
+    let cancelled_stderr = cancelled.take_stderr().unwrap();
+    let first_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(first_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let second_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(second_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let cancelled_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(cancelled_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let mut first_input = first.take_stdin().unwrap();
+    let mut second_input = second.take_stdin().unwrap();
+    let mut cancelled_input = cancelled.take_stdin().unwrap();
+    let cancelled_path = raw.join("app/native-queue-cancelled-create");
+    assert!(
+        !cancelled_path.exists(),
+        "cancelled admission create starts absent"
+    );
+    let client = service.client();
+    let mut gate = None;
+    let protocol = (|| -> io::Result<(u64, u64)> {
+        native_event(&mut first_output, "NATIVE_CONCURRENT_READY")?;
+        native_event(&mut second_output, "NATIVE_CONCURRENT_READY")?;
+        native_event(&mut cancelled_output, "NATIVE_CANCELLED_CREATE_READY")?;
+        let before = client.stats();
+        gate = Some(service.block_next_path(c"/app/native-concurrent")?);
+        first_input.write_all(b"go\n")?;
+        gate.as_ref()
+            .ok_or_else(|| io::Error::other("admission gate was not armed"))?
+            .wait_until_active()?;
+        second_input.write_all(b"go\n")?;
+        client.wait_for_admission(1, 0)?;
+        cancelled_input.write_all(b"go\n")?;
+        client.wait_for_admission(1, 1)?;
+        cancelled.kill()?;
+        let cancelled_status = cancelled.wait()?;
+        if cancelled_status.success() {
+            return Err(io::Error::other(
+                "capacity-cancelled command unexpectedly succeeded",
+            ));
+        }
+        gate.take()
+            .ok_or_else(|| io::Error::other("admission gate was released twice"))?
+            .release()?;
+        native_event(&mut first_output, "NATIVE_CONCURRENT_OK")?;
+        native_event(&mut second_output, "NATIVE_CONCURRENT_OK")?;
+        Ok(before)
+    })();
+    drop(gate.take());
+    let killed = if protocol.is_err() {
+        Some((first.kill(), second.kill(), cancelled.kill()))
+    } else {
+        None
+    };
+    drop(first_input);
+    drop(second_input);
+    drop(cancelled_input);
+    let outcome = (
+        protocol,
+        first.wait(),
+        second.wait(),
+        cancelled.wait(),
+        first_stderr_drain.join(),
+        second_stderr_drain.join(),
+        cancelled_stderr_drain.join(),
+    );
+    match outcome {
+        (
+            Ok(before),
+            Ok(first_status),
+            Ok(second_status),
+            Ok(cancelled_status),
+            Ok(Ok(first_stderr)),
+            Ok(Ok(second_stderr)),
+            Ok(Ok(cancelled_stderr)),
+        ) => {
+            assert!(
+                first_status.success(),
+                "first admission command {first_status:?}\n{first_stderr}"
+            );
+            assert!(
+                second_status.success(),
+                "second admission command {second_status:?}\n{second_stderr}"
+            );
+            assert!(
+                !cancelled_status.success(),
+                "capacity-cancelled command unexpectedly succeeded: {cancelled_status:?}\n{cancelled_stderr}"
+            );
+            assert!(
+                !cancelled_path.exists(),
+                "capacity-cancelled create reached the projected filesystem"
+            );
+            assert_eq!(
+                client.stats(),
+                (before.0 + 2, before.1 + 2),
+                "only the two admitted commands may acquire native files"
+            );
+            println!("NATIVE_ADMISSION_CANCELLATION_OK");
+        }
+        outcome => panic!(
+            "native admission cancellation failed after reaping children; killed={killed:?}; outcome={outcome:?}"
+        ),
+    }
+}
+
 pub(super) fn recursive_view(source: &Path, target: &Path, readonly: bool) -> File {
     fs::create_dir(target).unwrap();
     let source = CString::new(source.as_os_str().as_bytes()).unwrap();
@@ -1157,6 +1295,7 @@ fn native_provider(root: &Path) {
     native_queue_contract(&service, &raw);
     native_simultaneous_command_contract(&service, &view_c);
     native_shared_service_cancellation_contract(&service, &view_c);
+    native_admission_cancellation_contract(&service, &view_c, &raw);
     // This provider thread is deliberately neither the registered resolver
     // thread nor seccomp-filtered. The FUSE callback therefore receives a
     // wrong Request.pid; EACCES proves callback authentication rather than the
@@ -1322,6 +1461,7 @@ pub(super) fn run_role(role: &str, root: &Path) -> bool {
         "native-raw" => native_client(root, false),
         "native-command" => native_client(root, true),
         "native-concurrent" => native_concurrent_client(root),
+        "native-cancelled-create" => native_cancelled_create_client(root),
         _ => return false,
     }
     true
