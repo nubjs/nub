@@ -249,6 +249,20 @@ mod tests {
             "create" | "write" => {
                 let _ = std::fs::write(path, b"must not be written after cancellation");
             }
+            "truncate" => unsafe {
+                extern "C" {
+                    fn sandbox_file_broker_test_exclusive_truncate(path: *const u16) -> i32;
+                }
+                let path: Vec<u16> = std::path::PathBuf::from(path)
+                    .to_str()
+                    .unwrap()
+                    .encode_utf16()
+                    .chain([0])
+                    .collect();
+                // SAFETY: terminated fixture path; the native helper issues one
+                // actual `FILE_OVERWRITE` with exclusive sharing.
+                let _ = sandbox_file_broker_test_exclusive_truncate(path.as_ptr());
+            },
             "mkdir" => {
                 let _ = std::fs::create_dir(path);
             }
@@ -264,7 +278,7 @@ mod tests {
     #[test]
     #[ignore = "requires an ordinary-user native Windows acceptance run"]
     fn file_broker_kills_job_before_joining_blocked_worker() {
-        for operation in ["read", "create", "write", "mkdir"] {
+        for operation in ["read", "create", "write", "truncate", "mkdir"] {
             cancellation_control(operation);
         }
     }
@@ -568,6 +582,14 @@ mod tests {
         // SAFETY: pointer-free fixed-width layout matches the native protocol.
         unsafe { sandbox_file_broker_validate(request) }
     }
+    fn normalize_directory_capture(request: &mut Request) -> bool {
+        unsafe extern "C" {
+            fn sandbox_file_broker_normalize_directory_capture(request: *mut Request) -> i32;
+        }
+        // SAFETY: pointer-free fixed-width request is exclusively borrowed for
+        // the native capture normalization regression.
+        unsafe { sandbox_file_broker_normalize_directory_capture(request) != 0 }
+    }
 
     #[test]
     fn file_broker_protocol_rejects_authority_and_namespace_expansion() {
@@ -658,6 +680,34 @@ mod tests {
         ] {
             assert_ne!(validate(&request(path)), 0, "{path}");
         }
+        assert_ne!(
+            validate(&request(r"C:\output\listing.dir\")),
+            0,
+            "the broker protocol receives only canonical non-root leaves"
+        );
+        let mut directory = request(r"C:\output\listing.dir\");
+        directory.options = 0x21; // FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT
+        assert!(normalize_directory_capture(&mut directory));
+        assert_eq!(
+            validate(&directory),
+            0,
+            "directory capture normalizes one separator"
+        );
+        let mut regular_file = request(r"C:\output\future.json\");
+        assert!(!normalize_directory_capture(&mut regular_file));
+        assert_ne!(
+            validate(&regular_file),
+            0,
+            "a regular-file trailing separator is rejected before broker exchange"
+        );
+        for path in [r"C:\output\listing.dir\\", r"C:\"] {
+            let mut rejected = request(path);
+            rejected.options = 0x21;
+            let _ = normalize_directory_capture(&mut rejected);
+            assert_ne!(validate(&rejected), 0, "{path}");
+        }
+        directory.length = 1024;
+        assert!(!normalize_directory_capture(&mut directory));
         for disposition in [1, 2, 3, 4, 5] {
             assert_eq!(
                 validate(&Request {
@@ -749,7 +799,7 @@ mod tests {
             path: [0; 1024],
             ..valid.clone()
         };
-        for attributes in [0, 1, 3] {
+        for attributes in [0, 1, 3, 7] {
             assert_eq!(
                 validate(&Request {
                     attributes,
@@ -758,13 +808,16 @@ mod tests {
                 0
             );
         }
-        assert_ne!(
-            validate(&Request {
-                attributes: 2,
-                ..remove
-            }),
-            0
-        );
+        for attributes in [2, 5, 8, 0x10] {
+            assert_ne!(
+                validate(&Request {
+                    attributes,
+                    ..remove.clone()
+                }),
+                0,
+                "unobserved delete-disposition bits remain outside the protocol"
+            );
+        }
         assert_ne!(
             validate(&Request {
                 source_low: 4,
@@ -786,15 +839,26 @@ mod tests {
             let directory = root.join("win32.dir");
             assert_eq!(std::fs::create_dir(&directory).is_ok(), allowed);
             assert!(std::fs::create_dir(root.join("forbidden-folder.txt")).is_err());
-            assert!(std::fs::read_dir(root.join("private-folder.txt")).is_err());
+            assert!(
+                std::fs::read_dir(root.join("private-folder.txt")).is_err(),
+                "the unmatched directory remains denied in {mode} mode"
+            );
             let listing = std::fs::read_dir(root.join("listing.dir"));
-            assert_eq!(listing.is_ok(), allowed);
+            assert_eq!(
+                listing.is_ok(),
+                allowed,
+                "ordinary Rust read_dir is raw-denied and broker-allowed"
+            );
             if allowed {
                 let entries: Vec<_> = listing
                     .unwrap()
                     .map(|entry| entry.unwrap().file_name())
                     .collect();
                 assert!(entries.contains(&"entry.txt".into()));
+                assert!(
+                    !root.join("force-image.json").exists(),
+                    "the observed delete-disposition shape reaches the broker"
+                );
             }
             let linked = root.join("win32-link.json");
             assert_eq!(
@@ -818,6 +882,11 @@ mod tests {
                 allowed: i32,
                 statuses: *mut i32,
             ) -> u32;
+            fn sandbox_file_broker_test_exclusive_overwrite(root: *const u16, allowed: i32) -> u32;
+            fn sandbox_file_broker_test_exclusive_overwrite_denied(
+                path: *const u16,
+                exact_denial: i32,
+            ) -> u32;
         }
         for name in ["existing.json", "near.txt"] {
             let path: Vec<u16> = root
@@ -837,6 +906,32 @@ mod tests {
                 )
             };
             assert_eq!(error, 0, "four-call failure bits for {name}: {error:#x}");
+        }
+        let root_path: Vec<u16> = root.to_str().unwrap().encode_utf16().chain([0]).collect();
+        // SAFETY: terminated fixture root; helper makes actual exclusive native
+        // overwrite and overwrite-if calls rather than invoking the broker API.
+        assert_eq!(
+            unsafe {
+                sandbox_file_broker_test_exclusive_overwrite(root_path.as_ptr(), i32::from(allowed))
+            },
+            0,
+            "exclusive overwrite native control failed in {mode} mode"
+        );
+        for name in ["hidden-overwrite.json", "system-overwrite.json"] {
+            let path: Vec<u16> = root
+                .join(name)
+                .to_str()
+                .unwrap()
+                .encode_utf16()
+                .chain([0])
+                .collect();
+            // SAFETY: a terminated fixture path with attributes that native
+            // FILE_OVERWRITE must reject when the request asks for normal.
+            assert_eq!(
+                unsafe { sandbox_file_broker_test_exclusive_overwrite_denied(path.as_ptr(), 1) },
+                0,
+                "{name} reached a synthetic exclusive overwrite path in {mode} mode"
+            );
         }
         let future = root.join("future.json");
         let write = std::fs::write(&future, b"created through generic write");
@@ -863,6 +958,27 @@ mod tests {
             let result = unsafe { sandbox_file_broker_test_reparse_after_open(path.as_ptr()) };
             assert_eq!(result, 0, "post-transfer reparse setup failed: {result}");
             assert!(std::fs::read(&mutated).is_err());
+            let readonly: Vec<u16> = root
+                .join("readonly.txt")
+                .to_str()
+                .unwrap()
+                .encode_utf16()
+                .chain([0])
+                .collect();
+            // SAFETY: both targets are terminated fixture paths. Neither name
+            // matches the writable JSON-only test authority.
+            assert_eq!(
+                unsafe {
+                    sandbox_file_broker_test_exclusive_overwrite_denied(readonly.as_ptr(), 1)
+                },
+                0,
+                "read-only matcher target reached the exclusive overwrite path"
+            );
+            assert_eq!(
+                unsafe { sandbox_file_broker_test_exclusive_overwrite_denied(path.as_ptr(), 0) },
+                0,
+                "reparse target reached the exclusive overwrite path"
+            );
         }
         assert!(std::fs::write(root.join("future.txt"), b"denied").is_err());
         // Authority belongs to each explicitly matching hardlink spelling.
@@ -936,12 +1052,156 @@ mod tests {
         for name in [
             "source.json",
             "remove.json",
+            "force-image.json",
             "readonly.txt",
             "win32-source.json",
             "win32-remove.json",
         ] {
             std::fs::write(root.join(name), b"namespace fixture").unwrap();
         }
+    }
+
+    fn overwrite_fixture(root: &std::path::Path) {
+        std::fs::write(
+            root.join("exclusive-overwrite.json"),
+            b"exclusive overwrite",
+        )
+        .unwrap();
+        std::fs::hard_link(
+            root.join("exclusive-overwrite.json"),
+            root.join("exclusive-overwrite-alias.txt"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("overwrite-if-no-read.json"),
+            b"overwrite-if no read share",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("overwrite-if-delete-share.json"),
+            b"overwrite-if delete share",
+        )
+        .unwrap();
+        std::fs::write(root.join("readonly.txt"), b"read-only matcher target").unwrap();
+        for name in ["hidden-overwrite.json", "system-overwrite.json"] {
+            std::fs::write(root.join(name), b"metadata must remain unchanged").unwrap();
+        }
+        for name in [
+            "missing-overwrite.json",
+            "missing-overwrite-if.json",
+            "missing-overwrite-if-delete-share.json",
+        ] {
+            assert!(
+                !root.join(name).exists(),
+                "overwrite fixture must start absent: {name}"
+            );
+        }
+    }
+
+    fn assert_overwrite_fixture(root: &std::path::Path, overwritten: bool) {
+        let expected = if overwritten {
+            b"".as_slice()
+        } else {
+            b"exclusive overwrite".as_slice()
+        };
+        assert_eq!(
+            std::fs::read(root.join("exclusive-overwrite.json")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            std::fs::read(root.join("exclusive-overwrite-alias.txt")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            std::fs::read(root.join("overwrite-if-no-read.json")).unwrap(),
+            if overwritten {
+                b"".as_slice()
+            } else {
+                b"overwrite-if no read share".as_slice()
+            }
+        );
+        assert_eq!(
+            std::fs::read(root.join("overwrite-if-delete-share.json")).unwrap(),
+            if overwritten {
+                b"".as_slice()
+            } else {
+                b"overwrite-if delete share".as_slice()
+            }
+        );
+        assert_eq!(root.join("missing-overwrite.json").exists(), false);
+        assert_eq!(root.join("missing-overwrite-if.json").exists(), overwritten);
+        assert_eq!(
+            root.join("missing-overwrite-if-delete-share.json").exists(),
+            overwritten
+        );
+        if overwritten {
+            assert!(
+                std::fs::read(root.join("missing-overwrite-if.json"))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                std::fs::read(root.join("missing-overwrite-if-delete-share.json"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.join("readonly.txt")).unwrap(),
+            b"read-only matcher target"
+        );
+        for name in ["hidden-overwrite.json", "system-overwrite.json"] {
+            assert_eq!(
+                std::fs::read(root.join(name)).unwrap(),
+                b"metadata must remain unchanged",
+                "{name} was changed by a refused overwrite"
+            );
+        }
+    }
+
+    fn native_exclusive_overwrite(root: &std::path::Path, allowed: bool) {
+        unsafe extern "C" {
+            fn sandbox_file_broker_test_exclusive_overwrite(root: *const u16, allowed: i32) -> u32;
+        }
+        let root: Vec<u16> = root.to_str().unwrap().encode_utf16().chain([0]).collect();
+        // SAFETY: terminated fixture root; helper owns each native returned handle.
+        assert_eq!(
+            unsafe {
+                sandbox_file_broker_test_exclusive_overwrite(root.as_ptr(), i32::from(allowed))
+            },
+            0
+        );
+    }
+
+    fn native_exclusive_overwrite_denied(path: &std::path::Path) {
+        unsafe extern "C" {
+            fn sandbox_file_broker_test_exclusive_overwrite_denied(
+                path: *const u16,
+                exact_denial: i32,
+            ) -> u32;
+        }
+        let path: Vec<u16> = path.to_str().unwrap().encode_utf16().chain([0]).collect();
+        // SAFETY: terminated fixture path; the direct native request must not
+        // turn nonordinary existing attributes into a broker success.
+        assert_eq!(
+            unsafe { sandbox_file_broker_test_exclusive_overwrite_denied(path.as_ptr(), 1) },
+            0
+        );
+    }
+
+    fn overwrite_metadata_fixture(root: &std::path::Path) {
+        unsafe extern "C" {
+            fn sandbox_file_broker_test_exclusive_overwrite_metadata_fixture(
+                root: *const u16,
+            ) -> u32;
+        }
+        let root: Vec<u16> = root.to_str().unwrap().encode_utf16().chain([0]).collect();
+        // SAFETY: terminated fixture root; native setup marks only the two
+        // disposable metadata-control files.
+        assert_eq!(
+            unsafe { sandbox_file_broker_test_exclusive_overwrite_metadata_fixture(root.as_ptr()) },
+            0
+        );
     }
 
     fn native_namespace(root: &std::path::Path, allowed: bool) {
@@ -986,7 +1246,20 @@ mod tests {
             assert!(control.join("new-link.json").is_file());
             assert!(!control.join("source.json").exists());
             assert!(!control.join("remove.json").exists());
+            assert!(!control.join("force-image.json").exists());
             assert!(!control.join("created.dir").exists());
+        }
+        if !namespace {
+            overwrite_fixture(&files);
+            overwrite_metadata_fixture(&files);
+            for name in ["hidden-overwrite.json", "system-overwrite.json"] {
+                native_exclusive_overwrite_denied(&files.join(name));
+            }
+            let overwrite_control = root.path().join("unconfined-overwrite-control");
+            std::fs::create_dir(&overwrite_control).unwrap();
+            overwrite_fixture(&overwrite_control);
+            native_exclusive_overwrite(&overwrite_control, true);
+            assert_overwrite_fixture(&overwrite_control, true);
         }
         unsafe extern "C" {
             fn sandbox_file_broker_test_reparse_after_open(path: *const u16) -> u32;
@@ -1192,6 +1465,9 @@ mod tests {
                 }),
                 "{mode}: {stdout}"
             );
+            if !namespace {
+                assert_overwrite_fixture(&files, mode == "broker");
+            }
             if dll.is_some() {
                 assert!(
                     stdout.contains("FILE_BROKER_NATIVE_LOADER_OK"),
@@ -1208,6 +1484,13 @@ mod tests {
             drop(resource);
             drop(prepared);
             sandbox.close();
+            if namespace {
+                assert_eq!(
+                    files.join("force-image.json").try_exists().unwrap(),
+                    mode == "raw",
+                    "the host observes deletion only after the broker arm"
+                );
+            }
         }
         assert_eq!(std::fs::read(files.join("near.txt")).unwrap(), b"canary");
         assert!(!files.join("future.txt").is_file());
@@ -1216,6 +1499,7 @@ mod tests {
             assert!(files.join("new-link.json").is_file());
             assert!(!files.join("source.json").exists());
             assert!(!files.join("remove.json").exists());
+            assert!(!files.join("force-image.json").exists());
             assert!(!files.join("created.dir").exists());
             assert!(!files.join("forbidden.txt").exists());
             assert!(!files.join("amplified.json").exists());

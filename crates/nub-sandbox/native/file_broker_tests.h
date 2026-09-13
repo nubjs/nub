@@ -31,7 +31,7 @@ extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL al
         return set(source, &io, &name, DWORD(offsetof(NameInformation, name) + name.length),
                    static_cast<FILE_INFORMATION_CLASS>(kind));
     };
-    Handle directory, listing, source, remove, readonly;
+    Handle directory, listing, source, remove, force_image, readonly;
     NTSTATUS status = open(L"created.dir", FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | DELETE,
                            FILE_CREATE, true, directory);
     if ((status == 0) != bool(allowed)) return 2;
@@ -41,6 +41,8 @@ extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL al
     if ((status == 0) != bool(allowed)) return 4;
     status = open(L"remove.json", DELETE, FILE_OPEN, false, remove);
     if ((status == 0) != bool(allowed)) return 5;
+    status = open(L"force-image.json", DELETE, FILE_OPEN, false, force_image);
+    if ((status == 0) != bool(allowed)) return 24;
     if (!allowed) return 0;
     // The ordinary kernel path on a broker directory handle must not create a
     // child. Root-relative opens are not forwarded by the adapter.
@@ -114,6 +116,12 @@ extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL al
     }
     BOOLEAN deleted = TRUE;
     if (set(remove.value, &io, &deleted, sizeof(deleted), static_cast<FILE_INFORMATION_CLASS>(13)) != 0) return 15;
+    // DELETE | POSIX | FORCE_IMAGE_SECTION_CHECK is the ordinary Win32
+    // disposition shape. The final bit preserves the legacy image-section
+    // safety check; it does not grant additional authority.
+    DWORD force_image_delete = 0x7;
+    if (set(force_image.value, &io, &force_image_delete, sizeof(force_image_delete),
+            static_cast<FILE_INFORMATION_CLASS>(64)) != 0) return 25;
     if (set(directory.value, &io, &deleted, sizeof(deleted), static_cast<FILE_INFORMATION_CLASS>(13)) != 0) return 16;
     return 0;
 }
@@ -290,6 +298,116 @@ extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL a
         if (allowed ? status != 0 : status != kDenied) failures |= 1u << 8;
     }
     return failures;
+}
+
+// The matching caller requests no read share. Run first without confinement,
+// then in raw and brokered AppContainer children; this cannot pass by calling
+// the resolver directly.
+extern "C" DWORD sandbox_file_broker_test_exclusive_overwrite(const wchar_t* root, BOOL allowed) {
+    using namespace nub_sandbox::file_broker;
+    Api api;
+    if (!api.create) return 1;
+    auto overwrite = [&](const wchar_t* leaf, ULONG disposition, ULONG share,
+                         NTSTATUS expected, ULONG_PTR information, bool zero_length,
+                         bool check_read_conflict) {
+        wchar_t path[kPath + 4] = {};
+        if (swprintf_s(path, L"\\??\\%s\\%s", root, leaf) < 0) return false;
+        UNICODE_STRING name = {USHORT(wcslen(path) * sizeof(wchar_t)),
+                               USHORT(wcslen(path) * sizeof(wchar_t)), path};
+        OBJECT_ATTRIBUTES attrs = {};
+        attrs.Length = sizeof(attrs);
+        attrs.Attributes = OBJ_CASE_INSENSITIVE;
+        attrs.ObjectName = &name;
+        IO_STATUS_BLOCK io = {};
+        Handle file;
+        NTSTATUS status = api.create(&file.value, FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attrs, &io,
+            nullptr, FILE_ATTRIBUTE_NORMAL, share, disposition,
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
+        if (status != expected) return false;
+        if (status || !zero_length) return true;
+        if (check_read_conflict) {
+            IO_STATUS_BLOCK conflict_io = {};
+            Handle conflict;
+            NTSTATUS conflict_status = api.create(&conflict.value, FILE_READ_DATA | SYNCHRONIZE, &attrs,
+                &conflict_io, nullptr, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
+            if (conflict_status != static_cast<NTSTATUS>(0xc0000043)) return false;
+        }
+        LARGE_INTEGER size = {};
+        return io.Information == information && GetFileSizeEx(file.value, &size) && !size.QuadPart;
+    };
+    const NTSTATUS denied = kDenied;
+    const NTSTATUS missing = static_cast<NTSTATUS>(0xc0000034);
+    const NTSTATUS existing = allowed ? 0 : denied;
+    const NTSTATUS absent = allowed ? missing : denied;
+    const NTSTATUS create = allowed ? 0 : denied;
+    DWORD failures = 0;
+    if (!overwrite(L"exclusive-overwrite.json", FILE_OVERWRITE, 0, existing,
+                   FILE_OVERWRITTEN, allowed, true)) failures |= 1;
+    if (!overwrite(L"overwrite-if-no-read.json", FILE_OVERWRITE_IF, FILE_SHARE_WRITE, existing,
+                   FILE_OVERWRITTEN, allowed, true)) failures |= 2;
+    if (!overwrite(L"missing-overwrite.json", FILE_OVERWRITE, 0, absent, 0, false, false)) failures |= 4;
+    if (!overwrite(L"missing-overwrite-if.json", FILE_OVERWRITE_IF, 0, create,
+                   FILE_CREATED, allowed, false)) failures |= 8;
+    if (!overwrite(L"overwrite-if-delete-share.json", FILE_OVERWRITE_IF,
+                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, existing,
+                   FILE_OVERWRITTEN, allowed, false)) failures |= 16;
+    if (!overwrite(L"missing-overwrite-if-delete-share.json", FILE_OVERWRITE_IF,
+                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, create,
+                   FILE_CREATED, allowed, false)) failures |= 32;
+    return failures;
+}
+
+extern "C" DWORD sandbox_file_broker_test_exclusive_overwrite_denied(const wchar_t* path, BOOL exact_denial) {
+    using namespace nub_sandbox::file_broker;
+    Api api;
+    if (!api.create) return 1;
+    wchar_t native[kPath + 4] = {};
+    if (swprintf_s(native, L"\\??\\%s", path) < 0) return 2;
+    UNICODE_STRING name = {USHORT(wcslen(native) * sizeof(wchar_t)),
+                           USHORT(wcslen(native) * sizeof(wchar_t)), native};
+    OBJECT_ATTRIBUTES attrs = {};
+    attrs.Length = sizeof(attrs);
+    attrs.Attributes = OBJ_CASE_INSENSITIVE;
+    attrs.ObjectName = &name;
+    IO_STATUS_BLOCK io = {};
+    Handle file;
+    NTSTATUS status = api.create(&file.value, FILE_WRITE_DATA | SYNCHRONIZE, &attrs, &io,
+        nullptr, FILE_ATTRIBUTE_NORMAL, 0, FILE_OVERWRITE,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
+    return status < 0 && (!exact_denial || status == kDenied) ? 0 : ERROR_INVALID_DATA;
+}
+
+extern "C" DWORD sandbox_file_broker_test_exclusive_overwrite_metadata_fixture(const wchar_t* root) {
+    struct Entry { const wchar_t* leaf; DWORD attributes; } entries[] = {
+        {L"hidden-overwrite.json", FILE_ATTRIBUTE_HIDDEN},
+        {L"system-overwrite.json", FILE_ATTRIBUTE_SYSTEM},
+    };
+    for (const auto& entry : entries) {
+        wchar_t path[kPath] = {};
+        if (swprintf_s(path, L"%s\\%s", root, entry.leaf) < 0 ||
+            !SetFileAttributesW(path, entry.attributes)) return GetLastError();
+    }
+    return 0;
+}
+
+extern "C" NTSTATUS sandbox_file_broker_test_exclusive_truncate(const wchar_t* path) {
+    using namespace nub_sandbox::file_broker;
+    Api api;
+    if (!api.create) return kDenied;
+    wchar_t native[kPath + 4] = {};
+    if (swprintf_s(native, L"\\??\\%s", path) < 0) return kInvalid;
+    UNICODE_STRING name = {USHORT(wcslen(native) * sizeof(wchar_t)),
+                           USHORT(wcslen(native) * sizeof(wchar_t)), native};
+    OBJECT_ATTRIBUTES attrs = {};
+    attrs.Length = sizeof(attrs);
+    attrs.Attributes = OBJ_CASE_INSENSITIVE;
+    attrs.ObjectName = &name;
+    IO_STATUS_BLOCK io = {};
+    Handle file;
+    return api.create(&file.value, FILE_WRITE_DATA | SYNCHRONIZE, &attrs, &io,
+        nullptr, FILE_ATTRIBUTE_NORMAL, 0, FILE_OVERWRITE,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
 }
 
 extern "C" DWORD sandbox_file_broker_test_loader(const wchar_t* path, BOOL allowed) {
