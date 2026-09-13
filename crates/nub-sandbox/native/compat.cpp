@@ -38,13 +38,14 @@ struct Payload {
 };
 static Payload state = {};
 
-static bool capture_identities(HANDLE process, Payload& payload) {
+static bool capture_identities(HANDLE process, Payload& payload, DWORD* session = nullptr) {
     HANDLE token = nullptr;
     if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return false;
     alignas(void*) BYTE user[512], package[512];
     DWORD needed = 0;
     BOOL ok = GetTokenInformation(token, TokenUser, user, sizeof(user), &needed) &&
-              GetTokenInformation(token, TokenAppContainerSid, package, sizeof(package), &needed);
+              GetTokenInformation(token, TokenAppContainerSid, package, sizeof(package), &needed) &&
+              (!session || GetTokenInformation(token, TokenSessionId, session, sizeof(*session), &needed));
     DWORD error = GetLastError();
     CloseHandle(token);
     if (!ok) { SetLastError(error); return false; }
@@ -140,8 +141,12 @@ extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory,
 extern "C" DWORD sandbox_socket_broker_start(HANDLE process, HANDLE job, const wchar_t* name,
                                              nub_sandbox::socket_broker::Broker** broker) {
     Payload identities = {};
-    if (!capture_identities(process, identities)) return GetLastError();
-    return nub_sandbox::socket_broker::start(job, name, identities.user_sid,
+    DWORD session = 0;
+    if (!capture_identities(process, identities, &session)) return GetLastError();
+    wchar_t server[256];
+    DWORD error = nub_sandbox::socket_broker::server_name(name, session, identities.package_sid, server);
+    if (error) return error;
+    return nub_sandbox::socket_broker::start(job, server, identities.user_sid,
                                             identities.package_sid, broker);
 }
 extern "C" void sandbox_socket_broker_stop(nub_sandbox::socket_broker::Broker* broker) {
@@ -154,8 +159,12 @@ extern "C" DWORD sandbox_file_broker_start(HANDLE process, HANDLE job, const wch
     nub_sandbox::file_broker::Authorize authorize, const void* context,
     nub_sandbox::file_broker::Broker** broker) {
     Payload identities = {};
-    if (!capture_identities(process, identities)) return GetLastError();
-    return nub_sandbox::file_broker::start(job, name, identities.user_sid,
+    DWORD session = 0;
+    if (!capture_identities(process, identities, &session)) return GetLastError();
+    wchar_t server[256];
+    DWORD error = nub_sandbox::socket_broker::server_name(name, session, identities.package_sid, server);
+    if (error) return error;
+    return nub_sandbox::file_broker::start(job, server, identities.user_sid,
         identities.package_sid, authorize, context, broker);
 }
 extern "C" void sandbox_file_broker_stop(nub_sandbox::file_broker::Broker* broker) { delete broker; }

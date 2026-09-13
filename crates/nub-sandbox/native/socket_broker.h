@@ -146,6 +146,26 @@ inline bool transfer(HANDLE pipe, HANDLE event, HANDLE stop, void* data,
 }
 
 #ifdef SANDBOX_COMPAT_HOST
+inline DWORD server_name(const wchar_t* client_name, DWORD session, PSID package,
+                          wchar_t (&output)[256]) {
+    constexpr wchar_t prefix[] = L"\\\\.\\pipe\\LOCAL\\";
+    constexpr size_t prefix_length = _countof(prefix) - 1;
+    if (!client_name || _wcsnicmp(client_name, prefix, prefix_length) ||
+        !client_name[prefix_length] || wcschr(client_name + prefix_length, L'\\') ||
+        wcschr(client_name + prefix_length, L'/')) return ERROR_INVALID_NAME;
+    LPWSTR sid = nullptr;
+    if (!ConvertSidToStringSidW(package, &sid)) return GetLastError();
+    // NPFS expands LOCAL for the AppContainer caller, but not for this ordinary
+    // host. Create in that caller's session/package namespace, keeping its leaf.
+    constexpr wchar_t format[] = L"\\\\.\\pipe\\Sessions\\%lu\\AppContainerNamedObjects\\%s\\%s";
+    int length = _scwprintf(format, session, sid, client_name + prefix_length);
+    if (length >= 0 && size_t(length) < _countof(output))
+        length = swprintf_s(output, format, session, sid, client_name + prefix_length);
+    else length = -1;
+    LocalFree(sid);
+    return length < 0 ? ERROR_FILENAME_EXCED_RANGE : ERROR_SUCCESS;
+}
+
 struct Broker;
 struct Worker {
     Broker* broker = nullptr;
@@ -160,7 +180,7 @@ struct Broker {
     HANDLE stop = nullptr;
     bool winsock = false;
     bool diagnostics = false;
-    wchar_t name[128] = {};
+    wchar_t name[256] = {};
     Worker workers[kWorkers];
 
     ~Broker() {

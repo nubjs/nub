@@ -2,6 +2,31 @@
 
 extern "C" DWORD sandbox_socket_broker_test_frames(const wchar_t* name) {
     using namespace nub_sandbox::socket_broker;
+    PSID package = nullptr;
+    if (!ConvertStringSidToSidW(L"S-1-15-2-1-2-3-4-5-6-7", &package)) return GetLastError();
+    wchar_t qualified[256];
+    bool valid_names =
+        !server_name(L"\\\\.\\pipe\\LOCAL\\fixture", 0, package, qualified) &&
+        !wcscmp(qualified, L"\\\\.\\pipe\\Sessions\\0\\AppContainerNamedObjects\\S-1-15-2-1-2-3-4-5-6-7\\fixture") &&
+        !server_name(L"\\\\.\\pipe\\local\\fixture", 42, package, qualified) &&
+        !wcscmp(qualified, L"\\\\.\\pipe\\Sessions\\42\\AppContainerNamedObjects\\S-1-15-2-1-2-3-4-5-6-7\\fixture");
+    for (const wchar_t* invalid : {L"\\\\.\\pipe\\fixture", L"\\\\.\\pipe\\LOCAL\\",
+                                   L"\\\\.\\pipe\\LOCAL\\nested\\fixture", L"\\\\host\\pipe\\LOCAL\\fixture"})
+        valid_names = valid_names && server_name(invalid, 0, package, qualified) == ERROR_INVALID_NAME;
+    wchar_t too_long[300];
+    wcscpy_s(too_long, L"\\\\.\\pipe\\LOCAL\\");
+    size_t prefix = wcslen(too_long);
+    for (size_t i = prefix; i + 1 < _countof(too_long); ++i) too_long[i] = L'x';
+    too_long[_countof(too_long) - 1] = 0;
+    valid_names = valid_names &&
+        server_name(too_long, 42, package, qualified) == ERROR_FILENAME_EXCED_RANGE;
+    LocalFree(package);
+    if (!ConvertStringSidToSidW(L"S-1-15-2-7-6-5-4-3-2-1", &package)) return GetLastError();
+    valid_names = valid_names &&
+        !server_name(L"\\\\.\\pipe\\LOCAL\\fixture", MAXDWORD, package, qualified) &&
+        !wcscmp(qualified, L"\\\\.\\pipe\\Sessions\\4294967295\\AppContainerNamedObjects\\S-1-15-2-7-6-5-4-3-2-1\\fixture");
+    LocalFree(package);
+    if (!valid_names) return ERROR_INVALID_DATA;
     HANDLE server = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED |
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE |
         PIPE_REJECT_REMOTE_CLIENTS, 1, 1024, 1024, kTimeout, nullptr);
