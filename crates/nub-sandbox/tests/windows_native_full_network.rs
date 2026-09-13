@@ -671,6 +671,7 @@ fn native_adapter_full_network_dns_opt_in() {
     }
     std::fs::write(root.path().join("withheld/canary"), b"withheld").unwrap();
     let mut results = Vec::new();
+    let mut denied_results = Vec::new();
     for api in ["getaddrinfo", "dnsqueryex"] {
         let plain_name = fresh_dns_name(api, "plain");
         let mut plain_command = plain_command(&fixture, api, None);
@@ -683,22 +684,31 @@ fn native_adapter_full_network_dns_opt_in() {
         let adapted = output(&native, root.path(), &fixture, api);
         eprintln!("FULL_NETWORK_DNS_RESULT api={api} plain={plain:?} native={adapted:?}");
         results.push((api, plain_name, native_name, plain, adapted));
-        // Raw is deliberately observational: DNS is outside the socket adapter's hook surface.
-        let raw_policy = policy(
-            root.path(),
-            &fixture,
-            json!(false),
-            None,
-            Some(&fresh_dns_name(api, "raw")),
-        );
-        let raw = Sandbox::new(&raw_policy).expect("raw DNS session");
-        let observed = output(&raw, root.path(), &fixture, api);
-        eprintln!(
-            "native-full-network raw DNS api={api} status={:?} stdout={} stderr={}",
-            observed.status,
-            String::from_utf8_lossy(&observed.stdout).trim(),
-            String::from_utf8_lossy(&observed.stderr).trim(),
-        );
+        for (mode, net, native) in [
+            ("raw-deny", json!(false), false),
+            ("native-deny", json!(false), true),
+            ("native-host", json!(["example.com"]), true),
+        ] {
+            let denied_policy = policy(
+                root.path(),
+                &fixture,
+                net,
+                None,
+                Some(&fresh_dns_name(api, mode)),
+            );
+            let denied = if native {
+                Sandbox::with_windows_native_compat(&denied_policy)
+            } else {
+                Sandbox::new(&denied_policy)
+            }
+            .expect("restricted DNS session");
+            let token = output(&denied, root.path(), &fixture, "token-report");
+            let observed = output(&denied, root.path(), &fixture, api);
+            eprintln!(
+                "FULL_NETWORK_DNS_DENIED api={api} mode={mode} token={token:?} result={observed:?}"
+            );
+            denied_results.push((api, mode, token, observed));
+        }
     }
     // Run both APIs before assertions so one failure does not hide the other.
     for (api, plain_name, native_name, plain, adapted) in results {
@@ -712,6 +722,25 @@ fn native_adapter_full_network_dns_opt_in() {
             "adapter {api} failed for {native_name}: {adapted:?}"
         );
         assert_marker(&adapted, "FULL_NETWORK_DNS", &format!("{api}:0:1.1.1.1"));
+    }
+    for (api, mode, token, observed) in denied_results {
+        assert!(
+            token.status.success(),
+            "{api} {mode} token query: {token:?}"
+        );
+        assert_marker(
+            &token,
+            "FULL_NETWORK_TOKEN",
+            "appcontainer=1:capabilities=0:internet-client=0:admin=0",
+        );
+        assert!(
+            !observed.status.success(),
+            "{api} {mode} resolved a fresh disallowed hostname: {observed:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&observed.stdout).contains(&format!("FULL_NETWORK_DNS={api}:")),
+            "{api} {mode} did not reach the resolver: {observed:?}"
+        );
     }
 }
 
