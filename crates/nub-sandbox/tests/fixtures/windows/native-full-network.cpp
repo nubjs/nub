@@ -1,0 +1,400 @@
+// Adversarial fixture for the Windows native network adapter.
+//
+// The test harness runs this same binary in plain, raw AppContainer, and
+// native-adapter AppContainer modes.  It owns every peer endpoint and decides
+// the mode-specific verdict from these markers; this program never assumes
+// that socket()/bind()/sendto() failing is the denial signal.  A raw AppContainer
+// can report successful Winsock setup while no peer ever observes traffic.
+//
+// Build contract (owned by the parent test workflow, not this fixture):
+//   cl /nologo /std:c++17 /W4 /WX /EHsc native-full-network.cpp /link ws2_32.lib
+//
+// Arguments: <case>, one of tcp4, tcp6, udp4, udp6, listen4, listen6,
+// connectex4, acceptex4, concurrent4, descendant4, or fs-canary.
+// NUB_FULL_NETWORK_ENDPOINT is HOST:PORT (IPv6 uses [::1]:PORT).  Listener
+// cases print FULL_NETWORK_READY before accepting.  Every peer exchange uses
+// the fixed request/reply bytes below so the parent can independently prove
+// both directions of traffic.
+
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <mswsock.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+constexpr char kRequest[] = "nub-full-network-request";
+constexpr char kReply[] = "nub-full-network-reply";
+constexpr DWORD kTimeoutMs = 2000;
+constexpr int kConcurrentClients = 12;
+
+struct Socket final {
+  SOCKET value = INVALID_SOCKET;
+  Socket() = default;
+  explicit Socket(SOCKET socket) : value(socket) {}
+  Socket(const Socket&) = delete;
+  Socket& operator=(const Socket&) = delete;
+  Socket(Socket&& other) noexcept : value(other.value) {
+    other.value = INVALID_SOCKET;
+  }
+  Socket& operator=(Socket&& other) noexcept {
+    if (this != &other) {
+      reset();
+      value = other.value;
+      other.value = INVALID_SOCKET;
+    }
+    return *this;
+  }
+  ~Socket() { reset(); }
+  void reset() {
+    if (value != INVALID_SOCKET) closesocket(value);
+    value = INVALID_SOCKET;
+  }
+  explicit operator bool() const { return value != INVALID_SOCKET; }
+};
+
+struct Endpoint final {
+  sockaddr_storage address{};
+  int length = 0;
+  int family = AF_UNSPEC;
+};
+
+void marker(const char* name, const std::string& value) {
+  std::printf("%s=%s\n", name, value.c_str());
+  std::fflush(stdout);
+}
+
+std::string error_code(int code = WSAGetLastError()) {
+  return std::to_string(code);
+}
+
+bool set_timeout(SOCKET socket) {
+  return setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO,
+                    reinterpret_cast<const char*>(&kTimeoutMs), sizeof(kTimeoutMs)) == 0 &&
+         setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO,
+                    reinterpret_cast<const char*>(&kTimeoutMs), sizeof(kTimeoutMs)) == 0;
+}
+
+bool parse_endpoint(const char* text, int socktype, Endpoint* output) {
+  if (text == nullptr || *text == '\0') return false;
+  std::string host;
+  std::string port;
+  const std::string input(text);
+  if (input.front() == '[') {
+    const auto end = input.find("]:");
+    if (end == std::string::npos) return false;
+    host = input.substr(1, end - 1);
+    port = input.substr(end + 2);
+  } else {
+    const auto separator = input.rfind(':');
+    if (separator == std::string::npos) return false;
+    host = input.substr(0, separator);
+    port = input.substr(separator + 1);
+  }
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = socktype;
+  hints.ai_protocol = socktype == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP;
+  addrinfo* result = nullptr;
+  if (getaddrinfo(host.c_str(), port.c_str(), &hints, &result) != 0 || result == nullptr) return false;
+  if (result->ai_addrlen > sizeof(output->address)) {
+    freeaddrinfo(result);
+    return false;
+  }
+  std::memcpy(&output->address, result->ai_addr, result->ai_addrlen);
+  output->length = static_cast<int>(result->ai_addrlen);
+  output->family = result->ai_family;
+  freeaddrinfo(result);
+  return true;
+}
+
+Socket ordinary_socket(int family, int type, int protocol) {
+  Socket socket(WSASocketW(family, type, protocol, nullptr, 0,
+                           WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT));
+  if (socket) set_timeout(socket.value);
+  return socket;
+}
+
+// This must be the fixture's first named result.  The adapter routes this
+// WSASocketW through its root broker.  A failure therefore distinguishes
+// root-to-broker admission/RPC faults from later peer-oracle failures without
+// exposing or depending on the broker's private named-pipe protocol.
+bool root_broker_socket_diagnostic() {
+  Socket probe = ordinary_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (!probe) {
+    marker("FULL_NETWORK_ROOT_BROKER_SOCKET", "failed:" + error_code());
+    return false;
+  }
+  marker("FULL_NETWORK_ROOT_BROKER_SOCKET", "ok");
+  return true;
+}
+
+bool send_all(SOCKET socket, const char* bytes, int count) {
+  for (int sent = 0; sent < count;) {
+    const int written = send(socket, bytes + sent, count - sent, 0);
+    if (written <= 0) return false;
+    sent += written;
+  }
+  return true;
+}
+
+bool receive_exact(SOCKET socket, const char* expected, int count) {
+  std::string received(static_cast<size_t>(count), '\0');
+  for (int offset = 0; offset < count;) {
+    const int read = recv(socket, received.data() + offset, count - offset, 0);
+    if (read <= 0) return false;
+    offset += read;
+  }
+  return received == std::string(expected, static_cast<size_t>(count));
+}
+
+bool stream_round_trip(SOCKET socket, const Endpoint& endpoint) {
+  if (connect(socket, reinterpret_cast<const sockaddr*>(&endpoint.address), endpoint.length) != 0) return false;
+  return send_all(socket, kRequest, static_cast<int>(sizeof(kRequest) - 1)) &&
+         receive_exact(socket, kReply, static_cast<int>(sizeof(kReply) - 1));
+}
+
+bool datagram_round_trip(SOCKET socket, const Endpoint& endpoint) {
+  const int sent = sendto(socket, kRequest, static_cast<int>(sizeof(kRequest) - 1), 0,
+                          reinterpret_cast<const sockaddr*>(&endpoint.address), endpoint.length);
+  if (sent != static_cast<int>(sizeof(kRequest) - 1)) return false;
+  return receive_exact(socket, kReply, static_cast<int>(sizeof(kReply) - 1));
+}
+
+bool bind_ephemeral(SOCKET socket, int family, sockaddr_storage* bound, int* bound_length) {
+  if (family == AF_INET) {
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) return false;
+  } else if (family == AF_INET6) {
+    sockaddr_in6 address{};
+    address.sin6_family = AF_INET6;
+    address.sin6_addr = in6addr_loopback;
+    if (bind(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) return false;
+  } else {
+    return false;
+  }
+  *bound_length = sizeof(*bound);
+  return getsockname(socket, reinterpret_cast<sockaddr*>(bound), bound_length) == 0;
+}
+
+std::string printable_endpoint(const sockaddr_storage& address) {
+  char host[NI_MAXHOST]{};
+  char service[NI_MAXSERV]{};
+  const int length = address.ss_family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
+  if (getnameinfo(reinterpret_cast<const sockaddr*>(&address), length, host, sizeof(host), service,
+                  sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV) != 0) return "unknown";
+  return std::string(address.ss_family == AF_INET6 ? "[" : "") + host +
+         (address.ss_family == AF_INET6 ? "]:" : ":") + service;
+}
+
+bool listener_round_trip(int family) {
+  Socket listener = ordinary_socket(family, SOCK_STREAM, IPPROTO_TCP);
+  sockaddr_storage bound{};
+  int bound_length = 0;
+  if (!listener || !bind_ephemeral(listener.value, family, &bound, &bound_length) || listen(listener.value, 1) != 0) {
+    marker("FULL_NETWORK_PEER", "0");
+    return false;
+  }
+  marker("FULL_NETWORK_READY", printable_endpoint(bound));
+  Socket accepted(accept(listener.value, nullptr, nullptr));
+  if (accepted) set_timeout(accepted.value);
+  const bool peer = accepted && receive_exact(accepted.value, kRequest, static_cast<int>(sizeof(kRequest) - 1)) &&
+                    send_all(accepted.value, kReply, static_cast<int>(sizeof(kReply) - 1));
+  marker("FULL_NETWORK_PEER", peer ? "1" : "0");
+  return peer;
+}
+
+GUID connect_ex_guid() {
+  return {0x25a207b9, 0xddf3, 0x4660, {0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e}};
+}
+
+GUID accept_ex_guid() {
+  return {0xb5367df1, 0xcbac, 0x11cf, {0x95, 0xca, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92}};
+}
+
+template <typename Procedure>
+bool extension(SOCKET socket, const GUID& guid, Procedure* procedure) {
+  DWORD bytes = 0;
+  return WSAIoctl(socket, SIO_GET_EXTENSION_FUNCTION_POINTER, const_cast<GUID*>(&guid), sizeof(guid), procedure,
+                  sizeof(*procedure), &bytes, nullptr, nullptr) == 0;
+}
+
+bool wait_iocp(HANDLE port, OVERLAPPED* expected) {
+  DWORD bytes = 0;
+  ULONG_PTR key = 0;
+  OVERLAPPED* completed = nullptr;
+  const BOOL ok = GetQueuedCompletionStatus(port, &bytes, &key, &completed, kTimeoutMs);
+  return ok != 0 && completed == expected;
+}
+
+bool connect_ex_round_trip(const Endpoint& endpoint) {
+  if (endpoint.family != AF_INET) return false;
+  Socket socket = ordinary_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (!socket) return false;
+  sockaddr_in local{};
+  local.sin_family = AF_INET;
+  local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(socket.value, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0) return false;
+  LPFN_CONNECTEX connect_ex = nullptr;
+  const GUID guid = connect_ex_guid();
+  if (!extension(socket.value, guid, &connect_ex) || connect_ex == nullptr) return false;
+  HANDLE port = CreateIoCompletionPort(reinterpret_cast<HANDLE>(socket.value), nullptr, 1, 0);
+  if (port == nullptr) return false;
+  OVERLAPPED overlapped{};
+  const BOOL immediate = connect_ex(socket.value, reinterpret_cast<const sockaddr*>(&endpoint.address), endpoint.length,
+                                    nullptr, 0, nullptr, &overlapped);
+  const int error = immediate ? 0 : WSAGetLastError();
+  // A successful overlapped call still has to deliver its completion packet:
+  // the point of this arm is to exercise the adapter with an IOCP, not merely
+  // to exercise the extension entry point's synchronous fast path.
+  const bool completed = (immediate || error == ERROR_IO_PENDING) && wait_iocp(port, &overlapped);
+  CloseHandle(port);
+  if (!completed || setsockopt(socket.value, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, nullptr, 0) != 0) return false;
+  return send_all(socket.value, kRequest, static_cast<int>(sizeof(kRequest) - 1)) &&
+         receive_exact(socket.value, kReply, static_cast<int>(sizeof(kReply) - 1));
+}
+
+bool accept_ex_round_trip() {
+  Socket listener = ordinary_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  sockaddr_storage bound{};
+  int bound_length = 0;
+  if (!listener || !bind_ephemeral(listener.value, AF_INET, &bound, &bound_length) || listen(listener.value, 1) != 0) return false;
+  LPFN_ACCEPTEX accept_ex = nullptr;
+  const GUID guid = accept_ex_guid();
+  if (!extension(listener.value, guid, &accept_ex) || accept_ex == nullptr) return false;
+  Socket accepted = ordinary_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (!accepted) return false;
+  HANDLE port = CreateIoCompletionPort(reinterpret_cast<HANDLE>(listener.value), nullptr, 1, 0);
+  if (port == nullptr) return false;
+  std::array<char, 2 * (sizeof(sockaddr_in) + 16)> addresses{};
+  OVERLAPPED overlapped{};
+  DWORD bytes = 0;
+  const BOOL immediate = accept_ex(listener.value, accepted.value, addresses.data(), 0,
+                                  sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16, &bytes, &overlapped);
+  const int error = immediate ? 0 : WSAGetLastError();
+  marker("FULL_NETWORK_READY", printable_endpoint(bound));
+  const bool completed = (immediate || error == ERROR_IO_PENDING) && wait_iocp(port, &overlapped);
+  CloseHandle(port);
+  if (!completed || setsockopt(accepted.value, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
+                               reinterpret_cast<const char*>(&listener.value), sizeof(listener.value)) != 0) return false;
+  set_timeout(accepted.value);
+  return receive_exact(accepted.value, kRequest, static_cast<int>(sizeof(kRequest) - 1)) &&
+         send_all(accepted.value, kReply, static_cast<int>(sizeof(kReply) - 1));
+}
+
+bool concurrent_round_trips(const Endpoint& endpoint) {
+  std::atomic<int> successes{0};
+  std::vector<std::thread> workers;
+  for (int index = 0; index != kConcurrentClients; ++index) {
+    workers.emplace_back([&] {
+      Socket socket = ordinary_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+      if (socket && stream_round_trip(socket.value, endpoint)) ++successes;
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  marker("FULL_NETWORK_CONCURRENT", std::to_string(successes.load()));
+  return successes == kConcurrentClients;
+}
+
+bool descendant_round_trip(const char* executable, const char* endpoint) {
+  std::wstring command = L"\"";
+  int length = MultiByteToWideChar(CP_UTF8, 0, executable, -1, nullptr, 0);
+  if (length <= 0) return false;
+  std::vector<wchar_t> executable_wide(static_cast<size_t>(length));
+  MultiByteToWideChar(CP_UTF8, 0, executable, -1, executable_wide.data(), length);
+  command += executable_wide.data();
+  command += L"\" --descendant-client";
+  if (SetEnvironmentVariableA("NUB_FULL_NETWORK_ENDPOINT", endpoint) == 0) return false;
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &process) == 0) return false;
+  const DWORD waited = WaitForSingleObject(process.hProcess, kTimeoutMs + 1000);
+  DWORD code = 1;
+  GetExitCodeProcess(process.hProcess, &code);
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+  marker("FULL_NETWORK_DESCENDANT", waited == WAIT_OBJECT_0 && code == 0 ? "1" : "0");
+  return waited == WAIT_OBJECT_0 && code == 0;
+}
+
+bool filesystem_canary() {
+  const char* path = std::getenv("NUB_FULL_NETWORK_FS_CANARY");
+  if (path == nullptr) return false;
+  HANDLE readable = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+  const DWORD read_error = readable == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+  if (readable != INVALID_HANDLE_VALUE) CloseHandle(readable);
+  HANDLE writable = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+  const DWORD write_error = writable == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+  if (writable != INVALID_HANDLE_VALUE) CloseHandle(writable);
+  const bool denied = readable == INVALID_HANDLE_VALUE && writable == INVALID_HANDLE_VALUE;
+  marker("FULL_NETWORK_FS_CANARY", denied ? "read-denied:write-denied"
+                                           : "read=" + std::to_string(read_error) + ":write=" + std::to_string(write_error));
+  return denied;
+}
+
+bool endpoint_case(const std::string& name, int type, bool (*operation)(SOCKET, const Endpoint&)) {
+  Endpoint endpoint{};
+  if (!parse_endpoint(std::getenv("NUB_FULL_NETWORK_ENDPOINT"), type, &endpoint)) return false;
+  Socket socket = ordinary_socket(endpoint.family, type, type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP);
+  const bool peer = socket && operation(socket.value, endpoint);
+  marker("FULL_NETWORK_PEER", peer ? "1" : "0");
+  marker("FULL_NETWORK_CASE", name);
+  return peer;
+}
+
+int run_case(const std::string& name, const char* executable) {
+  if (name == "fs-canary") return filesystem_canary() ? 0 : 1;
+  if (!root_broker_socket_diagnostic()) return 1;
+  if (name == "tcp4" || name == "tcp6") return endpoint_case(name, SOCK_STREAM, stream_round_trip) ? 0 : 1;
+  if (name == "udp4" || name == "udp6") return endpoint_case(name, SOCK_DGRAM, datagram_round_trip) ? 0 : 1;
+  if (name == "listen4") return listener_round_trip(AF_INET) ? 0 : 1;
+  if (name == "listen6") return listener_round_trip(AF_INET6) ? 0 : 1;
+  if (name == "connectex4") {
+    Endpoint endpoint{};
+    const bool peer = parse_endpoint(std::getenv("NUB_FULL_NETWORK_ENDPOINT"), SOCK_STREAM, &endpoint) && connect_ex_round_trip(endpoint);
+    marker("FULL_NETWORK_PEER", peer ? "1" : "0");
+    return peer ? 0 : 1;
+  }
+  if (name == "acceptex4") {
+    const bool peer = accept_ex_round_trip();
+    marker("FULL_NETWORK_PEER", peer ? "1" : "0");
+    return peer ? 0 : 1;
+  }
+  if (name == "concurrent4") {
+    Endpoint endpoint{};
+    return parse_endpoint(std::getenv("NUB_FULL_NETWORK_ENDPOINT"), SOCK_STREAM, &endpoint) && concurrent_round_trips(endpoint) ? 0 : 1;
+  }
+  if (name == "descendant4") return descendant_round_trip(executable, std::getenv("NUB_FULL_NETWORK_ENDPOINT")) ? 0 : 1;
+  if (name == "--descendant-client") return endpoint_case("descendant-client", SOCK_STREAM, stream_round_trip) ? 0 : 1;
+  marker("FULL_NETWORK_CASE", "unknown");
+  return 2;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  WSADATA data{};
+  if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+    marker("FULL_NETWORK_WINSOCK", "startup-failed");
+    return 3;
+  }
+  const int result = argc == 2 ? run_case(argv[1], argv[0]) : 2;
+  WSACleanup();
+  return result;
+}
