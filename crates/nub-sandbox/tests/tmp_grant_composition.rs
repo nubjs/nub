@@ -91,15 +91,12 @@ fn tmp_modes_preserve_explicit_positive_grants_and_private_writes() {
 fn raw_whole_disk_write_grammar_preserves_the_tmp_deny_mode() {
     let root = fixture();
     let policy = policy(root.path(), "deny", true, "rw");
-    assert!(
-        policy
-            .fs
-            .rules
-            .entries
-            .iter()
-            .any(|rule| rule.matcher.as_str() == "/"),
-        "the raw whole-disk grant must reach the backend lowering"
-    );
+    let matcher = nub_sandbox::matcher::path::PathMatcher::new(&policy.fs.rules);
+    for path in [Path::new("/"), root.path()] {
+        let decision = matcher.decide(path);
+        assert_eq!(decision.effect, nub_sandbox::policy::Effect::Allow);
+        assert_eq!(decision.access, nub_sandbox::policy::FsAccess::ReadWrite);
+    }
     assert_eq!(
         policy.fs.tmp,
         nub_sandbox::policy::TmpMode::Deny,
@@ -125,12 +122,15 @@ fn policy(
     root_access: &str,
 ) -> nub_sandbox::SandboxPolicy {
     let project = root.join("project");
-    let fs = if broad_root && case == "private" {
-        json!({"/": root_access, "$tmp": "rw"})
-    } else if broad_root {
-        json!({"/": root_access, "$tmp": false})
+    let mut fs = if broad_root {
+        json!({"/": root_access})
     } else {
-        json!({(project.to_string_lossy()): "r", "$tmp": false})
+        json!({(project.to_string_lossy()): "r"})
+    };
+    fs["$tmp"] = match case {
+        "private" => json!("rw"),
+        "deny" => json!(false),
+        _ => panic!("unknown temporary storage case: {case}"),
     };
     let context = CompileCtx::new(
         Homes {
