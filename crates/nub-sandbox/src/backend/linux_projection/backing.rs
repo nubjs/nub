@@ -6,7 +6,12 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
-pub(super) struct Backing(File);
+use crate::policy::FsAccess;
+
+pub(super) struct Backing {
+    root: File,
+    read: Option<File>,
+}
 
 #[repr(C)]
 struct OpenHow {
@@ -65,13 +70,50 @@ impl Backing {
         if unsafe { libc::fcntl(root.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        let backing = Self(root);
+        let backing = Self { root, read: None };
         // Capability preflight: never replace openat2 with a racy pathname walk.
         backing.pin(Path::new("/"))?;
         Ok(backing)
     }
 
+    pub(super) fn with_read_view(root: File, read: File) -> io::Result<Self> {
+        let mut backing = Self::new(root)?;
+        if !same_object(&backing.root.metadata()?, &read.metadata()?) {
+            return Err(error(libc::EINVAL));
+        }
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        // The mount, not O_RDONLY, is the exported file's metadata ceiling.
+        if unsafe { libc::fstatvfs(read.as_raw_fd(), &mut stat) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if stat.f_flag & libc::ST_RDONLY == 0 {
+            return Err(error(libc::EROFS));
+        }
+        if unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        backing.read = Some(read);
+        Ok(backing)
+    }
+
+    pub(super) fn supports_export(&self) -> bool {
+        self.read.is_some()
+    }
+
+    pub(super) fn pin_authorized(&self, path: &Path, access: FsAccess) -> io::Result<File> {
+        let root = if access == FsAccess::Read {
+            self.read.as_ref().unwrap_or(&self.root)
+        } else {
+            &self.root
+        };
+        Self::open_from(root, path, libc::O_PATH, 0)
+    }
+
     pub(super) fn open(&self, path: &Path, flags: i32, mode: u32) -> io::Result<File> {
+        Self::open_from(&self.root, path, flags, mode)
+    }
+
+    fn open_from(root: &File, path: &Path, flags: i32, mode: u32) -> io::Result<File> {
         if !path.is_absolute()
             || path.components().any(|c| {
                 matches!(
@@ -100,7 +142,7 @@ impl Backing {
         let fd = unsafe {
             libc::syscall(
                 libc::SYS_openat2,
-                self.0.as_raw_fd(),
+                root.as_raw_fd(),
                 name.as_ptr(),
                 &how,
                 size_of::<OpenHow>(),
@@ -116,6 +158,36 @@ impl Backing {
 
     pub(super) fn pin(&self, path: &Path) -> io::Result<File> {
         self.open(path, libc::O_PATH, 0)
+    }
+
+    pub(super) fn create_at(
+        &self,
+        parent: &File,
+        name: &OsStr,
+        flags: i32,
+        mode: u32,
+    ) -> io::Result<File> {
+        child_path(Path::new("/"), name)?;
+        let name = CString::new(name.as_bytes()).map_err(|_| error(libc::EINVAL))?;
+        // An existing final component must return to projected lookup, never
+        // acquire authority by being raced into a destructive backing open.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                (flags & !libc::O_TRUNC)
+                    | libc::O_CREAT
+                    | libc::O_EXCL
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC,
+                mode,
+            )
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
     }
 }
 

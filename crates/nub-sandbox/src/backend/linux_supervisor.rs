@@ -33,7 +33,11 @@ use crate::policy::SelfProcFile;
 use crate::policy::{Effect, FsAccess, FsRuleSet};
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+mod projected_open;
 mod self_proc;
+#[cfg(test)]
+pub(super) use projected_open::ProjectedLaunch;
 use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;
@@ -459,6 +463,8 @@ struct SkEntry {
 }
 
 struct SupState {
+    #[cfg(test)]
+    projected: Option<super::linux_projection::NativeOpenClient>,
     self_proc: BTreeSet<SelfProcFile>,
     allow_all: bool,
     allow: Vec<String>,
@@ -566,6 +572,8 @@ impl SupState {
 impl SupState {
     fn new(policy: EgressPolicy) -> Self {
         Self {
+            #[cfg(test)]
+            projected: None,
             self_proc: policy.self_proc,
             allow_all: policy.allow_all,
             allow: policy.allow,
@@ -1821,6 +1829,13 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
         let nr = req.data.nr as libc::c_long;
         let cfd = req.data.args[0] as i32;
 
+        #[cfg(test)]
+        if let Some(client) = &state.projected
+            && projected_open::handle(client, nfd, &req, &control)
+        {
+            continue;
+        }
+
         if !state.self_proc.is_empty() && self_proc::handle_open(&state, nfd, &req) {
             continue;
         }
@@ -2616,6 +2631,58 @@ pub(super) fn spawn_supervised_with_ready(
     launch: SupervisedLaunch,
     ready: impl FnOnce(i32) -> io::Result<()>,
 ) -> io::Result<SupervisedChild> {
+    spawn_supervised_mode(policy, launch, ready, LaunchMode::Standard)
+}
+
+enum LaunchMode {
+    Standard,
+    #[cfg(test)]
+    Projected {
+        setup: ProjectedLaunch,
+        root: std::fs::File,
+    },
+}
+
+#[cfg(test)]
+pub(super) fn spawn_supervised_projected(
+    policy: EgressPolicy,
+    launch: SupervisedLaunch,
+    projection: ProjectedLaunch,
+) -> io::Result<SupervisedChild> {
+    if !launch.inherited_fds.is_empty() || !policy.self_proc.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "projected test launches do not import descriptors or procfs",
+        ));
+    }
+    let root_fd = unsafe {
+        libc::open(
+            projection.root.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if root_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let root = unsafe { std::fs::File::from_raw_fd(root_fd) };
+    projection.opener.accepts_root(&root)?;
+    spawn_supervised_mode(
+        policy,
+        launch,
+        |_| Ok(()),
+        LaunchMode::Projected {
+            setup: projection,
+            root,
+        },
+    )
+}
+
+fn spawn_supervised_mode(
+    policy: EgressPolicy,
+    launch: SupervisedLaunch,
+    ready: impl FnOnce(i32) -> io::Result<()>,
+    mode: LaunchMode,
+) -> io::Result<SupervisedChild> {
     // Do not revive the legacy write broker for a new filesystem backend. Its
     // post-open path check cannot undo O_TRUNC/O_CREAT side effects. The approved
     // positive-only grammar never needs this path; reject before starting an owner
@@ -2628,8 +2695,22 @@ pub(super) fn spawn_supervised_with_ready(
     }
     // Built in the PARENT and copied into the child by `fork`; the child installs it without
     // allocating. Accepted policies leave the legacy write-intent dispatch disabled.
-    let filter = notifier_program(policy.write_broker(), !policy.self_proc.is_empty());
+    let filter = match &mode {
+        #[cfg(test)]
+        LaunchMode::Projected { .. } => projected_open::notifier(),
+        LaunchMode::Standard => {
+            notifier_program(policy.write_broker(), !policy.self_proc.is_empty())
+        }
+    };
     let state = SupState::new(policy);
+    #[cfg(test)]
+    let state = {
+        let mut state = state;
+        if let LaunchMode::Projected { setup, .. } = &mode {
+            state.projected = Some(setup.opener.clone());
+        }
+        state
+    };
     let control = Arc::new(WorkerControl::new()?);
 
     if launch.argv.is_empty() {
@@ -2700,6 +2781,15 @@ pub(super) fn spawn_supervised_with_ready(
                     libc::_exit(12);
                 }
             }
+            #[cfg(test)]
+            if let LaunchMode::Projected { root, .. } = &mode {
+                if libc::fchdir(root.as_raw_fd()) < 0
+                    || libc::chroot(c".".as_ptr()) < 0
+                    || libc::chdir(c"/".as_ptr()) < 0
+                {
+                    libc::_exit(12);
+                }
+            }
             // Gates Landlock and seccomp, both of which refuse a caller that could still gain
             // privileges through a setuid `execve`.
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -2718,6 +2808,12 @@ pub(super) fn spawn_supervised_with_ready(
             }
             if let Some(filter) = launch.seccomp_ceiling
                 && install_target_seccomp(filter).is_err()
+            {
+                libc::_exit(16);
+            }
+            #[cfg(test)]
+            if matches!(&mode, LaunchMode::Projected { .. })
+                && projected_open::close_except(c2p[1], p2c[0]).is_err()
             {
                 libc::_exit(16);
             }
@@ -2778,7 +2874,11 @@ pub(super) fn spawn_supervised_with_ready(
     let listener = unsafe { OwnedFd::from_raw_fd(nfd) };
     let worker_control = Arc::clone(&control);
     let pidfd = unsafe { OwnedFd::from_raw_fd(pf) };
-    if !state.self_proc.is_empty() {
+    #[cfg(test)]
+    let needs_atomic = state.projected.is_some();
+    #[cfg(not(test))]
+    let needs_atomic = false;
+    if needs_atomic || !state.self_proc.is_empty() {
         self_proc::check_atomic_addfd(nfd)?;
     }
     let sup_thread = std::thread::Builder::new()

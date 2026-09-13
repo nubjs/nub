@@ -9,8 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, BsdFileFlags, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow, WriteFlags,
+    INodeNo, InitFlags, IoctlFlags, KernelConfig, LockOwner, OpenFlags, ReplyAttr, ReplyCreate,
+    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyOpen, ReplyWrite, Request,
+    TimeOrNow, WriteFlags,
 };
 
 use super::backing::{
@@ -66,6 +67,7 @@ struct Handle {
     inode: u64,
     node: Arc<Node>,
     kind: HandleKind,
+    authority: FsAccess,
 }
 
 enum HandleKind {
@@ -81,9 +83,19 @@ struct State {
     handles: HashMap<u64, Handle>,
     next_inode: u64,
     next_handle: u64,
+    export: Option<ExportSlot>,
 }
 
-pub(crate) struct Projection(Mutex<State>);
+struct ExportSlot {
+    tid: u32,
+    armed: bool,
+    file: Option<File>,
+}
+
+pub(super) const EXPORT_IOCTL: libc::c_ulong = 0x4e80;
+
+#[derive(Clone)]
+pub(crate) struct Projection(Arc<Mutex<State>>);
 
 impl Projection {
     pub(super) fn new(rules: Rules, backing: Backing) -> io::Result<Self> {
@@ -91,7 +103,7 @@ impl Projection {
             path: PathBuf::from("/"),
             pin: backing.pin(Path::new("/"))?,
         });
-        Ok(Self(Mutex::new(State {
+        Ok(Self(Arc::new(Mutex::new(State {
             backing,
             rules,
             nodes: HashMap::from([(
@@ -105,11 +117,48 @@ impl Projection {
             handles: HashMap::new(),
             next_inode: ROOT + 1,
             next_handle: 1,
-        })))
+            export: None,
+        }))))
     }
 
     fn state(&self) -> io::Result<MutexGuard<'_, State>> {
         self.0.lock().map_err(|_| error(libc::EIO))
+    }
+
+    pub(super) fn register_export(&self, tid: u32) -> io::Result<()> {
+        let mut state = self.state()?;
+        if !state.backing.supports_export() || state.export.is_some() {
+            return Err(error(libc::EACCES));
+        }
+        state.export = Some(ExportSlot {
+            tid,
+            armed: false,
+            file: None,
+        });
+        Ok(())
+    }
+
+    pub(super) fn unregister_export(&self) {
+        if let Ok(mut state) = self.state() {
+            state.export = None;
+        }
+    }
+
+    pub(super) fn arm_export(&self) -> io::Result<()> {
+        let mut state = self.state()?;
+        let slot = state.export.as_mut().ok_or_else(|| error(libc::EACCES))?;
+        if slot.armed || slot.file.is_some() {
+            return Err(error(libc::EBUSY));
+        }
+        slot.armed = true;
+        Ok(())
+    }
+
+    pub(super) fn take_export(&self) -> io::Result<File> {
+        let mut state = self.state()?;
+        let slot = state.export.as_mut().ok_or_else(|| error(libc::EACCES))?;
+        slot.armed = false;
+        slot.file.take().ok_or_else(|| error(libc::EIO))
     }
 }
 
@@ -263,10 +312,17 @@ impl State {
         let flags = normalize_open_flags(flags)?;
         let node = self.node(ino)?;
         let writable = self.authorize_open(&node.path, flags)?;
+        let authority = self
+            .rules
+            .access(&node.path)
+            .ok_or_else(|| error(libc::EACCES))?;
         if self.handles.len() == MAX_HANDLES {
             return Err(error(libc::EMFILE));
         }
-        let pin = self.current(&node)?;
+        let pin = self.backing.pin_authorized(&node.path, authority)?;
+        if !same_object(&node.pin.metadata()?, &pin.metadata()?) {
+            return Err(error(libc::ESTALE));
+        }
         // Reopening through the held descriptor requires following our own proc
         // magic link. No caller-controlled symlink is followed on the host.
         let file = reopen_regular(&pin, flags & !(libc::O_NOFOLLOW | libc::O_TRUNC))?;
@@ -277,6 +333,7 @@ impl State {
             inode: ino,
             node,
             kind: HandleKind::File { file, writable },
+            authority,
         })
     }
 
@@ -302,11 +359,10 @@ impl State {
         }
         // Always exclusive: a racing existing file must go through fresh lookup
         // and open rather than bypass the type/identity checks or get truncated.
-        let file = self.backing.open(
-            &path,
-            (flags & !libc::O_TRUNC) | libc::O_CREAT | libc::O_EXCL,
-            mode & !umask & 0o777,
-        )?;
+        let parent = self.current(&self.node(parent)?)?;
+        let file = self
+            .backing
+            .create_at(&parent, name, flags, mode & !umask & 0o777)?;
         let pin = file.try_clone()?;
         let ino = self.intern(path, pin)?;
         let node = self.node(ino)?;
@@ -314,6 +370,7 @@ impl State {
             inode: ino,
             node,
             kind: HandleKind::File { file, writable },
+            authority: FsAccess::ReadWrite,
         })?;
         Ok((self.attr(ino, Some(handle))?, handle))
     }
@@ -381,9 +438,10 @@ impl State {
     fn opendir(&mut self, ino: u64) -> io::Result<u64> {
         let node = self.node(ino)?;
         self.current(&node)?;
-        if self.rules.access(&node.path).is_none() {
-            return Err(error(libc::EACCES));
-        }
+        let authority = self
+            .rules
+            .access(&node.path)
+            .ok_or_else(|| error(libc::EACCES))?;
         let dir = self
             .backing
             .open(&node.path, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
@@ -413,7 +471,37 @@ impl State {
             inode: ino,
             node,
             kind: HandleKind::Directory(entries),
+            authority,
         })
+    }
+
+    fn export_handle(&mut self, tid: u32, ino: u64, fh: u64) -> io::Result<()> {
+        let slot = self.export.as_ref().ok_or_else(|| error(libc::EACCES))?;
+        if slot.tid != tid || !slot.armed || slot.file.is_some() {
+            return Err(error(libc::EACCES));
+        }
+        let handle = self.handle(ino, fh)?;
+        let HandleKind::File { file, .. } = &handle.kind else {
+            return Err(error(libc::EACCES));
+        };
+        if handle.authority == FsAccess::Read {
+            let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::fstatvfs(file.as_raw_fd(), &mut stat) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if stat.f_flag & libc::ST_RDONLY == 0 {
+                return Err(error(libc::EROFS));
+            }
+        }
+        let copy = file.try_clone()?;
+        // The exact OPEN handle owns this object even after its name is moved.
+        // No current(path) lookup belongs on the retained-handle export path.
+        self.export
+            .as_mut()
+            .ok_or_else(|| error(libc::EACCES))?
+            .file = Some(copy);
+        Ok(())
     }
 }
 
@@ -470,7 +558,39 @@ fn attributes(ino: u64, meta: &Metadata, access: Option<FsAccess>) -> io::Result
 }
 
 impl Filesystem for Projection {
+    fn ioctl(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        flags: IoctlFlags,
+        cmd: u32,
+        in_data: &[u8],
+        out_size: u32,
+        reply: ReplyIoctl,
+    ) {
+        let result = if u64::from(cmd) != EXPORT_IOCTL
+            || !flags.is_empty()
+            || !in_data.is_empty()
+            || out_size != 0
+        {
+            Err(error(libc::ENOTTY))
+        } else {
+            self.state()
+                .and_then(|mut state| state.export_handle(req.pid(), ino.0, fh.0))
+        };
+        match result {
+            Ok(()) => reply.ioctl(0, &[]),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
     fn init(&mut self, _: &Request, config: &mut KernelConfig) -> io::Result<()> {
+        if self.state()?.backing.supports_export() {
+            // Server workers inherit this thread's credentials. Namespace-local
+            // DAC override must not make backing opens stronger than the caller.
+            unsafe { super::super::linux_landlock::drop_all_capabilities() }?;
+        }
         config
             .add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP)
             .map_err(|_| {

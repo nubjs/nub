@@ -28,6 +28,65 @@ fn projection(root: &Path, grants: &[(&str, FsAccess)]) -> Projection {
     Projection::acquire(&rules(grants), root).unwrap()
 }
 
+#[test]
+fn native_export_requires_a_readonly_backing_view() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = projection(root.path(), &[("/**", FsAccess::ReadWrite)]);
+    assert_errno(fs.register_export(1), libc::EACCES);
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+            .open(root.path())
+            .unwrap()
+    };
+    assert_errno(
+        Projection::acquire_native(&rules(&[("/**", FsAccess::Read)]), open(), open()),
+        libc::EROFS,
+    );
+}
+
+#[test]
+fn native_export_uses_the_exact_retained_open_handle() {
+    use std::io::Read;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("file"), b"original").unwrap();
+    let fs = projection(root.path(), &[("/**", FsAccess::ReadWrite)]);
+    let mut state = fs.state().unwrap();
+    let ino = lookup(&mut state, ROOT, "file");
+    let handle = state.open(ino, libc::O_RDONLY).unwrap();
+    assert_eq!(
+        state.handle(ino, handle).unwrap().authority,
+        FsAccess::ReadWrite
+    );
+    let HandleKind::File { writable, .. } = &state.handle(ino, handle).unwrap().kind else {
+        panic!("file")
+    };
+    assert!(!*writable);
+    // Direct unit control of the slot state machine, not mounted enforcement.
+    // Real registration requires the separate read-only view checked above.
+    state.export = Some(ExportSlot {
+        tid: 42,
+        armed: true,
+        file: None,
+    });
+    assert_errno(state.export_handle(41, ino, handle), libc::EACCES);
+    assert_errno(state.export_handle(42, ROOT, handle), libc::EBADF);
+    std::fs::rename(root.path().join("file"), root.path().join("moved")).unwrap();
+    std::fs::write(root.path().join("file"), b"replacement").unwrap();
+    state.export_handle(42, ino, handle).unwrap();
+    assert_errno(state.export_handle(42, ino, handle), libc::EACCES);
+    state.handles.remove(&handle);
+    drop(state);
+    let mut file = fs.take_export().unwrap();
+    let mut bytes = String::new();
+    file.read_to_string(&mut bytes).unwrap();
+    assert_eq!(bytes, "original");
+    assert_errno(fs.take_export(), libc::EIO);
+    fs.unregister_export();
+    assert!(fs.state().unwrap().export.is_none());
+}
+
 fn lookup(state: &mut State, parent: u64, name: &str) -> u64 {
     state.lookup(parent, OsStr::new(name)).unwrap().ino.0
 }
