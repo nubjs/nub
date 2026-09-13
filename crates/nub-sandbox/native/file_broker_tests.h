@@ -1,5 +1,64 @@
 #pragma once
 
+extern "C" NTSTATUS sandbox_file_broker_test_rename_handle(HANDLE file, const wchar_t* destination) {
+    using namespace nub_sandbox::file_broker;
+    auto set = reinterpret_cast<NtSetInformation>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetInformationFile"));
+    if (!set) return kDenied;
+    NameInformation name = {};
+    if (swprintf_s(name.name, L"\\??\\%s", destination) < 0) return kInvalid;
+    name.length = DWORD(wcslen(name.name) * sizeof(wchar_t));
+    IO_STATUS_BLOCK io = {};
+    return set(file, &io, &name, DWORD(offsetof(NameInformation, name) + name.length),
+               static_cast<FILE_INFORMATION_CLASS>(10));
+}
+
+extern "C" DWORD sandbox_file_broker_test_requested_name(const wchar_t* root) {
+    using namespace nub_sandbox::file_broker;
+    Api api;
+    Request request = {};
+    if (swprintf_s(request.path, L"%s\\name-source.json", root) < 0) return 1;
+    request.length = DWORD(wcslen(request.path));
+    ParentPath parent;
+    IO_STATUS_BLOCK io = {};
+    if (resolve_parent(api, request, parent, io)) return 2;
+    Handle file;
+    if (open_relative(api, parent.handle(), parent.path + parent.leaf,
+        request.length - parent.leaf, FILE_GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, 0, file, io)) return 3;
+    wchar_t canonical[kPath] = {};
+    DWORD length = 0;
+    if (!requested_name(file.value, parent, canonical, length)) return 4;
+    for (DWORD i = 0; i < parent.length; ++i) parent.canonical[i] = towupper(parent.canonical[i]);
+    if (!requested_name(file.value, parent, canonical, length)) return 5;
+    Request alias = {};
+    if (swprintf_s(alias.path, L"%s\\name-alias.txt", root) < 0) return 6;
+    alias.length = DWORD(wcslen(alias.path));
+    ParentPath other;
+    if (resolve_parent(api, alias, other, io)) return 7;
+    // The other name is a hardlink to the same file, not an unrelated object.
+    Handle linked;
+    if (open_relative(api, other.handle(), other.path + other.leaf,
+        alias.length - other.leaf, FILE_GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, 0, linked, io) ||
+        !same_file(file.value, linked.value)) return 8;
+    if (requested_name(file.value, other, canonical, length)) return 9;
+    if (!requested_name(linked.value, other, canonical, length)) return 10;
+    Request moved = {};
+    if (swprintf_s(moved.path, L"%s\\name-moved.json", root) < 0 ||
+        !MoveFileExW(request.path, moved.path, 0)) return 11;
+    moved.length = DWORD(wcslen(moved.path));
+    // The original handle stays usable, but its changed name must not
+    // authorize a fresh request for the old spelling.
+    if (requested_name(file.value, parent, canonical, length)) return 12;
+    ParentPath destination;
+    if (resolve_parent(api, moved, destination, io) ||
+        !requested_name(file.value, destination, canonical, length)) return 13;
+    return 0;
+}
+
 // Real NT calls, also run unconfined before the raw/adapter pair. These do not
 // call the resolver directly and cannot pass by testing only the matcher.
 extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL allowed) {
