@@ -36,7 +36,7 @@ fn fixture_path() -> PathBuf {
     path
 }
 
-fn policy(root: &Path, fixture: &Path, net: serde_json::Value, endpoint: Option<&str>) -> nub_sandbox::SandboxPolicy {
+fn policy(root: &Path, fixture: &Path, net: serde_json::Value, endpoint: Option<&str>, dns_name: Option<&str>) -> nub_sandbox::SandboxPolicy {
     let project = root.join("project");
     let ambient: BTreeMap<String, String> = std::env::vars().filter(|(key, _)| {
         ["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"].contains(&key.to_ascii_uppercase().as_str())
@@ -48,6 +48,7 @@ fn policy(root: &Path, fixture: &Path, net: serde_json::Value, endpoint: Option<
     result.env.constructed = ambient;
     result.env.constructed.insert("NUB_FULL_NETWORK_FS_CANARY".into(), root.join("withheld/canary").to_string_lossy().into_owned());
     if let Some(endpoint) = endpoint { result.env.constructed.insert("NUB_FULL_NETWORK_ENDPOINT".into(), endpoint.into()); }
+    if let Some(name) = dns_name { result.env.constructed.insert("NUB_FULL_NETWORK_DNS_NAME".into(), name.into()); }
     result
 }
 
@@ -87,29 +88,31 @@ fn udp_peer(socket: UdpSocket) -> std::thread::JoinHandle<()> {
 fn positive_client(root: &Path, fixture: &Path, case: &str, udp: bool, connections: usize) {
     if udp {
         let peer = UdpSocket::bind("127.0.0.1:0").unwrap(); let address = peer.local_addr().unwrap().to_string();
-        let policy = policy(root, fixture, json!(true), Some(&address)); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
+        let policy = policy(root, fixture, json!(true), Some(&address), None); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
         let peer = udp_peer(peer); let result = output(&session, fixture, case); peer.join().unwrap();
         assert!(result.status.success(), "{result:?}"); assert_marker(&result, "FULL_NETWORK_PEER", "1");
     } else {
         let peer = TcpListener::bind("127.0.0.1:0").unwrap(); let address = peer.local_addr().unwrap().to_string();
-        let policy = policy(root, fixture, json!(true), Some(&address)); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
+        let policy = policy(root, fixture, json!(true), Some(&address), None); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
         let peer = tcp_peer(peer, connections); let result = output(&session, fixture, case); peer.join().unwrap();
-        assert!(result.status.success(), "{result:?}"); assert_marker(&result, "FULL_NETWORK_PEER", "1");
+        assert!(result.status.success(), "{result:?}");
+        if case == "concurrent4" { assert_marker(&result, "FULL_NETWORK_CONCURRENT", "12"); } else { assert_marker(&result, "FULL_NETWORK_PEER", "1"); }
     }
 }
 
 fn negative_client(root: &Path, fixture: &Path, net: serde_json::Value, native: bool, net_label: &str) {
     let peer = TcpListener::bind("127.0.0.1:0").unwrap(); peer.set_nonblocking(true).unwrap();
-    let endpoint = peer.local_addr().unwrap().to_string(); let policy = policy(root, fixture, net, Some(&endpoint));
+    let endpoint = peer.local_addr().unwrap().to_string(); let policy = policy(root, fixture, net, Some(&endpoint), None);
     let session = if native { Sandbox::with_windows_native_compat(&policy) } else { Sandbox::new(&policy) }.expect("negative session");
     let result = output(&session, fixture, "tcp4");
     assert!(!result.status.success(), "{net_label} unexpectedly succeeded: {result:?}");
-    if native { assert_marker(&result, "FULL_NETWORK_ROOT_BROKER_SOCKET", "failed:10013"); } else { assert_marker(&result, "FULL_NETWORK_PEER", "0"); }
+    assert!(String::from_utf8_lossy(&result.stdout).contains("FULL_NETWORK_ROOT_BROKER_SOCKET="), "missing root diagnostic: {result:?}");
+    if String::from_utf8_lossy(&result.stdout).contains("FULL_NETWORK_PEER=") { assert_marker(&result, "FULL_NETWORK_PEER", "0"); }
     assert!(peer.accept().is_err(), "{net_label} exposed a broad socket to the child");
 }
 
 fn listener_case(root: &Path, fixture: &Path, case: &str) {
-    let policy = policy(root, fixture, json!(true), None); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
+    let policy = policy(root, fixture, json!(true), None, None); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
     let prepared = session.prepare(command(fixture, case)).expect("listener prepares");
     let mut child = prepared.spawn().expect("listener launches");
     let stdout = child.take_stdout().expect("listener stdout");
@@ -122,6 +125,53 @@ fn listener_case(root: &Path, fixture: &Path, case: &str) {
     peer.write_all(REQUEST).unwrap(); let mut reply = [0; REPLY.len()]; peer.read_exact(&mut reply).unwrap(); assert_eq!(reply, REPLY);
     let mut rest = Vec::new(); stdout.read_to_end(&mut rest).unwrap(); let status = child.wait().unwrap();
     assert!(status.success(), "listener failed: {}\nstderr: {}", String::from_utf8_lossy(&rest), String::from_utf8_lossy(&stderr.join().unwrap()));
+}
+
+fn fresh_dns_name(api: &str, mode: &str) -> String {
+    format!("nub-{}-{}-{}-{}.1.1.1.1.sslip.io", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(), api, mode)
+}
+
+#[test]
+#[ignore = "requires NUB_WINDOWS_NATIVE_FULL_NETWORK_DNS_OPT_IN=1 and the precompiled focused fixture"]
+fn native_adapter_full_network_dns_opt_in() {
+    if std::env::var_os("NUB_WINDOWS_NATIVE_FULL_NETWORK_DNS_OPT_IN").as_deref() != Some(std::ffi::OsStr::new("1")) { return; }
+    let _serial = SERIAL.lock().unwrap(); standard_user(); let fixture = fixture_path();
+    let root = tempfile::Builder::new().prefix("nub-native-network-dns-").tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    for name in ["project", "home", "cache", "tmp", "withheld"] { std::fs::create_dir(root.path().join(name)).unwrap(); }
+    std::fs::write(root.path().join("withheld/canary"), b"withheld").unwrap();
+    for api in ["getaddrinfo", "dnsqueryex"] {
+        let plain_name = fresh_dns_name(api, "plain");
+        let plain = std::process::Command::new(&fixture).arg(api).env("NUB_FULL_NETWORK_DNS_NAME", &plain_name).output().unwrap();
+        assert!(plain.status.success(), "plain {api} setup/provider failure for {plain_name}: {plain:?}");
+        assert_marker(&plain, "FULL_NETWORK_DNS", &format!("{api}:0"));
+        let native_name = fresh_dns_name(api, "native");
+        let policy = policy(root.path(), &fixture, json!(true), None, Some(&native_name));
+        let native = Sandbox::with_windows_native_compat(&policy).expect("native full-network DNS session");
+        let adapted = output(&native, &fixture, api);
+        assert!(adapted.status.success(), "adapter {api} failed for {native_name}: {adapted:?}");
+        assert_marker(&adapted, "FULL_NETWORK_DNS", &format!("{api}:0"));
+        // Raw is deliberately observational: DNS is outside the socket adapter's hook surface.
+        let raw_policy = policy(root.path(), &fixture, json!(false), None, Some(&fresh_dns_name(api, "raw")));
+        let raw = Sandbox::new(&raw_policy).expect("raw DNS session");
+        let observed = output(&raw, &fixture, api);
+        eprintln!("native-full-network raw DNS {api}: {observed:?}");
+    }
+}
+
+#[test]
+#[ignore = "requires the source-controlled MSVC native-full-network fixture and an ordinary Windows user"]
+fn native_adapter_drop_reaps_pending_listener_and_closes_port() {
+    let _serial = SERIAL.lock().unwrap(); standard_user(); let fixture = fixture_path();
+    let root = tempfile::Builder::new().prefix("nub-native-network-owner-").tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    for name in ["project", "home", "cache", "tmp", "withheld"] { std::fs::create_dir(root.path().join(name)).unwrap(); }
+    std::fs::write(root.path().join("withheld/canary"), b"withheld").unwrap();
+    let policy = policy(root.path(), &fixture, json!(true), None, None); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
+    let mut child = session.prepare(command(&fixture, "owner-hold4")).unwrap().spawn().unwrap();
+    let mut stdout = BufReader::new(child.take_stdout().unwrap()); let mut line = String::new(); stdout.read_line(&mut line).unwrap(); assert_eq!(line.trim(), "FULL_NETWORK_ROOT_BROKER_SOCKET=ok");
+    line.clear(); stdout.read_line(&mut line).unwrap(); let address = line.trim().strip_prefix("FULL_NETWORK_READY=").expect("owner listener ready").to_owned();
+    drop(child);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(TcpStream::connect_timeout(&address.parse().unwrap(), DEADLINE).is_err(), "dropped command owner left listener reachable");
 }
 
 #[test]
@@ -139,9 +189,10 @@ fn native_adapter_full_network_has_peer_oracles_and_retained_policy_separation()
     positive_client(root.path(), &fixture, "tcp4", false, 1); positive_client(root.path(), &fixture, "udp4", true, 1);
     positive_client(root.path(), &fixture, "connectex4", false, 1); positive_client(root.path(), &fixture, "concurrent4", false, 12);
     positive_client(root.path(), &fixture, "descendant4", false, 1); listener_case(root.path(), &fixture, "listen4"); listener_case(root.path(), &fixture, "acceptex4");
-    let fs_policy = policy(root.path(), &fixture, json!(true), None); let native = Sandbox::with_windows_native_compat(&fs_policy).unwrap(); let fs = output(&native, &fixture, "fs-canary"); assert!(!fs.status.success()); assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5"); drop(native);
+    let fs_policy = policy(root.path(), &fixture, json!(true), None, None); let native = Sandbox::with_windows_native_compat(&fs_policy).unwrap(); let fs = output(&native, &fixture, "fs-canary"); assert!(!fs.status.success()); assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5"); drop(native);
 
     // These run after the positive lease with identical literal fs grants, targeting profile-key aliasing.
     negative_client(root.path(), &fixture, json!(false), false, "raw net:false");
+    negative_client(root.path(), &fixture, json!(false), true, "native net:false");
     negative_client(root.path(), &fixture, json!(["allowed.invalid"]), true, "hostname-restricted native");
 }

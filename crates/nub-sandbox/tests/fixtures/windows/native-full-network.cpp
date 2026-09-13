@@ -236,6 +236,15 @@ bool listener_round_trip(int family) {
   return peer;
 }
 
+bool listener_hold(int family) {
+  Socket listener = ordinary_socket(family, SOCK_STREAM, IPPROTO_TCP);
+  sockaddr_storage bound{}; int bound_length = 0;
+  if (!listener || !bind_ephemeral(listener.value, family, &bound, &bound_length) || listen(listener.value, 1) != 0) return false;
+  marker("FULL_NETWORK_READY", printable_endpoint(bound));
+  std::this_thread::sleep_for(std::chrono::seconds(30));
+  return true;
+}
+
 GUID connect_ex_guid() {
   return {0x25a207b9, 0xddf3, 0x4660, {0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e}};
 }
@@ -420,6 +429,7 @@ int run_case(const std::string& name, const char* executable) {
   if (name == "udp4" || name == "udp6") return endpoint_case(name, SOCK_DGRAM, datagram_round_trip) ? 0 : 1;
   if (name == "listen4") return listener_round_trip(AF_INET) ? 0 : 1;
   if (name == "listen6") return listener_round_trip(AF_INET6) ? 0 : 1;
+  if (name == "owner-hold4") return listener_hold(AF_INET) ? 0 : 1;
   if (name == "connectex4") {
     Endpoint endpoint{};
     const bool peer = parse_endpoint(std::getenv("NUB_FULL_NETWORK_ENDPOINT"), SOCK_STREAM, &endpoint) && connect_ex_round_trip(endpoint);
