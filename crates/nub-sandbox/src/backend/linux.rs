@@ -236,21 +236,25 @@ pub(crate) fn preflight(
     })
 }
 
-pub fn apply(
+pub(super) struct ProxyLaunch<'a> {
+    // The loopback egress proxy's port + bearer, when one is running (a per-host net policy). The
+    // Landlock build-jail arm ignores them — it has no supervisor to redirect and confines egress
+    // with the coarse seccomp family ceiling — so they flow only into the supervised plan. (5.1)
+    pub port: Option<u16>,
+    pub token: Option<&'a str>,
+    // The session-owned, sealed public CA bundle for a terminating proxy. The supervised child
+    // inherits this descriptor and reaches it only through `/proc/self/fd/<n>`; no temporary
+    // directory is granted and the private CA key never leaves the proxy.
+    pub ca_bundle: Option<std::fs::File>,
+}
+
+pub(super) fn apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
     tmp_dir: Option<&Path>,
     retained: &RetainedLinuxGrants,
     preflight: LinuxPreflight,
-    // The loopback egress proxy's port + bearer, when one is running (a per-host net policy). The
-    // Landlock build-jail arm ignores them — it has no supervisor to redirect and confines egress
-    // with the coarse seccomp family ceiling — so they flow only into the supervised plan. (5.1)
-    proxy_port: Option<u16>,
-    proxy_token: Option<&str>,
-    // The session-owned, sealed public CA bundle for a terminating proxy. The supervised child
-    // inherits this descriptor and reaches it only through `/proc/self/fd/<n>`; no temporary
-    // directory is granted and the private CA key never leaves the proxy.
-    ca_bundle: Option<std::fs::File>,
+    proxy: ProxyLaunch<'_>,
 ) -> Result<Prepared, Degradation> {
     if let Some(landlock) = preflight.landlock {
         return apply_landlock(policy, spec, landlock, tmp_dir, retained);
@@ -265,15 +269,7 @@ pub fn apply(
         // pointed at it; Deny tmp grants nothing, so the shared `/tmp` is simply never in the
         // allow-set. The managed tmp root is stable for one explicit session (Env is enforced
         // by construction — `base_command`/`envp` — always.)
-        let plan = build_supervised_plan(
-            policy,
-            &spec,
-            tmp_dir,
-            retained,
-            proxy_port,
-            proxy_token,
-            ca_bundle,
-        )?;
+        let plan = build_supervised_plan(policy, &spec, tmp_dir, retained, proxy)?;
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
@@ -316,10 +312,13 @@ fn build_supervised_plan(
     spec: &CommandSpec,
     tmp_dir: Option<&Path>,
     retained: &RetainedLinuxGrants,
-    proxy_port: Option<u16>,
-    proxy_token: Option<&str>,
-    ca_bundle: Option<std::fs::File>,
+    proxy: ProxyLaunch<'_>,
 ) -> Result<super::SupervisedPlan, Degradation> {
+    let ProxyLaunch {
+        port: proxy_port,
+        token: proxy_token,
+        ca_bundle,
+    } = proxy;
     let to_cstring = |bytes: &[u8], label: &str| -> Result<CString, Degradation> {
         CString::new(bytes).map_err(|_| Degradation {
             lost: vec!["process-input".to_string()],

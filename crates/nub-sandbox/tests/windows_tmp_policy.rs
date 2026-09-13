@@ -33,6 +33,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 const CHILD: &str = "appcontainer_tmp_child_records_profile_storage";
 const MODE: &str = "NUB_SANDBOX_TMP_POLICY_CHILD";
 const PROJECT: &str = "NUB_SANDBOX_TMP_POLICY_PROJECT";
+const REDIRECTED_LOCAL_APPDATA: &str = "NUB_SANDBOX_TMP_POLICY_LOCAL_APPDATA";
 const MARKER: &str = "WINDOWS_TMP_POLICY_ACCESS ";
 
 fn os_environment() -> BTreeMap<String, String> {
@@ -271,6 +272,12 @@ fn appcontainer_tmp_false_withholds_redirected_profile_storage() {
         "LOCALAPPDATA".into(),
         redirected.to_string_lossy().into_owned(),
     );
+    // Windows appends the package's AC path to LOCALAPPDATA during LowBox startup. Preserve
+    // the original fixture root separately so the probe does not append that layout twice.
+    denied.env.constructed.insert(
+        REDIRECTED_LOCAL_APPDATA.into(),
+        redirected.to_string_lossy().into_owned(),
+    );
     let session = Sandbox::acquire(&denied).expect("redirected storage session acquires");
     for _ in 0..2 {
         let prepared = session
@@ -291,6 +298,11 @@ fn appcontainer_tmp_false_withholds_redirected_profile_storage() {
                 path.is_dir(),
                 "redirected storage must actually exist: {}",
                 path.display()
+            );
+            assert_eq!(
+                Path::new(access[name]["path"].as_str().unwrap()),
+                path,
+                "child probed a different storage path"
             );
             for operation in ["read", "enumerate", "create"] {
                 assert!(!access[name][operation].as_bool().unwrap(), "{access}");
@@ -424,7 +436,7 @@ fn appcontainer_tmp_child_records_profile_storage() {
         "appcontainer_local_state": probe_path(ac_folder.join("LocalState"), &nonce),
         "project": probe_path(project, &nonce),
     });
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+    if let Some(local) = std::env::var_os(REDIRECTED_LOCAL_APPDATA) {
         let redirected = PathBuf::from(local)
             .join("Packages")
             .join(package.file_name().unwrap());
