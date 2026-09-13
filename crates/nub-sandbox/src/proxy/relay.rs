@@ -163,7 +163,9 @@ impl Stream {
                 Err(error) => return Err(error),
             }
         }
-        Ok(self.local_fin && self.write_closed)
+        // CLOSE is abortive at the peer. Wait until it has written every DATA frame to its
+        // socket before releasing the stream, even when both TCP read halves reached EOF.
+        Ok(self.local_fin && self.write_closed && self.credit == WINDOW)
     }
 }
 
@@ -570,6 +572,31 @@ pub(super) mod tests {
             socket.read_to_end(&mut reply).unwrap();
             assert!(String::from_utf8_lossy(&reply).starts_with(&format!("HTTP/1.1 {status}")));
         }
+    }
+
+    #[test]
+    fn graceful_close_waits_for_the_last_data_credit() {
+        let (socket, mut peer) = sockets();
+        let mut stream = Stream::new(socket).unwrap();
+        let (outgoing, frames) = mpsc::sync_channel(QUEUE);
+        peer.write_all(b"x").unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+        stream.frame(Frame::control(FIN, 1)).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !stream.local_fin {
+            assert!(!stream.pump(1, &outgoing).unwrap());
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(stream.write_closed);
+        assert_eq!(frames.try_recv().unwrap().kind, DATA);
+        assert_eq!(frames.try_recv().unwrap().kind, FIN);
+        assert_eq!(stream.credit, WINDOW - 1);
+        assert!(!stream.pump(1, &outgoing).unwrap());
+
+        stream.frame(Frame::control(CREDIT, 1)).unwrap();
+        assert!(stream.pump(1, &outgoing).unwrap());
     }
 
     #[test]
