@@ -25,7 +25,7 @@ $build = @"
 @echo off
 call "$vs\VC\Auxiliary\Build\vcvarsall.bat" $vcArchitecture
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++17 /W4 /WX /MT /EHsc /I"$detours" $quotedSources /Fe:"$output" /link advapi32.lib
+cl /nologo /std:c++17 /MT /EHsc /DWIN32_LEAN_AND_MEAN /w /I"$detours" $quotedSources /Fo:"$outputDirectory\\" /Fe:"$output" /link advapi32.lib
 "@
 $buildPath = Join-Path $outputDirectory "build-file-operation-shapes-$Architecture.cmd"
 Set-Content -Path $buildPath -Value $build -Encoding ascii

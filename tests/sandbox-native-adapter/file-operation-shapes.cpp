@@ -12,17 +12,17 @@
 
 #include "detours.h"
 
-using NtOpenFile = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
-                                   PIO_STATUS_BLOCK, ULONG, ULONG);
-using NtCreateFile = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
-                                      PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG,
-                                      ULONG, ULONG, PVOID, ULONG);
-using NtSetInformationFile = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID,
-                                              ULONG, ULONG);
+using NtOpenFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+                                     PIO_STATUS_BLOCK, ULONG, ULONG);
+using NtCreateFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+                                        PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG,
+                                        ULONG, ULONG, PVOID, ULONG);
+using NtSetInformationFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID,
+                                                ULONG, ULONG);
 
-static NtOpenFile real_nt_open_file = nullptr;
-static NtCreateFile real_nt_create_file = nullptr;
-static NtSetInformationFile real_nt_set_information_file = nullptr;
+static NtOpenFileFn real_nt_open_file = nullptr;
+static NtCreateFileFn real_nt_create_file = nullptr;
+static NtSetInformationFileFn real_nt_set_information_file = nullptr;
 
 static thread_local const char* current_operation = nullptr;
 static thread_local unsigned operation_events = 0;
@@ -130,14 +130,16 @@ static void begin_operation(const char* name) {
     operation_events = 0;
 }
 
-static void end_operation(bool passed, DWORD error) {
+static bool end_operation(bool passed, DWORD error) {
+    bool captured = operation_events != 0;
     emitting = true;
-    std::printf("OPERATION_RESULT operation=%s result=%s error=%lu nt_events=%u\n",
-                current_operation, passed ? "pass" : "notpass", static_cast<unsigned long>(error),
-                operation_events);
+    std::printf("OPERATION_RESULT operation=%s execution=%s capture=%s error=%lu nt_events=%u\n",
+                current_operation, passed ? "pass" : "notpass", captured ? "pass" : "notpass",
+                static_cast<unsigned long>(error), operation_events);
     std::fflush(stdout);
     emitting = false;
     current_operation = nullptr;
+    return passed && captured;
 }
 
 static bool make_file(const wchar_t* path) {
@@ -147,6 +149,47 @@ static bool make_file(const wchar_t* path) {
     CloseHandle(file);
     return true;
 }
+
+static bool is_absent(const wchar_t* path) {
+    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) return false;
+    DWORD error = GetLastError();
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+
+// Owns every disposable path from the moment the root exists. Calling finish
+// makes cleanup observable; the destructor is the all-exit fallback.
+struct FixtureCleanup {
+    wchar_t root[MAX_PATH] = {};
+    wchar_t enumeration_directory[MAX_PATH] = {};
+    wchar_t enumeration_file[MAX_PATH] = {};
+    wchar_t created_directory[MAX_PATH] = {};
+    wchar_t rename_source[MAX_PATH] = {};
+    wchar_t rename_destination[MAX_PATH] = {};
+    wchar_t hard_link[MAX_PATH] = {};
+    bool finished = false;
+
+    bool finish() {
+        if (finished) return is_absent(root);
+        finished = true;
+        DeleteFileW(hard_link);
+        DeleteFileW(rename_source);
+        DeleteFileW(rename_destination);
+        DeleteFileW(enumeration_file);
+        RemoveDirectoryW(created_directory);
+        RemoveDirectoryW(enumeration_directory);
+        RemoveDirectoryW(root);
+        bool absent = is_absent(root);
+        DWORD error = absent ? ERROR_SUCCESS : GetLastError();
+        std::printf("CLEANUP_RESULT result=%s root_absent=%s error=%lu\n",
+                    absent ? "pass" : "notpass", absent ? "pass" : "notpass",
+                    static_cast<unsigned long>(error));
+        return absent;
+    }
+
+    ~FixtureCleanup() {
+        if (!finished) finish();
+    }
+};
 
 int wmain() {
     if (!attach_detours()) {
@@ -158,76 +201,75 @@ int wmain() {
     wchar_t temporary[MAX_PATH] = {};
     DWORD temporary_length = GetTempPathW(MAX_PATH, temporary);
     if (!temporary_length || temporary_length >= MAX_PATH) return 3;
-    wchar_t root[MAX_PATH] = {};
-    if (swprintf_s(root, L"%snub-file-operation-shapes-%lu", temporary,
+    FixtureCleanup cleanup;
+    if (swprintf_s(cleanup.root, L"%snub-file-operation-shapes-%lu", temporary,
                    static_cast<unsigned long>(GetCurrentProcessId())) < 0 ||
-        !CreateDirectoryW(root, nullptr)) return 4;
+        !CreateDirectoryW(cleanup.root, nullptr)) return 4;
 
-    wchar_t enumeration_directory[MAX_PATH] = {};
-    wchar_t enumeration_file[MAX_PATH] = {};
-    wchar_t created_directory[MAX_PATH] = {};
-    wchar_t rename_source[MAX_PATH] = {};
-    wchar_t rename_destination[MAX_PATH] = {};
-    wchar_t hard_link[MAX_PATH] = {};
-    swprintf_s(enumeration_directory, L"%s\\enumeration", root);
-    swprintf_s(enumeration_file, L"%s\\entry.txt", enumeration_directory);
-    swprintf_s(created_directory, L"%s\\created", root);
-    swprintf_s(rename_source, L"%s\\rename-source.txt", root);
-    swprintf_s(rename_destination, L"%s\\rename-destination.txt", root);
-    swprintf_s(hard_link, L"%s\\hard-link.txt", root);
+    swprintf_s(cleanup.enumeration_directory, L"%s\\enumeration", cleanup.root);
+    swprintf_s(cleanup.enumeration_file, L"%s\\entry.txt", cleanup.enumeration_directory);
+    swprintf_s(cleanup.created_directory, L"%s\\created", cleanup.root);
+    swprintf_s(cleanup.rename_source, L"%s\\rename-source.txt", cleanup.root);
+    swprintf_s(cleanup.rename_destination, L"%s\\rename-destination.txt", cleanup.root);
+    swprintf_s(cleanup.hard_link, L"%s\\hard-link.txt", cleanup.root);
 
     int failures = 0;
-    if (!CreateDirectoryW(enumeration_directory, nullptr) || !make_file(enumeration_file) ||
-        !make_file(rename_source) || !make_file(rename_destination)) {
-        RemoveDirectoryW(enumeration_directory);
-        RemoveDirectoryW(root);
-        return 5;
+    if (!CreateDirectoryW(cleanup.enumeration_directory, nullptr) || !make_file(cleanup.enumeration_file) ||
+        !make_file(cleanup.rename_source) || !make_file(cleanup.rename_destination)) {
+        bool cleaned = cleanup.finish();
+        return cleaned ? 5 : 6;
     }
 
     begin_operation("create-directory");
-    BOOL created = CreateDirectoryW(created_directory, nullptr);
+    BOOL created = CreateDirectoryW(cleanup.created_directory, nullptr);
     DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
-    end_operation(created != FALSE, create_error);
-    failures += created == FALSE;
+    failures += !end_operation(created != FALSE, create_error);
 
     begin_operation("remove-directory");
-    BOOL removed = RemoveDirectoryW(created_directory);
+    BOOL removed = RemoveDirectoryW(cleanup.created_directory);
     DWORD remove_error = removed ? ERROR_SUCCESS : GetLastError();
-    end_operation(removed != FALSE, remove_error);
-    failures += removed == FALSE;
+    failures += !end_operation(removed != FALSE, remove_error);
 
     wchar_t pattern[MAX_PATH] = {};
-    swprintf_s(pattern, L"%s\\*", enumeration_directory);
+    swprintf_s(pattern, L"%s\\*", cleanup.enumeration_directory);
     begin_operation("directory-enumeration");
     WIN32_FIND_DATAW entry = {};
     HANDLE enumeration = FindFirstFileW(pattern, &entry);
     BOOL enumerated = enumeration != INVALID_HANDLE_VALUE;
     DWORD enumeration_error = enumerated ? ERROR_SUCCESS : GetLastError();
-    if (enumerated) FindClose(enumeration);
-    end_operation(enumerated != FALSE, enumeration_error);
-    failures += enumerated == FALSE;
+    bool entry_found = false;
+    while (enumerated) {
+        if (wcscmp(entry.cFileName, L"entry.txt") == 0) entry_found = true;
+        if (!FindNextFileW(enumeration, &entry)) {
+            DWORD next_error = GetLastError();
+            if (next_error != ERROR_NO_MORE_FILES) enumeration_error = next_error;
+            break;
+        }
+    }
+    if (enumeration != INVALID_HANDLE_VALUE) FindClose(enumeration);
+    enumerated = enumerated && entry_found && enumeration_error == ERROR_SUCCESS;
+    if (!entry_found && enumeration_error == ERROR_SUCCESS) enumeration_error = ERROR_FILE_NOT_FOUND;
+    failures += !end_operation(enumerated != FALSE, enumeration_error);
 
     begin_operation("rename-replace");
-    BOOL renamed = MoveFileExW(rename_source, rename_destination, MOVEFILE_REPLACE_EXISTING);
+    BOOL renamed = MoveFileExW(cleanup.rename_source, cleanup.rename_destination, MOVEFILE_REPLACE_EXISTING);
     DWORD rename_error = renamed ? ERROR_SUCCESS : GetLastError();
-    end_operation(renamed != FALSE, rename_error);
-    failures += renamed == FALSE;
+    failures += !end_operation(renamed != FALSE, rename_error);
 
     begin_operation("hardlink");
-    BOOL linked = CreateHardLinkW(hard_link, rename_destination, nullptr);
+    BOOL linked = CreateHardLinkW(cleanup.hard_link, cleanup.rename_destination, nullptr);
     DWORD link_error = linked ? ERROR_SUCCESS : GetLastError();
-    end_operation(linked != FALSE, link_error);
+    bool hardlink_passed = end_operation(linked != FALSE, link_error);
     // A normal same-volume hard link needs no privilege. Record a platform or
     // filesystem limitation explicitly instead of treating it as a pass.
     if (!linked && link_error == ERROR_PRIVILEGE_NOT_HELD)
         std::printf("OPERATION_NOTE operation=hardlink result=notpass reason=privilege-not-held\n");
-    failures += linked == FALSE;
+    failures += !hardlink_passed;
 
     begin_operation("delete");
-    BOOL deleted = DeleteFileW(hard_link);
+    BOOL deleted = DeleteFileW(cleanup.hard_link);
     DWORD delete_error = deleted ? ERROR_SUCCESS : GetLastError();
-    end_operation(deleted != FALSE, delete_error);
-    failures += deleted == FALSE;
+    failures += !end_operation(deleted != FALSE, delete_error);
 
     wchar_t system_directory[MAX_PATH] = {};
     DWORD system_length = GetSystemDirectoryW(system_directory, MAX_PATH);
@@ -242,23 +284,25 @@ int wmain() {
                                    nullptr, &startup, &child);
     DWORD launch_error = launched ? ERROR_SUCCESS : GetLastError();
     if (launched) {
-        WaitForSingleObject(child.hProcess, INFINITE);
+        DWORD wait = WaitForSingleObject(child.hProcess, 30000);
         DWORD exit_code = 1;
-        GetExitCodeProcess(child.hProcess, &exit_code);
-        launched = exit_code == 0;
-        if (!launched) launch_error = exit_code;
+        if (wait == WAIT_OBJECT_0 && GetExitCodeProcess(child.hProcess, &exit_code) && exit_code == 0) {
+            launched = TRUE;
+        } else {
+            launched = FALSE;
+            launch_error = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT :
+                           (wait == WAIT_FAILED ? GetLastError() : exit_code);
+            if (wait == WAIT_TIMEOUT) {
+                TerminateProcess(child.hProcess, ERROR_TIMEOUT);
+                WaitForSingleObject(child.hProcess, 30000);
+            }
+        }
         CloseHandle(child.hThread);
         CloseHandle(child.hProcess);
     }
-    end_operation(launched != FALSE, launch_error);
-    failures += launched == FALSE;
+    failures += !end_operation(launched != FALSE, launch_error);
 
-    DeleteFileW(hard_link);
-    DeleteFileW(rename_source);
-    DeleteFileW(rename_destination);
-    DeleteFileW(enumeration_file);
-    RemoveDirectoryW(enumeration_directory);
-    RemoveDirectoryW(root);
+    if (!cleanup.finish()) ++failures;
     std::printf("FIXTURE_RESULT result=%s failures=%d\n", failures ? "notpass" : "pass", failures);
     return failures ? 1 : 0;
 }
