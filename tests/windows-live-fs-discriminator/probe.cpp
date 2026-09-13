@@ -57,6 +57,8 @@ using NtCreateFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES
                                         PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
 using NtOpenFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
                                       ULONG, ULONG);
+using NtQueryAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, PFILE_BASIC_INFORMATION);
+using NtQueryFullAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, PFILE_NETWORK_OPEN_INFORMATION);
 using NtCreateSectionFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER,
                                            ULONG, ULONG, HANDLE);
 using NtMapViewOfSectionFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T,
@@ -85,6 +87,8 @@ std::wstring g_brokered_dll_path;
 HANDLE g_brokered_dll = nullptr;
 unsigned long g_create_broker_calls = 0;
 unsigned long g_open_broker_calls = 0;
+unsigned long g_query_broker_calls = 0;
+unsigned long g_query_full_broker_calls = 0;
 
 bool native_name_matches_brokered_dll(POBJECT_ATTRIBUTES attributes) {
   if (!attributes || !attributes->ObjectName || !attributes->ObjectName->Buffer ||
@@ -109,13 +113,54 @@ NTSTATUS duplicate_brokered_dll(PHANDLE file, PIO_STATUS_BLOCK io_status) {
   return kStatusSuccess;
 }
 
+NTSTATUS describe_brokered_dll(PFILE_BASIC_INFORMATION basic,
+                               PFILE_NETWORK_OPEN_INFORMATION full) {
+  BY_HANDLE_FILE_INFORMATION info = {};
+  FILE_STANDARD_INFO standard = {};
+  if (!g_brokered_dll || !GetFileInformationByHandle(g_brokered_dll, &info) ||
+      !GetFileInformationByHandleEx(g_brokered_dll, FileStandardInfo, &standard, sizeof(standard))) {
+    return kStatusAccessDenied;
+  }
+  const auto from_filetime = [](FILETIME value) {
+    LARGE_INTEGER result = {};
+    result.LowPart = value.dwLowDateTime;
+    result.HighPart = static_cast<LONG>(value.dwHighDateTime);
+    return result;
+  };
+  if (basic) {
+    std::memset(basic, 0, sizeof(*basic));
+    basic->CreationTime = from_filetime(info.ftCreationTime);
+    basic->LastAccessTime = from_filetime(info.ftLastAccessTime);
+    basic->LastWriteTime = from_filetime(info.ftLastWriteTime);
+    basic->ChangeTime = basic->LastWriteTime;
+    basic->FileAttributes = info.dwFileAttributes;
+  }
+  if (full) {
+    std::memset(full, 0, sizeof(*full));
+    full->CreationTime = from_filetime(info.ftCreationTime);
+    full->LastAccessTime = from_filetime(info.ftLastAccessTime);
+    full->LastWriteTime = from_filetime(info.ftLastWriteTime);
+    full->ChangeTime = full->LastWriteTime;
+    full->AllocationSize = standard.AllocationSize;
+    full->EndOfFile = standard.EndOfFile;
+    full->FileAttributes = info.dwFileAttributes;
+  }
+  return kStatusSuccess;
+}
+
 struct NativeOpenHooks {
   NtCreateFileFn create_original = nullptr;
   NtOpenFileFn open_original = nullptr;
+  NtQueryAttributesFileFn query_original = nullptr;
+  NtQueryFullAttributesFileFn query_full_original = nullptr;
   void* create_target = nullptr;
   void* open_target = nullptr;
+  void* query_target = nullptr;
+  void* query_full_target = nullptr;
   unsigned char create_saved[kHookBytes] = {};
   unsigned char open_saved[kHookBytes] = {};
+  unsigned char query_saved[kHookBytes] = {};
+  unsigned char query_full_saved[kHookBytes] = {};
   bool active = false;
 
   static bool patch(void* target, const void* replacement, unsigned char* saved, void** trampoline) {
@@ -157,10 +202,17 @@ struct NativeOpenHooks {
     if (!active) return true;
     restore(create_target, create_saved);
     restore(open_target, open_saved);
+    restore(query_target, query_saved);
+    restore(query_full_target, query_full_saved);
+    restore(query_full_target, query_full_saved);
     VirtualFree(reinterpret_cast<void*>(create_original), 0, MEM_RELEASE);
     VirtualFree(reinterpret_cast<void*>(open_original), 0, MEM_RELEASE);
+    VirtualFree(reinterpret_cast<void*>(query_original), 0, MEM_RELEASE);
+    VirtualFree(reinterpret_cast<void*>(query_full_original), 0, MEM_RELEASE);
     create_original = nullptr;
     open_original = nullptr;
+    query_original = nullptr;
+    query_full_original = nullptr;
     active = false;
     return true;
   }
@@ -190,22 +242,48 @@ NTSTATUS NTAPI shim_nt_open_file(PHANDLE file, ACCESS_MASK desired_access,
   return duplicate_brokered_dll(file, io_status);
 }
 
+NTSTATUS NTAPI shim_nt_query_attributes_file(POBJECT_ATTRIBUTES object_attributes,
+                                             PFILE_BASIC_INFORMATION file_attributes) {
+  const NTSTATUS status = g_native_open_hooks.query_original(object_attributes, file_attributes);
+  if (status >= 0 || !native_name_matches_brokered_dll(object_attributes)) return status;
+  ++g_query_broker_calls;
+  return describe_brokered_dll(file_attributes, nullptr);
+}
+
+NTSTATUS NTAPI shim_nt_query_full_attributes_file(POBJECT_ATTRIBUTES object_attributes,
+                                                  PFILE_NETWORK_OPEN_INFORMATION file_attributes) {
+  const NTSTATUS status = g_native_open_hooks.query_full_original(object_attributes, file_attributes);
+  if (status >= 0 || !native_name_matches_brokered_dll(object_attributes)) return status;
+  ++g_query_full_broker_calls;
+  return describe_brokered_dll(nullptr, file_attributes);
+}
+
 bool NativeOpenHooks::install() {
   HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
   create_target = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtCreateFile"));
   open_target = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtOpenFile"));
-  void* create_trampoline = nullptr;
-  void* open_trampoline = nullptr;
-  if (!create_target || !open_target ||
+  query_target = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtQueryAttributesFile"));
+  query_full_target = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtQueryFullAttributesFile"));
+  void* create_trampoline = nullptr, *open_trampoline = nullptr;
+  void* query_trampoline = nullptr, *query_full_trampoline = nullptr;
+  if (!create_target || !open_target || !query_target || !query_full_target ||
       !patch(create_target, reinterpret_cast<const void*>(shim_nt_create_file), create_saved, &create_trampoline) ||
-      !patch(open_target, reinterpret_cast<const void*>(shim_nt_open_file), open_saved, &open_trampoline)) {
+      !patch(open_target, reinterpret_cast<const void*>(shim_nt_open_file), open_saved, &open_trampoline) ||
+      !patch(query_target, reinterpret_cast<const void*>(shim_nt_query_attributes_file), query_saved, &query_trampoline) ||
+      !patch(query_full_target, reinterpret_cast<const void*>(shim_nt_query_full_attributes_file), query_full_saved, &query_full_trampoline)) {
     if (create_trampoline) VirtualFree(create_trampoline, 0, MEM_RELEASE);
     if (open_trampoline) VirtualFree(open_trampoline, 0, MEM_RELEASE);
+    if (query_trampoline) VirtualFree(query_trampoline, 0, MEM_RELEASE);
+    if (query_full_trampoline) VirtualFree(query_full_trampoline, 0, MEM_RELEASE);
     restore(create_target, create_saved);
+    restore(open_target, open_saved);
+    restore(query_target, query_saved);
     return false;
   }
   create_original = reinterpret_cast<NtCreateFileFn>(create_trampoline);
   open_original = reinterpret_cast<NtOpenFileFn>(open_trampoline);
+  query_original = reinterpret_cast<NtQueryAttributesFileFn>(query_trampoline);
+  query_full_original = reinterpret_cast<NtQueryFullAttributesFileFn>(query_full_trampoline);
   active = true;
   return true;
 }
@@ -386,10 +464,11 @@ bool child(const std::wstring& root, const std::wstring& image_exe, const std::w
   auto brokered_dllmain_calls = brokered_module ? reinterpret_cast<int(*)()>(GetProcAddress(brokered_module, "image_fixture_dllmain_calls")) : nullptr;
   const bool brokered_dll_ok = brokered_module && brokered_value && brokered_dllmain_calls &&
       brokered_value() == 0x472 && brokered_dllmain_calls() == 1 &&
-      (g_create_broker_calls + g_open_broker_calls) > 0;
-  std::printf("SHIM_DLL_LOAD=%s error=%lu create_calls=%lu open_calls=%lu dllmain_calls=%d export=%d\n",
+      (g_create_broker_calls + g_open_broker_calls) > 0 &&
+      (g_query_broker_calls + g_query_full_broker_calls) > 0;
+  std::printf("SHIM_DLL_LOAD=%s error=%lu create_calls=%lu open_calls=%lu query_calls=%lu query_full_calls=%lu dllmain_calls=%d export=%d\n",
               brokered_dll_ok ? "OK" : "FAIL", brokered_load_error, g_create_broker_calls,
-              g_open_broker_calls, brokered_dllmain_calls ? brokered_dllmain_calls() : -1,
+              g_open_broker_calls, g_query_broker_calls, g_query_full_broker_calls, brokered_dllmain_calls ? brokered_dllmain_calls() : -1,
               brokered_value ? brokered_value() : -1);
   if (brokered_module) FreeLibrary(brokered_module);
   const bool shim_restored = g_native_open_hooks.uninstall();
