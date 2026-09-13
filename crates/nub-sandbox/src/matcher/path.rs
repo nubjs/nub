@@ -236,6 +236,14 @@ pub fn canonicalize_glob_prefix(pattern: &str) -> String {
     if tail.is_empty() {
         canon.to_string()
     } else {
+        join_canonical_glob_prefix(canon, tail)
+    }
+}
+
+fn join_canonical_glob_prefix(canon: &str, tail: &str) -> String {
+    if canon.ends_with('/') {
+        format!("{canon}{tail}")
+    } else {
         format!("{canon}/{tail}")
     }
 }
@@ -398,6 +406,7 @@ mod tests {
         assert_eq!(expand_symbolic("C:/", &homes), "C:/");
         assert_eq!(expand_symbolic("C:", &homes), "/project/C:");
         assert_eq!(trim_trailing_slashes_preserving_drive_root("C:/"), "C:/");
+        assert_eq!(join_canonical_glob_prefix("C:/", "**"), "C:/**");
         assert_eq!(canonicalize_glob_prefix("C:/"), "C:/");
         assert_eq!(canonicalize_glob_prefix("C:/**"), "C:/**");
     }
@@ -405,7 +414,7 @@ mod tests {
     #[test]
     fn drive_root_descendant_twin_matches_descendants() {
         use crate::policy::{CanonGlob, FsOrigin, FsRule};
-        let rule = |matcher, access| FsRule {
+        let rule = |matcher: &str, access| FsRule {
             matcher: CanonGlob(matcher.into()),
             effect: Effect::Allow,
             access,
