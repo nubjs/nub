@@ -1,5 +1,9 @@
 // Records the NT request shapes produced by a small set of ordinary Win32
 // filesystem calls. This is a diagnostic fixture, not an adapter or policy.
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winternl.h>
@@ -26,6 +30,10 @@ static NtSetInformationFileFn real_nt_set_information_file = nullptr;
 
 static thread_local const char* current_operation = nullptr;
 static thread_local unsigned operation_events = 0;
+static thread_local bool open_status_recorded = false;
+static thread_local NTSTATUS open_status = 0;
+static thread_local bool rename_status_recorded = false;
+static thread_local NTSTATUS rename_status = 0;
 static thread_local bool emitting = false;
 
 // The native rename/link structures start with ReplaceIfExists and then the
@@ -49,6 +57,8 @@ static unsigned long long object_root(POBJECT_ATTRIBUTES attributes) {
 static void print_open(const char* api, ACCESS_MASK access, POBJECT_ATTRIBUTES attributes,
                        ULONG share, ULONG disposition, ULONG options, NTSTATUS status) {
     if (!current_operation || emitting) return;
+    open_status_recorded = true;
+    open_status = status;
     ++operation_events;
     emitting = true;
     std::printf("NT_REQUEST operation=%s api=%s access=0x%08lx share=0x%08lx disposition=%lu options=0x%08lx object_root=0x%llx status=0x%08lx\n",
@@ -90,7 +100,23 @@ static NTSTATUS NTAPI record_nt_set_information_file(HANDLE file, PIO_STATUS_BLO
     NTSTATUS status = real_nt_set_information_file(file, io, information, length, information_class);
     DWORD last_error = GetLastError();
     if (!current_operation || emitting) return status;
+    if (information_class == 10 || information_class == 65) {
+        rename_status_recorded = true;
+        rename_status = status;
+    }
     HANDLE root = nullptr;
+    DWORD info_flags = 0;
+    bool info_flags_available = false;
+    if (information && (information_class == 10 || information_class == 11) &&
+        length >= sizeof(BOOLEAN)) {
+        info_flags = *static_cast<BOOLEAN*>(information);
+        info_flags_available = true;
+    }
+    if (information && (information_class == 64 || information_class == 65 ||
+                        information_class == 72) && length >= sizeof(DWORD)) {
+        info_flags = *static_cast<DWORD*>(information);
+        info_flags_available = true;
+    }
     // FileRenameInformation/FileLinkInformation and their Ex forms use this
     // prefix. Other information classes deliberately report a zero root.
     if ((information_class == 10 || information_class == 11 || information_class == 65 ||
@@ -100,10 +126,14 @@ static NTSTATUS NTAPI record_nt_set_information_file(HANDLE file, PIO_STATUS_BLO
     }
     ++operation_events;
     emitting = true;
-    std::printf("NT_REQUEST operation=%s api=NtSetInformationFile file=0x%llx info_class=%lu information_length=%lu relative_root=0x%llx status=0x%08lx\n",
+    std::printf("NT_REQUEST operation=%s api=NtSetInformationFile file=0x%llx info_class=%lu information_length=%lu relative_root=0x%llx info_flags=",
                 current_operation, numeric_handle(file), static_cast<unsigned long>(information_class),
-                static_cast<unsigned long>(length), numeric_handle(root),
-                static_cast<unsigned long>(status));
+                static_cast<unsigned long>(length), numeric_handle(root));
+    if (info_flags_available)
+        std::printf("0x%08lx", static_cast<unsigned long>(info_flags));
+    else
+        std::printf("not-applicable");
+    std::printf(" status=0x%08lx\n", static_cast<unsigned long>(status));
     std::fflush(stdout);
     emitting = false;
     SetLastError(last_error);
@@ -144,6 +174,8 @@ static bool attach_detours() {
 static void begin_operation(const char* name) {
     current_operation = name;
     operation_events = 0;
+    open_status_recorded = false;
+    rename_status_recorded = false;
 }
 
 static bool end_operation(bool passed, DWORD error) {
@@ -172,9 +204,106 @@ static bool is_absent(const wchar_t* path) {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
+static bool format_path(wchar_t* destination, size_t destination_count, const wchar_t* root,
+                        const wchar_t* leaf) {
+    return _snwprintf_s(destination, destination_count, _TRUNCATE, L"%s\\%s", root, leaf) >= 0;
+}
+
+struct FileIdentity {
+    enum class State { unknown, absent, present } state = State::unknown;
+    bool available = false;
+    DWORD error = ERROR_SUCCESS;
+    FILE_ID_INFO value = {};
+};
+
+static FileIdentity identity_for_handle(HANDLE handle) {
+    FileIdentity identity;
+    identity.state = handle == INVALID_HANDLE_VALUE ? FileIdentity::State::unknown
+                                                     : FileIdentity::State::present;
+    identity.available = identity.state == FileIdentity::State::present && GetFileInformationByHandleEx(
+        handle, FileIdInfo, &identity.value, sizeof(identity.value));
+    if (!identity.available) identity.error = GetLastError();
+    return identity;
+}
+
+static FileIdentity identity_for_path(const wchar_t* path) {
+    FileIdentity identity;
+    HANDLE handle = CreateFileW(path, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        identity.error = GetLastError();
+        if (identity.error == ERROR_FILE_NOT_FOUND || identity.error == ERROR_PATH_NOT_FOUND)
+            identity.state = FileIdentity::State::absent;
+        return identity;
+    }
+    identity = identity_for_handle(handle);
+    CloseHandle(handle);
+    return identity;
+}
+
+static void format_identity(const FileIdentity& identity, char* output, size_t output_count) {
+    if (identity.state == FileIdentity::State::absent) {
+        _snprintf_s(output, output_count, _TRUNCATE, "absent");
+        return;
+    }
+    if (identity.state != FileIdentity::State::present || !identity.available) {
+        _snprintf_s(output, output_count, _TRUNCATE, "lookup-error-%lu",
+                    static_cast<unsigned long>(identity.error));
+        return;
+    }
+    _snprintf_s(output, output_count, _TRUNCATE,
+                "%016llx-%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                static_cast<unsigned long long>(identity.value.VolumeSerialNumber),
+                identity.value.FileId.Identifier[0], identity.value.FileId.Identifier[1],
+                identity.value.FileId.Identifier[2], identity.value.FileId.Identifier[3],
+                identity.value.FileId.Identifier[4], identity.value.FileId.Identifier[5],
+                identity.value.FileId.Identifier[6], identity.value.FileId.Identifier[7],
+                identity.value.FileId.Identifier[8], identity.value.FileId.Identifier[9],
+                identity.value.FileId.Identifier[10], identity.value.FileId.Identifier[11],
+                identity.value.FileId.Identifier[12], identity.value.FileId.Identifier[13],
+                identity.value.FileId.Identifier[14], identity.value.FileId.Identifier[15]);
+}
+
+// Use the documented SetFileInformationByHandle buffer layout without making the
+// fixture's compilation depend on a particular SDK's FileRenameInfoEx declaration.
+struct RenameInformationBuffer {
+    DWORD flags;
+    HANDLE root_directory;
+    DWORD file_name_length;
+    WCHAR file_name[MAX_PATH];
+};
+static_assert(offsetof(RenameInformationBuffer, root_directory) == sizeof(HANDLE));
+
+constexpr FILE_INFO_BY_HANDLE_CLASS kFileRenameInfo = FileRenameInfo;
+constexpr FILE_INFO_BY_HANDLE_CLASS kFileRenameInfoEx =
+    static_cast<FILE_INFO_BY_HANDLE_CLASS>(22);
+constexpr DWORD kFileRenameFlagReplaceIfExists = 0x00000001;
+constexpr DWORD kFileRenameFlagPosixSemantics = 0x00000002;
+
+static bool rename_replace(HANDLE source, const wchar_t* destination, bool posix) {
+    RenameInformationBuffer information = {};
+    information.flags = posix ? kFileRenameFlagReplaceIfExists | kFileRenameFlagPosixSemantics
+                              : kFileRenameFlagReplaceIfExists;
+    size_t name_length = wcslen(destination);
+    if (name_length >= MAX_PATH) {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return false;
+    }
+    std::memcpy(information.file_name, destination, name_length * sizeof(WCHAR));
+    information.file_name_length = static_cast<DWORD>(name_length * sizeof(WCHAR));
+    DWORD length = static_cast<DWORD>(offsetof(RenameInformationBuffer, file_name) +
+                                      information.file_name_length);
+    return SetFileInformationByHandle(source, posix ? kFileRenameInfoEx : kFileRenameInfo,
+                                      &information, length) != FALSE;
+}
+
 // Owns every disposable path from the moment the root exists. Calling finish
 // makes cleanup observable; the destructor is the all-exit fallback.
 struct FixtureCleanup {
+    static constexpr size_t kPinFileCases = 6;
+    static constexpr size_t kPinDirectoryCases = 4;
     wchar_t root[MAX_PATH] = {};
     wchar_t enumeration_directory[MAX_PATH] = {};
     wchar_t enumeration_file[MAX_PATH] = {};
@@ -182,6 +311,10 @@ struct FixtureCleanup {
     wchar_t rename_source[MAX_PATH] = {};
     wchar_t rename_destination[MAX_PATH] = {};
     wchar_t hard_link[MAX_PATH] = {};
+    wchar_t pin_file_sources[kPinFileCases][MAX_PATH] = {};
+    wchar_t pin_file_destinations[kPinFileCases][MAX_PATH] = {};
+    wchar_t pin_directory_sources[kPinDirectoryCases][MAX_PATH] = {};
+    wchar_t pin_directory_destinations[kPinDirectoryCases][MAX_PATH] = {};
     bool owned = false;
     bool finished = false;
 
@@ -193,6 +326,14 @@ struct FixtureCleanup {
         DeleteFileW(rename_source);
         DeleteFileW(rename_destination);
         DeleteFileW(enumeration_file);
+        for (size_t index = 0; index < kPinFileCases; ++index) {
+            DeleteFileW(pin_file_sources[index]);
+            DeleteFileW(pin_file_destinations[index]);
+        }
+        for (size_t index = 0; index < kPinDirectoryCases; ++index) {
+            RemoveDirectoryW(pin_directory_sources[index]);
+            RemoveDirectoryW(pin_directory_destinations[index]);
+        }
         RemoveDirectoryW(created_directory);
         RemoveDirectoryW(enumeration_directory);
         RemoveDirectoryW(root);
@@ -208,6 +349,192 @@ struct FixtureCleanup {
         if (!finished) finish();
     }
 };
+
+static bool format_pin_case_paths(const wchar_t* root, const wchar_t* label, wchar_t* source,
+                                  wchar_t* destination) {
+    wchar_t source_leaf[96] = {};
+    wchar_t destination_leaf[96] = {};
+    if (_snwprintf_s(source_leaf, _TRUNCATE, L"%s-source", label) < 0 ||
+        _snwprintf_s(destination_leaf, _TRUNCATE, L"%s-destination", label) < 0)
+        return false;
+    return format_path(source, MAX_PATH, root, source_leaf) &&
+           format_path(destination, MAX_PATH, root, destination_leaf);
+}
+
+static bool remove_pin_pair(const wchar_t* source, const wchar_t* destination, bool directory) {
+    if (directory) {
+        RemoveDirectoryW(source);
+        RemoveDirectoryW(destination);
+    } else {
+        DeleteFileW(source);
+        DeleteFileW(destination);
+    }
+    return is_absent(source) && is_absent(destination);
+}
+
+static void run_file_pin_case(const char* label, const wchar_t* source_path,
+                              const wchar_t* destination_path, DWORD holder_access, bool posix) {
+    bool setup = make_file(source_path) && make_file(destination_path);
+    DWORD setup_error = setup ? ERROR_SUCCESS : GetLastError();
+    HANDLE source = INVALID_HANDLE_VALUE;
+    HANDLE holder = INVALID_HANDLE_VALUE;
+    if (setup) {
+        source = CreateFileW(source_path, DELETE | SYNCHRONIZE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (source == INVALID_HANDLE_VALUE) setup_error = GetLastError();
+        if (source != INVALID_HANDLE_VALUE && holder_access) {
+            holder = CreateFileW(destination_path, holder_access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (holder == INVALID_HANDLE_VALUE) setup_error = GetLastError();
+        }
+    }
+    setup = setup && source != INVALID_HANDLE_VALUE &&
+            (!holder_access || holder != INVALID_HANDLE_VALUE);
+
+    FileIdentity source_before = source == INVALID_HANDLE_VALUE ? FileIdentity{} : identity_for_handle(source);
+    FileIdentity destination_before = holder == INVALID_HANDLE_VALUE
+        ? identity_for_path(destination_path) : identity_for_handle(holder);
+    bool renamed = false;
+    DWORD rename_error = setup ? ERROR_SUCCESS : setup_error;
+    unsigned rename_events = 0;
+    bool nt_status_available = false;
+    NTSTATUS recorded_status = 0;
+    if (setup) {
+        begin_operation(label);
+        renamed = rename_replace(source, destination_path, posix);
+        rename_error = renamed ? ERROR_SUCCESS : GetLastError();
+        rename_events = operation_events;
+        nt_status_available = rename_status_recorded;
+        recorded_status = rename_status;
+        current_operation = nullptr;
+    }
+    if (holder != INVALID_HANDLE_VALUE) CloseHandle(holder);
+    if (source != INVALID_HANDLE_VALUE) CloseHandle(source);
+
+    FileIdentity source_after = identity_for_path(source_path);
+    FileIdentity destination_after = identity_for_path(destination_path);
+    bool cleaned = remove_pin_pair(source_path, destination_path, false);
+    char source_before_text[64] = {};
+    char destination_before_text[64] = {};
+    char source_after_text[64] = {};
+    char destination_after_text[64] = {};
+    format_identity(source_before, source_before_text, sizeof(source_before_text));
+    format_identity(destination_before, destination_before_text, sizeof(destination_before_text));
+    format_identity(source_after, source_after_text, sizeof(source_after_text));
+    format_identity(destination_after, destination_after_text, sizeof(destination_after_text));
+    std::printf("PIN_CASE case=%s subject=target-file holder=%s holder_access=0x%08lx holder_share=0x%08lx setup=%s setup_error=%lu rename=%s execution=%s error=%lu nt_status=",
+                label,
+                holder_access ? "held" : "unheld", static_cast<unsigned long>(holder_access),
+                static_cast<unsigned long>(FILE_SHARE_READ | FILE_SHARE_WRITE),
+                setup ? "pass" : "notpass", static_cast<unsigned long>(setup_error),
+                posix ? "replace-posix" : "replace-if-exists", renamed ? "pass" : "notpass",
+                static_cast<unsigned long>(rename_error));
+    if (nt_status_available)
+        std::printf("0x%08lx", static_cast<unsigned long>(recorded_status));
+    else
+        std::printf("not-captured");
+    std::printf(" nt_events=%u source_before=%s destination_before=%s source_after=%s destination_after=%s cleanup=%s\n",
+                rename_events, source_before_text, destination_before_text, source_after_text,
+                destination_after_text, cleaned ? "pass" : "notpass");
+    std::fflush(stdout);
+}
+
+static void run_directory_pin_case(const char* label, const wchar_t* source_path,
+                                   const wchar_t* destination_path, DWORD holder_access, bool posix) {
+    bool setup = CreateDirectoryW(source_path, nullptr) != FALSE;
+    DWORD setup_error = setup ? ERROR_SUCCESS : GetLastError();
+    FileIdentity destination_before = identity_for_path(destination_path);
+    if (destination_before.state != FileIdentity::State::absent) {
+        setup = false;
+        setup_error = destination_before.state == FileIdentity::State::present
+            ? ERROR_ALREADY_EXISTS : destination_before.error;
+    }
+    HANDLE holder = INVALID_HANDLE_VALUE;
+    if (setup && holder_access) {
+        holder = CreateFileW(source_path, holder_access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (holder == INVALID_HANDLE_VALUE) {
+            setup = false;
+            setup_error = GetLastError();
+        }
+    }
+
+    HANDLE rename_source = INVALID_HANDLE_VALUE;
+    bool delete_open_attempted = false;
+    bool delete_opened = false;
+    DWORD delete_open_error = setup ? ERROR_SUCCESS : setup_error;
+    bool rename_attempted = false;
+    bool renamed = false;
+    DWORD rename_error = ERROR_SUCCESS;
+    unsigned operation_count = 0;
+    bool open_nt_status_available = false;
+    NTSTATUS recorded_open_status = 0;
+    bool rename_nt_status_available = false;
+    NTSTATUS recorded_rename_status = 0;
+    FileIdentity source_before;
+    if (setup) {
+        begin_operation(label);
+        delete_open_attempted = true;
+        rename_source = CreateFileW(source_path, DELETE | SYNCHRONIZE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        delete_opened = rename_source != INVALID_HANDLE_VALUE;
+        delete_open_error = delete_opened ? ERROR_SUCCESS : GetLastError();
+        open_nt_status_available = open_status_recorded;
+        recorded_open_status = open_status;
+        if (delete_opened) {
+            source_before = identity_for_handle(rename_source);
+            rename_attempted = true;
+            renamed = rename_replace(rename_source, destination_path, posix);
+            rename_error = renamed ? ERROR_SUCCESS : GetLastError();
+        }
+        operation_count = operation_events;
+        rename_nt_status_available = rename_status_recorded;
+        recorded_rename_status = rename_status;
+        current_operation = nullptr;
+    }
+    if (rename_source != INVALID_HANDLE_VALUE) CloseHandle(rename_source);
+    if (holder != INVALID_HANDLE_VALUE) {
+        if (source_before.state != FileIdentity::State::present)
+            source_before = identity_for_handle(holder);
+        CloseHandle(holder);
+    }
+
+    FileIdentity source_after = identity_for_path(source_path);
+    FileIdentity destination_after = identity_for_path(destination_path);
+    bool cleaned = remove_pin_pair(source_path, destination_path, true);
+    char source_before_text[64] = {};
+    char destination_before_text[64] = {};
+    char source_after_text[64] = {};
+    char destination_after_text[64] = {};
+    format_identity(source_before, source_before_text, sizeof(source_before_text));
+    format_identity(destination_before, destination_before_text, sizeof(destination_before_text));
+    format_identity(source_after, source_after_text, sizeof(source_after_text));
+    format_identity(destination_after, destination_after_text, sizeof(destination_after_text));
+    std::printf("PIN_CASE case=%s subject=directory-parent holder=%s holder_access=0x%08lx holder_share=0x%08lx setup=%s setup_error=%lu delete_open=%s delete_error=%lu open_nt_status=",
+                label, holder_access ? "held" : "unheld", static_cast<unsigned long>(holder_access),
+                static_cast<unsigned long>(FILE_SHARE_READ | FILE_SHARE_WRITE),
+                setup ? "pass" : "notpass", static_cast<unsigned long>(setup_error),
+                !delete_open_attempted ? "not-attempted" : (delete_opened ? "pass" : "notpass"),
+                static_cast<unsigned long>(delete_open_error));
+    if (open_nt_status_available)
+        std::printf("0x%08lx", static_cast<unsigned long>(recorded_open_status));
+    else
+        std::printf("not-captured");
+    std::printf(" rename=%s execution=%s error=%lu nt_status=",
+                posix ? "replace-posix" : "replace-if-exists",
+                rename_attempted ? (renamed ? "pass" : "notpass") : "not-attempted",
+                static_cast<unsigned long>(rename_attempted ? rename_error : ERROR_SUCCESS));
+    if (rename_nt_status_available)
+        std::printf("0x%08lx", static_cast<unsigned long>(recorded_rename_status));
+    else
+        std::printf("not-captured");
+    std::printf(" nt_events=%u source_before=%s destination_before=%s source_after=%s destination_after=%s cleanup=%s\n",
+                operation_count, source_before_text, destination_before_text, source_after_text,
+                destination_after_text, cleaned ? "pass" : "notpass");
+    std::fflush(stdout);
+}
 
 int wmain() {
     if (!attach_detours()) {
@@ -231,6 +558,27 @@ int wmain() {
         _snwprintf_s(cleanup.rename_source, _TRUNCATE, L"%s\\rename-source.txt", cleanup.root) < 0 ||
         _snwprintf_s(cleanup.rename_destination, _TRUNCATE, L"%s\\rename-destination.txt", cleanup.root) < 0 ||
         _snwprintf_s(cleanup.hard_link, _TRUNCATE, L"%s\\hard-link.txt", cleanup.root) < 0)
+        return cleanup.finish() ? 5 : 6;
+    if (!format_pin_case_paths(cleanup.root, L"pin-file-unheld-plain", cleanup.pin_file_sources[0],
+                               cleanup.pin_file_destinations[0]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-file-unheld-posix", cleanup.pin_file_sources[1],
+                               cleanup.pin_file_destinations[1]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-file-attributes-plain", cleanup.pin_file_sources[2],
+                               cleanup.pin_file_destinations[2]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-file-attributes-posix", cleanup.pin_file_sources[3],
+                               cleanup.pin_file_destinations[3]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-file-read-data-plain", cleanup.pin_file_sources[4],
+                               cleanup.pin_file_destinations[4]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-file-read-data-posix", cleanup.pin_file_sources[5],
+                               cleanup.pin_file_destinations[5]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-parent-unheld-plain", cleanup.pin_directory_sources[0],
+                               cleanup.pin_directory_destinations[0]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-parent-unheld-posix", cleanup.pin_directory_sources[1],
+                               cleanup.pin_directory_destinations[1]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-parent-traverse-plain", cleanup.pin_directory_sources[2],
+                               cleanup.pin_directory_destinations[2]) ||
+        !format_pin_case_paths(cleanup.root, L"pin-parent-traverse-posix", cleanup.pin_directory_sources[3],
+                               cleanup.pin_directory_destinations[3]))
         return cleanup.finish() ? 5 : 6;
 
     int failures = 0;
@@ -324,6 +672,33 @@ int wmain() {
         CloseHandle(child.hProcess);
     }
     failures += !end_operation(launched != FALSE, launch_error);
+
+    // These cases report raw observations. A platform's replacement outcome is
+    // deliberately not an assertion: the fixture exists to measure it.
+    run_file_pin_case("pin-file-unheld-plain", cleanup.pin_file_sources[0],
+                      cleanup.pin_file_destinations[0], 0, false);
+    run_file_pin_case("pin-file-unheld-posix", cleanup.pin_file_sources[1],
+                      cleanup.pin_file_destinations[1], 0, true);
+    run_file_pin_case("pin-file-attributes-plain", cleanup.pin_file_sources[2],
+                      cleanup.pin_file_destinations[2], FILE_READ_ATTRIBUTES | SYNCHRONIZE, false);
+    run_file_pin_case("pin-file-attributes-posix", cleanup.pin_file_sources[3],
+                      cleanup.pin_file_destinations[3], FILE_READ_ATTRIBUTES | SYNCHRONIZE, true);
+    run_file_pin_case("pin-file-read-data-plain", cleanup.pin_file_sources[4],
+                      cleanup.pin_file_destinations[4],
+                      FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, false);
+    run_file_pin_case("pin-file-read-data-posix", cleanup.pin_file_sources[5],
+                      cleanup.pin_file_destinations[5],
+                      FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, true);
+    run_directory_pin_case("pin-parent-unheld-plain", cleanup.pin_directory_sources[0],
+                           cleanup.pin_directory_destinations[0], 0, false);
+    run_directory_pin_case("pin-parent-unheld-posix", cleanup.pin_directory_sources[1],
+                           cleanup.pin_directory_destinations[1], 0, true);
+    run_directory_pin_case("pin-parent-traverse-plain", cleanup.pin_directory_sources[2],
+                           cleanup.pin_directory_destinations[2],
+                           FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, false);
+    run_directory_pin_case("pin-parent-traverse-posix", cleanup.pin_directory_sources[3],
+                           cleanup.pin_directory_destinations[3],
+                           FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, true);
 
     if (!cleanup.finish()) ++failures;
     std::printf("FIXTURE_RESULT result=%s failures=%d\n", failures ? "notpass" : "pass", failures);
