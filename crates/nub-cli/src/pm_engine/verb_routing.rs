@@ -55,9 +55,6 @@ const HOST_VERBS: &[&str] = &[
 /// The command line to hand the engine, when the engine is the one to
 /// take it. `None` leaves `argv` to nub's own dispatch.
 pub(crate) fn engine_takes(argv: Vec<OsString>) -> Option<Vec<OsString>> {
-    if !super::pnpm_engine::selected() {
-        return None;
-    }
     let name = pnpm_cli::command_name(&argv)?;
     (!HOST_VERBS.contains(&name.as_str())).then_some(argv)
 }

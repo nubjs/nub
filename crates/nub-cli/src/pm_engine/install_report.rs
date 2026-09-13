@@ -255,7 +255,11 @@ impl SourceIndex {
             .into_iter()
             .filter_map(|(key, value)| Some((key, super::config_read::render(value)?)))
             .collect();
-        let derives_store_optouts = !super::pnpm_engine::selected();
+        // The engine is the only engine, so the report never derives these:
+        // the vendored engine was the one that needed them derived. The field
+        // stays because the rendering below still branches on it and both
+        // arms are unit-tested.
+        let derives_store_optouts = false;
         Self {
             cli: cli.to_vec(),
             env: super::host_settings::env_settings_sourced(),

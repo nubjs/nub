@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use aube_lockfile::LockfileKind;
 
 /// Nub's own lockfile name under nub identity (the two-mode model): the
@@ -161,63 +161,6 @@ pub(crate) fn source_kind(path: &Path) -> LockfileKind {
     }
 }
 
-/// The target's write format. Both targets are pnpm-v9 bytes; only the
-/// filename differs, and the brand preflight registers nub's.
-fn target_kind(target: &str) -> LockfileKind {
-    match target {
-        "pnpm" => LockfileKind::Pnpm,
-        "nub" => LockfileKind::Aube,
-        other => unreachable!("use targets are nub and pnpm, got {other}"),
-    }
-}
-
-/// Parse a source lockfile into its resolution graph, dispatching by kind.
-/// Errors are brand-rewritten and tagged with the file being parsed.
-fn parse_source_graph(
-    from: &Path,
-    from_kind: LockfileKind,
-    manifest: &aube_manifest::PackageJson,
-) -> Result<aube_lockfile::LockfileGraph> {
-    match from_kind {
-        LockfileKind::Pnpm | LockfileKind::Aube => aube_lockfile::pnpm::parse(from),
-        LockfileKind::Npm | LockfileKind::NpmShrinkwrap => {
-            aube_lockfile::npm::parse(from, manifest)
-        }
-        LockfileKind::Yarn | LockfileKind::YarnBerry => aube_lockfile::yarn::parse(from, manifest),
-        LockfileKind::Bun => aube_lockfile::bun::parse(from),
-    }
-    .map_err(|e| anyhow::anyhow!("{}", super::present::rewrite(&e.to_string())))
-    .with_context(|| format!("parsing {}", from.display()))
-}
-
-/// Transcode a foreign lockfile into the target's format, preserving the
-/// resolution state rather than re-resolving it. Returns the path written.
-///
-/// This is what a build without the pnpm engine migrates with; the engine's
-/// own `import` is the path [`super::migrate`] takes when the engine is
-/// selected, and it re-resolves against the registry with the source's
-/// versions as preferences, the way pnpm does.
-///
-/// The brand preflight must already be registered ([`super::engine_session`]
-/// or [`super::engine_brand_preflight`]): the write path reads workspace
-/// config transitively (branch-lockfile naming), and the toggled getters
-/// freeze on first read.
-pub(crate) fn transcode_lockfile(
-    root: &Path,
-    from: &Path,
-    from_kind: LockfileKind,
-    target: &str,
-) -> Result<PathBuf> {
-    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json"))
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("reading package.json for the lockfile conversion")?;
-    let graph = parse_source_graph(from, from_kind, &manifest)?;
-    let written = aube_lockfile::write_lockfile_as(root, &graph, &manifest, target_kind(target))
-        .map_err(|e| anyhow::anyhow!("{}", super::present::rewrite(&e.to_string())))
-        .with_context(|| format!("writing {}", lockfile_name(target)))?;
-    Ok(written)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,60 +288,6 @@ mod tests {
             plan_alignment(&dir, "nub").unwrap(),
             AlignPlan::Keep { .. }
         ));
-    }
-
-    #[test]
-    fn transcode_lockfile_carries_resolution_state_into_the_target_format() {
-        // No network: a real (in-sync) npm v3 lockfile parses into the graph
-        // and writes back as pnpm format — version + integrity preserved,
-        // never delete-and-regenerate. (End-to-end, real pnpm accepts these
-        // conversions with --frozen-lockfile — the conformance harness and
-        // the ignored network e2e cover that; this pins the library seam.)
-        let dir = root(
-            "convert",
-            &[
-                (
-                    "package.json",
-                    r#"{"name":"app","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
-                ),
-                (
-                    "package-lock.json",
-                    r#"{
-  "name": "app",
-  "version": "1.0.0",
-  "lockfileVersion": 3,
-  "requires": true,
-  "packages": {
-    "": { "name": "app", "version": "1.0.0", "dependencies": { "is-positive": "3.1.0" } },
-    "node_modules/is-positive": {
-      "version": "3.1.0",
-      "resolved": "https://registry.npmjs.org/is-positive/-/is-positive-3.1.0.tgz",
-      "integrity": "sha512-8ND1j3y9/HP94TOvGzr69/FgbkX2ruOldhLEsTWwcJVfo4oRjwemJmJxt7RJkKYH8tz7vYBP9JcKQY8CLuJ90Q==",
-      "engines": { "node": ">=0.10.0" }
-    }
-  }
-}
-"#,
-                ),
-            ],
-        );
-        let written = transcode_lockfile(
-            &dir,
-            &dir.join("package-lock.json"),
-            LockfileKind::Npm,
-            "pnpm",
-        )
-        .unwrap();
-        assert_eq!(written, dir.join("pnpm-lock.yaml"));
-        let body = std::fs::read_to_string(&written).unwrap();
-        assert!(
-            body.contains("is-positive@3.1.0") || body.contains("is-positive: 3.1.0"),
-            "the resolved version must survive the conversion:\n{body}"
-        );
-        assert!(
-            body.contains("sha512-8ND1j3y9"),
-            "the integrity must survive the conversion:\n{body}"
-        );
     }
 
     #[test]

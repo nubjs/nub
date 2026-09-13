@@ -132,10 +132,7 @@ pub(crate) fn migrate_lockfile(root: &Path, from: &Path, target: &str) -> Result
              rerun the migration."
         );
     }
-    if super::pnpm_engine::selected() {
-        return engine_import(root, target);
-    }
-    use_align::transcode_lockfile(root, from, use_align::source_kind(from), target)
+    engine_import(root, target)
 }
 
 /// Migrate through the engine's own `import`, which is where the foreign

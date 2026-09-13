@@ -204,27 +204,21 @@ enum Selection {
     Forced(ProjectIdentity),
 }
 
-/// The selection this invocation asked for, if the engine is selected at all.
+/// The identity this invocation runs the engine under.
 ///
-/// Unset means the engine, so it is what a nub install actually runs on.
-/// `NUB_PM_ENGINE=aube` — or any other value — still falls through to the old
-/// engine, which is what keeps both arms runnable as a differential control
-/// until `vendor/aube` goes.
-fn selection() -> Option<Selection> {
+/// The engine is the only engine, so this no longer chooses one: it only says
+/// whether an identity was forced. An unrecognised value is `Auto` rather than
+/// an error, because the variable is an internal testing affordance and a
+/// typo in it should not change which project identity is detected.
+fn selection() -> Selection {
     let Some(asked) = std::env::var_os("NUB_PM_ENGINE") else {
-        return Some(Selection::Auto);
+        return Selection::Auto;
     };
-    match asked.to_str()? {
-        "pnpm" => Some(Selection::Forced(ProjectIdentity::Pnpm)),
-        "pnpm-nub" => Some(Selection::Forced(ProjectIdentity::Nub)),
-        "auto" => Some(Selection::Auto),
-        _ => None,
+    match asked.to_str() {
+        Some("pnpm") => Selection::Forced(ProjectIdentity::Pnpm),
+        Some("pnpm-nub") => Selection::Forced(ProjectIdentity::Nub),
+        _ => Selection::Auto,
     }
-}
-
-/// Whether the pnpm engine is selected for this invocation.
-pub(crate) fn selected() -> bool {
-    selection().is_some()
 }
 
 /// The profile this invocation runs the engine under.
@@ -522,7 +516,7 @@ fn host_base_dir(argv: &[std::ffi::OsString]) -> Result<PathBuf> {
 /// no spelling for those, so what it runs on is what nub left.
 pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     let cwd = host_base_dir(&argv)?;
-    let embedder = profile(selection().unwrap_or(Selection::Auto), &cwd)?;
+    let embedder = profile(selection(), &cwd)?;
     session_prologue(&cwd)?;
     // The engine's own entry point installs this before it can print. It
     // drops each cause the level above already states in full, so a host
