@@ -6,18 +6,17 @@
 //! display, so the order on screen is header → spinner → digest → the engine's
 //! success line, which stays last.
 //!
-//! PROVENANCE IS EXACT, NOT INFERRED. Under the nub embedder profile the chain
-//! that can supply a value is short, and every tier in it is readable from here:
-//! explicit install CLI flags → env → project config (`nub.jsonc`) →
-//! `pnpm-workspace.yaml` (non-empty only when pnpm is the incumbent) → pnpm's
-//! global `config.yaml` (when the engine context enables it) → project `.npmrc`
-//! → user `.npmrc` → nub's embedder defaults. The tiers aube would otherwise
-//! consult are inert for nub by construction — `config_namespace = None` empties
-//! both `.config/aube/config.toml` scopes. The global YAML is loaded through the
-//! engine's own context-gated loader, so this index follows any identity policy
-//! that makes that pnpm-named tier inert. Anything this walk cannot read is
-//! reported as nothing at all: a setting with no readable source is dropped from
-//! the block rather than printed with a guessed value or a guessed origin,
+//! PROVENANCE IS EXACT, NOT INFERRED. Under nub's own identity the chain that
+//! can supply a value is short, and every tier in it is readable from here:
+//! explicit install CLI flags → `npm_config_*` env → project config
+//! (`nub.jsonc`) → `pnpm-workspace.yaml` (non-empty only when pnpm is the
+//! incumbent) → pnpm's global `config.yaml` (pnpm 11+ incumbents only) →
+//! project `.npmrc` → user `.npmrc` → nub's own defaults. Every tier is read
+//! through the SAME nub-side code the install itself resolves settings with
+//! ([`super::host_settings`], [`super::config_read`]), so the report cannot
+//! describe a chain the install does not walk. Anything this walk cannot read
+//! is reported as nothing at all: a setting with no readable source is dropped
+//! from the block rather than printed with a guessed value or a guessed origin,
 //! because a wrong provenance is worse than none.
 
 use std::fmt;
@@ -25,6 +24,8 @@ use std::path::Path;
 use std::sync::RwLock;
 
 use clx::style;
+use nub_settings::meta as settings_meta;
+use nub_settings::meta::SettingMeta;
 
 use super::output::OutputFlags;
 
@@ -64,29 +65,39 @@ pub(super) enum Source {
     IncompatiblePackage(String),
 }
 
-/// Whether a raw setting string is the engine's idea of true.
+/// A raw setting string as a boolean, or `None` when the install would not
+/// read one from it.
 ///
-/// Deliberately delegates to `aube_settings::values::parse_bool` rather than
-/// comparing to `"true"`. The tiers this module reads are raw text — an
-/// `.npmrc` line or an env var, unparsed — and the engine accepts `1`, `TRUE`
-/// and `True` alongside `true`. A local `== "true"` therefore disagreed with the
-/// resolver on exactly those spellings, in both directions: `hoist=1` printed
-/// the shared store while the engine built a project-local tree with a hidden
-/// directory, and `enable-global-virtual-store=1` printed `isolated` while the
-/// engine symlinked into the machine-global store. The header's whole claim is
-/// that it reproduces the resolver instead of approximating it, so the boolean
-/// rule has to be the resolver's own.
-fn is_true(raw: &str) -> bool {
-    aube_settings::values::parse_bool(raw).unwrap_or(false)
+/// The tiers this module reads are raw text — an `.npmrc` line or an env var,
+/// unparsed — so the report has to apply the same rule the settings layer does
+/// when it types that text. That rule is the literal `true`/`false` pair and
+/// nothing else: `host_settings::typed` offers `serde_json::Value::Bool` only
+/// for those two spellings, and the engine's own `.npmrc` reader agrees, so
+/// `hoist=1` is not a truthy hoist but a value the install REFUSES by name.
+/// Accepting `1`/`yes`/`TRUE` here would print a layout no install can produce.
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
-/// Render a raw scalar only when the resolver can read it for this setting.
-/// Boolean tiers skip malformed values and fall through, exactly as their typed
-/// accessors do; printing an ignored value would claim an install took a value
-/// it did not use.
-fn readable_value(meta: &aube_settings::SettingMeta, raw: &str) -> Option<String> {
+/// Whether a raw setting string is the install's idea of true. Unreadable text
+/// is not true — but it is not false either, which is why the tier walk asks
+/// [`parse_bool`] rather than this when deciding whether a tier claims a value
+/// at all.
+fn is_true(raw: &str) -> bool {
+    parse_bool(raw).unwrap_or(false)
+}
+
+/// Render a raw scalar only when the settings layer can read it for this
+/// setting. A boolean tier whose text is not `true`/`false` is skipped rather
+/// than rendered: the install would refuse that line outright, so printing the
+/// value would claim it took one.
+fn readable_value(meta: &SettingMeta, raw: &str) -> Option<String> {
     if meta.type_ == "bool" {
-        return aube_settings::values::parse_bool(raw).map(|value| value.to_string());
+        return parse_bool(raw).map(|value| value.to_string());
     }
     Some(raw.to_string())
 }
@@ -98,24 +109,6 @@ fn comma_items(raw: &str) -> impl Iterator<Item = &str> {
     raw.split(',')
         .map(str::trim)
         .filter(|item| !item.is_empty())
-}
-
-/// The list representation the report passes to its comma-splitting rows.
-/// This mirrors aube's `parse_string_list`: JSON-ish arrays and bare lists both
-/// collapse to comma-separated items, with empty and quoted entries removed.
-fn render_string_list(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let items: Vec<&str> = match trimmed
-        .strip_prefix('[')
-        .and_then(|raw| raw.strip_suffix(']'))
-    {
-        Some(inner) => comma_items(inner)
-            .map(|item| item.trim_matches(|ch: char| ch == '"' || ch == '\''))
-            .filter(|item| !item.is_empty())
-            .collect(),
-        None => comma_items(trimmed).collect(),
-    };
-    items.join(",")
 }
 
 /// The toolchain's own name for the package that triggered the opt-out. The nub
@@ -172,18 +165,19 @@ impl Source {
 /// The readable settings tiers for one project root, loaded once per install.
 pub(super) struct SourceIndex {
     cli: Vec<(String, String)>,
-    env: Vec<(String, String)>,
+    /// `npm_config_*` variables that name a setting: the VARIABLE, the setting
+    /// it names, and its raw text. The variable is carried because it is what
+    /// the provenance parenthetical prints, and the settings layer's own
+    /// environment tier has already collapsed the two spellings of each one.
+    env: Vec<(String, String, String)>,
     project_config: Vec<(String, String)>,
-    /// Settings a `pnpm-workspace.yaml` claims, each normalized to the scalar
-    /// representation this report consumes (including comma-rendered string
-    /// lists). Resolved eagerly at load: the raw YAML map's element type belongs
-    /// to aube's yaml crate, which is not a nub dependency, so it cannot be held
-    /// in a field here.
-    workspace_yaml: Vec<(&'static str, String)>,
-    /// Settings supplied by pnpm v11's global `config.yaml`, loaded through
-    /// aube's context-gated loader and interpreted with the same YAML helpers as
-    /// the project workspace file.
-    global_config_yaml: Vec<(&'static str, String)>,
+    /// What a `pnpm-workspace.yaml` supplies, keyed by the YAML key as written.
+    /// Layout keys never appear: the same reader the `nub config` surface uses
+    /// drops them, which is the whole layout axis.
+    workspace_yaml: Vec<(String, String)>,
+    /// The same, from pnpm's global `config.yaml` — non-empty only under a
+    /// pnpm 11+ incumbent, the first major that keeps settings there.
+    global_config_yaml: Vec<(String, String)>,
     project_npmrc: Vec<(String, String)>,
     user_npmrc: Vec<(String, String)>,
     embedder_defaults: Vec<(String, String)>,
@@ -207,79 +201,79 @@ pub(super) struct SourceIndex {
     /// always. Reading it once at `load`, where every other tier is also
     /// snapshotted, makes the layout decision a pure function of this struct.
     ci: bool,
+    /// Whether the engine this run uses applies the two whole-install store
+    /// opt-outs the layout row can otherwise DERIVE: a declared package
+    /// matching `disableGlobalVirtualStoreForPackages`, and the injected-deps
+    /// `hoist=true` veto.
+    ///
+    /// Both belong to the vendored engine. pnpm 12 declares neither setting as
+    /// a field of the settings struct nub hands it, and nub's own settings
+    /// layer pushes neither value, so under that engine nothing but an
+    /// explicit `enableGlobalVirtualStore` or CI takes the store project-local
+    /// — and a row naming Next as the reason would describe a tree the install
+    /// does not build. Snapshotted for the same reason `ci` is: it keeps the
+    /// layout decision a pure function of this struct rather than of the
+    /// ambient engine selection, which no test could then vary.
+    derives_store_optouts: bool,
 }
 
 impl SourceIndex {
     pub(super) fn load(cwd: &Path, cli: &[(String, String)]) -> Self {
-        let npmrc = aube_registry::config::load_npmrc_entries_split(cwd);
-        let raw = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
-        // Keep the foreign YAML value local to this loader: nub-cli does not
-        // depend on aube's YAML crate, but can still normalize it before this
-        // index stores an owned string.
-        let workspace_yaml_scalar = |meta: &aube_settings::SettingMeta, raw| match meta.type_ {
-            "bool" => meta.workspace_yaml_keys.iter().find_map(|key| {
-                let value = aube_settings::workspace_yaml_value(raw, key)?;
-                value
-                    .as_bool()
-                    .or_else(|| value.as_str().and_then(aube_settings::values::parse_bool))
-                    .map(|value| value.to_string())
-            }),
-            "list<string>" => meta.workspace_yaml_keys.iter().find_map(|key| {
-                let value = aube_settings::workspace_yaml_value(raw, key)?;
-                if let Some(items) = value.as_sequence() {
-                    return Some(
-                        items
-                            .iter()
-                            .filter_map(|item| item.as_str())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    );
-                }
-                value.as_str().map(render_string_list)
-            }),
-            _ => aube_settings::values::string_from_workspace_yaml(meta.name, raw),
-        };
-        let yaml_settings = |raw| {
-            aube_settings::all()
-                .filter(|meta| !aube_settings::workspace_yaml_suppressed(meta))
-                .filter_map(|meta| workspace_yaml_scalar(meta, raw).map(|value| (meta.name, value)))
-                .collect::<Vec<_>>()
-        };
-        let global_raw = aube::commands::load_global_config_yaml();
-        let workspace_yaml = yaml_settings(&raw);
-        let global_config_yaml = yaml_settings(&global_raw);
-        // The same walk as `workspace_yaml`, filter inverted: that field holds
-        // the settings the YAML still supplies, this one asks whether the
-        // current pnpm posture rejected a layout key.
-        let pnpm_yaml_layout_dropped = [&raw, &global_raw].into_iter().any(|raw| {
-            aube_settings::all().any(|meta| {
-                aube_settings::workspace_yaml_suppressed(meta)
-                    && meta.layout
-                    && !meta.npmrc_keys.is_empty()
-                    && meta
-                        .workspace_yaml_keys
-                        .iter()
-                        .any(|key| aube_settings::workspace_yaml_value(raw, key).is_some())
-            })
-        });
-        let context = aube_util::engine_context();
+        let root = super::host_settings::workspace_root(cwd);
+        // Split by PATH rather than by position: `npmrc_files` drops a file
+        // that does not exist, so a project with no user `.npmrc` would
+        // otherwise have its own file read as the user scope and lose to
+        // nothing.
+        let user_path = super::config_read::user_npmrc_path();
+        let (mut project_npmrc, mut user_npmrc) = (Vec::new(), Vec::new());
+        for (path, text) in super::host_settings::npmrc_files(&root) {
+            let entries = super::config_read::entries_of(&text);
+            if user_path.as_deref() == Some(path.as_path()) {
+                user_npmrc = entries;
+            } else {
+                project_npmrc = entries;
+            }
+        }
+        let install = crate::project_config::load_project_config(cwd)
+            .ok()
+            .flatten()
+            .map(|loaded| loaded.values.install)
+            .unwrap_or_default();
+        // The install's OWN lowering, not a second reading of `nub.jsonc`:
+        // `install.linker: "global"` is `nodeLinker` plus
+        // `enableGlobalVirtualStore` in exactly one place, and a copy here
+        // could disagree with the tree the install builds.
+        let project_config = super::host_settings::supplied_settings(&install)
+            .into_iter()
+            .filter_map(|(key, value)| Some((key, super::config_read::render(value)?)))
+            .collect();
+        let derives_store_optouts = !super::pnpm_engine::selected();
         Self {
             cli: cli.to_vec(),
-            env: aube_settings::values::capture_env(),
-            workspace_yaml,
-            global_config_yaml,
-            project_npmrc: npmrc.project,
-            user_npmrc: npmrc.user,
-            embedder_defaults: aube_settings::embedder_defaults().to_vec(),
-            declared_packages: declared_packages(cwd),
+            env: super::host_settings::env_settings_sourced(),
+            project_config,
+            workspace_yaml: super::config_read::branded_yaml(
+                &root,
+                super::config_read::BrandedSource::WorkspaceYaml,
+            ),
+            global_config_yaml: super::config_read::branded_yaml(
+                &root,
+                super::config_read::BrandedSource::GlobalConfig,
+            ),
+            project_npmrc,
+            user_npmrc,
+            embedder_defaults: super::nub_config_defaults(cwd),
+            declared_packages: if derives_store_optouts {
+                declared_packages(&root)
+            } else {
+                Vec::new()
+            },
             branded_layout_ignored: branded_layout_ignored(
                 cwd,
-                pnpm_yaml_layout_dropped,
-                context.read_yarn_config,
-                context.read_bun_config,
+                super::config_read::branded_yaml_layout_dropped(&root),
             ),
-            ci: aube_util::env::is_ci(),
-            project_config: context.project_config_settings,
+            ci: std::env::var_os("CI").is_some(),
+            derives_store_optouts,
         }
     }
 
@@ -288,7 +282,7 @@ impl SourceIndex {
     /// — or one claims it in a shape this index cannot render, reported the same
     /// way, since a value it cannot read is a value it must not print.
     pub(super) fn resolve(&self, setting: &str) -> Option<(String, Option<Source>)> {
-        let meta = aube_settings::find(setting)?;
+        let meta = settings_meta::find(setting)?;
         // `InstallOptions::cli_flags` contains only explicit install flags. A
         // bag key may be a generic setting override the report cannot spell
         // faithfully from this narrowed representation, so only name declared
@@ -304,19 +298,20 @@ impl SourceIndex {
             let source = Source::Cli(format!("--{flag}={value}"));
             return Some((value, Some(source)));
         }
-        // Match the resolver's alias priority first, then its most-recent value
-        // rule within that alias. An invalid boolean masks its env tier and lets
-        // a lower tier decide; it must not be credited to a different alias.
-        for var in meta.env_vars.iter().rev() {
-            if !aube_util::env::branded_env_alias_enabled(var) {
-                continue;
-            }
-            if let Some((_, value)) = self.env.iter().rev().find(|(key, _)| key == var) {
-                if let Some(value) = readable_value(meta, value) {
-                    return Some((value, Some(Source::Env((*var).to_string()))));
-                }
-                break;
-            }
+        // Last variable in environment order wins, which is the order the
+        // settings layer lifts them in. Matched on the SETTING the layer
+        // resolved rather than on `meta.env_vars`: only an `npm_config_`
+        // prefix reaches this tier, in either case, so the brand-prefixed
+        // aliases the table still lists (`AUBE_*`) are excluded structurally
+        // — crediting one would name a variable no install consulted.
+        if let Some((var, _, raw)) = self
+            .env
+            .iter()
+            .rev()
+            .find(|(_, named, _)| named == meta.name)
+            && let Some(value) = readable_value(meta, raw)
+        {
+            return Some((value, Some(Source::Env(var.clone()))));
         }
         if let Some((_, raw)) = self
             .project_config
@@ -335,14 +330,17 @@ impl SourceIndex {
             (&self.workspace_yaml, Source::WorkspaceYaml),
             (&self.global_config_yaml, Source::GlobalConfigYaml),
         ] {
-            if let Some((_, value)) = entries.iter().find(|(name, _)| *name == setting) {
-                return Some((value.clone(), Some(source)));
+            if let Some((_, raw)) = entries
+                .iter()
+                .find(|(key, _)| meta.workspace_yaml_keys.contains(&key.as_str()))
+                && let Some(value) = readable_value(meta, raw)
+            {
+                return Some((value, Some(source)));
             }
         }
         for entries in [&self.project_npmrc, &self.user_npmrc] {
             if let Some(value) = entries.iter().rev().find_map(|(key, raw)| {
-                meta.npmrc_keys
-                    .contains(&key.as_str())
+                npmrc_key_names(meta, key)
                     .then(|| readable_value(meta, raw))
                     .flatten()
             }) {
@@ -359,6 +357,17 @@ impl SourceIndex {
             })
             .map(|value| (value, Some(Source::Default)))
     }
+}
+
+/// Whether an `.npmrc` key spells `meta`.
+///
+/// Camel-casing is the rule the settings layer itself applies — `.npmrc` keys
+/// arrive kebab-cased and `host_settings::lift` camel-cases each one before
+/// looking it up — so `node-linker` and `nodeLinker` are one key there and must
+/// be one key here. The table's own alias list is consulted too, for the
+/// settings whose `.npmrc` spelling is not a case transform of their name.
+fn npmrc_key_names(meta: &SettingMeta, key: &str) -> bool {
+    meta.npmrc_keys.contains(&key) || pnpm_config::naming_cases::to_camel_case(key) == meta.name
 }
 
 /// npm's layout keys live in `.npmrc`, which Nub reads under every incumbent.
@@ -382,41 +391,47 @@ fn npm_layout_key_present(cwd: &Path) -> bool {
 /// `node_modules` layout that Nub does not take from that source. The install
 /// header is the only place that ignored request can surface.
 ///
-/// The pnpm check covers the project `pnpm-workspace.yaml` and the global
-/// `config.yaml`. Yarn and Bun are gated on whether the incumbent posture reads
-/// their config files at all. npm needs no posture gate because its layout keys
-/// live in the neutral `.npmrc` cascade.
-fn branded_layout_ignored(cwd: &Path, in_pnpm_yaml: bool, read_yarn: bool, read_bun: bool) -> bool {
-    in_pnpm_yaml
-        || npm_layout_key_present(cwd)
-        || (read_yarn && super::yarnrc_node_linker(cwd).is_some())
-        || (read_bun && super::bun_config::declares_install_linker(cwd))
+/// Two sources, and there used to be four. The pnpm check covers the project
+/// `pnpm-workspace.yaml` and the global `config.yaml`; npm's keys need no gate
+/// because they live in the neutral `.npmrc` cascade. The yarn and bun arms are
+/// gone with the postures that fed them: Nub reads yarn and bun configuration
+/// for NO setting now, so a `nodeLinker` in `.yarnrc.yml` is not a layout
+/// request Nub declined but a file Nub never opened — and sending the reader to
+/// `nub.jsonc` over it would explain the wrong thing.
+fn branded_layout_ignored(cwd: &Path, in_pnpm_yaml: bool) -> bool {
+    in_pnpm_yaml || npm_layout_key_present(cwd)
 }
 
 /// Every package name declared by the root manifest and by each workspace
-/// member, matching the importer set `find_gvs_incompatible_trigger` scans.
-/// Traversal mirrors `unsupported_config::injected_deps_present`, the other
-/// manifest-wide probe the install header depends on.
+/// member — the importer set the whole-install store opt-out is matched
+/// against.
+///
+/// Discovered through nub's own workspace walk, which reads the neutral
+/// `workspaces` field and falls back to `pnpm-workspace.yaml` only under a
+/// pnpm incumbent. That gate is the point: a member list assembled from a
+/// branded file nub does not otherwise read would answer with packages no
+/// install of this project resolves.
 fn declared_packages(root: &Path) -> Vec<String> {
-    let mut roots = vec![root.to_path_buf()];
-    roots.extend(
-        aube_workspace::find_workspace_packages(root)
-            .into_iter()
-            .flatten(),
-    );
-    roots
-        .iter()
-        .filter_map(|dir| super::cached_aube_manifest(&dir.join("package.json")))
+    read_manifest(&root.join("package.json"))
+        .into_iter()
+        .chain(
+            nub_core::workspace::filter::discover_members(root)
+                .into_iter()
+                .map(|member| member.manifest),
+        )
         .flat_map(|manifest| {
-            manifest
-                .dependencies
-                .keys()
-                .chain(manifest.dev_dependencies.keys())
-                .chain(manifest.optional_dependencies.keys())
-                .cloned()
+            ["dependencies", "devDependencies", "optionalDependencies"]
+                .into_iter()
+                .filter_map(|field| manifest.get(field)?.as_object())
+                .flat_map(|deps| deps.keys().cloned())
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+fn read_manifest(path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(nub_core::strip_utf8_bom(&text)).ok()
 }
 
 /// The `nub.jsonc` field a lowered engine setting came from, for the settings
@@ -563,14 +578,11 @@ const RESOLUTION_SETTINGS: &[(&str, &str, &str)] = &[
 /// Whether a resolved value still sits at the engine's own default for it.
 ///
 /// Three of the four settings above are booleans and one (`resolutionMode`) is
-/// a string enum, so compare as booleans when both sides parse that way and fall
-/// back to text otherwise. A raw string compare called `auto-install-peers=1` a
-/// non-default and printed a row for a setting sitting exactly at its default.
+/// a string enum, so compare as booleans when both sides parse that way and
+/// fall back to text otherwise — which is what keeps a table default spelled
+/// `"true"` comparable with a resolved value that reached here as text.
 fn at_default(value: &str, default: &str) -> bool {
-    match (
-        aube_settings::values::parse_bool(value),
-        aube_settings::values::parse_bool(default),
-    ) {
+    match (parse_bool(value), parse_bool(default)) {
         (Some(actual), Some(expected)) => actual == expected,
         _ => value == default,
     }
@@ -591,16 +603,19 @@ fn at_default(value: &str, default: &str) -> bool {
 /// different routes — which is why this cannot simply read one setting. An
 /// explicit `enableGlobalVirtualStore=false` and the `hoist=true` nub pushes
 /// for injected dependencies both land in the settings index. The other two do
-/// not. A CI environment is derived from `is_ci()` where the engine plans the
-/// store, so the only way to report it is to ask the same question aube will.
-/// And a declared package on `disableGlobalVirtualStoreForPackages` — nub seeds
-/// `next` and `react-native`, so a stock Next.js project with no config at all
-/// takes this route — is a fact about the MANIFEST, not about any setting: it
-/// reads as unset here while `resolve_global_virtual_store_override` turns it
-/// into a whole-install opt-out. Those two get their own [`Source`] variants
-/// rather than no parenthetical at all: they are precisely the layouts a reader
-/// cannot account for by opening their config, so leaving them bare showed a
-/// value that contradicts the documented default with nothing to explain it.
+/// not. A CI environment is derived from the `CI` variable where the engine
+/// plans the store, so the only way to report it is to ask the same question.
+/// And a declared package on `disableGlobalVirtualStoreForPackages` — the
+/// vendored engine seeds `next` and `react-native`, so a stock Next.js project
+/// with no config at all takes this route — is a fact about the MANIFEST, not
+/// about any setting: it reads as unset here while the engine turns it into a
+/// whole-install opt-out. Those two get their own [`Source`] variants rather
+/// than no parenthetical at all: they are precisely the layouts a reader cannot
+/// account for by opening their config, so leaving them bare showed a value
+/// that contradicts the documented default with nothing to explain it.
+///
+/// The last two routes are the VENDORED engine's alone, which is what
+/// [`SourceIndex::derives_store_optouts`] gates — see that field.
 fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     let isolated = |source: Option<Source>| ("isolated".to_string(), source);
     let (linker, linker_source) = index
@@ -621,13 +636,15 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     if index.ci {
         return isolated(Some(Source::Ci));
     }
-    if let Some((_, source)) = index.resolve("hoist").filter(|(hoist, _)| is_true(hoist)) {
-        return isolated(source);
+    if index.derives_store_optouts {
+        if let Some((_, source)) = index.resolve("hoist").filter(|(hoist, _)| is_true(hoist)) {
+            return isolated(source);
+        }
+        if let Some(name) = gvs_incompatible_package(index) {
+            return isolated(Some(Source::IncompatiblePackage(name)));
+        }
     }
-    match gvs_incompatible_package(index) {
-        Some(name) => isolated(Some(Source::IncompatiblePackage(name))),
-        None => ("global-virtual-store".to_string(), None),
-    }
+    ("global-virtual-store".to_string(), None)
 }
 
 /// The declared package that matches `disableGlobalVirtualStoreForPackages`,
@@ -766,6 +783,53 @@ pub(super) fn print_resolved_layout(
     let rows = resolved_rows(&SourceIndex::load(cwd, cli_flags));
     eprint!("{}", render_block(&rows, stderr_cols()));
     eprintln!();
+}
+
+/// The setting flags a command line carries, in the bag shape [`SourceIndex`]
+/// resolves against: the flag's own kebab spelling without its dashes, and the
+/// value it was given.
+///
+/// Scanned here because the pnpm engine owns the grammar and hands the parse
+/// back to nobody — where the vendored engine builds the same bag from its own
+/// parsed args. Only a flag the settings table DECLARES is admitted, so a host
+/// flag, a value, or a positional can never be read as one; a spelling the
+/// table does not carry is omitted rather than guessed, which is the rule
+/// `resolve` already applies to a bag key it cannot attribute exactly.
+pub(super) fn cli_setting_flags(argv: &[std::ffi::OsString]) -> Vec<(String, String)> {
+    let declared = |flag: &str| settings_meta::all().find(|meta| meta.cli_flags.contains(&flag));
+    let mut out = Vec::new();
+    let mut args = argv.iter().filter_map(|arg| arg.to_str()).peekable();
+    while let Some(arg) = args.next() {
+        let Some(body) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let (flag, inline) = match body.split_once('=') {
+            Some((flag, value)) => (flag, Some(value)),
+            None => (body, None),
+        };
+        // `--no-<flag>` is the engine's negation of a boolean, and it names no
+        // flag of its own, so it is resolved against the positive spelling.
+        let (flag, negated) = match flag.strip_prefix("no-") {
+            Some(positive) if declared(positive).is_some() => (positive, true),
+            _ => (flag, false),
+        };
+        let Some(meta) = declared(flag) else {
+            continue;
+        };
+        let value = match (inline, meta.type_, negated) {
+            (Some(value), _, _) => value.to_string(),
+            (None, "bool", negated) => (!negated).to_string(),
+            // A non-boolean takes the next token, and only when there is one
+            // that is not itself a flag: `nub install --node-linker` alone is a
+            // command line the engine refuses, not a layout request.
+            (None, _, _) => match args.peek().filter(|next| !next.starts_with('-')) {
+                Some(_) => args.next().unwrap_or_default().to_string(),
+                None => continue,
+            },
+        };
+        out.push((flag.to_string(), value));
+    }
+    out
 }
 
 // ───────────────────────── the materialization digest ─────────────────────────
@@ -933,6 +997,10 @@ mod tests {
     /// An index no tier claims anything in, to be filled one tier at a time with
     /// `..empty_index()`. Spelling the whole struct out per test buried which
     /// field each one was actually about.
+    ///
+    /// `derives_store_optouts` is true here so every layout arm stays
+    /// exercisable; the one test about the engine that DOESN'T derive them
+    /// turns it off explicitly, which is what makes the difference legible.
     fn empty_index() -> SourceIndex {
         SourceIndex {
             cli: Vec::new(),
@@ -946,40 +1014,38 @@ mod tests {
             declared_packages: Vec::new(),
             branded_layout_ignored: false,
             ci: false,
+            derives_store_optouts: true,
         }
+    }
+
+    /// A tier keyed by setting name — `nub.jsonc`, the defaults — from string
+    /// literals.
+    fn named(entries: &[(&str, &str)]) -> Vec<(String, String)> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    /// The environment tier as `load` builds it: every `npm_config_*` variable
+    /// that names a setting, carrying the variable, the setting and the text.
+    fn env(entries: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+        entries
+            .iter()
+            .map(|(var, setting, value)| {
+                (
+                    (*var).to_string(),
+                    (*setting).to_string(),
+                    (*value).to_string(),
+                )
+            })
+            .collect()
     }
 
     fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::pm_engine::ENGINE_GLOBAL_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-    }
-
-    /// Holds the engine lock and restores the process-global engine context on
-    /// DROP, not by a statement at the end: the asserts in between can panic, and
-    /// a tail restore would leave every later test in this binary reading the
-    /// postures this one set. Since every holder takes the lock with
-    /// `unwrap_or_else(into_inner)`, they proceed on that corrupted state rather
-    /// than failing — one real failure would spray unrelated ones and bury which
-    /// test actually broke.
-    struct EngineGuard {
-        context: aube_util::EngineContext,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl EngineGuard {
-        fn take() -> Self {
-            Self {
-                _lock: engine_lock(),
-                context: aube_util::engine_context(),
-            }
-        }
-    }
-
-    impl Drop for EngineGuard {
-        fn drop(&mut self) {
-            aube_util::set_engine_context(self.context.clone());
-        }
     }
 
     /// The quiet common case: nothing in the project moved a setting, so the
@@ -1179,50 +1245,119 @@ mod tests {
         );
     }
 
-    /// The tiers this module reads are raw text, and the engine's `parse_bool`
-    /// accepts `1`/`TRUE`/`True` as true. Deciding the layout with `== "true"`
-    /// disagreed with the resolver on exactly those spellings — in BOTH
-    /// directions, so the header could print the opposite of the tree the
-    /// install was about to build.
+    /// The tiers this module reads are raw text, and the boolean vocabulary the
+    /// install types that text with is the literal `true`/`false` pair.
+    ///
+    /// CONTRACT CHANGE. This row previously asserted the opposite for `1`,
+    /// `TRUE` and `True` — the vendored engine's `parse_bool` accepted all
+    /// three, and the header had to match it or print the opposite of the tree
+    /// the install would build. The settings layer nub hands the pnpm engine
+    /// types an `.npmrc` scalar through `serde`, which reads a boolean from
+    /// `true`/`false` alone, and pnpm's own reader agrees. So `hoist=1` is not
+    /// a truthy hoist: it is a line the install REFUSES by name. The rule the
+    /// header has to reproduce moved, so the assertions moved with it.
     #[test]
-    fn boolean_settings_are_read_the_way_the_engine_reads_them() {
+    fn boolean_settings_are_read_the_way_the_install_reads_them() {
         let with_npmrc = |key: &str, value: &str| SourceIndex {
             project_npmrc: vec![(key.to_string(), value.to_string())],
-            embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            embedder_defaults: named(&[("nodeLinker", "isolated")]),
             ..empty_index()
         };
 
-        // The engine symlinks into the machine-global store for each of these,
-        // so the row must not say `isolated`.
-        for spelling in ["1", "TRUE", "True"] {
+        for spelling in ["true", "TRUE", "True", "1", "yes"] {
+            let index = with_npmrc("enableGlobalVirtualStore", spelling);
+            let expected = spelling == "true";
             assert_eq!(
-                layout_row(&with_npmrc("enableGlobalVirtualStore", spelling)).0,
-                "global-virtual-store",
-                "`enableGlobalVirtualStore={spelling}` is true to the engine"
+                index.resolve("enableGlobalVirtualStore").is_some(),
+                expected,
+                "only the literal `true` types as a boolean; `{spelling}` does not"
             );
+            // Unreadable is not the same as false: the tier is SKIPPED, so the
+            // layout falls through to what nothing-set yields rather than being
+            // credited a value the install never took.
+            assert_eq!(layout_row(&index).0, "global-virtual-store");
         }
 
-        // The other direction: `hoist=1` makes the engine veto the shared store
-        // and build the hidden tree, so the row must not claim the shared one.
+        // The other direction, and the one that used to read backwards: a
+        // `hoist` the install refuses must not veto the shared store here.
         assert_eq!(
             layout_row(&with_npmrc("hoist", "1")).0,
+            "global-virtual-store",
+            "`hoist=1` is a value the install refuses, not a hidden-tree request"
+        );
+        assert_eq!(
+            layout_row(&with_npmrc("hoist", "true")).0,
             "isolated",
-            "`hoist=1` is true to the engine, which vetoes the shared store"
+            "`hoist=true` still vetoes the shared store"
         );
 
-        // And `virtualStoreOnly=1` suppresses the package opt-out engine-side.
-        let store_only = SourceIndex {
-            embedder_defaults: vec![
-                ("nodeLinker".to_string(), "isolated".to_string()),
-                (
-                    "disableGlobalVirtualStoreForPackages".to_string(),
-                    "next".to_string(),
-                ),
-            ],
+        // `virtualStoreOnly` suppresses the package opt-out engine-side, and
+        // only its literal spelling does.
+        let store_only = |value: &str| SourceIndex {
+            embedder_defaults: named(&[
+                ("nodeLinker", "isolated"),
+                ("disableGlobalVirtualStoreForPackages", "next"),
+            ]),
             declared_packages: vec!["next".to_string()],
-            ..with_npmrc("virtualStoreOnly", "1")
+            ..with_npmrc("virtualStoreOnly", value)
         };
-        assert_eq!(layout_row(&store_only).0, "global-virtual-store");
+        assert_eq!(layout_row(&store_only("true")).0, "global-virtual-store");
+        assert_eq!(
+            layout_row(&store_only("1")).0,
+            "isolated",
+            "an unreadable `virtualStoreOnly` suppresses nothing"
+        );
+    }
+
+    /// The two whole-install store opt-outs the layout row DERIVES belong to the
+    /// vendored engine alone. pnpm 12 declares neither setting as a field of the
+    /// settings struct nub hands it and nub's own settings layer pushes neither
+    /// value, so a row telling that install's reader the store went project-local
+    /// "in Next projects" would name a tree it does not build.
+    #[test]
+    fn the_derived_store_optouts_are_the_vendored_engines_alone() {
+        let vendored = SourceIndex {
+            embedder_defaults: named(&[
+                ("nodeLinker", "isolated"),
+                ("disableGlobalVirtualStoreForPackages", "next"),
+                ("hoist", "true"),
+            ]),
+            declared_packages: vec!["next".to_string()],
+            ..empty_index()
+        };
+        assert_eq!(layout_row(&vendored).0, "isolated");
+
+        let engine = SourceIndex {
+            derives_store_optouts: false,
+            ..vendored
+        };
+        assert_eq!(
+            layout_row(&engine),
+            ("global-virtual-store".to_string(), None),
+            "neither the seeded package nor the injected-deps hoist decides \
+             anything under the engine that carries neither setting"
+        );
+
+        // The two routes that survive, because the engine really does take
+        // them: an explicit store bit, and CI.
+        let explicit = SourceIndex {
+            project_npmrc: named(&[("enable-global-virtual-store", "false")]),
+            ..engine
+        };
+        assert_eq!(
+            layout_row(&explicit),
+            ("isolated".to_string(), Some(Source::Npmrc))
+        );
+
+        let in_ci = SourceIndex {
+            project_npmrc: Vec::new(),
+            ci: true,
+            ..explicit
+        };
+        assert_eq!(
+            layout_row(&in_ci),
+            ("isolated".to_string(), Some(Source::Ci))
+        );
     }
 
     /// A package the shared store cannot serve takes the store project-local
@@ -1416,24 +1551,25 @@ mod tests {
         );
     }
 
-    /// The three branded files layout was taken back from, each detected in the
-    /// shape its own tool writes, and each gated on the posture that decides
-    /// whether nub reads that file at all.
+    /// The branded files layout is taken back from, each detected in the shape
+    /// its own tool writes.
+    ///
+    /// CONTRACT CHANGE. This row used to cover `.yarnrc.yml` and `bunfig.toml`
+    /// too, each behind the posture that decided whether nub opened the file.
+    /// Nub reads yarn and bun configuration for NO setting now, so those files
+    /// are not layout requests nub declined — they are files nub never opened,
+    /// and pointing their author at `nub.jsonc install.linker` would explain
+    /// the wrong thing. What remains is what nub still reads: pnpm's YAML
+    /// under a pnpm incumbent, and npm's keys in the neutral `.npmrc`.
     #[test]
     fn each_branded_layout_source_is_detected() {
-        let _guard = EngineGuard::take();
-        aube_util::update_engine_context(|c| {
-            c.read_branded_pnpm_config = true;
-            c.read_layout_from_workspace_yaml = false;
-            c.read_yarn_config = true;
-            c.read_bun_config = true;
-        });
-
+        // A pnpm incumbent, because that is the gate on reading the branded
+        // YAML at all — without it the file is simply not nub's to read.
         let project = |files: &[(&str, &str)]| {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(
                 dir.path().join("package.json"),
-                r#"{"name":"app","version":"1.0.0"}"#,
+                r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.4.1"}"#,
             )
             .unwrap();
             for (name, body) in files {
@@ -1447,11 +1583,9 @@ mod tests {
         for (file, body) in [
             ("pnpm-workspace.yaml", "nodeLinker: hoisted\n"),
             ("pnpm-workspace.yaml", "modulesDir: vendor_modules\n"),
-            (".yarnrc.yml", "nodeLinker: node-modules\n"),
-            ("bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),
-            // npm's keys live in `.npmrc`, so they need no posture gate.
-            // `install-strategy=nested` used to ABORT; dropping that must not
-            // trade a loud refusal for silence.
+            // npm's keys live in `.npmrc`, which nub reads under every
+            // incumbent. `install-strategy=nested` used to ABORT; dropping that
+            // must not trade a loud refusal for silence.
             (".npmrc", "install-strategy=nested\n"),
             (".npmrc", "install-strategy=hoisted\n"),
             (".npmrc", "legacy-bundling=true\n"),
@@ -1493,11 +1627,19 @@ mod tests {
             "the neutral spelling IS read, so it is not a dropped setting"
         );
 
-        // The gate: a file nub never opens went unread for its own reason, and
-        // blaming the compat layout policy for it would send the reader to the wrong fix.
-        let bun_only = project(&[("bunfig.toml", "[install]\nlinker = \"hoisted\"\n")]);
-        aube_util::update_engine_context(|c| c.read_bun_config = false);
-        assert!(!detected(&bun_only));
+        // Yarn's and Bun's files, written exactly as their own tools write
+        // them, disclose NOTHING — the negative half of the contract change
+        // above, and the reason this is asserted rather than merely deleted.
+        for (file, body) in [
+            (".yarnrc.yml", "nodeLinker: node-modules\n"),
+            ("bunfig.toml", "[install]\nlinker = \"hoisted\"\n"),
+        ] {
+            assert!(
+                !detected(&project(&[(file, body)])),
+                "nub reads no {file} for any setting, so its layout key is not \
+                 a request nub declined: {body:?}"
+            );
+        }
     }
 
     /// Nothing materialized prints nothing: materialization is routine, and a
@@ -1687,19 +1829,22 @@ mod tests {
     }
 
     /// Explicit install flags are the report's highest-priority tier. The
-    /// engine receives this same bag in `InstallOptions`, so `--node-linker`
-    /// must not be attributed to a lower file that it overrode.
+    /// install receives the same flags, so `--node-linker` must not be
+    /// attributed to a lower file that it overrode.
+    ///
+    /// Spelled with `autoInstallPeers` on the YAML tiers rather than
+    /// `nodeLinker`: a layout key can no longer reach them at all, and pinning
+    /// this test to a combination the loader cannot produce would make it a
+    /// test of the struct rather than of precedence.
     #[test]
     fn cli_flags_outrank_every_file_tier_with_the_canonical_spelling() {
         let index = SourceIndex {
-            cli: vec![("node-linker".to_string(), "hoisted".to_string())],
-            env: vec![("npm_config_node_linker".to_string(), "isolated".to_string())],
-            project_config: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            workspace_yaml: vec![("nodeLinker", "isolated".to_string())],
-            global_config_yaml: vec![("nodeLinker", "isolated".to_string())],
-            project_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            user_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            cli: named(&[("node-linker", "hoisted")]),
+            env: env(&[("npm_config_node_linker", "nodeLinker", "isolated")]),
+            project_config: named(&[("nodeLinker", "isolated")]),
+            project_npmrc: named(&[("nodeLinker", "isolated")]),
+            user_npmrc: named(&[("nodeLinker", "isolated")]),
+            embedder_defaults: named(&[("nodeLinker", "isolated")]),
             ..empty_index()
         };
         assert_eq!(
@@ -1709,98 +1854,147 @@ mod tests {
                 Some(Source::Cli("--node-linker=hoisted".to_string()))
             ))
         );
+
+        let yaml_tiers = SourceIndex {
+            cli: named(&[("auto-install-peers", "false")]),
+            env: env(&[("npm_config_auto_install_peers", "autoInstallPeers", "true")]),
+            project_config: named(&[("autoInstallPeers", "true")]),
+            workspace_yaml: named(&[("autoInstallPeers", "true")]),
+            global_config_yaml: named(&[("autoInstallPeers", "true")]),
+            project_npmrc: named(&[("auto-install-peers", "true")]),
+            user_npmrc: named(&[("auto-install-peers", "true")]),
+            embedder_defaults: named(&[("autoInstallPeers", "true")]),
+            ..empty_index()
+        };
+        assert_eq!(
+            yaml_tiers.resolve("autoInstallPeers"),
+            Some((
+                "false".to_string(),
+                Some(Source::Cli("--auto-install-peers=false".to_string()))
+            ))
+        );
     }
 
     /// pnpm v11's global config sits below the project workspace file but above
-    /// either `.npmrc` scope. SourceIndex receives it only from the engine's
-    /// `read_pnpm_global_config`-gated loader, so a disabled context leaves this
-    /// tier empty rather than inventing a global source.
+    /// either `.npmrc` scope. Both YAML tiers arrive only under a pnpm
+    /// incumbent, so a nub-identity project leaves them empty rather than
+    /// inventing a branded source.
     #[test]
     fn global_config_yaml_has_the_engine_precedence_tier() {
         let index = SourceIndex {
-            global_config_yaml: vec![("nodeLinker", "hoisted".to_string())],
-            project_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            user_npmrc: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            global_config_yaml: named(&[("autoInstallPeers", "false")]),
+            project_npmrc: named(&[("auto-install-peers", "true")]),
+            user_npmrc: named(&[("auto-install-peers", "true")]),
             ..empty_index()
         };
         assert_eq!(
-            index.resolve("nodeLinker"),
-            Some(("hoisted".to_string(), Some(Source::GlobalConfigYaml)))
+            index.resolve("autoInstallPeers"),
+            Some(("false".to_string(), Some(Source::GlobalConfigYaml)))
         );
         let project_workspace = SourceIndex {
-            workspace_yaml: vec![("nodeLinker", "isolated".to_string())],
+            workspace_yaml: named(&[("autoInstallPeers", "true")]),
             ..index
         };
         assert_eq!(
-            project_workspace.resolve("nodeLinker"),
-            Some(("isolated".to_string(), Some(Source::WorkspaceYaml)))
+            project_workspace.resolve("autoInstallPeers"),
+            Some(("true".to_string(), Some(Source::WorkspaceYaml)))
         );
     }
 
-    /// pnpm v11's workspace and global YAML list accessors return lists, while
-    /// this report stores renderable strings. Their comma representation must
-    /// preserve the same winning tier for the hoisting row rather than falling
-    /// through to a lower `.npmrc` setting.
+    /// Run the real `pnpm-workspace.yaml` reader against the two shapes it has
+    /// to tell apart, on one file: a resolution setting it supplies, and a
+    /// hoisting pattern it does not.
+    ///
+    /// CONTRACT CHANGE. This row used to assert the opposite of its second
+    /// half — a YAML `publicHoistPattern` reaching the hoisting row with
+    /// `(pnpm-workspace.yaml)` beside it — because the vendored engine's reader
+    /// was asked for it with the layout suppression turned OFF. Every hoisting
+    /// setting is `layout`-flagged, and nub takes layout from `nub.jsonc`,
+    /// `.npmrc` or the command line alone, so NO hoisting row can ever carry a
+    /// branded-YAML source. What the file can still supply is the resolution
+    /// row, which is what this now pins — along with the disclosure that the
+    /// dropped key earns.
+    ///
+    /// The manifest declares pnpm because that incumbency is the only thing
+    /// that makes the file nub's to read at all: under nub's own identity the
+    /// tier is empty by design, and a fixture without the declaration would
+    /// assert a reader works while it reads nothing.
     #[test]
-    fn pnpm_v11_yaml_list_tiers_preserve_hoisting_provenance() {
-        let index = SourceIndex {
-            workspace_yaml: vec![("publicHoistPattern", "vitest,@types/*".to_string())],
-            global_config_yaml: vec![("publicHoistPattern", "eslint".to_string())],
-            project_npmrc: vec![("public-hoist-pattern".to_string(), "lodash".to_string())],
-            ..empty_index()
-        };
-        let hoisting = |index: &SourceIndex| {
-            resolved_rows(index)
-                .into_iter()
-                .find(|row| row.label == "hoisting")
-                .unwrap()
-        };
-        let workspace = hoisting(&index);
-        assert_eq!(workspace.values, vec!["vitest", "@types/*"]);
-        assert_eq!(workspace.note.as_deref(), Some("(pnpm-workspace.yaml)"));
-
-        let global = hoisting(&SourceIndex {
-            workspace_yaml: Vec::new(),
-            ..index
-        });
-        assert_eq!(global.values, vec!["eslint"]);
-        assert_eq!(global.note.as_deref(), Some("(pnpm global config.yaml)"));
-    }
-
-    /// Exercise the actual pnpm-workspace.yaml reader too: YAML sequences use
-    /// the same string-list representation as the resolver, so the report can
-    /// both show every pattern and keep its source rather than falling through.
-    #[test]
-    fn pnpm_v11_workspace_yaml_sequences_keep_list_provenance() {
-        let _guard = EngineGuard::take();
-        aube_util::update_engine_context(|context| {
-            context.read_branded_pnpm_config = true;
-            context.read_layout_from_workspace_yaml = true;
-            context.read_pnpm_global_config = false;
-        });
+    fn a_pnpm_workspace_yaml_supplies_resolution_and_never_hoisting() {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(
             project.path().join("package.json"),
-            r#"{"name":"app","version":"1.0.0"}"#,
+            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11.3.0"}"#,
         )
         .unwrap();
         std::fs::write(
             project.path().join("pnpm-workspace.yaml"),
-            "publicHoistPattern:\n  - vitest\n  - '@types/*'\n",
+            "autoInstallPeers: false\npublicHoistPattern:\n  - vitest\n  - '@types/*'\n",
         )
         .unwrap();
 
         let index = SourceIndex::load(project.path(), &[]);
         assert_eq!(
-            index.resolve("publicHoistPattern"),
-            Some(("vitest,@types/*".to_string(), Some(Source::WorkspaceYaml)))
+            index.resolve("autoInstallPeers"),
+            Some(("false".to_string(), Some(Source::WorkspaceYaml)))
         );
-        let hoisting = resolved_rows(&index)
-            .into_iter()
-            .find(|row| row.label == "hoisting")
-            .unwrap();
-        assert_eq!(hoisting.values, vec!["vitest", "@types/*"]);
-        assert_eq!(hoisting.note.as_deref(), Some("(pnpm-workspace.yaml)"));
+        assert_eq!(
+            index.resolve("publicHoistPattern"),
+            None,
+            "a hoisting pattern is a layout setting, which this file never supplies"
+        );
+
+        let rows = resolved_rows(&index);
+        let resolution = rows.iter().find(|row| row.label == "resolution").unwrap();
+        assert_eq!(resolution.values, vec!["auto-install-peers=false"]);
+        assert_eq!(resolution.note.as_deref(), Some("(pnpm-workspace.yaml)"));
+        assert!(
+            rows.iter().all(|row| row.label != "hoisting"),
+            "no hoisting row, because nothing nub reads asked for one"
+        );
+        // The dropped key is not silently gone: the linker row says where a
+        // layout CAN be set, which is the whole point of dropping it.
+        let linker = rows.iter().find(|row| row.label == "linker").unwrap();
+        assert_eq!(
+            linker.note.as_deref(),
+            Some(&format!("({LAYOUT_POINTER})")[..])
+        );
+    }
+
+    /// Either YAML tier reaches the resolution ROW with its own name on it, and
+    /// a settled multi-entry row still collapses to one parenthetical when both
+    /// entries came from the same file.
+    #[test]
+    fn pnpm_yaml_tiers_preserve_resolution_provenance() {
+        let index = SourceIndex {
+            workspace_yaml: named(&[
+                ("autoInstallPeers", "false"),
+                ("strictPeerDependencies", "true"),
+            ]),
+            project_npmrc: named(&[("auto-install-peers", "true")]),
+            ..empty_index()
+        };
+        let resolution = |index: &SourceIndex| {
+            resolved_rows(index)
+                .into_iter()
+                .find(|row| row.label == "resolution")
+                .unwrap()
+        };
+        let workspace = resolution(&index);
+        assert_eq!(
+            workspace.values,
+            vec!["auto-install-peers=false", "strict-peer-dependencies"]
+        );
+        assert_eq!(workspace.note.as_deref(), Some("(pnpm-workspace.yaml)"));
+
+        let global = resolution(&SourceIndex {
+            workspace_yaml: Vec::new(),
+            global_config_yaml: named(&[("autoInstallPeers", "false")]),
+            project_npmrc: Vec::new(),
+            ..index
+        });
+        assert_eq!(global.values, vec!["auto-install-peers=false"]);
+        assert_eq!(global.note.as_deref(), Some("(pnpm global config.yaml)"));
     }
 
     /// Within either `.npmrc` scope, the last assignment wins. This is distinct
@@ -1833,21 +2027,22 @@ mod tests {
         );
     }
 
-    /// Boolean parsing is part of precedence: malformed values are ignored,
-    /// allowing a lower tier (or an earlier valid entry in the same `.npmrc`)
-    /// to decide just as the generated resolver does.
+    /// Boolean parsing is part of precedence: a value the install will not type
+    /// as a boolean is ignored, letting a lower tier — or an earlier valid entry
+    /// in the same `.npmrc` — decide, just as the install's own merge does.
     #[test]
     fn malformed_boolean_tiers_fall_through_to_the_resolver_winner() {
         let index = SourceIndex {
-            cli: vec![("enable-global-virtual-store".to_string(), "yes".to_string())],
-            env: vec![(
-                "npm_config_enable_global_virtual_store".to_string(),
-                "0".to_string(),
-            )],
-            project_npmrc: vec![
-                ("enable-global-virtual-store".to_string(), "1".to_string()),
-                ("enableGlobalVirtualStore".to_string(), "yes".to_string()),
-            ],
+            cli: named(&[("enable-global-virtual-store", "yes")]),
+            env: env(&[(
+                "npm_config_enable_global_virtual_store",
+                "enableGlobalVirtualStore",
+                "false",
+            )]),
+            project_npmrc: named(&[
+                ("enable-global-virtual-store", "true"),
+                ("enableGlobalVirtualStore", "yes"),
+            ]),
             ..empty_index()
         };
         assert_eq!(
@@ -1872,48 +2067,47 @@ mod tests {
         );
     }
 
-    /// A branded `AUBE_*` variable is not a source under nub: the profile turns
-    /// that alias family off, so crediting one would name a variable the engine
-    /// never read.
+    /// The parenthetical names the variable the install actually read — not a
+    /// spelling picked off the settings table's alias list.
+    ///
+    /// CONTRACT CHANGE. Two tests used to sit here, one per brand-prefixed
+    /// alias family (`AUBE_*`, `PNPM_CONFIG_*`), each flipping a process-global
+    /// engine posture to prove the report skipped a variable the resolver
+    /// skipped. This walk no longer goes through `meta.env_vars` at all: it
+    /// reads the tier the settings layer BUILT, which admits the `npm_config_`
+    /// prefix and nothing else, so the skip is structural and the postures that
+    /// gated it are gone. The prefix rule is asserted where it lives —
+    /// `host_settings::tests::a_brand_prefixed_variable_is_not_a_setting_source`
+    /// — and what remains here is this module's own half.
     #[test]
-    fn branded_env_aliases_are_not_a_source() {
-        crate::pm_engine::identity::register();
+    fn the_environment_tier_names_the_variable_the_install_read() {
         let index = SourceIndex {
-            env: vec![("AUBE_NODE_LINKER".to_string(), "hoisted".to_string())],
-            embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
+            env: env(&[
+                ("NPM_CONFIG_NODE_LINKER", "nodeLinker", "isolated"),
+                ("npm_config_node_linker", "nodeLinker", "hoisted"),
+            ]),
+            embedder_defaults: named(&[("nodeLinker", "isolated")]),
             ..empty_index()
         };
-        assert_eq!(
-            index.resolve("nodeLinker"),
-            Some(("isolated".to_string(), Some(Source::Default)))
-        );
-    }
-
-    /// The same aube gate that skips pnpm-branded aliases under a non-pnpm
-    /// incumbent must govern this provenance pass; otherwise the report names a
-    /// value the resolver did not read.
-    #[test]
-    fn pnpm_branded_env_aliases_follow_the_engine_context_gate() {
-        let _guard = EngineGuard::take();
-        let index = SourceIndex {
-            env: vec![("PNPM_CONFIG_NODE_LINKER".to_string(), "hoisted".to_string())],
-            embedder_defaults: vec![("nodeLinker".to_string(), "isolated".to_string())],
-            ..empty_index()
-        };
-
-        aube_util::update_engine_context(|context| context.read_branded_pnpm_config = false);
-        assert_eq!(
-            index.resolve("nodeLinker"),
-            Some(("isolated".to_string(), Some(Source::Default)))
-        );
-
-        aube_util::update_engine_context(|context| context.read_branded_pnpm_config = true);
         assert_eq!(
             index.resolve("nodeLinker"),
             Some((
                 "hoisted".to_string(),
-                Some(Source::Env("PNPM_CONFIG_NODE_LINKER".to_string()))
-            ))
+                Some(Source::Env("npm_config_node_linker".to_string()))
+            )),
+            "two spellings of one setting resolve last-wins, and the winner is named"
+        );
+
+        // A variable whose value the install would refuse leaves the tier to a
+        // lower one rather than being credited a value nothing took.
+        let refused = SourceIndex {
+            env: env(&[("npm_config_hoist", "hoist", "1")]),
+            embedder_defaults: named(&[("hoist", "true")]),
+            ..empty_index()
+        };
+        assert_eq!(
+            refused.resolve("hoist"),
+            Some(("true".to_string(), Some(Source::Default)))
         );
     }
 
@@ -1922,8 +2116,8 @@ mod tests {
     #[test]
     fn mixed_sources_drop_the_shared_parenthetical() {
         let index = SourceIndex {
-            project_npmrc: vec![("auto-install-peers".to_string(), "false".to_string())],
-            user_npmrc: vec![("strict-peer-dependencies".to_string(), "true".to_string())],
+            project_npmrc: named(&[("auto-install-peers", "false")]),
+            user_npmrc: named(&[("strict-peer-dependencies", "true")]),
             ..empty_index()
         };
         let rows = resolved_rows(&index);
@@ -1937,10 +2131,7 @@ mod tests {
         assert_eq!(resolution.note.as_deref(), Some("(.npmrc)"));
 
         let mixed = SourceIndex {
-            env: vec![(
-                "npm_config_auto_install_peers".to_string(),
-                "false".to_string(),
-            )],
+            env: env(&[("npm_config_auto_install_peers", "autoInstallPeers", "false")]),
             ..index
         };
         let rows = resolved_rows(&mixed);

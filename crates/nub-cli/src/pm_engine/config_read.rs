@@ -330,7 +330,7 @@ pub(crate) fn npmrc_path(location: Location) -> Result<PathBuf> {
 ///
 /// Parsed by the same reader the install uses, so a line one of them accepts
 /// and the other rejects cannot exist.
-fn entries_of(text: &str) -> Vec<(String, String)> {
+pub(super) fn entries_of(text: &str) -> Vec<(String, String)> {
     host_settings::npmrc_entries(text)
         .into_iter()
         .map(|(key, raw)| {
@@ -355,7 +355,7 @@ pub(crate) fn read_user_entries() -> Vec<(String, String)> {
     let mut out = user_npmrc_path()
         .map(|p| read_npmrc(&p))
         .unwrap_or_default();
-    out.extend(branded_yaml(BrandedSource::GlobalConfig));
+    out.extend(branded_yaml(&project_root(), BrandedSource::GlobalConfig));
     out
 }
 
@@ -369,7 +369,7 @@ pub(crate) fn read_project_entries() -> Vec<(String, String)> {
     } else {
         read_npmrc(&project)
     };
-    out.extend(branded_yaml(BrandedSource::WorkspaceYaml));
+    out.extend(branded_yaml(&root, BrandedSource::WorkspaceYaml));
     out.extend(nub_jsonc_entries(&root));
     out
 }
@@ -406,8 +406,8 @@ pub(crate) fn read_merged() -> Vec<(String, String)> {
     } else {
         out.extend(read_npmrc(&root.join(".npmrc")));
     }
-    out.extend(branded_yaml(BrandedSource::GlobalConfig));
-    out.extend(branded_yaml(BrandedSource::WorkspaceYaml));
+    out.extend(branded_yaml(&root, BrandedSource::GlobalConfig));
+    out.extend(branded_yaml(&root, BrandedSource::WorkspaceYaml));
     out.extend(nub_jsonc_entries(&root));
     // Last because it is highest.
     out.extend(env_entries());
@@ -433,7 +433,7 @@ fn default_entries(root: &Path) -> Vec<(String, String)> {
 
 /// The two pnpm-named files a config read may consult.
 #[derive(Clone, Copy)]
-enum BrandedSource {
+pub(super) enum BrandedSource {
     /// `$XDG_CONFIG_HOME/pnpm/config.yaml`.
     GlobalConfig,
     /// The project's `pnpm-workspace.yaml`.
@@ -454,14 +454,8 @@ enum BrandedSource {
 /// the `node_modules` layout from `nub.jsonc`, `.npmrc` or the command line
 /// only, so mirroring a `nodeLinker` out of a branded file would report a
 /// layout the very next install does not build.
-fn branded_yaml(source: BrandedSource) -> Vec<(String, String)> {
-    let Some(path) = branded_yaml_path(source) else {
-        return Vec::new();
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let Ok(map) = serde_yaml::from_str::<BTreeMap<String, serde_yaml::Value>>(&text) else {
+pub(super) fn branded_yaml(root: &Path, source: BrandedSource) -> Vec<(String, String)> {
+    let Some(map) = branded_yaml_map(root, source) else {
         return Vec::new();
     };
 
@@ -494,13 +488,48 @@ fn branded_yaml(source: BrandedSource) -> Vec<(String, String)> {
     out
 }
 
-fn branded_yaml_path(source: BrandedSource) -> Option<PathBuf> {
-    if !pnpm_incumbent() {
+/// The raw map one pnpm-named file carries, after the same incumbency gates
+/// [`branded_yaml`] applies. `None` covers every reason there is nothing to
+/// read: no pnpm incumbent, no file, unparseable YAML.
+fn branded_yaml_map(
+    root: &Path,
+    source: BrandedSource,
+) -> Option<BTreeMap<String, serde_yaml::Value>> {
+    let path = branded_yaml_path(root, source)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    serde_yaml::from_str(&text).ok()
+}
+
+/// Whether either pnpm-named file asks for a `node_modules` layout that
+/// [`branded_yaml`] drops.
+///
+/// The install report is the only surface that dropped request reaches, and
+/// what it prints is the neutral surface to move the setting to — so a layout
+/// setting with no `.npmrc` spelling is deliberately not disclosed: there
+/// would be nowhere to send the reader.
+pub(super) fn branded_yaml_layout_dropped(root: &Path) -> bool {
+    [BrandedSource::WorkspaceYaml, BrandedSource::GlobalConfig]
+        .into_iter()
+        .filter_map(|source| branded_yaml_map(root, source))
+        .any(|map| {
+            settings_meta::all().any(|meta| {
+                meta.layout
+                    && !meta.npmrc_keys.is_empty()
+                    && meta
+                        .workspace_yaml_keys
+                        .iter()
+                        .any(|key| map.contains_key(*key))
+            })
+        })
+}
+
+fn branded_yaml_path(root: &Path, source: BrandedSource) -> Option<PathBuf> {
+    if !pnpm_incumbent(root) {
         return None;
     }
     match source {
         BrandedSource::WorkspaceYaml => {
-            let path = project_root().join("pnpm-workspace.yaml");
+            let path = root.join("pnpm-workspace.yaml");
             path.exists().then_some(path)
         }
         BrandedSource::GlobalConfig => {
@@ -518,12 +547,15 @@ fn branded_yaml_path(source: BrandedSource) -> Option<PathBuf> {
     }
 }
 
-/// Whether the project containing the working directory declares pnpm as its
-/// package manager. Always false in the transitional build with no engine at
-/// all, which by construction has no pnpm-incumbent path.
-fn pnpm_incumbent() -> bool {
+/// Whether the project at `root` declares pnpm as its package manager.
+///
+/// Anchored at a root the caller names rather than at the process directory:
+/// the install report resolves the project the command line named (`--dir`),
+/// which is not always the one the process sits in, and answering from the
+/// wrong project reads as a working install of a different tree.
+fn pnpm_incumbent(root: &Path) -> bool {
     use super::project_identity::{ProjectIdentity, detect};
-    std::env::current_dir().is_ok_and(|cwd| detect(&cwd) == ProjectIdentity::Pnpm)
+    detect(root) == ProjectIdentity::Pnpm
 }
 
 /// A YAML scalar as `config get` prints it. A mapping or a nested sequence has
@@ -573,7 +605,7 @@ fn nub_jsonc_entries(_root: &Path) -> Vec<(String, String)> {
 
 /// A supplied value as `config get` prints it. A map or a nested structure has
 /// no one-line spelling, so it is reported through `--json` only.
-fn render(value: Value) -> Option<String> {
+pub(super) fn render(value: Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s),
         Value::Bool(b) => Some(b.to_string()),

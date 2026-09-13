@@ -103,8 +103,21 @@ pub(crate) fn supplied_settings(install: &InstallConfig) -> Map<String, Value> {
 /// and omitting it once made `config get cache-dir` print `undefined` while the
 /// install was already acting on the value (nubjs/nub#654).
 pub(crate) fn env_settings() -> Map<String, Value> {
+    env_settings_sourced()
+        .into_iter()
+        .map(|(_, setting, raw)| (setting, Value::String(raw)))
+        .collect()
+}
+
+/// The same tier, each entry still carrying the VARIABLE it came from.
+///
+/// The install report names that variable in its provenance parenthetical, and
+/// a settings-keyed map has already thrown it away — `npm_config_node_linker`
+/// and `NPM_CONFIG_NODE_LINKER` collapse to one `nodeLinker` entry there. In
+/// environment order, so a later duplicate is the winner both readers see.
+pub(crate) fn env_settings_sourced() -> Vec<(String, String, String)> {
     let known = known_keys();
-    let mut out = Map::new();
+    let mut out = Vec::new();
     for (name, value) in std::env::vars() {
         let Some(key) = setting_key_of_var(&name) else {
             continue;
@@ -120,12 +133,12 @@ pub(crate) fn env_settings() -> Map<String, Value> {
         if !known.contains(&setting) {
             continue;
         }
-        out.insert(setting, Value::String(value));
+        out.push((name, setting, value));
     }
     if let Ok(dir) = std::env::var("NUB_CACHE_DIR")
         && !dir.is_empty()
     {
-        out.insert("cacheDir".to_owned(), Value::String(dir));
+        out.push(("NUB_CACHE_DIR".to_owned(), "cacheDir".to_owned(), dir));
     }
     out
 }
@@ -758,6 +771,37 @@ mod tests {
         let resolved: WorkspaceSettings =
             serde_json::from_value(Value::Object(merged)).expect("the engine accepts the merge");
         assert_eq!(resolved.dedupe_peers, Some(false));
+    }
+
+    /// Only the `npm_config_` prefix names a setting. The settings table still
+    /// LISTS a brand-prefixed alias beside each of those spellings — `AUBE_*`
+    /// from the previous engine, `PNPM_CONFIG_*` from pnpm's own surface — and
+    /// neither is nub's to read: one carries an engine brand nub does not own,
+    /// the other configures a different tool's install. Structural rather than
+    /// gated, so the install report can credit whatever reaches this tier
+    /// without re-deciding the question.
+    #[test]
+    fn a_brand_prefixed_variable_is_not_a_setting_source() {
+        let install = InstallConfig::default();
+        let mut sources = sources(&install);
+        sources.env = env(&[
+            ("AUBE_NODE_LINKER", "hoisted"),
+            ("PNPM_CONFIG_NODE_LINKER", "hoisted"),
+        ]);
+
+        let merged = merge(&sources).expect("merge");
+
+        assert!(
+            !merged.contains_key("nodeLinker"),
+            "a brand-prefixed variable set nothing, so the layout is still unasked: {merged:?}"
+        );
+        // The positive control: the same setting IS reachable, so the assertion
+        // above is about the prefix rather than about `nodeLinker` being inert.
+        sources.env = env(&[("npm_config_node_linker", "hoisted")]);
+        assert_eq!(
+            merge(&sources).expect("merge")["nodeLinker"],
+            json!("hoisted")
+        );
     }
 
     #[test]

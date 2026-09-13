@@ -526,6 +526,7 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // Also asked before, and for a third reason: the answer is a COMPARISON
     // against the lockfile as it stands now.
     let legacy = legacy_lockfile_pending(embedder, command.as_deref(), &cwd);
+    report_resolved_layout(command.as_deref(), &argv, &cwd);
     match pnpm_cli::run(argv, embedder) {
         Ok(()) => {
             if let Some(foreign) = pending {
@@ -558,6 +559,77 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+/// Print the install report's resolved-layout header ahead of the engine's
+/// progress display, where the vendored engine's own install path prints it.
+///
+/// Only the second half of that report can follow the engine here. The
+/// materialization digest is fed by `record_plan`, which the VENDORED engine's
+/// disk-materialize expansion hook fills from the resolved graph; this engine
+/// decides materialization per package as each one lands
+/// ([`super::phantom_hooks::materialize_policy`]) and builds no plan, so a
+/// digest printed after the run would be empty on every install rather than
+/// merely quiet on most. It waits for a plan to report.
+///
+/// The flags are read off the command line rather than a parse: this engine
+/// owns the grammar and hands the parse back to nobody. Both readers admit
+/// only what the settings table declares, so neither can mistake a host flag
+/// for a setting.
+fn report_resolved_layout(command: Option<&str>, argv: &[std::ffi::OsString], cwd: &Path) {
+    if !command.is_some_and(|name| RESOLVING_COMMANDS.contains(&name)) {
+        return;
+    }
+    super::install_report::print_resolved_layout(
+        cwd,
+        &output_flags(argv),
+        &super::install_report::cli_setting_flags(argv),
+    );
+}
+
+/// What this command line says about output verbosity, in nub's own shape.
+///
+/// nub's pre-verb globals (`nub --silent install`) are already recorded as
+/// process defaults that [`OutputFlags`] merges under whatever is set here, so
+/// only the post-verb spellings need scanning — the same three the engine
+/// itself accepts.
+fn output_flags(argv: &[std::ffi::OsString]) -> super::output::OutputFlags {
+    use super::output::{LogLevel, OutputFlags, Reporter};
+    let mut flags = OutputFlags::default();
+    let mut args = argv.iter().filter_map(|arg| arg.to_str()).peekable();
+    while let Some(arg) = args.next() {
+        let mut value_of = |inline: Option<&str>| match inline {
+            Some(value) => Some(value.to_owned()),
+            None => args.next().map(str::to_owned),
+        };
+        let (name, inline) = match arg.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (arg, None),
+        };
+        match name {
+            "--silent" | "-s" => flags.silent = true,
+            "--reporter" => {
+                flags.reporter = match value_of(inline).as_deref() {
+                    Some("silent") => Some(Reporter::Silent),
+                    Some("append-only") => Some(Reporter::AppendOnly),
+                    Some("default") => Some(Reporter::Default),
+                    _ => flags.reporter,
+                }
+            }
+            "--loglevel" => {
+                flags.loglevel = match value_of(inline).as_deref() {
+                    Some("silent") => Some(LogLevel::Silent),
+                    Some("error") => Some(LogLevel::Error),
+                    Some("warn") => Some(LogLevel::Warn),
+                    Some("info") => Some(LogLevel::Info),
+                    Some("debug") => Some(LogLevel::Debug),
+                    _ => flags.loglevel,
+                }
+            }
+            _ => {}
+        }
+    }
+    flags
 }
 
 /// The commands that resolve the project and write its lockfile. A project

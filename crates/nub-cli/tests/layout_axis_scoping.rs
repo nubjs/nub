@@ -152,10 +152,17 @@ fn a_pnpm_11_project_takes_resolution_from_workspace_yaml_but_never_layout() {
 
 #[test]
 fn a_pnpm_11_global_config_reports_ignored_layout_but_keeps_resolution() {
+    // A RANGE, where its two siblings above pin an exact version. This row is
+    // the only one that runs a real install, and an exact pin is a config
+    // dependency the engine provisions from the network — even when it names
+    // the embedded version — so under `--offline` it can never resolve. A range
+    // is satisfied by the embedded engine and runs locally, while
+    // `declared_pnpm_major` reads the same field and still sees major 11, which
+    // is the fact this test is about.
     let files = [
         (
             "package.json",
-            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11.3.0"}"#,
+            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11"}"#,
         ),
         ("pnpm-lock.yaml", PNPM_LOCK),
     ];

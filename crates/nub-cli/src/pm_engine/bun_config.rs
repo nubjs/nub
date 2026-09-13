@@ -52,18 +52,6 @@ fn parse_bunfig_file(path: &Path) -> Option<Value> {
     Some(Value::Table(table))
 }
 
-/// Whether the project's `bunfig.toml` directs `node_modules` layout.
-/// `entries_from_bunfig` deliberately never maps `[install].linker`, so the
-/// install header asks this to point at `nub.jsonc` instead of dropping the key
-/// in silence.
-pub(crate) fn declares_install_linker(project_root: &Path) -> bool {
-    parse_bunfig_file(&project_root.join("bunfig.toml")).is_some_and(|root| {
-        root.get("install")
-            .and_then(Value::as_table)
-            .is_some_and(|install| install.contains_key("linker"))
-    })
-}
-
 fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
     let Some(install) = root.get("install").and_then(Value::as_table) else {
         return Vec::new();
