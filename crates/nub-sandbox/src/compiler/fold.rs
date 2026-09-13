@@ -346,8 +346,8 @@ fn fold_fs_array_entry(
         Some(_) => return Err(CompileError::shape(path, USER_FS_DENY_MSG)),
         None => (s, Effect::Allow),
     };
-    // `$(…)` resolves AFTER the `!` strip so a command's stdout is a path, never a
-    // deny operator it could smuggle in. Array grants are ReadWrite; denies deny both.
+    // Resolve `$(…)` after rejecting authored negation: command stdout is a path,
+    // not a policy operator. Array grants are ReadWrite.
     let pattern = resolve_fs_path(pattern, ctx, path)?;
     push_fs_rules(&pattern, effect, FsAccess::ReadWrite, ctx, out);
     Ok(())
