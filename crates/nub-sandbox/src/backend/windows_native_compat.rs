@@ -27,7 +27,7 @@ const ASSETS: &[(&str, &[u8])] = &[];
 pub(super) fn version() -> &'static str {
     static VERSION: LazyLock<String> = LazyLock::new(|| {
         let mut hash = Sha256::new();
-        hash.update(b"native-adapter/socket-broker-v1");
+        hash.update(b"native-adapter/socket-broker-v2-internet");
         for (name, bytes) in ASSETS {
             hash.update(name.as_bytes());
             hash.update(bytes);

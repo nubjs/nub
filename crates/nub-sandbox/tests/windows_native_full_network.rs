@@ -46,6 +46,19 @@ fn standard_user() {
         Some(5),
         "ordinary-user oracle"
     );
+    nub_sandbox::set_windows_egress_helper_command(vec![
+        std::env::current_exe().unwrap().into(),
+        "--ignored".into(),
+        "--exact".into(),
+        "windows_egress_helper_entry".into(),
+        "--nocapture".into(),
+    ]);
+}
+
+#[test]
+#[ignore = "co-package relay entry, launched only by the Windows backend"]
+fn windows_egress_helper_entry() {
+    nub_sandbox::serve_windows_egress_helper();
 }
 
 fn fixture_path() -> PathBuf {
@@ -297,8 +310,9 @@ fn udp_peer(socket: UdpSocket) -> Peer {
     })))
 }
 
-fn assert_positive_client(output: &Output, case: &str) {
-    assert!(output.status.success(), "{output:?}");
+fn assert_positive_client(output: &Output, mode: &str, case: &str) {
+    eprintln!("FULL_NETWORK_CLIENT mode={mode} case={case} output={output:?}");
+    assert!(output.status.success(), "{mode} {case}: {output:?}");
     if case == "concurrent4" {
         assert_marker(output, "FULL_NETWORK_CONCURRENT", "12");
     } else {
@@ -317,8 +331,8 @@ fn positive_client(root: &Path, fixture: &Path, case: &str, udp: bool, connectio
         let address = peer.local_addr().unwrap().to_string();
         let peer = udp_peer(peer);
         let result = plain_output(plain_command(fixture, case, Some(&address)));
+        assert_positive_client(&result, "plain", case);
         peer.join();
-        assert_positive_client(&result, case);
 
         let peer = UdpSocket::bind(bind).unwrap();
         let address = peer.local_addr().unwrap().to_string();
@@ -326,15 +340,15 @@ fn positive_client(root: &Path, fixture: &Path, case: &str, udp: bool, connectio
         let session = Sandbox::with_windows_native_compat(&policy).unwrap();
         let peer = udp_peer(peer);
         let result = output(&session, root, fixture, case);
+        assert_positive_client(&result, "native", case);
         peer.join();
-        assert_positive_client(&result, case);
     } else {
         let peer = TcpListener::bind(bind).unwrap();
         let address = peer.local_addr().unwrap().to_string();
         let peer = tcp_peer(peer, connections);
         let result = plain_output(plain_command(fixture, case, Some(&address)));
+        assert_positive_client(&result, "plain", case);
         peer.join();
-        assert_positive_client(&result, case);
 
         let peer = TcpListener::bind(bind).unwrap();
         let address = peer.local_addr().unwrap().to_string();
@@ -342,8 +356,8 @@ fn positive_client(root: &Path, fixture: &Path, case: &str, udp: bool, connectio
         let session = Sandbox::with_windows_native_compat(&policy).unwrap();
         let peer = tcp_peer(peer, connections);
         let result = output(&session, root, fixture, case);
+        assert_positive_client(&result, "native", case);
         peer.join();
-        assert_positive_client(&result, case);
         if case == "descendant4" {
             assert_token_attestation(&result);
         }
@@ -367,6 +381,13 @@ fn negative_client(
         Sandbox::new(&policy)
     }
     .expect("negative session");
+    let token = output(&session, root, fixture, "token-report");
+    assert!(token.status.success(), "{net_label} token query: {token:?}");
+    assert_marker(
+        &token,
+        "FULL_NETWORK_TOKEN",
+        "appcontainer=1:capabilities=0:internet-client=0:admin=0",
+    );
     let fs = output(&session, root, fixture, "fs-canary");
     assert!(fs.status.success(), "{net_label} filesystem canary: {fs:?}");
     assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5");
@@ -556,6 +577,14 @@ fn owner_listener_address(mut child: nub_sandbox::PreparedChild) -> String {
                 line.strip_prefix("FULL_NETWORK_READY=")
                     .map(str::to_owned)
                     .ok_or_else(|| format!("owner ready marker was {line:?}"))
+            })
+            .and_then(|address| {
+                // Restricted networking can block a connection even while a
+                // listener is alive. Prove that it holds the port before drop.
+                match TcpListener::bind(address.as_str()) {
+                    Err(_) => Ok(address),
+                    Ok(_) => Err(format!("owner listener did not reserve {address}")),
+                }
             });
         drop(child);
         let stdout = stdout
@@ -618,7 +647,7 @@ fn assert_token_attestation(output: &Output) {
     assert_marker(
         output,
         "FULL_NETWORK_TOKEN",
-        "appcontainer=1:capabilities=0:admin=0",
+        "appcontainer=1:capabilities=1:internet-client=1:admin=0",
     );
 }
 
@@ -641,26 +670,19 @@ fn native_adapter_full_network_dns_opt_in() {
         std::fs::create_dir(root.path().join(name)).unwrap();
     }
     std::fs::write(root.path().join("withheld/canary"), b"withheld").unwrap();
+    let mut results = Vec::new();
     for api in ["getaddrinfo", "dnsqueryex"] {
         let plain_name = fresh_dns_name(api, "plain");
         let mut plain_command = plain_command(&fixture, api, None);
         plain_command.env("NUB_FULL_NETWORK_DNS_NAME", &plain_name);
         let plain = plain_output(plain_command);
-        assert!(
-            plain.status.success(),
-            "plain {api} setup/provider failure for {plain_name}: {plain:?}"
-        );
-        assert_marker(&plain, "FULL_NETWORK_DNS", &format!("{api}:0:1.1.1.1"));
         let native_name = fresh_dns_name(api, "native");
         let native_policy = policy(root.path(), &fixture, json!(true), None, Some(&native_name));
         let native = Sandbox::with_windows_native_compat(&native_policy)
             .expect("native full-network DNS session");
         let adapted = output(&native, root.path(), &fixture, api);
-        assert!(
-            adapted.status.success(),
-            "adapter {api} failed for {native_name}: {adapted:?}"
-        );
-        assert_marker(&adapted, "FULL_NETWORK_DNS", &format!("{api}:0:1.1.1.1"));
+        eprintln!("FULL_NETWORK_DNS_RESULT api={api} plain={plain:?} native={adapted:?}");
+        results.push((api, plain_name, native_name, plain, adapted));
         // Raw is deliberately observational: DNS is outside the socket adapter's hook surface.
         let raw_policy = policy(
             root.path(),
@@ -677,6 +699,19 @@ fn native_adapter_full_network_dns_opt_in() {
             String::from_utf8_lossy(&observed.stdout).trim(),
             String::from_utf8_lossy(&observed.stderr).trim(),
         );
+    }
+    // Run both APIs before assertions so one failure does not hide the other.
+    for (api, plain_name, native_name, plain, adapted) in results {
+        assert!(
+            plain.status.success(),
+            "plain {api} setup/provider failure for {plain_name}: {plain:?}"
+        );
+        assert_marker(&plain, "FULL_NETWORK_DNS", &format!("{api}:0:1.1.1.1"));
+        assert!(
+            adapted.status.success(),
+            "adapter {api} failed for {native_name}: {adapted:?}"
+        );
+        assert_marker(&adapted, "FULL_NETWORK_DNS", &format!("{api}:0:1.1.1.1"));
     }
 }
 
@@ -720,6 +755,8 @@ fn owner_drop_case(net: serde_json::Value, label: &str) {
         TcpStream::connect_timeout(&address.parse().unwrap(), DEADLINE).is_err(),
         "dropped {label} command owner left listener reachable"
     );
+    let _rebound = TcpListener::bind(address.as_str())
+        .unwrap_or_else(|error| panic!("dropped {label} owner retained port {address}: {error}"));
 }
 
 #[test]

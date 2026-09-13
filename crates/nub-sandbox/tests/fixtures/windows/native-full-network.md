@@ -12,7 +12,7 @@ admission/RPC diagnosis, not a LAN or peer-traffic result. The fixture never
 opens the private broker pipe, asks about helper rights, retries through a
 different route, or changes host policy.
 
-For every TCP, UDP, IPv6, listener, IOCP, concurrency, and descendant case, an unconfined run against the same parent-owned peer runs before the adapted `net:true` run. The retained-session matrix runs its positive arm first, followed by native `net:false` and hostname-restricted arms using the **same literal filesystem grants**. Those negative arms must have no peer-observed request and no completed reply; successful setup APIs alone are not a pass. This catches a retained-resource identity alias between otherwise-zero-capability policies.
+For every TCP, UDP, IPv6, listener, IOCP, concurrency, and descendant case, an unconfined run against the same parent-owned peer runs before the adapted `net:true` run. The retained-session matrix runs its positive arm first, followed by native `net:false` and hostname-restricted arms using the **same literal filesystem grants**. Those negative arms must have no peer-observed request and no completed reply; successful setup APIs alone are not a pass. This catches retained-resource identity aliasing across network policies.
 
 `fs-canary` must report both read and write denied for every confined mode. The
 canary is a pre-existing parent-created file outside all project, temporary,
@@ -32,7 +32,7 @@ compatibility, or an adapter diagnostic failure is a failure, never success.
 | `token-attest` | Root attests its own AppContainer token, zero capabilities, and no Administrators membership. |
 | `fs-canary` | The ungranted parent-created file cannot be opened for either read or write. |
 
-The fixture never asks about a helper's token or rights. `FULL_NETWORK_TOKEN` reads the running fixture process's primary token and checks Administrators membership through its current effective token. The root and normal-descendant native paths must report `appcontainer=1:capabilities=0:admin=0`. The DNS gate uses a fresh, fixed-width nonce label per API and mode, checks that the returned A records actually include `1.1.1.1`, and logs raw zero-capability observations without turning them into a denial assertion.
+The fixture never asks about a helper's token or rights. `FULL_NETWORK_TOKEN` reads the running fixture process's primary token and checks Administrators membership through its current effective token. Full-network root and normal-descendant native paths must report `appcontainer=1:capabilities=1:internet-client=1:admin=0`: the requested Internet capability stays available to OS resolver calls. Native `net:false` and hostname-restricted controls must report `appcontainer=1:capabilities=0:internet-client=0:admin=0`. The DNS gate uses a fresh, fixed-width nonce label per API and mode, checks that the returned A records actually include `1.1.1.1`, and logs raw zero-capability observations without turning them into a denial assertion. Both APIs run before result assertions so an earlier failure cannot hide the later API's evidence.
 
 ## Deliberate boundary
 
