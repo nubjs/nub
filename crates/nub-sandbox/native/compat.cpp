@@ -157,6 +157,7 @@ extern "C" DWORD sandbox_file_broker_start(HANDLE process, HANDLE job, const wch
         identities.package_sid, authorize, context, broker);
 }
 extern "C" void sandbox_file_broker_stop(nub_sandbox::file_broker::Broker* broker) { delete broker; }
+extern "C" void sandbox_file_broker_cancel(nub_sandbox::file_broker::Broker* broker) { broker->cancel(); }
 extern "C" NTSTATUS sandbox_file_broker_validate(const nub_sandbox::file_broker::Request* request) {
     return nub_sandbox::file_broker::validate(*request);
 }

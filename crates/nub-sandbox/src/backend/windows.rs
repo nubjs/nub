@@ -3505,7 +3505,11 @@ pub(super) mod launch {
             // Keep synchronization handles before termination removes members
             // from the Job's active list. Termination itself is asynchronous.
             self.socket_broker.take();
-            self.file_broker.take();
+            if let Some(broker) = &self.file_broker {
+                // A worker can be blocked on file I/O involving a live child.
+                // Signal it now, but only join after terminating the Job.
+                broker.cancel();
+            }
             let snapshot = self.track_job_members();
             if let Some(helper) = &self.helper {
                 helper.terminate();

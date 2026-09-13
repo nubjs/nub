@@ -46,19 +46,16 @@ fn standard_user() {
         Some(5),
         "ordinary-user oracle"
     );
-    nub_sandbox::set_windows_egress_helper_command(vec![
-        std::env::current_exe().unwrap().into(),
-        "--ignored".into(),
-        "--exact".into(),
-        "windows_egress_helper_entry".into(),
-        "--nocapture".into(),
-    ]);
-}
-
-#[test]
-#[ignore = "co-package relay entry, launched only by the Windows backend"]
-fn windows_egress_helper_entry() {
-    nub_sandbox::serve_windows_egress_helper();
+    let relay = PathBuf::from(
+        std::env::var_os("NUB_WINDOWS_RELAY_FIXTURE")
+            .expect("focused gate must supply the standalone relay fixture"),
+    );
+    assert!(
+        relay.is_absolute() && relay.is_file(),
+        "invalid relay fixture: {relay:?}"
+    );
+    // Libtest's progress output would corrupt the helper's binary stdout transport.
+    nub_sandbox::set_windows_egress_helper_command(vec![relay.into(), "--relay".into()]);
 }
 
 fn fixture_path() -> PathBuf {

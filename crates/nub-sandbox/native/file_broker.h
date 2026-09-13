@@ -234,24 +234,17 @@ struct Broker {
     HANDLE job = nullptr, stop = nullptr;
     Authorize authorize = nullptr;
     const void* context = nullptr;
-    // Includes failed deliveries: an untrusted client can close/reuse its own
-    // handle immediately, so remote handle numbers must never be used to revoke.
-    volatile LONG transfers = 0;
     Worker workers[socket_broker::kWorkers];
-    bool reserve_transfer() {
-        LONG count = InterlockedCompareExchange(&transfers, 0, 0);
-        while (count < 4096) {
-            LONG previous = InterlockedCompareExchange(&transfers, count + 1, count);
-            if (previous == count) return true;
-            count = previous;
-        }
-        return false;
-    }
-    ~Broker() {
+    void cancel() {
         if (stop) SetEvent(stop);
         for (auto& worker : workers) {
+            if (worker.thread) CancelSynchronousIo(worker.thread);
+        }
+    }
+    ~Broker() {
+        cancel();
+        for (auto& worker : workers) {
             if (worker.thread) {
-                CancelSynchronousIo(worker.thread);
                 WaitForSingleObject(worker.thread, INFINITE);
                 CloseHandle(worker.thread);
             }
@@ -285,8 +278,7 @@ inline void serve(Worker& worker) {
     Handle file;
     IO_STATUS_BLOCK io = {};
     if (!response.status) {
-        if (WaitForSingleObject(broker.stop, 0) != WAIT_TIMEOUT ||
-            (request.operation < Basic && !broker.reserve_transfer())) response.status = kDenied;
+        if (WaitForSingleObject(broker.stop, 0) != WAIT_TIMEOUT) response.status = kDenied;
         else response.status = resolve(request, broker.authorize, broker.context, file, io, response);
     }
     if (!response.status && file.value) {
@@ -295,6 +287,10 @@ inline void serve(Worker& worker) {
             WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT ||
             !DuplicateHandle(GetCurrentProcess(), file.value, process.value, &target,
                              access_mask(request.access), FALSE, 0)) response.status = kDenied;
+        // The recipient owns this handle even if delivery fails. Never close a
+        // remote numeric handle: its process may already have reused the value.
+        // Each worker closes its source handle; command Job exit reclaims the
+        // recipient's handles without limiting legitimate cumulative opens.
         else response.handle = reinterpret_cast<uintptr_t>(target);
     }
     socket_broker::transfer(worker.pipe, worker.event, broker.stop, &response, sizeof(response), true);

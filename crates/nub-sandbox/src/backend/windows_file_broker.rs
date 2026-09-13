@@ -18,6 +18,20 @@ pub(super) struct FileBroker {
 // allocation is stable across moves. Drop joins workers before freeing it.
 unsafe impl Send for FileBroker {}
 
+impl FileBroker {
+    pub(super) fn cancel(&self) {
+        #[cfg(target_env = "msvc")]
+        {
+            unsafe extern "C" {
+                fn sandbox_file_broker_cancel(broker: *mut std::ffi::c_void);
+            }
+            // SAFETY: this only signals the owned workers. Drop joins them
+            // before freeing the native owner or its borrowed matcher.
+            unsafe { sandbox_file_broker_cancel(self.native.as_ptr()) };
+        }
+    }
+}
+
 impl Drop for FileBroker {
     fn drop(&mut self) {
         #[cfg(target_env = "msvc")]
@@ -372,6 +386,13 @@ mod tests {
         assert!(std::fs::remove_file(root.join("existing.json")).is_err());
         assert!(std::fs::rename(root.join("existing.json"), root.join("renamed.txt")).is_err());
         assert!(std::fs::hard_link(root.join("existing.json"), root.join("alias.txt")).is_err());
+        if allowed && std::env::var_os("NUB_FILE_BROKER_TEST_LOADER").is_none() {
+            // Closed recipient handles must not consume a cumulative quota.
+            for _ in 0..4097 {
+                drop(std::fs::File::open(root.join("existing.json")).unwrap());
+            }
+            println!("FILE_BROKER_REPEATED_OPENS=4097");
+        }
         if std::env::var_os("NUB_FILE_BROKER_TEST_LOADER").is_some() {
             let path: Vec<u16> = root
                 .join("loader-fixture.dll")
@@ -561,6 +582,18 @@ mod tests {
                 stdout.contains("FILE_BROKER_NATIVE_CHILD_OK"),
                 "{mode}: {stdout}"
             );
+            if dll.is_some() {
+                assert!(
+                    stdout.contains("FILE_BROKER_NATIVE_LOADER_OK"),
+                    "{mode}: {stdout}"
+                );
+            } else if mode == "broker" {
+                assert!(
+                    stdout.contains("FILE_BROKER_REPEATED_OPENS=4097"),
+                    "{stdout}"
+                );
+            }
+            println!("FILE_BROKER_NATIVE_MODE={mode}\n{stdout}");
             drop(child);
             drop(resource);
             drop(prepared);
