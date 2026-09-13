@@ -8,6 +8,8 @@ constexpr NTSTATUS kDenied = static_cast<NTSTATUS>(0xc0000022);
 constexpr NTSTATUS kInvalid = static_cast<NTSTATUS>(0xc000000d);
 constexpr ULONG kOpenReparse = 0x00200000;
 constexpr ULONG kCompleteIfOplocked = 0x00000100;
+// The user-mode SDK's winternl.h omits this documented NtCreateFile option.
+constexpr ULONG kDisallowExclusive = 0x00020000;
 enum Operation : DWORD { Open = 1, Create = 2, Basic = 3, Full = 4 };
 struct Request {
     DWORD version, size, operation, access, share, disposition, options, attributes, length;
@@ -27,7 +29,7 @@ constexpr DWORD kRead = FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES |
     FILE_EXECUTE | READ_CONTROL | SYNCHRONIZE;
 constexpr DWORD kWrite = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
 constexpr DWORD kOptions = FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
-    FILE_SEQUENTIAL_ONLY | FILE_RANDOM_ACCESS | FILE_WRITE_THROUGH | FILE_DISALLOW_EXCLUSIVE;
+    FILE_SEQUENTIAL_ONLY | FILE_RANDOM_ACCESS | FILE_WRITE_THROUGH | kDisallowExclusive;
 
 enum QualityField : DWORD {
     QualityLength = 1,
