@@ -88,7 +88,7 @@ These permissions follow the requesting process, including child processes and t
 - All eight permissions are read-only, including when selected through `$tooldirs:rw`.
 - Environment files, memory contents, file-descriptor directories and other processes' metadata remain excluded. Command-line access exposes the requesting process's arguments, not its owner's arguments.
 
-This option requires Linux 5.14 or newer with seccomp user notifications and atomic file-descriptor injection. Unsupported hosts refuse acquisition. macOS and Windows reject these Linux-specific permissions. Policies without these grants do not add read-open notifications; opt-in policies route read opens through the supervisor before ordinary paths continue under Landlock.
+This option requires Landlock ABI 3 or newer, seccomp user notifications and atomic file-descriptor injection. Linux 6.2 introduced the required Landlock ABI; the running kernel must also enable these facilities. Unsupported hosts refuse acquisition. macOS and Windows reject these Linux-specific permissions. Policies without these grants do not add read-open notifications; opt-in policies route read opens through the supervisor before ordinary paths continue under Landlock.
 
 The notification path has a measurable cost. In the [Linux release control](https://github.com/nubjs/nub/actions/runs/34522013136), 2,000 small-file opens took a median 62.2 ms with the bundle versus 13.9 ms on the preceding engine's directory-only bundle. An empty command took 2.58 ms versus 2.28 ms. Exact-path policies without metadata notifications remained near their preceding-engine timings. These are microbenchmarks, not package-install timings.
 
