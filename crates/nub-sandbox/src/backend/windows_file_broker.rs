@@ -1037,6 +1037,7 @@ mod tests {
             assert!(control.join("new-link.json").is_file());
             assert!(!control.join("source.json").exists());
             assert!(!control.join("remove.json").exists());
+            assert!(!control.join("force-image.json").exists());
             assert!(!control.join("created.dir").exists());
         }
         unsafe extern "C" {
@@ -1259,6 +1260,13 @@ mod tests {
             drop(resource);
             drop(prepared);
             sandbox.close();
+            if namespace {
+                assert_eq!(
+                    files.join("force-image.json").try_exists().unwrap(),
+                    mode == "raw",
+                    "the host observes deletion only after the broker arm"
+                );
+            }
         }
         assert_eq!(std::fs::read(files.join("near.txt")).unwrap(), b"canary");
         assert!(!files.join("future.txt").is_file());
@@ -1267,6 +1275,7 @@ mod tests {
             assert!(files.join("new-link.json").is_file());
             assert!(!files.join("source.json").exists());
             assert!(!files.join("remove.json").exists());
+            assert!(!files.join("force-image.json").exists());
             assert!(!files.join("created.dir").exists());
             assert!(!files.join("forbidden.txt").exists());
             assert!(!files.join("amplified.json").exists());
