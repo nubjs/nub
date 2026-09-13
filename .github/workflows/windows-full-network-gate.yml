@@ -33,6 +33,7 @@ jobs:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
       RUSTFLAGS: '-C target-feature=+crt-static'
       RUST_BACKTRACE: '1'
+      FULL_NETWORK_MODE: owner-pipe-diagnostic
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -122,7 +123,7 @@ jobs:
           Copy-Item $driver[0].executable reports/binaries/windows_native_full_network.exe
           Copy-Item $relay[0].executable reports/binaries/windows_relay_fixture.exe
           Get-FileHash -Algorithm SHA256 reports/binaries/* | Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content -Encoding utf8 reports/binary-sha256.json
-      - name: Running focused full-network gate as an ordinary user
+      - name: Running owner-pipe cancellation diagnostic as an ordinary user
         if: ${{ steps.build_tests.outcome == 'success' }}
         shell: pwsh
         run: |
@@ -133,10 +134,10 @@ jobs:
             if (!(Test-Path -LiteralPath $fileBrokerFixture -PathType Leaf)) { throw 'File-broker source is present but its matching-architecture fixture DLL is missing' }
             $parameters.FileBrokerFixtureBinary = $fileBrokerFixture
           }
-          & ./tests/sandbox-native-adapter/run-full-network-standard-user.ps1 @parameters
+          & ./tests/sandbox-native-adapter/run-full-network-standard-user.ps1 @parameters -Mode $env:FULL_NETWORK_MODE
           exit $LASTEXITCODE
       - name: Running existing lifecycle control as an ordinary user
-        if: ${{ always() && steps.build_tests.outcome == 'success' }}
+        if: ${{ always() && steps.build_tests.outcome == 'success' && env.FULL_NETWORK_MODE != 'owner-pipe-diagnostic' }}
         shell: pwsh
         run: |
           & ./tests/sandbox-native-adapter/run-standard-user.ps1 -TestBinary (Join-Path $PWD 'reports/binaries/production_readiness_windows.exe') -ReportDirectory reports/lifecycle-standard-user

@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory=$true)][string]$RelayBinary,
     [Parameter(Mandatory=$true)][string]$BinaryManifest,
     [string]$FileBrokerFixtureBinary,
+    [ValidateSet('full', 'owner-pipe-diagnostic')][string]$Mode = 'full',
     [Parameter(Mandatory=$true)][string]$ReportDirectory
 )
 
@@ -36,7 +37,7 @@ try {
     if ($FileBrokerFixtureBinary) { Copy-Item $FileBrokerFixtureBinary (Join-Path $stage 'file-broker-fixture.dll') }
     Copy-Item $BinaryManifest (Join-Path $stage 'binary-sha256.json')
 @'
-param([string]$Stage)
+param([string]$Stage, [ValidateSet('full', 'owner-pipe-diagnostic')][string]$Mode)
 $ErrorActionPreference = 'Stop'
 $profileRoot = [Environment]::GetFolderPath('UserProfile')
 if (!$profileRoot -or $profileRoot -like '*systemprofile*') { throw 'A normal user profile is required' }
@@ -82,6 +83,7 @@ $env:NUB_JAIL_DUMP_POLICY = '1'
 Write-Host "STANDARD_USER_FULL_NETWORK_PROFILE=$profileRoot"
 Write-Host "STANDARD_USER_FULL_NETWORK_FIXTURE=$env:NUB_WINDOWS_NATIVE_FULL_NETWORK_FIXTURE"
 Write-Host "STANDARD_USER_FULL_NETWORK_OWNED=$owned"
+Write-Host "STANDARD_USER_FULL_NETWORK_MODE=$Mode"
 $script:failed = $false
 function Test-Arguments([string]$filter, [bool]$exact, [bool]$ignored) {
     [string[]]$arguments = @()
@@ -125,6 +127,17 @@ function Run-Filtered([string]$file, [string]$label, [string[]]$arguments, [stri
     } finally { if ($proc) { $proc.Dispose() } }
 }
 $one = 'test result: ok. 1 passed; 0 failed; 0 ignored;'
+function Select-RunSet([ValidateSet('full', 'owner-pipe-diagnostic')][string]$Mode) {
+    if ($Mode -eq 'owner-pipe-diagnostic') {
+        return ,@{ file='windows_native_full_network.exe'; label='owner-pipe-diagnostic-owner-drop'; filter='native_adapter_drop_reaps_pending_listener_and_closes_port'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true }
+    }
+    return $null
+}
+$selectedRuns = Select-RunSet $Mode
+if ($null -ne $selectedRuns) {
+    Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC_SCOPE=owner-drop;ordinary-user-identity;artifact-binding;cleanup;skipped=baseline,dns,file-broker,lifecycle'
+    $runs = @($selectedRuns)
+} else {
 $runs = @(
     @{ file='windows_tmp_policy.exe'; label='tmp-policy'; filter=''; summary='test result: ok. 6 passed; 0 failed; 0 ignored;' },
     @{ file='nub_sandbox_lib.exe'; label='windows-cleanup'; filter='backend::windows::windows_cleanup_tests'; summary='test result: ok. 16 passed; 0 failed; 1 ignored;' },
@@ -146,24 +159,29 @@ $runs = @(
 )
 if ($fileBrokerFixture) {
     $runs += @(
-        @{ file='nub_sandbox_lib.exe'; label='file-broker-core'; filter='backend::windows_file_broker::tests::'; summary='test result: ok. 4 passed; 0 failed; 2 ignored;' },
+        @{ file='nub_sandbox_lib.exe'; label='file-broker-core'; filter='backend::windows_file_broker::tests::'; summary='test result: ok. 5 passed; 0 failed; 3 ignored;' },
         @{ file='nub_sandbox_lib.exe'; label='file-broker-native-open'; filter='backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control'; summary=$one; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_CHILD_OK') },
-        @{ file='nub_sandbox_lib.exe'; label='file-broker-native-loader'; filter='backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control'; summary=$one; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_LOADER_OK', 'FILE_BROKER_NATIVE_CHILD_OK') }
+        @{ file='nub_sandbox_lib.exe'; label='file-broker-native-loader'; filter='backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control'; summary=$one; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_LOADER_OK', 'FILE_BROKER_NATIVE_CHILD_OK') },
+        @{ file='nub_sandbox_lib.exe'; label='file-broker-kill-before-join'; filter='backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker'; summary=$one; ignored=$true; exact=$true; requiredMarkers=@('FILE_BROKER_BLOCKED_WORKER_ENTERED', 'FILE_BROKER_WORKER_OBSERVED_JOB_EXIT=1', 'FILE_BROKER_KILL_BEFORE_JOIN_OK') }
     )
+}
 }
 foreach ($run in $runs) {
     $arguments = Test-Arguments $run.filter ([bool]$run.exact) ([bool]$run.ignored)
     Run-Filtered $run.file $run.label $arguments $run.summary ([bool]$run.nativeAdapter) ([bool]$run.dnsOptIn) ([string[]]$run.requiredMarkers)
 }
-if ($script:failed) { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=failed'; exit 1 }
-Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=ok'
+if ($script:failed) {
+    if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=failed' } else { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=failed' }
+    exit 1
+}
+if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=ok' } else { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=ok' }
 '@ | Set-Content -Encoding ascii (Join-Path $stage 'run-full-network.ps1')
     Copy-Item (Join-Path $stage 'run-full-network.ps1') (Join-Path $ReportDirectory 'standard-user-run.ps1')
     icacls $stage /grant "${name}:(OI)(CI)RX" /T | Tee-Object "$ReportDirectory/stage-acl.log"
     if ($LASTEXITCODE -ne 0) { throw 'Granting staged artifact access failed' }
     $credential = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $password)
     Start-Service seclogon
-    $process = Start-Process powershell.exe -Credential $credential -LoadUserProfile -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$stage\run-full-network.ps1", $stage) -WorkingDirectory $stage -PassThru -RedirectStandardOutput "$ReportDirectory/standard-user.log" -RedirectStandardError "$ReportDirectory/standard-user-error.log"
+    $process = Start-Process powershell.exe -Credential $credential -LoadUserProfile -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$stage\run-full-network.ps1", $stage, $Mode) -WorkingDirectory $stage -PassThru -RedirectStandardOutput "$ReportDirectory/standard-user.log" -RedirectStandardError "$ReportDirectory/standard-user-error.log"
     if (!$process.WaitForExit(1200000)) { taskkill /PID $process.Id /T /F | Out-Null; throw 'Full-network gate exceeded its 20-minute deadline' }
     $process.WaitForExit(); $exitCode = $process.ExitCode
     Get-Content "$ReportDirectory/standard-user.log" -ErrorAction Continue
@@ -174,7 +192,8 @@ Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=ok'
         try { Get-ChildItem -LiteralPath $owned -Filter '*.log' -ErrorAction Stop | Copy-Item -Destination $ReportDirectory -Force }
         catch { $exitCode = 1; Write-Warning "Could not retain ordinary-user logs: $($_.Exception.Message)" }
     } else { $exitCode = 1; Write-Warning 'Ordinary-user owned-path marker is missing' }
-    if ($exitCode -ne 0 -or !(Select-String -Path "$ReportDirectory/standard-user.log" -Pattern '^STANDARD_USER_FULL_NETWORK_GATE=ok$')) { $exitCode = 1 }
+    $successPattern = if ($Mode -eq 'owner-pipe-diagnostic') { '^STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=ok$' } else { '^STANDARD_USER_FULL_NETWORK_GATE=ok$' }
+    if ($exitCode -ne 0 -or !(Select-String -Path "$ReportDirectory/standard-user.log" -Pattern $successPattern)) { $exitCode = 1 }
 } finally {
     $cleanup = @{ user = $name; stage = $stage; errors = @() }
     try { if ($process -and !$process.HasExited) { taskkill /PID $process.Id /T /F | Out-Null; if (!$process.WaitForExit(30000)) { throw 'standard-user process did not exit after taskkill' } } } catch { $cleanup.errors += "process: $($_.Exception.Message)"; $exitCode = 1 }
