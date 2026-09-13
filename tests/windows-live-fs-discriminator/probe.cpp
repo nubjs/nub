@@ -182,16 +182,20 @@ bool read_controls(unsigned long long* read_raw, unsigned long long* write_raw,
   char controls[512] = {};
   DWORD bytes = 0;
   if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), controls, sizeof(controls) - 1, &bytes, nullptr)) {
-    std::printf("CONTROL_READ=FAIL error=%lu\n", GetLastError());
-    std::fflush(stdout);
+    char report[128] = {};
+    const int length = sprintf_s(report, "CONTROL_READ=FAIL error=%lu\n", GetLastError());
+    DWORD written = 0;
+    if (length > 0) WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), report, static_cast<DWORD>(length), &written, nullptr);
     return false;
   }
   const int fields = sscanf_s(controls,
       "READ %llu\nWRITE %llu\nEXE_FILE %llu\nDLL_FILE %llu\nEXE_SECTION %llu\nDLL_SECTION %llu",
       read_raw, write_raw, exe_file_raw, dll_file_raw, exe_section_raw, dll_section_raw);
   if (fields != 6) {
-    std::printf("CONTROL_READ=FAIL fields=%d bytes=%lu text=%s\n", fields, bytes, controls);
-    std::fflush(stdout);
+    char report[640] = {};
+    const int length = sprintf_s(report, "CONTROL_READ=FAIL fields=%d bytes=%lu text=%s\n", fields, bytes, controls);
+    DWORD written = 0;
+    if (length > 0) WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), report, static_cast<DWORD>(length), &written, nullptr);
     return false;
   }
   return true;
@@ -280,7 +284,8 @@ int parent(const std::wstring& executable) {
   if (!duplicate_to_child(read_source.value, process.hProcess, GENERIC_READ, &child_read) || !duplicate_to_child(future_file.value, process.hProcess, GENERIC_WRITE, &child_write) || !duplicate_to_child(exe_file.value, process.hProcess, GENERIC_READ | GENERIC_EXECUTE, &child_exe_file) || !duplicate_to_child(dll_file.value, process.hProcess, GENERIC_READ | GENERIC_EXECUTE, &child_dll_file) || !duplicate_to_child(exe_section.value, process.hProcess, kSectionMapRead | kSectionMapExecute | kSectionQuery, &child_exe_section) || !duplicate_to_child(dll_section.value, process.hProcess, kSectionMapRead | kSectionMapExecute | kSectionQuery, &child_dll_section)) { std::printf("HANDLE_TRANSFER=FAIL error=%lu\n", GetLastError()); break; }
   CloseHandle(read_source.release()); CloseHandle(future_file.release()); CloseHandle(exe_file.release()); CloseHandle(dll_file.release()); CloseHandle(exe_section.release()); CloseHandle(dll_section.release());
   const std::string controls = "READ " + std::to_string(reinterpret_cast<uintptr_t>(child_read)) + "\nWRITE " + std::to_string(reinterpret_cast<uintptr_t>(child_write)) + "\nEXE_FILE " + std::to_string(reinterpret_cast<uintptr_t>(child_exe_file)) + "\nDLL_FILE " + std::to_string(reinterpret_cast<uintptr_t>(child_dll_file)) + "\nEXE_SECTION " + std::to_string(reinterpret_cast<uintptr_t>(child_exe_section)) + "\nDLL_SECTION " + std::to_string(reinterpret_cast<uintptr_t>(child_dll_section)) + "\n";
-  DWORD sent = 0; if (!WriteFile(stdin_write.value, controls.data(), static_cast<DWORD>(controls.size()), &sent, nullptr) || sent != controls.size()) break;
+  DWORD sent = 0; if (!WriteFile(stdin_write.value, controls.data(), static_cast<DWORD>(controls.size()), &sent, nullptr) || sent != controls.size()) { std::printf("CONTROL_WRITE=FAIL error=%lu bytes=%lu\n", GetLastError(), sent); break; }
+  std::printf("CONTROL_WRITE=OK bytes=%lu\n", sent);
   CloseHandle(stdin_write.release()); WaitForSingleObject(process.hProcess, 30000); DWORD child_exit = 1; GetExitCodeProcess(process.hProcess, &child_exit); char output[8192] = {}; DWORD output_count = 0; ReadFile(stdout_read.value, output, sizeof(output) - 1, &output_count, nullptr); std::printf("CHILD_OUTPUT=%s", output);
   char contents[64] = {}; Handle verify(CreateFileW(future.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)); DWORD read = 0;
   if (verify.value == INVALID_HANDLE_VALUE || !ReadFile(verify.value, contents, sizeof(contents) - 1, &read, nullptr) || child_exit != 0 || std::strcmp(contents, "brokered-write\n") != 0 || std::strstr(output, "CHILD_RESULT=PASS") == nullptr) { std::printf("RESULT=FAIL child_exit=%lu bytes=%lu content=%s\n", child_exit, read, contents); break; }
