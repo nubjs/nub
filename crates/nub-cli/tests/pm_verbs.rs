@@ -967,15 +967,16 @@ fn redirect_surfaces_agree_on_pm_identity() {
     let nub_dir = pm_tmpdir("suggest-nub");
     std::fs::write(nub_dir.join("package.json"), r#"{"name":"fresh"}"#).unwrap();
 
-    // Surface 1 — the `migrate` PM-verb redirect. nub has no `migrate` verb;
-    // it spells the lockfile migration `import`, so the nub-identity redirect
-    // must name a *real* command (`nub import`), never a phantom `nub migrate`.
+    // Surface 1 — the `migrate` PM-verb redirect. There is no top-level `nub
+    // migrate`: nub keeps the one-shot lockfile migration in its package-
+    // manager namespace, so the nub-identity redirect must name the *real*
+    // `nub pm migrate`, never a phantom top-level verb and never a blind npm.
     let migrate = run_nub(&nub_dir, &["migrate", "yarn.lock"]);
     assert_ne!(migrate.code, 0, "migrate is not a nub command");
     migrate.assert_brand_clean();
     assert!(
-        migrate.stderr.contains("nub import yarn.lock"),
-        "migrate redirect must suggest the real `nub import`, not npm: {}",
+        migrate.stderr.contains("nub pm migrate yarn.lock"),
+        "migrate redirect must suggest the real `nub pm migrate`, not npm: {}",
         migrate.stderr
     );
     assert!(
