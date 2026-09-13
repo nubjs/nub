@@ -173,9 +173,6 @@ pub(crate) enum LandlockAccess {
     ListDir,
     /// Read, list, and EXECUTE. See [`LandlockAccess::rights`] for why execute is here.
     ReadExecute,
-    /// Read exactly one non-directory file. The Linux TLS broker uses this for its inherited,
-    /// sealed CA bundle: a trust file needs neither directory traversal nor `execve`.
-    ReadFile,
     /// Every right the ABI handles.
     ReadWrite,
     /// A character device: read and write the node, never execute it.
@@ -230,7 +227,6 @@ impl LandlockAccess {
             LandlockAccess::ReadExecute => {
                 ACCESS_READ_FILE | ACCESS_READ_DIR | ACCESS_EXECUTE | ioctl_dev(abi)
             }
-            LandlockAccess::ReadFile => ACCESS_READ_FILE,
             LandlockAccess::ReadWrite => {
                 ACCESS_READ_FILE
                     | ACCESS_READ_DIR
@@ -598,7 +594,6 @@ pub(crate) fn build(
     policy: &SandboxPolicy,
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
-    ca_bundle_rule_fd: Option<RawFd>,
     retained: &RetainedPolicyGrants,
 ) -> Result<LandlockRuleset, String> {
     let abi = probe_abi().ok_or_else(|| "landlock is not available on this kernel".to_string())?;
@@ -631,19 +626,6 @@ pub(crate) fn build(
     let mut rules_added = 0usize;
     for grant in &grants {
         if add_rule(ruleset.as_raw_fd(), grant, abi)? {
-            rules_added += 1;
-        }
-    }
-    if let Some(ca_bundle_rule_fd) = ca_bundle_rule_fd {
-        // The trusted path is `/proc/self/fd/<n>` after exec, but Landlock attaches rules to the
-        // target object, not its spelling. The parent passes an `O_PATH` reference to the sealed
-        // memfd: granting its temporary pathname would make the child depend on a same-user-
-        // writable directory and would permit the bundle's replacement before launch.
-        let grant = LandlockGrant {
-            path: PathBuf::from("<inherited sealed CA bundle>"),
-            access: LandlockAccess::ReadFile,
-        };
-        if add_rule_fd(ruleset.as_raw_fd(), &grant, ca_bundle_rule_fd, abi)? {
             rules_added += 1;
         }
     }
@@ -993,7 +975,7 @@ pub(crate) fn install_landlock_confinement<C: std::os::unix::process::CommandExt
     entry_program: Option<&Path>,
     retained: &RetainedPolicyGrants,
 ) -> Result<LandlockRuleset, String> {
-    let ruleset = build(policy, tmp_dir, entry_program, None, retained)?;
+    let ruleset = build(policy, tmp_dir, entry_program, retained)?;
     let fd = ruleset.as_raw_fd();
     let terminal_filter =
         super::linux_lifetime::program(false).map_err(|error| error.to_string())?;
@@ -1076,7 +1058,6 @@ mod tests {
             for access in [
                 LandlockAccess::ListDir,
                 LandlockAccess::ReadExecute,
-                LandlockAccess::ReadFile,
                 LandlockAccess::ReadWrite,
                 LandlockAccess::Device,
             ] {

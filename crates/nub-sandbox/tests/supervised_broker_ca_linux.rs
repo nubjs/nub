@@ -8,6 +8,7 @@
 use nub_sandbox::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -38,6 +39,10 @@ fn supervised_broker_ca_child() {
     }
 
     let root = PathBuf::from(std::env::var_os(ROOT).expect("fixture root"));
+    assert!(
+        std::env::var_os(SECRET).is_none(),
+        "broker secret must not enter the child's constructed environment"
+    );
     let bundle = PathBuf::from(std::env::var_os("SSL_CERT_FILE").expect("broker CA path"));
     for key in CA_ENV_KEYS {
         assert_eq!(
@@ -53,12 +58,18 @@ fn supervised_broker_ca_child() {
         !contents.contains("PRIVATE KEY"),
         "the child must receive public certificates, never the MITM private key"
     );
+    let mut writable = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bundle)
+        .expect("the public descriptor may be reopened but remains sealed");
     assert!(
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&bundle)
-            .is_err(),
-        "the inherited CA must be read-only"
+        writable.write_all(b"x").is_err(),
+        "F_SEAL_WRITE must reject an actual CA write"
+    );
+    assert!(
+        writable.set_len(0).is_err(),
+        "F_SEAL_SHRINK must reject an actual CA truncation"
     );
     assert!(
         std::fs::read_dir(bundle.parent().expect("CA descriptor parent")).is_err(),

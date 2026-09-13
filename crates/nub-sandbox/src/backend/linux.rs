@@ -16,7 +16,7 @@ use seccompiler::{
 };
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -368,15 +368,12 @@ fn build_supervised_plan(
         }
     }
     let ca_bundle_fd = ca_bundle.as_ref().map(AsRawFd::as_raw_fd);
-    // `LANDLOCK_RULE_PATH_BENEATH` requires an `O_PATH` source descriptor. The sealed memfd is
-    // deliberately a readable file descriptor for the child, so resolve the parent's
-    // `/proc/self/fd/<n>` alias to an `O_PATH` handle for the Landlock rule instead.
-    let ca_bundle_rule_fd = ca_bundle_fd.map(open_ca_bundle_rule_fd).transpose()?;
     if let Some(fd) = ca_bundle_fd {
         // This is a sealed memfd, not the proxy's mutable named tempfile. The supervisor makes
-        // only this descriptor survive exec; `linux_landlock::build` attaches its read rule to
-        // the same object, so the child gets a stable public bundle without authority over its
-        // parent directory or the proxy's private CA key.
+        // only this descriptor survive exec, so the child gets a stable public bundle without
+        // authority over its parent directory or the proxy's private CA key. A memfd lives on
+        // an internal mount, which Landlock rejects as a path-beneath rule target; Landlock
+        // explicitly permits such pseudo-filesystems through `/proc/self/fd/<n>` instead.
         let bundle = format!("/proc/self/fd/{fd}");
         for key in super::CA_ENV_KEYS {
             envp.push(to_cstring(
@@ -410,17 +407,11 @@ fn build_supervised_plan(
     // subtree (`.git/hooks`, `.git/config`, the policy file) is carried by the write broker below.
     let ruleset = if fs_confines(&policy.fs) {
         Some(
-            super::linux_landlock::build(
-                policy,
-                tmp_dir,
-                Some(&program_abs),
-                ca_bundle_rule_fd.as_ref().map(AsRawFd::as_raw_fd),
-                &retained.0,
-            )
-            .map_err(|reason| Degradation {
-                lost: vec!["fs".to_string()],
-                reason: Some(reason),
-            })?,
+            super::linux_landlock::build(policy, tmp_dir, Some(&program_abs), &retained.0)
+                .map_err(|reason| Degradation {
+                    lost: vec!["fs".to_string()],
+                    reason: Some(reason),
+                })?,
         )
     } else {
         None
@@ -475,26 +466,6 @@ fn build_supervised_plan(
             reason: Some(reason),
         })?,
     })
-}
-
-/// Open an `O_PATH` reference to the inherited sealed CA memfd for Landlock rule creation.
-///
-/// The child receives the original readable descriptor; this parent-only reference is consumed
-/// synchronously by `landlock_add_rule` and cannot escape through the descriptor sweep.
-fn open_ca_bundle_rule_fd(fd: RawFd) -> Result<OwnedFd, Degradation> {
-    let path = CString::new(format!("/proc/self/fd/{fd}")).expect("numeric fd path has no NUL");
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-    if fd < 0 {
-        return Err(Degradation {
-            lost: vec!["fs".to_string()],
-            reason: Some(format!(
-                "opening sealed TLS broker CA for Landlock: {}",
-                std::io::Error::last_os_error()
-            )),
-        });
-    }
-    // SAFETY: `open` returned a fresh owned descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn has_explicit_fs_deny(policy: &SandboxPolicy) -> bool {
