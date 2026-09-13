@@ -1,10 +1,18 @@
 param(
     [Parameter(Mandatory=$true)][string]$ProbeBinary,
+    [Parameter(Mandatory=$true)][string]$ImageExe,
+    [Parameter(Mandatory=$true)][string]$ImageDll,
+    [Parameter(Mandatory=$true)][string]$ExistingSource,
+    [Parameter(Mandatory=$true)][string]$NearestNonmatch,
     [Parameter(Mandatory=$true)][string]$ReportDirectory
 )
 
 $ErrorActionPreference = 'Stop'
 $ProbeBinary = (Resolve-Path $ProbeBinary).Path
+$ImageExe = (Resolve-Path $ImageExe).Path
+$ImageDll = (Resolve-Path $ImageDll).Path
+$ExistingSource = (Resolve-Path $ExistingSource).Path
+$NearestNonmatch = (Resolve-Path $NearestNonmatch).Path
 New-Item -ItemType Directory -Force $ReportDirectory | Out-Null
 $ReportDirectory = (Resolve-Path $ReportDirectory).Path
 $name = 'lfs' + [guid]::NewGuid().ToString('N').Substring(0, 10)
@@ -18,6 +26,10 @@ try {
     Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
     New-Item -ItemType Directory -Force $stage | Out-Null
     Copy-Item $ProbeBinary (Join-Path $stage 'probe.exe')
+    Copy-Item $ImageExe (Join-Path $stage 'image-fixture.exe')
+    Copy-Item $ImageDll (Join-Path $stage 'image-fixture.dll')
+    Copy-Item $ExistingSource (Join-Path $stage 'existing-readable.txt')
+    Copy-Item $NearestNonmatch (Join-Path $stage 'image-nonmatch.txt')
     @'
 param([string]$Stage)
 $ErrorActionPreference = 'Stop'
@@ -29,6 +41,10 @@ New-Item -ItemType Directory -Force $env:TEMP | Out-Null
 $owned = Join-Path $profile 'nub-live-fs-discriminator'
 New-Item -ItemType Directory -Force $owned | Out-Null
 Copy-Item (Join-Path $Stage 'probe.exe') (Join-Path $owned 'probe.exe')
+Copy-Item (Join-Path $Stage 'image-fixture.exe') (Join-Path $owned 'image-fixture.exe')
+Copy-Item (Join-Path $Stage 'image-fixture.dll') (Join-Path $owned 'image-fixture.dll')
+Copy-Item (Join-Path $Stage 'existing-readable.txt') (Join-Path $owned 'existing-readable.txt')
+Copy-Item (Join-Path $Stage 'image-nonmatch.txt') (Join-Path $owned 'image-nonmatch.txt')
 Set-Location $owned
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -36,6 +52,10 @@ $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 whoami /all
 Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture | ConvertTo-Json -Compress
 certutil.exe -hashfile .\probe.exe SHA256
+certutil.exe -hashfile .\image-fixture.exe SHA256
+certutil.exe -hashfile .\image-fixture.dll SHA256
+certutil.exe -hashfile .\existing-readable.txt SHA256
+certutil.exe -hashfile .\image-nonmatch.txt SHA256
 & .\probe.exe
 $code = $LASTEXITCODE
 "STANDARD_USER_PROBE_EXIT=$code"

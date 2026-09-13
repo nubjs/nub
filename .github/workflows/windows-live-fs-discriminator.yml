@@ -1,8 +1,8 @@
-name: Windows live filesystem discriminator
+name: Windows live image capability discriminator
 
 on:
   push:
-    branches: [probe/windows-live-fs-discriminator]
+    branches: [windows-live-image-discriminator]
     paths:
       - tests/windows-live-fs-discriminator/**
       - .github/workflows/windows-live-fs-discriminator.yml
@@ -24,21 +24,29 @@ jobs:
           New-Item -ItemType Directory -Force reports, out | Out-Null
           git rev-parse HEAD | Set-Content reports/source-head.txt
           Get-FileHash tests/windows-live-fs-discriminator/probe.cpp -Algorithm SHA256 | ConvertTo-Json | Set-Content reports/source-hash.json
+          Get-FileHash tests/windows-live-fs-discriminator/image_fixture_exe.cpp -Algorithm SHA256 | ConvertTo-Json | Set-Content reports/image-exe-source-hash.json
+          Get-FileHash tests/windows-live-fs-discriminator/image_fixture_dll.cpp -Algorithm SHA256 | ConvertTo-Json | Set-Content reports/image-dll-source-hash.json
+          Get-FileHash tests/windows-live-fs-discriminator/existing-readable.txt,tests/windows-live-fs-discriminator/image-nonmatch.txt -Algorithm SHA256 | ConvertTo-Json | Set-Content reports/input-hashes.json
           Get-FileHash tests/windows-live-fs-discriminator/run-standard-user.ps1 -Algorithm SHA256 | ConvertTo-Json | Set-Content reports/instrument-hash.json
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -property installationPath
           @"
           @echo off
           call "$vs\VC\Auxiliary\Build\vcvarsall.bat" amd64
           if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /W4 /WX /MT /EHsc tests\windows-live-fs-discriminator\image_fixture_exe.cpp /Fe:out\image-fixture.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /W4 /WX /MT /LD /EHsc tests\windows-live-fs-discriminator\image_fixture_dll.cpp /Fe:out\image-fixture.dll
+          if errorlevel 1 exit /b 1
           cl /nologo /std:c++17 /W4 /WX /MT /EHsc tests\windows-live-fs-discriminator\probe.cpp /Fe:out\live-fs-probe.exe /link advapi32.lib userenv.lib ole32.lib
           "@ | Set-Content out\build.cmd
           cmd /c out\build.cmd *> reports\build.log
           if ($LASTEXITCODE -ne 0) { Get-Content reports\build.log; exit $LASTEXITCODE }
           Get-FileHash out\live-fs-probe.exe -Algorithm SHA256 | ConvertTo-Json | Set-Content reports\executable-hash.json
+          Get-FileHash out\image-fixture.exe,out\image-fixture.dll -Algorithm SHA256 | ConvertTo-Json | Set-Content reports\image-hashes.json
       - name: Running the ordinary-user AppContainer control
         shell: pwsh
         run: |
-          & tests/windows-live-fs-discriminator/run-standard-user.ps1 -ProbeBinary out/live-fs-probe.exe -ReportDirectory reports
+          & tests/windows-live-fs-discriminator/run-standard-user.ps1 -ProbeBinary out/live-fs-probe.exe -ImageExe out/image-fixture.exe -ImageDll out/image-fixture.dll -ExistingSource tests/windows-live-fs-discriminator/existing-readable.txt -NearestNonmatch tests/windows-live-fs-discriminator/image-nonmatch.txt -ReportDirectory reports
           exit $LASTEXITCODE
       - name: Uploading discriminator evidence
         if: ${{ always() }}
