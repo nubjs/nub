@@ -37,6 +37,7 @@ struct Payload {
     BOOL socket_diagnostics;
     uint64_t socket_name_fingerprint;
     wchar_t file_broker[128];
+    wchar_t file_wait_name[256];
     DWORD file_broker_pid;
 };
 static Payload state = {};
@@ -111,10 +112,12 @@ static BOOL inject(HANDLE process, const Payload& source) {
 extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory,
                                        const wchar_t* socket_broker, const wchar_t* file_broker) {
     Payload state = {};
+    DWORD session = 0;
+    if ((socket_broker || file_broker) && !capture_identities(process, state, &session)) {
+        return GetLastError();
+    }
     if (socket_broker) {
         if (wcscpy_s(state.socket_broker, socket_broker)) return ERROR_INVALID_NAME;
-        DWORD session = 0;
-        if (!capture_identities(process, state, &session)) return GetLastError();
         DWORD error = nub_sandbox::socket_broker::server_name(
             socket_broker, session, state.package_sid, state.socket_wait_name);
         if (error) return error;
@@ -124,6 +127,9 @@ extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory,
     }
     if (file_broker) {
         if (wcscpy_s(state.file_broker, file_broker)) return ERROR_INVALID_NAME;
+        DWORD error = nub_sandbox::socket_broker::server_name(
+            file_broker, session, state.package_sid, state.file_wait_name);
+        if (error) return error;
         state.file_broker_pid = GetCurrentProcessId();
     }
     state.null_device = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,

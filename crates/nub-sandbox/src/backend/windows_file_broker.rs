@@ -694,6 +694,7 @@ mod tests {
             let result = unsafe {
                 sandbox_file_broker_test_four_calls(path.as_ptr(), 1, statuses.as_mut_ptr())
             };
+            println!("FILE_BROKER_UNCONFINED_NTSTATUS={statuses:x?}");
             assert_eq!(
                 result, 0,
                 "unconfined four-call failure bits: {result:#x}; statuses [generic-open, generic-create, synchronized-open, synchronized-create, basic, full]: {statuses:x?}"
