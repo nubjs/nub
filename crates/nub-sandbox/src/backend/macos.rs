@@ -229,11 +229,10 @@ pub fn apply(
     // CA trust for the child (the leaf-verifying bundle). The read grant lives in the
     // SBPL profile (see build_profile); this is the env half so tools find the bundle.
     if let Some(bundle) = ca_bundle {
-        super::set_ca_env(&mut wrapped, bundle);
+        super::set_ca_env(&mut wrapped, &canonicalize_including_nonexistent(bundle));
     }
-    // Private tmp: point the child's TMPDIR/TMP/TEMP at the session-managed dir (the SBPL
-    // profile grants it rw + denies the shared system tmp). Set after env_clear so it
-    // survives the scrub. `Deny` sets nothing — the child inherits no usable tmp.
+    // Private tmp adds the session-managed directory; explicit positive grants still
+    // apply elsewhere. Set after env_clear so the redirection survives the scrub.
     if let Some(dir) = tmp_dir {
         super::set_tmp_env(&mut wrapped, dir);
     }
@@ -515,13 +514,13 @@ fn build_profile_with_stdio(
     emit_env_read_closure(&mut out);
     emit_net(policy, proxy_port, &mut out);
     emit_fs(policy, spec, &mut out);
-    // Tmp-mode enforcement — emitted AFTER emit_fs so the shared-tmp deny and the
-    // private-dir grant win last-match-wins over any generous read/write. (No-op for
-    // `Shared`.)
+    // Temporary storage composes with the user's other positive grants.
     emit_tmp(policy, tmp_dir, &mut out);
     // The child must READ the CA bundle to trust the minted leaves — grant it explicitly,
     // AFTER emit_fs so it survives even a deny-all fs floor (nub infra, not user config).
     if let Some(bundle) = ca_bundle {
+        // Seatbelt matches canonical paths, including /var -> /private/var in TMPDIR.
+        let bundle = canonicalize_including_nonexistent(bundle);
         out.push_str(&format!(
             "(allow file-read* (literal \"{}\"))\n",
             sbpl_escape(&bundle.to_string_lossy())
@@ -3269,6 +3268,51 @@ mod tests {
                 format!("{}\n", want.unwrap_or(line)),
                 "annotate_denies({line:?})"
             );
+        }
+    }
+
+    #[test]
+    fn ca_bundle_grant_resolves_alias_without_granting_siblings() {
+        let dir = tempfile::tempdir_in("/private/tmp").unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        std::fs::write(real.join("public.pem"), "public-ca").unwrap();
+        std::fs::write(real.join("sibling"), "withheld").unwrap();
+        let bundle = alias.join("public.pem");
+        let policy = fs_policy(Effect::Deny, vec![]);
+        for (target, allowed) in [
+            (real.join("public.pem"), true),
+            (real.join("sibling"), false),
+        ] {
+            let mut prepared = apply(
+                &policy,
+                CommandSpec::new("/bin/cat").args([target.as_os_str()]),
+                None,
+                None,
+                Some(&bundle),
+                None,
+            )
+            .unwrap();
+            let child_bundle = prepared
+                .command
+                .get_envs()
+                .find(|(key, _)| *key == "SSL_CERT_FILE")
+                .unwrap()
+                .1
+                .unwrap();
+            assert_eq!(Path::new(child_bundle), real.join("public.pem"));
+            let output = prepared.command.output().unwrap();
+            assert_eq!(
+                output.status.success(),
+                allowed,
+                "{target:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if allowed {
+                assert_eq!(output.stdout, b"public-ca");
+            }
         }
     }
 
