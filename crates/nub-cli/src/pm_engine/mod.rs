@@ -2825,6 +2825,26 @@ fn strip_yarnrc_value(rest: &str) -> &str {
     rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
+/// The defaults a config READ reports, for the project containing `cwd`.
+///
+/// The same list the install resolves against, anchored the same way
+/// [`project_supplied_settings`] anchors it. `config get` answers what an
+/// install would USE, so a setting nub defaults reports that default rather
+/// than `undefined` — `minimumReleaseAge` is `1440` in a project that has
+/// never configured it, because that is the quarantine the next install
+/// applies. A setting absent from this list has no nub default and stays
+/// unset, which is what keeps a layout key out of the answer.
+pub(crate) fn nub_config_defaults(cwd: &Path) -> Vec<(String, String)> {
+    let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient).unwrap_or(None);
+    let truly_fresh = is_truly_fresh_project(cwd, detected.as_ref());
+    nub_setting_defaults(
+        detected.as_ref(),
+        truly_fresh,
+        cwd,
+        VirtualStoreLocality::Default,
+    )
+}
+
 /// - Layout policy: EVERY project defaults to the isolated layout
 ///   (`nodeLinker=isolated`) — strict (no phantom deps) and GVS-fast; a project
 ///   that relies on phantom deps opts back into the flat tree with
@@ -2848,26 +2868,6 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 ///   keeping a pnpm-incumbent / mixed project drop-in interoperable. A
 ///   user-set `defaultLockfileFormat` (env/.npmrc/yaml) still wins on either
 ///   path — this is only the embedder-tier default.
-/// The defaults a config READ reports, for the project containing `cwd`.
-///
-/// The same list the install resolves against, anchored the same way
-/// [`project_supplied_settings`] anchors it. `config get` answers what an
-/// install would USE, so a setting nub defaults reports that default rather
-/// than `undefined` — `minimumReleaseAge` is `1440` in a project that has
-/// never configured it, because that is the quarantine the next install
-/// applies. A setting absent from this list has no nub default and stays
-/// unset, which is what keeps a layout key out of the answer.
-pub(crate) fn nub_config_defaults(cwd: &Path) -> Vec<(String, String)> {
-    let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient).unwrap_or(None);
-    let truly_fresh = is_truly_fresh_project(cwd, detected.as_ref());
-    nub_setting_defaults(
-        detected.as_ref(),
-        truly_fresh,
-        cwd,
-        VirtualStoreLocality::Default,
-    )
-}
-
 fn nub_setting_defaults(
     detected: Option<&DetectedLockfile>,
     truly_fresh: bool,
