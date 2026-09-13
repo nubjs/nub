@@ -89,6 +89,9 @@ mod linux;
 #[cfg(all(target_os = "linux", test))]
 mod linux_projection;
 
+#[cfg(all(target_os = "linux", test))]
+mod linux_projection_mount_tests;
+
 #[cfg(target_os = "linux")]
 mod linux_landlock;
 
