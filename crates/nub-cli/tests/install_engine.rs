@@ -1317,15 +1317,15 @@ fn jailed_build_that_never_needs_node_gyp_survives_a_failed_bootstrap() {
     let out = cmd.output().expect("failed to spawn nub");
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    // What this test actually owns: the bootstrap failure was DEMOTED to a
-    // warning instead of propagating. The presenter rebrands `WARN_AUBE_*` to
-    // `WARN_NUB_*` on the way out, so match either spelling — grepping only the
-    // raw aube one silently finds nothing.
-    assert!(
-        stderr.contains("WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED")
-            || stderr.contains("WARN_NUB_NODE_GYP_BOOTSTRAP_FAILED"),
-        "the failed up-front resolve must warn rather than abort the install: {stderr}"
-    );
+    // What this test owns is that a node-gyp the install never needed cannot
+    // fail it. The exit code below is what proves it: one package manager
+    // resolves node-gyp up front and demotes the failure to a warning, the
+    // other bundles its own and looks for it beside the running binary, where
+    // under nub there is nothing — so neither reaches the registry this
+    // fixture has made unreachable, and a build that needs no node-gyp runs
+    // either way. Asserting on the warning STRING pinned one of those two
+    // mechanisms rather than the behaviour, and the string is absent where
+    // there is no up-front resolve to fail.
 
     // Windows aborts node at startup under the build jail (`ncrypto::CSPRNG`
     // assertion), so the build script cannot run there at all and the install
