@@ -40,6 +40,15 @@ constexpr char kReply[] = "nub-full-network-reply";
 constexpr DWORD kTimeoutMs = 2000;
 constexpr int kConcurrentClients = 12;
 
+std::string environment(const char* key) {
+  char* value = nullptr;
+  size_t length = 0;
+  if (_dupenv_s(&value, &length, key) != 0) std::abort();
+  std::string result(value == nullptr ? "" : value);
+  std::free(value);
+  return result;
+}
+
 struct Socket final {
   SOCKET value = INVALID_SOCKET;
   Socket() = default;
@@ -433,8 +442,9 @@ bool descendant_round_trip(const char* executable, const char* endpoint) {
 }
 
 bool filesystem_canary() {
-  const char* path = std::getenv("NUB_FULL_NETWORK_FS_CANARY");
-  if (path == nullptr) return false;
+  const std::string path_value = environment("NUB_FULL_NETWORK_FS_CANARY");
+  if (path_value.empty()) return false;
+  const char* path = path_value.c_str();
   HANDLE readable = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL, nullptr);
   const DWORD read_error = readable == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
@@ -449,14 +459,15 @@ bool filesystem_canary() {
 }
 
 bool dns_lookup(bool query_ex) {
-  const char* name = std::getenv("NUB_FULL_NETWORK_DNS_NAME");
-  if (name == nullptr || *name == '\0') return false;
+  const std::string name_value = environment("NUB_FULL_NETWORK_DNS_NAME");
+  if (name_value.empty()) return false;
+  const char* name = name_value.c_str();
   int length = MultiByteToWideChar(CP_UTF8, 0, name, -1, nullptr, 0);
   if (length <= 0) return false;
   std::vector<wchar_t> wide(static_cast<size_t>(length));
   MultiByteToWideChar(CP_UTF8, 0, name, -1, wide.data(), length);
-  const char* expected = std::getenv("NUB_FULL_NETWORK_DNS_EXPECTED");
-  if (expected == nullptr) expected = "1.1.1.1";
+  const std::string expected_value = environment("NUB_FULL_NETWORK_DNS_EXPECTED");
+  const char* expected = expected_value.empty() ? "1.1.1.1" : expected_value.c_str();
   if (!query_ex) {
     ADDRINFOW hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
     ADDRINFOW* records = nullptr; const int status = GetAddrInfoW(wide.data(), nullptr, &hints, &records);
@@ -483,7 +494,7 @@ bool dns_lookup(bool query_ex) {
 
 bool endpoint_case(const std::string& name, int type, bool (*operation)(SOCKET, const Endpoint&)) {
   Endpoint endpoint{};
-  if (!parse_endpoint(std::getenv("NUB_FULL_NETWORK_ENDPOINT"), type, &endpoint)) return false;
+  if (!parse_endpoint(environment("NUB_FULL_NETWORK_ENDPOINT").c_str(), type, &endpoint)) return false;
   Socket socket = ordinary_socket(endpoint.family, type, type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP);
   const bool peer = socket && operation(socket.value, endpoint);
   marker("FULL_NETWORK_PEER", peer ? "1" : "0");
@@ -504,7 +515,7 @@ int run_case(const std::string& name, const char* executable) {
   if (name == "owner-hold4") return listener_hold(AF_INET) ? 0 : 1;
   if (name == "connectex4") {
     Endpoint endpoint{};
-    const bool peer = parse_endpoint(std::getenv("NUB_FULL_NETWORK_ENDPOINT"), SOCK_STREAM, &endpoint) && connect_ex_round_trip(endpoint);
+    const bool peer = parse_endpoint(environment("NUB_FULL_NETWORK_ENDPOINT").c_str(), SOCK_STREAM, &endpoint) && connect_ex_round_trip(endpoint);
     marker("FULL_NETWORK_PEER", peer ? "1" : "0");
     return peer ? 0 : 1;
   }
@@ -515,9 +526,9 @@ int run_case(const std::string& name, const char* executable) {
   }
   if (name == "concurrent4") {
     Endpoint endpoint{};
-    return parse_endpoint(std::getenv("NUB_FULL_NETWORK_ENDPOINT"), SOCK_STREAM, &endpoint) && concurrent_round_trips(endpoint) ? 0 : 1;
+    return parse_endpoint(environment("NUB_FULL_NETWORK_ENDPOINT").c_str(), SOCK_STREAM, &endpoint) && concurrent_round_trips(endpoint) ? 0 : 1;
   }
-  if (name == "descendant4") return descendant_round_trip(executable, std::getenv("NUB_FULL_NETWORK_ENDPOINT")) ? 0 : 1;
+  if (name == "descendant4") return descendant_round_trip(executable, environment("NUB_FULL_NETWORK_ENDPOINT").c_str()) ? 0 : 1;
   if (name == "--descendant-client") {
     const bool token = self_token_marker(false);
     return token && endpoint_case("descendant-client", SOCK_STREAM, stream_round_trip) ? 0 : 1;
