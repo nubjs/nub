@@ -34,8 +34,10 @@ struct Sources<'a> {
     install: &'a InstallConfig,
     /// `npm_config_*` and `NUB_CACHE_DIR`, in environment order.
     env: Vec<(String, String)>,
-    /// The workspace root's `package.json`.
+    /// The workspace root's `package.json`, and the directory it was read
+    /// from — a path a setting names is relative to that directory.
     manifest: Map<String, Value>,
+    root: PathBuf,
     /// nub's cache directory, when one can be determined.
     cache_root: Option<PathBuf>,
     ci: bool,
@@ -59,6 +61,7 @@ pub(crate) fn resolve(start_dir: &Path, install: &InstallConfig) -> Result<Works
         install,
         env,
         manifest: read_manifest(&root),
+        root,
         cache_root: nub_core::node::discovery::cache_dir(),
         ci: std::env::var_os("CI").is_some(),
     };
@@ -108,7 +111,7 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
         merged.insert("cacheDir".to_owned(), Value::String(dir.clone()));
     }
 
-    for (key, value) in manifest_settings(&sources.manifest) {
+    for (key, value) in manifest_settings(&sources.manifest, &sources.root) {
         if passthrough.is_some_and(|settings| settings.contains_key(&key)) {
             bail!(
                 "install.settings.{key} sets the same thing as {} in package.json; keep one of the two",
@@ -201,7 +204,7 @@ fn curated(install: &InstallConfig) -> Result<Map<String, Value>> {
 }
 
 /// The neutral `package.json` fields that are settings in pnpm's vocabulary.
-fn manifest_settings(manifest: &Map<String, Value>) -> Map<String, Value> {
+fn manifest_settings(manifest: &Map<String, Value>, root: &Path) -> Map<String, Value> {
     let mut out = Map::new();
     let mut overrides = Map::new();
     // Both spellings are honored, and `overrides` is read last so it wins.
@@ -236,8 +239,89 @@ fn manifest_settings(manifest: &Map<String, Value>) -> Map<String, Value> {
     // What the project has decided may run scripts. nub spells it
     // `allowScripts`, which is the name `nub approve-builds` writes back;
     // the engine reads the same decisions under its own name.
-    if let Some(value @ Value::Object(_)) = manifest.get(ALLOW_SCRIPTS_FIELD) {
-        out.insert("allowBuilds".to_owned(), value.clone());
+    if let Some(Value::Object(decisions)) = manifest.get(ALLOW_SCRIPTS_FIELD) {
+        let keyed = decisions
+            .iter()
+            .map(|(key, decision)| (engine_build_key(key, root), decision.clone()))
+            .collect();
+        out.insert("allowBuilds".to_owned(), Value::Object(keyed));
+    }
+    out
+}
+
+/// The protocols whose specifier is a PATH, and so has more than one
+/// spelling for one directory.
+const PATH_PROTOCOLS: [&str; 3] = ["file:", "link:", "portal:"];
+
+/// The key the engine will look a build decision up under.
+///
+/// nub documents `allowScripts` as keying on the package name for a registry
+/// dependency and on the full specifier for anything else, and a path
+/// specifier has many spellings for one directory: `file:./dep`, `file:dep`
+/// and `file:./sub/../dep` all name the same place. The engine writes exactly
+/// one of them, so a decision spelled any other way matches nothing — and the
+/// install then fails on a build the project explicitly approved, which is
+/// the opposite of what the field is for.
+///
+/// The rule is the engine's own: resolve the path against the directory the
+/// manifest was read from, collapse `.` and `..` the way Node's `path.resolve`
+/// does — lexically, touching no disk, so a symlink is not followed — make it
+/// relative again, and write it with forward slashes. Measured against the
+/// engine on both shapes: a single project's `file:./dep` is keyed
+/// `dep@file:dep`, and a workspace member's is keyed from the LOCKFILE dir
+/// rather than the member, which is the same directory this resolves against
+/// because a nub project carries its decisions in the root manifest.
+///
+/// Only the path is rewritten. Stripping to the bare package name would be
+/// wrong rather than merely lossy: the engine keys a git, tarball or path
+/// artifact on its whole identifier precisely so that a name on its own
+/// cannot approve one. An absolute path and an unrecognized protocol are both
+/// left exactly as written — the safe direction, since a key that matches
+/// nothing withholds a permission where a wrong one would grant it.
+fn engine_build_key(key: &str, root: &Path) -> String {
+    let Some((name, protocol, path)) = PATH_PROTOCOLS.iter().find_map(|protocol| {
+        let marker = format!("@{protocol}");
+        let at = key.find(&marker).filter(|at| *at > 0)?;
+        Some((&key[..at], *protocol, &key[at + marker.len()..]))
+    }) else {
+        return key.to_owned();
+    };
+    if path.is_empty() || Path::new(path).is_absolute() {
+        return key.to_owned();
+    }
+    let resolved = lexically_resolve(root, path);
+    let Some(relative) = pathdiff::diff_paths(&resolved, root) else {
+        return key.to_owned();
+    };
+    let forward_slashed = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if forward_slashed.is_empty() {
+        return key.to_owned();
+    }
+    format!("{name}@{protocol}{forward_slashed}")
+}
+
+/// `base` joined with `relative`, with `.` dropped and `..` popping a segment,
+/// decided from the path text alone. This is what makes the answer agree with
+/// the engine on a path whose parent does not exist yet, and what keeps a
+/// symlinked directory keyed the way the project wrote it.
+fn lexically_resolve(base: &Path, relative: &str) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in base.components().chain(Path::new(relative).components()) {
+        match component {
+            Component::Prefix(_) | Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            // At the root there is nothing to pop, and Node's own resolve
+            // stops there rather than escaping.
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(segment) => out.push(segment),
+        }
     }
     out
 }
@@ -469,6 +553,7 @@ mod tests {
             install,
             env: Vec::new(),
             manifest: Map::new(),
+            root: PathBuf::from("/app"),
             cache_root: Some(PathBuf::from("/cache/nub")),
             ci: false,
         }
@@ -688,6 +773,65 @@ mod tests {
         assert!(
             message.contains("/app/.npmrc") && message.contains("node-linker"),
             "{message}"
+        );
+    }
+
+    /// A path specifier has many spellings for one directory and the engine
+    /// writes exactly one of them, so a decision spelled any other way
+    /// approves nothing and fails the install it was meant to permit.
+    #[test]
+    fn a_path_decision_is_keyed_the_way_the_engine_keys_it() {
+        let root = Path::new("/app");
+        for (written, expected) in [
+            ("dep@file:./dep", "dep@file:dep"),
+            ("dep@file:dep", "dep@file:dep"),
+            ("dep@file:./sub/../dep", "dep@file:dep"),
+            ("dep@file:./a/b", "dep@file:a/b"),
+            ("dep@link:./dep", "dep@link:dep"),
+            ("dep@portal:./dep", "dep@portal:dep"),
+            ("@scope/dep@file:./dep", "@scope/dep@file:dep"),
+            ("dep@file:../sibling", "dep@file:../sibling"),
+        ] {
+            assert_eq!(engine_build_key(written, root), expected, "key {written}");
+        }
+    }
+
+    /// Everything the rule does not own is left exactly as written. A key
+    /// that matches nothing withholds a permission; a key rewritten wrongly
+    /// would grant one.
+    #[test]
+    fn a_decision_the_rule_does_not_own_is_left_alone() {
+        let root = Path::new("/app");
+        for key in [
+            "esbuild",
+            "@scope/pkg",
+            "dep@1.2.3",
+            "dep@github:owner/repo",
+            "dep@https://example.test/dep.tgz",
+            "dep@file:/absolute/dep",
+            "dep@file:",
+            "@scope/pkg@file:.",
+        ] {
+            assert_eq!(engine_build_key(key, root), key, "key {key}");
+        }
+    }
+
+    /// The collapse is decided from the text, so it answers for a path whose
+    /// parents do not exist and never follows a symlink into a different
+    /// answer than the one the project wrote.
+    #[test]
+    fn the_collapse_reads_the_path_and_not_the_disk() {
+        assert_eq!(
+            lexically_resolve(Path::new("/app"), "./nowhere/../dep"),
+            Path::new("/app/dep"),
+        );
+        assert_eq!(
+            lexically_resolve(Path::new("/app"), "../dep"),
+            Path::new("/dep")
+        );
+        assert_eq!(
+            lexically_resolve(Path::new("/"), "../dep"),
+            Path::new("/dep")
         );
     }
 }

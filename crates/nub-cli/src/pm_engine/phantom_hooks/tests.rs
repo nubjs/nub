@@ -120,9 +120,15 @@ fn set<'a>(names: &[&'a str]) -> HashSet<&'a str> {
 fn the_vite_seed_ejects_only_the_versions_that_need_it() {
     let subject = policy(&["vite"]);
 
-    assert!(subject.seeded("vite@5.4.11"), "below 8.1 the eject is what makes the copy patchable");
+    assert!(
+        subject.seeded("vite@5.4.11"),
+        "below 8.1 the eject is what makes the copy patchable"
+    );
     assert!(subject.seeded("vite@8.0.9"));
-    assert!(!subject.seeded("vite@8.1.0"), "8.1 reads the store location itself");
+    assert!(
+        !subject.seeded("vite@8.1.0"),
+        "8.1 reads the store location itself"
+    );
     assert!(!subject.seeded("vite@9.0.0"));
     assert!(
         !subject.seeded("vite@8.1.0-beta.1"),
@@ -149,7 +155,11 @@ fn a_project_context_package_is_seeded_by_the_default_list() {
 #[test]
 fn a_flag_is_downgraded_only_when_every_target_is_a_sibling_the_project_lacks() {
     assert!(
-        !should_seed(&targets(&["protobufjs"]), &set(&["protobufjs"]), &set(&["other"])),
+        !should_seed(
+            &targets(&["protobufjs"]),
+            &set(&["protobufjs"]),
+            &set(&["other"])
+        ),
         "a sibling the project does not name resolves the same either way",
     );
     assert!(
@@ -157,7 +167,11 @@ fn a_flag_is_downgraded_only_when_every_target_is_a_sibling_the_project_lacks() 
         "a target that is not a sibling has nowhere to resolve from once shared",
     );
     assert!(
-        should_seed(&targets(&["protobufjs"]), &set(&["protobufjs"]), &set(&["protobufjs"])),
+        should_seed(
+            &targets(&["protobufjs"]),
+            &set(&["protobufjs"]),
+            &set(&["protobufjs"])
+        ),
         "a target the project itself depends on resolves differently once ejected",
     );
     assert!(

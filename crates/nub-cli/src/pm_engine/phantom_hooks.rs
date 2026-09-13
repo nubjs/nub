@@ -159,8 +159,11 @@ impl EjectPhantomImporters {
                 if !scan.has_unguarded_phantom {
                     return false;
                 }
-                let siblings: HashSet<&str> =
-                    package.dependencies.iter().filter_map(|id| package_name(id)).collect();
+                let siblings: HashSet<&str> = package
+                    .dependencies
+                    .iter()
+                    .filter_map(|id| package_name(id))
+                    .collect();
                 should_seed(&scan.targets, &siblings, &top_level)
             })
             .map(|package| package.id.to_owned())
@@ -190,11 +193,9 @@ fn should_seed(
     if targets.is_empty() {
         return true;
     }
-    !targets
-        .iter()
-        .all(|target| {
-            siblings.contains(target.name.as_str()) && !top_level.contains(target.name.as_str())
-        })
+    !targets.iter().all(|target| {
+        siblings.contains(target.name.as_str()) && !top_level.contains(target.name.as_str())
+    })
 }
 
 /// The package name inside an install identifier, which spells a registry

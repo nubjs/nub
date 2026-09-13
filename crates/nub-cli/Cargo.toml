@@ -23,7 +23,7 @@ embed-runtime = ["nub-core/embed-runtime"]
 # The pnpm 12 engine (pacquet), consumed as a git dependency on the nubjs/pnpm
 # fork that carries the embedder seam. Opt-in while aube and pnpm coexist; the
 # flag goes away when vendor/aube is removed.
-pm-pnpm = ["dep:indexmap", "dep:pnpm-cli", "dep:pnpm-config", "dep:pnpm-diagnostics", "dep:pnpm-lockfile", "dep:pnpm-package-manager", "dep:pnpm-store-dir"]
+pm-pnpm = ["dep:indexmap", "dep:pathdiff", "dep:pnpm-cli", "dep:pnpm-config", "dep:pnpm-diagnostics", "dep:pnpm-lockfile", "dep:pnpm-package-manager", "dep:pnpm-store-dir"]
 # `nub compile` (spike): the in-process Rolldown bundler + Mach-O section
 # injection/signing (libsui) + zstd-19 Node compression. OFF by default — these
 # are large, compile-time-only deps, so the everyday build and CI cheap gates
