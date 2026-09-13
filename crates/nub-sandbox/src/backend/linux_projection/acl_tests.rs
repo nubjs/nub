@@ -407,8 +407,8 @@ fn child_contract(root: &Path) {
         policy_denied
             .expect_err("unlisted ACL fixture path opened through projection")
             .raw_os_error(),
-        Some(libc::EACCES),
-        "projection policy denial errno"
+        Some(libc::ENOENT),
+        "projection policy omission must hide the path during lookup"
     );
     assert_eq!(
         OpenOptions::new()
