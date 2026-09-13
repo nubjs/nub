@@ -298,12 +298,9 @@ impl State {
             return Err(error(libc::EOPNOTSUPP));
         }
         let writable = flags & libc::O_ACCMODE != libc::O_RDONLY;
-        if flags & libc::O_TRUNC != 0 && !writable {
-            return Err(error(libc::EACCES));
-        }
         match self.rules.access(path) {
             Some(FsAccess::ReadWrite) => Ok(writable),
-            Some(FsAccess::Read) if !writable => Ok(false),
+            Some(FsAccess::Read) if !writable && flags & libc::O_TRUNC == 0 => Ok(false),
             _ => Err(error(libc::EACCES)),
         }
     }
@@ -325,10 +322,10 @@ impl State {
         }
         // Reopening through the held descriptor requires following our own proc
         // magic link. No caller-controlled symlink is followed on the host.
-        let file = reopen_regular(&pin, flags & !(libc::O_NOFOLLOW | libc::O_TRUNC))?;
-        if flags & libc::O_TRUNC != 0 {
-            file.set_len(0)?;
-        }
+        // Linux permits O_RDONLY|O_TRUNC under write authority while retaining
+        // a read-only descriptor. The verified pin makes this destructive open
+        // safe without a later ftruncate that would require a writable fd.
+        let file = reopen_regular(&pin, flags & !libc::O_NOFOLLOW)?;
         self.insert_handle(Handle {
             inode: ino,
             node,

@@ -355,16 +355,12 @@ fn descriptors_are_cloexec_and_forget_does_not_leak_inodes() {
 }
 
 #[test]
-fn append_and_readonly_truncate_do_not_change_authority() {
+fn append_preserves_descriptor_access_mode() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("file"), b"start").unwrap();
     let fs = projection(root.path(), &[("/file", FsAccess::ReadWrite)]);
     let mut state = fs.state().unwrap();
     let ino = lookup(&mut state, ROOT, "file");
-    assert_errno(
-        state.open(ino, libc::O_RDONLY | libc::O_TRUNC),
-        libc::EACCES,
-    );
     assert_errno(
         state.open(ino, libc::O_TMPFILE | libc::O_RDWR),
         libc::EOPNOTSUPP,
@@ -379,5 +375,37 @@ fn append_and_readonly_truncate_do_not_change_authority() {
     assert_errno(
         state.write(ino, handle, i64::MAX as u64, b"x"),
         libc::EINVAL,
+    );
+}
+
+#[test]
+fn readonly_truncate_requires_write_authority_but_returns_a_readonly_handle() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("file");
+    std::fs::write(&file, b"canary").unwrap();
+    let read = projection(root.path(), &[("/file", FsAccess::Read)]);
+    let mut state = read.state().unwrap();
+    let ino = lookup(&mut state, ROOT, "file");
+    assert_errno(
+        state.open(ino, libc::O_RDONLY | libc::O_TRUNC),
+        libc::EACCES,
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"canary");
+    drop(state);
+
+    let write = projection(root.path(), &[("/file", FsAccess::ReadWrite)]);
+    let mut state = write.state().unwrap();
+    let ino = lookup(&mut state, ROOT, "file");
+    let handle = state.open(ino, libc::O_RDONLY | libc::O_TRUNC).unwrap();
+    assert!(std::fs::read(&file).unwrap().is_empty());
+    assert!(state.read(ino, handle, 0, 1).unwrap().is_empty());
+    assert_errno(state.write(ino, handle, 0, b"x"), libc::EBADF);
+    let HandleKind::File { file, writable } = &state.handle(ino, handle).unwrap().kind else {
+        panic!("regular file expected")
+    };
+    assert!(!writable);
+    assert_eq!(
+        unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) } & libc::O_ACCMODE,
+        libc::O_RDONLY
     );
 }
