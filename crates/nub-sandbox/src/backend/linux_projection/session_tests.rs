@@ -18,7 +18,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -115,6 +115,64 @@ fn executable_closure(executable: &Path) -> BTreeSet<PathBuf> {
         }
     }
     closure
+}
+
+fn fixture_path_targets(grants: &mut BTreeSet<PathBuf>, path: &Path, links_left: u8) {
+    assert!(path.is_absolute(), "fixture closure path must be absolute");
+    let mut current = PathBuf::from("/");
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir => {
+                current.pop();
+                continue;
+            }
+            Component::Normal(name) => current.push(name),
+            Component::Prefix(_) => unreachable!("Linux fixture path prefix"),
+        }
+        if fs::symlink_metadata(&current)
+            .expect("fixture closure component")
+            .file_type()
+            .is_symlink()
+        {
+            assert!(links_left > 0, "fixture closure symlink limit");
+            grants.insert(current.clone());
+            let target = fs::read_link(&current).expect("fixture closure symlink");
+            let mut target = if target.is_absolute() {
+                target
+            } else {
+                current.parent().unwrap().join(target)
+            };
+            target.push(components.as_path());
+            fixture_path_targets(grants, &target, links_left - 1);
+            return;
+        }
+    }
+    grants.insert(current);
+}
+
+#[test]
+fn fixture_path_grants_include_symlink_components_and_relative_targets() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(root.path()).unwrap();
+    fs::create_dir_all(root.join("usr/lib64")).unwrap();
+    fs::create_dir_all(root.join("usr/lib")).unwrap();
+    fs::write(root.join("usr/lib/loader"), b"loader").unwrap();
+    symlink("usr/lib64", root.join("lib64")).unwrap();
+    symlink("../lib/loader", root.join("usr/lib64/loader")).unwrap();
+    let mut grants = BTreeSet::new();
+    fixture_path_targets(&mut grants, &root.join("lib64/loader"), 40);
+    assert_eq!(
+        grants,
+        BTreeSet::from([
+            root.join("lib64"),
+            root.join("usr/lib64/loader"),
+            root.join("usr/lib/loader"),
+        ])
+    );
 }
 
 fn fixture(executable: &Path) -> Fixture {
@@ -226,8 +284,17 @@ fn root_topology_policy(
             .any(|entry| entry.matcher.as_str() == denied.to_string_lossy()),
         "root topology policy accidentally grants denied sentinel"
     );
+    // Unlike the copied fixture, source=/ preserves the host's symlink topology.
+    // Grant only this ELF closure's link nodes and targets, not system subtrees.
+    let mut closure = executable_closure(executable);
+    closure.insert(executable.to_owned());
+    let mut targets = BTreeSet::new();
+    for path in &closure {
+        fixture_path_targets(&mut targets, path, 40);
+    }
+    closure.extend(targets);
     entries.extend(
-        executable_closure(executable)
+        closure
             .into_iter()
             .map(|path| rule(path.to_string_lossy().into_owned(), FsAccess::Read)),
     );
@@ -431,7 +498,8 @@ fn projected_session_helper() {
                 .trim()
             {
                 "hold" => {
-                    println!("PROJECTED_SESSION_HELD_READY");
+                    // libtest's in-progress prefix has no trailing newline.
+                    println!("\nPROJECTED_SESSION_HELD_READY");
                     io::stdout().flush().expect("held marker flush");
                     loop {
                         unsafe {
@@ -440,7 +508,7 @@ fn projected_session_helper() {
                     }
                 }
                 "survive" => {
-                    println!("PROJECTED_SESSION_SURVIVOR_READY");
+                    println!("\nPROJECTED_SESSION_SURVIVOR_READY");
                     io::stdout().flush().expect("survivor marker flush");
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while fs::read("/app/release").expect("projected release") != b"release" {
