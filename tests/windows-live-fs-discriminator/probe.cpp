@@ -176,13 +176,22 @@ bool path_loadlibrary_denied(const std::wstring& path) {
   return !module && error == ERROR_ACCESS_DENIED;
 }
 
-bool read_handle_line(const char* expected, unsigned long long* value) {
-  char line[128] = {};
-  char actual[32] = {};
-  if (!std::fgets(line, sizeof(line), stdin) ||
-      sscanf_s(line, "%31s %llu", actual, static_cast<unsigned>(_countof(actual)), value) != 2 ||
-      std::strcmp(actual, expected) != 0) {
-    std::printf("CONTROL_READ=FAIL expected=%s line=%s\n", expected, line);
+bool read_controls(unsigned long long* read_raw, unsigned long long* write_raw,
+                   unsigned long long* exe_file_raw, unsigned long long* dll_file_raw,
+                   unsigned long long* exe_section_raw, unsigned long long* dll_section_raw) {
+  char controls[512] = {};
+  DWORD bytes = 0;
+  if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), controls, sizeof(controls) - 1, &bytes, nullptr)) {
+    std::printf("CONTROL_READ=FAIL error=%lu\n", GetLastError());
+    std::fflush(stdout);
+    return false;
+  }
+  const int fields = sscanf_s(controls,
+      "READ %llu\nWRITE %llu\nEXE_FILE %llu\nDLL_FILE %llu\nEXE_SECTION %llu\nDLL_SECTION %llu",
+      read_raw, write_raw, exe_file_raw, dll_file_raw, exe_section_raw, dll_section_raw);
+  if (fields != 6) {
+    std::printf("CONTROL_READ=FAIL fields=%d bytes=%lu text=%s\n", fields, bytes, controls);
+    std::fflush(stdout);
     return false;
   }
   return true;
@@ -196,9 +205,7 @@ bool child(const std::wstring& root, const std::wstring& image_exe, const std::w
       !path_create_process_denied(image_exe) || !path_loadlibrary_denied(image_dll)) return false;
   std::printf("READY pid=%lu\n", GetCurrentProcessId()); std::fflush(stdout);
   unsigned long long read_raw = 0, write_raw = 0, exe_file_raw = 0, dll_file_raw = 0, exe_section_raw = 0, dll_section_raw = 0;
-  if (!read_handle_line("READ", &read_raw) || !read_handle_line("WRITE", &write_raw) ||
-      !read_handle_line("EXE_FILE", &exe_file_raw) || !read_handle_line("DLL_FILE", &dll_file_raw) ||
-      !read_handle_line("EXE_SECTION", &exe_section_raw) || !read_handle_line("DLL_SECTION", &dll_section_raw)) return false;
+  if (!read_controls(&read_raw, &write_raw, &exe_file_raw, &dll_file_raw, &exe_section_raw, &dll_section_raw)) return false;
   Handle read(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(read_raw)));
   Handle write(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(write_raw)));
   Handle exe_file(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(exe_file_raw)));
