@@ -762,6 +762,8 @@ mod tests {
             native_namespace(&root, allowed);
             let directory = root.join("win32.dir");
             assert_eq!(std::fs::create_dir(&directory).is_ok(), allowed);
+            assert!(std::fs::create_dir(root.join("forbidden-folder.txt")).is_err());
+            assert!(std::fs::read_dir(root.join("private-folder.txt")).is_err());
             let listing = std::fs::read_dir(root.join("listing.dir"));
             assert_eq!(listing.is_ok(), allowed);
             if allowed {
@@ -906,6 +908,7 @@ mod tests {
 
     fn namespace_fixture(root: &std::path::Path) {
         std::fs::create_dir(root.join("listing.dir")).unwrap();
+        std::fs::create_dir(root.join("private-folder.txt")).unwrap();
         std::fs::write(root.join("listing.dir").join("entry.txt"), b"entry").unwrap();
         for name in [
             "source.json",
