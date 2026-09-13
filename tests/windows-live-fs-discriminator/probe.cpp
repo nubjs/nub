@@ -176,6 +176,18 @@ bool path_loadlibrary_denied(const std::wstring& path) {
   return !module && error == ERROR_ACCESS_DENIED;
 }
 
+bool read_handle_line(const char* expected, unsigned long long* value) {
+  char line[128] = {};
+  char actual[32] = {};
+  if (!std::fgets(line, sizeof(line), stdin) ||
+      sscanf_s(line, "%31s %llu", actual, static_cast<unsigned>(_countof(actual)), value) != 2 ||
+      std::strcmp(actual, expected) != 0) {
+    std::printf("CONTROL_READ=FAIL expected=%s line=%s\n", expected, line);
+    return false;
+  }
+  return true;
+}
+
 bool child(const std::wstring& root, const std::wstring& image_exe, const std::wstring& image_dll, const std::wstring& source, const std::wstring& nonmatch) {
   NtApi api;
   if (!api.load() || !raw_nt_open_denied(api, L"RAW_NT_IMAGE_OPEN", image_exe) ||
@@ -184,7 +196,9 @@ bool child(const std::wstring& root, const std::wstring& image_exe, const std::w
       !path_create_process_denied(image_exe) || !path_loadlibrary_denied(image_dll)) return false;
   std::printf("READY pid=%lu\n", GetCurrentProcessId()); std::fflush(stdout);
   unsigned long long read_raw = 0, write_raw = 0, exe_file_raw = 0, dll_file_raw = 0, exe_section_raw = 0, dll_section_raw = 0;
-  if (scanf_s("READ %llu\nWRITE %llu\nEXE_FILE %llu\nDLL_FILE %llu\nEXE_SECTION %llu\nDLL_SECTION %llu", &read_raw, &write_raw, &exe_file_raw, &dll_file_raw, &exe_section_raw, &dll_section_raw) != 6) return false;
+  if (!read_handle_line("READ", &read_raw) || !read_handle_line("WRITE", &write_raw) ||
+      !read_handle_line("EXE_FILE", &exe_file_raw) || !read_handle_line("DLL_FILE", &dll_file_raw) ||
+      !read_handle_line("EXE_SECTION", &exe_section_raw) || !read_handle_line("DLL_SECTION", &dll_section_raw)) return false;
   Handle read(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(read_raw)));
   Handle write(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(write_raw)));
   Handle exe_file(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(exe_file_raw)));
