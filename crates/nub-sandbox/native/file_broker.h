@@ -96,7 +96,8 @@ inline NTSTATUS validate(const Request& request) {
         if ((!request.source_low && !request.source_high) || request.access || request.share ||
             request.disposition || request.options) return kInvalid;
         if (request.operation == Remove) {
-            if (request.attributes != 0 && request.attributes != 1 && request.attributes != 3) return kInvalid;
+            if (request.attributes != 0 && request.attributes != 1 && request.attributes != 3 &&
+                request.attributes != 7) return kInvalid;
             if (request.length) return kInvalid;
             for (wchar_t c : request.path) if (c) return kInvalid;
             return 0;

@@ -115,6 +115,15 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
         }
         request.length = name.Length / sizeof(wchar_t) - 4;
         memcpy(request.path, name.Buffer + 4, request.length * sizeof(wchar_t));
+        // Rust `read_dir` searches `path.join("*")`. Its Windows implementation
+        // reaches the native open boundary with the directory name terminated by
+        // one separator. Keep that directory spelling out of the pointer-free
+        // protocol: the broker resolves the same non-root leaf under pinned
+        // parents, while the validator continues to reject roots and repeated
+        // separators.
+        if (request.length > 3 && request.path[request.length - 1] == L'\\') {
+            request.path[--request.length] = 0;
+        }
         if (validate(request) == 0) {
             // SECURITY_QUALITY_OF_SERVICE controls client impersonation for
             // server connections. This broker resolves only validated local
@@ -338,7 +347,10 @@ static NTSTATUS NTAPI set_file_information(HANDLE file, PIO_STATUS_BLOCK io,
             if (size != sizeof(DWORD)) return original;
             request.operation = Remove;
             request.attributes = *static_cast<const DWORD*>(information);
-            if (request.attributes != 1 && request.attributes != 3) return original;
+            // Win32 DeleteFileW/RemoveDirectoryW also emits the compatibility
+            // image-section check (DELETE | POSIX | FORCE_IMAGE_SECTION_CHECK).
+            if (request.attributes != 1 && request.attributes != 3 &&
+                request.attributes != 7) return original;
         } else if (kind == static_cast<FILE_INFORMATION_CLASS>(10) ||
                    kind == static_cast<FILE_INFORMATION_CLASS>(11)) {
             if (size < offsetof(BrokerNameInformation, name)) return original;

@@ -658,6 +658,11 @@ mod tests {
         ] {
             assert_ne!(validate(&request(path)), 0, "{path}");
         }
+        assert_ne!(
+            validate(&request(r"C:\output\listing.dir\")),
+            0,
+            "the broker protocol receives only canonical non-root leaves"
+        );
         for disposition in [1, 2, 3, 4, 5] {
             assert_eq!(
                 validate(&Request {
@@ -749,7 +754,7 @@ mod tests {
             path: [0; 1024],
             ..valid.clone()
         };
-        for attributes in [0, 1, 3] {
+        for attributes in [0, 1, 3, 7] {
             assert_eq!(
                 validate(&Request {
                     attributes,
@@ -758,13 +763,16 @@ mod tests {
                 0
             );
         }
-        assert_ne!(
-            validate(&Request {
-                attributes: 2,
-                ..remove
-            }),
-            0
-        );
+        for attributes in [2, 5, 8, 0x10] {
+            assert_ne!(
+                validate(&Request {
+                    attributes,
+                    ..remove.clone()
+                }),
+                0,
+                "unobserved delete-disposition bits remain outside the protocol"
+            );
+        }
         assert_ne!(
             validate(&Request {
                 source_low: 4,
@@ -786,15 +794,26 @@ mod tests {
             let directory = root.join("win32.dir");
             assert_eq!(std::fs::create_dir(&directory).is_ok(), allowed);
             assert!(std::fs::create_dir(root.join("forbidden-folder.txt")).is_err());
-            assert!(std::fs::read_dir(root.join("private-folder.txt")).is_err());
+            assert!(
+                std::fs::read_dir(root.join("private-folder.txt")).is_err(),
+                "the unmatched directory remains denied in {mode} mode"
+            );
             let listing = std::fs::read_dir(root.join("listing.dir"));
-            assert_eq!(listing.is_ok(), allowed);
+            assert_eq!(
+                listing.is_ok(),
+                allowed,
+                "ordinary Rust read_dir is raw-denied and broker-allowed"
+            );
             if allowed {
                 let entries: Vec<_> = listing
                     .unwrap()
                     .map(|entry| entry.unwrap().file_name())
                     .collect();
                 assert!(entries.contains(&"entry.txt".into()));
+                assert!(
+                    !root.join("force-image.json").exists(),
+                    "the observed delete-disposition shape reaches the broker"
+                );
             }
             let linked = root.join("win32-link.json");
             assert_eq!(
@@ -936,6 +955,7 @@ mod tests {
         for name in [
             "source.json",
             "remove.json",
+            "force-image.json",
             "readonly.txt",
             "win32-source.json",
             "win32-remove.json",

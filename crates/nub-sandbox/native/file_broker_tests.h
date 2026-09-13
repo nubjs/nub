@@ -31,7 +31,7 @@ extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL al
         return set(source, &io, &name, DWORD(offsetof(NameInformation, name) + name.length),
                    static_cast<FILE_INFORMATION_CLASS>(kind));
     };
-    Handle directory, listing, source, remove, readonly;
+    Handle directory, listing, source, remove, force_image, readonly;
     NTSTATUS status = open(L"created.dir", FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | DELETE,
                            FILE_CREATE, true, directory);
     if ((status == 0) != bool(allowed)) return 2;
@@ -41,6 +41,8 @@ extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL al
     if ((status == 0) != bool(allowed)) return 4;
     status = open(L"remove.json", DELETE, FILE_OPEN, false, remove);
     if ((status == 0) != bool(allowed)) return 5;
+    status = open(L"force-image.json", DELETE, FILE_OPEN, false, force_image);
+    if ((status == 0) != bool(allowed)) return 24;
     if (!allowed) return 0;
     // The ordinary kernel path on a broker directory handle must not create a
     // child. Root-relative opens are not forwarded by the adapter.
@@ -114,6 +116,12 @@ extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL al
     }
     BOOLEAN deleted = TRUE;
     if (set(remove.value, &io, &deleted, sizeof(deleted), static_cast<FILE_INFORMATION_CLASS>(13)) != 0) return 15;
+    // DELETE | POSIX | FORCE_IMAGE_SECTION_CHECK is the ordinary Win32
+    // disposition shape. The final bit preserves the legacy image-section
+    // safety check; it does not grant additional authority.
+    DWORD force_image_delete = 0x7;
+    if (set(force_image.value, &io, &force_image_delete, sizeof(force_image_delete),
+            static_cast<FILE_INFORMATION_CLASS>(64)) != 0) return 25;
     if (set(directory.value, &io, &deleted, sizeof(deleted), static_cast<FILE_INFORMATION_CLASS>(13)) != 0) return 16;
     return 0;
 }
