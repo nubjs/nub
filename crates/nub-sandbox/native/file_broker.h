@@ -70,6 +70,16 @@ inline DWORD access_mask(DWORD access) {
     return access;
 }
 
+// Directory enumeration can reach the NT boundary with exactly one terminal
+// separator. Canonicalize that spelling only for an explicit directory open;
+// raw protocol requests still pass through `valid_path` unchanged.
+inline bool normalize_directory_capture(Request& request) {
+    if (!(request.options & FILE_DIRECTORY_FILE) || request.length <= 3 ||
+        request.path[request.length - 1] != L'\\') return false;
+    request.path[--request.length] = 0;
+    return true;
+}
+
 inline bool valid_path(const wchar_t* path, DWORD length) {
     // Only ordinary local-drive names. No remote provider, device namespace,
     // streams, relative roots, short-name spelling, dot segments or wildcards.

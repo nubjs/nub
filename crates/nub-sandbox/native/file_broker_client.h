@@ -115,15 +115,7 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
         }
         request.length = name.Length / sizeof(wchar_t) - 4;
         memcpy(request.path, name.Buffer + 4, request.length * sizeof(wchar_t));
-        // Rust `read_dir` searches `path.join("*")`. Its Windows implementation
-        // reaches the native open boundary with the directory name terminated by
-        // one separator. Keep that directory spelling out of the pointer-free
-        // protocol: the broker resolves the same non-root leaf under pinned
-        // parents, while the validator continues to reject roots and repeated
-        // separators.
-        if (request.length > 3 && request.path[request.length - 1] == L'\\') {
-            request.path[--request.length] = 0;
-        }
+        normalize_directory_capture(request);
         if (validate(request) == 0) {
             // SECURITY_QUALITY_OF_SERVICE controls client impersonation for
             // server connections. This broker resolves only validated local

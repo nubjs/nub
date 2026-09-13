@@ -568,6 +568,14 @@ mod tests {
         // SAFETY: pointer-free fixed-width layout matches the native protocol.
         unsafe { sandbox_file_broker_validate(request) }
     }
+    fn normalize_directory_capture(request: &mut Request) -> bool {
+        unsafe extern "C" {
+            fn sandbox_file_broker_normalize_directory_capture(request: *mut Request) -> i32;
+        }
+        // SAFETY: pointer-free fixed-width request is exclusively borrowed for
+        // the native capture normalization regression.
+        unsafe { sandbox_file_broker_normalize_directory_capture(request) != 0 }
+    }
 
     #[test]
     fn file_broker_protocol_rejects_authority_and_namespace_expansion() {
@@ -663,6 +671,27 @@ mod tests {
             0,
             "the broker protocol receives only canonical non-root leaves"
         );
+        let mut directory = request(r"C:\output\listing.dir\");
+        directory.options |= 1;
+        assert!(normalize_directory_capture(&mut directory));
+        assert_eq!(
+            validate(&directory),
+            0,
+            "directory capture normalizes one separator"
+        );
+        let mut regular_file = request(r"C:\output\future.json\");
+        assert!(!normalize_directory_capture(&mut regular_file));
+        assert_ne!(
+            validate(&regular_file),
+            0,
+            "a regular-file trailing separator is rejected before broker exchange"
+        );
+        for path in [r"C:\output\listing.dir\\", r"C:\"] {
+            let mut rejected = request(path);
+            rejected.options |= 1;
+            let _ = normalize_directory_capture(&mut rejected);
+            assert_ne!(validate(&rejected), 0, "{path}");
+        }
         for disposition in [1, 2, 3, 4, 5] {
             assert_eq!(
                 validate(&Request {

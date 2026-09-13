@@ -187,6 +187,10 @@ extern "C" void sandbox_file_broker_cancel(nub_sandbox::file_broker::Broker* bro
 extern "C" NTSTATUS sandbox_file_broker_validate(const nub_sandbox::file_broker::Request* request) {
     return nub_sandbox::file_broker::validate(*request);
 }
+extern "C" BOOL sandbox_file_broker_normalize_directory_capture(
+    nub_sandbox::file_broker::Request* request) {
+    return nub_sandbox::file_broker::normalize_directory_capture(*request);
+}
 #else
 static auto true_create_file = CreateFileW;
 static auto true_create_file_a = CreateFileA;
