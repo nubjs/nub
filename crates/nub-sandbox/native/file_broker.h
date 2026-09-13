@@ -27,7 +27,27 @@ constexpr DWORD kRead = FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES |
     FILE_EXECUTE | READ_CONTROL | SYNCHRONIZE;
 constexpr DWORD kWrite = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
 constexpr DWORD kOptions = FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
-    FILE_SEQUENTIAL_ONLY | FILE_RANDOM_ACCESS | FILE_WRITE_THROUGH;
+    FILE_SEQUENTIAL_ONLY | FILE_RANDOM_ACCESS | FILE_WRITE_THROUGH | FILE_DISALLOW_EXCLUSIVE;
+
+enum QualityField : DWORD {
+    QualityLength = 1,
+    QualityImpersonation = 2,
+    QualityTracking = 4,
+};
+
+// The client copies and validates this before any request reaches the broker.
+// It is intentionally not part of the pointer-free protocol or server open.
+inline bool valid_quality(const SECURITY_QUALITY_OF_SERVICE& quality, DWORD& fields) {
+    fields = 0;
+    if (quality.Length != sizeof(quality)) fields |= QualityLength;
+    if (quality.ImpersonationLevel < SecurityAnonymous || quality.ImpersonationLevel > SecurityDelegation)
+        fields |= QualityImpersonation;
+    if (quality.ContextTrackingMode != SECURITY_STATIC_TRACKING &&
+        quality.ContextTrackingMode != SECURITY_DYNAMIC_TRACKING) fields |= QualityTracking;
+    // EffectiveOnly is a BOOLEAN: zero is false and any nonzero byte is true.
+    // Neither representation is forwarded to the local-disk open.
+    return !fields;
+}
 
 inline DWORD access_mask(DWORD access) {
     if (access & GENERIC_READ) access = (access & ~GENERIC_READ) | FILE_GENERIC_READ;

@@ -81,6 +81,33 @@ extern "C" DWORD sandbox_file_broker_test_foreign_client(const wchar_t* name) {
     return error;
 }
 
+extern "C" DWORD sandbox_file_broker_test_quality() {
+    using namespace nub_sandbox::file_broker;
+    SECURITY_QUALITY_OF_SERVICE quality = {};
+    quality.Length = sizeof(quality);
+    DWORD fields = 0;
+    for (DWORD impersonation = SecurityAnonymous; impersonation <= SecurityDelegation; ++impersonation) {
+        quality.ImpersonationLevel = static_cast<SECURITY_IMPERSONATION_LEVEL>(impersonation);
+        for (SECURITY_CONTEXT_TRACKING_MODE tracking : {SECURITY_STATIC_TRACKING, SECURITY_DYNAMIC_TRACKING}) {
+            quality.ContextTrackingMode = tracking;
+            for (unsigned effective = 0; effective <= 0xff; ++effective) {
+                quality.EffectiveOnly = static_cast<BOOLEAN>(effective);
+                if (!valid_quality(quality, fields) || fields) return ERROR_INVALID_DATA;
+            }
+        }
+    }
+    quality.Length = sizeof(quality) - 1;
+    if (valid_quality(quality, fields) || fields != QualityLength) return ERROR_INVALID_DATA;
+    quality.Length = sizeof(quality);
+    quality.ImpersonationLevel = static_cast<SECURITY_IMPERSONATION_LEVEL>(SecurityDelegation + 1);
+    if (valid_quality(quality, fields) || fields != QualityImpersonation) return ERROR_INVALID_DATA;
+    quality.ImpersonationLevel = SecurityImpersonation;
+    quality.ContextTrackingMode = static_cast<SECURITY_CONTEXT_TRACKING_MODE>(2);
+    if (valid_quality(quality, fields) || fields != QualityTracking) return ERROR_INVALID_DATA;
+    quality.ContextTrackingMode = SECURITY_STATIC_TRACKING;
+    return valid_quality(quality, fields) && !fields ? 0 : ERROR_INVALID_DATA;
+}
+
 // Called in the real test child, so GetProcAddress observes installed Detours.
 // `statuses` is an optional six-slot diagnostic sink used by the parent-side
 // control. It records generic-only open/create, then the four actual calls,
