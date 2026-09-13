@@ -60,7 +60,7 @@ pub(super) struct MitmCa {
     /// The child-scoped CA-bundle file (CA cert + real roots). The `NamedTempFile` owns
     /// the file's lifetime: 0600 on Unix (mkstemp), removed on drop. Holds ONLY public
     /// certs — never the CA key.
-    _bundle: tempfile::NamedTempFile,
+    _bundle: CaBundle,
     bundle_path: PathBuf,
     /// Linux launches consume an immutable descriptor instead of reopening the
     /// same-user-writable temporary pathname during child preparation.
@@ -116,6 +116,11 @@ impl MitmCa {
         &self.bundle_path
     }
 
+    #[cfg(windows)]
+    pub(super) fn bundle_file(&self) -> &std::fs::File {
+        self._bundle.as_file()
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn bundle_file(&self) -> io::Result<File> {
         self.bundle_file.try_clone()
@@ -166,15 +171,70 @@ fn bundle_bytes(ca_cert: &Certificate, roots: &[CertificateDer<'static>]) -> Vec
     bytes
 }
 
-fn write_bundle(bytes: &[u8]) -> io::Result<tempfile::NamedTempFile> {
+#[cfg(not(windows))]
+type CaBundle = tempfile::NamedTempFile;
+
+// Close the non-delete-shared file BEFORE attempting removal. NamedTempFile drops
+// its TempPath first, which would silently leave this Windows bundle on disk.
+#[cfg(windows)]
+struct CaBundle {
+    file: std::fs::File,
+    path: tempfile::TempPath,
+}
+
+#[cfg(windows)]
+impl CaBundle {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+    fn as_file(&self) -> &std::fs::File {
+        &self.file
+    }
+    fn as_file_mut(&mut self) -> &mut std::fs::File {
+        &mut self.file
+    }
+}
+
+fn write_bundle(bytes: &[u8]) -> io::Result<CaBundle> {
     use std::io::Write;
+    #[cfg(not(windows))]
     let mut f = tempfile::Builder::new()
         .prefix("nub-mitm-ca-")
         .suffix(".pem")
         .tempfile()?;
-    f.write_all(bytes)?;
-    f.flush()?;
+    #[cfg(windows)]
+    let mut f = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, WRITE_DAC};
+        let bundle = tempfile::Builder::new()
+            .prefix("nub-mitm-ca-")
+            .suffix(".pem")
+            .make(|path| {
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .access_mode(GENERIC_READ | GENERIC_WRITE | WRITE_DAC)
+                    .share_mode(FILE_SHARE_READ)
+                    .open(path)
+            })?;
+        let (file, path) = bundle.into_parts();
+        CaBundle { file, path }
+    };
+    f.as_file_mut().write_all(bytes)?;
+    f.as_file_mut().flush()?;
     Ok(f)
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn public_bundle_is_pinned_readable_and_removed_after_close() {
+    let bundle = write_bundle(b"public-ca-fixture").unwrap();
+    let path = bundle.path().to_path_buf();
+    assert_eq!(std::fs::read(&path).unwrap(), b"public-ca-fixture");
+    assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+    assert!(std::fs::remove_file(&path).is_err());
+    drop(bundle);
+    assert!(!path.exists());
 }
 
 #[cfg(target_os = "linux")]

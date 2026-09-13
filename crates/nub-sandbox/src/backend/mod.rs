@@ -36,10 +36,10 @@ use unix_tmp::PrivateTemp;
 #[cfg(not(unix))]
 type PrivateTemp = tempfile::TempDir;
 
-/// How an embedder launches nub as the Windows CO-PACKAGE EGRESS-PROXY HELPER — the argv the
+/// How an embedder launches nub as the Windows co-package byte relay — the argv the
 /// AppContainer backend uses as the image + command line for a per-host net launch's helper
-/// process (typically `[current_exe(), "<hidden-flag>"]`). The backend appends the per-run
-/// serialized net policy as a final argument at launch. `None` (unset) ⇒ the backend cannot spawn
+/// process (typically `[current_exe(), "<hidden-flag>"]`). The backend passes only inherited
+/// pipe endpoints, never serialized policy or credentials. `None` (unset) ⇒ the backend cannot spawn
 /// the helper, so a per-host policy fails closed. No elevated fallback exists.
 ///
 /// OS-agnostic by design: the setter compiles everywhere so an embedder registers once at startup
@@ -53,7 +53,7 @@ pub fn set_windows_egress_helper_command(argv: Vec<OsString>) {
 }
 
 /// The registered co-package egress-helper launch command, if an embedder installed one. Read only
-/// by the Windows backend (`windows::uses_egress_funnel` / `apply` / `launch_egress_helper`), so a
+/// by the Windows backend (`apply` / `launch_egress_helper`), so a
 /// non-Windows build derives the seam but never consults it — kept compiled everywhere so a change
 /// to it is type-checked on the dev host, matching this file's `set_ca_env`/`set_proxy_env` idiom.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -61,58 +61,13 @@ pub(crate) fn windows_egress_helper_command() -> Option<&'static [OsString]> {
     WINDOWS_EGRESS_HELPER_COMMAND.get().map(Vec::as_slice)
 }
 
-/// The Windows co-package egress-proxy HELPER PROCESS entry. nub re-invokes itself with the
-/// registered hidden flag and a base64(JSON) [`NetPolicy`](crate::policy::NetPolicy) argument; this
-/// reads that policy, starts the real [`EgressProxy`] (Connection tier, no MITM), prints
-/// `PROXY_READY port=<p> token=<t>` on its inherited stdout for the parent to read, and then serves
-/// until the parent tears it down (its KILL_ON_JOB_CLOSE job). Never returns.
-///
-/// The parent (the AppContainer backend's `launch_egress_helper`) is what confines this: it runs
-/// as a co-package AppContainer LowBox holding only `internetClient` + the loopback caps, sharing
-/// the confined child's package SID so the child reaches it by same-package loopback.
+/// Run the registered Windows relay entry. Its only authority is inherited pipe
+/// endpoints and same-package loopback; policy, credentials and upstream sockets
+/// remain in the parent. No runtime adapter is installed in the command.
 #[cfg(target_os = "windows")]
 pub fn serve_windows_egress_helper() -> ! {
-    use base64::Engine as _;
-    use std::io::Write as _;
-    // args: [exe, hidden-flag, base64(JSON policy)] — nub-cli's dispatch has matched the flag.
-    let blob = std::env::args().nth(2).unwrap_or_default();
-    let json = match base64::engine::general_purpose::STANDARD.decode(blob.as_bytes()) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("PROXY_START_FAIL policy-decode: {error}");
-            std::process::exit(2);
-        }
-    };
-    let policy: crate::policy::NetPolicy = match serde_json::from_slice(&json) {
-        Ok(policy) => policy,
-        Err(error) => {
-            eprintln!("PROXY_START_FAIL policy-parse: {error}");
-            std::process::exit(2);
-        }
-    };
-    // Diagnostic (gated, off in production): report the helper's own security principal so a
-    // verification run can confirm it is a Low-integrity AppContainer sharing the child's SID. The
-    // parent's reader forwards any `TOKEN[` line it sees on this stdout to nub's stderr.
-    if std::env::var_os("NUB_EGRESS_DUMP_TOKENS").is_some() {
-        println!("TOKEN[helper] {}", windows_token_report());
-        let _ = std::io::stdout().flush();
-    }
-    match EgressProxy::start(Arc::new(StaticDecider::new(policy)), None) {
-        Ok(proxy) => {
-            // The parent reads this line off the inherited stdout to learn where to point the child.
-            println!("PROXY_READY port={} token={}", proxy.port(), proxy.token());
-            let _ = std::io::stdout().flush();
-            // Hold the proxy alive and serve the child's whole lifetime; the parent reaps us.
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(3600));
-            }
-        }
-        Err(error) => {
-            println!("PROXY_START_FAIL start: {error}");
-            let _ = std::io::stdout().flush();
-            std::process::exit(2);
-        }
-    }
+    let result = crate::proxy::relay::serve();
+    std::process::exit(if result.is_ok() { 0 } else { 2 });
 }
 
 #[cfg(target_os = "macos")]
@@ -469,6 +424,7 @@ pub(crate) struct SupervisedPlan {
     /// Landlock ruleset held open until the fork consumes its fd; `None` = no fs boundary.
     pub(crate) ruleset: Option<linux_landlock::LandlockRuleset>,
     pub(crate) seccomp_ceiling: Option<Vec<seccompiler::sock_filter>>,
+    pub(crate) ca_bundle: Option<std::fs::File>,
 }
 
 #[cfg(target_os = "linux")]
@@ -497,7 +453,12 @@ impl SupervisedPlan {
             cwd,
             ruleset,
             seccomp_ceiling,
+            ca_bundle,
         } = self;
+        let inherited_fds: Vec<_> = ca_bundle
+            .iter()
+            .map(std::os::fd::AsRawFd::as_raw_fd)
+            .collect();
         let launch = linux_supervisor::SupervisedLaunch {
             argv: &argv,
             envp: &envp,
@@ -509,12 +470,13 @@ impl SupervisedPlan {
             stdin,
             stdout,
             stderr,
-            inherited_fds: &[],
+            inherited_fds: &inherited_fds,
         };
         let child = linux_supervisor::spawn_supervised_with_ready(egress, launch, ready);
         // Keep the ruleset alive across the fork+exec, exactly as the `Command` path keeps
         // `_inherited_files`: the child's `restrict_self` consumes the fd after fork.
         drop(ruleset);
+        drop(ca_bundle);
         child
     }
 
@@ -564,7 +526,7 @@ pub struct Sandbox {
 /// policy, credentials, proxy identity, or the managed temporary root after acquisition.
 pub(crate) struct SessionResources {
     policy: SandboxPolicy,
-    proxy: Option<EgressProxy>,
+    proxy: Option<SessionProxy>,
     private_tmp: Option<PrivateTemp>,
     #[cfg(target_os = "linux")]
     retained_grants: linux::RetainedLinuxGrants,
@@ -573,6 +535,11 @@ pub(crate) struct SessionResources {
     #[cfg(windows)]
     native_compat: bool,
 }
+
+#[cfg(windows)]
+type SessionProxy = crate::proxy::ProxyContext;
+#[cfg(not(windows))]
+type SessionProxy = EgressProxy;
 
 impl Sandbox {
     /// Acquire a reusable sandbox from an already-resolved policy.
@@ -1304,13 +1271,13 @@ fn capture_runtime_brokers(
     Ok(session.into_brokers())
 }
 
-/// Start the session's proxy once. Linux build-jail launches intentionally use Landlock's
-/// coarse socket ceiling and never route through a loopback proxy; all other backends retain
-/// the existing fail-closed proxy startup contract.
+/// Acquire parent-owned proxy state once. Windows binds one listener per command;
+/// Unix backends share the session listener. Linux catalog build-jail policies without
+/// brokers use the coarse socket ceiling rather than the raw-policy supervisor.
 fn start_session_proxy(
     policy: &SandboxPolicy,
     runtime_brokers: Vec<RuntimeCredentialBroker>,
-) -> Result<Option<EgressProxy>, Degradation> {
+) -> Result<Option<SessionProxy>, Degradation> {
     #[cfg(target_os = "linux")]
     {
         if policy.build_jail && policy.net.brokers.is_empty() {
@@ -1320,19 +1287,31 @@ fn start_session_proxy(
     }
     #[cfg(target_os = "windows")]
     {
-        if windows::uses_egress_funnel(policy) {
-            return Ok(None);
-        }
-        start_proxy_if_needed(policy, runtime_brokers)
+        proxy_context(policy, runtime_brokers)
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     start_proxy_if_needed(policy, runtime_brokers)
 }
 
+#[cfg(not(windows))]
 fn start_proxy_if_needed(
     policy: &SandboxPolicy,
     runtime_brokers: Vec<RuntimeCredentialBroker>,
 ) -> Result<Option<EgressProxy>, Degradation> {
+    proxy_context(policy, runtime_brokers)?
+        .map(|context| {
+            context.start().map_err(|error| Degradation {
+                lost: vec!["net-per-host".to_string()],
+                reason: Some(format!("starting required egress proxy: {error}")),
+            })
+        })
+        .transpose()
+}
+
+fn proxy_context(
+    policy: &SandboxPolicy,
+    runtime_brokers: Vec<RuntimeCredentialBroker>,
+) -> Result<Option<crate::proxy::ProxyContext>, Degradation> {
     if !proxy_needed(policy) {
         return Ok(None);
     }
@@ -1352,46 +1331,29 @@ fn start_proxy_if_needed(
         }
         Inspection::Connection => None,
     };
-    // A required proxy must fail closed if its listener cannot start.
-    // Result mapping is the epic branch's posture and is what `proxy_needed`'s doc
-    // promises — a required proxy that fails to start is an apply error, never a
-    // silent `None` that would launch the child with no egress mediation.
-    EgressProxy::start(decider, mitm)
-        .map(Some)
-        .map_err(|error| Degradation {
-            lost: vec!["net-per-host".to_string()],
-            reason: Some(format!("starting required egress proxy: {error}")),
-        })
+    Ok(Some(crate::proxy::ProxyContext { decider, mitm }))
 }
 
-/// The CA-trust env keys pointed at the child CA bundle (ephemeral CA + real roots).
-/// A union of the common tool conventions — `NODE_EXTRA_CA_CERTS` is ADDITIVE (Node
-/// keeps its built-in roots); the rest REPLACE the store, which is exactly why the bundle
-/// carries the real roots alongside the CA. Brand-clean: every key is a tool's own
-/// documented convention, none nub's. Set AFTER `env_clear` so it survives the scrub.
-// ⛔ ALWAYS DEFINED, DEAD-CODE-ALLOWED ON LINUX — matching `set_proxy_env` below, which is the
-// idiom this file already uses and the one these two deviated from. `mod windows` is declared
-// `#[cfg(any(target_os = "windows", test))]` so Windows logic stays testable without a Windows
-// machine, which means a LINUX TEST BUILD compiles `windows.rs` — and `windows.rs` calls this.
-// Gating on `not(linux)` configured it out exactly there: E0425 on Linux, invisible on macOS where
-// `not(linux)` is already true. Surfaced by a remote Linux build, never by a local gate.
+/// Child-only trust settings. Replacement stores need the real roots alongside
+/// the ephemeral CA; Node's additional store remains additive.
+pub(super) const CA_ENV_KEYS: &[&str] = &[
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "PIP_CERT",
+    "NPM_CONFIG_CAFILE",
+    "npm_config_cafile",
+    "CARGO_HTTP_CAINFO",
+    "AWS_CA_BUNDLE",
+    "DENO_CERT",
+];
+
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn set_ca_env(command: &mut Command, bundle: &std::path::Path) {
-    let path = bundle.as_os_str();
-    for key in [
-        "NODE_EXTRA_CA_CERTS", // Node (additive)
-        "SSL_CERT_FILE",       // OpenSSL / curl / most
-        "REQUESTS_CA_BUNDLE",  // python-requests
-        "CURL_CA_BUNDLE",      // curl
-        "GIT_SSL_CAINFO",      // git
-        "PIP_CERT",            // pip
-        "NPM_CONFIG_CAFILE",   // npm
-        "npm_config_cafile",   // npm (lowercase form)
-        "CARGO_HTTP_CAINFO",   // cargo
-        "AWS_CA_BUNDLE",       // aws-cli
-        "DENO_CERT",           // deno
-    ] {
-        command.env(key, path);
+    for key in CA_ENV_KEYS {
+        command.env(key, bundle);
     }
 }
 
@@ -1494,37 +1456,34 @@ fn prepare_with_resources(
     let redact_stderr = spec.redact_stderr;
     #[cfg(target_os = "linux")]
     let linux_preflight = linux::preflight(policy, &spec)?;
-    // Start the per-host egress proxy FIRST (if the policy needs it), so its bound port
-    // is threaded into the backend deny-layer (which permits egress ONLY to the proxy
-    // endpoint) before the child is prepared. The proxy is then stashed on `Prepared`
-    // so it outlives the child (design.md §2.5).
-    // THE LANDLOCK ARM STARTS NO PROXY. It has no netns, so a child cannot be routed through one
-    // — its net axis is a coarse per-package seccomp family permit (`linux::apply_landlock`), and
-    // an Allow rule there is provenance rather than a host gate. Starting one anyway left a
-    // loopback listener nothing could use on every catalogued package's lifecycle spawn, and a
-    // bind failure is a HARD apply error, so the machinery could refuse an install it does not
-    // participate in. A broker still forces the proxy: it is the only thing that can perform the
-    // marker→secret swap, and skipping it would turn a grant into a silent failure rather than a
-    // saved listener. No build-jail policy has brokers (its env axis strips the credential
-    // family), so in production this predicate is just "the build jail".
+    // Linux raw host rules use the supervisor's parent proxy; catalog coarse
+    // networking starts none. Windows retains TLS state at acquisition and binds
+    // a separate parent proxy per command so cancellation cannot stop a sibling.
+    #[cfg(not(windows))]
     let proxy_port = resources.proxy.as_ref().map(EgressProxy::port);
-    // The per-session egress-proxy token, delivered to the child via the proxy URL. Same
-    // presence as `proxy_port` (both derive from `proxy`), threaded into each backend so
-    // the child authenticates to the loopback proxy.
+    #[cfg(windows)]
+    let proxy_port = None;
+    #[cfg(not(windows))]
     let proxy_token = resources.proxy.as_ref().map(EgressProxy::token);
-    // The Linux Landlock build-jail backend takes neither (coarse seccomp family ceiling, no
-    // proxy to authenticate to); the SUPERVISED backend takes both, redirecting an allowed connect
-    // through the loopback proxy for per-host SNI precision (epic 5.1). `linux::apply` routes each
-    // arm and ignores the pair on the Landlock arm.
-    // The child CA bundle, when TLS termination engaged — its ephemeral path, threaded into the
-    // mac/win/generic backends. On Linux the only wired backend is the Landlock build jail, which
-    // starts no proxy and terminates no TLS, so there is never a CA bundle to hand it or announce.
+    #[cfg(windows)]
+    let proxy_token = None;
     #[cfg(not(target_os = "linux"))]
-    let ca_bundle = resources.proxy.as_ref().and_then(|p| p.ca_bundle_path());
-    #[cfg(not(target_os = "linux"))]
-    let ca_bundle_present = ca_bundle.is_some();
+    let ca_bundle = resources
+        .proxy
+        .as_ref()
+        .and_then(|proxy| proxy.ca_bundle_path());
     #[cfg(target_os = "linux")]
-    let ca_bundle_present = false;
+    let ca_bundle = resources
+        .proxy
+        .as_ref()
+        .map(EgressProxy::ca_bundle_file)
+        .transpose()
+        .map_err(|error| Degradation {
+            lost: vec!["credential-broker".into()],
+            reason: Some(format!("duplicating child CA bundle: {error}")),
+        })?
+        .flatten();
+    let ca_bundle_present = ca_bundle.is_some();
 
     // The acquired session owns the stable managed PRIVATE tmp root (when the policy asks).
     // Its path is threaded into each backend before its command profile is built; all commands
@@ -1544,9 +1503,14 @@ fn prepare_with_resources(
         linux_preflight,
         proxy_port,
         proxy_token,
+        ca_bundle,
     )?;
     #[cfg(target_os = "windows")]
     let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
+    #[cfg(windows)]
+    if let Some(windows::WindowsLaunch::AppContainer(plan)) = prepared.launch.as_mut() {
+        plan.proxy_context = resources.proxy.clone();
+    }
     #[cfg(windows)]
     if resources.native_compat {
         match prepared.launch.as_mut() {
@@ -1562,10 +1526,8 @@ fn prepare_with_resources(
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let mut prepared = generic_apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
 
-    // One-line stderr notice when TLS termination ACTUALLY engages — never silent, but
-    // never MISLEADING either: suppress it where the backend degraded net (e.g. Windows,
-    // whose AppContainer child can't reach the loopback proxy, so termination never
-    // happens and the request is fail-safe denied — announcing it would be a false claim).
+    // Announce TLS inspection only when preparation retained its network enforcement.
+    // A Windows command still must start its relay successfully before any child runs.
     if ca_bundle_present
         && !prepared
             .degradation

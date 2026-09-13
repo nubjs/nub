@@ -148,6 +148,7 @@ fn plan(root: &Path, mode: &str) -> AppContainerLaunch {
         env: Some(env),
         allow_internet: false,
         egress_funnel: None,
+        proxy_context: None,
         private_tmp: true,
         native_compat: std::env::var_os("NUB_NATIVE_EMBEDDED_ADAPTER").is_some(),
         stdout: WindowsStdio::Null,

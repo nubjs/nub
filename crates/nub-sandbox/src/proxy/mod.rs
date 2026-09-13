@@ -25,6 +25,8 @@
 mod ca;
 mod handshake;
 pub mod mitm;
+#[cfg(any(windows, test))]
+pub(crate) mod relay;
 mod sni;
 
 use crate::matcher::HostMatcher;
@@ -293,8 +295,27 @@ impl Write for ShutdownIo {
     }
 }
 
+/// Acquired policy and credential state. Windows commands start independent listeners
+/// and cancellation scopes from this context without recapturing credentials.
+#[derive(Clone)]
+pub(crate) struct ProxyContext {
+    pub(crate) decider: Arc<dyn GrantDecider>,
+    pub(crate) mitm: Option<Arc<mitm::MitmEngine>>,
+}
+
+impl ProxyContext {
+    pub(crate) fn start(&self) -> io::Result<EgressProxy> {
+        EgressProxy::start(self.decider.clone(), self.mitm.clone())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn ca_bundle_path(&self) -> Option<&std::path::Path> {
+        self.mitm.as_ref().map(|engine| engine.bundle_path())
+    }
+}
+
 /// A running egress proxy bound to `127.0.0.1:<port>`. Dropping it stops accepting new
-/// connections (the parent owns this; it drops after the sandboxed child exits).
+/// connections and joins the active handlers.
 pub struct EgressProxy {
     port: u16,
     /// The per-session bearer every client must present (HTTP `Proxy-Authorization` /
@@ -362,13 +383,16 @@ impl EgressProxy {
     pub fn ca_bundle_path(&self) -> Option<&std::path::Path> {
         self.mitm.as_ref().map(|m| m.bundle_path())
     }
-}
 
-impl Drop for EgressProxy {
-    fn drop(&mut self) {
-        // Signal the accept loop, close every in-flight socket, then wake `accept()`.
-        // The accept thread owns and joins every handler before returning, so dropping
-        // the proxy also drops every clone of the per-apply MITM engine and its secrets.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn ca_bundle_file(&self) -> io::Result<Option<std::fs::File>> {
+        self.mitm
+            .as_ref()
+            .map(|engine| engine.bundle_file())
+            .transpose()
+    }
+
+    pub(crate) fn stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Ok(active) = self.active_sockets.lock() {
             for stream in active.values().flatten() {
@@ -376,6 +400,15 @@ impl Drop for EgressProxy {
             }
         }
         let _ = TcpStream::connect((IpAddr::from([127, 0, 0, 1]), self.port));
+    }
+}
+
+impl Drop for EgressProxy {
+    fn drop(&mut self) {
+        // Signal the accept loop, close every in-flight socket, then wake `accept()`.
+        // The accept thread owns and joins every handler before returning, so dropping
+        // the proxy also drops every clone of the per-apply MITM engine and its secrets.
+        self.stop();
         if let Some(h) = self.accept_thread.take() {
             let _ = h.join();
         }
@@ -1299,6 +1332,12 @@ mod tests {
 
     #[test]
     fn live_tls_broker_releases_marker_only_to_the_exact_verified_upstream() {
+        for via_relay in [false, true] {
+            live_tls_broker_transport(via_relay);
+        }
+    }
+
+    fn live_tls_broker_transport(via_relay: bool) {
         use base64::Engine as _;
         use rcgen::{CertifiedKey, generate_simple_self_signed};
         use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -1374,7 +1413,9 @@ mod tests {
         )
         .unwrap();
         let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:", proxy.token()));
-        let mut socket = TcpStream::connect((IpAddr::from([127, 0, 0, 1]), proxy.port())).unwrap();
+        let relay = via_relay.then(|| relay::tests::TestRelay::start(proxy.port()));
+        let port = relay.as_ref().map_or(proxy.port(), |relay| relay.port);
+        let mut socket = TcpStream::connect((IpAddr::from([127, 0, 0, 1]), port)).unwrap();
         write!(
             socket,
             "CONNECT localhost:{upstream_port} HTTP/1.1\r\nHost: localhost:{upstream_port}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"

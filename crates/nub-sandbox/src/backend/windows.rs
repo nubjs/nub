@@ -49,7 +49,9 @@
 //! returns a reusable resource; each spawn returns its own native process, Job and
 //! streams. A command owns a resource lease through final tree reaping.
 
-use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, FsRule, Inspection, NetPolicy};
+#[cfg(test)]
+use crate::policy::Inspection;
+use crate::policy::{Effect, FsAccess, FsOrigin, FsPolicy, FsRule, NetPolicy};
 // Referenced only by the Windows-gated `apply`; the host build (module-under-test)
 // never names it.
 #[cfg(target_os = "windows")]
@@ -130,13 +132,14 @@ pub(crate) struct AppContainerLaunch {
     /// Grant the `internetClient` capability (egress allowed). `false` ⇒ coarse deny.
     allow_internet: bool,
     /// Zero-privilege per-host egress FUNNEL: `Some(policy)` ⇒ before spawning the (capability-
-    /// free) child, launch a CO-PACKAGE helper process — SAME AppContainer SID, holding
-    /// `internetClient` — running nub's egress proxy over this net policy, then point the child
+    /// free) child, launch a CO-PACKAGE zero-capability byte relay with the SAME SID, then point the child
     /// at it via `HTTP_PROXY`. Same-package loopback needs no administrator exemption.
     /// `apply` sets it only when
     /// [`plan_net`] chose [`WinNetPlan::Funnel`]; the proxy's port/token are known only at launch,
     /// so [`AppContainerLaunch::run`] injects the proxy env then rather than `apply` baking it in.
     egress_funnel: Option<NetPolicy>,
+    #[cfg(windows)]
+    pub(super) proxy_context: Option<crate::proxy::ProxyContext>,
     /// A stable profile-owned slot, resolved only after policy identity acquisition.
     private_tmp: bool,
     pub(super) native_compat: bool,
@@ -713,8 +716,8 @@ pub(super) fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Select the unprivileged co-package funnel for connection-level rules.
-/// TLS inspection and credential brokering are rejected, not weakened.
+/// Select the unprivileged co-package byte relay. All host and TLS decisions stay
+/// in the parent's command-owned proxy, regardless of the inspection tier.
 fn plan_net(net: &NetPolicy, helper_available: bool) -> WinNetPlan {
     if !net.enforce {
         return WinNetPlan::Unconfined;
@@ -724,26 +727,10 @@ fn plan_net(net: &NetPolicy, helper_available: bool) -> WinNetPlan {
     if !needs_proxy {
         return WinNetPlan::CoarseDeny;
     }
-    let connection_only = net.brokers.is_empty() && net.inspection == Inspection::Connection;
-    if helper_available && connection_only {
+    if helper_available {
         return WinNetPlan::Funnel;
     }
     WinNetPlan::Unsupported
-}
-
-/// Whether `apply` will route this policy through the zero-privilege co-package egress funnel —
-/// the exact predicate [`plan_net`] uses to return [`WinNetPlan::Funnel`]. `backend::apply`
-/// consults this to SKIP starting an in-process egress proxy on Windows: the funnel's proxy runs
-/// in the helper process instead, and an in-process one would bind a port the child cannot reach
-/// (a wasted bind whose failure would needlessly fail the launch closed).
-#[cfg(target_os = "windows")]
-pub(super) fn uses_egress_funnel(policy: &SandboxPolicy) -> bool {
-    let net = &policy.net;
-    net.enforce
-        && (net.rules.iter().any(|r| r.effect == Effect::Allow) || !net.brokers.is_empty())
-        && net.brokers.is_empty()
-        && net.inspection == Inspection::Connection
-        && crate::backend::windows_egress_helper_command().is_some()
 }
 
 // TRAVERSE MODEL (why a LEAF grant alone suffices — no ancestor traverse grants): a
@@ -782,13 +769,13 @@ pub(crate) fn apply(
     let tmp_lost = super::tmp_lost_axis(policy);
     let private_tmp = policy.fs.tmp == crate::policy::TmpMode::Private;
 
-    // The current launch paths do not remove access to Windows-managed temporary
-    // storage. Reject the requested restriction before acquiring any profile or ACEs.
+    // The current launch paths still add implicit Windows-managed temporary storage.
+    // Withholding that implicit grant is unsupported, even though positive fs grants union.
     if policy.fs.tmp == crate::policy::TmpMode::Deny {
         return Err(Degradation {
             lost: vec!["tmp-deny".to_string()],
             reason: Some(
-                "denying all temporary storage is not implemented by the Windows backend"
+                "withholding implicit temporary storage is not implemented by the Windows backend"
                     .to_string(),
             ),
         });
@@ -889,7 +876,7 @@ pub(crate) fn apply(
             lost: vec!["net-per-host".to_string()],
             reason: Some(
                 "Windows per-host network rules require a registered unprivileged egress helper; \
-                 TLS inspection and credential brokering are not supported by that helper"
+                 all policy and TLS inspection run in the parent"
                     .to_string(),
             ),
         });
@@ -964,6 +951,15 @@ pub(crate) fn apply(
     {
         read_grants.push(prog);
     }
+    if net_plan == WinNetPlan::Funnel
+        && let Some(program) =
+            crate::backend::windows_egress_helper_command().and_then(|argv| argv.first())
+        && let Some(program) = resolve_program(program, spec.cwd.as_deref())
+        && !read_grants.contains(&program)
+    {
+        // The trusted launcher image is another executable leaf, not a tool-directory grant.
+        read_grants.push(program);
+    }
 
     // ── degradation (fail-safe-not-silent) ──────────────────────────────────────
     let mut deg = Degradation::full();
@@ -1019,6 +1015,7 @@ pub(crate) fn apply(
         allow_internet: !policy.net.enforce,
         // `run()` launches the co-package helper over this policy and injects its proxy env.
         egress_funnel: funnel.then(|| policy.net.clone()),
+        proxy_context: None,
         private_tmp,
         native_compat: false,
         stdout: if spec.redact_stdout {
@@ -1383,12 +1380,7 @@ pub(super) mod launch {
     const TRAVERSE_MASK: u32 = 0x0010_00a1;
     // The well-known internetClient capability SID.
     const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
-    // internetClientServer + privateNetworkClientServer. Granted to the co-package egress-funnel
-    // HELPER alongside internetClient so its loopback bind/accept is never the variable under test
-    // — the exact cap set the proven funnel harness gave the helper. The confined CHILD still holds
-    // ZERO capabilities; these widen the trusted helper, not the sandboxed principal.
-    const INTERNET_CLIENT_SERVER_SID: &str = "S-1-15-3-2";
-    const PRIVATE_NETWORK_CLIENT_SERVER_SID: &str = "S-1-15-3-3";
+
     // An app-package-readable working directory for a LowBox process — a LowBox cannot resolve
     // nub's own user-profile cwd. `System32` carries ALL APPLICATION PACKAGES read (measured), so
     // the egress-funnel helper (which needs no policy grants of its own) starts there.
@@ -2152,6 +2144,7 @@ pub(super) mod launch {
         state: Option<Arc<ResourceState>>,
         allow_internet: bool,
         egress_funnel: Option<super::NetPolicy>,
+        proxy_context: Option<crate::proxy::ProxyContext>,
     }
 
     /// Shared identity ownership without a command, arguments or environment.
@@ -2484,6 +2477,7 @@ pub(super) mod launch {
                 },
                 allow_internet: self.allow_internet,
                 egress_funnel: self.egress_funnel,
+                proxy_context: self.proxy_context,
                 state: Some(state),
             }
         }
@@ -2496,6 +2490,7 @@ pub(super) mod launch {
                 state: None,
                 allow_internet: false,
                 egress_funnel: None,
+                proxy_context: None,
             }
         }
 
@@ -2661,23 +2656,35 @@ pub(super) mod launch {
                 )?;
             }
 
-            // 5c. THE ZERO-PRIVILEGE EGRESS FUNNEL. Launch a CO-PACKAGE helper process — SAME
-            //     AppContainer SID (`ac_sid`), holding `internetClient` — that runs nub's egress
-            //     proxy over `plan.egress_funnel`'s policy, then point THIS (capability-free) child
-            //     at it via `HTTP_PROXY`. The child reaches the helper by SAME-PACKAGE loopback,
-            //     which needs NO admin loopback exemption (the `IsAppContainerLoopback` kernel
-            //     permit), so no machine-wide firewall mutation is needed.
-            //
-            //     Ordered here, AFTER the window-station ACE (1b): the helper shares `ac_sid`, so
-            //     that ACE is what lets a USER32-importing nub.exe survive loader init on a non-
-            //     interactive station. The proxy port/token exist only now, so the child's proxy
-            //     env is injected here rather than in `apply`'s `build_child_env`. `_egress_helper`
-            //     holds the helper in a KILL_ON_JOB_CLOSE job dropped when `run` returns (after the
-            //     child is waited + reaped below), so the helper lives exactly the child's lifetime
-            //     and dies with nub even on a crash.
-            let _egress_helper = if let Some(policy) = &self.egress_funnel {
+            // The helper is an untrusted, zero-capability byte relay. Only the
+            // parent context owns policy, real credentials and upstream sockets.
+            let _egress_helper = if self.egress_funnel.is_some() {
+                let context = self.proxy_context.as_ref().ok_or_else(|| {
+                    io::Error::other("Windows relay has no acquired parent proxy context")
+                })?;
+                if let Some(engine) = context.mitm.as_ref() {
+                    use std::os::windows::io::AsRawHandle as _;
+                    // The public CA leaf is session-owned, not part of the reusable
+                    // policy identity. Its open handle pins the object until cleanup.
+                    set_ace_on_handle(
+                        engine.bundle_file().as_raw_handle(),
+                        ac_sid,
+                        windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ,
+                        GRANT_ACCESS,
+                        false,
+                        false,
+                    )?;
+                    let env = plan.env.get_or_insert_with(Default::default);
+                    for key in super::super::CA_ENV_KEYS {
+                        env.retain(|name, _| !name.eq_ignore_ascii_case(key));
+                        env.insert(
+                            (*key).to_string(),
+                            engine.bundle_path().to_string_lossy().into_owned(),
+                        );
+                    }
+                }
                 let (port, token, guard) = timed("egress_funnel_helper", || {
-                    launch_egress_helper(ac_sid, policy, plan.env.as_ref())
+                    launch_egress_helper(ac_sid, context, plan.env.as_ref())
                 })?;
                 if let Some(env) = plan.env.as_mut() {
                     let url = format!("http://{token}@127.0.0.1:{port}");
@@ -4211,17 +4218,20 @@ pub(super) mod launch {
         Ok(job)
     }
 
-    /// Owns the running co-package egress-funnel helper. Dropping it closes the helper's
-    /// KILL_ON_JOB_CLOSE job handle, which reaps the helper — so the helper lives exactly as long
-    /// as the `AppContainerLaunch::run` frame that holds it (i.e. the confined child's lifetime),
-    /// and dies with nub even on a crash. The explicit `TerminateProcess` is belt-and-suspenders
-    /// for an immediate teardown; the job close is the guarantee.
+    /// Command-local relay, proxy and Job ownership. Cancellation closes parent sockets
+    /// and drains IPC before releasing the acquired policy/credential context.
     struct HelperGuard {
         job: HandleGuard,
         process: HandleGuard,
+        proxy: crate::proxy::EgressProxy,
+        relay: Option<crate::proxy::relay::Relay>,
     }
     impl HelperGuard {
         fn terminate(&self) {
+            self.proxy.stop();
+            if let Some(relay) = &self.relay {
+                relay.stop();
+            }
             unsafe {
                 windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job.0, 0);
             }
@@ -4233,80 +4243,36 @@ pub(super) mod launch {
             unsafe {
                 WaitForSingleObject(self.process.0, u32::MAX);
             }
+            self.relay.take();
         }
     }
 
-    /// Launch the CO-PACKAGE egress-proxy helper for the zero-privilege per-host funnel, and read
-    /// back the loopback port + bearer token it binds.
-    ///
-    /// The helper is nub itself, re-invoked through the embedder-registered command
-    /// ([`windows_egress_helper_command`](crate::backend::windows_egress_helper_command)) plus a
-    /// base64(JSON) [`NetPolicy`] argument, launched as an AppContainer LowBox with `ac_sid` (the
-    /// SAME package SID as the confined child) and `internetClient` (+ the client/server loopback
-    /// caps, matching the proven harness so the bind/accept is never the variable). It prints
-    /// `PROXY_READY port=<p> token=<t>` on the inherited stdout pipe read here.
-    ///
-    /// Grants NO file ACEs: the medium-IL parent opens the image section, and nub's own
-    /// dependencies load from `System32` (ALL APPLICATION PACKAGES readable) — the proven funnel
-    /// harness ran the same-shape helper this way with no per-file grant. The window-station ACE
-    /// the child already holds (step 1b) covers the helper too, since it shares `ac_sid`.
+    /// Launch a zero-capability byte relay. Preconnected pipe handles are the only
+    /// cross-boundary authority; the parent proxy owns all policy and TLS state.
     fn launch_egress_helper(
         ac_sid: PSID,
-        policy: &crate::policy::NetPolicy,
+        context: &crate::proxy::ProxyContext,
         command_env: Option<&std::collections::BTreeMap<String, String>>,
     ) -> io::Result<(u16, String, HelperGuard)> {
-        use base64::Engine as _;
         use std::os::windows::io::AsRawHandle as _;
-
-        // 1. Command line: the registered [image, hidden-flag] + the per-run serialized policy.
         let base = crate::backend::windows_egress_helper_command()
             .ok_or_else(|| io::Error::other("no Windows egress-helper command is registered"))?;
-        let (program, flag_args) = base
+        let (program, args) = base
             .split_first()
             .ok_or_else(|| io::Error::other("the Windows egress-helper command is empty"))?;
-        let json = serde_json::to_vec(policy).map_err(io::Error::other)?;
-        let blob = base64::engine::general_purpose::STANDARD.encode(&json);
-        let mut argv: Vec<std::ffi::OsString> = flag_args.to_vec();
-        argv.push(std::ffi::OsString::from(blob));
-        let mut cmdline = build_command_line(program, &crate::backend::CommandArgs::Argv(argv));
-
-        // 2. A pipe carrying the helper's stdout back to nub (PROXY_READY). Only the WRITE end is
-        //    marked inheritable and scoped into the child via the handle list; the read end stays
-        //    private to nub.
-        let (reader, writer) = std::io::pipe()?;
-        let w: HANDLE = writer.as_raw_handle().cast();
-        if unsafe { SetHandleInformation(w, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // 3. SECURITY_CAPABILITIES: the child's package SID + internetClient (+ loopback
-        //    client/server caps, per the proven harness). The HELPER is trusted nub code, not the
-        //    sandboxed principal — the confined child holds ZERO capabilities.
-        let cap_owned: Vec<CapSid> = [
-            INTERNET_CLIENT_SID,
-            INTERNET_CLIENT_SERVER_SID,
-            PRIVATE_NETWORK_CLIENT_SERVER_SID,
-        ]
-        .iter()
-        .map(|s| CapSid::new(s))
-        .collect::<io::Result<_>>()?;
-        let mut caps: Vec<SID_AND_ATTRIBUTES> = cap_owned
-            .iter()
-            .map(|c| SID_AND_ATTRIBUTES {
-                Sid: c.0,
-                Attributes: SE_GROUP_ENABLED,
-            })
-            .collect();
+        let mut cmdline =
+            build_command_line(program, &crate::backend::CommandArgs::Argv(args.to_vec()));
+        let proxy = context.start()?;
+        let token = proxy.token().to_string();
+        let (parent_read, helper_write) = crate::proxy::relay::pipe::pair(true)?;
+        let (parent_write, helper_read) = crate::proxy::relay::pipe::pair(false)?;
+        let inherit = [helper_read.as_raw_handle(), helper_write.as_raw_handle()];
         let mut sec_caps = SECURITY_CAPABILITIES {
             AppContainerSid: ac_sid,
-            Capabilities: caps.as_mut_ptr(),
-            CapabilityCount: caps.len() as u32,
+            Capabilities: std::ptr::null_mut(),
+            CapabilityCount: 0,
             Reserved: 0,
         };
-
-        // 4. Proc-thread attribute list: SECURITY_CAPABILITIES + a HANDLE_LIST scoping inheritance
-        //    to exactly the stdout write end.
-        let inherit = [w];
         let job_guard = HandleGuard(create_process_job(true)?);
         let jobs = [job_guard.0];
         let mut attr = ProcThreadAttrList::new(3)?;
@@ -4323,22 +4289,17 @@ pub(super) mod launch {
         attr.update(
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
             inherit.as_ptr().cast_mut().cast(),
-            std::mem::size_of::<HANDLE>() * inherit.len(),
+            std::mem::size_of_val(&inherit),
         )?;
-
-        // 5. STARTUPINFOEX: stdout+stderr → the pipe write end; stdin none. cwd = System32
-        //    (app-package-readable). Inherit the parent env (NULL lpEnvironment) — the helper is
-        //    nub itself and only needs enough env to start the proxy.
         let cwd_wide = to_wide(APP_PACKAGE_READABLE_CWD);
         let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
         si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
         si.lpAttributeList = attr.as_ptr();
         si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-        si.StartupInfo.hStdInput = std::ptr::null_mut();
-        si.StartupInfo.hStdOutput = w;
-        si.StartupInfo.hStdError = w;
-
-        // Only OS startup roots, never ambient or injected credential values.
+        si.StartupInfo.hStdInput = helper_read.as_raw_handle();
+        si.StartupInfo.hStdOutput = helper_write.as_raw_handle();
+        // stderr is not the binary transport and receives no inherited handle.
+        si.StartupInfo.hStdError = std::ptr::null_mut();
         let mut helper_env: std::collections::BTreeMap<String, String> = [
             "SystemRoot",
             "WINDIR",
@@ -4361,12 +4322,10 @@ pub(super) mod launch {
             | CREATE_NO_WINDOW
             | CREATE_UNICODE_ENVIRONMENT;
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-        // This helper is an AppContainer process too: keep its loader attachment out of a
-        // concurrent recorded-station borrow.
-        // SAFETY: cmdline/cwd_wide/attr/sec_caps/caps all outlive this call; lpCommandLine is a
-        // writable UTF-16 buffer; bInheritHandles TRUE so the scoped handle list takes effect.
         let ok = {
             let _station = crate::backend::windows_ace::station_guard();
+            // SAFETY: all startup buffers outlive CreateProcessW; only the two
+            // explicitly listed pipe endpoints are inherited by this helper.
             unsafe {
                 CreateProcessW(
                     std::ptr::null(),
@@ -4383,90 +4342,28 @@ pub(super) mod launch {
             }
         };
         if ok == 0 {
-            let error = io::Error::last_os_error();
-            return Err(io::Error::new(
-                error.kind(),
-                format!("CreateProcessW (AppContainer egress helper) failed: {error}"),
-            ));
+            return Err(io::Error::last_os_error());
         }
-        let _ = &cap_owned; // backs `sec_caps` — held alive until here
-
         let process = HandleGuard(pi.hProcess);
         let thread = HandleGuard(pi.hThread);
-        let guard = HelperGuard {
+        let mut guard = HelperGuard {
             job: job_guard,
             process,
+            proxy,
+            relay: None,
         };
+        let (relay, ready) =
+            crate::proxy::relay::Relay::parent(parent_read, parent_write, guard.proxy.port())?;
+        guard.relay = Some(relay);
+        drop(helper_read);
+        drop(helper_write);
         if unsafe { ResumeThread(thread.0) } == u32::MAX {
             return Err(io::Error::last_os_error());
         }
-        // 7. nub drops its own copy of the write end (else the reader never sees EOF), then reads
-        //    PROXY_READY off the pipe on a worker thread, bounded by a deadline. The worker RETURNS
-        //    as soon as it has the line (closing nub's read end), so it does not linger; on the
-        //    helper's death the read end sees EOF and the worker exits too.
-        drop(writer);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let reader_thread = std::thread::spawn(move || {
-            use std::io::BufRead as _;
-            let mut buf = std::io::BufReader::new(reader);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match buf.read_line(&mut line) {
-                    Ok(0) => {
-                        let _ = tx.send(None);
-                        return;
-                    }
-                    Ok(_) => {
-                        if let Some(rest) = line.trim().strip_prefix("PROXY_READY") {
-                            let mut port = 0u16;
-                            let mut token = String::new();
-                            for field in rest.split_whitespace() {
-                                if let Some(v) = field.strip_prefix("port=") {
-                                    port = v.parse().unwrap_or(0);
-                                } else if let Some(v) = field.strip_prefix("token=") {
-                                    token = v.to_string();
-                                }
-                            }
-                            let _ = tx.send(Some((port, token)));
-                            return;
-                        }
-                        if line.contains("PROXY_START_FAIL") {
-                            let _ = tx.send(None);
-                            return;
-                        }
-                        // Diagnostic principal dump (gated in the helper) — surface it so a
-                        // verification run can compare the helper's SID against the child's.
-                        if line.contains("TOKEN[") {
-                            eprint!("{line}");
-                        }
-                    }
-                    Err(_) => {
-                        let _ = tx.send(None);
-                        return;
-                    }
-                }
-            }
-        });
-
-        let ready = rx.recv_timeout(std::time::Duration::from_secs(20));
-        if !matches!(&ready, Ok(Some((port, token))) if *port != 0 && !token.is_empty()) {
-            drop(guard);
-            let _ = reader_thread.join();
-            return Err(io::Error::other(
-                "the co-package egress-funnel helper did not report a ready proxy",
-            ));
-        }
-        let _ = reader_thread.join();
-        match ready {
-            Ok(Some((port, token))) if port != 0 && !token.is_empty() => Ok((port, token, guard)),
-            _ => {
-                // guard drops here → helper reaped.
-                Err(io::Error::other(
-                    "the co-package egress-funnel helper did not report a ready proxy",
-                ))
-            }
-        }
+        let port = ready
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|_| io::Error::other("the co-package byte relay did not report readiness"))?;
+        Ok((port, token, guard))
     }
 
     #[cfg(test)]
@@ -5219,7 +5116,7 @@ mod tests {
         assert_eq!(plan_net(&net, true), WinNetPlan::Funnel);
         net.inspection = Inspection::TlsInspect;
         assert_eq!(plan_net(&net, false), WinNetPlan::Unsupported);
-        assert_eq!(plan_net(&net, true), WinNetPlan::Unsupported);
+        assert_eq!(plan_net(&net, true), WinNetPlan::Funnel);
     }
 
     // `apply` is `#[cfg(windows)]`, so this test compiles + runs only on the Windows VM/CI.
@@ -5377,8 +5274,10 @@ mod tests {
             ..Default::default()
         });
 
+        let mut unrestricted = full_disk(NetPolicy::default());
+        unrestricted.fs.tmp = crate::policy::TmpMode::Shared;
         let prepared = apply(
-            &full_disk(NetPolicy::default()),
+            &unrestricted,
             crate::CommandSpec::new("cmd.exe"),
             None,
             None,

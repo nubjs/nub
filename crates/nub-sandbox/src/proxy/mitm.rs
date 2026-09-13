@@ -264,6 +264,11 @@ impl MitmEngine {
         self.ca.bundle_path()
     }
 
+    #[cfg(windows)]
+    pub(crate) fn bundle_file(&self) -> &std::fs::File {
+        self.ca.bundle_file()
+    }
+
     #[cfg(target_os = "linux")]
     pub fn bundle_file(&self) -> std::io::Result<std::fs::File> {
         self.ca.bundle_file()
