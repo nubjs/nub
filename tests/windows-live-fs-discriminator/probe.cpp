@@ -57,8 +57,8 @@ using NtCreateFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES
                                         PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
 using NtOpenFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
                                       ULONG, ULONG);
-using NtQueryAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, PFILE_BASIC_INFORMATION);
-using NtQueryFullAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, PFILE_NETWORK_OPEN_INFORMATION);
+using NtQueryAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, FILE_BASIC_INFORMATION*);
+using NtQueryFullAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, FILE_NETWORK_OPEN_INFORMATION*);
 using NtCreateSectionFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER,
                                            ULONG, ULONG, HANDLE);
 using NtMapViewOfSectionFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T,
@@ -113,8 +113,8 @@ NTSTATUS duplicate_brokered_dll(PHANDLE file, PIO_STATUS_BLOCK io_status) {
   return kStatusSuccess;
 }
 
-NTSTATUS describe_brokered_dll(PFILE_BASIC_INFORMATION basic,
-                               PFILE_NETWORK_OPEN_INFORMATION full) {
+NTSTATUS describe_brokered_dll(FILE_BASIC_INFORMATION* basic,
+                               FILE_NETWORK_OPEN_INFORMATION* full) {
   BY_HANDLE_FILE_INFORMATION info = {};
   FILE_STANDARD_INFO standard = {};
   if (!g_brokered_dll || !GetFileInformationByHandle(g_brokered_dll, &info) ||
@@ -243,7 +243,7 @@ NTSTATUS NTAPI shim_nt_open_file(PHANDLE file, ACCESS_MASK desired_access,
 }
 
 NTSTATUS NTAPI shim_nt_query_attributes_file(POBJECT_ATTRIBUTES object_attributes,
-                                             PFILE_BASIC_INFORMATION file_attributes) {
+                                             FILE_BASIC_INFORMATION* file_attributes) {
   const NTSTATUS status = g_native_open_hooks.query_original(object_attributes, file_attributes);
   if (status >= 0 || !native_name_matches_brokered_dll(object_attributes)) return status;
   ++g_query_broker_calls;
@@ -251,7 +251,7 @@ NTSTATUS NTAPI shim_nt_query_attributes_file(POBJECT_ATTRIBUTES object_attribute
 }
 
 NTSTATUS NTAPI shim_nt_query_full_attributes_file(POBJECT_ATTRIBUTES object_attributes,
-                                                  PFILE_NETWORK_OPEN_INFORMATION file_attributes) {
+                                                  FILE_NETWORK_OPEN_INFORMATION* file_attributes) {
   const NTSTATUS status = g_native_open_hooks.query_full_original(object_attributes, file_attributes);
   if (status >= 0 || !native_name_matches_brokered_dll(object_attributes)) return status;
   ++g_query_full_broker_calls;
