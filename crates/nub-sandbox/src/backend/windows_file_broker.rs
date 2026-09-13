@@ -829,14 +829,16 @@ mod tests {
         // `files` remains a sibling of the project grant, so its globbed
         // entries cannot acquire an inherited AppContainer ACL.
         assert!(!files.starts_with(&project));
-        let mut authority_fs = serde_json::Map::from([
+        let mut authority_fs: serde_json::Map<String, serde_json::Value> = [
             ("./".to_string(), serde_json::json!("r")),
             ("$tmp".to_string(), serde_json::json!(false)),
             (
                 format!("{}/*.json", files.display()),
                 serde_json::json!("rw"),
             ),
-        ]);
+        ]
+        .into_iter()
+        .collect();
         if dll.is_some() {
             authority_fs.insert(
                 format!("{}/loader-*.dll", files.display()),
