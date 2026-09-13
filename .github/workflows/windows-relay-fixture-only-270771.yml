@@ -1,0 +1,117 @@
+name: Windows relay fixture-only gate 270771
+
+on:
+  push:
+    branches: [windows-relay-fixture-only-270771]
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - id: compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          git rev-parse HEAD | tee reports/source-head.txt
+          rustc -vV | tee reports/rustc-vV.txt
+          printf '%s\n' "$CARGO_BUILD_TARGET" | tee reports/rust-target.txt
+          cargo build --locked -p nub-sandbox --example windows_relay_fixture --message-format=json-render-diagnostics > reports/windows-relay-fixture-artifacts.jsonl
+          cargo build --locked -p nub-sandbox --example broker_session_fixture --message-format=json-render-diagnostics > reports/broker-session-fixture-artifacts.jsonl
+      - id: hashes
+        if: ${{ always() && steps.compile.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          function OneArtifact([string]$file, [string]$name) {
+            $items = @(Get-Content $file | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq $name -and $_.executable })
+            if ($items.Count -ne 1) { throw "Expected one $name executable, got $($items.Count)" }
+            return $items[0].executable
+          }
+          $relay = OneArtifact 'reports/windows-relay-fixture-artifacts.jsonl' 'windows_relay_fixture'
+          $broker = OneArtifact 'reports/broker-session-fixture-artifacts.jsonl' 'broker_session_fixture'
+          New-Item -ItemType Directory -Force reports/binaries | Out-Null
+          Copy-Item $relay reports/binaries/windows_relay_fixture.exe
+          Copy-Item $broker reports/binaries/broker_session_fixture.exe
+          @{ source = (git rev-parse HEAD).Trim(); target = $env:CARGO_BUILD_TARGET; os = (Get-CimInstance Win32_OperatingSystem).Caption; binaries = @(@{target='windows_relay_fixture';path=$relay;sha256=(Get-FileHash -Algorithm SHA256 $relay).Hash.ToLowerInvariant()},@{target='broker_session_fixture';path=$broker;sha256=(Get-FileHash -Algorithm SHA256 $broker).Hash.ToLowerInvariant()}) } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 reports/fixture-binaries.json
+      - id: ordinary_user
+        if: ${{ always() && steps.compile.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          function OneArtifact([string]$file, [string]$name) {
+            $items = @(Get-Content $file | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq $name -and $_.executable })
+            if ($items.Count -ne 1) { throw "Expected one $name executable, got $($items.Count)" }
+            return $items[0].executable
+          }
+          $relay = OneArtifact 'reports/windows-relay-fixture-artifacts.jsonl' 'windows_relay_fixture'
+          $broker = OneArtifact 'reports/broker-session-fixture-artifacts.jsonl' 'broker_session_fixture'
+          $name = 'sbx' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+          $stage = Join-Path $env:PUBLIC $name
+          $password = ConvertTo-SecureString ([guid]::NewGuid().ToString('N') + '!aA1') -AsPlainText -Force
+          $user = $null; $process = $null; $exitCode = 1
+          try {
+            $user = New-LocalUser -Name $name -Password $password -AccountNeverExpires -PasswordNeverExpires
+            Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
+            New-Item -ItemType Directory -Force $stage | Out-Null
+            Copy-Item $relay (Join-Path $stage 'windows_relay_fixture.exe'); Copy-Item $broker (Join-Path $stage 'broker_session_fixture.exe')
+          @'
+          param([string]$Stage)
+          $ErrorActionPreference = 'Stop'
+          $profileRoot = [Environment]::GetFolderPath('UserProfile')
+          if (!$profileRoot -or $profileRoot -like '*systemprofile*') { throw 'A normal user profile is required' }
+          $env:USERPROFILE = $profileRoot; $env:HOME = $profileRoot
+          $env:APPDATA = Join-Path $profileRoot 'AppData\Roaming'; $env:LOCALAPPDATA = Join-Path $profileRoot 'AppData\Local'
+          $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'; $env:TMP = $env:TEMP
+          New-Item -ItemType Directory -Force $env:TEMP | Out-Null
+          $owned = Join-Path $profileRoot 'sandbox-native-relay-probe'; New-Item -ItemType Directory -Force $owned | Out-Null
+          Copy-Item (Join-Path $Stage '*') $owned -Force; Set-Location $owned
+          whoami /all; Write-Host "STANDARD_USER_FIXTURE_PROFILE=$profileRoot"
+          foreach ($name in 'windows_relay_fixture','broker_session_fixture') { $hash=(Get-FileHash -Algorithm SHA256 "$name.exe").Hash.ToLowerInvariant(); Write-Host "STANDARD_USER_STAGED_BINARY_SHA256=${name}:$hash" }
+          & .\windows_relay_fixture.exe 2>&1 | Tee-Object windows_relay_fixture.log; $relayCode=$LASTEXITCODE
+          & .\broker_session_fixture.exe 2>&1 | Tee-Object broker_session_fixture.log; $brokerCode=$LASTEXITCODE
+          if ($relayCode -ne 0 -or $brokerCode -ne 0) { exit 1 }
+          if (!(Select-String -Path windows_relay_fixture.log -Pattern 'WINDOWS_PARENT_RELAY_OK' -Quiet)) { exit 1 }
+          if (!(Select-String -Path broker_session_fixture.log -Pattern 'BROKER_NATIVE_SESSION_OK' -Quiet)) { exit 1 }
+          '@ | Set-Content -Encoding ascii (Join-Path $stage 'run-fixtures.ps1')
+            icacls $stage /grant "${name}:(OI)(CI)RX" /T | Tee-Object reports/stage-acl.log
+            if ($LASTEXITCODE -ne 0) { throw 'Granting staged binary access failed' }
+            $credential = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $password)
+            Start-Service seclogon
+            $process = Start-Process powershell.exe -Credential $credential -LoadUserProfile -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"$stage\run-fixtures.ps1",$stage) -WorkingDirectory $stage -PassThru -RedirectStandardOutput 'reports/standard-user-fixtures.log' -RedirectStandardError 'reports/standard-user-fixtures-error.log'
+            if (!$process.WaitForExit(1200000)) { taskkill /PID $process.Id /T /F | Out-Null; throw 'Fixture batch exceeded deadline' }
+            $process.WaitForExit(); $exitCode = $process.ExitCode
+            Get-Content reports/standard-user-fixtures.log -ErrorAction Continue; Get-Content reports/standard-user-fixtures-error.log -ErrorAction Continue
+          } finally {
+            $cleanup=@{user=$name;errors=@()}; if ($user) { try { Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'" | Remove-CimInstance } catch {$cleanup.errors += $_.Exception.Message}; try {Remove-LocalUser -Name $name} catch {$cleanup.errors += $_.Exception.Message} }; try {if(Test-Path $stage){Remove-Item -Recurse -Force $stage}} catch {$cleanup.errors += $_.Exception.Message}; $cleanup|ConvertTo-Json -Depth 3|Set-Content -Encoding utf8 reports/standard-user-fixtures-cleanup.json; if($cleanup.errors.Count){$exitCode=1}
+          }
+          exit $exitCode
+      - name: Aggregate
+        if: always()
+        shell: bash
+        run: |
+          printf 'compile=%s\nhashes=%s\nordinary-user=%s\n' '${{ steps.compile.outcome }}' '${{ steps.hashes.outcome }}' '${{ steps.ordinary_user.outcome }}' | tee reports/final-status.txt
+          test '${{ steps.compile.outcome }}' = success && test '${{ steps.hashes.outcome }}' = success && test '${{ steps.ordinary_user.outcome }}' = success
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-relay-fixture-only-270771-${{ matrix.runner }}
+          path: reports/
