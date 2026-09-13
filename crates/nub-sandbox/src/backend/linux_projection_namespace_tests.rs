@@ -8,7 +8,7 @@ use super::super::linux_supervisor::{
     EgressPolicy, ProjectedLaunch, SupervisedLaunch, SupervisedStdio, spawn_supervised_projected,
 };
 use super::*;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
 
@@ -54,6 +54,14 @@ fn namespace_fixture(root: &Path, exe: &Path) -> FsRuleSet {
     rules.entries.extend([
         rule("/app/namespace/*.json", FsAccess::ReadWrite),
         rule("/app/namespace/*.dir", FsAccess::ReadWrite),
+        rule(
+            "/app/namespace/directory-source.dir/*.json",
+            FsAccess::ReadWrite,
+        ),
+        rule(
+            "/app/namespace/directory-renamed.dir/*.json",
+            FsAccess::ReadWrite,
+        ),
         rule("/app/namespace/read-only.locked", FsAccess::Read),
         // `/app` remains traversal-only: this exact future leaf must not grant
         // authority to its siblings or parent directory.
@@ -75,6 +83,7 @@ fn namespace_fixture(root: &Path, exe: &Path) -> FsRuleSet {
         ("target.json", b"target".as_slice()),
         ("read-only.locked", b"read-only".as_slice()),
         ("nearest.txt", b"nearest-canary".as_slice()),
+        ("directory-neighbor.txt", b"directory-canary".as_slice()),
     ] {
         fs::write(namespace.join(name), bytes).unwrap();
     }
@@ -117,6 +126,23 @@ fn renameat2(old: &Path, new: &Path, flags: u32) -> io::Result<()> {
 fn write_existing(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
     file.write_all(bytes)
+}
+
+fn read_at(directory: &File, name: &std::ffi::CStr) -> io::Result<Vec<u8>> {
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn case_marker(case: &str, projected: bool) {
@@ -192,6 +218,57 @@ fn namespace_command(root: &Path, projected: bool) {
         b"exchange-left"
     );
     case_marker("rename_flags", projected);
+
+    let directory_source = namespace.join("directory-source.dir");
+    let directory_renamed = namespace.join("directory-renamed.dir");
+    fs::create_dir(&directory_source).unwrap();
+    create(
+        &directory_source.join("fresh.json"),
+        b"fresh-directory-child",
+    )
+    .unwrap();
+    create(
+        &directory_source.join("retained.json"),
+        b"original-directory-handle",
+    )
+    .unwrap();
+    let directory = File::open(&directory_source).unwrap();
+    let mut retained_directory_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory_source.join("retained.json"))
+        .unwrap();
+    fs::rename(&directory_source, &directory_renamed).unwrap();
+    let mut fresh = File::open(directory_renamed.join("fresh.json")).unwrap();
+    let mut fresh_bytes = Vec::new();
+    fresh.read_to_end(&mut fresh_bytes).unwrap();
+    assert_eq!(fresh_bytes, b"fresh-directory-child");
+    assert_eq!(
+        read_at(&directory, c"fresh.json").unwrap(),
+        b"fresh-directory-child"
+    );
+    retained_directory_file.seek(SeekFrom::Start(0)).unwrap();
+    retained_directory_file
+        .write_all(b"retained-directory-handle")
+        .unwrap();
+    retained_directory_file.seek(SeekFrom::Start(0)).unwrap();
+    let mut retained_directory_bytes = Vec::new();
+    retained_directory_file
+        .read_to_end(&mut retained_directory_bytes)
+        .unwrap();
+    assert_eq!(retained_directory_bytes, b"retained-directory-handle");
+    assert_eq!(
+        fs::read(directory_renamed.join("retained.json")).unwrap(),
+        b"retained-directory-handle"
+    );
+    if projected {
+        assert_errno(
+            fs::rename(&directory_renamed, namespace.join("directory-neighbor.txt")),
+            libc::EACCES,
+            "directory rename to nonmatching neighbor",
+        );
+    }
+    case_marker("directory_rename", projected);
 
     let mut held = OpenOptions::new()
         .read(true)
@@ -281,7 +358,13 @@ fn namespace_command(root: &Path, projected: bool) {
     println!("NAMESPACE_COMMAND_OK projected={projected}");
 }
 
-fn verify_backing(backing_root: &Path, projected: bool, nearest: &Snapshot, read_only: &Snapshot) {
+fn verify_backing(
+    backing_root: &Path,
+    projected: bool,
+    nearest: &Snapshot,
+    read_only: &Snapshot,
+    directory_neighbor: &Snapshot,
+) {
     let app = backing_root.join("app");
     let namespace = app.join("namespace");
     assert_eq!(
@@ -326,6 +409,20 @@ fn verify_backing(backing_root: &Path, projected: bool, nearest: &Snapshot, read
     assert!(!namespace.join("held-renamed.json").exists());
     assert!(!namespace.join("unlink.json").exists());
     assert!(!namespace.join("future.dir").exists());
+    assert!(!namespace.join("directory-source.dir").exists());
+    assert_eq!(
+        fs::read(namespace.join("directory-renamed.dir/fresh.json")).unwrap(),
+        b"fresh-directory-child"
+    );
+    assert_eq!(
+        fs::read(namespace.join("directory-renamed.dir/retained.json")).unwrap(),
+        b"retained-directory-handle"
+    );
+    assert_unchanged(
+        &namespace.join("directory-neighbor.txt"),
+        directory_neighbor,
+        "directory rename neighbor",
+    );
     assert_eq!(
         fs::read(app.join("exact-leaf.json")).unwrap(),
         b"exact-parent-leaf"
@@ -376,6 +473,7 @@ fn namespace_provider(root: &Path) {
     let namespace = root.join("raw/app/namespace");
     let nearest = snapshot(&namespace.join("nearest.txt"));
     let read_only = snapshot(&namespace.join("read-only.locked"));
+    let directory_neighbor = snapshot(&namespace.join("directory-neighbor.txt"));
     // Ensure the command's executable and its dependency are resolved through
     // the mounted provider rather than an inherited host file descriptor.
     for name in ["run", "math.so"] {
@@ -432,7 +530,13 @@ fn namespace_provider(root: &Path) {
         output.status.success(),
         "namespace mounted command failed: {output:?}"
     );
-    verify_backing(&root.join("raw"), true, &nearest, &read_only);
+    verify_backing(
+        &root.join("raw"),
+        true,
+        &nearest,
+        &read_only,
+        &directory_neighbor,
+    );
     println!("NAMESPACE_PROVIDER_OK");
 }
 
@@ -447,6 +551,7 @@ fn namespace_native_provider(root: &Path) {
     let namespace = raw.join("app/namespace");
     let nearest = snapshot(&namespace.join("nearest.txt"));
     let read_only = snapshot(&namespace.join("read-only.locked"));
+    let directory_neighbor = snapshot(&namespace.join("directory-neighbor.txt"));
     let rw = root.join("rw");
     let read = root.join("read");
     let rw_root = native_tests::recursive_view(&raw, &rw, false);
@@ -562,7 +667,7 @@ fn namespace_native_provider(root: &Path) {
         "native namespace command did not advance open/export counters: before={before:?} after={after:?}"
     );
     assert_ne!(resolver_tid, 0, "native namespace resolver has no TID");
-    verify_backing(&raw, true, &nearest, &read_only);
+    verify_backing(&raw, true, &nearest, &read_only, &directory_neighbor);
     println!("NAMESPACE_NATIVE_PROVIDER_NORMAL_UNMOUNT_OK");
 }
 
@@ -570,8 +675,9 @@ fn namespace_raw(root: &Path) {
     let namespace = root.join("app/namespace");
     let nearest = snapshot(&namespace.join("nearest.txt"));
     let read_only = snapshot(&namespace.join("read-only.locked"));
+    let directory_neighbor = snapshot(&namespace.join("directory-neighbor.txt"));
     namespace_command(root, false);
-    verify_backing(root, false, &nearest, &read_only);
+    verify_backing(root, false, &nearest, &read_only, &directory_neighbor);
     println!("NAMESPACE_RAW_OK");
 }
 
