@@ -1,0 +1,674 @@
+//! The settings a nub-incumbent project hands the engine (feature `pm-pnpm`).
+//!
+//! Under nub's profile the engine reads none of pnpm's own configuration, so
+//! what a pnpm project keeps in `pnpm-workspace.yaml` reaches the engine from
+//! here instead: one [`WorkspaceSettings`], applied where the yaml would be.
+//! Its sources are the ones a nub project has always had, lowest precedence
+//! first, in the order the previous engine resolved them:
+//!
+//! 1. nub's defaults: the global virtual store outside CI, and the store and
+//!    cache under nub's own cache directory;
+//! 2. `.npmrc`, the user's file before the project's;
+//! 3. `nub.jsonc`'s `install` block, the curated keys before `install.settings`;
+//! 4. `npm_config_*` variables, then `NUB_CACHE_DIR`.
+//!
+//! The neutral `package.json` fields of the workspace root join them; nothing
+//! else sets those, so they take no part in the order. Registry, credential,
+//! proxy and TLS keys stay out on purpose: the engine reads them from `.npmrc`
+//! and `npm_config_*` itself, under its own trust rules, and a copy in this
+//! layer would outrank those rules.
+
+use crate::project_config::{Hoist, InstallConfig, LinkerConfig};
+use anyhow::{Context, Result, anyhow, bail};
+use pnpm_config::WorkspaceSettings;
+use pnpm_config::naming_cases::to_camel_case;
+use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+/// Everything the merge reads, gathered up front so the merge itself touches
+/// neither the filesystem nor the process environment.
+struct Sources<'a> {
+    /// `.npmrc` files that exist, lowest precedence first, with their text.
+    npmrc: Vec<(PathBuf, String)>,
+    install: &'a InstallConfig,
+    /// `npm_config_*` and `NUB_CACHE_DIR`, in environment order.
+    env: Vec<(String, String)>,
+    /// The workspace root's `package.json`.
+    manifest: Map<String, Value>,
+    /// nub's cache directory, when one can be determined.
+    cache_root: Option<PathBuf>,
+    ci: bool,
+}
+
+/// A `.npmrc` value: `key=value`, or the repeated `key[]=value` list form.
+enum Raw {
+    Scalar(String),
+    List(Vec<String>),
+}
+
+/// The settings for the project containing `start_dir`.
+pub(crate) fn resolve(start_dir: &Path, install: &InstallConfig) -> Result<WorkspaceSettings> {
+    let root = workspace_root(start_dir);
+    let env = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, _)| setting_key_of_var(name).is_some() || name == "NUB_CACHE_DIR")
+        .collect();
+    let sources = Sources {
+        npmrc: npmrc_files(&root),
+        install,
+        env,
+        manifest: read_manifest(&root),
+        cache_root: nub_core::node::discovery::cache_dir(),
+        ci: std::env::var_os("CI").is_some(),
+    };
+    let merged = merge(&sources)?;
+    serde_json::from_value(Value::Object(merged))
+        .context("nub could not hand its install settings to the package manager")
+}
+
+fn merge(sources: &Sources) -> Result<Map<String, Value>> {
+    let known = known_keys();
+    let mut merged = Map::new();
+
+    for (path, text) in &sources.npmrc {
+        for (key, raw) in npmrc_entries(text) {
+            lift(&mut merged, &known, &key, raw, &path.display().to_string())?;
+        }
+    }
+
+    merged.extend(curated(sources.install)?);
+    let passthrough = sources.install.settings.as_ref();
+    for (key, value) in passthrough.into_iter().flatten() {
+        if !known.contains(key) {
+            bail!("install.settings.{key} is not a setting pnpm-workspace.yaml accepts");
+        }
+        check(key, value).map_err(|error| anyhow!("install.settings.{key}: {error}"))?;
+        merged.insert(key.clone(), value.clone());
+    }
+
+    for (name, value) in &sources.env {
+        if let Some(key) = setting_key_of_var(name) {
+            let source = format!("the {name} environment variable");
+            lift(
+                &mut merged,
+                &known,
+                key,
+                Raw::Scalar(value.clone()),
+                &source,
+            )?;
+        }
+    }
+    if let Some((_, dir)) = sources
+        .env
+        .iter()
+        .rfind(|(name, _)| name == "NUB_CACHE_DIR")
+        && !dir.is_empty()
+    {
+        merged.insert("cacheDir".to_owned(), Value::String(dir.clone()));
+    }
+
+    for (key, value) in manifest_settings(&sources.manifest) {
+        if passthrough.is_some_and(|settings| settings.contains_key(&key)) {
+            bail!(
+                "install.settings.{key} sets the same thing as {} in package.json; keep one of the two",
+                manifest_field(&key)
+            );
+        }
+        merged.insert(key, value);
+    }
+
+    // nub's defaults fill only what no source set. The shared store is a
+    // symlink layout, so it has nothing to say to a hoisted one.
+    let isolated = merged
+        .get("nodeLinker")
+        .is_none_or(|linker| linker.as_str() == Some("isolated"));
+    if !sources.ci
+        && isolated
+        && !merged.contains_key("enableGlobalVirtualStore")
+        && !merged.contains_key("virtualStoreType")
+    {
+        merged.insert("enableGlobalVirtualStore".to_owned(), Value::Bool(true));
+    }
+    if let Some(cache_root) = &sources.cache_root {
+        for (key, leaf) in [("storeDir", "store"), ("cacheDir", "pm")] {
+            if !merged.contains_key(key) {
+                let dir = cache_root.join(leaf).to_string_lossy().into_owned();
+                merged.insert(key.to_owned(), Value::String(dir));
+            }
+        }
+    }
+    Ok(merged)
+}
+
+/// `nub.jsonc`'s curated `install` keys, spelled as the engine's settings and
+/// lowered the way the previous engine lowered them.
+fn curated(install: &InstallConfig) -> Result<Map<String, Value>> {
+    let mut out = Map::new();
+    match &install.linker {
+        None => {}
+        Some(LinkerConfig::Pnp) => bail!(
+            "nub: `install.linker: \"pnp\"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]"
+        ),
+        Some(LinkerConfig::Hoisted) => {
+            out.insert("nodeLinker".to_owned(), json!("hoisted"));
+        }
+        Some(LinkerConfig::Global { .. }) => {
+            out.insert("nodeLinker".to_owned(), json!("isolated"));
+            out.insert("enableGlobalVirtualStore".to_owned(), json!(true));
+        }
+        Some(LinkerConfig::Isolated { hoist }) => {
+            out.insert("nodeLinker".to_owned(), json!("isolated"));
+            out.insert("enableGlobalVirtualStore".to_owned(), json!(false));
+            match hoist {
+                None => {}
+                Some(Hoist::Bool(enabled)) => {
+                    out.insert("hoist".to_owned(), json!(enabled));
+                    if *enabled {
+                        out.insert("hoistPattern".to_owned(), json!(["*"]));
+                    }
+                }
+                Some(Hoist::Patterns(patterns)) => {
+                    out.insert("hoist".to_owned(), json!(true));
+                    out.insert("hoistPattern".to_owned(), json!(patterns));
+                }
+            }
+        }
+    }
+    if let Some(patterns) = &install.public_hoist {
+        // Naming patterns narrows what is hoisted, so the blanket flag goes off
+        // rather than staying at whatever a lower source set.
+        out.insert("shamefullyHoist".to_owned(), json!(false));
+        out.insert("publicHoistPattern".to_owned(), json!(patterns));
+    }
+    if let Some(age) = install.minimum_release_age {
+        // Rounded up: a sub-minute remainder must not weaken the gate.
+        out.insert(
+            "minimumReleaseAge".to_owned(),
+            json!(age.as_secs().div_ceil(60)),
+        );
+        out.insert("minimumReleaseAgeStrict".to_owned(), json!(true));
+    }
+    if let Some(exclude) = &install.minimum_release_age_exclude {
+        out.insert("minimumReleaseAgeExclude".to_owned(), json!(exclude));
+    }
+    Ok(out)
+}
+
+/// The neutral `package.json` fields that are settings in pnpm's vocabulary.
+fn manifest_settings(manifest: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = Map::new();
+    let mut overrides = Map::new();
+    // Both spellings are honored, and `overrides` is read last so it wins.
+    for field in ["resolutions", "overrides"] {
+        if let Some(Value::Object(pins)) = manifest.get(field) {
+            for (selector, spec) in pins {
+                if spec.is_string() && !selector.is_empty() {
+                    overrides.insert(selector.clone(), spec.clone());
+                }
+            }
+        }
+    }
+    if !overrides.is_empty() {
+        out.insert("overrides".to_owned(), Value::Object(overrides));
+    }
+    for field in [
+        "packageExtensions",
+        "patchedDependencies",
+        "allowedDeprecatedVersions",
+    ] {
+        if let Some(value @ Value::Object(_)) = manifest.get(field) {
+            out.insert(field.to_owned(), value.clone());
+        }
+    }
+    if let Some(Value::Object(workspaces)) = manifest.get("workspaces") {
+        for field in ["catalog", "catalogs"] {
+            if let Some(value @ Value::Object(_)) = workspaces.get(field) {
+                out.insert(field.to_owned(), value.clone());
+            }
+        }
+    }
+    out
+}
+
+/// How a user wrote the `package.json` field behind a setting.
+fn manifest_field(setting: &str) -> String {
+    match setting {
+        "overrides" => "`overrides` or `resolutions`".to_owned(),
+        "catalog" | "catalogs" => format!("`workspaces.{setting}`"),
+        other => format!("`{other}`"),
+    }
+}
+
+/// Record one `.npmrc` or environment entry, if it names a setting this layer
+/// carries. Keys pnpm does not know are npm's own and pass by silently; a
+/// known key with a value pnpm would refuse is an error naming its source.
+fn lift(
+    merged: &mut Map<String, Value>,
+    known: &BTreeSet<String>,
+    key: &str,
+    raw: Raw,
+    source: &str,
+) -> Result<()> {
+    if read_by_engine(key) {
+        return Ok(());
+    }
+    let setting = to_camel_case(key);
+    if !known.contains(&setting) {
+        return Ok(());
+    }
+    let value = match raw {
+        Raw::Scalar(raw) => typed(&setting, &raw).with_context(|| {
+            format!("{source} sets `{key}` to `{raw}`, which is not a value pnpm accepts for it")
+        })?,
+        Raw::List(items) => {
+            let value = json!(items);
+            check(&setting, &value).map_err(|error| anyhow!("{source} sets `{key}[]`: {error}"))?;
+            value
+        }
+    };
+    merged.insert(setting, value);
+    Ok(())
+}
+
+/// The setting an `npm_config_*` variable names, in its raw spelling.
+fn setting_key_of_var(name: &str) -> Option<&str> {
+    const PREFIX: &str = "npm_config_";
+    let head = name.get(..PREFIX.len())?;
+    head.eq_ignore_ascii_case(PREFIX)
+        .then(|| &name[PREFIX.len()..])
+        .filter(|key| !key.is_empty())
+}
+
+/// Whether the engine reads `key` from `.npmrc` and the environment itself.
+/// `user-agent` is here too: the engine sends its own, and an `npm run`
+/// parent exports npm's to every child.
+fn read_by_engine(key: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "registry",
+        "_auth",
+        "_authToken",
+        "_password",
+        "username",
+        "email",
+        "tokenHelper",
+        "token-helper",
+        "https-proxy",
+        "http-proxy",
+        "proxy",
+        "no-proxy",
+        "noproxy",
+        "ca",
+        "cafile",
+        "cert",
+        "key",
+        "strict-ssl",
+        "local-address",
+        "npmrc-auth-file",
+        "userconfig",
+        "user-agent",
+    ];
+    let kebab = key.replace('_', "-");
+    key.starts_with("//")
+        || key.ends_with(":registry")
+        || KEYS.contains(&key)
+        || KEYS.contains(&kebab.as_str())
+}
+
+/// Every setting name `pnpm-workspace.yaml` accepts. The struct serializes
+/// every field under its own spelling, so this follows the engine across pin
+/// moves with nothing to keep in step by hand.
+fn known_keys() -> BTreeSet<String> {
+    match serde_json::to_value(WorkspaceSettings::default()) {
+        Ok(Value::Object(fields)) => fields.into_iter().map(|(key, _)| key).collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+/// Whether the engine accepts `value` for `setting`. The struct drops unknown
+/// keys rather than refusing them, so callers check the name first.
+fn check(setting: &str, value: &Value) -> Result<(), serde_json::Error> {
+    let mut one = Map::new();
+    one.insert(setting.to_owned(), value.clone());
+    serde_json::from_value::<WorkspaceSettings>(Value::Object(one)).map(drop)
+}
+
+/// A `.npmrc` string as the JSON value its setting takes. `.npmrc` carries no
+/// types, so each plausible reading is offered to the engine in turn.
+fn typed(setting: &str, raw: &str) -> Option<Value> {
+    let boolean = match raw {
+        "true" => Some(Value::Bool(true)),
+        "false" => Some(Value::Bool(false)),
+        _ => None,
+    };
+    let number = raw.parse::<i64>().ok().map(Value::from);
+    let list = json!(
+        raw.split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+    );
+    [
+        boolean,
+        number,
+        Some(Value::String(raw.to_owned())),
+        Some(list),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| check(setting, value).is_ok())
+}
+
+fn npmrc_entries(text: &str) -> Vec<(String, Raw)> {
+    let mut entries: Vec<(String, Raw)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(['#', ';', '[']) {
+            continue;
+        }
+        let (key, value) = match line.split_once('=') {
+            Some((key, value)) => (key.trim(), unquote(value.trim())),
+            // A bare key is npm's shorthand for `key=true`.
+            None => (line, "true"),
+        };
+        if let Some(base) = key.strip_suffix("[]") {
+            match entries.iter_mut().rfind(|(existing, _)| existing == base) {
+                Some((_, Raw::List(items))) => items.push(value.to_owned()),
+                _ => entries.push((base.to_owned(), Raw::List(vec![value.to_owned()]))),
+            }
+        } else {
+            entries.push((key.to_owned(), Raw::Scalar(value.to_owned())));
+        }
+    }
+    entries
+}
+
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
+/// The user's `.npmrc`, then the project's, keeping the files that exist.
+fn npmrc_files(root: &Path) -> Vec<(PathBuf, String)> {
+    let user = ["npm_config_userconfig", "NPM_CONFIG_USERCONFIG"]
+        .into_iter()
+        .find_map(|name| std::env::var_os(name).filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+        .or_else(|| dirs_next::home_dir().map(|home| home.join(".npmrc")));
+    let project = root.join(".npmrc");
+    let project = (user.as_ref() != Some(&project)).then_some(project);
+    user.into_iter()
+        .chain(project)
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(&path).ok()?;
+            Some((path, text))
+        })
+        .collect()
+}
+
+/// The directory whose `package.json` declares the workspace containing
+/// `start_dir`, found the way the engine finds it, or `start_dir` itself.
+fn workspace_root(start_dir: &Path) -> PathBuf {
+    start_dir
+        .ancestors()
+        .find(|dir| declares_workspace(&read_manifest(dir)))
+        .unwrap_or(start_dir)
+        .to_path_buf()
+}
+
+fn declares_workspace(manifest: &Map<String, Value>) -> bool {
+    let Some(workspaces) = manifest.get("workspaces") else {
+        return false;
+    };
+    workspaces
+        .as_array()
+        .or_else(|| workspaces.get("packages")?.as_array())
+        .is_some_and(|patterns| patterns.iter().any(Value::is_string))
+}
+
+fn read_manifest(dir: &Path) -> Map<String, Value> {
+    std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(text.trim_start_matches('\u{feff}')).ok())
+        .and_then(|value| match value {
+            Value::Object(manifest) => Some(manifest),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn sources(install: &InstallConfig) -> Sources<'_> {
+        Sources {
+            npmrc: Vec::new(),
+            install,
+            env: Vec::new(),
+            manifest: Map::new(),
+            cache_root: Some(PathBuf::from("/cache/nub")),
+            ci: false,
+        }
+    }
+
+    fn settings(value: Value) -> Option<Map<String, Value>> {
+        value.as_object().cloned()
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    /// Each rung is set by two sources, and the higher one must win: project
+    /// `.npmrc` over the user's, `nub.jsonc` over `.npmrc`, the environment
+    /// over `nub.jsonc`, and `NUB_CACHE_DIR` over its npm spelling.
+    #[test]
+    fn each_source_outranks_the_one_below_it() {
+        let install = InstallConfig {
+            settings: settings(json!({ "strictPeerDependencies": false, "nodeLinker": "hoisted" })),
+            ..Default::default()
+        };
+        let mut sources = sources(&install);
+        sources.npmrc = vec![
+            (
+                PathBuf::from("/home/.npmrc"),
+                "dedupe-peers=true\n".to_owned(),
+            ),
+            (
+                PathBuf::from("/app/.npmrc"),
+                "dedupe-peers=false\nstrict-peer-dependencies=true\n".to_owned(),
+            ),
+        ];
+        sources.env = env(&[
+            ("npm_config_node_linker", "isolated"),
+            ("npm_config_cache_dir", "/from/npm"),
+            ("NUB_CACHE_DIR", "/from/nub"),
+        ]);
+
+        let merged = merge(&sources).expect("merge");
+
+        assert_eq!(merged["dedupePeers"], json!(false));
+        assert_eq!(merged["strictPeerDependencies"], json!(false));
+        assert_eq!(merged["nodeLinker"], json!("isolated"));
+        assert_eq!(merged["cacheDir"], json!("/from/nub"));
+        assert_eq!(merged["storeDir"], json!("/cache/nub/store"));
+        let resolved: WorkspaceSettings =
+            serde_json::from_value(Value::Object(merged)).expect("the engine accepts the merge");
+        assert_eq!(resolved.dedupe_peers, Some(false));
+    }
+
+    #[test]
+    fn curated_keys_lower_as_the_previous_engine_lowered_them() {
+        let install = InstallConfig {
+            linker: Some(LinkerConfig::Isolated {
+                hoist: Some(Hoist::Patterns(vec!["@types/*".to_owned()])),
+            }),
+            public_hoist: Some(vec!["*eslint*".to_owned()]),
+            minimum_release_age: Some(Duration::from_secs(61)),
+            minimum_release_age_exclude: Some(vec!["@internal/*".to_owned()]),
+            settings: None,
+        };
+
+        let merged = merge(&sources(&install)).expect("merge");
+
+        assert_eq!(merged["nodeLinker"], json!("isolated"));
+        assert_eq!(merged["enableGlobalVirtualStore"], json!(false));
+        assert_eq!(merged["hoist"], json!(true));
+        assert_eq!(merged["hoistPattern"], json!(["@types/*"]));
+        assert_eq!(merged["shamefullyHoist"], json!(false));
+        assert_eq!(merged["publicHoistPattern"], json!(["*eslint*"]));
+        assert_eq!(
+            merged["minimumReleaseAge"],
+            json!(2),
+            "61 seconds rounds up to 2 minutes"
+        );
+        assert_eq!(merged["minimumReleaseAgeStrict"], json!(true));
+        assert_eq!(merged["minimumReleaseAgeExclude"], json!(["@internal/*"]));
+    }
+
+    /// The shared store is nub's default only where it can apply: off in CI,
+    /// off for a hoisted layout, and never over an explicit choice.
+    #[test]
+    fn the_global_virtual_store_is_a_default_and_nothing_more() {
+        let plain = InstallConfig::default();
+        assert_eq!(
+            merge(&sources(&plain)).unwrap()["enableGlobalVirtualStore"],
+            json!(true)
+        );
+
+        let mut ci = sources(&plain);
+        ci.ci = true;
+        assert!(!merge(&ci).unwrap().contains_key("enableGlobalVirtualStore"));
+
+        let hoisted = InstallConfig {
+            linker: Some(LinkerConfig::Hoisted),
+            ..Default::default()
+        };
+        assert!(
+            !merge(&sources(&hoisted))
+                .unwrap()
+                .contains_key("enableGlobalVirtualStore")
+        );
+
+        let mut opted_out = sources(&plain);
+        opted_out.npmrc = vec![(
+            PathBuf::from("/app/.npmrc"),
+            "enable-global-virtual-store=false\n".to_owned(),
+        )];
+        assert_eq!(
+            merge(&opted_out).unwrap()["enableGlobalVirtualStore"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn neutral_package_json_fields_become_settings() {
+        let install = InstallConfig::default();
+        let mut sources = sources(&install);
+        sources.manifest = settings(json!({
+            "resolutions": { "is-odd>is-number": "6.0.0", "semver": "7.0.0" },
+            "overrides": { "is-odd>is-number": "7.0.0" },
+            "packageExtensions": { "foo@1": { "peerDependencies": { "bar": "*" } } },
+            "workspaces": { "packages": ["packages/*"], "catalog": { "react": "19.2.0" } }
+        }))
+        .unwrap();
+
+        let merged = merge(&sources).expect("merge");
+
+        assert_eq!(
+            merged["overrides"],
+            json!({ "is-odd>is-number": "7.0.0", "semver": "7.0.0" }),
+            "`overrides` wins a pin both fields set"
+        );
+        assert_eq!(
+            merged["packageExtensions"]["foo@1"]["peerDependencies"]["bar"],
+            json!("*")
+        );
+        assert_eq!(merged["catalog"], json!({ "react": "19.2.0" }));
+        assert!(
+            !merged.contains_key("packages"),
+            "membership is the engine's to read"
+        );
+    }
+
+    #[test]
+    fn install_settings_refuses_what_the_engine_would_not_accept() {
+        let refuse = |install: InstallConfig, manifest: Value, needle: &str| {
+            let mut sources = sources(&install);
+            sources.manifest = settings(manifest).unwrap();
+            let message = merge(&sources).expect_err(needle).to_string();
+            assert!(message.contains(needle), "{needle:?} not in {message:?}");
+        };
+        let passthrough = |value: Value| InstallConfig {
+            settings: settings(value),
+            ..Default::default()
+        };
+
+        refuse(
+            passthrough(json!({ "strictPeerDependency": true })),
+            json!({}),
+            "is not a setting",
+        );
+        refuse(
+            passthrough(json!({ "strictPeerDependencies": "yes" })),
+            json!({}),
+            "install.settings.strictPeerDependencies",
+        );
+        refuse(
+            passthrough(json!({ "overrides": { "a": "1.0.0" } })),
+            json!({ "resolutions": { "a": "2.0.0" } }),
+            "`overrides` or `resolutions` in package.json",
+        );
+    }
+
+    /// Credentials and registries are the engine's to read, npm's own keys pass
+    /// by, the list form collects, and a known key with a bad value names the
+    /// file it came from.
+    #[test]
+    fn npmrc_entries_lift_only_the_settings_this_layer_carries() {
+        let install = InstallConfig::default();
+        let mut sources = sources(&install);
+        sources.npmrc = vec![(
+            PathBuf::from("/app/.npmrc"),
+            "registry=https://registry.example/\n\
+             //registry.example/:_authToken=secret\n\
+             https-proxy=http://proxy.example/\n\
+             loglevel=warn\n\
+             public-hoist-pattern[]=*eslint*\n\
+             public-hoist-pattern[]=*prettier*\n"
+                .to_owned(),
+        )];
+        sources.env = env(&[("npm_config_user_agent", "npm/11.0.0 node/v26.0.0")]);
+
+        let merged = merge(&sources).expect("merge");
+
+        for absent in ["registry", "httpsProxy", "loglevel", "userAgent"] {
+            assert!(!merged.contains_key(absent), "{absent} must not be lifted");
+        }
+        assert!(!merged.keys().any(|key| key.contains("authToken")));
+        assert_eq!(
+            merged["publicHoistPattern"],
+            json!(["*eslint*", "*prettier*"])
+        );
+
+        sources.npmrc = vec![(
+            PathBuf::from("/app/.npmrc"),
+            "node-linker=sideways\n".to_owned(),
+        )];
+        sources.env.clear();
+        let message = merge(&sources)
+            .expect_err("an invalid value is refused")
+            .to_string();
+        assert!(
+            message.contains("/app/.npmrc") && message.contains("node-linker"),
+            "{message}"
+        );
+    }
+}

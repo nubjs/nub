@@ -1640,7 +1640,12 @@ fn validate_install(v: &Value, path: &str) -> Result<InstallConfig> {
 const CURATED_EQUIVALENTS: &[(&str, &[&str])] = &[
     (
         "linker",
-        &["nodeLinker", "enableGlobalVirtualStore", "hoist", "hoistPattern"],
+        &[
+            "nodeLinker",
+            "enableGlobalVirtualStore",
+            "hoist",
+            "hoistPattern",
+        ],
     ),
     ("publicHoist", &["publicHoistPattern", "shamefullyHoist"]),
     ("minimumReleaseAge", &["minimumReleaseAge"]),
@@ -1654,8 +1659,12 @@ const CURATED_EQUIVALENTS: &[(&str, &[&str])] = &[
 /// or were replaced by a neutral `package.json` field.
 fn excluded_setting(key: &str) -> Option<&'static str> {
     Some(match key {
-        "pnpmfile" | "ignorePnpmfile" | "tryLoadDefaultPnpmfile" | "globalShims"
-        | "pnpmHomeDir" | "pnpmExecPath" => {
+        "pnpmfile"
+        | "ignorePnpmfile"
+        | "tryLoadDefaultPnpmfile"
+        | "globalShims"
+        | "pnpmHomeDir"
+        | "pnpmExecPath" => {
             "is a pnpm file or directory setting, which a Nub project does not read"
         }
         "nodeVersion" | "executionEnv" | "useNodeVersion" => {
@@ -2221,7 +2230,10 @@ mod tests {
             r#"{ "install": { "settings": { "strictPeerDependencies": true, "dedupePeers": false } } }"#,
         );
         let settings = cfg.install.settings.expect("the table is kept");
-        assert_eq!(settings.get("strictPeerDependencies"), Some(&Value::Bool(true)));
+        assert_eq!(
+            settings.get("strictPeerDependencies"),
+            Some(&Value::Bool(true))
+        );
         assert_eq!(settings.get("dedupePeers"), Some(&Value::Bool(false)));
     }
 

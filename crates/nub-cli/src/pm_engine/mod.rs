@@ -56,6 +56,8 @@ mod compat_db;
 pub mod config_scope;
 mod duplicate_home;
 mod expo_compat;
+#[cfg(feature = "pm-pnpm")]
+mod host_settings;
 pub mod identity;
 pub mod info_family;
 pub mod install_family;
@@ -70,7 +72,9 @@ mod pnpm_engine;
 #[cfg(feature = "pm-pnpm")]
 mod project_identity;
 #[cfg(feature = "pm-pnpm")]
-pub(crate) use pnpm_engine::{run_process_argv as run_pnpm_engine, selected as pnpm_engine_selected};
+pub(crate) use pnpm_engine::{
+    run_process_argv as run_pnpm_engine, selected as pnpm_engine_selected,
+};
 pub mod present;
 pub mod publish_family;
 mod remix_compat;

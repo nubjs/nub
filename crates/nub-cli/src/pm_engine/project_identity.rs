@@ -62,7 +62,9 @@ fn identity_of_dir(dir: &Path) -> Option<ProjectIdentity> {
         Some(_) => return Some(ProjectIdentity::Nub),
         None => {}
     }
-    dir.join("nub.lock").exists().then_some(ProjectIdentity::Nub)
+    dir.join("nub.lock")
+        .exists()
+        .then_some(ProjectIdentity::Nub)
 }
 
 /// The package manager `dir`'s manifest names, from `packageManager` or
@@ -139,7 +141,11 @@ mod tests {
             let dir = tempdir().unwrap();
             write(&dir.path().join("package.json"), r#"{"name":"fx"}"#);
             write(&dir.path().join(marker), "");
-            assert_eq!(detect(dir.path()), ProjectIdentity::Pnpm, "{marker} must claim the project");
+            assert_eq!(
+                detect(dir.path()),
+                ProjectIdentity::Pnpm,
+                "{marker} must claim the project"
+            );
         }
         for manifest in [
             r#"{"name":"fx","packageManager":"pnpm@12.4.1"}"#,
@@ -147,7 +153,11 @@ mod tests {
         ] {
             let dir = tempdir().unwrap();
             write(&dir.path().join("package.json"), manifest);
-            assert_eq!(detect(dir.path()), ProjectIdentity::Pnpm, "a pnpm pin must claim the project");
+            assert_eq!(
+                detect(dir.path()),
+                ProjectIdentity::Pnpm,
+                "a pnpm pin must claim the project"
+            );
         }
     }
 
@@ -159,7 +169,11 @@ mod tests {
         let dir = tempdir().unwrap();
         write(&dir.path().join("package.json"), r#"{"name":"fx"}"#);
         assert_eq!(detect(dir.path()), ProjectIdentity::Nub);
-        assert_eq!(detect(tempdir().unwrap().path()), ProjectIdentity::Nub, "a fresh directory is nub's");
+        assert_eq!(
+            detect(tempdir().unwrap().path()),
+            ProjectIdentity::Nub,
+            "a fresh directory is nub's"
+        );
     }
 
     /// npm, yarn and bun no longer confer an identity of their own — a repo
@@ -169,16 +183,26 @@ mod tests {
     fn another_package_managers_pin_does_not_claim_the_project() {
         for name in ["npm@11.0.0", "yarn@4.0.0", "bun@1.1.0"] {
             let dir = tempdir().unwrap();
-            write(&dir.path().join("package.json"), &format!(r#"{{"name":"fx","packageManager":"{name}"}}"#));
+            write(
+                &dir.path().join("package.json"),
+                &format!(r#"{{"name":"fx","packageManager":"{name}"}}"#),
+            );
             write(&dir.path().join("package-lock.json"), "{}");
-            assert_eq!(detect(dir.path()), ProjectIdentity::Nub, "{name} must not claim the project");
+            assert_eq!(
+                detect(dir.path()),
+                ProjectIdentity::Nub,
+                "{name} must not claim the project"
+            );
         }
     }
 
     #[test]
     fn a_command_run_inside_a_member_reaches_the_roots_verdict() {
         let root = tempdir().unwrap();
-        write(&root.path().join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+        write(
+            &root.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        );
         let member = root.path().join("packages").join("a");
         write(&member.join("package.json"), r#"{"name":"@fx/a"}"#);
         assert_eq!(detect(&member), ProjectIdentity::Pnpm);
@@ -189,7 +213,10 @@ mod tests {
     #[test]
     fn the_nearest_marker_wins_over_a_further_ancestor() {
         let root = tempdir().unwrap();
-        write(&root.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        write(
+            &root.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        );
         let nested = root.path().join("vendored").join("tool");
         write(&nested.join("package.json"), r#"{"name":"tool"}"#);
         write(&nested.join("nub.lock"), "lockfileVersion: '9.0'\n");
@@ -198,15 +225,23 @@ mod tests {
 
     #[test]
     fn an_install_block_is_rejected_only_in_a_pnpm_project() {
-        let configured =
-            InstallConfig { public_hoist: Some(vec!["*".to_string()]), ..Default::default() };
+        let configured = InstallConfig {
+            public_hoist: Some(vec!["*".to_string()]),
+            ..Default::default()
+        };
         let path = Path::new("/fx/nub.jsonc");
 
         let err = check_install_block(ProjectIdentity::Pnpm, path, &configured)
             .expect_err("an install block under pnpm incumbency is not a sound configuration");
         let message = err.to_string();
-        assert!(message.contains("nub.jsonc"), "the message must name nub's file: {message}");
-        assert!(message.contains("pnpm-workspace.yaml"), "the message must name pnpm's file: {message}");
+        assert!(
+            message.contains("nub.jsonc"),
+            "the message must name nub's file: {message}"
+        );
+        assert!(
+            message.contains("pnpm-workspace.yaml"),
+            "the message must name pnpm's file: {message}"
+        );
 
         check_install_block(ProjectIdentity::Nub, path, &configured)
             .expect("a nub project is exactly where an install block belongs");
