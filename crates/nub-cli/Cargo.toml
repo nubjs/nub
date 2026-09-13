@@ -297,21 +297,14 @@ num_cpus = "1"
 libc.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-# The shared zero-privilege sandbox engine. nub injects it as the enforcement
-# backend for dependency lifecycle scripts (pm_engine/sandbox_closure.rs), so the
-# build jail and the agent sandbox run one implementation. Linux (Landlock) +
-# macOS (Seatbelt) are wired; the Windows AppContainer lifecycle seam is still
-# pending. nub-sandbox is PM-pure (it takes only paths + already-parsed data —
-# no nub-cli/nub-core/aube types).
+# Shared unprivileged sandbox for dependency lifecycle scripts and agent commands.
+# The engine accepts paths and resolved policy, without nub-cli/nub-core/aube types.
 nub-sandbox = { path = "../nub-sandbox" }
 
 [target.'cfg(windows)'.dependencies]
-# The shared zero-privilege sandbox engine, on Windows too: the AppContainer per-host
-# egress FUNNEL needs nub-cli to register the co-package helper launch command
-# (pm_engine/sandbox_closure.rs) and to dispatch its hidden re-entry to
-# `serve_windows_egress_helper` (cli.rs). The aube-scripts lifecycle seam stays unwired here
-# (that is why this was linux/macos-only before), but the agent sandbox reaches the backend
-# independently. Same PM-pure crate as the linux/macos block above.
+# The same engine serves Windows lifecycle scripts and agent commands. Windows also
+# registers the co-package egress helper in main.rs and dispatches its hidden entrypoint
+# to `serve_windows_egress_helper` in cli.rs.
 nub-sandbox = { path = "../nub-sandbox" }
 # CRT fd-level capture (_dup/_dup2/_pipe/_read) so `with_fd_captured` works on
 # Windows too — load-bearing for `config get registry`'s default-registry

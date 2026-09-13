@@ -307,6 +307,8 @@ extern "C" DWORD sandbox_file_broker_test_exclusive_overwrite(const wchar_t* roo
     using namespace nub_sandbox::file_broker;
     Api api;
     if (!api.create) return 1;
+    const NTSTATUS denied = kDenied;
+    const NTSTATUS missing = static_cast<NTSTATUS>(0xc0000034);
     auto overwrite = [&](const wchar_t* leaf, ULONG disposition, ULONG share,
                          NTSTATUS expected, ULONG_PTR information, bool zero_length,
                          bool check_read_conflict) {
@@ -323,8 +325,17 @@ extern "C" DWORD sandbox_file_broker_test_exclusive_overwrite(const wchar_t* roo
         NTSTATUS status = api.create(&file.value, FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attrs, &io,
             nullptr, FILE_ATTRIBUTE_NORMAL, share, disposition,
             FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
-        if (status != expected) return false;
-        if (status || !zero_length) return true;
+        std::fprintf(stderr,
+            "FILE_BROKER_OVERWRITE leaf=%ls allowed=%d disposition=%lu share=%lu status=%08lx expected=%08lx handle=%d\n",
+            leaf, int(allowed), disposition, share, static_cast<unsigned long>(status),
+            static_cast<unsigned long>(expected), file.value != nullptr);
+        // A noncreating open of an absent file may report absence before the
+        // raw access check. Neither outcome may return a handle or create the
+        // missing name; the parent also checks the host filesystem afterward.
+        bool raw_absent_denial = !allowed && expected == missing && status == denied;
+        if (status != expected && !raw_absent_denial) return false;
+        if (status) return file.value == nullptr;
+        if (!zero_length) return true;
         if (check_read_conflict) {
             IO_STATUS_BLOCK conflict_io = {};
             Handle conflict;
@@ -336,10 +347,8 @@ extern "C" DWORD sandbox_file_broker_test_exclusive_overwrite(const wchar_t* roo
         LARGE_INTEGER size = {};
         return io.Information == information && GetFileSizeEx(file.value, &size) && !size.QuadPart;
     };
-    const NTSTATUS denied = kDenied;
-    const NTSTATUS missing = static_cast<NTSTATUS>(0xc0000034);
     const NTSTATUS existing = allowed ? 0 : denied;
-    const NTSTATUS absent = allowed ? missing : denied;
+    const NTSTATUS absent = missing;
     const NTSTATUS create = allowed ? 0 : denied;
     DWORD failures = 0;
     if (!overwrite(L"exclusive-overwrite.json", FILE_OVERWRITE, 0, existing,
