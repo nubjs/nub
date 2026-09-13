@@ -11,8 +11,8 @@
 //! Axis mapping:
 //!   - reads:  base essential reads always; `default_effect == Allow` adds a
 //!     `(allow file-read* (subpath "/"))` generous base; each IR entry emits a
-//!     read allow/deny in order. `file-map-executable` shadows every read-allow so
-//!     dylibs in an allowed region load.
+//!     read allow/deny in order. `file-map-executable` and `process-exec` follow the
+//!     same paths so allowed libraries load and ungranted native binaries cannot run.
 //!   - writes: deny-default (the base denies all writes); ONLY a ReadWrite allow emits
 //!     `(allow file-write*)` and ONLY a Deny emits `(deny file-write*)`. An Allow is
 //!     purely additive on this axis — see the Read arm in [`emit_fs`] for why a
@@ -699,6 +699,8 @@ fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut
         for dir in &roots {
             let term = format!("(subpath \"{}\")", sbpl_escape(dir));
             out.push_str(&format!("(deny file-read* {term})\n"));
+            out.push_str(&format!("(deny file-map-executable {term})\n"));
+            out.push_str(&format!("(deny process-exec {term})\n"));
             out.push_str(&format!("(deny file-write* {term})\n"));
         }
         // Re-open the policy's OWN explicit grants that happen to live inside the shared tmp.
@@ -726,6 +728,7 @@ fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut
             let term = emit_term(&m);
             out.push_str(&format!("(allow file-read* {term})\n"));
             out.push_str(&format!("(allow file-map-executable {term})\n"));
+            out.push_str(&format!("(allow process-exec {term})\n"));
             if rule.access == FsAccess::ReadWrite {
                 out.push_str(&format!("(allow file-write* {term})\n"));
             }
@@ -738,6 +741,8 @@ fn emit_tmp(policy: &SandboxPolicy, tmp_dir: Option<&std::path::Path>, out: &mut
                 }
                 let term = emit_term(&to_match_term(rule.matcher.as_str()));
                 out.push_str(&format!("(deny file-read* {term})\n"));
+                out.push_str(&format!("(deny file-map-executable {term})\n"));
+                out.push_str(&format!("(deny process-exec {term})\n"));
                 out.push_str(&format!("(deny file-write* {term})\n"));
             }
         }
@@ -789,6 +794,7 @@ fn regrant_over_tmp_deny(term: &str, out: &mut String) {
     out.push_str(&format!("(allow file* {term})\n"));
     out.push_str(&format!("(allow file-read* {term})\n"));
     out.push_str(&format!("(allow file-map-executable {term})\n"));
+    out.push_str(&format!("(allow process-exec {term})\n"));
     out.push_str(&format!("(allow file-write* {term})\n"));
 }
 
@@ -852,6 +858,7 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
     if !fs_confines(policy) {
         // Fully relaxed fs — grant every file op (we wrapped only to enforce net).
         out.push_str("(allow file*)\n");
+        out.push_str("(allow process-exec)\n");
         return;
     }
 
@@ -860,6 +867,7 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
         // Unmatched reads allowed (generous base); entries below tighten it.
         out.push_str("(allow file-read* (subpath \"/\"))\n");
         out.push_str("(allow file-map-executable (subpath \"/\"))\n");
+        out.push_str("(allow process-exec (subpath \"/\"))\n");
     }
     // Auto-grant read/map of the target binary FILE so read-confine can exec it
     // (system tools are already covered by the essential base). Only the file — NOT
@@ -871,6 +879,7 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
     {
         out.push_str(&format!("(allow file-read* {term})\n"));
         out.push_str(&format!("(allow file-map-executable {term})\n"));
+        out.push_str(&format!("(allow process-exec {term})\n"));
     }
     for rule in &policy.fs.rules.entries {
         let term = emit_term(&to_match_term(rule.matcher.as_str()));
@@ -878,8 +887,13 @@ fn emit_fs(policy: &SandboxPolicy, spec: &CommandSpec, out: &mut String) {
             Effect::Allow => {
                 out.push_str(&format!("(allow file-read* {term})\n"));
                 out.push_str(&format!("(allow file-map-executable {term})\n"));
+                out.push_str(&format!("(allow process-exec {term})\n"));
             }
-            Effect::Deny => out.push_str(&format!("(deny file-read* {term})\n")),
+            Effect::Deny => {
+                out.push_str(&format!("(deny file-read* {term})\n"));
+                out.push_str(&format!("(deny file-map-executable {term})\n"));
+                out.push_str(&format!("(deny process-exec {term})\n"));
+            }
         }
     }
 
@@ -1924,10 +1938,11 @@ mod tests {
         // status — "booted" and "booted for the stated reason" are different claims — recovered
         // by differencing against the same profile built with no stdio paths, which also pins
         // that `emit_stdio_grants` really is the last thing appended.
-        let bare = build_profile_with_stdio(&policy, &spec(), None, None, None, &[]);
+        let command = CommandSpec::new(&node);
+        let bare = build_profile_with_stdio(&policy, &command, None, None, None, &[]);
         let run = |fd: &OwnedFd| -> (std::process::ExitStatus, String) {
             let paths: Vec<String> = stdio_fd_path(fd.as_raw_fd()).into_iter().collect();
-            let profile = build_profile_with_stdio(&policy, &spec(), None, None, None, &paths);
+            let profile = build_profile_with_stdio(&policy, &command, None, None, None, &paths);
             let granted = profile
                 .strip_prefix(bare.as_str())
                 .expect("stdio grants are appended after everything else")
@@ -2825,13 +2840,15 @@ mod tests {
         let regrant = prof
             .rfind(&format!("(allow file-read* (subpath \"{work}\"))"))
             .expect("the tmp-resident grant must be re-opened");
-        let deny = prof
-            .rfind("(deny file-read* (regex")
-            .expect("the .env floor must still be emitted");
-        assert!(
-            deny > regrant,
-            "the deny replay must follow the tmp re-grant, or $TMPDIR/work/.env reopens"
-        );
+        for operation in ["file-read*", "file-map-executable", "process-exec"] {
+            let deny = prof
+                .rfind(&format!("(deny {operation} (regex"))
+                .expect("the .env floor must still be emitted");
+            assert!(
+                deny > regrant,
+                "the {operation} deny must follow the tmp re-grant"
+            );
+        }
     }
 
     /// The re-grant preserves an explicit broad positive write grant under private tmp.

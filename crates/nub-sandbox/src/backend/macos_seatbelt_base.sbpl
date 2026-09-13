@@ -22,7 +22,6 @@
 (deny default)
 
 ; child processes inherit the parent policy (one-way ratchet)
-(allow process-exec)
 (allow process-fork)
 (allow signal (target same-sandbox))
 ; NOTE: process-info* is NOT granted here. It is ALLOWED-BY-DEFAULT even under
@@ -108,8 +107,8 @@
 
 ; openpty() and existing controlling ttys so interactive tools stay functional
 (allow pseudo-tty)
-(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
-(allow file-read* file-write*
+(allow process-exec file-read* file-write* file-ioctl (literal "/dev/ptmx"))
+(allow process-exec file-read* file-write*
   (require-all
     (regex #"^/dev/ttys[0-9]+")
     (extension "com.apple.sandbox.pty")))
@@ -162,7 +161,7 @@
 ; code runs, so EVERY Node fails under a read-confine that omits this, on every
 ; installation (macOS ships no system Node, so there is no configuration that
 ; escapes it). World-readable system config; granting read costs nothing.
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (subpath "/System/Library/OpenSSL"))
 ; `/usr/bin/shasum` — and every other system tool that is a `#!/usr/bin/perl`
 ; script — dyld-loads `libperl.dylib` from here. The framework grants above name
@@ -182,9 +181,9 @@
 ; Verified with `sandbox-exec`: the base profile reproduces the CI dyld error
 ; verbatim; adding this line alone restores the control digest. `file-map-executable`
 ; is not required — same finding as the toolchain-prefix grant below.
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (subpath "/System/Library/Perl"))
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (subpath "/Library/Apple")
   (subpath "/Library/Filesystems/NetFSPlugins")
   (subpath "/Library/Preferences/Logging")
@@ -195,7 +194,7 @@
   (subpath "/Library/Preferences")
   (subpath "/var/db")
   (subpath "/private/var/db"))
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (subpath "/Library/Apple/System/Library/Frameworks")
   (subpath "/Library/Apple/System/Library/PrivateFrameworks")
   (subpath "/Library/Apple/usr/lib")
@@ -222,12 +221,12 @@
   (literal "/private/etc/localtime"))
 (allow file-read-metadata file-test-existence
   (path-ancestors "/System/Volumes/Data/private"))
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (literal "/"))
 (allow system-fsctl (fsctl-command FSIOC_CAS_BSDFLAGS))
 
 ; standard special/config files
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (literal "/dev/autofs_nowait")
   (literal "/dev/random")
   (literal "/dev/urandom")
@@ -235,12 +234,12 @@
   (literal "/private/etc/passwd")
   (literal "/private/etc/protocols")
   (literal "/private/etc/services"))
-(allow file-read* file-test-existence file-write-data
+(allow process-exec file-read* file-test-existence file-write-data
   (literal "/dev/null")
   (literal "/dev/zero"))
-(allow file-read-data file-test-existence file-write-data
+(allow process-exec file-read-data file-test-existence file-write-data
   (subpath "/dev/fd"))
-(allow file-read* file-test-existence file-write-data file-ioctl
+(allow process-exec file-read* file-test-existence file-write-data file-ioctl
   (literal "/dev/dtracehelper"))
 ; `/etc` is granted by LEAF, never as a subpath. The wholesale subpath swept in
 ; `/etc/shadow` + `/etc/gshadow`, which the build-jail preset then carved back out with a
@@ -253,7 +252,7 @@
 ; `/etc` is a firmlink to `/private/etc`, so both spellings are granted. Beyond the standard
 ; config files granted above, these are the leaves a lifecycle script actually reaches: TLS
 ; trust roots, name resolution, and the `paths`/`paths.d` PATH seed.
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (subpath "/private/etc/ssl")
   (subpath "/etc/ssl")
   (subpath "/private/etc/paths.d")
@@ -285,7 +284,7 @@
   (literal "/private/etc/networks")
   (literal "/private/etc/paths")
   (literal "/etc/paths"))
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (literal "/System/Library/CoreServices")
   (literal "/System/Library/CoreServices/.SystemVersionPlatform.plist")
   (literal "/System/Library/CoreServices/SystemVersion.plist"))
@@ -319,33 +318,29 @@
 (allow network-outbound (literal "/private/var/run/syslog"))
 (allow ipc-posix-shm-read*
   (ipc-posix-name "apple.shm.notification_center"))
-(allow file-read*
+(allow process-exec file-read*
   (literal "/private/var/db/eligibilityd/eligibility.plist"))
 (allow mach-lookup (global-name "com.apple.audio.audiohald"))
 (allow mach-lookup (global-name "com.apple.audio.AudioComponentRegistrar"))
 
 ; the minimum system runtime paths so exec of a system tool works
-(allow file-read-data (subpath "/bin"))
+(allow process-exec file-read-data (subpath "/bin"))
 (allow file-read-metadata (subpath "/bin"))
-(allow file-read-data (subpath "/sbin"))
+(allow process-exec file-read-data (subpath "/sbin"))
 (allow file-read-metadata (subpath "/sbin"))
-(allow file-read-data (subpath "/usr/bin"))
+(allow process-exec file-read-data (subpath "/usr/bin"))
 (allow file-read-metadata (subpath "/usr/bin"))
-(allow file-read-data (subpath "/usr/sbin"))
+(allow process-exec file-read-data (subpath "/usr/sbin"))
 (allow file-read-metadata (subpath "/usr/sbin"))
-(allow file-read-data (subpath "/usr/libexec"))
+(allow process-exec file-read-data (subpath "/usr/libexec"))
 (allow file-read-metadata (subpath "/usr/libexec"))
-(allow file-read* (subpath "/Library/Preferences"))
-(allow file-read* (subpath "/Applications"))
+(allow process-exec file-read* (subpath "/Library/Preferences"))
+(allow process-exec file-read* (subpath "/Applications"))
 
 ; ── third-party toolchain prefixes ───────────────────────────────────────────
-; EXEC OF A BINARY REQUIRES READ ON THE BINARY. `(allow process-exec)` above is
-; necessary and NOT sufficient: with the path unreadable the kernel refuses the
-; exec itself, and the caller sees EPERM rather than anything naming a sandbox.
-; Measured on macOS 15 (one variable, matched pair):
-;     without these grants   java rc=71  execvp() ... Operation not permitted
-;     with these grants      java rc=0   openjdk version "26.0.1"
-; and identically for `git` (`git version 2.38.1`, rc=0).
+; Native executable loading does not require a separate file-read permission.
+; Keep process-exec scoped to the readable runtime paths rather than permitting
+; execution globally; interpreter file reads alone do not test that boundary.
 ;
 ; This block previously bound only `/opt/homebrew/lib` and `/usr/local/lib`, so
 ; every Homebrew BINARY — the `bin` symlinks and their `Cellar` targets — stayed
@@ -372,17 +367,17 @@
 ; world-readable toolchain content, no credentials, and the alternative for any
 ; package that shells out is no sandbox whatsoever. `file-map-executable` is NOT
 ; required — measured, adding it changed nothing.
-(allow file-read* file-test-existence
+(allow process-exec file-read* file-test-existence
   (subpath "/opt/homebrew")                     ; Homebrew, Apple Silicon
   (subpath "/usr/local")                        ; Homebrew on Intel; generic /usr/local
   (subpath "/opt/local")                        ; MacPorts
   (subpath "/Library/Java"))                    ; installer-placed JDKs (JAVA_HOME on CI runners)
 
 ; terminal basics + device metadata traversal
-(allow file-read* (regex "^/dev/fd/(0|1|2)$"))
+(allow process-exec file-read* (regex "^/dev/fd/(0|1|2)$"))
 (allow file-write* (regex "^/dev/fd/(1|2)$"))
-(allow file-read* file-write* (literal "/dev/null"))
-(allow file-read* file-write* (literal "/dev/tty"))
+(allow process-exec file-read* file-write* (literal "/dev/null"))
+(allow process-exec file-read* file-write* (literal "/dev/tty"))
 (allow file-read-metadata (literal "/dev"))
 (allow file-read-metadata (regex "^/dev/.*$"))
 (allow file-read-metadata (literal "/dev/stdin"))
@@ -390,13 +385,13 @@
 (allow file-read-metadata (literal "/dev/stderr"))
 (allow file-read-metadata (regex "^/dev/tty[^/]*$"))
 (allow file-read-metadata (regex "^/dev/pty[^/]*$"))
-(allow file-read* file-write* (regex "^/dev/ttys[0-9]+$"))
-(allow file-read* file-write* (literal "/dev/ptmx"))
+(allow process-exec file-read* file-write* (regex "^/dev/ttys[0-9]+$"))
+(allow process-exec file-read* file-write* (literal "/dev/ptmx"))
 (allow file-ioctl (regex "^/dev/ttys[0-9]+$"))
 (allow file-read-metadata (literal "/System/Volumes") (vnode-type DIRECTORY))
 (allow file-read-metadata (literal "/System/Volumes/Data") (vnode-type DIRECTORY))
 (allow file-read-metadata (literal "/System/Volumes/Data/Users") (vnode-type DIRECTORY))
 
 ; sandbox extensions the launcher may hand down
-(allow file-read* (extension "com.apple.app-sandbox.read"))
-(allow file-read* file-write* (extension "com.apple.app-sandbox.read-write"))
+(allow process-exec file-read* (extension "com.apple.app-sandbox.read"))
+(allow process-exec file-read* file-write* (extension "com.apple.app-sandbox.read-write"))

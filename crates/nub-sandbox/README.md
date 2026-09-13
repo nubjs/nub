@@ -17,6 +17,8 @@ The engine compiles filesystem, network and environment permissions for native c
 
 Directory grants cover descendants. Overlapping positive grants combine: a read-only grant does not remove an existing write grant. Filesystem deny entries such as `!~/.ssh` are rejected; Nub does not translate them into sibling grants.
 
+Read grants also permit loading libraries and executing files, subject to the operating system's executable permissions. There is no separate execute-only grant.
+
 The filesystem boolean `false` grants no authored paths; `true` requests unrestricted filesystem access. Backend runtime essentials still apply to a confined command. Prefer explicit paths for an allowlist:
 
 ```json
