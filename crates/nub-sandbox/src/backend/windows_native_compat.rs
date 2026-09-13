@@ -27,7 +27,7 @@ const ASSETS: &[(&str, &[u8])] = &[];
 pub(super) fn version() -> &'static str {
     static VERSION: LazyLock<String> = LazyLock::new(|| {
         let mut hash = Sha256::new();
-        hash.update(b"native-adapter/socket-broker-v2-internet");
+        hash.update(b"native-adapter/socket-broker-v2-internet/file-broker-v1");
         for (name, bytes) in ASSETS {
             hash.update(name.as_bytes());
             hash.update(bytes);
@@ -184,6 +184,7 @@ pub(super) fn inject(
     process: *mut std::ffi::c_void,
     path: &Path,
     broker: Option<&SocketBroker>,
+    file_broker: Option<&super::windows_file_broker::FileBroker>,
 ) -> io::Result<()> {
     #[cfg(target_env = "msvc")]
     {
@@ -192,6 +193,7 @@ pub(super) fn inject(
                 process: *mut std::ffi::c_void,
                 directory: *const u16,
                 broker: *const u16,
+                file_broker: *const u16,
             ) -> u32;
         }
         let path = super::windows::strip_verbatim_prefix(path.to_path_buf());
@@ -199,7 +201,9 @@ pub(super) fn inject(
         // SAFETY: the launcher owns this suspended process handle, and the FFI
         // copies the terminated directory string before returning.
         let endpoint = broker.map_or(std::ptr::null(), |broker| broker.endpoint.as_ptr());
-        let code = unsafe { sandbox_native_inject(process, wide.as_ptr(), endpoint) };
+        let file_endpoint = file_broker.map_or(std::ptr::null(), |broker| broker.endpoint.as_ptr());
+        let code =
+            unsafe { sandbox_native_inject(process, wide.as_ptr(), endpoint, file_endpoint) };
         if code != 0 {
             return Err(io::Error::other(format!(
                 "native sandbox compatibility injection: {}",
@@ -210,7 +214,7 @@ pub(super) fn inject(
     }
     #[cfg(not(target_env = "msvc"))]
     {
-        let _ = (process, path, broker);
+        let _ = (process, path, broker, file_broker);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "native compatibility requires an MSVC build",

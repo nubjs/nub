@@ -2984,6 +2984,7 @@ pub(super) mod launch {
                 relays: relay_threads,
                 helper: _egress_helper,
                 socket_broker: None,
+                file_broker: None,
                 _resource: self.state.clone(),
                 status: None,
                 tracked: Vec::new(),
@@ -2998,6 +2999,15 @@ pub(super) mod launch {
                 .as_ref()
                 .and_then(|state| state.native_compat.as_deref())
             {
+                // Private unit-harness seam only. No policy or environment knob
+                // enables this incomplete operation surface in production.
+                #[cfg(all(test, target_env = "msvc"))]
+                {
+                    child.file_broker = crate::backend::windows_file_broker::start_for_test(
+                        child.process.0,
+                        child.job.0,
+                    )?;
+                }
                 if self.native_full_network {
                     child.socket_broker =
                         Some(crate::backend::windows_native_compat::SocketBroker::start(
@@ -3009,6 +3019,7 @@ pub(super) mod launch {
                     child.process.0,
                     path,
                     child.socket_broker.as_ref(),
+                    child.file_broker.as_ref(),
                 )?;
             }
             if unsafe { ResumeThread(thread.0) } == u32::MAX {
@@ -3460,6 +3471,7 @@ pub(super) mod launch {
         relays: Vec<std::thread::JoinHandle<()>>,
         helper: Option<HelperGuard>,
         socket_broker: Option<crate::backend::windows_native_compat::SocketBroker>,
+        file_broker: Option<crate::backend::windows_file_broker::FileBroker>,
         _resource: Option<Arc<ResourceState>>,
         status: Option<ExitStatus>,
         tracked: Vec<(u32, HandleGuard)>,
@@ -3493,6 +3505,7 @@ pub(super) mod launch {
             // Keep synchronization handles before termination removes members
             // from the Job's active list. Termination itself is asynchronous.
             self.socket_broker.take();
+            self.file_broker.take();
             let snapshot = self.track_job_members();
             if let Some(helper) = &self.helper {
                 helper.terminate();
@@ -3682,6 +3695,7 @@ pub(super) mod launch {
             }
             let status = ExitStatus::from_raw(code);
             self.socket_broker.take();
+            self.file_broker.take();
             self.status = Some(status);
             Ok(Some(status))
         }
