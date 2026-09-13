@@ -3037,6 +3037,7 @@ dependencies = [
  "pem",
  "rcgen",
  "regex",
+ "regex-automata",
  "rustls",
  "rustls-native-certs",
  "seccompiler",
