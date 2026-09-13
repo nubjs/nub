@@ -64,8 +64,11 @@ jobs:
       - name: Running tmp-grant composition fixture
         run: |
           set -euo pipefail
+          set +e
           set -o pipefail
           cargo test --locked -p nub-sandbox --test tmp_grant_composition -- --nocapture --test-threads=1 2>&1 | tee reports/tmp-grant-composition.log
+          test_rc=$?
+          set -e
           test -x "$(find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f -name 'tmp_grant_composition-*' -perm -111 -print -quit)"
           binary="$(find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f -name 'tmp_grant_composition-*' -perm -111 -print -quit)"
           {
@@ -73,6 +76,7 @@ jobs:
             sha256sum "$binary" 2>/dev/null || shasum -a 256 "$binary"
             grep -E 'running [0-9]+ tests|test result:' reports/tmp-grant-composition.log
           } > reports/test-binary-and-count.txt
+          exit "$test_rc"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
