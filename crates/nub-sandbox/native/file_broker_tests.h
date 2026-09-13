@@ -82,8 +82,9 @@ extern "C" DWORD sandbox_file_broker_test_foreign_client(const wchar_t* name) {
 }
 
 // Called in the real test child, so GetProcAddress observes installed Detours.
-// `statuses` is an optional fixed-size diagnostic sink used by the parent-side
-// control. It records raw NTSTATUS values without changing the child verdict.
+// `statuses` is an optional six-slot diagnostic sink used by the parent-side
+// control. It records generic-only open/create, then the four actual calls,
+// without changing the child verdict.
 extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL allowed,
                                                       NTSTATUS* statuses) {
     using namespace nub_sandbox::file_broker;
@@ -104,18 +105,28 @@ extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL a
     auto basic = reinterpret_cast<QueryFn>(GetProcAddress(module, "NtQueryAttributesFile"));
     auto full = reinterpret_cast<QueryFn>(GetProcAddress(module, "NtQueryFullAttributesFile"));
     if (!open || !create || !basic || !full) return 2;
+    constexpr ACCESS_MASK actual_read = GENERIC_READ | SYNCHRONIZE;
     IO_STATUS_BLOCK io = {};
-    Handle first, second;
+    Handle first, second, generic_first, generic_second;
     alignas(8) BYTE metadata[56] = {};
     NTSTATUS results[] = {
-        open(&first.value, GENERIC_READ, &attrs, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        open(&first.value, actual_read, &attrs, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
              FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT),
-        create(&second.value, GENERIC_READ, &attrs, &io, nullptr, 0,
+        create(&second.value, actual_read, &attrs, &io, nullptr, 0,
             FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN,
             FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0),
         basic(&attrs, metadata), full(&attrs, metadata),
     };
-    if (statuses) memcpy(statuses, results, sizeof(results));
+    if (statuses) {
+        // Keep the unconfined discriminator out of the sandbox child: the
+        // tested contract is the documented synchronous desired-access mask.
+        statuses[0] = open(&generic_first.value, GENERIC_READ, &attrs, &io,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+        statuses[1] = create(&generic_second.value, GENERIC_READ, &attrs, &io, nullptr, 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
+        memcpy(statuses + 2, results, sizeof(results));
+    }
     DWORD failures = 0;
     for (DWORD i = 0; i < std::size(results); ++i) {
         if (allowed ? results[i] != 0 : results[i] != kDenied) failures |= 1u << (i + 4);

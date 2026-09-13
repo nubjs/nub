@@ -9,6 +9,16 @@ enum FileBrokerDiagnosticStage : DWORD {
     FileBrokerResponse = 3,
 };
 
+enum FileBrokerCaptureStatus : DWORD {
+    FileBrokerCaptureObjectAttributes = 1,
+    FileBrokerCaptureName = 2,
+    FileBrokerCapturePath = 3,
+    FileBrokerCaptureAccess = 4,
+    FileBrokerCaptureOptions = 5,
+    FileBrokerCaptureValidation = 6,
+    FileBrokerCaptureFault = 7,
+};
+
 static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status) {
     wchar_t value[2];
     if (!GetEnvironmentVariableW(L"NUB_JAIL_DUMP_POLICY", value, _countof(value))) return;
@@ -27,22 +37,42 @@ static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status) 
 }
 
 static bool capture_file_request(nub_sandbox::file_broker::Request& request,
-                                 POBJECT_ATTRIBUTES attrs) {
+                                 POBJECT_ATTRIBUTES attrs, DWORD& failure) {
     using namespace nub_sandbox::file_broker;
     // Neither pointers nor child handle values cross the protocol. Root-relative
     // calls require a separate authenticated handle-resolution protocol.
+    failure = FileBrokerCaptureFault;
     __try {
         if (!attrs || attrs->Length != sizeof(*attrs) || attrs->RootDirectory ||
             attrs->SecurityDescriptor || attrs->SecurityQualityOfService ||
-            attrs->Attributes != OBJ_CASE_INSENSITIVE || !attrs->ObjectName) return false;
+            attrs->Attributes != OBJ_CASE_INSENSITIVE || !attrs->ObjectName) {
+            failure = FileBrokerCaptureObjectAttributes;
+            return false;
+        }
         UNICODE_STRING name = *attrs->ObjectName;
         if (!name.Buffer || name.Length % sizeof(wchar_t) || name.Length < 8 * sizeof(wchar_t) ||
-            name.Length > name.MaximumLength || name.Length / sizeof(wchar_t) >= kPath + 4) return false;
+            name.Length > name.MaximumLength || name.Length / sizeof(wchar_t) >= kPath + 4) {
+            failure = FileBrokerCaptureName;
+            return false;
+        }
         // NT DOS paths only; the parent independently rejects unsupported names.
-        if (wcsncmp(name.Buffer, L"\\??\\", 4)) return false;
+        if (wcsncmp(name.Buffer, L"\\??\\", 4)) {
+            failure = FileBrokerCapturePath;
+            return false;
+        }
         request.length = name.Length / sizeof(wchar_t) - 4;
         memcpy(request.path, name.Buffer + 4, request.length * sizeof(wchar_t));
-        return validate(request) == 0;
+        if (validate(request) == 0) return true;
+        if (request.operation < Basic) {
+            DWORD access = access_mask(request.access);
+            if (!access || (access & ~(kRead | kWrite))) failure = FileBrokerCaptureAccess;
+            else if ((request.options & ~kOptions) ||
+                     !(request.options & FILE_SYNCHRONOUS_IO_NONALERT) ||
+                     ((request.options & FILE_SYNCHRONOUS_IO_NONALERT) && !(access & SYNCHRONIZE))) {
+                failure = FileBrokerCaptureOptions;
+            } else failure = FileBrokerCaptureValidation;
+        } else failure = FileBrokerCaptureValidation;
+        return false;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -109,8 +139,9 @@ static NTSTATUS broker_file_open(DWORD operation, PHANDLE handle, ACCESS_MASK ac
     ULONG options, ULONG attributes) {
     using namespace nub_sandbox::file_broker;
     Request request = {kVersion, sizeof(Request), operation, access, share, disposition, options, attributes};
-    if (!state.file_broker[0] || !capture_file_request(request, attrs)) {
-        diagnose_file_broker(FileBrokerCapture, ERROR_INVALID_PARAMETER);
+    DWORD capture = ERROR_INVALID_STATE;
+    if (!state.file_broker[0] || !capture_file_request(request, attrs, capture)) {
+        diagnose_file_broker(FileBrokerCapture, capture);
         return kDenied;
     }
     Response response = {};
@@ -156,8 +187,9 @@ static NtQueryFileAttributes true_query_full_attributes = nullptr;
 static NTSTATUS broker_file_attributes(DWORD operation, POBJECT_ATTRIBUTES attrs, PVOID output) {
     using namespace nub_sandbox::file_broker;
     Request request = {kVersion, sizeof(Request), operation};
-    if (!capture_file_request(request, attrs)) {
-        diagnose_file_broker(FileBrokerCapture, ERROR_INVALID_PARAMETER);
+    DWORD capture = ERROR_INVALID_STATE;
+    if (!capture_file_request(request, attrs, capture)) {
+        diagnose_file_broker(FileBrokerCapture, capture);
         return kDenied;
     }
     Response response = {};

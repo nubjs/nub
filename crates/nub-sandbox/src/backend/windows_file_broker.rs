@@ -291,6 +291,10 @@ mod tests {
             "NUB_FILE_BROKER_CANCELLATION_FILE".into(),
             file.to_str().unwrap().into(),
         );
+        policy
+            .env
+            .constructed
+            .insert("NUB_JAIL_DUMP_POLICY".into(), "1".into());
         let sandbox = Sandbox::with_windows_native_compat(&policy).unwrap();
         let mut prepared = sandbox
             .prepare(
@@ -686,13 +690,13 @@ mod tests {
                 .chain([0])
                 .collect();
             // SAFETY: native fixture owns every temporary handle.
-            let mut statuses = [0; 4];
+            let mut statuses = [0; 6];
             let result = unsafe {
                 sandbox_file_broker_test_four_calls(path.as_ptr(), 1, statuses.as_mut_ptr())
             };
             assert_eq!(
                 result, 0,
-                "unconfined four-call failure bits: {result:#x}; raw statuses: {statuses:x?}"
+                "unconfined four-call failure bits: {result:#x}; statuses [generic-open, generic-create, synchronized-open, synchronized-create, basic, full]: {statuses:x?}"
             );
         }
         if dll.is_some() {
@@ -728,6 +732,10 @@ mod tests {
                 "NUB_FILE_BROKER_TEST_ROOT".into(),
                 files.to_str().unwrap().into(),
             );
+            policy
+                .env
+                .constructed
+                .insert("NUB_JAIL_DUMP_POLICY".into(), "1".into());
             policy
                 .env
                 .constructed
