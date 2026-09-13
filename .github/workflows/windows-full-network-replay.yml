@@ -1,16 +1,12 @@
 name: Windows full-network artifact replay
 
 on:
-  workflow_dispatch:
-    inputs:
-      build_run:
-        description: Exact completed `windows-full-network-gate` run ID
-        required: true
-        type: string
-      build_head:
-        description: Exact source revision recorded by the completed gate run
-        required: true
-        type: string
+  push:
+    branches: [windows-full-network-replay]
+    paths:
+      - '.github/workflows/windows-full-network-replay.yml'
+      - 'tests/sandbox-native-adapter/run-full-network-standard-user.ps1'
+      - 'tests/sandbox-native-adapter/test-full-network-runner.ps1'
 
 permissions:
   actions: read
@@ -35,8 +31,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $buildRun = '${{ inputs.build_run }}'
-          $buildHead = '${{ inputs.build_head }}'
+          # These placeholders deliberately fail closed until the owner pins the
+          # completed diagnostic run and the source revision it recorded.
+          $buildRun = 'REPLACE_WITH_COMPLETED_OWNER_DIAGNOSTIC_RUN'
+          $buildHead = 'REPLACE_WITH_EXACT_OWNER_DIAGNOSTIC_HEAD'
           if ($buildRun -notmatch '^[1-9][0-9]*$') { throw 'A completed numeric build_run input is required' }
           if ($buildHead -notmatch '^[0-9a-f]{40}$') { throw 'A full lowercase build_head input is required' }
           & git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer $env:GH_TOKEN" fetch --depth=1 origin $buildHead
