@@ -379,7 +379,7 @@ static void run_file_pin_case(const char* label, const wchar_t* source_path,
     HANDLE source = INVALID_HANDLE_VALUE;
     HANDLE holder = INVALID_HANDLE_VALUE;
     if (setup) {
-        source = CreateFileW(source_path, DELETE | SYNCHRONIZE,
+        source = CreateFileW(source_path, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (source == INVALID_HANDLE_VALUE) setup_error = GetLastError();
@@ -476,7 +476,7 @@ static void run_directory_pin_case(const char* label, const wchar_t* source_path
     if (setup) {
         begin_operation(label);
         delete_open_attempted = true;
-        rename_source = CreateFileW(source_path, DELETE | SYNCHRONIZE,
+        rename_source = CreateFileW(source_path, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                     nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
         delete_opened = rename_source != INVALID_HANDLE_VALUE;
