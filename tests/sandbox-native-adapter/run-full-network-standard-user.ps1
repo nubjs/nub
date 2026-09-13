@@ -107,6 +107,7 @@ $runs = @(
     @{ file='nub_sandbox_lib.exe'; label='socket-foreign-client'; filter='backend::windows_native_compat::tests::socket_broker_rejects_a_live_client_outside_its_job_and_cancels_idle_workers'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='socket-framing'; filter='backend::windows_native_compat::tests::socket_broker_rejects_wrong_frame_lengths_and_drains_cancelled_read'; summary=$one; exact=$true },
     @{ file='windows_native_full_network.exe'; label='owner-drop'; filter='native_adapter_drop_reaps_pending_listener_and_closes_port'; summary=$one; exact=$true; ignored=$true },
+    @{ file='windows_native_full_network.exe'; label='broker-owner-drop'; filter='native_adapter_drop_reaps_pending_broker_session_and_closes_port'; summary=$one; exact=$true; ignored=$true },
     @{ file='nub_sandbox_lib.exe'; label='full-disk-admission'; filter='backend::windows::tests::apply_windows_full_disk_rejects_restricted_network'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='public-full-disk-admission'; filter='backend::tests::public_preparation_rejects_unrestricted_filesystem_with_restricted_network'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='embedded-native-adapter'; filter='backend::windows_native_adapter_probe::embedded_native_adapter_primitives_with_raw_and_plain_controls'; summary=$one; nativeAdapter=$true; exact=$true },

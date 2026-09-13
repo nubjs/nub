@@ -61,7 +61,7 @@ jobs:
           call "$vcvars" ${{ matrix.vcvars }}
           if errorlevel 1 exit /b %errorlevel%
           cl.exe /Bv
-          cl.exe /nologo /std:c++17 /MT /W4 /WX /EHsc crates\nub-sandbox\tests\fixtures\windows\native-full-network.cpp /Fe:reports\binaries\native-full-network.exe /link Ws2_32.lib Dnsapi.lib
+          cl.exe /nologo /std:c++17 /MT /W4 /WX /EHsc crates\nub-sandbox\tests\fixtures\windows\native-full-network.cpp /Fe:reports\binaries\native-full-network.exe /link Ws2_32.lib Dnsapi.lib Advapi32.lib
           if errorlevel 1 exit /b %errorlevel%
           dumpbin.exe /headers reports\binaries\native-full-network.exe
           exit /b %errorlevel%
