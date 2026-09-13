@@ -312,7 +312,11 @@ pub(super) fn handle(
         if !notification_is_live(nfd, req.id) {
             return Err(io::Error::from_raw_os_error(libc::ECANCELED));
         }
-        let pending = client.submit(request)?;
+        let pending = client.submit_cancellable(
+            request,
+            || control.cancelled(),
+            |capacity| control.wait(capacity, libc::POLLIN, None),
+        )?;
         if !control.wait(pending.readiness_fd(), libc::POLLIN, None)? {
             return Err(io::Error::from_raw_os_error(libc::ECANCELED));
         }
