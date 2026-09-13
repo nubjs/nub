@@ -1,23 +1,22 @@
+use std::collections::VecDeque;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use globset::GlobMatcher;
+use regex_automata::nfa::thompson::{State, NFA};
+use regex_automata::util::primitives::StateID;
 
 use crate::matcher::path::compile_glob;
 use crate::matcher::path::PathMatcher;
 use crate::policy::{Effect, FsAccess, FsRuleSet};
 
-// A policy can be authored with brace alternatives that cross a directory
-// boundary. `globset` deliberately keeps its parsed token stream private, so
-// expand only that syntactic construct before deriving the search-only parent
-// patterns. Keeping the expansion bounded makes compilation proportional to a
-// policy-sized input rather than permitting a crafted sequence of braces to
-// allocate without limit.
-const MAX_TRAVERSAL_ALTERNATIVES: usize = 1024;
+// Match globset's own regex-NFA cap, so traversal accepts every glob grammar
+// instance accepted by the authority matcher while still bounding state memory.
+const MAX_TRAVERSAL_NFA_BYTES: usize = 10 * (1 << 20);
 
 pub(super) struct Rules {
     matcher: PathMatcher,
-    traversal: Vec<GlobMatcher>,
+    traversal: Vec<TraversalMatcher>,
 }
 
 impl Rules {
@@ -34,13 +33,10 @@ impl Rules {
                 ));
             }
             // Validate with the authority matcher first. The traversal compiler
-            // must accept precisely its grammar, including its platform flags.
-            compile_glob(pattern).map_err(io::Error::other)?;
-            for expanded in expand_braces(pattern)? {
-                for prefix in ancestor_prefixes(&expanded) {
-                    traversal.push(compile_glob(prefix).map_err(io::Error::other)?);
-                }
-            }
+            // derives from that same compiled glob regex, rather than parsing
+            // the source syntax a second time.
+            let authority = compile_glob(pattern).map_err(io::Error::other)?;
+            traversal.push(TraversalMatcher::compile(authority.glob().regex())?);
         }
         Ok(Self {
             matcher: PathMatcher::new(set),
@@ -56,186 +52,184 @@ impl Rules {
     pub(super) fn traversable(&self, path: &Path) -> bool {
         path == Path::new("/")
             || self.access(path).is_some()
-            || self.traversal.iter().any(|glob| glob.is_match(path))
+            || self.traversal.iter().any(|glob| glob.can_descend(path))
     }
 }
 
-/// Expands globset's brace alternates while leaving every other glob token
-/// intact for `compile_glob`. Braces inside a class and escaped braces are
-/// literals, just as they are in globset's parser.
-fn expand_braces(pattern: &str) -> io::Result<Vec<String>> {
-    let Some((open, close)) = outer_brace(pattern) else {
-        return Ok(vec![pattern.to_owned()]);
-    };
-    let before = &pattern[..open];
-    let after = &pattern[close + 1..];
-    let mut alternatives = split_alternatives(&pattern[open + 1..close]);
-    // globset's default drops empty alternate branches. It does retain an
-    // entirely empty group, which is equivalent to an empty substitution.
-    if alternatives
-        .iter()
-        .any(|alternative| !alternative.is_empty())
-    {
-        alternatives.retain(|alternative| !alternative.is_empty());
-    }
-
-    let mut expanded = Vec::new();
-    for alternative in alternatives {
-        let mut joined = String::with_capacity(before.len() + alternative.len() + after.len());
-        joined.push_str(before);
-        joined.push_str(alternative);
-        joined.push_str(after);
-        for expansion in expand_braces(&joined)? {
-            if expanded.len() == MAX_TRAVERSAL_ALTERNATIVES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "projection traversal has too many brace alternatives",
-                ));
-            }
-            expanded.push(expansion);
-        }
-    }
-    Ok(expanded)
+/// Decides whether an existing directory can prefix a strictly deeper path
+/// matched by its authority glob. This uses globset's compiled regex language,
+/// not a second parser for source-glob grammar.
+struct TraversalMatcher {
+    nfa: NFA,
+    can_complete_after_byte: Vec<bool>,
 }
 
-/// Finds the first brace pair outside a character class and outside escaping.
-/// Full syntax validation happens through `compile_glob` before this helper is
-/// called, so this only needs to reproduce the lexical boundaries.
-fn outer_brace(pattern: &str) -> Option<(usize, usize)> {
-    let bytes = pattern.as_bytes();
-    let mut escaped = false;
-    let mut class = false;
-    let mut class_first = false;
-    let mut depth = 0;
-    let mut open = None;
-    for (index, &byte) in bytes.iter().enumerate() {
-        // globset's class parser does not honor backslash escaping. Handle the
-        // class before the outer lexer so `\\]` closes a class exactly as it
-        // does there.
-        if class {
-            if byte == b']' && !class_first {
-                class = false;
-            } else {
-                class_first = false;
-            }
-            continue;
+impl TraversalMatcher {
+    fn compile(regex: &str) -> io::Result<Self> {
+        let mut compiler = NFA::compiler();
+        // globset parses its generated regex with these same syntax flags.
+        // In particular, utf8(false) preserves raw Unix filename bytes.
+        compiler.syntax(
+            regex_automata::util::syntax::Config::new()
+                .utf8(false)
+                .dot_matches_new_line(true),
+        );
+        compiler.configure(
+            NFA::config()
+                .utf8(false)
+                .nfa_size_limit(Some(MAX_TRAVERSAL_NFA_BYTES)),
+        );
+        let nfa = compiler.build(regex).map_err(io::Error::other)?;
+        let can_complete_after_byte = descendant_states(&nfa);
+        Ok(Self {
+            nfa,
+            can_complete_after_byte,
+        })
+    }
+
+    fn can_descend(&self, path: &Path) -> bool {
+        let mut input = path.as_os_str().as_bytes().to_vec();
+        if input != b"/" && !input.ends_with(b"/") {
+            input.push(b'/');
         }
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if byte == b'\\' {
-            escaped = true;
-            continue;
-        }
-        match byte {
-            b'[' => {
-                class = true;
-                class_first = true;
-            }
-            b'{' => {
-                if depth == 0 {
-                    open = Some(index);
-                }
-                depth += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return open.map(|start| (start, index));
+        let mut active = vec![false; self.nfa.states().len()];
+        add_closure(
+            &self.nfa,
+            &mut active,
+            [self.nfa.start_anchored()],
+            &input,
+            0,
+        );
+        for (at, byte) in input.iter().copied().enumerate() {
+            let mut next = vec![false; active.len()];
+            for (index, present) in active.iter().copied().enumerate() {
+                if present {
+                    if let Some(next_state) =
+                        byte_transition(self.nfa.state(StateID::must(index)), byte)
+                    {
+                        add_closure(&self.nfa, &mut next, [next_state], &input, at + 1);
+                    }
                 }
             }
-            _ => {}
+            active = next;
         }
+        active
+            .iter()
+            .zip(&self.can_complete_after_byte)
+            .any(|(active, can_complete)| *active && *can_complete)
     }
-    None
 }
 
-/// Splits a brace group's top-level alternatives without treating nested
-/// braces, classes, or escaped commas as separators.
-fn split_alternatives(group: &str) -> Vec<&str> {
-    let bytes = group.as_bytes();
-    let mut alternatives = Vec::new();
-    let mut start = 0;
-    let mut escaped = false;
-    let mut class = false;
-    let mut class_first = false;
-    let mut depth = 0;
-    for (index, &byte) in bytes.iter().enumerate() {
-        if class {
-            if byte == b']' && !class_first {
-                class = false;
-            } else {
-                class_first = false;
-            }
-            continue;
-        }
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if byte == b'\\' {
-            escaped = true;
-            continue;
-        }
-        match byte {
-            b'[' => {
-                class = true;
-                class_first = true;
-            }
-            b'{' => depth += 1,
-            b'}' => depth -= 1,
-            b',' if depth == 0 => {
-                alternatives.push(&group[start..index]);
-                start = index + 1;
-            }
-            _ => {}
+fn descendant_states(nfa: &NFA) -> Vec<bool> {
+    // Runtime closure checks each Look assertion against the directory bytes.
+    // Treating a Look edge as possible here can only retain an extra
+    // search-only directory; it cannot exclude an authority-reachable child.
+    let states = nfa.states();
+    let mut reverse = vec![Vec::new(); states.len()];
+    for (index, state) in states.iter().enumerate() {
+        for (next, consumes_byte) in edges(state) {
+            reverse[next.as_usize()].push((index, consumes_byte));
         }
     }
-    alternatives.push(&group[start..]);
-    alternatives
+
+    let mut any_completion = vec![false; states.len()];
+    let mut work = VecDeque::new();
+    for (index, state) in states.iter().enumerate() {
+        if matches!(state, State::Match { .. }) {
+            any_completion[index] = true;
+            work.push_back(index);
+        }
+    }
+    while let Some(next) = work.pop_front() {
+        for &(previous, _) in &reverse[next] {
+            if !any_completion[previous] {
+                any_completion[previous] = true;
+                work.push_back(previous);
+            }
+        }
+    }
+
+    let mut after_byte = vec![false; states.len()];
+    for (next, predecessors) in reverse.iter().enumerate() {
+        if any_completion[next] {
+            for &(previous, consumes_byte) in predecessors {
+                if consumes_byte && !after_byte[previous] {
+                    after_byte[previous] = true;
+                    work.push_back(previous);
+                }
+            }
+        }
+    }
+    while let Some(next) = work.pop_front() {
+        for &(previous, consumes_byte) in &reverse[next] {
+            if !consumes_byte && !after_byte[previous] {
+                after_byte[previous] = true;
+                work.push_back(previous);
+            }
+        }
+    }
+    after_byte
 }
 
-/// Returns valid glob prefixes ending at physical path separators. A slash in
-/// a character class is not a usable filesystem-name boundary; an escaped
-/// slash is, but its escape is omitted from the preceding prefix so it remains
-/// a valid glob.
-fn ancestor_prefixes(pattern: &str) -> impl Iterator<Item = &str> {
-    let bytes = pattern.as_bytes();
-    let mut prefixes = Vec::new();
-    let mut escaped = false;
-    let mut class = false;
-    let mut class_first = false;
-    for (index, &byte) in bytes.iter().enumerate() {
-        if class {
-            if byte == b']' && !class_first {
-                class = false;
-            } else {
-                class_first = false;
-            }
+fn add_closure(
+    nfa: &NFA,
+    active: &mut [bool],
+    starts: impl IntoIterator<Item = StateID>,
+    input: &[u8],
+    at: usize,
+) {
+    let mut stack = starts.into_iter().collect::<Vec<_>>();
+    while let Some(state) = stack.pop() {
+        let index = state.as_usize();
+        if active[index] {
             continue;
         }
-        if escaped {
-            if byte == b'/' && index > 1 {
-                prefixes.push(&pattern[..index - 1]);
+        active[index] = true;
+        match nfa.state(state) {
+            State::Look { look, next } if nfa.look_matcher().matches(*look, input, at) => {
+                stack.push(*next);
             }
-            escaped = false;
-            continue;
-        }
-        if byte == b'\\' {
-            escaped = true;
-            continue;
-        }
-        match byte {
-            b'[' => {
-                class = true;
-                class_first = true;
-            }
-            b'/' if index != 0 => prefixes.push(&pattern[..index]),
+            State::Union { alternates } => stack.extend(alternates.iter().copied()),
+            State::BinaryUnion { alt1, alt2 } => stack.extend([*alt1, *alt2]),
+            State::Capture { next, .. } => stack.push(*next),
             _ => {}
         }
     }
-    prefixes.into_iter()
+}
+
+fn byte_transition(state: &State, byte: u8) -> Option<StateID> {
+    match state {
+        State::ByteRange { trans } if trans.matches_byte(byte) => Some(trans.next),
+        State::Sparse(transitions) => transitions.matches_byte(byte),
+        State::Dense(transitions) => transitions.matches_byte(byte),
+        _ => None,
+    }
+}
+
+fn edges(state: &State) -> Vec<(StateID, bool)> {
+    match state {
+        State::ByteRange { trans } => vec![(trans.next, true)],
+        State::Sparse(transitions) => transitions
+            .transitions
+            .iter()
+            .map(|transition| (transition.next, true))
+            .collect(),
+        State::Dense(transitions) => transitions
+            .transitions
+            .iter()
+            .copied()
+            .filter(|state| *state != StateID::ZERO)
+            .map(|state| (state, true))
+            .collect(),
+        State::Look { next, .. } | State::Capture { next, .. } => vec![(*next, false)],
+        State::Union { alternates } => alternates
+            .iter()
+            .copied()
+            .map(|state| (state, false))
+            .collect(),
+        State::BinaryUnion { alt1, alt2 } => vec![(*alt1, false), (*alt2, false)],
+        State::Fail | State::Match { .. } => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -310,6 +304,82 @@ mod tests {
         assert_eq!(rules.access(Path::new("/app/a")), None);
         assert!(!rules.traversable(Path::new("/app/z")));
         assert_eq!(rules.access(Path::new("/app/a/file")), Some(FsAccess::Read));
+    }
+
+    #[test]
+    fn negated_class_initial_bracket_keeps_braces_literal() {
+        // In globset, the first `]` after `!` is a class member, not its
+        // closing delimiter. The braces are therefore members too, rather
+        // than a directory-alternative expression.
+        let rules = Rules::compile(&set("/app/[!]{a,b}]/file", FsAccess::Read)).unwrap();
+        for path in ["/app", "/app/x"] {
+            assert!(rules.traversable(Path::new(path)), "{path}");
+            assert_eq!(rules.access(Path::new(path)), None, "{path}");
+        }
+        assert_eq!(rules.access(Path::new("/app/x/file")), Some(FsAccess::Read));
+        assert!(!rules.traversable(Path::new("/app/a")));
+    }
+
+    #[test]
+    fn class_negation_consumes_only_one_marker_before_braces() {
+        // `[!!]` has one negation marker and `!` as its first member. The
+        // following braces are a real alternative, not class contents.
+        let rules = Rules::compile(&set("/app/[!!]{a/x,b/y}]/file", FsAccess::Read)).unwrap();
+        for path in ["/app", "/app/za", "/app/za/x]", "/app/zb", "/app/zb/y]"] {
+            assert!(rules.traversable(Path::new(path)), "{path}");
+            assert_eq!(rules.access(Path::new(path)), None, "{path}");
+        }
+        assert_eq!(
+            rules.access(Path::new("/app/za/x]/file")),
+            Some(FsAccess::Read)
+        );
+        assert_eq!(rules.access(Path::new("/app/za/x]/sibling")), None);
+    }
+
+    #[test]
+    fn brace_recursive_suffixes_keep_future_leaf_ancestors_search_only() {
+        // globset parses the `**` before the brace close as RecursiveSuffix.
+        // Traversal is deliberately a search-only superset; the exact matcher
+        // below remains the sole authority for the future leaf and siblings.
+        let rules = Rules::compile(&set("/app/{lib/**,plain}/file", FsAccess::Read)).unwrap();
+        for path in ["/app", "/app/lib", "/app/lib/deep", "/app/plain"] {
+            assert!(rules.traversable(Path::new(path)), "{path}");
+            assert_eq!(rules.access(Path::new(path)), None, "{path}");
+        }
+        assert_eq!(
+            rules.access(Path::new("/app/lib/deep/file")),
+            Some(FsAccess::Read)
+        );
+        assert_eq!(rules.access(Path::new("/app/lib/deep/sibling")), None);
+    }
+
+    #[test]
+    fn compiled_regex_reaches_recursive_prefix_inside_braces() {
+        let rules = Rules::compile(&set("/app/pre{**/deep,x}/file", FsAccess::Read)).unwrap();
+        for path in [
+            "/app",
+            "/app/preone",
+            "/app/preone/two",
+            "/app/preone/two/deep",
+        ] {
+            assert!(rules.traversable(Path::new(path)), "{path}");
+            assert_eq!(rules.access(Path::new(path)), None, "{path}");
+        }
+        assert_eq!(
+            rules.access(Path::new("/app/preone/two/deep/file")),
+            Some(FsAccess::Read)
+        );
+        assert_eq!(
+            rules.access(Path::new("/app/preone/two/deep/sibling")),
+            None
+        );
+    }
+
+    #[test]
+    fn long_valid_glob_uses_the_authority_nfa_cap() {
+        assert_eq!(MAX_TRAVERSAL_NFA_BYTES, 10 * (1 << 20));
+        let pattern = format!("/app/{}file", "?".repeat(32 * 1024));
+        assert!(Rules::compile(&set(&pattern, FsAccess::Read)).is_ok());
     }
 
     #[test]

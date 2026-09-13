@@ -24,9 +24,9 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
 # Matcher stack: globset is ripgrep's glob engine (cross-platform path
-# normalization + per-glob case flags); regex backs the env /regex/ grammar; ipnet
-# parses net CIDRs. All already in the workspace lockfile (transitive) — no new
-# supply-chain surface.
+# normalization + per-glob case flags); regex backs the env /regex/ grammar;
+# ipnet parses net CIDRs. All already in the workspace lockfile (transitive) —
+# no new supply-chain surface.
 globset = "0.4"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
@@ -129,6 +129,9 @@ base64 = "0.22"
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The projection's private mount is supplied directly, never by a mount helper.
 fuser = { version = "0.17.0", default-features = false }
+# The test-only Linux projection derives prefix reachability from globset's
+# compiled regex rather than re-parsing its source grammar.
+regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "nfa"] }
 
 # The Windows enforcement probe is BOTH the runner and the AppContainer child, so it
 # needs a little FFI (token-query + process-liveness) beyond what the lib exposes.
