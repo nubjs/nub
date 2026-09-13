@@ -66,7 +66,7 @@ jobs:
           run_case production-readiness-macos 4 cargo test --locked -p nub-sandbox --test production_readiness_macos -- --nocapture --test-threads=1
           run_case macos-path-operations 2 cargo test --locked -p nub-sandbox --test macos_path_operations -- --nocapture --test-threads=1
           run_case macos-positive-grammar 4 cargo test --locked -p nub-sandbox --test macos_positive_grammar -- --nocapture --test-threads=1
-          grep -qx 'MACOS_FRESH_PATH_AUTHORITY_VERIFIED' reports/production-readiness-macos.log || failures=1
+          grep -q 'MACOS_FRESH_PATH_AUTHORITY_VERIFIED' reports/production-readiness-macos.log || failures=1
           find "$CARGO_TARGET_DIR/debug/deps" -type f -perm -111 \( \
             -name 'production_readiness_macos-*' -o \
             -name 'macos_path_operations-*' -o \
