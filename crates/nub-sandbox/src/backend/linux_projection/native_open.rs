@@ -9,6 +9,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
+#[cfg(test)]
+use std::time::Duration;
 
 pub(crate) fn mount_id(file: &File) -> io::Result<u64> {
     let mut stat: libc::statx = unsafe { std::mem::zeroed() };
@@ -66,6 +68,11 @@ impl NativePending {
 
     pub(crate) fn finish(&self) -> io::Result<File> {
         self.result.try_recv().map_err(|_| error(libc::EIO))?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finish_blocking(&self) -> io::Result<File> {
+        self.result.recv().map_err(|_| error(libc::EIO))?
     }
 }
 
@@ -148,6 +155,47 @@ impl NativeOpenClient {
 pub(crate) struct NativeOpenService {
     client: NativeOpenClient,
     worker: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    gate: Arc<Mutex<Option<OpenGate>>>,
+}
+
+#[cfg(test)]
+struct OpenGate {
+    path: CString,
+    entered: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct NativeOpenGate {
+    entered: mpsc::Receiver<()>,
+    release: Option<mpsc::SyncSender<()>>,
+}
+
+#[cfg(test)]
+impl NativeOpenGate {
+    pub(crate) fn wait_until_active(&self) -> io::Result<()> {
+        self.entered
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| error(libc::EIO))
+    }
+
+    pub(crate) fn release(mut self) -> io::Result<()> {
+        self.release
+            .take()
+            .expect("gate release called once")
+            .send(())
+            .map_err(|_| error(libc::EIO))
+    }
+}
+
+#[cfg(test)]
+impl Drop for NativeOpenGate {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
 }
 
 impl NativeOpenService {
@@ -161,6 +209,10 @@ impl NativeOpenService {
         let (send, jobs) = mpsc::sync_channel::<Job>(1);
         let counters = Arc::new(Counters::default());
         let worker_counters = Arc::clone(&counters);
+        #[cfg(test)]
+        let gate = Arc::new(Mutex::new(None));
+        #[cfg(test)]
+        let worker_gate = Arc::clone(&gate);
         let (ready, startup) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
             .name("projection-open".into())
@@ -196,6 +248,8 @@ impl NativeOpenService {
                     return;
                 }
                 for job in jobs {
+                    #[cfg(test)]
+                    wait_for_gate(&worker_gate, job.request.path.as_c_str());
                     let result = if job.cancelled.load(Ordering::Acquire) {
                         Err(error(libc::ECANCELED))
                     } else {
@@ -219,6 +273,8 @@ impl NativeOpenService {
                     counters,
                 },
                 worker: Some(worker),
+                #[cfg(test)]
+                gate,
             }),
             Ok(Err(error)) => {
                 drop(send);
@@ -237,6 +293,26 @@ impl NativeOpenService {
         self.client.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn block_next_path(&self, path: &std::ffi::CStr) -> io::Result<NativeOpenGate> {
+        let (entered, entered_rx) = mpsc::sync_channel(1);
+        let (release, release_rx) = mpsc::sync_channel(1);
+        let mut gate = self.gate.lock().map_err(|_| error(libc::EIO))?;
+        assert!(
+            gate.is_none(),
+            "only one native open test gate may be armed"
+        );
+        *gate = Some(OpenGate {
+            path: path.to_owned(),
+            entered,
+            release: release_rx,
+        });
+        Ok(NativeOpenGate {
+            entered: entered_rx,
+            release: Some(release),
+        })
+    }
+
     pub(crate) fn shutdown(mut self) -> io::Result<()> {
         self.stop()
     }
@@ -251,6 +327,18 @@ impl NativeOpenService {
             worker.join().map_err(|_| error(libc::EIO))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+fn wait_for_gate(gate: &Mutex<Option<OpenGate>>, path: &std::ffi::CStr) {
+    let gate = gate.lock().ok().and_then(|mut gate| match gate.as_ref() {
+        Some(armed) if armed.path.as_c_str() == path => gate.take(),
+        _ => None,
+    });
+    if let Some(gate) = gate {
+        let _ = gate.entered.send(());
+        let _ = gate.release.recv();
     }
 }
 

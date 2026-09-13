@@ -2,15 +2,17 @@
 //! mounted projection. Mount and supervisor ownership remain in the parent
 //! helper; this module only supplies the fixture and the command-side contract.
 
+use super::super::linux_projection::{NativeOpenClient, NativeOpenRequest, NativeOpenService};
 use super::super::linux_supervisor::{
-    EgressPolicy, ProjectedLaunch, SupervisedLaunch, SupervisedStdio, spawn_supervised_projected,
+    EgressPolicy, ProjectedLaunch, SupervisedChild, SupervisedLaunch, SupervisedStdio,
+    spawn_supervised_projected,
 };
 use super::*;
 use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule};
 use std::ffi::CStr;
-use std::io::{BufRead, Read};
+use std::io::{BufRead, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 const PAGE: usize = 4096;
 const FORGED_EXPORT_IOCTL: libc::c_ulong = 0x4e80;
@@ -53,6 +55,9 @@ pub(super) fn native_fixture(root: &Path, exe: &Path) -> FsRuleSet {
         native_rule("/app/native-rw-link", FsAccess::Read),
         native_rule("/app/native-rw-absolute", FsAccess::Read),
         native_rule("/app/native-retained", FsAccess::ReadWrite),
+        native_rule("/app/native-concurrent", FsAccess::Read),
+        native_rule("/app/native-queue-hold", FsAccess::Read),
+        native_rule("/app/native-queue-cancelled-create", FsAccess::ReadWrite),
     ]);
     let app = root.join("raw/app");
     fs::write(app.join("native-read"), b"read-canary").unwrap();
@@ -60,6 +65,8 @@ pub(super) fn native_fixture(root: &Path, exe: &Path) -> FsRuleSet {
     rw[..9].copy_from_slice(b"rw-canary");
     fs::write(app.join("native-rw"), rw).unwrap();
     fs::write(app.join("native-retained"), b"retained-old").unwrap();
+    fs::write(app.join("native-concurrent"), b"concurrent-canary").unwrap();
+    fs::write(app.join("native-queue-hold"), b"queue-hold-canary").unwrap();
     let mut mapped = vec![0; PAGE * 2];
     mapped[..8].copy_from_slice(b"initial!");
     fs::write(app.join("native-mapped-rw"), &mapped).unwrap();
@@ -749,6 +756,208 @@ fn native_client(root: &Path, mediated: bool) {
     println!("NATIVE_CLIENT_ACCEPTANCE_OK mediated={mediated}");
 }
 
+fn native_concurrent_client(root: &Path) {
+    audit_command();
+    println!("NATIVE_CONCURRENT_READY");
+    io::stdout().flush().unwrap();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "go");
+    let mut file = open_read(&root.join("app/native-concurrent"));
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"concurrent-canary");
+    println!("NATIVE_CONCURRENT_OK");
+}
+
+fn native_request(path: &CStr, flags: i32, mode: u64) -> NativeOpenRequest {
+    NativeOpenRequest {
+        path: path.to_owned(),
+        directory: None,
+        flags: flags as u64,
+        mode,
+        resolve: None,
+        umask: 0,
+    }
+}
+
+fn assert_native_identity(file: &File, backing: &Path) {
+    let delivered = file.metadata().unwrap();
+    let backing = fs::metadata(backing).unwrap();
+    assert_eq!(
+        (delivered.dev(), delivered.ino()),
+        (backing.dev(), backing.ino()),
+        "native result must be the backing descriptor rather than the FUSE path"
+    );
+}
+
+fn native_queue_contract(service: &NativeOpenService, raw: &Path) {
+    let client = service.client();
+    let hold_path = c"/app/native-queue-hold";
+    let before = client.stats();
+    let gate = service.block_next_path(hold_path).unwrap();
+    let active = client
+        .submit(native_request(hold_path, libc::O_RDONLY, 0))
+        .unwrap();
+    gate.wait_until_active().unwrap();
+    let queued = client
+        .submit(native_request(c"/app/native-read", libc::O_RDONLY, 0))
+        .unwrap();
+    let overflow = client.submit(native_request(c"/app/native-concurrent", libc::O_RDONLY, 0));
+    match overflow {
+        Err(error) => assert_eq!(
+            error.raw_os_error(),
+            Some(libc::EAGAIN),
+            "one active request plus one queued request must saturate the native queue"
+        ),
+        Ok(_) => {
+            panic!("one active request plus one queued request must saturate the native queue")
+        }
+    }
+    gate.release().unwrap();
+    let active = active.finish_blocking().unwrap();
+    let queued = queued.finish_blocking().unwrap();
+    assert_native_identity(&active, &raw.join("app/native-queue-hold"));
+    assert_native_identity(&queued, &raw.join("app/native-read"));
+    assert_eq!(
+        client.stats(),
+        (before.0 + 2, before.1 + 2),
+        "each completed regular native open must be exported exactly once"
+    );
+    println!("NATIVE_QUEUE_SATURATION_OK");
+
+    let cancelled = raw.join("app/native-queue-cancelled-create");
+    assert!(!cancelled.exists(), "cancelled create starts absent");
+    let before = client.stats();
+    let gate = service.block_next_path(hold_path).unwrap();
+    let active = client
+        .submit(native_request(hold_path, libc::O_RDONLY, 0))
+        .unwrap();
+    gate.wait_until_active().unwrap();
+    let queued = client
+        .submit(native_request(
+            c"/app/native-queue-cancelled-create",
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o600,
+        ))
+        .unwrap();
+    drop(queued);
+    let cancelled_gate = service
+        .block_next_path(c"/app/native-queue-cancelled-create")
+        .unwrap();
+    gate.release().unwrap();
+    let active = active.finish_blocking().unwrap();
+    assert_native_identity(&active, &raw.join("app/native-queue-hold"));
+    cancelled_gate.wait_until_active().unwrap();
+    let sentinel = client
+        .submit(native_request(c"/app/native-read", libc::O_RDONLY, 0))
+        .unwrap();
+    cancelled_gate.release().unwrap();
+    let sentinel = sentinel.finish_blocking().unwrap();
+    assert_native_identity(&sentinel, &raw.join("app/native-read"));
+    assert!(
+        !cancelled.exists(),
+        "dropping a queued native create must prevent its side effect"
+    );
+    assert_eq!(
+        client.stats(),
+        (before.0 + 2, before.1 + 2),
+        "cancelled queued create must never reach projected open/export before the sentinel"
+    );
+    println!("NATIVE_QUEUED_CANCEL_OK");
+}
+
+fn spawn_native_command(role: &str, view: &CString, opener: NativeOpenClient) -> SupervisedChild {
+    let exe = [
+        CString::new("/app/run").unwrap(),
+        CString::new("--exact").unwrap(),
+        CString::new(HELPER).unwrap(),
+        CString::new("--nocapture").unwrap(),
+        CString::new("--test-threads=1").unwrap(),
+    ];
+    let env = [
+        CString::new("PATH=/usr/bin:/bin").unwrap(),
+        CString::new(format!("{ROLE}={role}")).unwrap(),
+        CString::new("NUB_PROJECTION_TEST_ROOT=/").unwrap(),
+    ];
+    let launch = SupervisedLaunch {
+        argv: &exe,
+        envp: &env,
+        cwd: Some(c"/"),
+        ruleset_fd: -1,
+        seccomp_ceiling: None,
+        stdin: SupervisedStdio::Piped,
+        stdout: SupervisedStdio::Piped,
+        stderr: SupervisedStdio::Piped,
+        inherited_fds: &[],
+    };
+    let policy = EgressPolicy {
+        self_proc: BTreeSet::new(),
+        allow_all: false,
+        allow: vec![],
+        write_policy: None,
+        proxy_port: None,
+        proxy_token: None,
+    };
+    spawn_supervised_projected(
+        policy,
+        launch,
+        ProjectedLaunch {
+            root: view.clone(),
+            opener,
+        },
+    )
+    .unwrap()
+}
+
+fn native_simultaneous_command_contract(service: &NativeOpenService, view: &CString) {
+    let mut first = spawn_native_command("native-concurrent", view, service.client());
+    let mut second = spawn_native_command("native-concurrent", view, service.client());
+    let mut first_output = BufReader::new(first.take_stdout().unwrap());
+    let mut second_output = BufReader::new(second.take_stdout().unwrap());
+    let first_stderr = first.take_stderr().unwrap();
+    let second_stderr = second.take_stderr().unwrap();
+    let first_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(first_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let second_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(second_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let mut first_input = first.take_stdin().unwrap();
+    let mut second_input = second.take_stdin().unwrap();
+    native_event(&mut first_output, "NATIVE_CONCURRENT_READY").unwrap();
+    native_event(&mut second_output, "NATIVE_CONCURRENT_READY").unwrap();
+    let before = service.client().stats();
+    first_input.write_all(b"go\n").unwrap();
+    second_input.write_all(b"go\n").unwrap();
+    native_event(&mut first_output, "NATIVE_CONCURRENT_OK").unwrap();
+    native_event(&mut second_output, "NATIVE_CONCURRENT_OK").unwrap();
+    drop(first_input);
+    drop(second_input);
+    let first_status = first.wait().unwrap();
+    let second_status = second.wait().unwrap();
+    let first_stderr = first_stderr_drain.join().unwrap().unwrap();
+    let second_stderr = second_stderr_drain.join().unwrap().unwrap();
+    assert!(
+        first_status.success(),
+        "first native command {first_status:?}\n{first_stderr}"
+    );
+    assert!(
+        second_status.success(),
+        "second native command {second_status:?}\n{second_stderr}"
+    );
+    assert_eq!(
+        service.client().stats(),
+        (before.0 + 2, before.1 + 2),
+        "two supervised commands sharing one native service must each receive one exported file"
+    );
+    println!("NATIVE_SHARED_SERVICE_COMMANDS_OK");
+}
+
 pub(super) fn recursive_view(source: &Path, target: &Path, readonly: bool) -> File {
     fs::create_dir(target).unwrap();
     let source = CString::new(source.as_os_str().as_bytes()).unwrap();
@@ -835,6 +1044,8 @@ fn native_provider(root: &Path) {
     let serve = projection.clone();
     let server = std::thread::spawn(move || serve.serve(fuse.into()));
     let service = projection.native_opener(&view).unwrap();
+    native_queue_contract(&service, &raw);
+    native_simultaneous_command_contract(&service, &view_c);
     // This provider thread is deliberately neither the registered resolver
     // thread nor seccomp-filtered. The FUSE callback therefore receives a
     // wrong Request.pid; EACCES proves callback authentication rather than the
@@ -1000,6 +1211,7 @@ pub(super) fn run_role(role: &str, root: &Path) -> bool {
         "native-provider" => native_provider(root),
         "native-raw" => native_client(root, false),
         "native-command" => native_client(root, true),
+        "native-concurrent" => native_concurrent_client(root),
         _ => return false,
     }
     true
