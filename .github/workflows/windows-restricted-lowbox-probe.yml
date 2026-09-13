@@ -39,7 +39,7 @@ jobs:
           dumpbin /headers /imports child.exe > "$root\reports\child-pe.txt"
           dumpbin /headers /imports launcher.exe > "$root\reports\launcher-pe.txt"
           "@ | Set-Content .restricted-lowbox/build.cmd
-          cmd /c .restricted-lowbox/build.cmd
+          cmd /c .\.restricted-lowbox\build.cmd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-FileHash .restricted-lowbox/*.exe, tests/sandbox-restricted-lowbox/* -Algorithm SHA256 | Format-List > reports/hashes.txt
       - name: Measuring ordinary-user token and file authority
