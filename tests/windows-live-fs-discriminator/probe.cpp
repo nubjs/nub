@@ -181,9 +181,11 @@ bool read_controls(unsigned long long* read_raw, unsigned long long* write_raw,
                    unsigned long long* exe_section_raw, unsigned long long* dll_section_raw) {
   char controls[512] = {};
   DWORD bytes = 0;
-  if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), controls, sizeof(controls) - 1, &bytes, nullptr)) {
+  const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  const DWORD type = GetFileType(input);
+  if (!ReadFile(input, controls, sizeof(controls) - 1, &bytes, nullptr)) {
     char report[128] = {};
-    const int length = sprintf_s(report, "CONTROL_READ=FAIL error=%lu\n", GetLastError());
+    const int length = sprintf_s(report, "CONTROL_READ=FAIL input=%p type=%lu error=%lu\n", input, type, GetLastError());
     DWORD written = 0;
     if (length > 0) WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), report, static_cast<DWORD>(length), &written, nullptr);
     return false;
@@ -198,6 +200,8 @@ bool read_controls(unsigned long long* read_raw, unsigned long long* write_raw,
     if (length > 0) WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), report, static_cast<DWORD>(length), &written, nullptr);
     return false;
   }
+  std::printf("CONTROL_READ=OK bytes=%lu\n", bytes);
+  std::fflush(stdout);
   return true;
 }
 
