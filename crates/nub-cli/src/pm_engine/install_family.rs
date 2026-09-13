@@ -1478,7 +1478,7 @@ fn stamp_if_virgin(session: &EngineSession, code: i32) {
 /// key by insertion order at the manifest's tail, leaving the user's existing
 /// keys untouched. The caller has already proven virginity (no prior
 /// `devEngines`), so the object is created wholesale.
-fn stamp_virgin_dev_engines(cwd: &Path) {
+pub(super) fn stamp_virgin_dev_engines(cwd: &Path) {
     // Skip silently when the install ran without a `package.json` (the editor
     // refuses to scaffold one); the install already succeeded, so this is a
     // no-op, not an error.

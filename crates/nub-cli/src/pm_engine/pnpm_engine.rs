@@ -458,11 +458,19 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     pnpm_diagnostics::install_report_handler();
     // Asked BEFORE the run, because a successful install answers it: it
     // writes nub's own lockfile, and the project then looks migrated.
-    let pending = pending_migration(embedder, pnpm_cli::command_name(&argv).as_deref(), &cwd);
+    let command = pnpm_cli::command_name(&argv);
+    let pending = pending_migration(embedder, command.as_deref(), &cwd);
+    // Asked before the run for the same reason, and it is the stronger case:
+    // the install is about to write nub's lockfile, after which no project
+    // still looks virgin.
+    let stamp = project_is_virgin(embedder, command.as_deref(), &cwd);
     match pnpm_cli::run(argv, embedder) {
         Ok(()) => {
             if let Some(foreign) = pending {
                 eprintln!("{}", super::migrate::migration_hint(&foreign));
+            }
+            if stamp {
+                super::install_family::stamp_virgin_dev_engines(&cwd);
             }
             Ok(0)
         }
@@ -491,6 +499,43 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
 /// still holding another package manager's lockfile has just had it ignored,
 /// so this is where saying so belongs — not on a command that only reads.
 const RESOLVING_COMMANDS: [&str; 6] = ["install", "add", "remove", "update", "ci", "dedupe"];
+
+/// The commands that may leave nub's mark on a project's manifest.
+///
+/// Narrower than [`RESOLVING_COMMANDS`] by two, and both exclusions are the
+/// point. `ci` refuses without a lockfile it already reads, so it can never
+/// meet a virgin project; `dedupe` rewrites an existing lockfile rather than
+/// claiming a project. `import` is not here either — it converts a FOREIGN
+/// lockfile, so its project is non-virgin by construction.
+const STAMPING_COMMANDS: [&str; 4] = ["install", "add", "remove", "update"];
+
+/// Whether nub is the FIRST package manager to touch this project, asked
+/// before the command that would stop it being true.
+///
+/// nub's canonical lockfile is deliberately unbranded, so — unlike every
+/// other package manager, whose lockfile name is itself the project's
+/// signal — nub leaves nothing downstream tools can read. The
+/// `devEngines.packageManager` range is that signal, and it is only nub's to
+/// write on a project no one else has claimed.
+///
+/// Any incumbent signal answers `false`: a lockfile of nub's own, a foreign
+/// one, or a pnpm-named file anywhere up the walk. The declaration fields are
+/// deliberately NOT consulted here — the writer never overwrites an existing
+/// `devEngines.packageManager`, so a hand-written foreign one survives on its
+/// own merits rather than by this predicate having to know about it.
+fn project_is_virgin(embedder: Embedder, command: Option<&str>, cwd: &Path) -> bool {
+    if embedder.program_name == Embedder::PNPM.program_name
+        || !command.is_some_and(|name| STAMPING_COMMANDS.contains(&name))
+    {
+        return false;
+    }
+    let root = super::host_settings::workspace_root(cwd);
+    if super::nub_lockfile_present(&root) || super::migrate::pending_migration(&root).is_some() {
+        return false;
+    }
+    root.ancestors()
+        .all(|dir| !super::dir_has_pnpm_named_file(dir))
+}
 
 /// The foreign lockfile this command is about to ignore, if there is one and
 /// saying so is this program's business.

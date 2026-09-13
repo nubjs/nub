@@ -87,11 +87,17 @@ fn nub_defaults_to_a_strict_24_hour_release_age_floor() {
     );
 }
 
-/// Rows "none|none → nub identity" (truly-fresh) and "declared X|none → X's
-/// format" (the fresh-with-pin row): an empty-deps install writes the
-/// identity's lockfile without any network.
+/// A truly-fresh project is nub's: an empty-deps install writes `nub.lock`
+/// without any network, and stamps the cross-tool signal that lockfile
+/// deliberately withholds.
+///
+/// The declared-npm arm is gone with npm incumbency. It asserted that
+/// `packageManager: npm@11.0.0` made a fresh install write a
+/// `package-lock.json`; nub writes no npm lockfile at all now, and a foreign
+/// declaration confers no identity, so the project is nub's and the hint is
+/// what points at the conversion.
 #[test]
-fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
+fn a_truly_fresh_project_writes_nub_lock_and_stamps_the_signal() {
     // none + none → truly fresh: nub claims identity via the neutral lockfile
     // (writes nub.lock) AND stamps a caret RANGE into `devEngines.packageManager`
     // — the non-locking PM signal nub's unbranded nub.lock withholds, the
@@ -122,22 +128,6 @@ fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
     assert!(
         manifest.get("packageManager").is_none(),
         "the virgin stamp writes only the devEngines range, never the exact packageManager pin: {manifest}"
-    );
-
-    // declared npm + none → package-lock.json, NOT the nub default.
-    let dir = project(
-        "fresh-npm",
-        r#"{"name":"app","version":"1.0.0","packageManager":"npm@11.0.0"}"#,
-    );
-    let (stdout, stderr, code) = run(&dir, &["install"]);
-    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        dir.join("package-lock.json").is_file(),
-        "declared-npm fresh install must write package-lock.json: {stderr}"
-    );
-    assert!(
-        !dir.join("pnpm-lock.yaml").exists(),
-        "the declaration must outrank the pnpm fresh default"
     );
 }
 
@@ -381,9 +371,14 @@ fn cache_scratch_installs_never_inherit_ambient_identity() {
         "an install inside nub's cache root must not inherit ambient lockfile ambiguity: {stderr}"
     );
     // Positive proof the walk was clamped (fresh identity, resolution reached)
-    // rather than the command dying on some unrelated early exit.
+    // rather than the command dying on some unrelated early exit. The proof is
+    // the dead registry the fixture configured appearing in the failure: only
+    // an install that got past identity and into resolution can have tried to
+    // reach it. It replaces an assertion on `ERR_NUB_REGISTRY_ERROR`, which is
+    // one package manager's code for this and not the other's — a detail of
+    // who is serving, where the claim is about how far the install got.
     assert!(
-        stderr.contains("ERR_NUB_REGISTRY_ERROR"),
+        stderr.contains("127.0.0.1:1"),
         "the scratch install should get past identity to the registry fetch: {stderr}"
     );
 }
