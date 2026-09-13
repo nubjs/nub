@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -11,7 +13,7 @@ use fuser::{
     AccessFlags, BsdFileFlags, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
     INodeNo, InitFlags, IoctlFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
     ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyOpen,
-    ReplyWrite, Request, TimeOrNow, WriteFlags,
+    ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 
 use super::backing::{
@@ -27,6 +29,8 @@ const MAX_HANDLES: usize = 16_384;
 const MAX_DIRECTORY_ENTRIES: usize = 65_536;
 const MAX_IO: usize = 1024 * 1024;
 const TTL: Duration = Duration::ZERO;
+const XATTR_CREATE: i32 = 0x1;
+const XATTR_REPLACE: i32 = 0x2;
 
 /// The user-ID domain carried by this projection's FUSE protocol.
 ///
@@ -166,6 +170,22 @@ struct ExportSlot {
     tid: u32,
     armed: bool,
     file: Option<File>,
+}
+
+/// An xattr path bound to one provider-held inode pin.
+///
+/// Linux before its newer `*xattrat` syscalls cannot address an O_PATH pin
+/// directly with `f*xattr`: those calls return EBADF. Its procfs magic link,
+/// however, resolves to the held struct path without re-looking up a mutable
+/// backing name, including when the pin names a symlink.
+struct XattrTarget {
+    _pin: File,
+    path: CString,
+}
+
+enum XattrReply {
+    Size(u32),
+    Data(Vec<u8>),
 }
 
 pub(super) const EXPORT_IOCTL: libc::c_ulong = 0x4e80;
@@ -726,6 +746,144 @@ impl State {
         self.current(&node)
     }
 
+    fn xattr_target(&self, ino: u64, write: bool) -> io::Result<XattrTarget> {
+        let node = self.node(ino)?;
+        let access = self
+            .rules
+            .access(&node.path)
+            .ok_or_else(|| error(libc::EACCES))?;
+        if write && access != FsAccess::ReadWrite {
+            return Err(error(libc::EACCES));
+        }
+
+        // A FUSE xattr callback has no file handle. Hold the fresh,
+        // identity-checked pin through the host operation rather than
+        // re-resolving its final component after validation.
+        let pin = self.current(&node)?;
+        let proc_path = format!("/proc/self/fd/{}", pin.as_raw_fd()).into_bytes();
+        Ok(XattrTarget {
+            _pin: pin,
+            path: CString::new(proc_path).map_err(|_| error(libc::EINVAL))?,
+        })
+    }
+
+    fn xattr_name(name: &OsStr) -> io::Result<CString> {
+        CString::new(name.as_bytes()).map_err(|_| error(libc::EINVAL))
+    }
+
+    fn getxattr(&self, ino: u64, name: &OsStr, size: u32) -> io::Result<XattrReply> {
+        let target = self.xattr_target(ino, false)?;
+        let name = Self::xattr_name(name)?;
+        if size == 0 {
+            // SAFETY: target and name are owned NUL-terminated byte strings;
+            // null with a zero length is the host's size-query form.
+            let result = unsafe {
+                libc::getxattr(target.path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0)
+            };
+            if result < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return u32::try_from(result)
+                .map(XattrReply::Size)
+                .map_err(|_| error(libc::EOVERFLOW));
+        }
+        let mut value = Vec::new();
+        value
+            .try_reserve_exact(size as usize)
+            .map_err(|_| error(libc::ENOMEM))?;
+        value.resize(size as usize, 0);
+        // SAFETY: value owns exactly `size` writable bytes, and target/name
+        // remain live for the syscall.
+        let result = unsafe {
+            libc::getxattr(
+                target.path.as_ptr(),
+                name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        value.truncate(usize::try_from(result).map_err(|_| error(libc::EOVERFLOW))?);
+        Ok(XattrReply::Data(value))
+    }
+
+    fn listxattr(&self, ino: u64, size: u32) -> io::Result<XattrReply> {
+        let target = self.xattr_target(ino, false)?;
+        if size == 0 {
+            // SAFETY: target is an owned NUL-terminated path; null with a
+            // zero length is the host's size-query form.
+            let result = unsafe { libc::listxattr(target.path.as_ptr(), std::ptr::null_mut(), 0) };
+            if result < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return u32::try_from(result)
+                .map(XattrReply::Size)
+                .map_err(|_| error(libc::EOVERFLOW));
+        }
+        let mut names = Vec::new();
+        names
+            .try_reserve_exact(size as usize)
+            .map_err(|_| error(libc::ENOMEM))?;
+        names.resize(size as usize, 0);
+        // SAFETY: names owns exactly `size` writable bytes and target remains
+        // live for the syscall.
+        let result = unsafe {
+            libc::listxattr(target.path.as_ptr(), names.as_mut_ptr().cast(), names.len())
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        names.truncate(usize::try_from(result).map_err(|_| error(libc::EOVERFLOW))?);
+        Ok(XattrReply::Data(names))
+    }
+
+    fn setxattr(
+        &self,
+        ino: u64,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+    ) -> io::Result<()> {
+        if position != 0 {
+            return Err(error(libc::EOPNOTSUPP));
+        }
+        if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+            return Err(error(libc::EINVAL));
+        }
+        let target = self.xattr_target(ino, true)?;
+        let name = Self::xattr_name(name)?;
+        // SAFETY: target/name are owned NUL-terminated strings and value is a
+        // live byte slice for the duration of the syscall.
+        if unsafe {
+            libc::setxattr(
+                target.path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                flags,
+            )
+        } < 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn removexattr(&self, ino: u64, name: &OsStr) -> io::Result<()> {
+        let target = self.xattr_target(ino, true)?;
+        let name = Self::xattr_name(name)?;
+        // SAFETY: target and name are owned NUL-terminated byte strings.
+        if unsafe { libc::removexattr(target.path.as_ptr(), name.as_ptr()) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
     fn setattr(
         &mut self,
         ino: u64,
@@ -1223,6 +1381,55 @@ impl Filesystem for Projection {
         });
         match result {
             Ok(attr) => reply.attr(&TTL, &attr),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn setxattr(
+        &self,
+        _: &Request,
+        ino: INodeNo,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+        reply: ReplyEmpty,
+    ) {
+        match self
+            .state()
+            .and_then(|state| state.setxattr(ino.0, name, value, flags, position))
+        {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn getxattr(&self, _: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        let result = self
+            .state()
+            .and_then(|state| state.getxattr(ino.0, name, size));
+        match result {
+            Ok(XattrReply::Size(size)) => reply.size(size),
+            Ok(XattrReply::Data(value)) => reply.data(&value),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn listxattr(&self, _: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let result = self.state().and_then(|state| state.listxattr(ino.0, size));
+        match result {
+            Ok(XattrReply::Size(size)) => reply.size(size),
+            Ok(XattrReply::Data(names)) => reply.data(&names),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn removexattr(&self, _: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        match self
+            .state()
+            .and_then(|state| state.removexattr(ino.0, name))
+        {
+            Ok(()) => reply.ok(),
             Err(err) => reply.error(err.into()),
         }
     }

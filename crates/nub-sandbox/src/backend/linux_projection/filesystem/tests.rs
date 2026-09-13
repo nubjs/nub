@@ -1,7 +1,8 @@
 use super::*;
 use crate::policy::{CanonGlob, Effect, FsOrigin, FsRule, FsRuleSet};
+use std::ffi::{CStr, CString};
 use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 
 fn rules(grants: &[(&str, FsAccess)]) -> FsRuleSet {
@@ -115,6 +116,122 @@ fn assert_errno<T>(result: io::Result<T>, expected: i32) {
     match result {
         Err(err) => assert_eq!(err.raw_os_error(), Some(expected)),
         Ok(_) => panic!("expected errno {expected}"),
+    }
+}
+
+fn get_xattr(state: &State, ino: u64, name: &OsStr) -> io::Result<Vec<u8>> {
+    let XattrReply::Size(size) = state.getxattr(ino, name, 0)? else {
+        unreachable!("zero-size xattr request must return a size")
+    };
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+    let XattrReply::Data(value) = state.getxattr(ino, name, size)? else {
+        unreachable!("nonzero xattr request must return data")
+    };
+    Ok(value)
+}
+
+fn list_xattr(state: &State, ino: u64) -> io::Result<Vec<u8>> {
+    let XattrReply::Size(size) = state.listxattr(ino, 0)? else {
+        unreachable!("zero-size xattr request must return a size")
+    };
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+    let XattrReply::Data(value) = state.listxattr(ino, size)? else {
+        unreachable!("nonzero xattr request must return data")
+    };
+    Ok(value)
+}
+
+fn raw_lsetxattr(path: &Path, name: &OsStr, value: &[u8], flags: i32) -> io::Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| error(libc::EINVAL))?;
+    let name = CString::new(name.as_bytes()).map_err(|_| error(libc::EINVAL))?;
+    // SAFETY: path/name are NUL-terminated and value remains live throughout.
+    if unsafe {
+        libc::lsetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            flags,
+        )
+    } < 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn raw_lgetxattr(path: &Path, name: &OsStr) -> io::Result<Vec<u8>> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| error(libc::EINVAL))?;
+    let name = CString::new(name.as_bytes()).map_err(|_| error(libc::EINVAL))?;
+    // SAFETY: path/name are NUL-terminated; null plus zero is the size query.
+    let size = unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut value = vec![0; usize::try_from(size).map_err(|_| error(libc::EOVERFLOW))?];
+    // SAFETY: value owns the queried number of writable bytes; path and name
+    // remain live throughout the syscall.
+    let result = unsafe {
+        libc::lgetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    value.truncate(usize::try_from(result).map_err(|_| error(libc::EOVERFLOW))?);
+    Ok(value)
+}
+
+fn raw_getxattr_at(path: &CStr, name: &OsStr) -> io::Result<Vec<u8>> {
+    let name = CString::new(name.as_bytes()).map_err(|_| error(libc::EINVAL))?;
+    // SAFETY: path/name are NUL-terminated; null plus zero is the size query.
+    let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut value = vec![0; usize::try_from(size).map_err(|_| error(libc::EOVERFLOW))?];
+    // SAFETY: value owns the queried number of writable bytes; path and name
+    // remain live throughout the syscall.
+    let result = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    value.truncate(usize::try_from(result).map_err(|_| error(libc::EOVERFLOW))?);
+    Ok(value)
+}
+
+fn raw_setxattr_at(path: &CStr, name: &OsStr, value: &[u8], flags: i32) -> io::Result<()> {
+    let name = CString::new(name.as_bytes()).map_err(|_| error(libc::EINVAL))?;
+    // SAFETY: path/name are NUL-terminated and value remains live throughout.
+    if unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            flags,
+        )
+    } < 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -687,6 +804,180 @@ fn setattr_mode_zero_uses_empty_path_metadata_operations() {
 }
 
 #[test]
+fn xattrs_follow_path_authority_no_follow_and_fresh_identity() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("rw"), b"rw").unwrap();
+    std::fs::hard_link(root.path().join("rw"), root.path().join("read-alias")).unwrap();
+    std::fs::write(root.path().join("host-flags"), b"host-flags").unwrap();
+    std::fs::write(root.path().join("target"), b"target").unwrap();
+    symlink("target", root.path().join("link")).unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/", FsAccess::ReadWrite),
+            ("/rw", FsAccess::ReadWrite),
+            ("/read-alias", FsAccess::Read),
+            ("/host-flags", FsAccess::ReadWrite),
+            ("/target", FsAccess::ReadWrite),
+            ("/link", FsAccess::ReadWrite),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let rw = lookup(&mut state, ROOT, "rw");
+    let read_alias = lookup(&mut state, ROOT, "read-alias");
+    let target = lookup(&mut state, ROOT, "target");
+    let link = lookup(&mut state, ROOT, "link");
+    let name = OsStr::new("user.nub_projection");
+
+    // Only a raw host failure may classify the filesystem as unsupported;
+    // provider ENOTSUP on an xattr-capable host is a regression, not a skip.
+    if let Err(err) = raw_lsetxattr(&root.path().join("host-flags"), name, b"host-control", 0) {
+        assert_eq!(err.raw_os_error(), Some(libc::ENOTSUP));
+        eprintln!("XATTR_HOST_UNSUPPORTED");
+        return;
+    }
+    state.setxattr(rw, name, b"first", XATTR_CREATE, 0).unwrap();
+    assert_eq!(get_xattr(&state, rw, name).unwrap(), b"first");
+    assert_eq!(get_xattr(&state, read_alias, name).unwrap(), b"first");
+    let root_name = OsStr::new("user.nub_projection_root");
+    raw_lsetxattr(root.path(), root_name, b"host-root", 0).unwrap();
+    assert_eq!(get_xattr(&state, ROOT, root_name).unwrap(), b"host-root");
+    state
+        .setxattr(ROOT, root_name, b"provider-root", 0, 0)
+        .unwrap();
+    assert_eq!(
+        raw_lgetxattr(root.path(), root_name).unwrap(),
+        b"provider-root"
+    );
+    let read_root = projection(root.path(), &[("/", FsAccess::Read)]);
+    let read_root = read_root.state().unwrap();
+    assert_eq!(
+        get_xattr(&read_root, ROOT, root_name).unwrap(),
+        b"provider-root"
+    );
+    assert!(
+        list_xattr(&read_root, ROOT)
+            .unwrap()
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == b"user.nub_projection_root")
+    );
+    assert_errno(
+        read_root.setxattr(ROOT, root_name, b"denied", 0, 0),
+        libc::EACCES,
+    );
+    assert_errno(read_root.removexattr(ROOT, root_name), libc::EACCES);
+    assert_errno(state.getxattr(rw, name, 1), libc::ERANGE);
+    assert!(
+        list_xattr(&state, read_alias)
+            .unwrap()
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == b"user.nub_projection")
+    );
+    assert_errno(state.listxattr(read_alias, 1), libc::ERANGE);
+    assert_errno(
+        state.setxattr(read_alias, name, b"denied", 0, 0),
+        libc::EACCES,
+    );
+    assert_errno(state.removexattr(read_alias, name), libc::EACCES);
+    assert_errno(
+        state.setxattr(rw, name, b"exists", XATTR_CREATE, 0),
+        libc::EEXIST,
+    );
+    state
+        .setxattr(rw, name, b"replaced", XATTR_REPLACE, 0)
+        .unwrap();
+    assert_eq!(get_xattr(&state, read_alias, name).unwrap(), b"replaced");
+    raw_lsetxattr(&root.path().join("host-flags"), name, b"host-control", 0).unwrap();
+    let host_result = raw_lsetxattr(
+        &root.path().join("host-flags"),
+        name,
+        b"host-combined",
+        XATTR_CREATE | XATTR_REPLACE,
+    );
+    let projection_result = state.setxattr(
+        rw,
+        name,
+        b"projection-combined",
+        XATTR_CREATE | XATTR_REPLACE,
+        0,
+    );
+    assert_eq!(
+        host_result
+            .as_ref()
+            .err()
+            .and_then(|err| err.raw_os_error()),
+        projection_result
+            .as_ref()
+            .err()
+            .and_then(|err| err.raw_os_error())
+    );
+    assert_errno(
+        state.setxattr(rw, name, b"position", 0, 1),
+        libc::EOPNOTSUPP,
+    );
+
+    // The pinned proc-fd route must address the link itself, never its target.
+    state
+        .setxattr(target, OsStr::new("user.nub_link"), b"target", 0, 0)
+        .unwrap();
+    assert_eq!(
+        get_xattr(&state, target, OsStr::new("user.nub_link")).unwrap(),
+        b"target"
+    );
+    assert_errno(
+        get_xattr(&state, link, OsStr::new("user.nub_link")),
+        libc::ENODATA,
+    );
+    let host_link_error = raw_lsetxattr(
+        &root.path().join("link"),
+        OsStr::new("user.nub_link"),
+        b"link",
+        0,
+    )
+    .unwrap_err();
+    assert_errno(
+        state.setxattr(link, OsStr::new("user.nub_link"), b"link", 0, 0),
+        host_link_error.raw_os_error().unwrap(),
+    );
+    let host_link_read_error =
+        raw_lgetxattr(&root.path().join("link"), OsStr::new("user.nub_link")).unwrap_err();
+    assert_errno(
+        get_xattr(&state, link, OsStr::new("user.nub_link")),
+        host_link_read_error.raw_os_error().unwrap(),
+    );
+    assert_eq!(
+        get_xattr(&state, target, OsStr::new("user.nub_link")).unwrap(),
+        b"target"
+    );
+
+    state.removexattr(rw, name).unwrap();
+    assert_errno(get_xattr(&state, read_alias, name), libc::ENODATA);
+    state.setxattr(rw, name, b"stale-control", 0, 0).unwrap();
+
+    // A pin acquired before replacement remains bound to the original inode;
+    // the later path replacement must not become its xattr target.
+    let held = state.xattr_target(rw, true).unwrap();
+    std::fs::rename(root.path().join("rw"), root.path().join("moved-rw")).unwrap();
+    std::fs::write(root.path().join("rw"), b"replacement").unwrap();
+    assert_eq!(
+        raw_getxattr_at(held.path.as_c_str(), name).unwrap(),
+        b"stale-control"
+    );
+    raw_setxattr_at(held.path.as_c_str(), name, b"retained", 0).unwrap();
+    assert_eq!(
+        raw_lgetxattr(&root.path().join("moved-rw"), name).unwrap(),
+        b"retained"
+    );
+
+    // An old FUSE inode is not authority for the replacement at its spelling.
+    assert_errno(get_xattr(&state, rw, name), libc::ESTALE);
+    assert_errno(state.setxattr(rw, name, b"replacement", 0, 0), libc::ESTALE);
+    let replacement = lookup(&mut state, ROOT, "rw");
+    assert_errno(get_xattr(&state, replacement, name), libc::ENODATA);
+    println!("XATTR_RAW_PROVIDER_CONTRACT_OK");
+}
+
+#[test]
 fn setattr_timestamp_conversion_preserves_pre_epoch_values() {
     let [atime, mtime] = requested_times(
         Some(TimeOrNow::SpecificTime(
@@ -794,16 +1085,7 @@ fn parent_identity_translates_only_zero_owner_requests_before_mutation() {
 
     let before = std::fs::metadata(&file).unwrap();
     assert_errno(
-        state.setattr(
-            ino,
-            Some(0o600),
-            Some(1),
-            Some(0),
-            None,
-            None,
-            None,
-            None,
-        ),
+        state.setattr(ino, Some(0o600), Some(1), Some(0), None, None, None, None),
         libc::EINVAL,
     );
     let after_uid = std::fs::metadata(&file).unwrap();
@@ -814,16 +1096,7 @@ fn parent_identity_translates_only_zero_owner_requests_before_mutation() {
     );
 
     assert_errno(
-        state.setattr(
-            ino,
-            Some(0o640),
-            Some(0),
-            Some(1),
-            None,
-            None,
-            None,
-            None,
-        ),
+        state.setattr(ino, Some(0o640), Some(0), Some(1), None, None, None, None),
         libc::EINVAL,
     );
     let after_gid = std::fs::metadata(&file).unwrap();

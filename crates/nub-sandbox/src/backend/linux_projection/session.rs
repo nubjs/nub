@@ -13,6 +13,7 @@ use super::namespace::{NamespacePair, ProjectedMount, ProjectionMountPaths};
 use super::native_open::{NativeOpenClient, NativeOpenService, mount_id};
 use super::{Projection, rules};
 use crate::backend::linux_supervisor::ProjectedLaunch;
+use crate::backend::unix_tmp::PrivateTemp;
 use crate::policy::FsRuleSet;
 
 type CleanupResult = Arc<Mutex<Option<Result<(), String>>>>;
@@ -46,7 +47,7 @@ struct SessionState {
     mount: ProjectedMount,
     opener: Option<NativeOpenService>,
     server: Option<JoinHandle<io::Result<()>>>,
-    staging: Option<tempfile::TempDir>,
+    staging: Option<PrivateTemp>,
     cleanup: CleanupResult,
     worker_error: Option<String>,
 }
@@ -101,7 +102,7 @@ impl ProjectedSession {
         };
         let host_uid = unsafe { libc::geteuid() };
         let host_gid = unsafe { libc::getegid() };
-        let staging = tempfile::tempdir()?;
+        let staging = PrivateTemp::new()?;
         let rw = staging.path().join("rw");
         let read = staging.path().join("read");
         let view = staging.path().join("view");
@@ -330,8 +331,8 @@ impl SessionState {
         }
         self.mount.unmount_view()?;
         self.mount.release_backing_namespace()?;
-        if let Some(staging) = self.staging.as_ref() {
-            std::fs::remove_dir_all(staging.path())?;
+        if let Some(staging) = self.staging.as_mut() {
+            staging.close()?;
         }
         self.staging.take();
         Ok(())

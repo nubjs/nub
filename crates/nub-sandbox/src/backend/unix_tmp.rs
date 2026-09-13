@@ -14,6 +14,7 @@ pub(crate) struct PrivateTemp {
     entry: PathBuf,
     data: PathBuf,
     _lease: File,
+    closed: bool,
 }
 
 impl PrivateTemp {
@@ -53,21 +54,28 @@ impl PrivateTemp {
             entry,
             data,
             _lease: lease,
+            closed: false,
         })
     }
 
     pub(super) fn path(&self) -> &Path {
         &self.data
     }
+
+    pub(super) fn close(&mut self) -> io::Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        let _operation = operation(&self.root)?;
+        remove_owned(&self.entry, &self._lease)?;
+        self.closed = true;
+        Ok(())
+    }
 }
 
 impl Drop for PrivateTemp {
     fn drop(&mut self) {
-        let result = (|| {
-            let _operation = operation(&self.root)?;
-            remove_owned(&self.entry, &self._lease)
-        })();
-        if let Err(error) = result {
+        if let Err(error) = self.close() {
             tracing::warn!(%error, "private sandbox temp close requires cleanup");
         }
     }
@@ -229,6 +237,48 @@ mod tests {
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
         assert!(collect(root.path()).is_empty());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn explicit_close_is_idempotent_and_drop_does_not_touch_a_replacement() {
+        let root = registry();
+        let mut session = PrivateTemp::create_in(root.path()).unwrap();
+        let entry = session.entry.clone();
+        session.close().unwrap();
+        assert!(!entry.exists());
+        std::fs::create_dir(&entry).unwrap();
+        std::fs::write(entry.join("keep"), b"replacement").unwrap();
+        session.close().unwrap();
+        drop(session);
+        assert_eq!(std::fs::read(entry.join("keep")).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn explicit_close_retains_identity_and_lease_until_retry_succeeds() {
+        let root = registry();
+        let mut session = PrivateTemp::create_in(root.path()).unwrap();
+        let entry = session.entry.clone();
+        let moved = root.path().join("moved");
+        let foreign = root.path().join("foreign");
+        std::fs::write(session.path().join("output"), b"owned").unwrap();
+        std::fs::rename(&entry, &moved).unwrap();
+        std::fs::create_dir(&entry).unwrap();
+        std::fs::write(entry.join("keep"), b"replacement").unwrap();
+
+        assert!(session.close().is_err());
+        assert!(!session.closed);
+        let other = open_owned(&moved.join("lease"), false).unwrap();
+        assert_eq!(
+            lock(&other, true).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(std::fs::read(moved.join("data/output")).unwrap(), b"owned");
+
+        std::fs::rename(&entry, &foreign).unwrap();
+        std::fs::rename(&moved, &entry).unwrap();
+        session.close().unwrap();
+        assert!(!entry.exists());
+        assert_eq!(std::fs::read(foreign.join("keep")).unwrap(), b"replacement");
     }
 
     #[test]

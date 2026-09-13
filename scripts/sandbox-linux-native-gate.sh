@@ -52,6 +52,8 @@ for filter in \
   backend::linux_projection_mount_tests::mounted_projection_enforces_paths_and_owns_commands \
   backend::linux_projection_mount_tests::mounted_projection_preserves_mapping_semantics \
   backend::linux_projection::session_tests::projected_session_real_lifecycle_and_cleanup \
+  backend::linux_projection::session_tests::projected_session_source_root_topology_and_cleanup \
+  backend::linux_projection::session_tests::projected_session_source_root_read_backing_prunes_rw_clone \
   backend::linux_supervisor::lifecycle_tests::legacy_write_policy_is_refused_before_command_admission
 do
   grep -F "$filter: test" "$EVIDENCE/tests.list"
@@ -72,8 +74,10 @@ run_test() {
 }
 run_test provider 0 backend::linux_projection:: --nocapture --test-threads=1
 run_test dispatcher 0 backend::linux_supervisor::projected_open::tests:: --nocapture --test-threads=1
+run_test private-temp 0 backend::unix_tmp::tests:: --nocapture --test-threads=1
 run_test legacy-refusal 0 backend::linux_supervisor::lifecycle_tests::legacy_write_policy_is_refused_before_command_admission --exact --nocapture
 run_test owner-unmount 0 backend::linux_projection_mount_tests::owner_unmount_classifies_only_connection_abort --exact --nocapture
+if ! grep -Fq 'XATTR_RAW_PROVIDER_CONTRACT_OK' "$EVIDENCE/provider.log"; then result=1; fi
 if [ "$MODE" = source-only ]; then
   printf 'PROJECTION_SOURCE_GATE_EXIT=%s MOUNTED_ENFORCEMENT_NOT_RUN=1\n' "$result"
   exit "$result"

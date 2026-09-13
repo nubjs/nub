@@ -4,15 +4,19 @@
 //! capabilities its mount actually uses.
 
 use super::ProjectedSession;
+use super::namespace::{NamespacePair, ProjectionMountPaths};
 use super::session::AcquireFault;
 use crate::backend::{CommandSpec, Prepared, PreparedChild, PreparedSignalTarget, Sandbox};
 use crate::policy::{
     CanonGlob, Effect, EnvPolicy, FsAccess, FsOrigin, FsRule, FsRuleSet, NetPolicy, SandboxPolicy,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::CString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,6 +27,8 @@ const HELPER: &str = "backend::linux_projection::session_tests::projected_sessio
 const ROLE: &str = "NUB_PROJECTED_SESSION_ROLE";
 const ENV_MARKER: &str = "NUB_PROJECTED_SESSION_ENV";
 const ENV_VALUE: &str = "constructed-session-env";
+const TOPOLOGY_ALLOWED: &str = "NUB_PROJECTED_TOPOLOGY_ALLOWED";
+const TOPOLOGY_DENIED: &str = "NUB_PROJECTED_TOPOLOGY_DENIED";
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -45,15 +51,7 @@ fn copy(source: &Path, destination: &Path) {
     fs::copy(source, destination).expect("fixture copy");
 }
 
-fn fixture(executable: &Path) -> Fixture {
-    let root = tempfile::tempdir().expect("fixture root");
-    let source = root.path().join("source");
-    let app = source.join("app");
-    fs::create_dir_all(&app).expect("fixture app directory");
-
-    // This is a disposable test-binary closure, not executable discovery or a
-    // production policy grant. The copied binary reaches its interpreter and
-    // shared objects only through the projected namespace.
+fn executable_closure(executable: &Path) -> BTreeSet<PathBuf> {
     let mut closure = BTreeSet::new();
     let mut pending = vec![executable.to_owned()];
     while let Some(binary) = pending.pop() {
@@ -78,6 +76,19 @@ fn fixture(executable: &Path) -> Fixture {
             }
         }
     }
+    closure
+}
+
+fn fixture(executable: &Path) -> Fixture {
+    let root = tempfile::tempdir().expect("fixture root");
+    let source = root.path().join("source");
+    let app = source.join("app");
+    fs::create_dir_all(&app).expect("fixture app directory");
+
+    // This is a disposable test-binary closure, not executable discovery or a
+    // production policy grant. The copied binary reaches its interpreter and
+    // shared objects only through the projected namespace.
+    let closure = executable_closure(executable);
 
     copy(executable, &app.join("run"));
     fs::set_permissions(app.join("run"), fs::Permissions::from_mode(0o755))
@@ -144,10 +155,77 @@ fn policy(rules: FsRuleSet) -> SandboxPolicy {
     policy
 }
 
+fn root_topology_policy(
+    executable: &Path,
+    allowed: &Path,
+    denied: &Path,
+    staging_root: &Path,
+) -> SandboxPolicy {
+    // The staging entry is allocated by ProjectedSession. This explicit grant
+    // lets the child use it as cwd without granting the denied sentinel.
+    let staging = staging_root.to_string_lossy();
+    let mut entries = vec![
+        rule(executable.to_string_lossy().into_owned(), FsAccess::Read),
+        rule(staging.to_string(), FsAccess::Read),
+        rule(
+            format!("{}/**", staging.trim_end_matches('/')),
+            FsAccess::Read,
+        ),
+        rule(allowed.to_string_lossy().into_owned(), FsAccess::Read),
+    ];
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry.matcher.as_str() == denied.to_string_lossy()),
+        "root topology policy accidentally grants denied sentinel"
+    );
+    entries.extend(
+        executable_closure(executable)
+            .into_iter()
+            .map(|path| rule(path.to_string_lossy().into_owned(), FsAccess::Read)),
+    );
+
+    let mut constructed = BTreeMap::new();
+    constructed.insert("PATH".into(), "/usr/bin:/bin".into());
+    constructed.insert(ROLE.into(), "root-topology".into());
+    constructed.insert(
+        TOPOLOGY_ALLOWED.into(),
+        allowed.to_string_lossy().into_owned(),
+    );
+    constructed.insert(
+        TOPOLOGY_DENIED.into(),
+        denied.to_string_lossy().into_owned(),
+    );
+    let mut policy = SandboxPolicy::default();
+    policy.fs.rules = FsRuleSet {
+        entries,
+        default_effect: Effect::Deny,
+    };
+    policy.env = EnvPolicy::resolved(constructed);
+    policy.env.enforce = true;
+    policy.net = NetPolicy {
+        enforce: true,
+        default_effect: Effect::Deny,
+        ..NetPolicy::default()
+    };
+    policy
+}
+
 fn command() -> CommandSpec {
     CommandSpec::new("/app/run")
         .args(["--exact", HELPER, "--nocapture", "--test-threads=1"])
         .cwd("/")
+        .redact_stdout(true)
+        .redact_stderr(true)
+}
+
+fn root_topology_command(executable: &Path, staging: &Path) -> CommandSpec {
+    CommandSpec::new(executable)
+        .args(["--exact", HELPER, "--nocapture", "--test-threads=1"])
+        // The projected launch applies cwd after chroot. This gives the helper
+        // the precise dynamically allocated staging path without expanding the
+        // command/environment surface just for test instrumentation.
+        .cwd(staging)
         .redact_stdout(true)
         .redact_stderr(true)
 }
@@ -189,20 +267,48 @@ fn spawn_ready(prepared: Prepared) -> PreparedChild {
 
 fn parent_network_control() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("parent listener");
+    listener
+        .set_nonblocking(true)
+        .expect("parent listener nonblocking");
     let address = listener.local_addr().expect("parent listener address");
-    let server = thread::spawn(move || {
-        let (mut accepted, _) = listener.accept().expect("parent accept");
-        accepted
-            .write_all(b"parent-network-control")
-            .expect("parent reply");
+    thread::scope(|scope| {
+        let server = scope.spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut accepted = loop {
+                match listener.accept() {
+                    Ok((accepted, _)) => break accepted,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::new(io::ErrorKind::TimedOut, "parent accept"));
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            accepted.set_write_timeout(Some(Duration::from_secs(2)))?;
+            accepted
+                .write_all(b"parent-network-control")
+                .map_err(|error| io::Error::new(error.kind(), format!("parent reply: {error}")))
+        });
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+            .expect("parent allowed network control");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("parent control read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("parent control write timeout");
+        let mut bytes = String::new();
+        stream
+            .read_to_string(&mut bytes)
+            .expect("parent control read");
+        server
+            .join()
+            .expect("parent network thread")
+            .expect("parent network control");
+        assert_eq!(bytes, "parent-network-control");
     });
-    let mut stream = TcpStream::connect(address).expect("parent allowed network control");
-    let mut bytes = String::new();
-    stream
-        .read_to_string(&mut bytes)
-        .expect("parent control read");
-    server.join().expect("parent network thread");
-    assert_eq!(bytes, "parent-network-control");
     println!("PROJECTED_SESSION_PARENT_NETWORK_CONTROL_OK");
 }
 
@@ -237,45 +343,69 @@ fn child_contract() {
     denied_network();
 }
 
+fn root_topology_contract() {
+    let allowed = PathBuf::from(std::env::var_os(TOPOLOGY_ALLOWED).expect("topology allowed path"));
+    let denied = PathBuf::from(std::env::var_os(TOPOLOGY_DENIED).expect("topology denied path"));
+    assert_eq!(
+        fs::read(&allowed).expect("root topology allowed sentinel"),
+        b"allowed"
+    );
+    let denied_error = fs::read(&denied).expect_err("root topology denied sentinel opened");
+    assert!(
+        matches!(
+            denied_error.raw_os_error(),
+            Some(libc::EACCES | libc::ENOENT)
+        ),
+        "root topology denied sentinel errno: {denied_error}"
+    );
+}
+
 /// Bounded subprocess role run from the copied test ELF inside the projection.
 #[test]
 fn projected_session_helper() {
-    if std::env::var(ROLE).as_deref() != Ok("mounted-session") {
-        return;
-    }
-    child_contract();
-    match fs::read_to_string("/app/role")
-        .expect("projected role")
-        .trim()
-    {
-        "hold" => {
-            println!("PROJECTED_SESSION_HELD_READY");
-            io::stdout().flush().expect("held marker flush");
-            loop {
-                unsafe {
-                    libc::pause();
+    match std::env::var(ROLE).as_deref() {
+        Ok("mounted-session") => {
+            child_contract();
+            match fs::read_to_string("/app/role")
+                .expect("projected role")
+                .trim()
+            {
+                "hold" => {
+                    println!("PROJECTED_SESSION_HELD_READY");
+                    io::stdout().flush().expect("held marker flush");
+                    loop {
+                        unsafe {
+                            libc::pause();
+                        }
+                    }
                 }
+                "survive" => {
+                    println!("PROJECTED_SESSION_SURVIVOR_READY");
+                    io::stdout().flush().expect("survivor marker flush");
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while fs::read("/app/release").expect("projected release") != b"release" {
+                        assert!(
+                            Instant::now() < deadline,
+                            "projected survivor release timed out"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    eprintln!("PROJECTED_SESSION_STDERR_OK");
+                    println!("PROJECTED_SESSION_SURVIVOR_REAP_OK");
+                }
+                "final" => {
+                    eprintln!("PROJECTED_SESSION_FINAL_STDERR_OK");
+                    println!("PROJECTED_SESSION_FINAL_REAP_OK");
+                }
+                role => panic!("unknown projected session role {role:?}"),
             }
         }
-        "survive" => {
-            println!("PROJECTED_SESSION_SURVIVOR_READY");
-            io::stdout().flush().expect("survivor marker flush");
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while fs::read("/app/release").expect("projected release") != b"release" {
-                assert!(
-                    Instant::now() < deadline,
-                    "projected survivor release timed out"
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-            eprintln!("PROJECTED_SESSION_STDERR_OK");
-            println!("PROJECTED_SESSION_SURVIVOR_REAP_OK");
+        Ok("root-topology") => {
+            root_topology_contract();
+            eprintln!("PROJECTED_SESSION_ROOT_TOPOLOGY_STDERR_OK");
+            println!("PROJECTED_SESSION_ROOT_TOPOLOGY_OK");
         }
-        "final" => {
-            eprintln!("PROJECTED_SESSION_FINAL_STDERR_OK");
-            println!("PROJECTED_SESSION_FINAL_REAP_OK");
-        }
-        role => panic!("unknown projected session role {role:?}"),
+        _ => (),
     }
 }
 
@@ -334,6 +464,47 @@ fn failed_cleanup_retains_then_retries() {
     assert_cleanup_ok(&observer);
     drop(fixture.root);
     println!("PROJECTED_SESSION_FAILED_CLEANUP_RETRY_OK");
+}
+
+fn staging_journal_mismatch_retains_then_retries() {
+    let fixture = source_for_fault();
+    let mut session =
+        ProjectedSession::acquire(&fixture.rules, &fixture.source).expect("projected acquisition");
+    let observer = session.cleanup_observer();
+    let staging = session.staging_path().to_owned();
+    let entry = staging.parent().expect("private staging entry").to_owned();
+    let lease = entry.join("lease");
+    let original_lease = fs::read(&lease).expect("private staging lease");
+    fs::write(&lease, b"[0,0]\n").expect("mismatched staging lease");
+
+    let error = session
+        .shutdown()
+        .expect_err("mismatched staging journal cleaned");
+    assert!(
+        error.to_string().contains("ownership identity changed"),
+        "staging journal returned the wrong cleanup error: {error}"
+    );
+    match session.launch() {
+        Err(error) => assert_eq!(
+            error.raw_os_error(),
+            Some(libc::EBADF),
+            "mount teardown did not complete before staging journal failure"
+        ),
+        Ok(_) => panic!("cleanup failure retained a live projected root"),
+    }
+    assert!(
+        staging.exists(),
+        "journal failure removed the owned staging before retry"
+    );
+
+    fs::write(&lease, original_lease).expect("restore private staging lease");
+    session
+        .shutdown()
+        .expect("restored staging retry after mount teardown");
+    assert!(!entry.exists(), "restored owned staging entry remained");
+    assert_cleanup_ok(&observer);
+    drop(fixture.root);
+    println!("PROJECTED_SESSION_STAGING_JOURNAL_RETRY_OK");
 }
 
 fn prepared_children_retain_the_mounted_lease() {
@@ -423,5 +594,141 @@ fn projected_session_real_lifecycle_and_cleanup() {
     // make parallel mounted fault/lifetime probes invalid evidence.
     startup_faults_cleanup();
     failed_cleanup_retains_then_retries();
+    staging_journal_mismatch_retains_then_retries();
     prepared_children_retain_the_mounted_lease();
+}
+
+/// Real `source=/` command, policy, and cleanup coverage.
+#[test]
+#[ignore = "requires an ordinary Linux user with direct user namespaces and /dev/fuse"]
+fn projected_session_source_root_topology_and_cleanup() {
+    let fixture = tempfile::tempdir().expect("root topology fixture");
+    let staging_root =
+        std::env::temp_dir().join(format!("nub-sandbox-tmp-{}", unsafe { libc::geteuid() }));
+    assert_ne!(
+        staging_root,
+        Path::new("/"),
+        "root topology fixture needs a bounded private staging root"
+    );
+    let allowed = fixture.path().join("allowed");
+    let denied = PathBuf::from("/etc/passwd");
+    assert!(
+        !denied.starts_with(&staging_root),
+        "denied sentinel must remain outside the explicit staging grant"
+    );
+    fs::write(&allowed, b"allowed").expect("root topology allowed sentinel");
+
+    // These reads prove the sentinel is real and the parent remains raw. The
+    // child receives only the explicit policy above, which omits /etc/passwd.
+    assert_eq!(
+        fs::read(&allowed).expect("raw allowed sentinel"),
+        b"allowed"
+    );
+    assert!(!fs::read(&denied).expect("raw denied sentinel").is_empty());
+    let raw_mountinfo = fs::read_to_string("/proc/self/mountinfo").expect("raw source mountinfo");
+    for mount in ["/dev", "/proc"] {
+        assert!(
+            raw_mountinfo
+                .lines()
+                .any(|line| line.split_whitespace().nth(4) == Some(mount)),
+            "source=/ raw topology lacks nested {mount} mount"
+        );
+    }
+
+    let executable = std::env::current_exe().expect("test executable");
+    let sandbox = Sandbox::test_projected(
+        &root_topology_policy(&executable, &allowed, &denied, &staging_root),
+        Path::new("/"),
+    )
+    .expect("private source=/ projected sandbox acquisition");
+    let observer = sandbox.test_projected_cleanup_observer();
+    let staging = sandbox.test_projected_staging_path().to_owned();
+    assert!(
+        staging.starts_with(&staging_root),
+        "session staging escaped its explicitly granted private root: {}",
+        staging.display()
+    );
+
+    let output = spawn_ready(
+        sandbox
+            .prepare(root_topology_command(&executable, &staging))
+            .expect("source=/ prepared command"),
+    )
+    .wait_with_output()
+    .expect("source=/ command reap");
+    assert!(
+        output.status.success(),
+        "source=/ command failed: {output:?}"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PROJECTED_SESSION_ROOT_TOPOLOGY_OK"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("PROJECTED_SESSION_ROOT_TOPOLOGY_STDERR_OK")
+    );
+
+    drop(sandbox);
+    assert!(
+        !staging.exists(),
+        "source=/ session retained staging after its final command closed"
+    );
+    assert_cleanup_ok(&observer);
+    println!("PROJECTED_SESSION_SOURCE_ROOT_TOPOLOGY_CLEANUP_OK");
+}
+
+/// Serverless read-backing discriminator for the recursive source-root snapshot.
+#[test]
+#[ignore = "requires an ordinary Linux user with direct user namespaces and /dev/fuse"]
+fn projected_session_source_root_read_backing_prunes_rw_clone() {
+    let staging = tempfile::tempdir().expect("source-root backing staging");
+    let rw = staging.path().join("rw");
+    let read = staging.path().join("read");
+    let view = staging.path().join("view");
+    for path in [&rw, &read, &view] {
+        fs::create_dir(path).expect("source-root backing mountpoint");
+    }
+    let mut mount = NamespacePair::mount_projected(
+        ProjectionMountPaths::new(Path::new("/"), &rw, &read, &view)
+            .expect("source-root mount paths"),
+    )
+    .expect("source-root projected mount");
+    let connection = mount
+        .take_connection()
+        .expect("source-root FUSE connection");
+    let (rw_root, read_root) = mount
+        .take_backing_roots()
+        .expect("source-root backing roots");
+    let relative_staging = staging
+        .path()
+        .strip_prefix("/")
+        .expect("absolute source-root staging");
+    let copied_rw_escape = relative_staging.join("rw/etc/passwd");
+    let copied_rw_escape =
+        CString::new(copied_rw_escape.as_os_str().as_bytes()).expect("source-root escape path");
+    let fd = unsafe {
+        libc::openat(
+            read_root.as_raw_fd(),
+            copied_rw_escape.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if fd >= 0 {
+        unsafe {
+            libc::close(fd);
+        }
+        panic!("read backing cloned the private RW source-root mount");
+    }
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOENT),
+        "read backing escape returned the wrong errno"
+    );
+
+    drop(read_root);
+    drop(rw_root);
+    drop(connection);
+    mount.unmount_view().expect("source-root view unmount");
+    mount
+        .release_backing_namespace()
+        .expect("source-root recursive backing release");
+    println!("PROJECTED_SESSION_SOURCE_ROOT_READ_BACKING_PRUNED_OK");
 }
