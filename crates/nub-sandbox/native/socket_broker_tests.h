@@ -16,10 +16,12 @@ extern "C" DWORD sandbox_socket_broker_test_frames(const wchar_t* name) {
     if (!error) {
         OVERLAPPED connection = {};
         connection.hEvent = incoming;
-        if (!ConnectNamedPipe(server, &connection) && GetLastError() != ERROR_PIPE_CONNECTED)
-            error = ERROR_PIPE_NOT_CONNECTED;
+        DWORD bytes = 0;
+        BOOL connected = ConnectNamedPipe(server, &connection);
+        if ((connected || GetLastError() != ERROR_PIPE_CONNECTED) &&
+            !complete(server, connection, connected, stop, kTimeout, bytes)) error = ERROR_PIPE_NOT_CONNECTED;
     }
-    for (DWORD size : {0u, DWORD(sizeof(Request) - 1), DWORD(sizeof(Request)), DWORD(sizeof(Request) + 1)}) {
+    for (DWORD size : {DWORD(sizeof(Request) - 1), DWORD(sizeof(Request)), DWORD(sizeof(Request) + 1)}) {
         if (error) break;
         BYTE frame[sizeof(Request) + 1] = {};
         if (!transfer(client, outgoing, nullptr, frame, size, true)) { error = ERROR_WRITE_FAULT; break; }
@@ -44,6 +46,14 @@ extern "C" DWORD sandbox_socket_broker_test_frames(const wchar_t* name) {
         if (!error && (!transfer(client, outgoing, nullptr, &request, sizeof(request), true) ||
                        !transfer(server, incoming, nullptr, &request, sizeof(request), false)))
             error = ERROR_INVALID_DATA;
+    }
+    if (!error) {
+        // An empty request is a disconnect without a frame, not a zero-byte
+        // WriteFile (whose null-write semantics vary by transport).
+        CloseHandle(client);
+        client = INVALID_HANDLE_VALUE;
+        Request request = {};
+        if (transfer(server, incoming, nullptr, &request, sizeof(request), false)) error = ERROR_INVALID_DATA;
     }
     if (client != INVALID_HANDLE_VALUE) CloseHandle(client);
     CloseHandle(server);
