@@ -1,0 +1,201 @@
+name: Windows relay native gate next
+
+on:
+  push:
+    branches: [windows-relay-native-gate-next]
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/nub-sandbox/**'
+      - 'tests/sandbox-native-adapter/run-standard-user.ps1'
+      - '.github/workflows/windows-relay-native-gate-next.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-gate:
+    name: Relay native gate (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - id: compile
+        name: Compiling static-CRT artifacts and fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          git rev-parse HEAD | tee reports/source-head.txt
+          rustc -vV | tee reports/rustc-vV.txt
+          printf '%s\n' "$CARGO_BUILD_TARGET" | tee reports/rust-target.txt
+          cargo build --locked -p nub-sandbox --lib 2>&1 | tee reports/static-crt-lib-build.log
+          cargo test --locked -p nub-sandbox --lib --no-run --message-format=json-render-diagnostics > reports/lib-test-artifacts.jsonl
+          cargo test --locked -p nub-sandbox --test windows_tmp_policy --no-run --message-format=json-render-diagnostics > reports/windows-tmp-policy-artifacts.jsonl
+          cargo build --locked -p nub-sandbox --example windows_relay_fixture --message-format=json-render-diagnostics > reports/windows-relay-fixture-artifacts.jsonl
+          cargo build --locked -p nub-sandbox --example broker_session_fixture --message-format=json-render-diagnostics > reports/broker-session-fixture-artifacts.jsonl
+      - id: selected_units
+        name: Running every independent selected unit filter
+        if: ${{ always() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          failures=0
+          run_unit() {
+            local test_name="$1"
+            local slug
+            slug="$(printf '%s' "$test_name" | tr ': ' '__')"
+            local log="reports/${slug}.log"
+            if cargo test --locked -p nub-sandbox --lib "$test_name" -- --nocapture >"$log" 2>&1; then
+              cat "$log"
+              if grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$log" > /dev/null; then
+                printf '%s=passed\n' "$test_name" >> reports/selected-units-status.txt
+              else
+                printf '%s=did-not-prove-pass\n' "$test_name" >> reports/selected-units-status.txt
+                failures=1
+              fi
+            else
+              cat "$log"
+              printf '%s=failed\n' "$test_name" >> reports/selected-units-status.txt
+              failures=1
+            fi
+          }
+          run_unit proxy::relay
+          run_unit live_tls_broker_releases_marker_only_to_the_exact_verified_upstream
+          run_unit public_bundle_is_pinned_readable_and_removed_after_close
+          run_unit plan_net_decides_windows_net_posture
+          run_unit apply_windows_full_disk_build_jail_rejects_restricted_network
+          run_unit apply_windows_tmp_deny_rejects_before_working_directory_preflight
+          exit "$failures"
+      - id: hashes
+        name: Recording exact compiled test binaries
+        if: ${{ always() && steps.compile.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          function OneArtifact([string]$file, [string]$name) {
+            $items = @(Get-Content $file | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq $name -and $_.executable })
+            if ($items.Count -ne 1) { throw "Expected one $name executable, got $($items.Count)" }
+            return $items[0].executable
+          }
+          $binaries = @(
+            @{ target = 'nub_sandbox'; path = OneArtifact 'reports/lib-test-artifacts.jsonl' 'nub_sandbox' },
+            @{ target = 'windows_tmp_policy'; path = OneArtifact 'reports/windows-tmp-policy-artifacts.jsonl' 'windows_tmp_policy' },
+            @{ target = 'windows_relay_fixture'; path = OneArtifact 'reports/windows-relay-fixture-artifacts.jsonl' 'windows_relay_fixture' },
+            @{ target = 'broker_session_fixture'; path = OneArtifact 'reports/broker-session-fixture-artifacts.jsonl' 'broker_session_fixture' }
+          )
+          foreach ($binary in $binaries) { $binary.sha256 = (Get-FileHash -Algorithm SHA256 $binary.path).Hash.ToLowerInvariant() }
+          @{ source = (git rev-parse HEAD).Trim(); os = (Get-CimInstance Win32_OperatingSystem).Caption; target = $env:CARGO_BUILD_TARGET; binaries = $binaries } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 reports/test-binaries.json
+      - id: standard_user
+        name: Running windows_tmp_policy as a standard user
+        if: ${{ always() && steps.compile.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $artifacts = Get-Content reports/windows-tmp-policy-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
+          $test = @($artifacts | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_tmp_policy' -and $_.executable })
+          if ($test.Count -ne 1) { throw "Expected one exact windows_tmp_policy executable, got $($test.Count)" }
+          $source = Get-Content ./tests/sandbox-native-adapter/run-standard-user.ps1 -Raw
+          $originalCommand = "& '.\probe.exe' --ignored --nocapture --test-threads=1"
+          if (!$source.Contains($originalCommand)) { throw 'Standard-user helper command shape changed' }
+          $adapted = $source.Replace($originalCommand, "& '.\probe.exe' --nocapture --test-threads=1").Replace('^test result: ok\. 8 passed; 0 failed;', '^test result: ok\. 3 passed; 0 failed;')
+          Set-Content -Encoding utf8 reports/run-standard-user-windows-tmp-policy.ps1 $adapted
+          & reports/run-standard-user-windows-tmp-policy.ps1 -TestBinary $test[0].executable -ReportDirectory reports
+          $code = $LASTEXITCODE
+          $access = @(Select-String -Path reports/standard-user.log,reports/standard-user-error.log -Pattern '^WINDOWS_TMP_POLICY_ACCESS ' | ForEach-Object { $_.Line })
+          if ($access.Count -lt 1) { $code = 1 }
+          $access | Set-Content -Encoding utf8 reports/standard-user-access-matrix.jsonl
+          exit $code
+      - id: fixture_standard_user
+        name: Running both relay fixtures as a standard user
+        if: ${{ always() && steps.compile.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          function OneArtifact([string]$file, [string]$name) {
+            $items = @(Get-Content $file | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq $name -and $_.executable })
+            if ($items.Count -ne 1) { throw "Expected one $name executable, got $($items.Count)" }
+            return $items[0].executable
+          }
+          $relay = OneArtifact 'reports/windows-relay-fixture-artifacts.jsonl' 'windows_relay_fixture'
+          $broker = OneArtifact 'reports/broker-session-fixture-artifacts.jsonl' 'broker_session_fixture'
+          $name = 'sbx' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+          $stage = Join-Path $env:PUBLIC $name
+          $password = ConvertTo-SecureString ([guid]::NewGuid().ToString('N') + '!aA1') -AsPlainText -Force
+          $user = $null; $process = $null; $exitCode = 1
+          try {
+            $user = New-LocalUser -Name $name -Password $password -AccountNeverExpires -PasswordNeverExpires
+            Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
+            New-Item -ItemType Directory -Force $stage | Out-Null
+            Copy-Item $relay (Join-Path $stage 'windows_relay_fixture.exe')
+            Copy-Item $broker (Join-Path $stage 'broker_session_fixture.exe')
+          @'
+          param([string]$Stage)
+          $ErrorActionPreference = 'Continue'
+          $profileRoot = [Environment]::GetFolderPath('UserProfile')
+          if (!$profileRoot -or $profileRoot -like '*systemprofile*') { throw 'A normal user profile is required' }
+          $owned = Join-Path $profileRoot 'sandbox-native-relay-probe'
+          New-Item -ItemType Directory -Force $owned | Out-Null
+          Copy-Item (Join-Path $Stage '*') $owned -Force
+          Set-Location $owned
+          whoami /all
+          Write-Host "STANDARD_USER_FIXTURE_PROFILE=$profileRoot"
+          $failed = $false
+          & .\windows_relay_fixture.exe 2>&1 | Tee-Object windows_relay_fixture.log
+          if ($LASTEXITCODE -ne 0 -or !(Select-String -Path windows_relay_fixture.log -Pattern 'WINDOWS_PARENT_RELAY_OK' -Quiet)) { $failed = $true }
+          & .\broker_session_fixture.exe 2>&1 | Tee-Object broker_session_fixture.log
+          if ($LASTEXITCODE -ne 0 -or !(Select-String -Path broker_session_fixture.log -Pattern 'BROKER_NATIVE_SESSION_OK' -Quiet)) { $failed = $true }
+          exit $(if ($failed) { 1 } else { 0 })
+          '@ | Set-Content -Encoding ascii (Join-Path $stage 'run-fixtures.ps1')
+            icacls $stage /grant "${name}:(OI)(CI)RX" /T | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Granting standard-user fixture access failed' }
+            $credential = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $password)
+            Start-Service seclogon
+            $process = Start-Process powershell.exe -Credential $credential -LoadUserProfile -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"$stage\run-fixtures.ps1",$stage) -WorkingDirectory $stage -PassThru -RedirectStandardOutput 'reports/standard-user-fixtures.log' -RedirectStandardError 'reports/standard-user-fixtures-error.log'
+            if (!$process.WaitForExit(1200000)) { taskkill /PID $process.Id /T /F | Out-Null; throw 'Standard-user fixture batch exceeded deadline' }
+            $process.WaitForExit(); $exitCode = $process.ExitCode
+            Get-Content reports/standard-user-fixtures.log -ErrorAction Continue
+            Get-Content reports/standard-user-fixtures-error.log -ErrorAction Continue
+          } finally {
+            $cleanup = @{ user = $name; errors = @() }
+            if ($process -and !$process.HasExited) { try { taskkill /PID $process.Id /T /F | Out-Null } catch { $cleanup.errors += $_.Exception.Message } }
+            if ($user) { try { Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'" | Remove-CimInstance } catch { $cleanup.errors += $_.Exception.Message }; try { Remove-LocalUser -Name $name } catch { $cleanup.errors += $_.Exception.Message } }
+            try { if (Test-Path $stage) { Remove-Item -Recurse -Force $stage } } catch { $cleanup.errors += $_.Exception.Message }
+            $cleanup | ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 reports/standard-user-fixtures-cleanup.json
+            if ($cleanup.errors.Count -ne 0) { $exitCode = 1 }
+          }
+          exit $exitCode
+      - name: Aggregating every test verdict
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'compile=%s\nunits=%s\nhashes=%s\nstandard-user=%s\nfixtures-standard-user=%s\n' '${{ steps.compile.outcome }}' '${{ steps.selected_units.outcome }}' '${{ steps.hashes.outcome }}' '${{ steps.standard_user.outcome }}' '${{ steps.fixture_standard_user.outcome }}' | tee reports/final-status.txt
+          test '${{ steps.compile.outcome }}' = success
+          test '${{ steps.selected_units.outcome }}' = success
+          test '${{ steps.hashes.outcome }}' = success
+          test '${{ steps.standard_user.outcome }}' = success
+          test '${{ steps.fixture_standard_user.outcome }}' = success
+      - name: Uploading native gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-relay-native-gate-next-${{ matrix.runner }}
+          path: reports/
+          if-no-files-found: warn
