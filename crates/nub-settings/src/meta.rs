@@ -114,16 +114,6 @@ pub struct SettingMeta {
     pub workspace_yaml_keys: &'static [&'static str],
     /// Example invocations
     pub examples: &'static [&'static str],
-    /// Escape hatch for the workspace-level accessor audit in
-    /// `tests/accessor_audit.rs`. `true` means "this setting is
-    /// honored but not via its generated `resolved::<name>` typed
-    /// accessor" — e.g. read through `std::env::var` behind a
-    /// hand-rolled `LazyLock`, looked up in `NpmConfig` by string
-    /// key, or accepted for pnpm parity with no behavior wired.
-    /// Default `false`; the audit fails CI when a setting with a
-    /// supported scalar type has no `resolved::<name>` call site
-    /// anywhere in the workspace and this flag is not set.
-    pub typed_accessor_unused: bool,
     /// Marks a setting as part of the npm-shared `.npmrc` surface:
     /// npm (and yarn / pnpm) read it from `.npmrc` too, so
     /// `nub config set` writes it there to keep the multi-tool
