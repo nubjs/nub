@@ -1,27 +1,19 @@
 # Windows native full-network fixture
 
-`native-full-network.cpp` is one executable used unchanged by the plain,
-zero-capability raw, and native-adapter AppContainer controls. The parent test
-harness must compile it once per target architecture using the command in the
-source header, hash the resulting executable, and retain its source, binary,
-ordinary-user token/profile output, and terminal CI result.
+`native-full-network.cpp` is one executable used unchanged by the plain, zero-capability raw, and native-adapter AppContainer controls. The parent test harness must compile it once per target architecture using the command in the source header, hash the resulting executable, and retain its source, binary, ordinary-user token/profile output, and terminal CI result. The optional DNS gate additionally requires `NUB_WINDOWS_NATIVE_FULL_NETWORK_DNS_OPT_IN=1`; an executed gate without that exact value fails rather than becoming a green skip.
 
 ## Contract
 
 The harness provides only disposable, parent-owned loopback endpoints and
-checks request/reply bytes in both directions. The fixture emits
+checks request/reply bytes in both directions. Network cases emit
 `FULL_NETWORK_ROOT_BROKER_SOCKET` first: this is a `WSASocketW` call that the
 adapter routes through its root broker. A failed marker is an adapter
 admission/RPC diagnosis, not a LAN or peer-traffic result. The fixture never
 opens the private broker pipe, asks about helper rights, retries through a
 different route, or changes host policy.
 
-For adapted `net:true`, every listed case must exit zero and report the peer
-marker. The retained-session matrix runs that positive arm first, followed by
-native `net:false` and hostname-restricted arms using the **same literal
-filesystem grants**. Those negative arms must have no peer-observed request and
-no completed reply; successful setup APIs alone are not a pass. This catches a
-retained-resource identity alias between otherwise-zero-capability policies.
+For every TCP, UDP, IPv6, listener, IOCP, concurrency, and descendant case, an unconfined run against the same parent-owned peer runs before the adapted `net:true` run. The retained-session matrix runs its positive arm first, followed by native `net:false` and hostname-restricted arms using the **same literal filesystem grants**. Those negative arms must have no peer-observed request and no completed reply; successful setup APIs alone are not a pass. This catches a retained-resource identity alias between otherwise-zero-capability policies.
+
 `fs-canary` must report both read and write denied for every confined mode. The
 canary is a pre-existing parent-created file outside all project, temporary,
 and tool-root grants; the unconfined control must prove that the same path is
@@ -36,8 +28,11 @@ compatibility, or an adapter diagnostic failure is a failure, never success.
 | `connectex4` | Child uses `ConnectEx` and waits through an IOCP completion. |
 | `acceptex4` | Child posts `AcceptEx`, announces its listener, and waits through an IOCP completion. |
 | `concurrent4` | Twelve simultaneous TCP round trips; each completion is required. |
-| `descendant4` | Root starts a normal descendant; the descendant performs an owned TCP round trip. |
+| `descendant4` | Root starts a normal descendant; the descendant attests its own AppContainer token then performs an owned TCP round trip. |
+| `token-attest` | Root attests its own AppContainer token, one internetClient capability, and no Administrators membership. |
 | `fs-canary` | The ungranted parent-created file cannot be opened for either read or write. |
+
+The fixture never asks about a helper's token or rights. `FULL_NETWORK_TOKEN` is read only from the running fixture process's primary token. The root and normal-descendant native paths must report `appcontainer=1:capabilities=1:admin=0`. The DNS gate uses a fresh, fixed-width nonce label per API and mode, checks that the returned A records actually include `1.1.1.1`, and logs raw zero-capability observations without turning them into a denial assertion.
 
 ## Deliberate boundary
 

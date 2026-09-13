@@ -7,10 +7,10 @@
 // can report successful Winsock setup while no peer ever observes traffic.
 //
 // Build contract (owned by the parent test workflow, not this fixture):
-//   cl /nologo /std:c++17 /W4 /WX /EHsc native-full-network.cpp /link ws2_32.lib dnsapi.lib
+//   cl /nologo /std:c++17 /W4 /WX /EHsc native-full-network.cpp /link ws2_32.lib dnsapi.lib advapi32.lib
 //
 // Arguments: <case>, one of tcp4, tcp6, udp4, udp6, listen4, listen6,
-// connectex4, acceptex4, concurrent4, descendant4, or fs-canary.
+// connectex4, acceptex4, concurrent4, descendant4, token-attest, or fs-canary.
 // NUB_FULL_NETWORK_ENDPOINT is HOST:PORT (IPv6 uses [::1]:PORT).  Listener
 // cases print FULL_NETWORK_READY before accepting.  Every peer exchange uses
 // the fixed request/reply bytes below so the parent can independently prove
@@ -149,6 +149,55 @@ bool root_broker_socket_diagnostic() {
   }
   marker("FULL_NETWORK_ROOT_BROKER_SOCKET", "ok");
   return true;
+}
+
+// This fixture only queries its own primary token.  In particular, it never
+// opens the adapter, relay, or another helper process merely to make a token
+// claim.  The capability count comes from TokenCapabilities and administrator
+// membership uses the AppContainer-aware membership API.
+bool self_token_marker(bool require_full_network) {
+  HANDLE token = nullptr;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) == 0) return false;
+  DWORD app_container = 0;
+  DWORD returned = 0;
+  bool valid = GetTokenInformation(token, TokenIsAppContainer, &app_container,
+                                   sizeof(app_container), &returned) != 0;
+  DWORD capability_bytes = 0;
+  GetTokenInformation(token, TokenCapabilities, nullptr, 0, &capability_bytes);
+  std::vector<BYTE> capabilities(capability_bytes);
+  if (capability_bytes < sizeof(TOKEN_GROUPS) ||
+      GetTokenInformation(token, TokenCapabilities, capabilities.data(), capability_bytes,
+                          &returned) == 0) {
+    valid = false;
+  }
+  DWORD capability_count = 0;
+  if (valid) {
+    capability_count = reinterpret_cast<const TOKEN_GROUPS*>(capabilities.data())->GroupCount;
+  }
+  SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
+  PSID administrators = nullptr;
+  BOOL administrator = FALSE;
+  if (AllocateAndInitializeSid(&authority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                               DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
+                               &administrators) == 0 ||
+      CheckTokenMembershipEx(token, administrators, CTMF_INCLUDE_APPCONTAINER,
+                             &administrator) == 0) {
+    valid = false;
+  }
+  if (administrators != nullptr) FreeSid(administrators);
+  CloseHandle(token);
+  marker("FULL_NETWORK_TOKEN", "appcontainer=" + std::to_string(app_container) +
+          ":capabilities=" + std::to_string(capability_count) +
+          ":admin=" + std::to_string(administrator != FALSE));
+  return valid && (!require_full_network ||
+                   (app_container == 1 && capability_count == 1 && administrator == FALSE));
+}
+
+bool self_token_attestation() {
+  // A full-network AppContainer has only the internetClient capability.  The
+  // ordinary-user fixture must therefore show a LowBox token, exactly that one
+  // capability, and no Administrators membership from its own token.
+  return self_token_marker(true);
 }
 
 bool send_all(SOCKET socket, const char* bytes, int count) {
@@ -436,6 +485,7 @@ int run_case(const std::string& name, const char* executable) {
   if (name == "fs-canary") return filesystem_canary() ? 0 : 1;
   if (name == "getaddrinfo") return dns_lookup(false) ? 0 : 1;
   if (name == "dnsqueryex") return dns_lookup(true) ? 0 : 1;
+  if (name == "token-attest") return self_token_attestation() ? 0 : 1;
   if (!root_broker_socket_diagnostic()) return 1;
   if (name == "tcp4" || name == "tcp6") return endpoint_case(name, SOCK_STREAM, stream_round_trip) ? 0 : 1;
   if (name == "udp4" || name == "udp6") return endpoint_case(name, SOCK_DGRAM, datagram_round_trip) ? 0 : 1;
@@ -458,7 +508,10 @@ int run_case(const std::string& name, const char* executable) {
     return parse_endpoint(std::getenv("NUB_FULL_NETWORK_ENDPOINT"), SOCK_STREAM, &endpoint) && concurrent_round_trips(endpoint) ? 0 : 1;
   }
   if (name == "descendant4") return descendant_round_trip(executable, std::getenv("NUB_FULL_NETWORK_ENDPOINT")) ? 0 : 1;
-  if (name == "--descendant-client") return endpoint_case("descendant-client", SOCK_STREAM, stream_round_trip) ? 0 : 1;
+  if (name == "--descendant-client") {
+    const bool token = self_token_marker(false);
+    return token && endpoint_case("descendant-client", SOCK_STREAM, stream_round_trip) ? 0 : 1;
+  }
   marker("FULL_NETWORK_CASE", "unknown");
   return 2;
 }
