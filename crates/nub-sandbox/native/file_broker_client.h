@@ -19,8 +19,23 @@ enum FileBrokerCaptureStatus : DWORD {
     FileBrokerCaptureFault = 7,
 };
 
+enum FileBrokerObjectAttributeField : DWORD {
+    FileBrokerObjectMissing = 1,
+    FileBrokerObjectLength = 2,
+    FileBrokerObjectRoot = 4,
+    FileBrokerObjectDescriptor = 8,
+    FileBrokerObjectQualityOfService = 16,
+    FileBrokerObjectFlags = 32,
+    FileBrokerObjectName = 64,
+};
+
+struct FileBrokerCaptureDetails {
+    DWORD object_fields = 0;
+    DWORD object_attributes = 0;
+};
+
 static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status,
-    const nub_sandbox::file_broker::Request& request) {
+    const nub_sandbox::file_broker::Request& request, const FileBrokerCaptureDetails& capture) {
     wchar_t value[2];
     if (!GetEnvironmentVariableW(L"NUB_JAIL_DUMP_POLICY", value, _countof(value))) return;
     // One fixed-size numeric record per failing stage; never print a path,
@@ -28,10 +43,15 @@ static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status,
     static volatile LONG seen = 0;
     LONG bit = 1L << static_cast<LONG>(stage);
     if (!(InterlockedOr(&seen, bit) & bit)) {
-        char message[160];
-        int length = sprintf_s(message,
-            "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
-            static_cast<DWORD>(stage), status, request.access, request.options, request.disposition);
+        char message[208];
+        int length = stage == FileBrokerCapture
+            ? sprintf_s(message,
+                "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx object=0x%08lx attributes=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
+                static_cast<DWORD>(stage), status, capture.object_fields, capture.object_attributes,
+                request.access, request.options, request.disposition)
+            : sprintf_s(message,
+                "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
+                static_cast<DWORD>(stage), status, request.access, request.options, request.disposition);
         DWORD written = 0;
         if (length > 0) WriteFile(GetStdHandle(STD_ERROR_HANDLE), message,
                                   static_cast<DWORD>(length), &written, nullptr);
@@ -39,19 +59,31 @@ static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status,
 }
 
 static bool capture_file_request(nub_sandbox::file_broker::Request& request,
-                                 POBJECT_ATTRIBUTES attrs, DWORD& failure) {
+                                 POBJECT_ATTRIBUTES attrs, DWORD& failure,
+                                 FileBrokerCaptureDetails& details) {
     using namespace nub_sandbox::file_broker;
     // Neither pointers nor child handle values cross the protocol. Root-relative
     // calls require a separate authenticated handle-resolution protocol.
     failure = FileBrokerCaptureFault;
     __try {
-        if (!attrs || attrs->Length != sizeof(*attrs) || attrs->RootDirectory ||
-            attrs->SecurityDescriptor || attrs->SecurityQualityOfService ||
-            attrs->Attributes != OBJ_CASE_INSENSITIVE || !attrs->ObjectName) {
+        if (!attrs) {
+            details.object_fields = FileBrokerObjectMissing;
             failure = FileBrokerCaptureObjectAttributes;
             return false;
         }
-        UNICODE_STRING name = *attrs->ObjectName;
+        OBJECT_ATTRIBUTES object = *attrs;
+        details.object_attributes = object.Attributes;
+        if (object.Length != sizeof(object)) details.object_fields |= FileBrokerObjectLength;
+        if (object.RootDirectory) details.object_fields |= FileBrokerObjectRoot;
+        if (object.SecurityDescriptor) details.object_fields |= FileBrokerObjectDescriptor;
+        if (object.SecurityQualityOfService) details.object_fields |= FileBrokerObjectQualityOfService;
+        if (object.Attributes != OBJ_CASE_INSENSITIVE) details.object_fields |= FileBrokerObjectFlags;
+        if (!object.ObjectName) details.object_fields |= FileBrokerObjectName;
+        if (details.object_fields) {
+            failure = FileBrokerCaptureObjectAttributes;
+            return false;
+        }
+        UNICODE_STRING name = *object.ObjectName;
         if (!name.Buffer || name.Length % sizeof(wchar_t) || name.Length < 8 * sizeof(wchar_t) ||
             name.Length > name.MaximumLength || name.Length / sizeof(wchar_t) >= kPath + 4) {
             failure = FileBrokerCaptureName;
@@ -141,23 +173,24 @@ static NTSTATUS broker_file_open(DWORD operation, PHANDLE handle, ACCESS_MASK ac
     ULONG options, ULONG attributes) {
     using namespace nub_sandbox::file_broker;
     Request request = {kVersion, sizeof(Request), operation, access, share, disposition, options, attributes};
+    FileBrokerCaptureDetails details = {};
     DWORD capture = ERROR_INVALID_STATE;
-    if (!state.file_broker[0] || !capture_file_request(request, attrs, capture)) {
-        diagnose_file_broker(FileBrokerCapture, capture, request);
+    if (!state.file_broker[0] || !capture_file_request(request, attrs, capture, details)) {
+        diagnose_file_broker(FileBrokerCapture, capture, request, details);
         return kDenied;
     }
     Response response = {};
     DWORD failure = ERROR_GEN_FAILURE;
     if (!exchange_file_request(request, response, failure)) {
-        diagnose_file_broker(FileBrokerExchange, failure, request);
+        diagnose_file_broker(FileBrokerExchange, failure, request, details);
         return kDenied;
     }
     if (response.status) {
-        diagnose_file_broker(FileBrokerResponse, static_cast<DWORD>(response.status), request);
+        diagnose_file_broker(FileBrokerResponse, static_cast<DWORD>(response.status), request, details);
         return response.status;
     }
     if (!response.handle) {
-        diagnose_file_broker(FileBrokerResponse, ERROR_INVALID_HANDLE, request);
+        diagnose_file_broker(FileBrokerResponse, ERROR_INVALID_HANDLE, request, details);
         return kDenied;
     }
     HANDLE received = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(response.handle));
@@ -189,23 +222,24 @@ static NtQueryFileAttributes true_query_full_attributes = nullptr;
 static NTSTATUS broker_file_attributes(DWORD operation, POBJECT_ATTRIBUTES attrs, PVOID output) {
     using namespace nub_sandbox::file_broker;
     Request request = {kVersion, sizeof(Request), operation};
+    FileBrokerCaptureDetails details = {};
     DWORD capture = ERROR_INVALID_STATE;
-    if (!capture_file_request(request, attrs, capture)) {
-        diagnose_file_broker(FileBrokerCapture, capture, request);
+    if (!capture_file_request(request, attrs, capture, details)) {
+        diagnose_file_broker(FileBrokerCapture, capture, request, details);
         return kDenied;
     }
     Response response = {};
     DWORD failure = ERROR_GEN_FAILURE;
     if (!exchange_file_request(request, response, failure)) {
-        diagnose_file_broker(FileBrokerExchange, failure, request);
+        diagnose_file_broker(FileBrokerExchange, failure, request, details);
         return kDenied;
     }
     if (response.status) {
-        diagnose_file_broker(FileBrokerResponse, static_cast<DWORD>(response.status), request);
+        diagnose_file_broker(FileBrokerResponse, static_cast<DWORD>(response.status), request, details);
         return response.status;
     }
     if (response.handle || response.information) {
-        diagnose_file_broker(FileBrokerResponse, ERROR_INVALID_DATA, request);
+        diagnose_file_broker(FileBrokerResponse, ERROR_INVALID_DATA, request, details);
         return kDenied;
     }
     __try {
