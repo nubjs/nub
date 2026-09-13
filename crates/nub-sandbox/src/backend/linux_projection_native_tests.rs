@@ -788,6 +788,27 @@ fn native_cancelled_create_client(root: &Path) {
     );
 }
 
+fn wait_for_unreaped_exit(child: &SupervisedChild) -> io::Result<()> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        } == 0
+        {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 fn native_request(path: &CStr, flags: i32, mode: u64) -> NativeOpenRequest {
     NativeOpenRequest {
         path: path.to_owned(),
@@ -1206,6 +1227,137 @@ fn native_admission_cancellation_contract(service: &NativeOpenService, view: &CS
     }
 }
 
+fn native_stale_notification_contract(service: &NativeOpenService, view: &CString, raw: &Path) {
+    let mut first = spawn_native_command("native-concurrent", view, service.client());
+    let mut second = spawn_native_command("native-concurrent", view, service.client());
+    let mut stale = spawn_native_command("native-cancelled-create", view, service.client());
+    let mut first_output = BufReader::new(first.take_stdout().unwrap());
+    let mut second_output = BufReader::new(second.take_stdout().unwrap());
+    let mut stale_output = BufReader::new(stale.take_stdout().unwrap());
+    let first_stderr = first.take_stderr().unwrap();
+    let second_stderr = second.take_stderr().unwrap();
+    let stale_stderr = stale.take_stderr().unwrap();
+    let first_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(first_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let second_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(second_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let stale_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(stale_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let mut first_input = first.take_stdin().unwrap();
+    let mut second_input = second.take_stdin().unwrap();
+    let mut stale_input = stale.take_stdin().unwrap();
+    let stale_path = raw.join("app/native-queue-cancelled-create");
+    assert!(
+        !stale_path.exists(),
+        "stale notification create starts absent"
+    );
+    let client = service.client();
+    let mut first_gate = None;
+    let mut stale_gate = None;
+    let protocol = (|| -> io::Result<(u64, u64)> {
+        native_event(&mut first_output, "NATIVE_CONCURRENT_READY")?;
+        native_event(&mut second_output, "NATIVE_CONCURRENT_READY")?;
+        native_event(&mut stale_output, "NATIVE_CANCELLED_CREATE_READY")?;
+        let before = client.stats();
+        first_gate = Some(service.block_next_path(c"/app/native-concurrent")?);
+        first_input.write_all(b"go\n")?;
+        first_gate
+            .as_ref()
+            .ok_or_else(|| io::Error::other("first stale-test gate was not armed"))?
+            .wait_until_active()?;
+        second_input.write_all(b"go\n")?;
+        client.wait_for_admission(1, 0)?;
+        stale_input.write_all(b"go\n")?;
+        client.wait_for_admission(1, 1)?;
+        stale_gate = Some(service.block_next_path(c"/app/native-queue-cancelled-create")?);
+        first_gate
+            .take()
+            .ok_or_else(|| io::Error::other("first stale-test gate was released twice"))?
+            .release()?;
+        stale_gate
+            .as_ref()
+            .ok_or_else(|| io::Error::other("stale notification gate was not armed"))?
+            .wait_until_active()?;
+        stale.kill()?;
+        wait_for_unreaped_exit(&stale)?;
+        let sentinel = client.submit(native_request(c"/app/native-read", libc::O_RDONLY, 0))?;
+        stale_gate
+            .take()
+            .ok_or_else(|| io::Error::other("stale notification gate was released twice"))?
+            .release()?;
+        let sentinel = sentinel.finish_blocking()?;
+        assert_native_identity(&sentinel, &raw.join("app/native-read"));
+        native_event(&mut first_output, "NATIVE_CONCURRENT_OK")?;
+        native_event(&mut second_output, "NATIVE_CONCURRENT_OK")?;
+        Ok(before)
+    })();
+    drop(first_gate.take());
+    drop(stale_gate.take());
+    let killed = if protocol.is_err() {
+        Some((first.kill(), second.kill(), stale.kill()))
+    } else {
+        None
+    };
+    drop(first_input);
+    drop(second_input);
+    drop(stale_input);
+    let outcome = (
+        protocol,
+        first.wait(),
+        second.wait(),
+        stale.wait(),
+        first_stderr_drain.join(),
+        second_stderr_drain.join(),
+        stale_stderr_drain.join(),
+    );
+    match outcome {
+        (
+            Ok(before),
+            Ok(first_status),
+            Ok(second_status),
+            Ok(stale_status),
+            Ok(Ok(first_stderr)),
+            Ok(Ok(second_stderr)),
+            Ok(Ok(stale_stderr)),
+        ) => {
+            assert!(
+                first_status.success(),
+                "first stale-notification peer {first_status:?}\n{first_stderr}"
+            );
+            assert!(
+                second_status.success(),
+                "second stale-notification peer {second_status:?}\n{second_stderr}"
+            );
+            assert!(
+                !stale_status.success(),
+                "stale notification command unexpectedly succeeded: {stale_status:?}\n{stale_stderr}"
+            );
+            assert!(
+                !stale_path.exists(),
+                "stale notification create reached the projected filesystem"
+            );
+            assert_eq!(
+                client.stats(),
+                (before.0 + 3, before.1 + 3),
+                "only two peers and the post-stale sentinel may acquire native files"
+            );
+            println!("NATIVE_STALE_NOTIFICATION_CANCEL_OK");
+        }
+        outcome => panic!(
+            "native stale-notification protocol failed after reaping children; killed={killed:?}; outcome={outcome:?}"
+        ),
+    }
+}
+
 pub(super) fn recursive_view(source: &Path, target: &Path, readonly: bool) -> File {
     fs::create_dir(target).unwrap();
     let source = CString::new(source.as_os_str().as_bytes()).unwrap();
@@ -1296,6 +1448,7 @@ fn native_provider(root: &Path) {
     native_simultaneous_command_contract(&service, &view_c);
     native_shared_service_cancellation_contract(&service, &view_c);
     native_admission_cancellation_contract(&service, &view_c, &raw);
+    native_stale_notification_contract(&service, &view_c, &raw);
     // This provider thread is deliberately neither the registered resolver
     // thread nor seccomp-filtered. The FUSE callback therefore receives a
     // wrong Request.pid; EACCES proves callback authentication rather than the
