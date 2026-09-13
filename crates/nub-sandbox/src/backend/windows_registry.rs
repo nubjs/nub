@@ -2,8 +2,8 @@
 //!
 //! This module deliberately owns *intent* and liveness, rather than an ACL snapshot.
 //! A record is written before a profile, private directory, or ACE is touched; the
-//! Windows launcher records only the ACEs it added.  That lets recovery remove Nub's
-//! additions without rolling back another program's intervening DACL edits.
+//! Windows launcher records added ACEs and protected, exclusively owned profile storage.
+//! Recovery removes additions or owned storage without restoring old DACL snapshots.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Recovery progress must not be silently dropped by an older binary's next journal write.
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 pub(crate) const BACKEND_VERSION: &str = "appcontainer-acl-v4";
 pub(crate) const MAX_IDLE_ENTRIES: usize = 64;
 pub(crate) const MAX_OWNED_BYTES: u64 = 1024 * 1024 * 1024;
@@ -89,11 +89,11 @@ impl PolicyIdentity {
         format!("nub_sbx_r_{}", &self.hash[..40])
     }
 
-    pub(crate) fn with_private_tmp(mut self, private: bool) -> Self {
-        self.canonical.push_str(if private {
-            "\nmanaged-tmp=profile/AC/Temp"
-        } else {
-            "\nmanaged-tmp=none"
+    pub(crate) fn with_tmp_mode(mut self, mode: crate::policy::TmpMode) -> Self {
+        self.canonical.push_str(match mode {
+            crate::policy::TmpMode::Shared => "\nmanaged-tmp=shared",
+            crate::policy::TmpMode::Private => "\nmanaged-tmp=profile/AC/Temp",
+            crate::policy::TmpMode::Deny => "\nmanaged-tmp=deny",
         });
         self.hash = hex(&Sha256::digest(self.canonical.as_bytes()));
         self
@@ -149,6 +149,9 @@ pub(crate) enum AclKind {
     Subtree,
     Object,
     PrivateProfile,
+    /// A fresh, Nub-owned AppContainer storage directory whose complete DACL was replaced.
+    /// Cleanup deletes the journal-owned tree rather than trying to reconstruct its old DACL.
+    ProfileStorage,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1125,9 +1128,9 @@ fn load(root: &Path) -> io::Result<RegistryFile> {
                 ))
             })?;
             match file.schema {
-                // Schema 2 has the same ownership records but may lack revoke progress. Keep
-                // every existing identity and lease; the next locked save fences out old writers.
-                2 => file.schema = SCHEMA_VERSION,
+                // Schema 2 may lack revoke progress; schema 3 lacks protected-storage mutations.
+                // Preserve their records and leases; the next locked save fences out old writers.
+                2 | 3 => file.schema = SCHEMA_VERSION,
                 SCHEMA_VERSION => {}
                 schema => {
                     return Err(io::Error::other(format!(
@@ -1416,7 +1419,7 @@ mod tests {
 
     #[test]
     fn legacy_registry_migration_preserves_ownership_and_revoke_progress() {
-        for has_progress in [false, true] {
+        for (schema, has_progress) in [(2, false), (2, true), (3, false), (3, true)] {
             let root = tempfile::tempdir().unwrap();
             let mut entry = idle_entry(0, 123);
             entry.state = EntryState::RecoveryNeeded;
@@ -1440,7 +1443,7 @@ mod tests {
             }
             let journal = root.path().join("registry.json");
             let original = serde_json::to_vec(&serde_json::json!({
-                "schema": 2,
+                "schema": schema,
                 "entries": {"0": legacy},
             }))
             .unwrap();
@@ -1448,7 +1451,10 @@ mod tests {
             let _lock = MutationLock::acquire(root.path()).unwrap();
             let file = load(root.path()).unwrap();
             assert_eq!(serde_json::to_value(&file.entries["0"]).unwrap(), expected);
-            assert_eq!(file.schema, 3, "older readers must reject the next save");
+            assert_eq!(
+                file.schema, SCHEMA_VERSION,
+                "older readers must reject the next save"
+            );
             assert_eq!(std::fs::read(&journal).unwrap(), original);
             save(root.path(), &file).unwrap();
             let reloaded = load(root.path()).unwrap();
@@ -1458,7 +1464,7 @@ mod tests {
             );
             let saved: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
-            assert_eq!(saved["schema"], 3);
+            assert_eq!(saved["schema"], SCHEMA_VERSION);
         }
     }
 
@@ -1890,12 +1896,20 @@ mod tests {
     }
 
     #[test]
-    fn managed_tmp_marker_changes_identity_without_a_generated_path() {
+    fn managed_tmp_marker_separates_all_storage_postures() {
         let dir = tempfile::tempdir().unwrap();
         let identity = id(dir.path());
-        let private = identity.clone().with_private_tmp(true);
-        let shared = identity.with_private_tmp(false);
+        let shared = identity
+            .clone()
+            .with_tmp_mode(crate::policy::TmpMode::Shared);
+        let private = identity
+            .clone()
+            .with_tmp_mode(crate::policy::TmpMode::Private);
+        let deny = identity.with_tmp_mode(crate::policy::TmpMode::Deny);
         assert_ne!(private.hash, shared.hash);
+        assert_ne!(private.hash, deny.hash);
+        assert_ne!(shared.hash, deny.hash);
         assert!(private.canonical.ends_with("managed-tmp=profile/AC/Temp"));
+        assert!(deny.canonical.ends_with("managed-tmp=deny"));
     }
 }

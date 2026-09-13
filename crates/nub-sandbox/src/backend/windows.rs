@@ -140,8 +140,9 @@ pub(crate) struct AppContainerLaunch {
     egress_funnel: Option<NetPolicy>,
     #[cfg(windows)]
     pub(super) proxy_context: Option<crate::proxy::ProxyContext>,
-    /// A stable profile-owned slot, resolved only after policy identity acquisition.
-    private_tmp: bool,
+    /// Shared uses the ambient temporary directory; Private uses a profile-owned slot; Deny
+    /// withholds all implicit profile-storage access without subtracting explicit fs grants.
+    tmp_mode: crate::policy::TmpMode,
     pub(super) native_compat: bool,
     stdout: WindowsStdio,
     stderr: WindowsStdio,
@@ -766,20 +767,12 @@ pub(crate) fn apply(
 
     let confine_fs = fs_confines(&policy.fs);
     let sandboxing = confine_fs || policy.net.enforce;
-    let tmp_lost = super::tmp_lost_axis(policy);
+    // Deny means that this backend adds no profile-storage grant.  It needs no AppContainer
+    // when the command is otherwise plain, whereas Private does need one to supply its managed
+    // `AC\\Temp` slot.  `tmp_lost_axis` remains the cross-platform fallback contract, so only
+    // preserve the private loss here for Windows's genuinely plain compatibility path.
+    let tmp_lost = (policy.fs.tmp == crate::policy::TmpMode::Private).then_some("tmp-private");
     let private_tmp = policy.fs.tmp == crate::policy::TmpMode::Private;
-
-    // The current launch paths still add implicit Windows-managed temporary storage.
-    // Withholding that implicit grant is unsupported, even though positive fs grants union.
-    if policy.fs.tmp == crate::policy::TmpMode::Deny {
-        return Err(Degradation {
-            lost: vec!["tmp-deny".to_string()],
-            reason: Some(
-                "withholding implicit temporary storage is not implemented by the Windows backend"
-                    .to_string(),
-            ),
-        });
-    }
 
     // Derived HERE rather than beside its other consumers below because `verify_clean_root`
     // needs `publishable` — the subtrees nub publishes to `ALL APPLICATION PACKAGES` — to tell
@@ -1016,7 +1009,7 @@ pub(crate) fn apply(
         // `run()` launches the co-package helper over this policy and injects its proxy env.
         egress_funnel: funnel.then(|| policy.net.clone()),
         proxy_context: None,
-        private_tmp,
+        tmp_mode: policy.fs.tmp,
         native_compat: false,
         stdout: if spec.redact_stdout {
             WindowsStdio::Piped
@@ -1836,6 +1829,28 @@ pub(super) mod launch {
         inherit: bool,
         propagate: bool,
     ) -> io::Result<()> {
+        set_ace_on_handle_with_inheritance(
+            handle,
+            sid,
+            access,
+            mode,
+            if inherit {
+                CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
+            } else {
+                NO_INHERITANCE
+            },
+            propagate,
+        )
+    }
+
+    fn set_ace_on_handle_with_inheritance(
+        handle: HANDLE,
+        sid: PSID,
+        access: u32,
+        mode: i32,
+        inheritance: u32,
+        propagate: bool,
+    ) -> io::Result<()> {
         use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SetSecurityInfo};
         use windows_sys::Win32::Security::{
             InitializeSecurityDescriptor, SE_DACL_AUTO_INHERITED, SECURITY_DESCRIPTOR,
@@ -1893,11 +1908,7 @@ pub(super) mod launch {
         let mut ea: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
         ea.grfAccessPermissions = access;
         ea.grfAccessMode = mode;
-        ea.grfInheritance = if inherit {
-            CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
-        } else {
-            NO_INHERITANCE
-        };
+        ea.grfInheritance = inheritance;
         ea.Trustee = TRUSTEE_W {
             pMultipleTrustee: std::ptr::null_mut(),
             MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
@@ -1970,6 +1981,10 @@ pub(super) mod launch {
     const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 10;
     /// The ace grants nothing on the object itself; it exists only to propagate to children.
     const INHERIT_ONLY_ACE: u32 = 0x8;
+    /// This ace stops after its immediate child, so it cannot preserve a profile-storage tree.
+    const NO_PROPAGATE_INHERIT_ACE: u32 = 0x4;
+    /// Windows adds this origin marker when it materializes an inherited profile-storage ACE.
+    const INHERITED_ACE: u32 = 0x10;
 
     /// Walk `dacl` and hand each decodable ace to `visit` as `(is_allow, flags, mask)`, but
     /// only for aces whose trustee is `sid`.
@@ -2206,6 +2221,36 @@ pub(super) mod launch {
                     }),
                 )?;
                 if same_windows {
+                    // A retained lease bypasses registry acquisition, so `validate_entry` above
+                    // proves only object identity. tmp:false also needs its positive-only DACL
+                    // checked here: a same-session caller must not reuse a profile whose
+                    // AppContainer rights were widened after the first command.
+                    if self.tmp_mode == crate::policy::TmpMode::Deny {
+                        let ac_sid = lease._state.sid.0;
+                        let profile_folder = acquisition_step(
+                            "retained-profile-folder",
+                            appcontainer_folder(ac_sid),
+                        )?;
+                        let profile_storage = acquisition_step(
+                            "retained-profile-storage-layout",
+                            ProfileStorage::from_ac(profile_folder),
+                        )?;
+                        acquisition_step(
+                            "retained-profile-storage-validate",
+                            validate_profile_storage(&self, &profile_storage, ac_sid),
+                        )?;
+                        let redirected_storage = redirected_profile_storage(
+                            &self,
+                            &lease._state._lease.entry.profile_name,
+                        )
+                        .filter(|redirected| !redirected.same_package(&profile_storage));
+                        if let Some(storage) = &redirected_storage {
+                            acquisition_step(
+                                "retained-redirected-profile-storage-validate",
+                                validate_profile_storage(&self, storage, ac_sid),
+                            )?;
+                        }
+                    }
                     return Ok(self.bind(Arc::clone(&lease._state)));
                 }
             }
@@ -2256,9 +2301,16 @@ pub(super) mod launch {
             });
             let ac_sid = sid.0;
             let profile_folder = acquisition_step("profile-folder", appcontainer_folder(ac_sid))?;
+            let profile_storage = acquisition_step(
+                "profile-storage-layout",
+                ProfileStorage::from_ac(profile_folder.clone()),
+            )?;
+            let redirected_storage = redirected_profile_storage(&self, &name)
+                .filter(|redirected| !redirected.same_package(&profile_storage));
             #[cfg(test)]
             test_crash_transition("profile-created", &name, &profile_folder);
-            let private_tmp = self.private_tmp.then(|| profile_folder.join("Temp"));
+            let private_tmp = (self.tmp_mode == crate::policy::TmpMode::Private)
+                .then(|| profile_folder.join("Temp"));
             let native_compat = self
                 .native_compat
                 .then(|| crate::backend::windows_native_compat::asset_path(&name))
@@ -2283,10 +2335,23 @@ pub(super) mod launch {
                     #[cfg(test)]
                     test_crash_transition("native-assets-granted", &name, path);
                 }
-                acquisition_step(
-                    "profile-journal",
-                    resource.record_private_path(&profile_folder),
-                )?;
+                if self.tmp_mode == crate::policy::TmpMode::Deny {
+                    acquisition_step(
+                        "profile-storage-protect",
+                        protect_profile_storage(&mut resource, &self, &profile_storage, ac_sid),
+                    )?;
+                    #[cfg(test)]
+                    test_crash_transition(
+                        "profile-storage-protected",
+                        &name,
+                        &profile_storage.package,
+                    );
+                } else {
+                    acquisition_step(
+                        "profile-journal",
+                        resource.record_private_path(&profile_storage.package),
+                    )?;
+                }
                 if let Some(path) = &private_tmp {
                     acquisition_step(
                         "profile-temp-journal",
@@ -2356,41 +2421,43 @@ pub(super) mod launch {
             }
 
             if resource.fresh {
-                let private = self.env.as_ref().and_then(|env| {
-                    env.iter()
-                        .find(|(key, _)| key.eq_ignore_ascii_case("LOCALAPPDATA"))
-                        .map(|(_, value)| PathBuf::from(value).join("Packages").join(&name))
-                });
-                if let Some(dir) = &private {
+                if let Some(storage) = &redirected_storage {
                     // This profile name is exclusively owned by this registry entry.
-                    acquisition_step(
-                        "redirected-profile-journal",
-                        resource.record_private_path(dir),
-                    )?;
-                    for path in [dir.clone(), dir.join("AC"), dir.join("AC/Temp")] {
+                    if self.tmp_mode == crate::policy::TmpMode::Deny {
                         acquisition_step(
-                            "redirected-profile-acl-journal",
-                            resource.record_mutation(super::windows_registry::AclMutation {
-                                path: path.to_string_lossy().into_owned(),
-                                kind: super::windows_registry::AclKind::PrivateProfile,
-                                access: GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
-                            }),
+                            "redirected-profile-protect",
+                            protect_profile_storage(&mut resource, &self, storage, ac_sid),
                         )?;
+                    } else {
                         acquisition_step(
-                            "redirected-profile-create",
-                            std::fs::create_dir_all(&path),
+                            "redirected-profile-journal",
+                            resource.record_private_path(&storage.package),
                         )?;
-                        grant_recorded_ace(
-                            &mut resource,
-                            &path,
-                            ac_sid,
-                            (
-                                super::windows_registry::AclKind::PrivateProfile,
-                                GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
-                            ),
-                            false,
-                            false,
-                        )?;
+                        for path in storage.paths() {
+                            acquisition_step(
+                                "redirected-profile-acl-journal",
+                                resource.record_mutation(super::windows_registry::AclMutation {
+                                    path: path.to_string_lossy().into_owned(),
+                                    kind: super::windows_registry::AclKind::PrivateProfile,
+                                    access: GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
+                                }),
+                            )?;
+                            acquisition_step(
+                                "redirected-profile-create",
+                                std::fs::create_dir_all(path),
+                            )?;
+                            grant_recorded_ace(
+                                &mut resource,
+                                path,
+                                ac_sid,
+                                (
+                                    super::windows_registry::AclKind::PrivateProfile,
+                                    GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
+                                ),
+                                false,
+                                false,
+                            )?;
+                        }
                     }
                 }
                 for dir in &self.publishable_grants {
@@ -2439,7 +2506,17 @@ pub(super) mod launch {
                     )?;
                 }
                 if std::env::var_os("NUB_SANDBOX_WIN_NO_ANCESTOR_REPAIR").is_none() {
-                    for dir in ancestor_chain(&self, private.as_deref()) {
+                    // Deny protects the profile root itself.  It must not then regain
+                    // metadata access through the generic ancestor-repair path; only authored
+                    // subtree grants are copied into that owned protected DACL above.
+                    let redirected_ancestor = (self.tmp_mode != crate::policy::TmpMode::Deny)
+                        .then(|| {
+                            redirected_storage
+                                .as_ref()
+                                .map(|storage| storage.package.as_path())
+                        })
+                        .flatten();
+                    for dir in ancestor_chain(&self, redirected_ancestor) {
                         if !ancestors.contains(&dir) && dir.exists() {
                             grant_recorded_ace(
                                 &mut resource,
@@ -2454,7 +2531,30 @@ pub(super) mod launch {
                 }
                 #[cfg(test)]
                 test_crash_transition("acl-installed-before-ready", &name, &profile_folder);
+                if self.tmp_mode == crate::policy::TmpMode::Deny {
+                    acquisition_step(
+                        "profile-storage-validate",
+                        validate_profile_storage(&self, &profile_storage, ac_sid),
+                    )?;
+                    if let Some(storage) = &redirected_storage {
+                        acquisition_step(
+                            "redirected-profile-validate",
+                            validate_profile_storage(&self, storage, ac_sid),
+                        )?;
+                    }
+                }
                 acquisition_step("ready", resource.ready())?;
+            } else if self.tmp_mode == crate::policy::TmpMode::Deny {
+                acquisition_step(
+                    "profile-storage-reuse-validate",
+                    validate_profile_storage(&self, &profile_storage, ac_sid),
+                )?;
+                if let Some(storage) = &redirected_storage {
+                    acquisition_step(
+                        "redirected-profile-reuse-validate",
+                        validate_profile_storage(&self, storage, ac_sid),
+                    )?;
+                }
             }
             Ok(self.bind(Arc::new(ResourceState {
                 _lease: resource,
@@ -3615,13 +3715,11 @@ pub(super) mod launch {
         )?
         .with_network(launch.egress_funnel.as_ref())
         .map(|identity| {
-            identity
-                .with_private_tmp(launch.private_tmp)
-                .with_native_compat(
-                    launch
-                        .native_compat
-                        .then(crate::backend::windows_native_compat::version),
-                )
+            identity.with_tmp_mode(launch.tmp_mode).with_native_compat(
+                launch
+                    .native_compat
+                    .then(crate::backend::windows_native_compat::version),
+            )
         })
     }
 
@@ -3698,6 +3796,415 @@ pub(super) mod launch {
         Ok(folder)
     }
 
+    /// The only profile directories this backend owns: the package root created for the
+    /// policy-named profile, its `AC` folder returned by Windows, and the `Temp` child used by
+    /// the private mode.  Never discover siblings under `Packages`: their names are caller data.
+    #[derive(Clone)]
+    struct ProfileStorage {
+        package: PathBuf,
+        ac: PathBuf,
+        temp: PathBuf,
+    }
+
+    impl ProfileStorage {
+        fn from_ac(ac: PathBuf) -> io::Result<Self> {
+            if !ac
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("AC"))
+            {
+                return Err(io::Error::other(format!(
+                    "GetAppContainerFolderPath returned a non-AC path: {}",
+                    ac.display()
+                )));
+            }
+            let package = ac
+                .parent()
+                .ok_or_else(|| {
+                    io::Error::other(format!(
+                        "AppContainer AC path has no package parent: {}",
+                        ac.display()
+                    ))
+                })?
+                .to_path_buf();
+            Ok(Self {
+                package,
+                temp: ac.join("Temp"),
+                ac,
+            })
+        }
+
+        fn from_package(package: PathBuf) -> Self {
+            let ac = package.join("AC");
+            Self {
+                temp: ac.join("Temp"),
+                package,
+                ac,
+            }
+        }
+
+        fn paths(&self) -> [&Path; 3] {
+            [&self.package, &self.ac, &self.temp]
+        }
+
+        fn same_package(&self, other: &Self) -> bool {
+            super::path_prefixes(&self.package, &other.package)
+                && super::path_prefixes(&other.package, &self.package)
+        }
+    }
+
+    fn redirected_profile_storage(
+        launch: &AppContainerLaunch,
+        name: &str,
+    ) -> Option<ProfileStorage> {
+        launch.env.as_ref().and_then(|env| {
+            env.iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("LOCALAPPDATA"))
+                .map(|(_, value)| {
+                    ProfileStorage::from_package(PathBuf::from(value).join("Packages").join(name))
+                })
+        })
+    }
+
+    fn profile_storage_access(launch: &AppContainerLaunch, path: &Path) -> u32 {
+        let read = launch
+            .read_grants
+            .iter()
+            .any(|grant| super::path_prefixes(grant, path));
+        let write = launch
+            .write_grants
+            .iter()
+            .any(|grant| super::path_prefixes(grant, path));
+        match (read, write) {
+            (_, true) => GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | DELETE,
+            (true, false) => GENERIC_READ | GENERIC_EXECUTE,
+            (false, false) => 0,
+        }
+    }
+
+    /// Replace an owned storage DACL with positive maintenance access plus exactly the authored
+    /// subtree grant that covers it.  A protected package root deliberately stops a broad parent
+    /// home ACL from leaking storage access; a broad explicit home/root grant is re-applied here
+    /// instead, while an object-only node/traverse grant is not converted into storage metadata.
+    fn protect_profile_storage(
+        resource: &mut super::windows_registry::Acquired,
+        launch: &AppContainerLaunch,
+        storage: &ProfileStorage,
+        ac_sid: PSID,
+    ) -> io::Result<()> {
+        acquisition_step(
+            "profile-storage-journal",
+            resource.record_private_path(&storage.package),
+        )?;
+        for path in storage.paths() {
+            acquisition_step(
+                "profile-storage-acl-journal",
+                resource.record_mutation(super::windows_registry::AclMutation {
+                    path: path.to_string_lossy().into_owned(),
+                    kind: super::windows_registry::AclKind::ProfileStorage,
+                    access: profile_storage_access(launch, path),
+                }),
+            )?;
+            acquisition_step("profile-storage-create", std::fs::create_dir_all(path))?;
+            protect_profile_storage_path(
+                resource,
+                path,
+                ac_sid,
+                profile_storage_access(launch, path),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn protect_profile_storage_path(
+        resource: &mut super::windows_registry::Acquired,
+        path: &Path,
+        ac_sid: PSID,
+        access: u32,
+    ) -> io::Result<()> {
+        use super::windows_registry::{AclKind, AclMutation, object_handle_id};
+        use windows_sys::Win32::Security::{
+            ACL_REVISION, AddAccessAllowedAceEx, InitializeAcl, InitializeSecurityDescriptor,
+            SECURITY_DESCRIPTOR, SetKernelObjectSecurity, SetSecurityDescriptorControl,
+            SetSecurityDescriptorDacl,
+        };
+
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+        let file = acquisition_step("profile-storage-open", open_acl_file(path))?;
+        let id = acquisition_step(
+            "profile-storage-identity",
+            object_handle_id(file.as_raw_handle()),
+        )?;
+        acquisition_step(
+            "profile-storage-admission",
+            resource.record_mutation_id(
+                AclMutation {
+                    path: path.to_string_lossy().into_owned(),
+                    kind: AclKind::ProfileStorage,
+                    access,
+                },
+                Some(id),
+            ),
+        )?;
+        #[cfg(test)]
+        test_crash_transition(
+            "profile-storage-admitted",
+            &resource.entry.profile_name,
+            path,
+        );
+
+        let _lock = super::windows_registry::OperationLock::acquire("acl")?;
+        let user = current_user_sid()?;
+        let system = CapSid::new("S-1-5-18")?;
+        let administrators = CapSid::new("S-1-5-32-544")?;
+        let mut trustees = vec![
+            (user.sid, GENERIC_ALL),
+            (system.0, GENERIC_ALL),
+            (administrators.0, GENERIC_ALL),
+        ];
+        if access != 0 {
+            trustees.push((ac_sid, access));
+        }
+        let bytes = std::mem::size_of::<ACL>()
+            + trustees
+                .iter()
+                .map(|(sid, _)| {
+                    std::mem::size_of::<windows_sys::Win32::Security::ACCESS_ALLOWED_ACE>()
+                        - std::mem::size_of::<u32>()
+                        + unsafe { GetLengthSid(*sid) as usize }
+                })
+                .sum::<usize>();
+        let words = bytes.div_ceil(std::mem::size_of::<usize>());
+        let mut storage = vec![0usize; words];
+        let dacl = storage.as_mut_ptr().cast::<ACL>();
+        if unsafe { InitializeAcl(dacl, bytes as u32, ACL_REVISION) } == 0 {
+            return Err(acl_error(
+                "InitializeAcl(profile storage)",
+                io::Error::last_os_error(),
+            ));
+        }
+        for (sid, mask) in trustees {
+            if unsafe {
+                AddAccessAllowedAceEx(
+                    dacl,
+                    ACL_REVISION,
+                    CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+                    mask,
+                    sid,
+                )
+            } == 0
+            {
+                return Err(acl_error(
+                    "AddAccessAllowedAceEx(profile storage)",
+                    io::Error::last_os_error(),
+                ));
+            }
+        }
+        let mut fresh: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        let descriptor: PSECURITY_DESCRIPTOR = std::ptr::from_mut(&mut fresh).cast();
+        if unsafe {
+            InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION) == 0
+                || SetSecurityDescriptorDacl(descriptor, 1, dacl, 0) == 0
+                || SetSecurityDescriptorControl(descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
+                    == 0
+                || SetKernelObjectSecurity(
+                    file.as_raw_handle(),
+                    DACL_SECURITY_INFORMATION,
+                    descriptor,
+                ) == 0
+        } {
+            return Err(acl_error(
+                "SetKernelObjectSecurity(profile storage)",
+                io::Error::last_os_error(),
+            ));
+        }
+        #[cfg(test)]
+        test_crash_transition(
+            "profile-storage-acl-installed",
+            &resource.entry.profile_name,
+            path,
+        );
+        Ok(())
+    }
+
+    fn validate_profile_storage(
+        launch: &AppContainerLaunch,
+        storage: &ProfileStorage,
+        ac_sid: PSID,
+    ) -> io::Result<()> {
+        for path in storage.paths() {
+            let file = open_acl_file(path)?;
+            let expected = profile_storage_access(launch, path);
+            if !profile_storage_dacl_matches(file.as_raw_handle(), path, ac_sid, expected)? {
+                return Err(io::Error::other(format!(
+                    "AppContainer profile storage DACL no longer matches tmp:false policy: {}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn profile_storage_dacl_matches(
+        handle: HANDLE,
+        _path: &Path,
+        ac_sid: PSID,
+        expected_access: u32,
+    ) -> io::Result<bool> {
+        use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+        use windows_sys::Win32::Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER, GetAce, GetSecurityDescriptorControl,
+        };
+
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        // `GetSecurityInfo` allocates the descriptor independently of whether its DACL pointer
+        // is null.  Take ownership before rejecting a NULL DACL so that malformed/unprotected
+        // storage cannot turn validation into a small repeated leak on every reuse attempt.
+        let _descriptor = LocalFreeGuard(descriptor);
+        if rc != 0 || dacl.is_null() {
+            return Ok(false);
+        }
+        let user = current_user_sid()?;
+        let system = CapSid::new("S-1-5-18")?;
+        let administrators = CapSid::new("S-1-5-32-544")?;
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0
+            || control & SE_DACL_PROTECTED == 0
+        {
+            return Ok(false);
+        }
+        let expected_profile = file_specific_rights(expected_access);
+        let maintenance = file_specific_rights(0x1000_0000);
+        #[derive(Default)]
+        struct StorageRights {
+            object: u32,
+            file_child: u32,
+            container_child: u32,
+        }
+        impl StorageRights {
+            fn matches(&self, expected: u32) -> bool {
+                self.object == expected
+                    && self.file_child == expected
+                    && self.container_child == expected
+            }
+        }
+        let mut profile_allowed = StorageRights::default();
+        let mut user_allowed = StorageRights::default();
+        let mut system_allowed = StorageRights::default();
+        let mut administrators_allowed = StorageRights::default();
+        unsafe {
+            for index in 0..(*dacl).AceCount as u32 {
+                let mut raw = std::ptr::null_mut();
+                if GetAce(dacl, index, &mut raw) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let header = &*raw.cast::<ACE_HEADER>();
+                // Windows may materialize a generic inheritable ACE as an effective mapped ACE
+                // plus an inherit-only generic ACE. Check each authority separately, rather
+                // than requiring that implementation detail's original `OI | CI` header.
+                let flags = u32::from(header.AceFlags);
+                const SUPPORTED_FLAGS: u32 =
+                    OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE;
+                if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+                    || flags & !SUPPORTED_FLAGS != 0
+                    || flags & NO_PROPAGATE_INHERIT_ACE != 0
+                    || (flags & INHERIT_ONLY_ACE != 0
+                        && flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) == 0)
+                {
+                    return Ok(false);
+                }
+                let ace = raw.cast::<ACCESS_ALLOWED_ACE>();
+                let sid: PSID = std::ptr::addr_of!((*ace).SidStart).cast_mut().cast();
+                let allowed = file_specific_rights((*ace).Mask);
+                let rights = if sids_equal(sid, ac_sid) {
+                    &mut profile_allowed
+                } else if sids_equal(sid, user.sid) {
+                    &mut user_allowed
+                } else if sids_equal(sid, system.0) {
+                    &mut system_allowed
+                } else if sids_equal(sid, administrators.0) {
+                    &mut administrators_allowed
+                } else {
+                    return Ok(false);
+                };
+                if flags & INHERIT_ONLY_ACE == 0 {
+                    rights.object |= allowed;
+                }
+                if flags & OBJECT_INHERIT_ACE != 0 {
+                    rights.file_child |= allowed;
+                }
+                if flags & CONTAINER_INHERIT_ACE != 0 {
+                    rights.container_child |= allowed;
+                }
+            }
+        }
+        Ok(profile_allowed.matches(expected_profile)
+            && user_allowed.matches(maintenance)
+            && system_allowed.matches(maintenance)
+            && administrators_allowed.matches(maintenance))
+    }
+
+    struct CurrentUserSid {
+        // The token buffer owns `sid`; it must outlive every ACL builder that names it.
+        _buffer: Vec<usize>,
+        sid: PSID,
+    }
+
+    fn current_user_sid() -> io::Result<CurrentUserSid> {
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        let mut bytes = 0u32;
+        unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes,
+            );
+        }
+        let mut buffer = vec![0usize; (bytes as usize).div_ceil(std::mem::size_of::<usize>())];
+        if unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                bytes,
+                &mut bytes,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        Ok(CurrentUserSid {
+            _buffer: buffer,
+            sid,
+        })
+    }
+
     /// A profile SID returned by create/derive is separately allocated from the
     /// persistent profile registration.  Closing this guard therefore cannot remove
     /// an identity another nub process is actively using.
@@ -3740,6 +4247,63 @@ pub(super) mod launch {
     pub(super) fn test_profile_has_ace(profile: &str, path: &Path) -> io::Result<bool> {
         let sid = SidGuard(derive_appcontainer(profile)?);
         path_has_sid(path, sid.0)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_profile_storage_temp(profile: &str) -> io::Result<PathBuf> {
+        let sid = SidGuard(derive_appcontainer(profile)?);
+        Ok(appcontainer_folder(sid.0)?.join("Temp"))
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_profile_storage_matches(
+        profile: &str,
+        path: &Path,
+        expected_access: u32,
+    ) -> io::Result<bool> {
+        let sid = SidGuard(derive_appcontainer(profile)?);
+        let file = open_acl_file(path)?;
+        profile_storage_dacl_matches(file.as_raw_handle(), path, sid.0, expected_access)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_add_profile_storage_ace(
+        profile: &str,
+        path: &Path,
+        access: u32,
+        inherit_only: bool,
+    ) -> io::Result<()> {
+        let sid = SidGuard(derive_appcontainer(profile)?);
+        let file = open_acl_file(path)?;
+        let inheritance = CONTAINER_INHERIT_ACE
+            | OBJECT_INHERIT_ACE
+            | if inherit_only { INHERIT_ONLY_ACE } else { 0 };
+        set_ace_on_handle_with_inheritance(
+            file.as_raw_handle(),
+            sid.0,
+            access,
+            GRANT_ACCESS,
+            inheritance,
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_add_profile_storage_effective_ace(
+        profile: &str,
+        path: &Path,
+        access: u32,
+    ) -> io::Result<()> {
+        let sid = SidGuard(derive_appcontainer(profile)?);
+        let file = open_acl_file(path)?;
+        set_ace_on_handle_with_inheritance(
+            file.as_raw_handle(),
+            sid.0,
+            access,
+            GRANT_ACCESS,
+            NO_INHERITANCE,
+            true,
+        )
     }
 
     #[cfg(test)]
@@ -4117,6 +4681,12 @@ pub(super) mod launch {
         }
         let path = Path::new(&mutation.path);
         let expected = entry.object_ids.get(&mutation.path);
+        // A profile-storage mutation replaced the whole DACL on an exclusively owned tree.
+        // Its durable private-path witness authorizes deletion below; restoring a snapshot would
+        // overwrite any intervening maintenance edit and is both unnecessary and unsafe.
+        if mutation.kind == AclKind::ProfileStorage {
+            return super::windows_registry::validate_object(entry, path);
+        }
         if mutation.kind == AclKind::PrivateProfile {
             let file = match open_acl_file(path) {
                 Ok(file) => file,
@@ -5190,11 +5760,15 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn apply_windows_tmp_deny_rejects_before_working_directory_preflight() {
+    fn apply_windows_tmp_deny_adds_no_resource_to_an_unrestricted_policy() {
         for build_jail in [false, true] {
             let policy = SandboxPolicy {
                 fs: FsPolicy {
                     tmp: crate::policy::TmpMode::Deny,
+                    rules: FsRuleSet {
+                        default_effect: Effect::Allow,
+                        entries: vec![],
+                    },
                     ..Default::default()
                 },
                 build_jail,
@@ -5208,10 +5782,9 @@ mod tests {
                 None,
                 None,
             );
-            let Err(error) = result else {
-                panic!("temporary storage denial must fail before launch");
-            };
-            assert_eq!(error.lost, ["tmp-deny"]);
+            let prepared = result.expect("tmp:false adds no implicit storage to a plain launch");
+            assert!(prepared.degradation.is_full());
+            assert!(matches!(prepared.launch, Some(WindowsLaunch::Plain(_))));
         }
     }
 
