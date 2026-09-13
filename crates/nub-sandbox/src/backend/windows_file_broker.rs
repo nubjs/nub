@@ -672,7 +672,7 @@ mod tests {
             "the broker protocol receives only canonical non-root leaves"
         );
         let mut directory = request(r"C:\output\listing.dir\");
-        directory.options |= 1;
+        directory.options = 0x21; // FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT
         assert!(normalize_directory_capture(&mut directory));
         assert_eq!(
             validate(&directory),
@@ -688,10 +688,12 @@ mod tests {
         );
         for path in [r"C:\output\listing.dir\\", r"C:\"] {
             let mut rejected = request(path);
-            rejected.options |= 1;
+            rejected.options = 0x21;
             let _ = normalize_directory_capture(&mut rejected);
             assert_ne!(validate(&rejected), 0, "{path}");
         }
+        directory.length = 1024;
+        assert!(!normalize_directory_capture(&mut directory));
         for disposition in [1, 2, 3, 4, 5] {
             assert_eq!(
                 validate(&Request {

@@ -74,7 +74,7 @@ inline DWORD access_mask(DWORD access) {
 // separator. Canonicalize that spelling only for an explicit directory open;
 // raw protocol requests still pass through `valid_path` unchanged.
 inline bool normalize_directory_capture(Request& request) {
-    if (!(request.options & FILE_DIRECTORY_FILE) || request.length <= 3 ||
+    if (!(request.options & FILE_DIRECTORY_FILE) || request.length <= 3 || request.length >= kPath ||
         request.path[request.length - 1] != L'\\') return false;
     request.path[--request.length] = 0;
     return true;
