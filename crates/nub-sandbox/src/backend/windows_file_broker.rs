@@ -711,8 +711,10 @@ mod tests {
             }
             // SAFETY: terminated fixture path. The helper loads and unloads its
             // own module and checks both DllMain and the known fixture export.
+            eprintln!("FILE_BROKER_LOADER_BEGIN");
             let result =
                 unsafe { sandbox_file_broker_test_loader(path.as_ptr(), i32::from(allowed)) };
+            eprintln!("FILE_BROKER_LOADER_END result={result}");
             assert_eq!(result, 0, "loader failed: {result}");
             println!("FILE_BROKER_NATIVE_LOADER_OK");
         }
