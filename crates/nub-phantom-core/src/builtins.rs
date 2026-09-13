@@ -69,9 +69,38 @@ pub fn is_builtin(spec: &str) -> bool {
     BARE_BUILTINS.binary_search(&head).is_ok()
 }
 
+/// Bare names a HOST process injects at runtime, which no install can supply.
+/// Electron short-circuits `require('electron')` (and the `electron/main`,
+/// `electron/renderer`, `electron/common` subpaths) inside its own module
+/// resolver before `node_modules` is consulted, and the npm package of that name
+/// is only the launcher stub; VS Code's extension host injects `vscode` the same
+/// way. A reference to one is therefore not a phantom any layout could repair:
+/// inside the host it always resolves, outside the host the package is useless
+/// either way. Ejecting `electron-log` from the global virtual store for it
+/// bought nothing.
+const HOST_PROVIDED: &[&str] = &["electron", "vscode"];
+
+/// Is `spec` a module the host process provides at runtime (see
+/// [`HOST_PROVIDED`])? Matches the head segment, so `electron/main` counts.
+pub fn is_host_provided(spec: &str) -> bool {
+    let head = spec.split('/').next().unwrap_or(spec);
+    HOST_PROVIDED.contains(&head)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_builtin;
+    use super::{is_builtin, is_host_provided};
+
+    #[test]
+    fn host_provided_names_match_by_head_segment() {
+        assert!(is_host_provided("electron"));
+        assert!(is_host_provided("electron/main"));
+        assert!(is_host_provided("vscode"));
+        assert!(!is_host_provided("electron-log"));
+        assert!(!is_host_provided("vscode-languageserver"));
+        // Host-provided is a separate class, not a builtin.
+        assert!(!is_builtin("electron"));
+    }
 
     #[test]
     fn builtin_list_is_sorted_for_binary_search() {

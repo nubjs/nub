@@ -7,7 +7,7 @@ date: 2026-09-09T12:00:00Z
 
 import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
 
-We've used Nub's built-in phantom detector to scan the 10,000 most downloaded packages on `npm` for undeclared dependencies. The resulting database covers 792 packages, including 650 missing from `@yarnpkg/extensions`, which undergirds the global virtual stores of pnpm v12 and Aube.
+We've used Nub's built-in phantom detector to scan the 10,000 most downloaded packages on `npm` for undeclared dependencies. The resulting database covers 791 packages, including 649 missing from `@yarnpkg/extensions`, which undergirds the global virtual stores of pnpm v12 and Aube.
 
 The results are published as [`@nubjs/extensions`](https://www.npmjs.com/package/@nubjs/extensions).
 
@@ -49,12 +49,27 @@ More recently, this package has come to underpin the [Aube](https://github.com/a
 
 ### The problem
 
-Here's the problem: it's woefully incomplete and minimally maintained. There have been just a handful of updates in the last three years. In our scan of the top 10,000 packages, we found **650 additional packages** with undeclared dependencies beyond the **142 already covered by Yarn's database**, bringing the total to **792 packages**.
+Here's the problem: it's woefully incomplete and minimally maintained. There have been just a handful of updates in the last three years. In our scan of the top 10,000 packages, we found **649 additional packages** with undeclared imports beyond the **142 already covered by Yarn's database**, bringing the total to **791 packages**.
 
 | Database | Packages |
 | --- | ---: |
 | `@yarnpkg/extensions@2.0.7` | 142 |
-| `@nubjs/extensions@1.0.3` | 792 |
+| `@nubjs/extensions@1.0.4` | 791 |
+
+Not every undeclared import breaks an install, so the scan classes each package by the worst edge it carries:
+
+| What the scan found | Packages | Breaks under a strict layout? |
+| --- | ---: | --- |
+| Declaration-file reference only | 341 | Yes, at type-check time. The package's `.d.ts` files import something it never declares, so `tsc` reports `TS2307` inside them; with `skipLibCheck` the import silently becomes `any` instead. No unguarded runtime import. |
+| Guarded load only | 114 | No error. The `try`/`catch` around the import turns the optional feature off. |
+| Undeclared framework peer | 101 | Yes. The app already has `react`, `typescript` or `expo-modules-core`, but a strict linker cannot connect the two until the peer is declared. |
+| Forgotten dependency | 104 | Yes, when that code path runs. The import is unguarded on the package's main entry graph; 25 have a reproduced failure under Yarn Plug'n'Play. |
+
+Every entry ships as an optional peer, which installs nothing on its own; the 25 reproduced cases ship as `dependencies`.
+
+Every package in the database is below, ranked by weekly downloads. A row lists the imports that package does not declare, and the class the scan assigned to each.
+
+<ExtensionsTable />
 
 The new `@nubjs/extensions` package serves as a modern, 100%-compatible drop-in replacement.
 

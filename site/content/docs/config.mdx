@@ -240,7 +240,27 @@ The command runs through the platform shell (`sh -c`, or `cmd /C` on Windows) in
 
 To ignore the project's pins and take the first Node on `PATH`, use `"$(which node)"`, or `"$(where node)"` on Windows. Only the first line of output is read, so a tool that lists every match still names one binary.
 
-A path is also accepted, absolute or relative to the file:
+A path is also accepted. An absolute path hardcodes one binary:
+
+```jsonc title="~/.config/nub/nub.jsonc"
+{
+  // ...
+  "nodeExecutable": "/opt/homebrew/bin/node"
+}
+```
+
+That path exists only on your machine, so it usually belongs in the global file. A path that starts with `~/` resolves against your home directory.
+
+On Windows, write the path with forward slashes or doubled backslashes, since JSON treats a single backslash as an escape. The `.exe` extension is optional.
+
+```jsonc title="~/.config/nub/nub.jsonc"
+{
+  // ...
+  "nodeExecutable": "C:/Program Files/nodejs/node.exe"
+}
+```
+
+A relative path resolves against the directory of the file that set it, which suits a binary checked into the repository:
 
 ```jsonc title="nub.jsonc"
 {

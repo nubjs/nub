@@ -1,0 +1,16 @@
+{
+  "name": "@nubjs/runner-win32-arm64",
+  "version": "0.9.1",
+  "description": "Nub standalone-runner native addon for Windows ARM64",
+  "license": "MIT",
+  "repository": "https://github.com/nubjs/nub",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "nub-native.node"
+  ]
+}

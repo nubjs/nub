@@ -234,6 +234,8 @@ Nub runs every script body through a POSIX `sh`, so one script behaves the same 
 
 It is POSIX `sh`, not bash: bash-only extensions such as `[[ … ]]`, arrays, and `${VAR^^}` are not guaranteed — the same contract `npm` gives, whose `sh -c` is dash on Debian and Ubuntu.
 
+Dependency install scripts run through the same shell during `nub install`. A package whose `postinstall` calls `./build.sh` works on Windows as it does on macOS and Linux.
+
 ## `--script-shell`
 
 To pin a specific shell, set `script-shell` in `.npmrc` and Nub invokes script bodies with it on every platform. The rest of `.npmrc` (registry, auth, `node-linker`, `hoist-pattern`) is installer configuration and is not read here.

@@ -11,22 +11,22 @@ Nub's TypeScript loader is now a standalone package that runs under stock `node`
 
 ## The loader as a standalone package
 
-`@nubjs/loader` runs TypeScript, JSX, tsconfig paths, and data-format imports under plain Node, with no Nub binary involved — install it as a dev dependency and register it the way tsx and ts-node are registered:
+`@nubjs/runner` runs TypeScript, JSX, tsconfig paths, and data-format imports under plain Node, with no Nub binary involved — install it as a dev dependency and register it the way tsx and ts-node are registered:
 
 ```sh
-npm install --save-dev @nubjs/loader
-node --import @nubjs/loader app.ts
+npm install --save-dev @nubjs/runner
+node --import @nubjs/runner app.ts
 ```
 
 Every preload form Node accepts works:
 
 ```sh
-node --import @nubjs/loader app.ts        # ESM hooks + CommonJS require() augmentation
-node --require @nubjs/loader app.ts       # CommonJS delivery (Node 20.19+)
-node --import @nubjs/loader/esm app.ts    # ESM hooks only
+node --import @nubjs/runner app.ts        # ESM hooks + CommonJS require() augmentation
+node --require @nubjs/runner app.ts       # CommonJS delivery (Node 20.19+)
+node --import @nubjs/runner/esm app.ts    # ESM hooks only
 ```
 
-It also works anywhere a preload can be set rather than passed, such as `NODE_OPTIONS="--import @nubjs/loader" vitest`. The native transform rides eight platform packages as `optionalDependencies`, covering macOS, Linux (glibc and musl), and Windows on x64 and arm64. Source that runs under the loader also runs unchanged under tsx or ts-node, so adopting it is reversible. Documentation is at [nubjs.com/docs/loader](https://nubjs.com/docs/loader). ([#810](https://github.com/nubjs/nub/pull/810))
+It also works anywhere a preload can be set rather than passed, such as `NODE_OPTIONS="--import @nubjs/runner" vitest`. The native transform rides eight platform packages as `optionalDependencies`, covering macOS, Linux (glibc and musl), and Windows on x64 and arm64. Source that runs under the loader also runs unchanged under tsx or ts-node, so adopting it is reversible. Documentation is at [nubjs.com/docs/standalone](https://nubjs.com/docs/standalone). ([#810](https://github.com/nubjs/nub/pull/810))
 
 ## Install and update
 

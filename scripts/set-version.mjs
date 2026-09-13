@@ -54,17 +54,17 @@ const pkgs = [
   "npm/nub-linux-arm64-musl/package.json",
   "npm/nub-win32-x64/package.json",
   "npm/nub-win32-arm64/package.json",
-  // The standalone loader and its per-platform addon packages track the binary's
+  // The standalone runner and its per-platform addon packages track the binary's
   // version in lockstep: the addon bakes the version into the transpile-cache key.
-  "npm/loader/package.json",
-  "npm/loader-darwin-arm64/package.json",
-  "npm/loader-darwin-x64/package.json",
-  "npm/loader-linux-x64/package.json",
-  "npm/loader-linux-x64-musl/package.json",
-  "npm/loader-linux-arm64/package.json",
-  "npm/loader-linux-arm64-musl/package.json",
-  "npm/loader-win32-x64/package.json",
-  "npm/loader-win32-arm64/package.json",
+  "npm/runner/package.json",
+  "npm/runner-darwin-arm64/package.json",
+  "npm/runner-darwin-x64/package.json",
+  "npm/runner-linux-x64/package.json",
+  "npm/runner-linux-x64-musl/package.json",
+  "npm/runner-linux-arm64/package.json",
+  "npm/runner-linux-arm64-musl/package.json",
+  "npm/runner-win32-x64/package.json",
+  "npm/runner-win32-arm64/package.json",
 ];
 for (const f of pkgs) {
   const p = JSON.parse(fs.readFileSync(f, "utf8"));

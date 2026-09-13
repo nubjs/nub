@@ -193,7 +193,7 @@ The Nub CLI matches a `nub` condition on every run it augments, so a package tha
 }
 ```
 
-Two runs do not match it. Passing `--node` runs with Node's own conditions and nothing else, and the standalone [loader](https://www.npmjs.com/package/@nubjs/loader) leaves Node's condition set alone so a file resolves the same way under it as under tsx. Both fall through to `default`.
+Two runs do not match it. Passing `--node` runs with Node's own conditions and nothing else, and the standalone [runner](https://www.npmjs.com/package/@nubjs/runner) leaves Node's condition set alone so a file resolves the same way under it as under tsx. Both fall through to `default`.
 
 ## Yarn Plug'n'Play
 

@@ -80,6 +80,7 @@ fn dep_build_policy_hash(
     build_policy: &aube_scripts::BuildPolicy,
     default_trust_floor: &super::default_trust::DefaultTrustFloor,
     node_version: Option<&str>,
+    shell_id: &str,
 ) -> String {
     let policy = build_policy.fingerprint();
     let floor = default_trust_floor.fingerprint();
@@ -94,6 +95,15 @@ fn dep_build_policy_hash(
     hasher.update(floor.as_bytes());
     hasher.update(&(engine.len() as u64).to_le_bytes());
     hasher.update(engine.as_bytes());
+    // The shell the builds run under, for the engine's reason: output from
+    // another shell can be wrong (`cmd.exe` exits 0 having written `${VAR}`
+    // literally), so a shell change must widen the scan. The platform default
+    // adds nothing, so a hash written before this existed still matches and an
+    // upgrade does not force a full rescan everywhere.
+    if shell_id != aube_scripts::PLATFORM_DEFAULT_SHELL_ID {
+        hasher.update(&(shell_id.len() as u64).to_le_bytes());
+        hasher.update(shell_id.as_bytes());
+    }
     hasher.finalize().to_hex().to_string()
 }
 
@@ -356,8 +366,12 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     }
 
     let filtered_install = !workspace_filter_empty || dep_selection.is_filtered();
-    let dep_build_policy_hash =
-        dep_build_policy_hash(build_policy, default_trust_floor, node_version);
+    let dep_build_policy_hash = dep_build_policy_hash(
+        build_policy,
+        default_trust_floor,
+        node_version,
+        &aube_scripts::resolved_shell_id(),
+    );
     let lifecycle_delta_filter = if ignore_scripts {
         None
     } else {
@@ -870,7 +884,9 @@ mod tests {
             policy(),
             super::super::default_trust::DefaultTrustFloor::disabled(),
         );
-        let h = |v: Option<&str>| dep_build_policy_hash(&policy, &floor, v);
+        let h = |v: Option<&str>| {
+            dep_build_policy_hash(&policy, &floor, v, aube_scripts::PLATFORM_DEFAULT_SHELL_ID)
+        };
 
         assert_ne!(
             h(Some("22.15.0")),
@@ -886,6 +902,23 @@ mod tests {
             h(None),
             h(Some("22.15.0")),
             "an unresolved version must not collide with a resolved one"
+        );
+    }
+
+    #[test]
+    fn dep_build_policy_hash_tracks_a_non_default_lifecycle_shell() {
+        // Output from another shell can be wrong rather than stale, so a shell
+        // change has to widen the lifecycle scan the way a Node major switch does.
+        let (policy, floor) = (
+            policy(),
+            super::super::default_trust::DefaultTrustFloor::disabled(),
+        );
+        let h = |shell: &str| dep_build_policy_hash(&policy, &floor, Some("26.5.0"), shell);
+        let other = if cfg!(windows) { "sh" } else { "bash" };
+        assert_ne!(
+            h(aube_scripts::PLATFORM_DEFAULT_SHELL_ID),
+            h(other),
+            "a lifecycle shell change must widen the lifecycle scan"
         );
     }
 

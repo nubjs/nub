@@ -11,6 +11,7 @@ import { Bench } from '@/components/code';
 import { ShimDemo } from '@/components/shim-demo';
 import { CompatTable } from '@/components/compat-table';
 import { ToolMatrix } from '@/components/tool-matrix';
+import { ExtensionsTable } from '@/components/extensions-table';
 import { PmSupport } from '@/components/pm-support-table';
 import { InstallTabs } from '@/components/install-tabs';
 import { TypesSetup } from '@/components/types-setup';
@@ -109,6 +110,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     ShimDemo,
     CompatTable,
     ToolMatrix,
+    ExtensionsTable,
     PmSupport,
     InstallTabs,
     TypesSetup,

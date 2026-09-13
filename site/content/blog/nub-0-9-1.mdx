@@ -1,0 +1,109 @@
+---
+title: "Nub 0.9.1"
+description: Sizes the libuv threadpool to the machine on every augmented run, adds a project-wide command prefix, routes npm installs onto Nub's engine behind an opt-in shim, and accepts more of the lockfiles that npm ci accepts.
+author: The Nub Team
+date: 2026-09-12
+---
+
+Nub 0.9.1 sizes libuv's threadpool to the cores of the machine on every augmented run, takes a `prefix` command in `nub.jsonc`, runs `npm ci` and `npm install` on its own engine behind an opt-in shim, and accepts more of the npm lockfiles and projects that `npm ci` accepts.
+
+<NubIntro />
+
+> [!IMPORTANT]
+> **Augmented runs on a machine with more than four cores now get a larger libuv threadpool.** The size is the larger of four and the cores available to the process; a container gets its cgroup quota, and Windows stops at eight. A `UV_THREADPOOL_SIZE` you set yourself is used as is, and `--node` or `NODE_COMPAT` keep Node's default. See [Threadpool](#threadpool) below.
+
+## Threadpool
+
+Node sends async `fs`, `dns.lookup`, `zlib` and `crypto` calls to a pool of four threads. Native addons such as `bcrypt` and `sharp` queue on the same four. The pool is four threads on a laptop and four on a 64-core server, because libuv reads `UV_THREADPOOL_SIZE` once and only the environment can change it. Nub now sets it when it starts Node.
+
+```sh
+nub server.ts                        # pool sized to the cores, 16 on a 16-vCPU box
+node server.ts                       # pool of 4
+UV_THREADPOOL_SIZE=6 nub server.ts   # your value, used as is
+```
+
+The value applies on every launcher: the file run, `nub run`, `nubx`, `nub watch` and lifecycle scripts. On a 16-vCPU box under autocannon at 64 connections, a bcrypt route went from 18 to 66 requests per second, a sharp thumbnail route from 57 to 179, and a pbkdf2 route from 46 to 131 (mean of three rounds, [benchmark](https://github.com/nubjs/nub/blob/main/tests/bench/runtime/pool-bound.sh)). Routes that use the pool lightly read within noise of plain Node.
+
+A pool sized to the host takes every core it can see, which is a cost for whatever shares the box. Three things around the size limit that.
+
+- **Extra threads run at a lower priority.** On Linux, the threads beyond Node's four run at nice 10. On an idle box they run at full speed; under contention they yield most of the CPU. Twelve busy neighbours lose about 1% of their throughput beside the demoted pool, against 7.5% beside a sixteen-thread pool at normal priority.
+- **Children keep Node's default.** Nub removes its own value from `process.env` once the pool exists, so a `cluster` worker, a PM2 fork or any `child_process` spawn starts with four threads. A child that runs through `nub` is sized again.
+- **Windows stops at eight.** Each pool thread commits its full stack up front there.
+
+The [Threadpool](/docs/runtime/threadpool) page documents the behavior. ([#919](https://github.com/nubjs/nub/pull/919))
+
+## The `prefix` field
+
+A project can put a command in front of everything Nub runs for it: a file run, a `package.json` script, and `nub watch`.
+
+```jsonc title="nub.jsonc"
+{
+  "prefix": "dotenvx run --"   // split like a shell; the array form takes exact arguments
+}
+```
+
+```bash
+nub server.ts        # dotenvx run -- node server.ts
+nub run build        # dotenvx run -- sh -c "<the build script>"
+nub watch server.ts  # dotenvx run -- node --watch server.ts
+```
+
+A script is wrapped as a whole, so a script that starts no Node process still runs behind the prefix. The program resolves from the project's `node_modules/.bin`, then `PATH`, so a wrapper installed as a devDependency works with no global install; a path form, absolute or relative, anchors to the file that set it. A `nub run` inside a script, or a wrapper written in Node, does not wrap the same project again. The `nubx` and `nub dlx` runners do not take it, and `--node` runs without it. The field is in the [config reference](/docs/config#prefix). ([#915](https://github.com/nubjs/nub/pull/915))
+
+## npm installs on Nub's engine
+
+The shims run the package manager the project pins. One opt-in changes that for the two npm verbs an install pipeline runs:
+
+```sh
+nub pm shim --route-installs
+```
+
+With the marker set, a bare `npm ci` in a project with a `package-lock.json` runs `nub ci`, and a bare `npm install` runs `nub install`, both on Nub's engine and from the same lockfile. The notice on stderr names the swap:
+
+```console
+$ npm ci
+npm ci → nub ci (via nub shim)
+```
+
+Everything else reaches the real npm as typed: `npm test`, `npx`, `npm publish`, a global install, an install that names a package, and an install with a flag Nub does not translate. A routed install runs every lifecycle script as npm does, hands them `NODE_ENV=production` exactly when dev dependencies are omitted, and honors `ignore-scripts` from `.npmrc` and the environment. The [shim page](/docs/pm/pm-shim#running-npm-installs-on-nubs-engine) lists the translated flags. ([#925](https://github.com/nubjs/nub/pull/925))
+
+## npm lockfile compatibility
+
+A corpus of 28 popular npm projects, frozen-installed under Nub in CI and checked against their own lockfile, found refusals of lockfiles npm itself wrote. Each is fixed.
+
+| PR | What changed |
+| --- | --- |
+| [#918](https://github.com/nubjs/nub/pull/918) | A workspace member's required peer is recorded on its importer, a member nested inside another member resolves through the parent member's `node_modules`, a `link` target with no `version` parses, and a space-separated multi-digest SRI value verifies as ssri does. |
+| [#918](https://github.com/nubjs/nub/pull/918) | The PM verbs install past a tsconfig whose `extends` target is a devDependency the install is about to provide. A member's lifecycle script gets every ancestor `node_modules/.bin` on `PATH`, and every importer lifecycle script gets the lazy node-gyp shim, so a root `preinstall` that runs `node-gyp install` no longer exits 127. |
+| [#923](https://github.com/nubjs/nub/pull/923) | The peer each npm placement resolves to is recorded as a graph edge. A peer-only package reached solely through a transitive's peer edge was pruned and died at runtime with `Cannot find package`. A lockfile npm wrote for a project with an auto-installed peer now round-trips byte-identical. |
+| [#928](https://github.com/nubjs/nub/pull/928) | A dependency declared in more than one manifest section, which npm, pnpm and bun all accept, no longer fails a frozen install with `ERR_NUB_OUTDATED_LOCKFILE`. |
+| [#929](https://github.com/nubjs/nub/pull/929) | A bun-style `patchedDependencies` key such as `name@github:owner/repo#sha` matches by resolved identity instead of failing `ERR_NUB_PATCH_NON_SEMVER_RANGE`. Declarations under pnpm's names keep pnpm's semver-only grammar. |
+
+## Memory-constrained launches
+
+On Linux x64, a direct Node launch inside a cgroup memory budget starts the main isolate with a 16 MiB V8 semi-space on two measured releases.
+
+| Node release | Memory budget, inclusive |
+| --- | --- |
+| 22.23.2 | 512 MiB–1 GiB |
+| 24.20.0 | 512 MiB |
+
+The flag is hidden from `process.execArgv`, and Workers keep their own `resourceLimits`. The tuning stands down when Node options, preloads, `NODE_OPTIONS`, PnP, a `prefix`, or an environment loader own startup. Other releases, larger budgets, budgets below 512 MiB, watch mode and compiled executables keep Node's defaults, because the larger nursery regressed production SSR above the ranges and raised OOM kills below them. The [runtime overview](/docs/runtime#memory-constrained-launches) has the policy. ([#917](https://github.com/nubjs/nub/pull/917))
+
+## Other changes
+
+| PR | What changed |
+| --- | --- |
+| [#912](https://github.com/nubjs/nub/pull/912) | Nub passes `--experimental-async-context-frame` on Node 22.9 through 23.x. Node 24 made that `AsyncLocalStorage` implementation the default; on the 22 line it roughly halves the cost of carrying a store across `await`. |
+| [#920](https://github.com/nubjs/nub/pull/920) | A user loader layered above Nub's keeps ownership of its files. Running `tsx script.ts` under `nub run`, or from a `prepare` script, failed with `require is not defined in ES module scope`. |
+| [#935](https://github.com/nubjs/nub/pull/935) | When the project's Node came from Nub's own store, Nub fills the node-gyp header cache from it, so a from-source native build works offline instead of downloading headers from nodejs.org. Windows keeps the download, because the official zip ships no headers. |
+| [#939](https://github.com/nubjs/nub/pull/939) | The phantom detector treats `electron` and `vscode` as host-provided, since no install can supply them, so a package such as `electron-log` stays in the shared store. The first install after upgrading re-scans cached verdicts once. |
+| [#926](https://github.com/nubjs/nub/pull/926) | The [De-phantoming the npm ecosystem](/blog/phantom-dependencies-package-extensions) post describes the daily scan behind the compatibility database, and the [`@nubjs/extensions`](/docs/install/extensions) page documents the published package with configuration for pnpm and Yarn. |
+| [#930](https://github.com/nubjs/nub/pull/930) | The `nub agent docs` command prints usage and the table of contents; `--list` prints the contents alone and `--page` selects a page. |
+| [#931](https://github.com/nubjs/nub/pull/931) | The cross-runtime scoring leaves a test the reference Node itself skips out of the node-relative denominator. Nub passes 98.4% of the 4,690 tests Node 26.7 runs and passes. |
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.9.1) list every change in this release.
+
+## Get started
+
+<GetStarted />

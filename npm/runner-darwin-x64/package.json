@@ -1,0 +1,16 @@
+{
+  "name": "@nubjs/runner-darwin-x64",
+  "version": "0.9.1",
+  "description": "Nub standalone-runner native addon for macOS x64 (Intel)",
+  "license": "MIT",
+  "repository": "https://github.com/nubjs/nub",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "nub-native.node"
+  ]
+}
