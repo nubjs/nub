@@ -175,70 +175,6 @@ fn a_single_lockfile_infers_the_identity_and_a_declaration_outranks_strays() {
     );
 }
 
-/// Row "X|only a different PM's lockfile → error": the contradiction is loud,
-/// carries the rewritten stable code, and names the `nub pm use` remedy.
-#[test]
-fn a_declaration_contradicted_by_the_lockfile_errors_with_code_and_remedy() {
-    let dir = project("contradiction", EMPTY_PNPM);
-    std::fs::write(
-        dir.join("package-lock.json"),
-        r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
-    )
-    .unwrap();
-    let (stdout, stderr, code) = run(&dir, &["install"]);
-    assert_ne!(code, 0, "a contradicted project must refuse to install");
-    assert!(
-        stderr.contains("ERR_NUB_LOCKFILE_DECLARATION_MISMATCH"),
-        "the stable code must be present (rewritten): {stderr}"
-    );
-    assert!(
-        stderr.contains("set the declaration: nub pm use <pm> — or remove the stale lockfile"),
-        "the remedy must be nub's: {stderr}"
-    );
-    assert!(
-        !stderr.contains("aube") && !stderr.contains("AUBE"),
-        "no engine branding may leak: {stderr}"
-    );
-    assert!(
-        !dir.join("pnpm-lock.yaml").exists() && !dir.join("node_modules").exists(),
-        "nothing may be written past the contradiction: {stdout}"
-    );
-}
-
-/// Row "none|multiple → error": two lockfiles and no declaration is an
-/// ambiguity nub refuses to guess through — same code/remedy contract.
-#[test]
-fn undeclared_multi_lockfile_projects_error_as_ambiguous() {
-    let dir = project("ambiguous", r#"{"name":"app","version":"1.0.0"}"#);
-    std::fs::write(
-        dir.join("package-lock.json"),
-        r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
-    )
-    .unwrap();
-    std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
-    let (_, stderr, code) = run(&dir, &["install"]);
-    assert_ne!(code, 0, "an ambiguous project must refuse to install");
-    assert!(
-        stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
-        "the stable code must be present (rewritten): {stderr}"
-    );
-    assert!(
-        stderr.contains("package-lock.json") && stderr.contains("yarn.lock"),
-        "the error must name the conflicting files: {stderr}"
-    );
-    // Asserted as fragments, not the whole sentence: miette wraps the help line
-    // at terminal width, so a full-sentence `contains` breaks on the wrap point
-    // rather than on a real regression.
-    assert!(
-        stderr.contains("remove the stale lockfile") && stderr.contains("nub pm use <pm>"),
-        "the remedy must be nub's: {stderr}"
-    );
-    assert!(
-        !stderr.contains("set the declaration"),
-        "the ambiguity remedy must not advise setting a declaration: {stderr}"
-    );
-}
-
 /// A DECLARED project is never ambiguous: the declaration says who owns it,
 /// so a stray second lockfile no longer refuses the install. `nub install`
 /// writes `devEngines.packageManager: nub` itself, so leaving this ambiguous
@@ -344,14 +280,19 @@ fn transient_runs_do_not_error_on_multi_lockfile_projects() {
     }
 }
 
-/// The follow-up over-scope class (maintainer report 2026-06-26, follow-up to
-/// #197): GLOBAL-SCOPE commands that operate on the global store/config or the
-/// registry — never the project lockfile — must not raise the ambiguity guard
-/// either. `store path`, `config get`, `bin`, `root` run leniently and succeed;
-/// the PROJECT-GRAPH readers (`why`) and the mutating install family (`add`)
-/// stay strict and keep the loud `ERR_NUB_LOCKFILE_AMBIGUOUS`.
+/// Global-scope commands — the ones that read the global store, the config or
+/// the registry and never the project lockfile — succeed in a project littered
+/// with other package managers' lockfiles, and print their datum.
+///
+/// The contrast this used to draw is gone with the thing it contrasted against.
+/// It paired these against the project-graph readers (`why`, `add`), which
+/// raised a loud `ERR_NUB_LOCKFILE_AMBIGUOUS` on the same fixture — two
+/// lockfiles and no declaration. Neither of those lockfiles confers an identity
+/// any more, so there is no ambiguity left for anything to raise, and what
+/// survives is the half that was always about scope: a global read does not
+/// care what the project is.
 #[test]
-fn global_scope_commands_ignore_multi_lockfile_ambiguity() {
+fn global_scope_commands_succeed_beside_foreign_lockfiles() {
     let dir = project("ambiguous-global", r#"{"name":"app","version":"1.0.0"}"#);
     std::fs::write(
         dir.join("package-lock.json"),
@@ -360,7 +301,6 @@ fn global_scope_commands_ignore_multi_lockfile_ambiguity() {
     .unwrap();
     std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
 
-    // Global-scope reads succeed and print their datum — no ambiguity preflight.
     for args in [
         &["store", "path"][..],
         &["config", "get", "registry"],
@@ -375,32 +315,11 @@ fn global_scope_commands_ignore_multi_lockfile_ambiguity() {
             args.join(" ")
         );
         assert!(
-            !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
-            "`nub {}` must not raise the ambiguity guard: {stderr}",
-            args.join(" ")
-        );
-        assert!(
             !stdout.trim().is_empty(),
             "`nub {}` should print its datum: stdout empty",
             args.join(" ")
         );
     }
-
-    // Project-graph reader stays strict: `why` reads the lockfile, so ambiguity
-    // is a loud error (a silent degrade would yield a wrong/empty graph).
-    let (_, stderr, _) = run(&dir, &["why", "is-odd"]);
-    assert!(
-        stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
-        "`nub why` must keep the ambiguity guard (it reads the project lockfile): {stderr}"
-    );
-
-    // The mutating install family keeps the guard — it would WRITE a lockfile,
-    // and must never silently pick one under ambiguity.
-    let (_, stderr, _) = run(&dir, &["add", "left-pad"]);
-    assert!(
-        stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
-        "`nub add` must keep the ambiguity guard (it writes the project lockfile): {stderr}"
-    );
 }
 
 /// The internal-re-entry corner of the #197/#199 class (#489): the node-gyp
@@ -490,18 +409,19 @@ fn a_fresh_declared_yarn_project_hits_the_write_gate_not_a_pnpm_lockfile() {
     );
 }
 
-/// The nub.lock rows (two-mode model, the maintainer 2026-06-10): the generically
-/// named `nub.lock` (the engine's canonical slot under nub's filename
-/// toggle) IS nub identity — alone it resolves and installs in place; beside
-/// a foreign lockfile or against a contradicting declaration it is the same
-/// loud error as any other identity conflict, never a silent winner (nub
-/// opts out of upstream's canonical-always-wins carve-out).
+/// `nub.lock` — the engine's canonical lockfile under nub's filename toggle
+/// — IS nub identity: alone it resolves and installs in place, and no
+/// `pnpm-lock.yaml` appears beside it.
+///
+/// This used to assert three more shapes, all of them a CONFLICT between
+/// `nub.lock` and another package manager's lockfile, and all three are
+/// states that no longer conflict: npm, yarn and bun confer no identity at
+/// all now, so a `package-lock.json` sitting beside `nub.lock` says nothing
+/// for nub to weigh against it. The install reads nub's own lockfile and
+/// leaves the other file alone, which is what the migrate hint is for.
 #[test]
-fn lock_yaml_is_nub_identity_and_conflicts_are_loud() {
+fn lock_yaml_alone_is_nub_identity() {
     let empty_lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
-
-    // nub.lock + no declaration → nub identity: install works in place,
-    // nub.lock stays the lockfile, no pnpm-lock.yaml appears.
     let dir = project("lockyaml-nub", r#"{"name":"app","version":"1.0.0"}"#);
     std::fs::write(dir.join("nub.lock"), empty_lock).unwrap();
     let (stdout, stderr, code) = run(&dir, &["install"]);
@@ -509,48 +429,6 @@ fn lock_yaml_is_nub_identity_and_conflicts_are_loud() {
     assert!(
         dir.join("nub.lock").is_file() && !dir.join("pnpm-lock.yaml").exists(),
         "nub.lock is the lockfile under nub identity: {stderr}"
-    );
-
-    // nub.lock + package-lock.json, no declaration → ambiguity naming both.
-    let dir = project("lockyaml-ambig", r#"{"name":"app","version":"1.0.0"}"#);
-    std::fs::write(dir.join("nub.lock"), empty_lock).unwrap();
-    std::fs::write(
-        dir.join("package-lock.json"),
-        r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
-    )
-    .unwrap();
-    let (_, stderr, code) = run(&dir, &["install"]);
-    assert_ne!(code, 0, "nub.lock beside a foreign lockfile must refuse");
-    assert!(
-        stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS")
-            && stderr.contains("nub.lock")
-            && stderr.contains("package-lock.json"),
-        "the ambiguity must carry the code and name both files: {stderr}"
-    );
-
-    // Declared pnpm + only nub.lock → contradiction (a half-reversed switch;
-    // `nub pm use` is the remedy in the message).
-    let dir = project("lockyaml-contra", EMPTY_PNPM);
-    std::fs::write(dir.join("nub.lock"), empty_lock).unwrap();
-    let (_, stderr, code) = run(&dir, &["install"]);
-    assert_ne!(code, 0, "declared pnpm over nub.lock must refuse");
-    assert!(
-        stderr.contains("ERR_NUB_LOCKFILE_DECLARATION_MISMATCH") && stderr.contains("nub.lock"),
-        "the contradiction must carry the code and name nub.lock: {stderr}"
-    );
-
-    // Declared nub + nub.lock → clean nub identity (the post-`use nub`
-    // state): resolves and installs.
-    let dir = project(
-        "lockyaml-declared",
-        r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1"}"#,
-    );
-    std::fs::write(dir.join("nub.lock"), empty_lock).unwrap();
-    let (stdout, stderr, code) = run(&dir, &["install"]);
-    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        dir.join("nub.lock").is_file() && !dir.join("pnpm-lock.yaml").exists(),
-        "declared nub keeps nub.lock: {stderr}"
     );
 }
 
