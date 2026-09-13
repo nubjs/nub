@@ -129,12 +129,16 @@ Socket ordinary_socket(int family, int type, int protocol) {
 
 bool wait_iocp(HANDLE port, OVERLAPPED* expected);
 
-void cancel_and_drain(HANDLE port, SOCKET socket, OVERLAPPED* overlapped) {
+void cancel_and_drain(SOCKET socket, OVERLAPPED* overlapped) {
   // An incomplete Winsock extension operation owns the caller's OVERLAPPED and
   // address buffers.  Cancel and observe its terminal completion before either
   // stack storage or the completion port can go away.
   CancelIoEx(reinterpret_cast<HANDLE>(socket), overlapped);
-  (void)wait_iocp(port, overlapped);
+  DWORD bytes = 0;
+  DWORD flags = 0;
+  // The outer driver can terminate a stuck fixture, but this frame cannot return
+  // while Winsock still owns its stack storage, even after cancellation.
+  WSAGetOverlappedResult(socket, overlapped, &bytes, TRUE, &flags);
 }
 
 // This must be the fixture's first named result.  The adapter routes this
@@ -165,14 +169,14 @@ bool self_token_marker(bool require_full_network) {
   DWORD capability_bytes = 0;
   GetTokenInformation(token, TokenCapabilities, nullptr, 0, &capability_bytes);
   std::vector<BYTE> capabilities(capability_bytes);
-  if (capability_bytes < sizeof(TOKEN_GROUPS) ||
+  if (capability_bytes < sizeof(DWORD) ||
       GetTokenInformation(token, TokenCapabilities, capabilities.data(), capability_bytes,
-                          &returned) == 0) {
+                          &returned) == 0 || returned < sizeof(DWORD)) {
     valid = false;
   }
   DWORD capability_count = 0;
   if (valid) {
-    capability_count = reinterpret_cast<const TOKEN_GROUPS*>(capabilities.data())->GroupCount;
+    std::memcpy(&capability_count, capabilities.data(), sizeof(capability_count));
   }
   SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
   PSID administrators = nullptr;
@@ -180,7 +184,7 @@ bool self_token_marker(bool require_full_network) {
   if (AllocateAndInitializeSid(&authority, 2, SECURITY_BUILTIN_DOMAIN_RID,
                                DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
                                &administrators) == 0 ||
-      CheckTokenMembershipEx(token, administrators, CTMF_INCLUDE_APPCONTAINER,
+      CheckTokenMembershipEx(nullptr, administrators, CTMF_INCLUDE_APPCONTAINER,
                              &administrator) == 0) {
     valid = false;
   }
@@ -190,13 +194,12 @@ bool self_token_marker(bool require_full_network) {
           ":capabilities=" + std::to_string(capability_count) +
           ":admin=" + std::to_string(administrator != FALSE));
   return valid && (!require_full_network ||
-                   (app_container == 1 && capability_count == 1 && administrator == FALSE));
+                   (app_container == 1 && capability_count == 0 && administrator == FALSE));
 }
 
 bool self_token_attestation() {
-  // A full-network AppContainer has only the internetClient capability.  The
-  // ordinary-user fixture must therefore show a LowBox token, exactly that one
-  // capability, and no Administrators membership from its own token.
+  // The adapter transfers sockets instead of adding internetClient. The child
+  // must retain its zero-capability LowBox token and ordinary-user membership.
   return self_token_marker(true);
 }
 
@@ -339,7 +342,7 @@ bool connect_ex_round_trip(const Endpoint& endpoint) {
   // to exercise the extension entry point's synchronous fast path.
   const bool completed = (immediate || error == ERROR_IO_PENDING) && wait_iocp(port, &overlapped);
   if (!completed) {
-    cancel_and_drain(port, socket.value, &overlapped);
+    if (immediate || error == ERROR_IO_PENDING) cancel_and_drain(socket.value, &overlapped);
     CloseHandle(port);
     return false;
   }
@@ -370,7 +373,7 @@ bool accept_ex_round_trip() {
   marker("FULL_NETWORK_READY", printable_endpoint(bound));
   const bool completed = (immediate || error == ERROR_IO_PENDING) && wait_iocp(port, &overlapped);
   if (!completed) {
-    cancel_and_drain(port, listener.value, &overlapped);
+    if (immediate || error == ERROR_IO_PENDING) cancel_and_drain(listener.value, &overlapped);
     CloseHandle(port);
     return false;
   }

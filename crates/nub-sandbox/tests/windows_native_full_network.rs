@@ -366,6 +366,9 @@ fn negative_client(
         Sandbox::new(&policy)
     }
     .expect("negative session");
+    let fs = output(&session, fixture, "fs-canary");
+    assert!(fs.status.success(), "{net_label} filesystem canary: {fs:?}");
+    assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5");
     let result = output(&session, fixture, "tcp4");
     assert!(
         !result.status.success(),
@@ -613,7 +616,7 @@ fn assert_token_attestation(output: &Output) {
     assert_marker(
         output,
         "FULL_NETWORK_TOKEN",
-        "appcontainer=1:capabilities=1:admin=0",
+        "appcontainer=1:capabilities=0:admin=0",
     );
 }
 
