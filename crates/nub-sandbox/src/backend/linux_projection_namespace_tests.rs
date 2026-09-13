@@ -4,6 +4,9 @@
 //! raw arm establishes that the host supports each syscall; its mounted arm
 //! requires the provider to enforce the fixed path policy through the kernel.
 
+use super::super::linux_supervisor::{
+    EgressPolicy, ProjectedLaunch, SupervisedLaunch, SupervisedStdio, spawn_supervised_projected,
+};
 use super::*;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -433,6 +436,136 @@ fn namespace_provider(root: &Path) {
     println!("NAMESPACE_PROVIDER_OK");
 }
 
+fn namespace_native_provider(root: &Path) {
+    unsafe {
+        libc::alarm(60);
+        libc::umask(0);
+    }
+    let rules: FsRuleSet =
+        serde_json::from_slice(&fs::read(root.join("rules.json")).unwrap()).unwrap();
+    let raw = root.join("raw");
+    let namespace = raw.join("app/namespace");
+    let nearest = snapshot(&namespace.join("nearest.txt"));
+    let read_only = snapshot(&namespace.join("read-only.locked"));
+    let rw = root.join("rw");
+    let read = root.join("read");
+    let rw_root = native_tests::recursive_view(&raw, &rw, false);
+    let read_root = native_tests::recursive_view(&raw, &read, true);
+    let projection = Projection::acquire_native(&rules, rw_root, read_root).unwrap();
+    let fuse = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open("/dev/fuse")
+        .expect("direct unprivileged /dev/fuse prerequisite");
+    let view = root.join("view");
+    let view_c = CString::new(view.as_os_str().as_bytes()).unwrap();
+    let options = CString::new(format!(
+        "fd={},rootmode=40000,user_id=0,group_id=0",
+        fuse.as_raw_fd()
+    ))
+    .unwrap();
+    checked(unsafe {
+        libc::mount(
+            c"nub-namespace-native-test".as_ptr(),
+            view_c.as_ptr(),
+            c"fuse".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NODEV,
+            options.as_ptr().cast(),
+        )
+    })
+    .expect("direct FUSE mount prerequisite");
+    let serve = projection.clone();
+    let server = std::thread::spawn(move || serve.serve(fuse.into()));
+    let service = projection.native_opener(&view).unwrap();
+    let argv = [
+        CString::new("/app/run").unwrap(),
+        CString::new("--exact").unwrap(),
+        CString::new(HELPER).unwrap(),
+        CString::new("--nocapture").unwrap(),
+        CString::new("--test-threads=1").unwrap(),
+    ];
+    let env = [
+        CString::new("PATH=/usr/bin:/bin").unwrap(),
+        CString::new(format!("{ROLE}=namespace-native-command")).unwrap(),
+        CString::new("NUB_PROJECTION_TEST_ROOT=/").unwrap(),
+    ];
+    let launch = SupervisedLaunch {
+        argv: &argv,
+        envp: &env,
+        cwd: Some(c"/"),
+        ruleset_fd: -1,
+        seccomp_ceiling: None,
+        stdin: SupervisedStdio::Null,
+        stdout: SupervisedStdio::Piped,
+        stderr: SupervisedStdio::Piped,
+        inherited_fds: &[],
+    };
+    let policy = EgressPolicy {
+        self_proc: BTreeSet::new(),
+        allow_all: false,
+        allow: vec![],
+        write_policy: None,
+        proxy_port: None,
+        proxy_token: None,
+    };
+    let stats = service.client();
+    let before = stats.stats();
+    let mut child = spawn_supervised_projected(
+        policy,
+        launch,
+        ProjectedLaunch {
+            root: view_c.clone(),
+            opener: stats.clone(),
+        },
+    )
+    .unwrap();
+    let stdout_pipe = child.take_stdout().unwrap();
+    let stderr = child.take_stderr().unwrap();
+    let stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let mut stdout = String::new();
+    let stdout_result = BufReader::new(stdout_pipe).read_to_string(&mut stdout);
+    let status = child.wait();
+    let stderr = stderr_drain.join().unwrap().unwrap();
+    println!("{stdout}{stderr}");
+    let after = stats.stats();
+    let resolver_tid = stats.resolver_tid();
+    println!(
+        "NAMESPACE_NATIVE_EXPORTS before={before:?} after={after:?} resolver_tid={resolver_tid}"
+    );
+    drop(stats);
+    service.shutdown().unwrap();
+    drop(projection);
+    unmount_projection(&view_c, server);
+    for path in [&read, &rw] {
+        let path_c = CString::new(path.as_os_str().as_bytes()).unwrap();
+        checked(unsafe { libc::umount2(path_c.as_ptr(), 0) })
+            .expect("normal native backing-view unmount");
+        fs::remove_dir(path).unwrap();
+    }
+    fs::remove_dir(&view).unwrap();
+    assert!(
+        stdout_result.is_ok(),
+        "native namespace stdout read {stdout_result:?}; status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let status = status.expect("native namespace child wait");
+    assert!(
+        status.success(),
+        "native namespace command {status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        after.0 > before.0 && after.1 > before.1,
+        "native namespace command did not advance open/export counters: before={before:?} after={after:?}"
+    );
+    assert_ne!(resolver_tid, 0, "native namespace resolver has no TID");
+    verify_backing(&raw, true, &nearest, &read_only);
+    println!("NAMESPACE_NATIVE_PROVIDER_NORMAL_UNMOUNT_OK");
+}
+
 fn namespace_raw(root: &Path) {
     let namespace = root.join("app/namespace");
     let nearest = snapshot(&namespace.join("nearest.txt"));
@@ -459,7 +592,11 @@ fn namespace_supervisor(root: &Path) {
     checked(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) }).unwrap();
     let exe = std::env::current_exe().unwrap();
     let mut failures = Vec::new();
-    for (arm, role) in [("raw", "namespace-raw"), ("mounted", "namespace-provider")] {
+    for (arm, role) in [
+        ("raw", "namespace-raw"),
+        ("mounted", "namespace-provider"),
+        ("native", "namespace-native-provider"),
+    ] {
         println!("NAMESPACE_ARM_START {arm}");
         io::stdout().flush().unwrap();
         let case = root.join(arm);
@@ -497,7 +634,12 @@ pub(super) fn run_role(role: &str, root: &Path) -> bool {
         "namespace-supervisor" => namespace_supervisor(root),
         "namespace-raw" => namespace_raw(root),
         "namespace-provider" => namespace_provider(root),
+        "namespace-native-provider" => namespace_native_provider(root),
         "namespace-command" => {
+            audit_command();
+            namespace_command(Path::new("/"), true);
+        }
+        "namespace-native-command" => {
             audit_command();
             namespace_command(Path::new("/"), true);
         }
