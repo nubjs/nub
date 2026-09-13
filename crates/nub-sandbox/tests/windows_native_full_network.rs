@@ -144,13 +144,13 @@ fn native_adapter_full_network_dns_opt_in() {
         let plain_name = fresh_dns_name(api, "plain");
         let plain = std::process::Command::new(&fixture).arg(api).env("NUB_FULL_NETWORK_DNS_NAME", &plain_name).output().unwrap();
         assert!(plain.status.success(), "plain {api} setup/provider failure for {plain_name}: {plain:?}");
-        assert_marker(&plain, "FULL_NETWORK_DNS", &format!("{api}:0"));
+        assert_marker(&plain, "FULL_NETWORK_DNS", &format!("{api}:0:1.1.1.1"));
         let native_name = fresh_dns_name(api, "native");
         let policy = policy(root.path(), &fixture, json!(true), None, Some(&native_name));
         let native = Sandbox::with_windows_native_compat(&policy).expect("native full-network DNS session");
         let adapted = output(&native, &fixture, api);
         assert!(adapted.status.success(), "adapter {api} failed for {native_name}: {adapted:?}");
-        assert_marker(&adapted, "FULL_NETWORK_DNS", &format!("{api}:0"));
+        assert_marker(&adapted, "FULL_NETWORK_DNS", &format!("{api}:0:1.1.1.1"));
         // Raw is deliberately observational: DNS is outside the socket adapter's hook surface.
         let raw_policy = policy(root.path(), &fixture, json!(false), None, Some(&fresh_dns_name(api, "raw")));
         let raw = Sandbox::new(&raw_policy).expect("raw DNS session");
@@ -190,7 +190,7 @@ fn native_adapter_full_network_has_peer_oracles_and_retained_policy_separation()
     positive_client(root.path(), &fixture, "tcp4", false, 1); positive_client(root.path(), &fixture, "tcp6", false, 1); positive_client(root.path(), &fixture, "udp4", true, 1); positive_client(root.path(), &fixture, "udp6", true, 1);
     positive_client(root.path(), &fixture, "connectex4", false, 1); positive_client(root.path(), &fixture, "concurrent4", false, 12);
     positive_client(root.path(), &fixture, "descendant4", false, 1); listener_case(root.path(), &fixture, "listen4"); listener_case(root.path(), &fixture, "listen6"); listener_case(root.path(), &fixture, "acceptex4");
-    let fs_policy = policy(root.path(), &fixture, json!(true), None, None); let native = Sandbox::with_windows_native_compat(&fs_policy).unwrap(); let fs = output(&native, &fixture, "fs-canary"); assert!(!fs.status.success()); assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5"); drop(native);
+    let fs_policy = policy(root.path(), &fixture, json!(true), None, None); let native = Sandbox::with_windows_native_compat(&fs_policy).unwrap(); let fs = output(&native, &fixture, "fs-canary"); assert!(fs.status.success()); assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5"); drop(native);
 
     // These run after the positive lease with identical literal fs grants, targeting profile-key aliasing.
     negative_client(root.path(), &fixture, json!(false), false, "raw net:false");

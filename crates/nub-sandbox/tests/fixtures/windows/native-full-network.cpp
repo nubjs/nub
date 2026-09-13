@@ -396,18 +396,30 @@ bool dns_lookup(bool query_ex) {
   if (length <= 0) return false;
   std::vector<wchar_t> wide(static_cast<size_t>(length));
   MultiByteToWideChar(CP_UTF8, 0, name, -1, wide.data(), length);
+  const char* expected = std::getenv("NUB_FULL_NETWORK_DNS_EXPECTED");
+  if (expected == nullptr) expected = "1.1.1.1";
   if (!query_ex) {
     ADDRINFOW hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
     ADDRINFOW* records = nullptr; const int status = GetAddrInfoW(wide.data(), nullptr, &hints, &records);
+    bool matched = false;
+    for (auto* item = records; item != nullptr; item = item->ai_next) {
+      char address[INET_ADDRSTRLEN]{};
+      if (item->ai_family == AF_INET && InetNtopA(AF_INET, &reinterpret_cast<sockaddr_in*>(item->ai_addr)->sin_addr, address, sizeof(address)) != nullptr && std::strcmp(address, expected) == 0) matched = true;
+    }
     if (records != nullptr) FreeAddrInfoW(records);
-    marker("FULL_NETWORK_DNS", "getaddrinfo:" + std::to_string(status)); return status == 0;
+    marker("FULL_NETWORK_DNS", "getaddrinfo:" + std::to_string(status) + ":" + (matched ? expected : "unexpected")); return status == 0 && matched;
   }
   DNS_QUERY_REQUEST request{}; request.Version = DNS_QUERY_REQUEST_VERSION1; request.QueryName = wide.data();
   request.QueryType = DNS_TYPE_A; request.QueryOptions = DNS_QUERY_WIRE_ONLY | DNS_QUERY_NO_HOSTS_FILE;
   DNS_QUERY_RESULT result{}; result.Version = DNS_QUERY_RESULTS_VERSION1;
   const DNS_STATUS status = DnsQueryEx(&request, &result, nullptr);
+  bool matched = false;
+  for (auto* item = result.pQueryRecords; item != nullptr; item = item->pNext) {
+    char address[INET_ADDRSTRLEN]{};
+    if (item->wType == DNS_TYPE_A && InetNtopA(AF_INET, &item->Data.A.IpAddress, address, sizeof(address)) != nullptr && std::strcmp(address, expected) == 0) matched = true;
+  }
   if (result.pQueryRecords != nullptr) DnsRecordListFree(result.pQueryRecords, DnsFreeRecordList);
-  marker("FULL_NETWORK_DNS", "dnsqueryex:" + std::to_string(status)); return status == ERROR_SUCCESS;
+  marker("FULL_NETWORK_DNS", "dnsqueryex:" + std::to_string(status) + ":" + (matched ? expected : "unexpected")); return status == ERROR_SUCCESS && matched;
 }
 
 bool endpoint_case(const std::string& name, int type, bool (*operation)(SOCKET, const Endpoint&)) {
