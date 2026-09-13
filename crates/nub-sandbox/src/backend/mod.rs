@@ -435,10 +435,27 @@ pub(crate) struct SupervisedPlan {
     pub(crate) ruleset: Option<linux_landlock::LandlockRuleset>,
     pub(crate) seccomp_ceiling: Option<Vec<seccompiler::sock_filter>>,
     pub(crate) ca_bundle: Option<std::fs::File>,
+    /// Test-only bridge into the existing projected-open notifier. Production policy
+    /// admission never constructs this: a projection still needs a real session owner
+    /// for its mount and provider lifetime.
+    #[cfg(test)]
+    projected: Option<linux_supervisor::ProjectedLaunch>,
 }
 
 #[cfg(target_os = "linux")]
 impl SupervisedPlan {
+    /// Attach an already-owned projected mount to this otherwise ordinary supervised
+    /// launch. This is deliberately test-only: it proves `Prepared` resource/ready
+    /// handling without admitting a projection through public policy selection.
+    #[cfg(test)]
+    pub(super) fn with_test_projection(
+        mut self,
+        projected: linux_supervisor::ProjectedLaunch,
+    ) -> Self {
+        self.projected = Some(projected);
+        self
+    }
+
     /// Fork the confined child and return its owned supervisor/stdio handle.
     fn spawn(
         self,
@@ -464,6 +481,8 @@ impl SupervisedPlan {
             ruleset,
             seccomp_ceiling,
             ca_bundle,
+            #[cfg(test)]
+            projected,
         } = self;
         let inherited_fds: Vec<_> = ca_bundle
             .iter()
@@ -482,6 +501,14 @@ impl SupervisedPlan {
             stderr,
             inherited_fds: &inherited_fds,
         };
+        #[cfg(test)]
+        let child = match projected {
+            Some(projected) => linux_supervisor::spawn_supervised_projected_with_ready(
+                egress, launch, projected, ready,
+            ),
+            None => linux_supervisor::spawn_supervised_with_ready(egress, launch, ready),
+        };
+        #[cfg(not(test))]
         let child = linux_supervisor::spawn_supervised_with_ready(egress, launch, ready);
         // Keep the ruleset alive across the fork+exec, exactly as the `Command` path keeps
         // `_inherited_files`: the child's `restrict_self` consumes the fd after fork.
@@ -1000,6 +1027,24 @@ fn try_wait_child_eintr(
 }
 
 impl Prepared {
+    /// Construct an internal supervised launch fixture. This is intentionally unavailable
+    /// outside tests: policy admission continues to build only the ordinary Linux plan.
+    #[cfg(all(target_os = "linux", test))]
+    pub(super) fn test_supervised(plan: SupervisedPlan) -> Self {
+        Self {
+            command: Command::new("/bin/false"),
+            degradation: Degradation::full(),
+            proxy: None,
+            session: None,
+            _inherited_files: Vec::new(),
+            signal_process_group: false,
+            _private_tmp: None,
+            redact_stdout: true,
+            redact_stderr: true,
+            supervised: Some(plan),
+        }
+    }
+
     #[cfg(windows)]
     fn acquire_windows_resource(
         &self,

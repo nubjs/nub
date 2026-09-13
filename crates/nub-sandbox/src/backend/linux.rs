@@ -463,6 +463,8 @@ fn build_supervised_plan(
             lost: vec!["net".to_string()],
             reason: Some(reason),
         })?,
+        #[cfg(test)]
+        projected: None,
     })
 }
 

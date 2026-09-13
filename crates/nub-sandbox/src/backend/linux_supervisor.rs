@@ -2649,6 +2649,19 @@ pub(super) fn spawn_supervised_projected(
     launch: SupervisedLaunch,
     projection: ProjectedLaunch,
 ) -> io::Result<SupervisedChild> {
+    spawn_supervised_projected_with_ready(policy, launch, projection, |_| Ok(()))
+}
+
+/// Test-only projected launch with the same ready barrier as the ordinary
+/// [`spawn_supervised_with_ready`] path. The caller owns the already-mounted
+/// projection; this function neither provisions nor persists it.
+#[cfg(test)]
+pub(super) fn spawn_supervised_projected_with_ready(
+    policy: EgressPolicy,
+    launch: SupervisedLaunch,
+    projection: ProjectedLaunch,
+    ready: impl FnOnce(i32) -> io::Result<()>,
+) -> io::Result<SupervisedChild> {
     if !launch.inherited_fds.is_empty() || !policy.self_proc.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -2669,7 +2682,7 @@ pub(super) fn spawn_supervised_projected(
     spawn_supervised_mode(
         policy,
         launch,
-        |_| Ok(()),
+        ready,
         LaunchMode::Projected {
             setup: projection,
             root,
