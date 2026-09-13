@@ -32,6 +32,7 @@ struct Payload {
     wchar_t socket_broker[128];
     DWORD socket_broker_pid;
     BOOL socket_diagnostics;
+    uint64_t socket_name_fingerprint;
     wchar_t file_broker[128];
     DWORD file_broker_pid;
 };
@@ -110,6 +111,7 @@ extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory,
         if (wcscpy_s(state.socket_broker, socket_broker)) return ERROR_INVALID_NAME;
         state.socket_broker_pid = GetCurrentProcessId();
         state.socket_diagnostics = nub_sandbox::socket_broker::diagnostics_enabled();
+        state.socket_name_fingerprint = nub_sandbox::socket_broker::name_fingerprint(socket_broker);
     }
     if (file_broker) {
         if (wcscpy_s(state.file_broker, file_broker)) return ERROR_INVALID_NAME;
@@ -172,6 +174,23 @@ static auto true_wsa_socket_w = WSASocketW;
 static auto true_wsa_socket_a = WSASocketA;
 #include "file_broker_client.h"
 
+static thread_local bool socket_pipe_open_active = false;
+
+static void diagnose_socket_open(POBJECT_ATTRIBUTES attrs, bool mapped, NTSTATUS status,
+                                 bool create) {
+    using namespace nub_sandbox::socket_broker;
+    if (!socket_pipe_open_active) return;
+    DWORD shape = create ? 1 : 0;
+    if (attrs) {
+        if (attrs->RootDirectory) shape |= 2;
+        if (native_name_matches(attrs->ObjectName, state.socket_broker, L"\\??\\pipe\\")) shape |= 4;
+        if (native_name_matches(attrs->ObjectName, state.socket_broker, L"\\Device\\NamedPipe\\")) shape |= 8;
+    }
+    if (mapped) shape |= 16;
+    diagnose(true, Stage::NativePath, shape);
+    diagnose(true, Stage::NativeStatus, DWORD(status));
+}
+
 static SOCKET broker_socket(int family, int type, int protocol, DWORD flags) {
     using namespace nub_sandbox::socket_broker;
     Request request = {kVersion, family, type, protocol, flags};
@@ -186,12 +205,25 @@ static SOCKET broker_socket(int family, int type, int protocol, DWORD flags) {
     HANDLE pipe = INVALID_HANDLE_VALUE;
     Stage stage = Stage::PipeOpen;
     DWORD pipe_error = ERROR_SUCCESS;
+    if (state.socket_diagnostics) {
+        diagnose(true, Stage::PayloadName,
+            name_fingerprint(state.socket_broker) == state.socket_name_fingerprint ?
+                ERROR_SUCCESS : ERROR_INVALID_DATA);
+        // Query only this calling thread, without impersonating or changing it.
+        HANDLE token = nullptr;
+        BOOL present = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+        DWORD token_error = present ? ERROR_SUCCESS : GetLastError();
+        if (token) CloseHandle(token);
+        diagnose(true, Stage::ThreadToken, token_error);
+    }
     ULONGLONG deadline = GetTickCount64() + kTimeout;
     do {
+        socket_pipe_open_active = state.socket_diagnostics != FALSE;
         pipe = true_create_file(state.socket_broker, kClientAccess,
             0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
                 SECURITY_IDENTIFICATION, nullptr);
         pipe_error = pipe == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+        socket_pipe_open_active = false;
         if (pipe != INVALID_HANDLE_VALUE || pipe_error != ERROR_PIPE_BUSY) break;
         ULONGLONG now = GetTickCount64();
         if (now >= deadline) { stage = Stage::PipeWait; pipe_error = ERROR_TIMEOUT; break; }
@@ -538,6 +570,7 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     wchar_t path[1024];
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
+    diagnose_socket_open(attrs, mapped, status, false);
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         nub_sandbox::null_device::duplicate_after_access_denied(
             state.null_device, handle, access, attrs, io, share, options)) return 0;
@@ -564,6 +597,7 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_nt_create_file(handle, access, mapped ? &redirected : attrs, io, allocation,
         attributes, share, disposition, options, ea, ea_length);
+    diagnose_socket_open(attrs, mapped, status, true);
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         (disposition == FILE_OPEN || disposition == FILE_OPEN_IF) && !allocation && !ea && !ea_length &&
         (attributes == 0 || attributes == FILE_ATTRIBUTE_NORMAL) &&
