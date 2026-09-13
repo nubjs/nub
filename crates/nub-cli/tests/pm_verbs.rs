@@ -124,45 +124,12 @@ const IS_POSITIVE_PACKAGE_LOCK: &str = r#"{
 }
 "#;
 
-/// A minimal npm lockfile where `demo-plugin` declares a peer on `demo-host`,
-/// with both as direct deps. An organic pnpm-lock keys the plugin as
-/// `demo-plugin@1.0.0(demo-host@1.0.0)`; the #453 bug wrote a bare
-/// `demo-plugin@1.0.0`. `import` reads peer data straight from the lockfile —
-/// no registry — so synthetic package names exercise the pass fully offline.
-/// bun.lock counterpart of [`PEER_DEP_PACKAGE_LOCK`]: ajv@6.12.6 +
-/// ajv-keywords@3.5.2 (a real published peer pair, captured from `bun install`).
-/// Exercises the same import peer pass through the BUN parser, whose
-/// peer-dependency plumbing is separate from the npm one.
-const AJV_PEER_BUN_LOCK: &str = r#"{
-  "lockfileVersion": 1,
-  "configVersion": 1,
-  "workspaces": {
-    "": {
-      "name": "fixture",
-      "dependencies": {
-        "ajv": "6.12.6",
-        "ajv-keywords": "3.5.2",
-      },
-    },
-  },
-  "packages": {
-    "ajv": ["ajv@6.12.6", "", { "dependencies": { "fast-deep-equal": "^3.1.1", "fast-json-stable-stringify": "^2.0.0", "json-schema-traverse": "^0.4.1", "uri-js": "^4.2.2" } }, "sha512-j3fVLgvTo527anyYyJOGTYJbG+vnnQYvE0m5mmkc1TK+nxAppkCLMIL0aZ4dblVCNoGShhm+kzE4ZUykBoMg4g=="],
-
-    "ajv-keywords": ["ajv-keywords@3.5.2", "", { "peerDependencies": { "ajv": "^6.9.1" } }, "sha512-5p6WTN0DdTGVQk6VjcEju19IgaHudalcfabD7yhDGeA6bcQnmL+CpveLJq/3hvfwd1aof6L386Ougkx6RfyMIQ=="],
-
-    "fast-deep-equal": ["fast-deep-equal@3.1.3", "", {}, "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q=="],
-
-    "fast-json-stable-stringify": ["fast-json-stable-stringify@2.1.0", "", {}, "sha512-lhd/wF+Lk98HZoTCtlVraHtfh5XYijIjalXck7saUtuanSDyLMxnHhSXEDJqHxD7msR8D0uCmqlkwjCV8xvwHw=="],
-
-    "json-schema-traverse": ["json-schema-traverse@0.4.1", "", {}, "sha512-xbbCH5dCYU5T8LcEhhuh7HJ88HXuW3qsI3Y0zOZFKfZEHcpWiHU/Jxzk629Brsab/mMiHQti9wMP+845RPe3Vg=="],
-
-    "punycode": ["punycode@2.3.1", "", {}, "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg=="],
-
-    "uri-js": ["uri-js@4.4.1", "", { "dependencies": { "punycode": "^2.1.0" } }, "sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg=="],
-  }
-}"#;
-
-const PEER_DEP_PACKAGE_LOCK: &str = r#"{
+/// A real published peer pair — `ajv-keywords@3.5.2` peers on `ajv@6.12.6` —
+/// as npm writes it. Real names rather than synthetic ones because `import`
+/// re-resolves against the registry, which is pnpm 12.4.1's own behaviour on
+/// the same fixture (both fail identically against a dead registry), so an
+/// invented package name cannot survive the pass it is meant to exercise.
+const AJV_PEER_PACKAGE_LOCK: &str = r#"{
   "name": "fixture",
   "version": "1.0.0",
   "lockfileVersion": 3,
@@ -171,22 +138,53 @@ const PEER_DEP_PACKAGE_LOCK: &str = r#"{
     "": {
       "name": "fixture",
       "version": "1.0.0",
-      "dependencies": { "demo-plugin": "1.0.0", "demo-host": "1.0.0" }
+      "dependencies": { "ajv": "6.12.6", "ajv-keywords": "3.5.2" }
     },
-    "node_modules/demo-host": {
-      "version": "1.0.0",
-      "resolved": "https://registry.npmjs.org/demo-host/-/demo-host-1.0.0.tgz",
-      "integrity": "sha512-8ND1j3y9/HP94TOvGzr69/FgbkX2ruOldhLEsTWwcJVfo4oRjwemJmJxt7RJkKYH8tz7vYBP9JcKQY8CLuJ90Q=="
+    "node_modules/ajv": {
+      "version": "6.12.6",
+      "resolved": "https://registry.npmjs.org/ajv/-/ajv-6.12.6.tgz",
+      "integrity": "sha512-j3fVLgvTo527anyYyJOGTYJbG+vnnQYvE0m5mmkc1TK+nxAppkCLMIL0aZ4dblVCNoGShhm+kzE4ZUykBoMg4g==",
+      "dependencies": {
+        "fast-deep-equal": "^3.1.1",
+        "fast-json-stable-stringify": "^2.0.0",
+        "json-schema-traverse": "^0.4.1",
+        "uri-js": "^4.2.2"
+      }
     },
-    "node_modules/demo-plugin": {
-      "version": "1.0.0",
-      "resolved": "https://registry.npmjs.org/demo-plugin/-/demo-plugin-1.0.0.tgz",
-      "integrity": "sha512-8ND1j3y9/HP94TOvGzr69/FgbkX2ruOldhLEsTWwcJVfo4oRjwemJmJxt7RJkKYH8tz7vYBP9JcKQY8CLuJ90Q==",
-      "peerDependencies": { "demo-host": "^1.0.0" }
+    "node_modules/ajv-keywords": {
+      "version": "3.5.2",
+      "resolved": "https://registry.npmjs.org/ajv-keywords/-/ajv-keywords-3.5.2.tgz",
+      "integrity": "sha512-5p6WTN0DdTGVQk6VjcEju19IgaHudalcfabD7yhDGeA6bcQnmL+CpveLJq/3hvfwd1aof6L386Ougkx6RfyMIQ==",
+      "peerDependencies": { "ajv": "^6.9.1" }
+    },
+    "node_modules/fast-deep-equal": {
+      "version": "3.1.3",
+      "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
+      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q=="
+    },
+    "node_modules/fast-json-stable-stringify": {
+      "version": "2.1.0",
+      "resolved": "https://registry.npmjs.org/fast-json-stable-stringify/-/fast-json-stable-stringify-2.1.0.tgz",
+      "integrity": "sha512-lhd/wF+Lk98HZoTCtlVraHtfh5XYijIjalXck7saUtuanSDyLMxnHhSXEDJqHxD7msR8D0uCmqlkwjCV8xvwHw=="
+    },
+    "node_modules/json-schema-traverse": {
+      "version": "0.4.1",
+      "resolved": "https://registry.npmjs.org/json-schema-traverse/-/json-schema-traverse-0.4.1.tgz",
+      "integrity": "sha512-xbbCH5dCYU5T8LcEhhuh7HJ88HXuW3qsI3Y0zOZFKfZEHcpWiHU/Jxzk629Brsab/mMiHQti9wMP+845RPe3Vg=="
+    },
+    "node_modules/punycode": {
+      "version": "2.3.1",
+      "resolved": "https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz",
+      "integrity": "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg=="
+    },
+    "node_modules/uri-js": {
+      "version": "4.4.1",
+      "resolved": "https://registry.npmjs.org/uri-js/-/uri-js-4.4.1.tgz",
+      "integrity": "sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==",
+      "dependencies": { "punycode": "^2.1.0" }
     }
   }
-}
-"#;
+}"#;
 
 /// `nub add` then `nub rm` (alias) round-trip on a truly-fresh project: add
 /// persists the dep + writes nub's neutral `nub.lock` + links node_modules;
@@ -664,11 +662,37 @@ fn dedupe_ignores_npm_alias_targets_and_check_passes() {
     );
 }
 
-/// `nub import` converts a foreign lockfile to pnpm-lock.yaml (nub's
-/// canonical format — never aube-lock.yaml), refuses a second run without
-/// `--force`, and works fully offline.
+/// The lockfile the project's own package manager writes, whichever of the
+/// two names it goes by, with the path it was found at.
+///
+/// Two package managers are in this tree and they disagree on the name — one
+/// writes `pnpm-lock.yaml`, the other `nub.lock` under nub's identity, which
+/// is the whole point of the filename toggle. A test that names one of them
+/// asserts which package manager is serving rather than what it produced.
+#[track_caller]
+fn canonical_lockfile(dir: &Path) -> (PathBuf, String) {
+    for name in ["nub.lock", "pnpm-lock.yaml"] {
+        let path = dir.join(name);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            return (path, text);
+        }
+    }
+    panic!("no lockfile was written in {}", dir.display());
+}
+
+/// `nub import` converts a foreign lockfile to the project's own, leaves the
+/// source in place, and never writes an engine-named file.
+///
+/// Two claims this used to make are gone because they were the old engine's
+/// alone, measured against pnpm 12.4.1 on the same fixture. It reported
+/// `Imported 1 packages from package-lock.json to pnpm-lock.yaml`, where pnpm
+/// prints only its `Done in …` footer — so the wording is not a contract, and
+/// the conversion is asserted on the lockfile's contents instead. And a second
+/// `import` was refused pending `--force`, where pnpm exits 0 and overwrites;
+/// pnpm has no `--force` on this verb at all, so the guard is not something to
+/// port.
 #[test]
-fn import_converts_package_lock_to_pnpm_lock() {
+fn import_converts_package_lock_to_the_projects_own_lockfile() {
     let dir = pm_tmpdir("import");
     std::fs::write(
         dir.join("package.json"),
@@ -684,16 +708,11 @@ fn import_converts_package_lock_to_pnpm_lock() {
         out.stdout, out.stderr
     );
     out.assert_brand_clean();
-    assert!(
-        out.stderr
-            .contains("Imported 1 packages from package-lock.json to pnpm-lock.yaml"),
-        "import must report the conversion: {}",
-        out.stderr
-    );
-    let lock = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+    let (path, lock) = canonical_lockfile(&dir);
     assert!(
         lock.contains("is-positive"),
-        "converted lockfile must carry the dependency: {lock}"
+        "converted lockfile {} must carry the dependency: {lock}",
+        path.display()
     );
     assert!(
         !dir.join("aube-lock.yaml").exists() && !dir.join("pnpm-lock.yaml.import-backup").exists(),
@@ -703,61 +722,29 @@ fn import_converts_package_lock_to_pnpm_lock() {
         dir.join("package-lock.json").is_file(),
         "the source lockfile is left in place (parity with pnpm import)"
     );
-
-    // Second run: the target exists → refused without --force, allowed with.
-    let again = run_nub(&dir, &["import"]);
-    assert_ne!(again.code, 0);
-    assert!(
-        again.stderr.contains("pnpm-lock.yaml already exists") && again.stderr.contains("--force"),
-        "re-import must point at --force: {}",
-        again.stderr
-    );
-    let forced = run_nub(&dir, &["import", "--force"]);
-    assert_eq!(forced.code, 0, "stderr: {}", forced.stderr);
 }
 
-/// Regression for #453: importing a suffix-less source (npm/bun) must run the
-/// peer-context pass so the written pnpm-lock carries peer suffixes. The install
-/// path skips that pass for pnpm incumbents, assuming a pnpm-lock already has
-/// them; a bare `demo-plugin@1.0.0` would leave the store-resident plugin with
-/// no peer sibling under the isolated layout and fail at runtime with
-/// `Cannot find package 'demo-host'`.
+/// Regression for #453: importing a suffix-less source (npm) must run the
+/// peer-context pass so the written lockfile carries peer suffixes. The
+/// install path skips that pass for pnpm incumbents, assuming a pnpm-lock
+/// already has them; a bare `ajv-keywords@3.5.2` would leave the
+/// store-resident plugin with no peer sibling under the isolated layout.
+///
+/// The bun.lock counterpart this used to sit beside is retired rather than
+/// ported. `import` does not read a `bun.lock` — refused
+/// `ERR_NUB_LOCKFILE_NOT_FOUND`, whose help names yarn, package-lock and
+/// shrinkwrap, and pnpm 12.4.1 refuses the identical fixture with the same
+/// sentence — so the assertion was aimed at a door that is closed on both
+/// sides. Converting a `bun.lock` is `nub pm migrate`, which does read one.
 #[test]
 fn import_writes_peer_suffixes_for_suffixless_source() {
     let dir = pm_tmpdir("import-peer");
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"fixture","version":"1.0.0","dependencies":{"demo-plugin":"1.0.0","demo-host":"1.0.0"}}"#,
-    )
-    .unwrap();
-    std::fs::write(dir.join("package-lock.json"), PEER_DEP_PACKAGE_LOCK).unwrap();
-
-    let out = run_nub(&dir, &["import"]);
-    assert_eq!(
-        out.code, 0,
-        "stdout: {}\nstderr: {}",
-        out.stdout, out.stderr
-    );
-    let lock = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
-    assert!(
-        lock.contains("demo-plugin@1.0.0(demo-host@1.0.0)"),
-        "imported pnpm-lock must peer-suffix the plugin key (#453): {lock}"
-    );
-}
-
-/// Same guarantee through the BUN lockfile parser: a real published peer pair
-/// (ajv-keywords peers on ajv) must come out suffixed with the resolved peer
-/// mirrored into the snapshot's dependencies — the edge that gives the
-/// store-resident copy its sibling link under the isolated layout (#453).
-#[test]
-fn import_writes_peer_suffixes_for_bun_lock_source() {
-    let dir = pm_tmpdir("import-peer-bun");
-    std::fs::write(
-        dir.join("package.json"),
         r#"{"name":"fixture","version":"1.0.0","dependencies":{"ajv":"6.12.6","ajv-keywords":"3.5.2"}}"#,
     )
     .unwrap();
-    std::fs::write(dir.join("bun.lock"), AJV_PEER_BUN_LOCK).unwrap();
+    std::fs::write(dir.join("package-lock.json"), AJV_PEER_PACKAGE_LOCK).unwrap();
 
     let out = run_nub(&dir, &["import"]);
     assert_eq!(
@@ -765,10 +752,11 @@ fn import_writes_peer_suffixes_for_bun_lock_source() {
         "stdout: {}\nstderr: {}",
         out.stdout, out.stderr
     );
-    let lock = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+    let (path, lock) = canonical_lockfile(&dir);
     assert!(
         lock.contains("ajv-keywords@3.5.2(ajv@6.12.6)"),
-        "bun-sourced import must carry the peer-context suffix: {lock}"
+        "imported lockfile {} must peer-suffix the plugin key (#453): {lock}",
+        path.display()
     );
     // Bound the check to ajv-keywords' OWN snapshot block: split on its
     // suffixed key (unique to the snapshots section — the packages key stays
