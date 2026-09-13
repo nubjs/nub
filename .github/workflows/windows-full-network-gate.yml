@@ -1,0 +1,150 @@
+name: Windows full-network gate
+
+on:
+  push:
+    branches: [windows-full-network-gate]
+    paths:
+      - 'crates/nub-sandbox/**'
+      - 'tests/sandbox-native-adapter/run-full-network-standard-user.ps1'
+      - '.github/workflows/windows-full-network-gate.yml'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  full-network:
+    name: full network (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            machine: x64
+            vcvars: amd64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            machine: ARM64
+            vcvars: amd64_arm64
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      RUSTFLAGS: '-C target-feature=+crt-static'
+      RUST_BACKTRACE: '1'
+      FULL_NETWORK_MODE: owner-pipe-diagnostic
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Recording source and runtime environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports, reports/binaries | Out-Null
+          @{ source = (git rev-parse HEAD); sourceStatus = @(git status --short); runner = '${{ matrix.runner }}'; target = '${{ matrix.target }}'; os = [Environment]::OSVersion.VersionString; architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString(); rustc = (& rustc -Vv); cargo = (& cargo --version) } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 reports/source-runtimeenv.json
+          Get-FileHash -Algorithm SHA256 crates/nub-sandbox/tests/fixtures/windows/native-full-network.cpp | ConvertTo-Json | Set-Content -Encoding utf8 reports/native-full-network-source-sha256.json
+      - name: Compiling MSVC native full-network fixture
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (!(Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere is missing: $vswhere" }
+          $install = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if (!$install) { throw 'No Visual Studio installation with MSVC x64 tools was found' }
+          $vcvars = Join-Path $install 'VC\Auxiliary\Build\vcvarsall.bat'
+          if (!(Test-Path -LiteralPath $vcvars -PathType Leaf)) { throw "vcvarsall is missing: $vcvars" }
+          @"
+          @echo off
+          call "$vcvars" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b %errorlevel%
+          cl.exe /Bv /nologo /std:c++17 /MT /W4 /WX /EHsc crates\nub-sandbox\tests\fixtures\windows\native-full-network.cpp /Fe:reports\binaries\native-full-network.exe /link Ws2_32.lib Dnsapi.lib Advapi32.lib
+          if errorlevel 1 exit /b %errorlevel%
+          dumpbin.exe /headers reports\binaries\native-full-network.exe
+          exit /b %errorlevel%
+          "@ | Set-Content -Encoding ascii reports/compile-native-full-network.cmd
+          & cmd.exe /d /s /c reports\compile-native-full-network.cmd *> reports/msvc-fixture.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item reports/msvc-fixture.log reports/native-full-network-pe-headers.txt
+          if (!(Select-String -Path reports/msvc-fixture.log -Pattern 'machine \(${{ matrix.machine }}\)' -CaseSensitive:$false)) { throw "Fixture is not a native ${{ matrix.machine }} PE" }
+      - name: Compiling MSVC native file-broker fixture
+        if: ${{ hashFiles('crates/nub-sandbox/native/file_broker_fixture.c') != '' }}
+        shell: pwsh
+        run: |
+          $source = 'crates/nub-sandbox/native/file_broker_fixture.c'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (!(Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere is missing: $vswhere" }
+          $install = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if (!$install) { throw 'No Visual Studio installation with MSVC x64 tools was found' }
+          $vcvars = Join-Path $install 'VC\Auxiliary\Build\vcvarsall.bat'
+          if (!(Test-Path -LiteralPath $vcvars -PathType Leaf)) { throw "vcvarsall is missing: $vcvars" }
+          @"
+          @echo off
+          call "$vcvars" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b %errorlevel%
+          cl.exe /Bv /nologo /MT /W4 /WX /LD crates\nub-sandbox\native\file_broker_fixture.c /link /OUT:reports\binaries\file-broker-fixture.dll
+          if errorlevel 1 exit /b %errorlevel%
+          dumpbin.exe /headers reports\binaries\file-broker-fixture.dll
+          exit /b %errorlevel%
+          "@ | Set-Content -Encoding ascii reports/compile-file-broker-fixture.cmd
+          & cmd.exe /d /s /c reports\compile-file-broker-fixture.cmd *> reports/msvc-file-broker-fixture.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item $source reports/file-broker-fixture.c
+          Get-FileHash -Algorithm SHA256 $source | ConvertTo-Json | Set-Content -Encoding utf8 reports/file-broker-fixture-source-sha256.json
+          Get-FileHash -Algorithm SHA256 reports/binaries/file-broker-fixture.dll | ConvertTo-Json | Set-Content -Encoding utf8 reports/file-broker-fixture-dll-sha256.json
+          Copy-Item reports/msvc-file-broker-fixture.log reports/file-broker-fixture-pe-headers.txt
+          if (!(Select-String -Path reports/msvc-file-broker-fixture.log -Pattern 'machine \(${{ matrix.machine }}\)' -CaseSensitive:$false)) { throw "File-broker fixture is not a native ${{ matrix.machine }} PE" }
+      - name: Building exact ordinary-user test artifacts
+        id: build_tests
+        shell: pwsh
+        run: |
+          & cargo test -p nub-sandbox --profile fast --lib --no-run --message-format=json-render-diagnostics > reports/windows-library-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cargo test -p nub-sandbox --profile fast --test windows_tmp_policy --no-run --message-format=json-render-diagnostics > reports/windows-tmp-policy-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cargo test -p nub-sandbox --profile fast --test production_readiness_windows --no-run --message-format=json-render-diagnostics > reports/production-readiness-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cargo test -p nub-sandbox --profile fast --test windows_native_full_network --no-run --message-format=json-render-diagnostics > reports/windows-native-full-network-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cargo build -p nub-sandbox --profile fast --example windows_relay_fixture --message-format=json-render-diagnostics > reports/windows-relay-fixture-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $library = @(Get-Content reports/windows-library-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.kind -contains 'lib' -and $_.executable })
+          $tmp = @(Get-Content reports/windows-tmp-policy-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_tmp_policy' -and $_.executable })
+          $lifecycle = @(Get-Content reports/production-readiness-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'production_readiness_windows' -and $_.executable })
+          $driver = @(Get-Content reports/windows-native-full-network-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_native_full_network' -and $_.executable })
+          $relay = @(Get-Content reports/windows-relay-fixture-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_relay_fixture' -and $_.target.kind -contains 'example' -and $_.executable })
+          if ($library.Count -ne 1 -or $tmp.Count -ne 1 -or $lifecycle.Count -ne 1 -or $driver.Count -ne 1 -or $relay.Count -ne 1) { throw "Expected exact library, tmp, lifecycle, full-network driver, and standalone relay executables; library=$($library.Count) tmp=$($tmp.Count) lifecycle=$($lifecycle.Count) driver=$($driver.Count) relay=$($relay.Count)" }
+          Copy-Item $library[0].executable reports/binaries/nub_sandbox_lib.exe
+          Copy-Item $tmp[0].executable reports/binaries/windows_tmp_policy.exe
+          Copy-Item $lifecycle[0].executable reports/binaries/production_readiness_windows.exe
+          Copy-Item $driver[0].executable reports/binaries/windows_native_full_network.exe
+          Copy-Item $relay[0].executable reports/binaries/windows_relay_fixture.exe
+          Get-FileHash -Algorithm SHA256 reports/binaries/* | Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content -Encoding utf8 reports/binary-sha256.json
+      - name: Running owner-pipe cancellation diagnostic as an ordinary user
+        if: ${{ steps.build_tests.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $parameters = @{ FixtureBinary = (Join-Path $PWD 'reports/binaries/native-full-network.exe'); LibraryBinary = (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe'); TmpBinary = (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe'); NetworkBinary = (Join-Path $PWD 'reports/binaries/windows_native_full_network.exe'); RelayBinary = (Join-Path $PWD 'reports/binaries/windows_relay_fixture.exe'); BinaryManifest = (Join-Path $PWD 'reports/binary-sha256.json'); ReportDirectory = 'reports/full-network-standard-user' }
+          $fileBrokerSource = 'crates/nub-sandbox/native/file_broker_fixture.c'
+          $fileBrokerFixture = Join-Path $PWD 'reports/binaries/file-broker-fixture.dll'
+          if (Test-Path -LiteralPath $fileBrokerSource -PathType Leaf) {
+            if (!(Test-Path -LiteralPath $fileBrokerFixture -PathType Leaf)) { throw 'File-broker source is present but its matching-architecture fixture DLL is missing' }
+            $parameters.FileBrokerFixtureBinary = $fileBrokerFixture
+          }
+          & ./tests/sandbox-native-adapter/run-full-network-standard-user.ps1 @parameters -Mode $env:FULL_NETWORK_MODE
+          exit $LASTEXITCODE
+      - name: Running existing lifecycle control as an ordinary user
+        if: ${{ always() && steps.build_tests.outcome == 'success' && env.FULL_NETWORK_MODE != 'owner-pipe-diagnostic' }}
+        shell: pwsh
+        run: |
+          & ./tests/sandbox-native-adapter/run-standard-user.ps1 -TestBinary (Join-Path $PWD 'reports/binaries/production_readiness_windows.exe') -ReportDirectory reports/lifecycle-standard-user
+          exit $LASTEXITCODE
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-full-network-gate-${{ matrix.runner }}
+          if-no-files-found: warn
+          path: reports/
