@@ -4,9 +4,8 @@
 //! raw arm establishes that the host supports each syscall; its mounted arm
 //! requires the provider to enforce the fixed path policy through the kernel.
 
-use super::super::linux_supervisor::{
-    EgressPolicy, ProjectedLaunch, SupervisedLaunch, SupervisedStdio, spawn_supervised_projected,
-};
+use super::super::linux_supervisor::{EgressPolicy, ProjectedLaunch};
+use super::super::{Prepared, PreparedSignalTarget, SupervisedPlan};
 use super::*;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -269,6 +268,33 @@ fn namespace_command(root: &Path, projected: bool) {
         );
     }
     case_marker("directory_rename", projected);
+
+    fs::create_dir(&directory_source).unwrap();
+    create(&directory_source.join("fresh.json"), b"exchange-peer").unwrap();
+    let peer_directory = File::open(&directory_source).unwrap();
+    renameat2(&directory_source, &directory_renamed, RENAME_EXCHANGE).unwrap();
+    assert_eq!(
+        fs::read(directory_source.join("fresh.json")).unwrap(),
+        b"fresh-directory-child"
+    );
+    assert_eq!(
+        fs::read(directory_renamed.join("fresh.json")).unwrap(),
+        b"exchange-peer"
+    );
+    assert_eq!(
+        read_at(&directory, c"fresh.json").unwrap(),
+        b"fresh-directory-child"
+    );
+    assert_eq!(
+        read_at(&peer_directory, c"fresh.json").unwrap(),
+        b"exchange-peer"
+    );
+    renameat2(&directory_source, &directory_renamed, RENAME_EXCHANGE).unwrap();
+    assert_eq!(
+        fs::read(directory_renamed.join("fresh.json")).unwrap(),
+        b"fresh-directory-child"
+    );
+    case_marker("directory_exchange", projected);
 
     let mut held = OpenOptions::new()
         .read(true)
@@ -595,17 +621,6 @@ fn namespace_native_provider(root: &Path) {
         CString::new(format!("{ROLE}=namespace-native-command")).unwrap(),
         CString::new("NUB_PROJECTION_TEST_ROOT=/").unwrap(),
     ];
-    let launch = SupervisedLaunch {
-        argv: &argv,
-        envp: &env,
-        cwd: Some(c"/"),
-        ruleset_fd: -1,
-        seccomp_ceiling: None,
-        stdin: SupervisedStdio::Null,
-        stdout: SupervisedStdio::Piped,
-        stderr: SupervisedStdio::Piped,
-        inherited_fds: &[],
-    };
     let policy = EgressPolicy {
         self_proc: BTreeSet::new(),
         allow_all: false,
@@ -616,15 +631,32 @@ fn namespace_native_provider(root: &Path) {
     };
     let stats = service.client();
     let before = stats.stats();
-    let mut child = spawn_supervised_projected(
-        policy,
-        launch,
-        ProjectedLaunch {
-            root: view_c.clone(),
-            opener: stats.clone(),
-        },
-    )
-    .unwrap();
+    let plan = SupervisedPlan {
+        egress: policy,
+        argv: argv.to_vec(),
+        envp: env.to_vec(),
+        cwd: Some(c"/".into()),
+        ruleset: None,
+        seccomp_ceiling: None,
+        ca_bundle: None,
+        projected: None,
+    }
+    .with_test_projection(ProjectedLaunch {
+        root: view_c.clone(),
+        opener: stats.clone(),
+    });
+    let mut ready_target = None;
+    let mut child = Prepared::test_supervised(plan)
+        .spawn_with_signal_target(|target| {
+            let PreparedSignalTarget::Direct(group) = target;
+            if group >= 0 || namespace.join("future.json").exists() {
+                return Err(io::Error::other("projected ready barrier was not held"));
+            }
+            ready_target = Some(group);
+            Ok(())
+        })
+        .unwrap();
+    assert!(ready_target.is_some());
     let stdout_pipe = child.take_stdout().unwrap();
     let stderr = child.take_stderr().unwrap();
     let stderr_drain = std::thread::spawn(move || -> io::Result<String> {
@@ -635,6 +667,7 @@ fn namespace_native_provider(root: &Path) {
     let mut stdout = String::new();
     let stdout_result = BufReader::new(stdout_pipe).read_to_string(&mut stdout);
     let status = child.wait();
+    drop(child);
     let stderr = stderr_drain.join().unwrap().unwrap();
     println!("{stdout}{stderr}");
     let after = stats.stats();
@@ -667,6 +700,7 @@ fn namespace_native_provider(root: &Path) {
         "native namespace command did not advance open/export counters: before={before:?} after={after:?}"
     );
     assert_ne!(resolver_tid, 0, "native namespace resolver has no TID");
+    println!("PROJECTED_PREPARED_READY_STDIO_REAP_OK");
     verify_backing(&raw, true, &nearest, &read_only, &directory_neighbor);
     println!("NAMESPACE_NATIVE_PROVIDER_NORMAL_UNMOUNT_OK");
 }
