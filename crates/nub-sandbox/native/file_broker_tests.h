@@ -90,8 +90,8 @@ extern "C" DWORD sandbox_file_broker_test_quality() {
         quality.ImpersonationLevel = static_cast<SECURITY_IMPERSONATION_LEVEL>(impersonation);
         for (SECURITY_CONTEXT_TRACKING_MODE tracking : {SECURITY_STATIC_TRACKING, SECURITY_DYNAMIC_TRACKING}) {
             quality.ContextTrackingMode = tracking;
-            for (BOOLEAN effective : {BOOLEAN(FALSE), BOOLEAN(TRUE)}) {
-                quality.EffectiveOnly = effective;
+            for (unsigned effective = 0; effective <= 0xff; ++effective) {
+                quality.EffectiveOnly = static_cast<BOOLEAN>(effective);
                 if (!valid_quality(quality, fields) || fields) return ERROR_INVALID_DATA;
             }
         }
@@ -105,8 +105,7 @@ extern "C" DWORD sandbox_file_broker_test_quality() {
     quality.ContextTrackingMode = static_cast<SECURITY_CONTEXT_TRACKING_MODE>(2);
     if (valid_quality(quality, fields) || fields != QualityTracking) return ERROR_INVALID_DATA;
     quality.ContextTrackingMode = SECURITY_STATIC_TRACKING;
-    quality.EffectiveOnly = 2;
-    return !valid_quality(quality, fields) && fields == QualityEffectiveOnly ? 0 : ERROR_INVALID_DATA;
+    return valid_quality(quality, fields) && !fields ? 0 : ERROR_INVALID_DATA;
 }
 
 // Called in the real test child, so GetProcAddress observes installed Detours.

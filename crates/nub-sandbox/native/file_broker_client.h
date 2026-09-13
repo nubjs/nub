@@ -101,9 +101,10 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
             // SECURITY_QUALITY_OF_SERVICE controls client impersonation for
             // server connections. This broker resolves only validated local
             // disk paths and never forwards this child pointer to its host.
-            if (!object.SecurityQualityOfService ||
-                valid_quality(*static_cast<const SECURITY_QUALITY_OF_SERVICE*>(object.SecurityQualityOfService),
-                              details.quality_fields)) return true;
+            if (!object.SecurityQualityOfService) return true;
+            SECURITY_QUALITY_OF_SERVICE quality =
+                *static_cast<const SECURITY_QUALITY_OF_SERVICE*>(object.SecurityQualityOfService);
+            if (valid_quality(quality, details.quality_fields)) return true;
             failure = FileBrokerCaptureObjectAttributes;
             return false;
         }

@@ -33,7 +33,6 @@ enum QualityField : DWORD {
     QualityLength = 1,
     QualityImpersonation = 2,
     QualityTracking = 4,
-    QualityEffectiveOnly = 8,
 };
 
 // The client copies and validates this before any request reaches the broker.
@@ -45,7 +44,8 @@ inline bool valid_quality(const SECURITY_QUALITY_OF_SERVICE& quality, DWORD& fie
         fields |= QualityImpersonation;
     if (quality.ContextTrackingMode != SECURITY_STATIC_TRACKING &&
         quality.ContextTrackingMode != SECURITY_DYNAMIC_TRACKING) fields |= QualityTracking;
-    if (quality.EffectiveOnly != FALSE && quality.EffectiveOnly != TRUE) fields |= QualityEffectiveOnly;
+    // EffectiveOnly is a BOOLEAN: zero is false and any nonzero byte is true.
+    // Neither representation is forwarded to the local-disk open.
     return !fields;
 }
 
