@@ -85,12 +85,15 @@ fn is_bare_relative(p: &str) -> bool {
     if p.is_empty() {
         return false;
     }
-    // Absolute POSIX (`/x`), Windows drive (`C:\`), UNC (`\\`), or a symbolic
+    // Absolute POSIX (`/x`), rooted Windows drive (`C:\` / `C:/`), UNC (`\\`), or a symbolic
     // root already handled by the caller — none are bare-relative. `$` covers both
     // a `$name` sentinel and `$(…)`; neither is ever project-joined here.
     let b = p.as_bytes();
     let posix_abs = b[0] == b'/';
-    let win_drive = p.len() >= 2 && b[1] == b':';
+    // `C:` alone is drive-relative (to that drive's current directory), not an absolute
+    // root. Treat it like every other relative spelling so it cannot collide with the
+    // canonical `C:/` root pair the filesystem compiler emits.
+    let win_drive = p.len() >= 3 && b[1] == b':' && matches!(b[2], b'/' | b'\\');
     let unc = p.starts_with("\\\\");
     !(posix_abs || win_drive || unc || p.starts_with(['<', '~', '$']))
 }
@@ -226,11 +229,31 @@ pub fn canonicalize_glob_prefix(pattern: &str) -> String {
     }
     let canon = canonicalize_including_nonexistent(Path::new(prefix));
     let canon = normalize_slashes(&canon.to_string_lossy());
-    let canon = canon.trim_end_matches('/');
+    // Do not collapse `C:/` to `C:`: the first is an absolute drive root and the
+    // second is drive-relative on Windows. The compiler's root subtree pair depends
+    // on retaining this distinction through canonicalization.
+    let canon = trim_trailing_slashes_preserving_drive_root(&canon);
     if tail.is_empty() {
         canon.to_string()
     } else {
+        join_canonical_glob_prefix(canon, tail)
+    }
+}
+
+fn join_canonical_glob_prefix(canon: &str, tail: &str) -> String {
+    if canon.ends_with('/') {
+        format!("{canon}{tail}")
+    } else {
         format!("{canon}/{tail}")
+    }
+}
+
+fn trim_trailing_slashes_preserving_drive_root(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    if bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
+        path
+    } else {
+        path.trim_end_matches('/')
     }
 }
 
@@ -371,6 +394,47 @@ pub fn compile_glob(pattern: &str) -> Result<GlobMatcher, globset::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drive_root_preserves_absolute_and_relative_spellings() {
+        let homes = Homes {
+            home: PathBuf::from("/home/test"),
+            tmp: PathBuf::from("/tmp/test"),
+            cache: PathBuf::from("/home/test/.cache"),
+            project: PathBuf::from("/project"),
+        };
+        assert_eq!(expand_symbolic("C:/", &homes), "C:/");
+        assert_eq!(expand_symbolic("C:", &homes), "/project/C:");
+        assert_eq!(trim_trailing_slashes_preserving_drive_root("C:/"), "C:/");
+        assert_eq!(join_canonical_glob_prefix("C:/", "**"), "C:/**");
+        assert_eq!(canonicalize_glob_prefix("C:/"), "C:/");
+        assert_eq!(canonicalize_glob_prefix("C:/**"), "C:/**");
+    }
+
+    #[test]
+    fn drive_root_descendant_twin_matches_descendants() {
+        use crate::policy::{CanonGlob, FsOrigin, FsRule};
+        let rule = |matcher: &str, access| FsRule {
+            matcher: CanonGlob(matcher.into()),
+            effect: Effect::Allow,
+            access,
+            origin: FsOrigin::Authored,
+        };
+        let matcher = PathMatcher::new(&FsRuleSet {
+            entries: vec![
+                rule("C:/", FsAccess::ReadWrite),
+                rule("C:/**", FsAccess::ReadWrite),
+            ],
+            default_effect: Effect::Deny,
+        });
+        assert_eq!(
+            matcher.decide_normalized("C:/workspace/file", None),
+            FsDecision {
+                effect: Effect::Allow,
+                access: FsAccess::ReadWrite,
+            }
+        );
+    }
 
     #[test]
     fn positive_read_grants_never_subtract_write_access() {

@@ -233,7 +233,7 @@ A network rule is a literal host, a CIDR, `*`, or `*.suffix`. The suffix wildcar
 
 The `<private>` token, also spelled `<local>`, permits RFC 1918 and IPv6 ULA addresses. A bare `*` does not permit those ranges. `$trusted` and `$downloads` are array-only built-in host sets. A fine-grained allow starts the proxy; `net: true` and `net: false` do not. The object form accepts per-host booleans, but `proxy` is compiler-derived rather than a policy key.
 
-The proxy also checks resolved IP addresses after the hostname rule. These destination checks apply to both literal addresses and DNS results:
+The proxy also checks resolved IP addresses after the hostname rule. These destination checks apply to both literal addresses and DNS results. IPv4-mapped, IPv4-compatible and well-known NAT64 (`64:ff9b::/96`) addresses are classified by their embedded IPv4 address; arbitrary network-specific translation prefixes are not inferred:
 
 | Destination | Proxy behavior |
 | --- | --- |

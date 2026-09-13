@@ -373,7 +373,7 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
         // subtree head.
         let node_only = {
             let pattern = rule.matcher.as_str();
-            let twin = format!("{pattern}/**");
+            let twin = subtree_twin(pattern);
             !pattern.ends_with("/**")
                 && fs.rules.entries.get(index + 1).is_none_or(|t| {
                     t.matcher.as_str() != twin.as_str()
@@ -438,10 +438,10 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
                 if rule.origin == FsOrigin::NubOwnedPublic && !publishable.contains(&dir) {
                     publishable.push(dir.clone());
                 }
-                if rule.access == FsAccess::ReadWrite
-                    && !is_dangerous_write_root(&dir)
-                    && !write.contains(&dir)
-                {
+                // Every write capability originates in an explicit ReadWrite allow. Do not
+                // narrow an authored root here: the policy is positive-only and its matching
+                // grants compose by union on every backend.
+                if rule.access == FsAccess::ReadWrite && !write.contains(&dir) {
                     write.push(dir);
                 }
             }
@@ -614,39 +614,39 @@ pub(super) fn literal_subtree(glob: &str) -> Option<PathBuf> {
     if let Some(prefix) = glob.strip_suffix("/**")
         && !has_glob_meta(prefix)
     {
-        return Some(PathBuf::from(prefix));
+        // The canonical subtree twin of an absolute drive root is `C:/**`: the node
+        // remains `C:/`, while appending `/**` replaces its trailing slash. `C:` alone
+        // is drive-relative on Windows, so restore the root slash before materializing
+        // the ACL target.
+        return Some(PathBuf::from(
+            absolute_drive_root(prefix).unwrap_or_else(|| prefix.to_string()),
+        ));
     }
     None
 }
 
-/// Top-level roots a WRITE grant must never cover — a `..`-collapsed surface path can
-/// resolve to a system root, and an inheritable modify ACE there would be a
-/// filesystem-wide write hole. The Windows twin of the macOS `is_dangerous_write_root`
-/// (reads are exempt; a generous read is a legitimate posture, and read is separately
-/// allowlist-confined here anyway). Matches on the forward-slashed canonical form.
-pub(super) fn is_dangerous_write_root(dir: &Path) -> bool {
-    let Some(s) = dir.to_str() else { return false };
-    let s = s.trim_end_matches('/');
-    // Drive root (`C:`), the Windows dir, and Program Files are the roots a stray `..`
-    // could land on. Case-insensitive: Windows paths are case-insensitive.
-    let low = s.to_ascii_lowercase();
-    if low.is_empty() || low == "/" {
-        return true;
+/// The canonical descendant twin for a literal node. A drive root already ends in the
+/// separator that `/**` supplies, so appending another one produces the non-canonical
+/// `C://**` rather than the compiler's `C:/**`.
+fn subtree_twin(pattern: &str) -> String {
+    if is_absolute_drive_root(pattern) {
+        format!("{pattern}**")
+    } else {
+        format!("{pattern}/**")
     }
-    // `C:` / `C:/` — a bare drive root (2 chars + optional slash).
-    let bytes = low.as_bytes();
-    if bytes.len() <= 3 && bytes.get(1) == Some(&b':') {
-        return true;
-    }
-    matches!(
-        low.as_str(),
-        "c:/windows"
-            | "c:/windows/system32"
-            | "c:/program files"
-            | "c:/program files (x86)"
-            | "c:/programdata"
-            | "c:/users"
-    )
+}
+
+/// Return the absolute drive-root spelling for the drive-relative prefix of its `/**`
+/// twin. The IR is forward-slashed before it reaches this backend.
+fn absolute_drive_root(prefix: &str) -> Option<String> {
+    let bytes = prefix.as_bytes();
+    (bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        .then(|| format!("{prefix}/"))
+}
+
+fn is_absolute_drive_root(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
 /// Whether the fs axis confines anything (mirrors the mac/linux `fs_confines`). A
@@ -5583,12 +5583,15 @@ mod tests {
 
     #[test]
     fn subtree_twin_collapses_to_the_directory() {
-        // `C:/proj/**` and `C:/proj` both mean the subtree — one grant.
+        // `C:/proj/**` and `C:/proj` both mean the subtree — one grant. The drive-root
+        // pair keeps the node's absolute slash while its `/**` twin spells `C:/**`.
         assert_eq!(
             literal_subtree("C:/proj/**"),
             Some(PathBuf::from("C:/proj"))
         );
         assert_eq!(literal_subtree("C:/proj"), Some(PathBuf::from("C:/proj")));
+        assert_eq!(literal_subtree("C:/**"), Some(PathBuf::from("C:/")));
+        assert_eq!(subtree_twin("C:/"), "C:/**");
     }
 
     #[test]
@@ -5736,31 +5739,54 @@ mod tests {
     }
 
     #[test]
-    fn dangerous_write_roots_never_get_a_write_grant() {
-        // A rw allow that resolves to a system root must not open an inheritable modify
-        // ACE there (filesystem-wide write hole). Read of it is still fine.
-        for root in ["C:", "C:/", "C:/Windows", "C:/Program Files", "C:/Users"] {
-            let p = fs(
-                Effect::Deny,
-                vec![rule(root, Effect::Allow, FsAccess::ReadWrite)],
-            );
-            let __g = derive_grants(&p);
-            let _read = __g.read;
-            let write = __g.write;
-            assert!(
-                write.is_empty(),
-                "{root} must not receive a write grant (dangerous root)"
-            );
-        }
-        // A real project dir under Users is NOT over-blocked.
-        let p = fs(
-            Effect::Deny,
-            vec![rule("C:/Users/me/proj", Effect::Allow, FsAccess::ReadWrite)],
+    fn explicit_broad_write_roots_are_granted() {
+        use crate::compiler::{CompileCtx, ScopeCapabilities};
+        use crate::matcher::Homes;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        let ctx = CompileCtx::new(
+            Homes {
+                home: PathBuf::from("C:/Users/test"),
+                tmp: PathBuf::from("C:/Users/test/AppData/Local/Temp"),
+                cache: PathBuf::from("C:/Users/test/AppData/Local/cache"),
+                project: PathBuf::from("C:/workspace"),
+            },
+            PathBuf::from("C:/workspace"),
+            ScopeCapabilities::approved(),
+            BTreeMap::new(),
         );
-        let __g = derive_grants(&p);
-        let _r = __g.read;
-        let write = __g.write;
-        assert_eq!(write, vec![PathBuf::from("C:/Users/me/proj")]);
+
+        // The public object form is the contract: C:/ remains absolute in the node
+        // rule and pairs with C:/**, while a separate rw child retains its write grant.
+        let policy =
+            crate::compiler::compile(&json!({ "fs": { "C:/": "r", "C:/workspace": "rw" } }), &ctx)
+                .expect("public drive-root policy compiles");
+        let actual: Vec<_> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .map(|rule| (rule.matcher.as_str(), rule.access))
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("C:/", FsAccess::Read),
+                ("C:/**", FsAccess::Read),
+                ("C:/workspace", FsAccess::ReadWrite),
+                ("C:/workspace/**", FsAccess::ReadWrite),
+            ],
+            "the absolute root and a drive-relative C: must not collapse in IR"
+        );
+        let grants = derive_grants(&policy.fs);
+        assert_eq!(grants.read, vec![PathBuf::from("C:/")]);
+        assert_eq!(grants.write, vec![PathBuf::from("C:/workspace")]);
+
+        let root_rw = crate::compiler::compile(&json!({ "fs": { "C:/": "rw" } }), &ctx)
+            .expect("public root rw policy compiles");
+        let grants = derive_grants(&root_rw.fs);
+        assert_eq!(grants.write, vec![PathBuf::from("C:/")]);
     }
 
     #[test]

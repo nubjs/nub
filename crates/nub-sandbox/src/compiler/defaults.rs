@@ -55,8 +55,26 @@ pub fn subtree_globs(expanded: &str) -> Vec<String> {
     if expanded == "/" {
         return vec!["**".to_string()];
     }
-    let trimmed = expanded.trim_end_matches('/');
-    vec![trimmed.to_string(), format!("{trimmed}/**")]
+    // `C:/` is an absolute drive root; removing its slash turns it into drive-relative
+    // `C:`. Its descendant twin is `C:/**` (not `C://**`): the `/**` contributes the
+    // separator. Keep this encoding distinct from authored `C:`, which remains relative.
+    let drive_root = is_absolute_drive_root(expanded);
+    let trimmed = if drive_root {
+        expanded
+    } else {
+        expanded.trim_end_matches('/')
+    };
+    let descendant = if drive_root {
+        format!("{trimmed}**")
+    } else {
+        format!("{trimmed}/**")
+    };
+    vec![trimmed.to_string(), descendant]
+}
+
+fn is_absolute_drive_root(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
 /// Kernel trees the Linux backend handles without granting a literal subtree.
@@ -1184,6 +1202,13 @@ pub fn baseline_allows(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drive_root_subtree_globs_preserve_absolute_node() {
+        assert_eq!(super::subtree_globs("C:/"), ["C:/", "C:/**"]);
+        // A drive-relative spelling is not silently promoted to the absolute root.
+        assert_eq!(super::subtree_globs("C:"), ["C:", "C:/**"]);
+    }
+
     /// ⛔ EVERY KEY THE JAIL STAMPS MUST SURVIVE THIS SCRUB — the entry and the stamp move
     /// together, in BOTH directions, and this is the guard for the reverse direction.
     ///
