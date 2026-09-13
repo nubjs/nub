@@ -199,6 +199,17 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     // through `nub upgrade`, so the advice would name a release nub does not
     // take and a command nub does not have.
     merged.entry("updateNotifier").or_insert(Value::Bool(false));
+    // A sibling named by a plain semver range is the workspace member, not a
+    // package of the same name on the registry. npm, yarn and bun all resolve
+    // it that way, and a project that reached nub from any of them would
+    // otherwise get a 404 for a package sitting in its own tree. The engine's
+    // own default is the other one — it matches a workspace package only for a
+    // `workspace:`-prefixed range — which is what a pnpm-incumbent project
+    // keeps, because it never reaches this function. Direct dependencies only:
+    // matching transitively would change what a DEPENDENCY resolves to.
+    merged
+        .entry("linkWorkspacePackages")
+        .or_insert(Value::Bool(true));
     if let Some(cache_root) = &sources.cache_root {
         for (key, leaf) in [("storeDir", "store"), ("cacheDir", "pm")] {
             if !merged.contains_key(key) {
@@ -893,6 +904,29 @@ mod tests {
         assert_eq!(
             lexically_resolve(Path::new("/"), "../dep"),
             Path::new("/dep")
+        );
+    }
+    /// A workspace sibling named by a plain semver range must resolve to the
+    /// member rather than to whatever carries that name on the registry. The
+    /// engine defaults the other way, so without this a monorepo arriving from
+    /// npm, yarn or bun gets a 404 for a package in its own tree.
+    #[test]
+    fn a_workspace_sibling_is_linked_by_a_plain_range_by_default() {
+        let plain = InstallConfig::default();
+        assert_eq!(
+            merge(&sources(&plain)).unwrap()["linkWorkspacePackages"],
+            json!(true),
+        );
+
+        // A default and nothing more: the project can still turn it off.
+        let mut opted_out = sources(&plain);
+        opted_out.npmrc = vec![(
+            PathBuf::from("/app/.npmrc"),
+            "link-workspace-packages=false\n".to_owned(),
+        )];
+        assert_eq!(
+            merge(&opted_out).unwrap()["linkWorkspacePackages"],
+            json!(false),
         );
     }
 }
