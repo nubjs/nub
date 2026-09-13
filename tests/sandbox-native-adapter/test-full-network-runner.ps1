@@ -37,13 +37,15 @@ $cases = @(
     @('backend::windows_file_broker::tests::', $false, $false, 'backend::windows_file_broker::tests::|--nocapture|--test-threads=1'),
     @('backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control', $true, $true, '--ignored|--exact|backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control|--nocapture|--test-threads=1'),
     @('backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control', $true, $true, '--ignored|--exact|backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control|--nocapture|--test-threads=1'),
-    @('backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker', $true, $true, '--ignored|--exact|backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker|--nocapture|--test-threads=1')
+    @('backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker', $true, $true, '--ignored|--exact|backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker|--nocapture|--test-threads=1'),
+    @('backend::windows_file_broker::tests::file_broker_native_namespace_with_raw_control', $true, $true, '--ignored|--exact|backend::windows_file_broker::tests::file_broker_native_namespace_with_raw_control|--nocapture|--test-threads=1'),
+    @('backend::windows_file_broker::tests::file_broker_cancels_namespace_before_mutation', $true, $true, '--ignored|--exact|backend::windows_file_broker::tests::file_broker_cancels_namespace_before_mutation|--nocapture|--test-threads=1')
 )
 foreach ($case in $cases) {
     $actual = Test-Arguments $case[0] $case[1] $case[2]
     if (($actual -join '|') -ne $case[3]) { throw "Arguments differed: $($actual -join '|')" }
 }
-Write-Host 'FULL_NETWORK_ARGUMENT_CASES=8'
+Write-Host 'FULL_NETWORK_ARGUMENT_CASES=10'
 Write-Host 'FULL_NETWORK_RELAY_INSTRUMENT=standalone-executable'
 if ($null -ne (Select-RunSet 'full')) { throw 'Full mode must retain the full baseline selection' }
 $diagnostic = @(Select-RunSet 'owner-pipe-diagnostic')
@@ -52,13 +54,17 @@ $diagnosticArguments = Test-Arguments $diagnostic[0].filter ([bool]$diagnostic[0
 if (($diagnosticArguments -join '|') -ne '--ignored|--exact|native_adapter_drop_reaps_pending_listener_and_closes_port|--nocapture|--test-threads=1') { throw 'Owner-pipe diagnostic arguments differed' }
 Write-Host 'FULL_NETWORK_OWNER_PIPE_SELECTOR=exact-owner-drop'
 $repair = @(Select-RunSet 'native-repair-diagnostic' $true)
-if ($repair.Count -ne 8 -or $repair[0].filter -ne 'backend::windows::tests::explicit_broad_write_roots_are_granted' -or $repair[1].filter -ne 'native_adapter_full_network_has_peer_oracles_and_retained_policy_separation') { throw 'Native repair diagnostic must select the root test and native peer driver' }
+if ($repair.Count -ne 10 -or $repair[0].filter -ne 'backend::windows::tests::explicit_broad_write_roots_are_granted' -or $repair[1].filter -ne 'native_adapter_full_network_has_peer_oracles_and_retained_policy_separation') { throw 'Native repair diagnostic must select the root test and native peer driver' }
 $repairIgnored = @($repair | Where-Object { $_.ignored })
-if ($repairIgnored.Count -ne 4 -or $repairIgnored[1].filter -ne 'backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control' -or $repairIgnored[2].filter -ne 'backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control' -or $repairIgnored[3].filter -ne 'backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker') { throw 'Native repair diagnostic must select the three ignored file-broker acceptance tests' }
+if ($repairIgnored.Count -ne 6 -or $repairIgnored[1].filter -ne 'backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control' -or $repairIgnored[2].filter -ne 'backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control' -or $repairIgnored[3].filter -ne 'backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker' -or $repairIgnored[4].filter -ne 'backend::windows_file_broker::tests::file_broker_native_namespace_with_raw_control' -or $repairIgnored[5].filter -ne 'backend::windows_file_broker::tests::file_broker_cancels_namespace_before_mutation') { throw 'Native repair diagnostic must select all five ignored file-broker acceptance tests' }
 foreach ($run in $repair) {
     $arguments = Test-Arguments $run.filter ([bool]$run.exact) ([bool]$run.ignored)
     if ($run.exact -and $arguments -notcontains '--exact') { throw "Native repair exact arguments omitted --exact: $($run.label)" }
-    if ($run.exact) {
+    $namespaceFilter = $run.filter -in @(
+        'backend::windows_file_broker::tests::file_broker_native_namespace_with_raw_control',
+        'backend::windows_file_broker::tests::file_broker_cancels_namespace_before_mutation'
+    )
+    if ($run.exact -and !$namespaceFilter) {
         $parts = $run.filter -split '::'
         $source = if ($parts.Length -eq 1) { 'tests/windows_native_full_network.rs' } else { "src/backend/$($parts[1]).rs" }
         $text = Get-Content -Raw (Join-Path $PSScriptRoot "../../crates/nub-sandbox/$source")
