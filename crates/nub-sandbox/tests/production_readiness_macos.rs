@@ -14,7 +14,7 @@ use nub_sandbox::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, co
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -33,6 +33,7 @@ fn production_macos_child_reentry() {
     let root = PathBuf::from(std::env::var_os(ROOT).expect("fixture root"));
     match case.to_string_lossy().as_ref() {
         "filesystem" => child_filesystem(&root),
+        "path-authority" => child_path_authority(&root),
         "tmp-alias" => child_tmp_alias(&root),
         "repeat" => child_repeat(&root),
         "network-deny" => child_network_deny(&root),
@@ -316,6 +317,114 @@ fn child_filesystem(root: &Path) {
         "replacement symlink escaped tree grant"
     );
     assert!(fs::write(project.join("proof"), b"project").is_ok());
+}
+
+#[test]
+fn fresh_names_and_retained_handles_preserve_path_authority() {
+    let root = fixture();
+    let generated = root.path().join("generated");
+    fs::create_dir(root.path().join("project")).unwrap();
+    fs::create_dir(&generated).unwrap();
+    fs::write(generated.join("existing.json"), b"original").unwrap();
+    fs::hard_link(
+        generated.join("existing.json"),
+        root.path().join("outside-alias.txt"),
+    )
+    .unwrap();
+    fs::write(root.path().join("readonly"), b"readonly").unwrap();
+    fs::write(root.path().join("withheld"), b"withheld").unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("readonly"),
+        generated.join("readonly-link.json"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("withheld"),
+        generated.join("withheld-link.json"),
+    )
+    .unwrap();
+    // This name is readable outside confinement despite being an ungranted alias.
+    assert_eq!(
+        fs::read(root.path().join("outside-alias.txt")).unwrap(),
+        b"original"
+    );
+    let rules = json!({
+        (generated.join("*.json").to_string_lossy()): "rw",
+        (root.path().join("readonly").to_string_lossy()): "r",
+    });
+    let sandbox = Sandbox::acquire(&policy(root.path(), rules, json!(false), "path-authority"))
+        .expect("path-authority sandbox");
+    run(&sandbox, root.path(), "path-authority");
+    sandbox.close();
+
+    assert_eq!(
+        fs::read(generated.join("existing.json")).unwrap(),
+        b"shared"
+    );
+    assert_eq!(
+        fs::read(root.path().join("outside-alias.txt")).unwrap(),
+        b"shared",
+        "an allowed hardlink write changes the shared contents"
+    );
+    assert_eq!(fs::read(generated.join("moved.json")).unwrap(), b"retained");
+    assert_eq!(
+        fs::read(generated.join("future.json")).unwrap(),
+        b"replacement"
+    );
+    assert_eq!(fs::read(root.path().join("readonly")).unwrap(), b"readonly");
+    assert_eq!(fs::read(root.path().join("withheld")).unwrap(), b"withheld");
+    for denied in ["future.txt", "renamed.txt", "promoted.json"] {
+        assert!(!generated.join(denied).exists(), "created {denied}");
+    }
+    println!("MACOS_FRESH_PATH_AUTHORITY_VERIFIED");
+}
+
+fn child_path_authority(root: &Path) {
+    let generated = root.join("generated");
+    assert!(
+        fs::read(root.join("outside-alias.txt")).is_err(),
+        "granting a hardlink name also granted an omitted alias"
+    );
+    fs::write(generated.join("existing.json"), b"shared").unwrap();
+    assert!(
+        fs::read(root.join("outside-alias.txt")).is_err(),
+        "writing an allowed name made the omitted alias readable"
+    );
+    assert_eq!(
+        fs::read(generated.join("readonly-link.json")).unwrap(),
+        b"readonly"
+    );
+    assert!(fs::write(generated.join("readonly-link.json"), b"changed").is_err());
+    assert!(fs::read(generated.join("withheld-link.json")).is_err());
+    assert!(fs::write(generated.join("withheld-link.json"), b"changed").is_err());
+    assert!(
+        fs::hard_link(root.join("readonly"), generated.join("promoted.json")).is_err(),
+        "a read-only source gained writable authority through a new hardlink"
+    );
+
+    // The parent directory has no rw grant. The matching new leaf does.
+    let mut retained = fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(generated.join("future.json"))
+        .expect("create a future matching leaf without granting its parent");
+    retained.write_all(b"original").unwrap();
+    fs::rename(generated.join("future.json"), generated.join("moved.json")).unwrap();
+    fs::write(generated.join("future.json"), b"replacement").unwrap();
+    retained.seek(SeekFrom::Start(0)).unwrap();
+    retained.write_all(b"retained").unwrap();
+    retained.seek(SeekFrom::Start(0)).unwrap();
+    let mut contents = String::new();
+    retained.read_to_string(&mut contents).unwrap();
+    assert_eq!(contents, "retained");
+    assert_eq!(
+        fs::read(generated.join("future.json")).unwrap(),
+        b"replacement"
+    );
+    assert!(fs::write(generated.join("future.txt"), b"denied").is_err());
+    assert!(fs::rename(generated.join("future.json"), generated.join("renamed.txt")).is_err());
+    println!("MACOS_FRESH_PATH_AUTHORITY_OK");
 }
 
 fn child_tmp_alias(root: &Path) {

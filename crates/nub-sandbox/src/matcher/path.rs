@@ -331,6 +331,23 @@ impl PathMatcher {
         self.decide_normalized(&normalize_slashes(candidate), None)
     }
 
+    /// Match a resolved projection name without consulting the host filesystem.
+    /// The caller pins its backing objects; Unix filename bytes stay literal.
+    #[cfg(all(target_os = "linux", test))]
+    pub(crate) fn decide_verified_path(&self, candidate: &Path) -> FsDecision {
+        if !candidate.is_absolute()
+            || candidate
+                .components()
+                .any(|part| matches!(part, Component::ParentDir))
+        {
+            return FsDecision {
+                effect: Effect::Deny,
+                access: FsAccess::Read,
+            };
+        }
+        self.decide_matching(|glob| glob.is_match(candidate))
+    }
+
     /// Last matching effect among entries AT OR AFTER `start`, i.e. does anything the
     /// policy says LATER override this one. The Linux mount-plan compiler asks this of
     /// each allow before turning it into a bind.
@@ -357,10 +374,16 @@ impl PathMatcher {
     }
 
     fn decide_normalized(&self, first: &str, second: Option<&str>) -> FsDecision {
+        self.decide_matching(|glob| {
+            glob.is_match(first) || second.is_some_and(|path| glob.is_match(path))
+        })
+    }
+
+    fn decide_matching(&self, matches: impl Fn(&GlobMatcher) -> bool) -> FsDecision {
         let mut winner = (self.positive_only && self.default_effect == Effect::Allow)
             .then_some((Effect::Allow, FsAccess::ReadWrite));
         for (glob, effect, access, _) in &self.entries {
-            if glob.is_match(first) || second.is_some_and(|path| glob.is_match(path)) {
+            if matches(glob) {
                 if self.positive_only && winner == Some((Effect::Allow, FsAccess::ReadWrite)) {
                     continue;
                 }
@@ -394,6 +417,62 @@ pub fn compile_glob(pattern: &str) -> Result<GlobMatcher, globset::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn verified_projection_names_preserve_unix_bytes_and_positive_union() {
+        use crate::policy::{CanonGlob, FsOrigin, FsRule};
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let rule = |pattern: &str, access| FsRule {
+            matcher: CanonGlob(pattern.into()),
+            effect: Effect::Allow,
+            access,
+            origin: FsOrigin::Authored,
+        };
+        let exact = PathMatcher::new(&FsRuleSet {
+            entries: vec![
+                rule("/project/secret", FsAccess::Read),
+                rule("/project/\u{fffd}", FsAccess::Read),
+            ],
+            default_effect: Effect::Deny,
+        });
+        assert_eq!(
+            exact
+                .decide_verified_path(Path::new("/project/secret"))
+                .effect,
+            Effect::Allow
+        );
+        for path in [
+            Path::new(r"/project\secret"),
+            Path::new(OsStr::from_bytes(b"/project/\xff")),
+            Path::new("/project/../secret"),
+            Path::new("project/secret"),
+        ] {
+            assert_eq!(exact.decide_verified_path(path).effect, Effect::Deny);
+        }
+
+        let broad = PathMatcher::new(&FsRuleSet {
+            entries: vec![
+                rule("/project/*", FsAccess::ReadWrite),
+                rule("/project/*", FsAccess::Read),
+            ],
+            default_effect: Effect::Deny,
+        });
+        for path in [
+            Path::new(r"/project/back\slash"),
+            Path::new(OsStr::from_bytes(b"/project/\xff")),
+        ] {
+            assert_eq!(
+                broad.decide_verified_path(path),
+                FsDecision {
+                    effect: Effect::Allow,
+                    access: FsAccess::ReadWrite,
+                }
+            );
+        }
+    }
 
     #[test]
     fn drive_root_preserves_absolute_and_relative_spellings() {
