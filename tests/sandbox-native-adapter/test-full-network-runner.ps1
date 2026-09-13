@@ -46,11 +46,17 @@ $diagnosticArguments = Test-Arguments $diagnostic[0].filter ([bool]$diagnostic[0
 if (($diagnosticArguments -join '|') -ne '--ignored|--exact|native_adapter_drop_reaps_pending_listener_and_closes_port|--nocapture|--test-threads=1') { throw 'Owner-pipe diagnostic arguments differed' }
 Write-Host 'FULL_NETWORK_OWNER_PIPE_SELECTOR=exact-owner-drop'
 $repair = @(Select-RunSet 'native-repair-diagnostic' $true)
-if ($repair.Count -ne 8 -or $repair[0].filter -ne 'backend::windows::tests::dangerous_write_roots_never_get_a_write_grant' -or $repair[1].filter -ne 'native_adapter_full_network_has_peer_oracles_and_retained_policy_separation') { throw 'Native repair diagnostic must select the root test and native peer driver' }
+if ($repair.Count -ne 8 -or $repair[0].filter -ne 'backend::windows::tests::explicit_broad_write_roots_are_granted' -or $repair[1].filter -ne 'native_adapter_full_network_has_peer_oracles_and_retained_policy_separation') { throw 'Native repair diagnostic must select the root test and native peer driver' }
 $repairIgnored = @($repair | Where-Object { $_.ignored })
 if ($repairIgnored.Count -ne 4 -or $repairIgnored[1].filter -ne 'backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control' -or $repairIgnored[2].filter -ne 'backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control' -or $repairIgnored[3].filter -ne 'backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker') { throw 'Native repair diagnostic must select the three ignored file-broker acceptance tests' }
 foreach ($run in $repair) {
     $arguments = Test-Arguments $run.filter ([bool]$run.exact) ([bool]$run.ignored)
     if ($run.exact -and $arguments -notcontains '--exact') { throw "Native repair exact arguments omitted --exact: $($run.label)" }
+    if ($run.exact) {
+        $parts = $run.filter -split '::'
+        $source = if ($parts.Length -eq 1) { 'tests/windows_native_full_network.rs' } else { "src/backend/$($parts[1]).rs" }
+        $text = Get-Content -Raw (Join-Path $PSScriptRoot "../../crates/nub-sandbox/$source")
+        if ($text -notmatch ("\bfn\s+" + [regex]::Escape($parts[-1]) + "\s*\(")) { throw "Native repair filter has no source declaration: $($run.filter)" }
+    }
 }
 Write-Host 'FULL_NETWORK_NATIVE_REPAIR_SELECTOR=root-peer-socket-file'

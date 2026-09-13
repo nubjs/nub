@@ -133,7 +133,7 @@ function Select-RunSet([ValidateSet('full', 'owner-pipe-diagnostic', 'native-rep
     }
     if ($Mode -eq 'native-repair-diagnostic') {
         $runs = @(
-            @{ file='nub_sandbox_lib.exe'; label='native-repair-root-grant'; filter='backend::windows::tests::dangerous_write_roots_never_get_a_write_grant'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; exact=$true },
+            @{ file='nub_sandbox_lib.exe'; label='native-repair-root-grant'; filter='backend::windows::tests::explicit_broad_write_roots_are_granted'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; exact=$true },
             @{ file='windows_native_full_network.exe'; label='native-repair-peer-driver'; filter='native_adapter_full_network_has_peer_oracles_and_retained_policy_separation'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true },
             @{ file='nub_sandbox_lib.exe'; label='native-repair-socket-foreign-client'; filter='backend::windows_native_compat::tests::socket_broker_rejects_a_live_client_outside_its_job_and_cancels_idle_workers'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; exact=$true },
             @{ file='nub_sandbox_lib.exe'; label='native-repair-socket-framing'; filter='backend::windows_native_compat::tests::socket_broker_rejects_wrong_frame_lengths_and_drains_cancelled_read'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; exact=$true }
