@@ -40,6 +40,61 @@ fn assert_errno<T>(result: io::Result<T>, expected: i32) {
 }
 
 #[test]
+fn kernel_open_flags_preserve_read_and_write_authority() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("read-only"), b"original").unwrap();
+    std::fs::create_dir(root.path().join("generated")).unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/read-only", FsAccess::Read),
+            ("/generated/*.json", FsAccess::ReadWrite),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let ino = lookup(&mut state, ROOT, "read-only");
+    let kernel_flags = KERNEL_O_LARGEFILE | KERNEL_FMODE_EXEC;
+    assert_eq!(
+        normalize_open_flags(kernel_flags).unwrap(),
+        libc::O_LARGEFILE
+    );
+    let handle = state.open(ino, kernel_flags | libc::O_RDONLY).unwrap();
+    assert_eq!(state.read(ino, handle, 0, 100).unwrap(), b"original");
+    assert_errno(state.write(ino, handle, 0, b"no"), libc::EBADF);
+    assert_errno(
+        state.open(ino, KERNEL_O_LARGEFILE | libc::O_WRONLY),
+        libc::EACCES,
+    );
+    for flags in [libc::O_WRONLY, libc::O_TRUNC, libc::O_CREAT, libc::O_PATH] {
+        assert_errno(state.open(ino, kernel_flags | flags), libc::EOPNOTSUPP);
+    }
+    let dir = lookup(&mut state, ROOT, "generated");
+    let (attr, created) = state
+        .create(
+            dir,
+            OsStr::new("new.json"),
+            0o600,
+            0,
+            KERNEL_O_LARGEFILE | libc::O_RDWR,
+        )
+        .unwrap();
+    state.write(attr.ino.0, created, 0, b"created").unwrap();
+    assert_eq!(
+        std::fs::read(root.path().join("generated/new.json")).unwrap(),
+        b"created"
+    );
+    assert_errno(
+        state.create(dir, OsStr::new("exec.json"), 0o600, 0, kernel_flags),
+        libc::EOPNOTSUPP,
+    );
+    assert!(!root.path().join("generated/exec.json").exists());
+    assert_eq!(
+        std::fs::read(root.path().join("read-only")).unwrap(),
+        b"original"
+    );
+}
+
+#[test]
 fn future_create_reopen_truncate_and_host_writes_follow_fixed_pattern() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("generated")).unwrap();

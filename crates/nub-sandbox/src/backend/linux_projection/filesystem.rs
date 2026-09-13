@@ -26,6 +26,32 @@ const MAX_DIRECTORY_ENTRIES: usize = 65_536;
 const MAX_IO: usize = 1024 * 1024;
 const TTL: Duration = Duration::ZERO;
 
+// FUSE forwards kernel flags, not libc's user API values. On 64-bit glibc,
+// O_LARGEFILE is zero even though the kernel sends its architecture-specific bit.
+#[cfg(target_arch = "x86_64")]
+const KERNEL_O_LARGEFILE: i32 = 1 << 15;
+#[cfg(target_arch = "aarch64")]
+const KERNEL_O_LARGEFILE: i32 = 1 << 17;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const KERNEL_O_LARGEFILE: i32 = libc::O_LARGEFILE;
+const KERNEL_FMODE_EXEC: i32 = 1 << 5;
+
+fn normalize_open_flags(flags: i32) -> io::Result<i32> {
+    // execve's internal marker is not a flag for the backing open syscall.
+    // It never permits writing or creating an executable through this request.
+    if flags & KERNEL_FMODE_EXEC != 0
+        && flags & (libc::O_ACCMODE | libc::O_TRUNC | libc::O_CREAT) != libc::O_RDONLY
+    {
+        return Err(error(libc::EOPNOTSUPP));
+    }
+    let large_file = if flags & KERNEL_O_LARGEFILE != 0 {
+        libc::O_LARGEFILE
+    } else {
+        0
+    };
+    Ok((flags & !(KERNEL_FMODE_EXEC | KERNEL_O_LARGEFILE)) | large_file)
+}
+
 struct Node {
     path: PathBuf,
     pin: File,
@@ -234,6 +260,7 @@ impl State {
     }
 
     fn open(&mut self, ino: u64, flags: i32) -> io::Result<u64> {
+        let flags = normalize_open_flags(flags)?;
         let node = self.node(ino)?;
         let writable = self.authorize_open(&node.path, flags)?;
         if self.handles.len() == MAX_HANDLES {
@@ -261,6 +288,10 @@ impl State {
         umask: u32,
         flags: i32,
     ) -> io::Result<(FileAttr, u64)> {
+        if flags & KERNEL_FMODE_EXEC != 0 {
+            return Err(error(libc::EOPNOTSUPP));
+        }
+        let flags = normalize_open_flags(flags)?;
         let path = self.child(parent, name)?;
         let writable = self.authorize_open(&path, flags & !(libc::O_CREAT | libc::O_EXCL))?;
         if self.rules.access(&path) != Some(FsAccess::ReadWrite) {
