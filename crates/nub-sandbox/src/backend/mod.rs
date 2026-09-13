@@ -1861,13 +1861,10 @@ fn generic_apply(
     })
 }
 
-/// The degradation axis name for a backend that does NOT enforce the requested
-/// [`TmpMode`] — `tmp-private` (a private per-run tmp was requested but the shared
-/// system tmp is not hidden) / `tmp-deny` (tmp was to be denied but is not). `None` for
-/// `Shared` (nothing to enforce). A backend that DOES enforce the mode never calls this;
-/// one that doesn't pushes the axis into `lost` so the caller never mistakes an
-/// unenforced private/deny-tmp for a real one (fail-safe honesty, never silent).
-/// macOS ENFORCES the mode in its SBPL, so it never consults this (hence the cfg).
+/// The loss reported when a backend cannot supply managed private storage or
+/// withhold its implicit temporary grants. Neither mode subtracts from explicit
+/// positive filesystem grants. Backends implementing the mode do not use this
+/// fallback; `Shared` requests no additional temporary-storage behavior.
 #[cfg(any(
     target_os = "windows",
     not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
