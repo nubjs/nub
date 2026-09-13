@@ -1407,179 +1407,6 @@ pub enum Command {
         #[allow(dead_code)]
         command: NodeCommand,
     },
-
-    /// Install dependencies from package.json via the embedded engine.
-    ///
-    /// Respects the project's existing lockfile (pnpm-lock.yaml,
-    /// package-lock.json, …) for both resolution and layout; see
-    /// src/pm_engine/ for the layout policy and the yarn write gate.
-    #[usage(visible_alias = "i")]
-    Install {
-        /// Hard-fail if the lockfile is out of date (default in CI).
-        #[usage(long)]
-        frozen_lockfile: bool,
-
-        /// Re-resolve and rewrite the lockfile even when it's stale.
-        #[usage(long, conflicts("--frozen-lockfile"))]
-        no_frozen_lockfile: bool,
-
-        /// Use the lockfile when fresh, re-resolve when stale (default outside CI).
-        #[usage(long, conflicts("--frozen-lockfile", "--no-frozen-lockfile"))]
-        prefer_frozen_lockfile: bool,
-
-        /// Skip devDependencies; install only production deps.
-        #[usage(short = 'P', long, visible_alias = "production")]
-        prod: bool,
-
-        /// Install only devDependencies.
-        #[usage(short = 'D', long, conflicts("--prod"))]
-        dev: bool,
-
-        /// Skip all lifecycle scripts (root and dependency).
-        #[usage(long)]
-        ignore_scripts: bool,
-
-        /// Run this pnpmfile instead of the project's own one. Relative
-        /// paths resolve against the project root. Naming a path this way
-        /// is what loads hooks in a project whose incumbent is not pnpm.
-        #[usage(long, value_name = "PATH", conflicts("--ignore-pnpmfile"))]
-        pnpmfile: Option<PathBuf>,
-
-        /// Run this pnpmfile before the project's own one.
-        #[usage(long, value_name = "PATH", conflicts("--ignore-pnpmfile"))]
-        global_pnpmfile: Option<PathBuf>,
-
-        /// Skip `.pnpmfile.cjs` / `.pnpmfile.mjs` hooks for this install.
-        #[usage(long)]
-        ignore_pnpmfile: bool,
-
-        /// Skip optionalDependencies.
-        #[usage(long)]
-        no_optional: bool,
-
-        /// Never hit the network; fail if a package isn't cached.
-        #[usage(long)]
-        offline: bool,
-
-        /// Use cached packages when available, network otherwise.
-        #[usage(long, conflicts("--offline"))]
-        prefer_offline: bool,
-
-        /// Resolve and write the lockfile, but skip linking node_modules.
-        #[usage(long)]
-        lockfile_only: bool,
-
-        /// Re-resolve and relink even when the install state says up-to-date.
-        #[usage(long)]
-        force: bool,
-
-        /// node_modules layout: `isolated` (pnpm-style) or `hoisted` (npm-style).
-        /// Overrides the lockfile-derived default.
-        #[usage(long, value_name = "MODE")]
-        node_linker: Option<String>,
-
-        /// Registry URL for this invocation (metadata, tarballs, audit).
-        /// Overrides `registry` from `.npmrc`.
-        #[usage(long, value_name = "URL")]
-        registry: Option<String>,
-
-        /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
-        #[usage(short = 'C', long = "dir", value_name = "DIR")]
-        dir: Option<PathBuf>,
-
-        /// Scope to workspace packages matching PATTERN (repeatable). `-F` alias.
-        #[usage(short = 'F', long, value_name = "PATTERN")]
-        filter: Vec<String>,
-
-        /// Production-only variant of `--filter`.
-        #[usage(long, value_name = "PATTERN")]
-        filter_prod: Vec<String>,
-
-        /// Run across every workspace package (same as `--filter=*`).
-        #[usage(short = 'r', long)]
-        recursive: bool,
-
-        /// Error when a workspace selector matches no packages.
-        #[usage(long)]
-        fail_if_no_match: bool,
-
-        /// Include the workspace root in recursive operations.
-        #[usage(long)]
-        include_workspace_root: bool,
-
-        #[usage(flatten)]
-        output: crate::pm_engine::OutputFlags,
-
-        #[usage(flatten)]
-        age_gate: crate::pm_engine::AgeGateFlags,
-
-        /// Which platforms' optional dependencies to install
-        /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
-        /// run only. Mirrors pnpm's flags of the same names.
-        #[usage(flatten)]
-        platform: crate::pm_engine::PlatformFlags,
-    },
-
-    /// Clean install for CI: delete node_modules, install strictly from the
-    /// lockfile (drift or a missing lockfile is a hard error).
-    Ci {
-        /// Skip devDependencies; install only production deps.
-        #[usage(short = 'P', long, visible_alias = "production")]
-        prod: bool,
-
-        /// Install only devDependencies.
-        #[usage(short = 'D', long, conflicts("--prod"))]
-        dev: bool,
-
-        /// Skip all lifecycle scripts (root and dependency).
-        #[usage(long)]
-        ignore_scripts: bool,
-
-        /// Skip optionalDependencies.
-        #[usage(long)]
-        no_optional: bool,
-
-        /// Registry URL for this invocation (metadata, tarballs, audit).
-        /// Overrides `registry` from `.npmrc`.
-        #[usage(long, value_name = "URL")]
-        registry: Option<String>,
-
-        /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
-        #[usage(short = 'C', long = "dir", value_name = "DIR")]
-        dir: Option<PathBuf>,
-
-        /// Scope to workspace packages matching PATTERN (repeatable). `-F` alias.
-        #[usage(short = 'F', long, value_name = "PATTERN")]
-        filter: Vec<String>,
-
-        /// Production-only variant of `--filter`.
-        #[usage(long, value_name = "PATTERN")]
-        filter_prod: Vec<String>,
-
-        /// Run across every workspace package (same as `--filter=*`).
-        #[usage(short = 'r', long)]
-        recursive: bool,
-
-        /// Error when a workspace selector matches no packages.
-        #[usage(long)]
-        fail_if_no_match: bool,
-
-        /// Include the workspace root in recursive operations.
-        #[usage(long)]
-        include_workspace_root: bool,
-
-        #[usage(flatten)]
-        output: crate::pm_engine::OutputFlags,
-
-        #[usage(flatten)]
-        age_gate: crate::pm_engine::AgeGateFlags,
-
-        /// Which platforms' optional dependencies to install
-        /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
-        /// run only. Mirrors pnpm's flags of the same names.
-        #[usage(flatten)]
-        platform: crate::pm_engine::PlatformFlags,
-    },
 }
 
 /// The `nub node` version-management verbs. Spec: `internal/commands/node-versions.md`.
@@ -3045,10 +2872,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     }
     let (config_node, config_no_check) = command_config_flags(&cli.command);
     match &cli.command {
-        // Install-family commands own a verb-local `-C/--dir` that is parsed
-        // below this point. Their engine session applies it first, then
-        // initializes the one process snapshot from that final cwd.
-        Some(Command::Install { .. } | Command::Ci { .. }) => {}
         // Self-update, the scaffold, and the help pages consume no project
         // config, and `upgrade` is a plausible remedy for whatever broke it —
         // none of them may be gated on a file they never read. `init`'s
@@ -3447,100 +3270,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             let sub = command.as_deref().filter(|s| is_help_routable(s));
             run_help(sub, false);
             Ok(0)
-        }
-        Some(Command::Install {
-            frozen_lockfile,
-            no_frozen_lockfile,
-            prefer_frozen_lockfile,
-            prod,
-            dev,
-            ignore_scripts,
-            pnpmfile,
-            global_pnpmfile,
-            ignore_pnpmfile,
-            no_optional,
-            offline,
-            prefer_offline,
-            lockfile_only,
-            force,
-            node_linker,
-            registry,
-            dir,
-            filter,
-            filter_prod,
-            recursive,
-            fail_if_no_match,
-            include_workspace_root,
-            output,
-            age_gate,
-            platform,
-        }) => {
-            age_gate.apply();
-            platform.apply();
-            crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
-                frozen_lockfile,
-                no_frozen_lockfile,
-                prefer_frozen_lockfile,
-                prod,
-                dev,
-                ignore_scripts,
-                pnpmfile,
-                global_pnpmfile,
-                ignore_pnpmfile,
-                no_optional,
-                offline,
-                prefer_offline,
-                lockfile_only,
-                force,
-                node_linker,
-                registry,
-                dir,
-                allow_all_builds: false,
-                filter: crate::pm_engine::WorkspaceFilterFlags {
-                    filter,
-                    filter_prod,
-                    recursive,
-                    fail_if_no_match,
-                    include_workspace_root,
-                },
-                output,
-            })
-        }
-        Some(Command::Ci {
-            prod,
-            dev,
-            ignore_scripts,
-            no_optional,
-            registry,
-            dir,
-            filter,
-            filter_prod,
-            recursive,
-            fail_if_no_match,
-            include_workspace_root,
-            output,
-            age_gate,
-            platform,
-        }) => {
-            age_gate.apply();
-            platform.apply();
-            crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
-                prod,
-                dev,
-                ignore_scripts,
-                no_optional,
-                registry,
-                dir,
-                allow_all_builds: false,
-                filter: crate::pm_engine::WorkspaceFilterFlags {
-                    filter,
-                    filter_prod,
-                    recursive,
-                    fail_if_no_match,
-                    include_workspace_root,
-                },
-                output,
-            })
         }
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
         // sub-verb match in `run_node`) and never reaches the parser here.
@@ -12003,18 +11732,6 @@ mod tests {
         Cli::try_parse_from(&v)
     }
 
-    /// The text a process would print for `args` (help page or failure).
-    fn rendered(args: &[&str]) -> String {
-        let words: Vec<std::ffi::OsString> =
-            args.iter().skip(1).map(std::ffi::OsString::from).collect();
-        match Cli::embedded_outcome(&words) {
-            usage_rs::embedded::Outcome::Parsed(_) => {
-                panic!("{args:?} parsed; expected a response")
-            }
-            usage_rs::embedded::Outcome::Exit(exit) => exit.text,
-        }
-    }
-
     fn parse_owned(args: Vec<String>) -> Cli {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         parse(&refs).unwrap_or_else(|e| panic!("{args:?}: {e:?}"))
@@ -12629,29 +12346,6 @@ mod tests {
     }
 
     #[test]
-    fn install_parses_with_the_i_alias_and_engine_flags() {
-        // `nub i -P --node-linker hoisted` ≡ `nub install …` (npm/pnpm muscle
-        // memory); the engine flags land on the variant, and the frozen
-        // lockfile flags stay mutually exclusive.
-        let cli = parse(&["nub", "i", "-P", "--node-linker", "hoisted"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Install { prod: true, ref node_linker, .. })
-                if node_linker.as_deref() == Some("hoisted")
-        ));
-        assert!(
-            parse(&[
-                "nub",
-                "install",
-                "--frozen-lockfile",
-                "--no-frozen-lockfile"
-            ])
-            .is_err(),
-            "the frozen-lockfile flags are mutually exclusive"
-        );
-    }
-
-    #[test]
     fn install_routes_to_add_args() {
         let args = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
@@ -12819,30 +12513,6 @@ mod tests {
                 install_to_add_args(&args(&["install", flag, "hooks.cjs"])),
                 None,
                 "nub install {flag} hooks.cjs stays on the native install path"
-            );
-        }
-    }
-
-    #[test]
-    fn install_help_does_not_advertise_unapproved_gvs_flags() {
-        let help = rendered(&["nub", "install", "--help"]);
-        assert!(
-            help.contains("--node-linker") && help.contains("--registry"),
-            "sanity-check install help rendered: {help}"
-        );
-        for flag in [
-            "--enable-global-virtual-store",
-            "--disable-global-virtual-store",
-            "--enable-gvs",
-            "--disable-gvs",
-        ] {
-            assert!(
-                !help.contains(flag),
-                "nub install help must not advertise unapproved GVS flag {flag}:\n{help}"
-            );
-            assert!(
-                parse(&["nub", "install", flag]).is_err(),
-                "nub install must reject unapproved GVS flag {flag}"
             );
         }
     }

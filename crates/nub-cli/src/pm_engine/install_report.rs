@@ -914,11 +914,7 @@ pub(super) struct Materialized {
     pub(super) reason: Reason,
 }
 
-impl Materialized {
-    fn spec(&self) -> String {
-        format!("{}@{}", self.name, self.version)
-    }
-}
+impl Materialized {}
 
 static PLAN: RwLock<Vec<Materialized>> = RwLock::new(Vec::new());
 
@@ -927,70 +923,6 @@ static PLAN: RwLock<Vec<Materialized>> = RwLock::new(Vec::new());
 pub(super) fn record_plan(mut entries: Vec<Materialized>) {
     entries.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
     *PLAN.write().unwrap_or_else(|error| error.into_inner()) = entries;
-}
-
-fn recorded_plan() -> Vec<Materialized> {
-    PLAN.read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
-}
-
-pub(super) fn digest_rows(entries: &[Materialized], verbose: bool) -> Vec<Row> {
-    if entries.is_empty() {
-        return Vec::new();
-    }
-    // Verbose replaces the joined list rather than annotating it — the detail
-    // lines already name every package, so keeping both would print each twice.
-    if verbose {
-        return entries
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| Row {
-                label: if i == 0 { "materialized" } else { "" },
-                values: vec![entry.spec()],
-                note: Some(format!("({})", entry.reason)),
-            })
-            .collect();
-    }
-    vec![
-        Row::new(
-            "materialized",
-            entries.iter().map(Materialized::spec).collect(),
-            None,
-        ),
-        Row {
-            label: "",
-            values: Vec::new(),
-            note: Some("run with --loglevel debug to see why".to_string()),
-        },
-    ]
-}
-
-/// Print the digest between the end of linking and the engine's success line.
-/// Nothing prints when nothing moved, which is the common case.
-pub(super) fn print_digest(output: &OutputFlags, uses_shared_store: bool, is_noop: bool) {
-    // Off the shared store every package is already project-local, so there is
-    // no subset to report and the word "materialized" would mean nothing.
-    if output.is_silent() || is_noop || !uses_shared_store {
-        return;
-    }
-    let entries = recorded_plan();
-    if entries.is_empty() {
-        return;
-    }
-    let rows = digest_rows(&entries, output.is_debug());
-    eprintln!();
-    eprint!("{}", render_block(&rows, stderr_cols()));
-    eprintln!();
-}
-
-/// Register the digest with the engine so it lands after linking and before the
-/// engine's own success line, keeping that line last. Set-once; with no host
-/// registered the engine calls nothing.
-pub(super) fn register(output: OutputFlags) {
-    aube::commands::install::set_pre_summary_hook(Box::new(move |summary| {
-        print_digest(&output, summary.uses_shared_store, summary.is_noop);
-    }));
 }
 
 #[cfg(test)]
@@ -1007,15 +939,6 @@ mod tests {
             values.iter().map(|value| (*value).to_string()).collect(),
             source,
         )
-    }
-
-    fn materialized(spec: &str, reason: Reason) -> Materialized {
-        let (name, version) = spec.rsplit_once('@').unwrap();
-        Materialized {
-            name: name.to_string(),
-            version: version.to_string(),
-            reason,
-        }
     }
 
     /// An index no tier claims anything in, to be filled one tier at a time with
@@ -1067,12 +990,6 @@ mod tests {
             .collect()
     }
 
-    fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::pm_engine::ENGINE_GLOBAL_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-    }
-
     /// The quiet common case: nothing in the project moved a setting, so the
     /// header is the single layout line.
     #[test]
@@ -1114,73 +1031,6 @@ mod tests {
              \x20 hoisting    @types/*, *eslint* (nub.jsonc install.publicHoist)\n\
              \x20 resolution  auto-install-peers, strict-peer-dependencies (.npmrc)\n"
         );
-    }
-
-    /// A long value wraps to the terminal width with every continuation line in
-    /// the value column — the shape a ~40-package digest has to hold.
-    #[test]
-    fn long_values_wrap_with_a_hanging_indent() {
-        let entries: Vec<Materialized> = (0..40)
-            .map(|i| materialized(&format!("package-{i:02}@1.0.0"), Reason::Configured))
-            .collect();
-        let rendered = plain(&render_block(&digest_rows(&entries, false), 80));
-        let value_col = INDENT + "materialized".len() + GAP;
-
-        let mut lines = rendered.lines();
-        assert!(
-            lines
-                .next()
-                .unwrap()
-                .starts_with("  materialized  package-00@1.0.0, "),
-            "first line must open the value column: {rendered}"
-        );
-        for line in rendered.lines() {
-            assert!(
-                line.chars().count() <= 80,
-                "line exceeds the terminal width ({}): {line:?}",
-                line.chars().count()
-            );
-        }
-        for line in lines {
-            assert_eq!(
-                line.len() - line.trim_start().len(),
-                value_col,
-                "continuation must hang at the value column: {line:?}"
-            );
-        }
-        // Wrapping must neither drop a package nor split one across lines.
-        for entry in &entries {
-            assert!(
-                rendered.contains(&entry.spec()),
-                "{} went missing",
-                entry.spec()
-            );
-        }
-        assert!(rendered.contains("run with --loglevel debug to see why"));
-    }
-
-    /// The debug view attaches a reason per package, including the closure edge
-    /// that explains a package nothing flagged directly.
-    #[test]
-    fn debug_view_attaches_a_reason_per_package() {
-        let entries = vec![
-            materialized(
-                "my-plugin@1.0.0",
-                Reason::ImporterOf("vite@7.2.1".to_string()),
-            ),
-            materialized(
-                "vite@7.2.1",
-                Reason::Undeclared(vec!["postcss".to_string()]),
-            ),
-        ];
-        let rendered = plain(&render_block(&digest_rows(&entries, true), 100));
-        assert_eq!(
-            rendered,
-            "  materialized  my-plugin@1.0.0 (imports vite@7.2.1)\n\
-             \x20               vite@7.2.1 (undeclared imports: postcss)\n"
-        );
-        // The joined list is REPLACED, not annotated — no package appears twice.
-        assert_eq!(rendered.matches("vite@7.2.1 (").count(), 1);
     }
 
     /// The layout speaks the vocabulary of the config that set it. Both symlink
@@ -1692,14 +1542,6 @@ mod tests {
         }
     }
 
-    /// Nothing materialized prints nothing: materialization is routine, and a
-    /// run without any must not grow a block announcing that.
-    #[test]
-    fn empty_digest_renders_nothing() {
-        assert!(digest_rows(&[], false).is_empty());
-        assert!(digest_rows(&[], true).is_empty());
-    }
-
     /// A package in the closure whose edge could not be located must not claim
     /// config named it. `Reason::Configured` was the fallback for that case, so
     /// the digest told the reader to go look in `install.linker.eject` for a
@@ -1715,41 +1557,6 @@ mod tests {
             Reason::Closure.to_string(),
             Reason::Configured.to_string(),
             "the two must stay distinguishable — collapsing them is the defect"
-        );
-    }
-
-    /// The plan is built from hash sets, so `record_plan` sorts before storing
-    /// or an install's own output reorders between identical runs. The digest
-    /// tests all call `digest_rows` on already-ordered input and would not
-    /// notice the sort disappearing; this goes through the recording path.
-    #[test]
-    fn a_recorded_plan_is_ordered_regardless_of_insertion() {
-        let _guard = engine_lock();
-        struct RestorePlan(Vec<Materialized>);
-        impl Drop for RestorePlan {
-            fn drop(&mut self) {
-                record_plan(std::mem::take(&mut self.0));
-            }
-        }
-        let _restore = RestorePlan(recorded_plan());
-
-        let entry = |name: &str, version: &str| Materialized {
-            name: name.to_string(),
-            version: version.to_string(),
-            reason: Reason::Closure,
-        };
-        record_plan(vec![
-            entry("zod", "3.23.8"),
-            entry("next", "15.0.0"),
-            entry("next", "14.2.0"),
-            entry("acorn", "8.12.1"),
-        ]);
-
-        let ordered: Vec<_> = recorded_plan().iter().map(Materialized::spec).collect();
-        assert_eq!(
-            ordered,
-            ["acorn@8.12.1", "next@14.2.0", "next@15.0.0", "zod@3.23.8"],
-            "sorted by name then version, not by insertion"
         );
     }
 

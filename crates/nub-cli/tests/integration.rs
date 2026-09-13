@@ -10548,3 +10548,47 @@ fn a_failed_compile_prints_the_error_tier_rather_than_escaping_to_termination() 
         "the error must not ALSO escape to Termination; got: {stderr:?}"
     );
 }
+
+#[test]
+fn install_help_does_not_advertise_unapproved_gvs_flags() {
+    // The engine renders `nub install --help` now, so the guard that used to sit
+    // on nub's own parser belongs here, against the real binary. The
+    // global-virtual-store toggles are nub-internal: neither advertised nor accepted.
+    let help = Command::new(nub_binary())
+        .args(["install", "--help"])
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        stdout.contains("--node-linker") && stdout.contains("--registry"),
+        "sanity-check install help rendered: {stdout}"
+    );
+
+    let project = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        project.path().join("package.json"),
+        "{\"name\":\"gvs\",\"version\":\"1.0.0\"}\n",
+    )
+    .expect("write manifest");
+    for flag in [
+        "--enable-global-virtual-store",
+        "--disable-global-virtual-store",
+        "--enable-gvs",
+        "--disable-gvs",
+    ] {
+        assert!(
+            !stdout.contains(flag),
+            "install help must not advertise unapproved GVS flag {flag}:\n{stdout}"
+        );
+        let rejected = Command::new(nub_binary())
+            .args(["install", flag])
+            .current_dir(project.path())
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .output()
+            .expect("failed to spawn nub");
+        assert!(
+            !rejected.status.success(),
+            "nub install must reject unapproved GVS flag {flag}"
+        );
+    }
+}

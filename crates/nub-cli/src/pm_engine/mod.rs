@@ -86,11 +86,8 @@ pub mod use_align;
 pub mod use_nub;
 pub mod vite_compat;
 
-pub use install_family::{
-    CiFlags, InstallFlags, WorkspaceFilterFlags, run_ci, run_dlx_for_nubx, run_install,
-};
+pub use install_family::run_dlx_for_nubx;
 pub use min_release_age::AgeGateFlags;
-pub use output::OutputFlags;
 pub use platform_flags::PlatformFlags;
 
 use std::path::{Path, PathBuf};
@@ -657,29 +654,6 @@ pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
         ConfigScopeNoise::Warn,
         IdentityStrictness::Strict,
         VirtualStoreLocality::Default,
-        ProjectInstallConfig::Apply,
-    )
-}
-
-/// [`engine_session`] for `nub ci` — identical resolution (Warn + Strict, it
-/// writes/reads the project lockfile) but forces a PROJECT-LOCAL virtual store
-/// (GVS off, isolation kept). `nub ci` is the frozen, ephemeral, deploy-oriented
-/// install; its `node_modules` is almost always COPY-relocated (multi-stage
-/// Docker) or thrown away, and a machine-global virtual store makes that tree
-/// non-relocatable — every `.store/<dep>` becomes an absolute symlink into
-/// `~/.cache/nub/pm/store` that a `COPY --from` leaves dangling (#241).
-/// Forcing the store project-local yields the self-contained, COPY-safe tree
-/// `CI=1 nub install` already produces, while keeping the isolated layout's
-/// phantom-dep protection. An explicit user `enableGlobalVirtualStore`/
-/// `nodeLinker` still wins — this is an embedder-tier default (mirrors how
-/// `aube dlx` defaults GVS off for its scratch installs).
-// @lat: [[research/gvs-in-ci#7. Recommendation]]
-pub(crate) fn engine_session_ci(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(
-        dir,
-        ConfigScopeNoise::Warn,
-        IdentityStrictness::Strict,
-        VirtualStoreLocality::ProjectLocal,
         ProjectInstallConfig::Apply,
     )
 }
@@ -1256,55 +1230,6 @@ fn lower_native_install_settings_for_mode(
         Some(install) => lower_native_install_settings(install, embedder_defaults),
         None => Ok(NativeInstallSettings::default()),
     }
-}
-
-/// The config-derived install knobs the IMPLEMENT-wins resolve from the active
-/// PM's persistent config: a dependency-selection pin, a frozen-install
-/// request, and the yarn block-all-scripts opt-out. Composed onto the install
-/// args by [`install_family::run_install`] / `run_ci`.
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct InstallConfigSignals {
-    pub(crate) dep_selection: unsupported_config::DepSelectionConfig,
-    pub(crate) frozen: bool,
-    pub(crate) scripts_disabled: bool,
-    /// yarn `enableNetwork: false` (Berry) — forces an offline install. OR'd
-    /// onto the `--offline` CLI flag in `run_install`/`run_ci`.
-    pub(crate) offline: bool,
-}
-
-/// Resolve the config-derived install knobs for one install/ci invocation from
-/// the resolved session identity. Reads the active PM's persistent config
-/// (npm `.npmrc` `omit`/`include`, bun bunfig `production`/`frozenLockfile`,
-/// yarn `.yarnrc.yml` `enableImmutableInstalls`/`immutablePatterns`/
-/// `enableScripts`). Returns all-default when no identity resolves.
-pub(crate) fn install_config_signals(session: &EngineSession) -> InstallConfigSignals {
-    let Some((role, root)) = session_role_root(session) else {
-        return InstallConfigSignals::default();
-    };
-    let root = root.as_path();
-    InstallConfigSignals {
-        dep_selection: unsupported_config::dep_selection_from_config(role, root)
-            .unwrap_or_default(),
-        frozen: unsupported_config::frozen_from_config(role, root),
-        scripts_disabled: unsupported_config::yarn_scripts_disabled(role, root),
-        offline: unsupported_config::yarn_network_disabled(role, root),
-    }
-}
-
-/// Resolve the active-PM [`Role`] + project root for a session, mirroring
-/// [`install_config_signals`]'s identity resolution. `None` when no lockfile /
-/// identity resolves (an undetected session has no PM config to read).
-pub(crate) fn session_role_root(
-    session: &EngineSession,
-) -> Option<(config_scope::Role, std::path::PathBuf)> {
-    let detected = session.detected.as_ref()?;
-    let declared = nub_core::pm::resolve::declared_pm_raw(&detected.dir);
-    let role = config_scope::role_of(
-        declared.as_ref().map(|(n, _)| n.as_str()),
-        Some(detected.kind),
-    )
-    .unwrap_or(config_scope::Role::Nub);
-    Some((role, detected.dir.clone()))
 }
 
 /// Per-process, mtime-validated cache of parsed `aube_manifest::PackageJson`
@@ -3158,13 +3083,6 @@ fn nub_data_dir_from(
         return Some(local.join("nub"));
     }
     home.map(|h| h.join(".local/share").join("nub"))
-}
-
-/// Process-env snapshot for `InstallOptions::env_snapshot` — same content as
-/// `aube_settings::values::capture_env()` (a clone of `std::env::vars()`),
-/// built locally because aube-settings isn't a direct nub dep.
-pub(crate) fn env_snapshot() -> Vec<(String, String)> {
-    std::env::vars().collect()
 }
 
 /// Multi-thread runtime mirroring aube's own `cli_main` shape
