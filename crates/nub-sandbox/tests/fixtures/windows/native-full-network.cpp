@@ -187,6 +187,19 @@ bool self_token_marker(bool require_full_network) {
   if (valid) {
     std::memcpy(&capability_count, capabilities.data(), sizeof(capability_count));
   }
+  bool internet_client = false;
+  if (valid && capability_count == 1 &&
+      returned >= FIELD_OFFSET(TOKEN_GROUPS, Groups) + sizeof(SID_AND_ATTRIBUTES)) {
+    SID_AND_ATTRIBUTES capability{};
+    std::memcpy(&capability, capabilities.data() + FIELD_OFFSET(TOKEN_GROUPS, Groups),
+                sizeof(capability));
+    BYTE internet_sid[SECURITY_MAX_SID_SIZE];
+    DWORD internet_sid_size = sizeof(internet_sid);
+    internet_client = CreateWellKnownSid(WinCapabilityInternetClientSid, nullptr,
+                                         internet_sid, &internet_sid_size) != 0 &&
+                      EqualSid(capability.Sid, internet_sid) != 0 &&
+                      (capability.Attributes & SE_GROUP_ENABLED) != 0;
+  }
   SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
   PSID administrators = nullptr;
   BOOL administrator = FALSE;
@@ -201,14 +214,16 @@ bool self_token_marker(bool require_full_network) {
   CloseHandle(token);
   marker("FULL_NETWORK_TOKEN", "appcontainer=" + std::to_string(app_container) +
           ":capabilities=" + std::to_string(capability_count) +
+          ":internet-client=" + std::to_string(internet_client) +
           ":admin=" + std::to_string(administrator != FALSE));
   return valid && (!require_full_network ||
-                   (app_container == 1 && capability_count == 0 && administrator == FALSE));
+                   (app_container == 1 && capability_count == 1 && internet_client &&
+                    administrator == FALSE));
 }
 
 bool self_token_attestation() {
-  // The adapter transfers sockets instead of adding internetClient. The child
-  // must retain its zero-capability LowBox token and ordinary-user membership.
+  // Full networking keeps Internet authority for OS resolver calls while the
+  // adapter supplies ordinary sockets. Neither capability is elevation.
   return self_token_marker(true);
 }
 
@@ -507,6 +522,7 @@ int run_case(const std::string& name, const char* executable) {
   if (name == "getaddrinfo") return dns_lookup(false) ? 0 : 1;
   if (name == "dnsqueryex") return dns_lookup(true) ? 0 : 1;
   if (name == "token-attest") return self_token_attestation() ? 0 : 1;
+  if (name == "token-report") return self_token_marker(false) ? 0 : 1;
   if (!root_broker_socket_diagnostic()) return 1;
   if (name == "tcp4" || name == "tcp6") return endpoint_case(name, SOCK_STREAM, stream_round_trip) ? 0 : 1;
   if (name == "udp4" || name == "udp6") return endpoint_case(name, SOCK_DGRAM, datagram_round_trip) ? 0 : 1;

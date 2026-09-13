@@ -111,7 +111,7 @@ impl PolicyIdentity {
     pub(crate) fn with_native_full_network(mut self, enabled: bool) -> Self {
         if enabled {
             self.canonical
-                .push_str("\nnative-full-network=socket-broker-v1");
+                .push_str("\nnative-full-network=socket-broker-v2-internet");
             self.hash = hex(&Sha256::digest(self.canonical.as_bytes()));
         }
         self

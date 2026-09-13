@@ -157,9 +157,8 @@ impl AppContainerLaunch {
             && self.allow_internet
             && self.egress_funnel.is_none()
             && self.proxy_context.is_none();
-        if self.native_full_network {
-            self.allow_internet = false;
-        }
+        // Keep the requested Internet capability for native resolver/service
+        // calls. The broker adds ordinary local socket authority, not DNS APIs.
         self.native_full_network
     }
 }
@@ -5202,7 +5201,7 @@ mod tests {
 
     #[cfg(all(windows, target_env = "msvc"))]
     #[test]
-    fn native_full_network_preparation_keeps_appcontainer_without_capabilities() {
+    fn native_full_network_preparation_keeps_requested_internet_capability() {
         let mut policy = SandboxPolicy::default();
         policy.env = crate::policy::EnvPolicy::resolved(Default::default());
         let cwd = tempfile::tempdir().unwrap();
@@ -5221,7 +5220,7 @@ mod tests {
         };
         assert!(plan.native_compat);
         assert!(plan.native_full_network);
-        assert!(!plan.allow_internet);
+        assert!(plan.allow_internet);
         assert!(plan.egress_funnel.is_none());
         assert!(plan.proxy_context.is_none());
 

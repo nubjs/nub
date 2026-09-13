@@ -28,6 +28,7 @@ struct Payload {
     BOOL identities_captured;
     wchar_t socket_broker[128];
     DWORD socket_broker_pid;
+    BOOL socket_diagnostics;
 };
 static Payload state = {};
 
@@ -102,6 +103,7 @@ extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory,
     if (socket_broker) {
         if (wcscpy_s(state.socket_broker, socket_broker)) return ERROR_INVALID_NAME;
         state.socket_broker_pid = GetCurrentProcessId();
+        state.socket_diagnostics = nub_sandbox::socket_broker::diagnostics_enabled();
     }
     state.null_device = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -150,25 +152,39 @@ static SOCKET broker_socket(int family, int type, int protocol, DWORD flags) {
     using namespace nub_sandbox::socket_broker;
     Request request = {kVersion, family, type, protocol, flags};
     int error = validate(request);
-    if (error) { WSASetLastError(error); return INVALID_SOCKET; }
+    if (error) {
+        diagnose(state.socket_diagnostics, Stage::Request, error);
+        WSASetLastError(error);
+        return INVALID_SOCKET;
+    }
     // Open a fresh connection in the requesting process, never inherit a shared
     // client handle whose kernel-recorded PID belongs to a different descendant.
     HANDLE pipe = INVALID_HANDLE_VALUE;
+    Stage stage = Stage::PipeOpen;
+    DWORD pipe_error = ERROR_SUCCESS;
     ULONGLONG deadline = GetTickCount64() + kTimeout;
     do {
-        pipe = true_create_file(state.socket_broker,
-            FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES |
-                READ_CONTROL | SYNCHRONIZE,
+        pipe = true_create_file(state.socket_broker, kClientAccess,
             0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
                 SECURITY_IDENTIFICATION, nullptr);
-        if (pipe != INVALID_HANDLE_VALUE || GetLastError() != ERROR_PIPE_BUSY) break;
+        pipe_error = pipe == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+        if (pipe != INVALID_HANDLE_VALUE || pipe_error != ERROR_PIPE_BUSY) break;
         ULONGLONG now = GetTickCount64();
-        if (now >= deadline || !WaitNamedPipeW(state.socket_broker, DWORD(deadline - now))) break;
+        if (now >= deadline) { stage = Stage::PipeWait; pipe_error = ERROR_TIMEOUT; break; }
+        if (!WaitNamedPipeW(state.socket_broker, DWORD(deadline - now))) {
+            stage = Stage::PipeWait;
+            pipe_error = GetLastError();
+            break;
+        }
     } while (true);
-    if (pipe == INVALID_HANDLE_VALUE) { WSASetLastError(WSAEACCES); return INVALID_SOCKET; }
-    DWORD server = 0, mode = PIPE_READMODE_MESSAGE;
-    if (!GetNamedPipeServerProcessId(pipe, &server) || server != state.socket_broker_pid ||
-        !SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr)) {
+    if (pipe == INVALID_HANDLE_VALUE) {
+        diagnose(state.socket_diagnostics, stage, pipe_error);
+        WSASetLastError(WSAEACCES);
+        return INVALID_SOCKET;
+    }
+    pipe_error = configure_client(pipe, state.socket_broker_pid, stage);
+    if (pipe_error) {
+        diagnose(state.socket_diagnostics, stage, pipe_error);
         CloseHandle(pipe);
         WSASetLastError(WSAEACCES);
         return INVALID_SOCKET;
@@ -177,15 +193,24 @@ static SOCKET broker_socket(int family, int type, int protocol, DWORD flags) {
     Response response = {};
     SOCKET result = INVALID_SOCKET;
     error = WSAETIMEDOUT;
-    if (event && transfer(pipe, event, nullptr, &request, sizeof(request), true) &&
-        transfer(pipe, event, nullptr, &response, sizeof(response), false)) {
+    if (!event) diagnose(state.socket_diagnostics, Stage::ClientEvent, GetLastError());
+    else if (!transfer(pipe, event, nullptr, &request, sizeof(request), true))
+        diagnose(state.socket_diagnostics, Stage::RequestWrite, GetLastError());
+    else if (!transfer(pipe, event, nullptr, &response, sizeof(response), false))
+        diagnose(state.socket_diagnostics, Stage::ResponseRead, GetLastError());
+    else {
         error = response.version == kVersion ? response.error : WSAEINVAL;
+        if (response.version != kVersion)
+            diagnose(state.socket_diagnostics, Stage::ResponseVersion, ERROR_REVISION_MISMATCH);
+        else if (error) diagnose(state.socket_diagnostics, Stage::BrokerError, error);
         if (!error) {
             result = true_wsa_socket_w(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
                                        &response.info, 0, flags);
             error = result == INVALID_SOCKET ? WSAGetLastError() : 0;
+            if (error) diagnose(state.socket_diagnostics, Stage::Reconstruct, error);
             DWORD acknowledgement = result == INVALID_SOCKET ? 0 : kVersion;
             if (!transfer(pipe, event, nullptr, &acknowledgement, sizeof(acknowledgement), true)) {
+                diagnose(state.socket_diagnostics, Stage::AcknowledgementWrite, GetLastError());
                 if (result != INVALID_SOCKET) closesocket(result);
                 result = INVALID_SOCKET;
                 error = WSAETIMEDOUT;

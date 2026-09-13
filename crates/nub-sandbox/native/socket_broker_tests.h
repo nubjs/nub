@@ -6,9 +6,17 @@ extern "C" DWORD sandbox_socket_broker_test_frames(const wchar_t* name) {
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE |
         PIPE_REJECT_REMOTE_CLIENTS, 1, 1024, 1024, kTimeout, nullptr);
     if (server == INVALID_HANDLE_VALUE) return GetLastError();
-    HANDLE client = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                                FILE_FLAG_OVERLAPPED, nullptr);
+    HANDLE client = CreateFileW(name, kClientAccess, 0, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
+                                SECURITY_IDENTIFICATION, nullptr);
     DWORD error = client == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    Stage stage = Stage::PipeOpen;
+    if (!error) {
+        error = configure_client(client, GetCurrentProcessId(), stage);
+        if (error) diagnose(true, stage, error);
+        else if (configure_client(client, 0, stage) != ERROR_ACCESS_DENIED ||
+                 stage != Stage::ServerPidMismatch) error = ERROR_INVALID_DATA;
+    }
     HANDLE incoming = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE outgoing = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
