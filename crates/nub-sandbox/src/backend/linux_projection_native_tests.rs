@@ -929,33 +929,66 @@ fn native_simultaneous_command_contract(service: &NativeOpenService, view: &CStr
     });
     let mut first_input = first.take_stdin().unwrap();
     let mut second_input = second.take_stdin().unwrap();
-    native_event(&mut first_output, "NATIVE_CONCURRENT_READY").unwrap();
-    native_event(&mut second_output, "NATIVE_CONCURRENT_READY").unwrap();
-    let before = service.client().stats();
-    first_input.write_all(b"go\n").unwrap();
-    second_input.write_all(b"go\n").unwrap();
-    native_event(&mut first_output, "NATIVE_CONCURRENT_OK").unwrap();
-    native_event(&mut second_output, "NATIVE_CONCURRENT_OK").unwrap();
+    let mut gate = None;
+    let protocol = (|| -> io::Result<(u64, u64)> {
+        native_event(&mut first_output, "NATIVE_CONCURRENT_READY")?;
+        native_event(&mut second_output, "NATIVE_CONCURRENT_READY")?;
+        let before = service.client().stats();
+        gate = Some(service.block_next_path(c"/app/native-concurrent")?);
+        first_input.write_all(b"go\n")?;
+        gate.as_ref()
+            .expect("first command gate remains armed")
+            .wait_until_active()?;
+        second_input.write_all(b"go\n")?;
+        gate.take()
+            .expect("first command gate releases once")
+            .release()?;
+        native_event(&mut first_output, "NATIVE_CONCURRENT_OK")?;
+        native_event(&mut second_output, "NATIVE_CONCURRENT_OK")?;
+        Ok(before)
+    })();
+    drop(gate.take());
+    let killed = if protocol.is_err() {
+        Some((first.kill(), second.kill()))
+    } else {
+        None
+    };
     drop(first_input);
     drop(second_input);
-    let first_status = first.wait().unwrap();
-    let second_status = second.wait().unwrap();
-    let first_stderr = first_stderr_drain.join().unwrap().unwrap();
-    let second_stderr = second_stderr_drain.join().unwrap().unwrap();
-    assert!(
-        first_status.success(),
-        "first native command {first_status:?}\n{first_stderr}"
+    let outcome = (
+        protocol,
+        first.wait(),
+        second.wait(),
+        first_stderr_drain.join(),
+        second_stderr_drain.join(),
     );
-    assert!(
-        second_status.success(),
-        "second native command {second_status:?}\n{second_stderr}"
-    );
-    assert_eq!(
-        service.client().stats(),
-        (before.0 + 2, before.1 + 2),
-        "two supervised commands sharing one native service must each receive one exported file"
-    );
-    println!("NATIVE_SHARED_SERVICE_COMMANDS_OK");
+    match outcome {
+        (
+            Ok(before),
+            Ok(first_status),
+            Ok(second_status),
+            Ok(Ok(first_stderr)),
+            Ok(Ok(second_stderr)),
+        ) => {
+            assert!(
+                first_status.success(),
+                "first native command {first_status:?}\n{first_stderr}"
+            );
+            assert!(
+                second_status.success(),
+                "second native command {second_status:?}\n{second_stderr}"
+            );
+            assert_eq!(
+                service.client().stats(),
+                (before.0 + 2, before.1 + 2),
+                "two supervised commands sharing one native service must each receive one exported file"
+            );
+            println!("NATIVE_SHARED_SERVICE_COMMANDS_OK");
+        }
+        outcome => panic!(
+            "native shared-service protocol failed after reaping children; killed={killed:?}; outcome={outcome:?}"
+        ),
+    }
 }
 
 fn native_shared_service_cancellation_contract(service: &NativeOpenService, view: &CString) {
@@ -977,32 +1010,62 @@ fn native_shared_service_cancellation_contract(service: &NativeOpenService, view
     });
     let victim_input = victim.take_stdin().unwrap();
     let mut survivor_input = survivor.take_stdin().unwrap();
-    native_event(&mut victim_output, "NATIVE_CONCURRENT_READY").unwrap();
-    native_event(&mut survivor_output, "NATIVE_CONCURRENT_READY").unwrap();
-    let before = service.client().stats();
-    victim.kill().unwrap();
+    let protocol = (|| -> io::Result<(u64, u64)> {
+        native_event(&mut victim_output, "NATIVE_CONCURRENT_READY")?;
+        native_event(&mut survivor_output, "NATIVE_CONCURRENT_READY")?;
+        let before = service.client().stats();
+        victim.kill()?;
+        let victim_status = victim.wait()?;
+        if victim_status.success() {
+            return Err(io::Error::other(
+                "cancelled native command unexpectedly succeeded",
+            ));
+        }
+        survivor_input.write_all(b"go\n")?;
+        native_event(&mut survivor_output, "NATIVE_CONCURRENT_OK")?;
+        Ok(before)
+    })();
+    let killed = if protocol.is_err() {
+        Some((victim.kill(), survivor.kill()))
+    } else {
+        None
+    };
     drop(victim_input);
-    let victim_status = victim.wait().unwrap();
-    let victim_stderr = victim_stderr_drain.join().unwrap().unwrap();
-    assert!(
-        !victim_status.success(),
-        "cancelled native command unexpectedly succeeded: {victim_status:?}\n{victim_stderr}"
-    );
-    survivor_input.write_all(b"go\n").unwrap();
-    native_event(&mut survivor_output, "NATIVE_CONCURRENT_OK").unwrap();
     drop(survivor_input);
-    let survivor_status = survivor.wait().unwrap();
-    let survivor_stderr = survivor_stderr_drain.join().unwrap().unwrap();
-    assert!(
-        survivor_status.success(),
-        "surviving native command {survivor_status:?}\n{survivor_stderr}"
+    let outcome = (
+        protocol,
+        victim.wait(),
+        survivor.wait(),
+        victim_stderr_drain.join(),
+        survivor_stderr_drain.join(),
     );
-    assert_eq!(
-        service.client().stats(),
-        (before.0 + 1, before.1 + 1),
-        "only the surviving command may acquire a native file after its peer is cancelled"
-    );
-    println!("NATIVE_SHARED_SERVICE_CANCELLATION_OK");
+    match outcome {
+        (
+            Ok(before),
+            Ok(victim_status),
+            Ok(survivor_status),
+            Ok(Ok(victim_stderr)),
+            Ok(Ok(survivor_stderr)),
+        ) => {
+            assert!(
+                !victim_status.success(),
+                "cancelled native command unexpectedly succeeded: {victim_status:?}\n{victim_stderr}"
+            );
+            assert!(
+                survivor_status.success(),
+                "surviving native command {survivor_status:?}\n{survivor_stderr}"
+            );
+            assert_eq!(
+                service.client().stats(),
+                (before.0 + 1, before.1 + 1),
+                "only the surviving command may acquire a native file after its peer is cancelled"
+            );
+            println!("NATIVE_SHARED_SERVICE_CANCELLATION_OK");
+        }
+        outcome => panic!(
+            "native shared-service cancellation protocol failed after reaping children; killed={killed:?}; outcome={outcome:?}"
+        ),
+    }
 }
 
 pub(super) fn recursive_view(source: &Path, target: &Path, readonly: bool) -> File {
