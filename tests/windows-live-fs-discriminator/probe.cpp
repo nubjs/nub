@@ -1,6 +1,6 @@
 // A standalone capability discriminator, not production sandbox code.
-// It distinguishes kernel SEC_IMAGE mapping through a parent-transferred file
-// or section handle from path-based CreateProcessW/LoadLibraryW semantics.
+// Its opt-in in-process hook mirrors Chromium's denied-open broker seam only
+// to test whether the native loader accepts a parent-transferred original DLL.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winternl.h>
@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cwchar>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -54,6 +55,8 @@ struct AttributeList {
 
 using NtCreateFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
                                         PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+using NtOpenFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
+                                      ULONG, ULONG);
 using NtCreateSectionFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER,
                                            ULONG, ULONG, HANDLE);
 using NtMapViewOfSectionFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T,
@@ -74,6 +77,138 @@ struct NtApi {
     return create_file && create_section && map_view && unmap_view;
   }
 };
+
+constexpr size_t kHookBytes = 12;
+constexpr NTSTATUS kStatusSuccess = static_cast<NTSTATUS>(0);
+
+std::wstring g_brokered_dll_path;
+HANDLE g_brokered_dll = nullptr;
+unsigned long g_create_broker_calls = 0;
+unsigned long g_open_broker_calls = 0;
+
+bool native_name_matches_brokered_dll(POBJECT_ATTRIBUTES attributes) {
+  if (!attributes || !attributes->ObjectName || !attributes->ObjectName->Buffer ||
+      attributes->ObjectName->Length == 0) return false;
+  const std::wstring_view name(attributes->ObjectName->Buffer,
+                               attributes->ObjectName->Length / sizeof(wchar_t));
+  if (name.size() < g_brokered_dll_path.size()) return false;
+  return CompareStringOrdinal(name.data() + name.size() - g_brokered_dll_path.size(),
+                              static_cast<int>(g_brokered_dll_path.size()),
+                              g_brokered_dll_path.data(),
+                              static_cast<int>(g_brokered_dll_path.size()), TRUE) == CSTR_EQUAL;
+}
+
+NTSTATUS duplicate_brokered_dll(PHANDLE file, PIO_STATUS_BLOCK io_status) {
+  HANDLE duplicate = nullptr;
+  if (!file || !io_status || !g_brokered_dll ||
+      !DuplicateHandle(GetCurrentProcess(), g_brokered_dll, GetCurrentProcess(), &duplicate,
+                       0, FALSE, DUPLICATE_SAME_ACCESS)) return kStatusAccessDenied;
+  *file = duplicate;
+  io_status->Status = kStatusSuccess;
+  io_status->Information = kFileOpen;
+  return kStatusSuccess;
+}
+
+struct NativeOpenHooks {
+  NtCreateFileFn create_original = nullptr;
+  NtOpenFileFn open_original = nullptr;
+  void* create_target = nullptr;
+  void* open_target = nullptr;
+  unsigned char create_saved[kHookBytes] = {};
+  unsigned char open_saved[kHookBytes] = {};
+  bool active = false;
+
+  static bool patch(void* target, const void* replacement, unsigned char* saved, void** trampoline) {
+    std::memcpy(saved, target, kHookBytes);
+    void* memory = VirtualAlloc(nullptr, kHookBytes, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!memory) return false;
+    std::memcpy(memory, saved, kHookBytes);
+    DWORD old_protect = 0;
+    if (!VirtualProtect(target, kHookBytes, PAGE_EXECUTE_READWRITE, &old_protect)) {
+      VirtualFree(memory, 0, MEM_RELEASE);
+      return false;
+    }
+    unsigned char jump[kHookBytes] = {0x48, 0xB8};
+    const uintptr_t address = reinterpret_cast<uintptr_t>(replacement);
+    std::memcpy(jump + 2, &address, sizeof(address));
+    jump[10] = 0xFF;
+    jump[11] = 0xE0;
+    std::memcpy(target, jump, sizeof(jump));
+    FlushInstructionCache(GetCurrentProcess(), target, kHookBytes);
+    DWORD unused = 0;
+    VirtualProtect(target, kHookBytes, old_protect, &unused);
+    *trampoline = memory;
+    return true;
+  }
+
+  static void restore(void* target, const unsigned char* saved) {
+    if (!target) return;
+    DWORD old_protect = 0;
+    if (VirtualProtect(target, kHookBytes, PAGE_EXECUTE_READWRITE, &old_protect)) {
+      std::memcpy(target, saved, kHookBytes);
+      FlushInstructionCache(GetCurrentProcess(), target, kHookBytes);
+      DWORD unused = 0;
+      VirtualProtect(target, kHookBytes, old_protect, &unused);
+    }
+  }
+
+  bool install();
+  bool uninstall() {
+    if (!active) return true;
+    restore(create_target, create_saved);
+    restore(open_target, open_saved);
+    VirtualFree(reinterpret_cast<void*>(create_original), 0, MEM_RELEASE);
+    VirtualFree(reinterpret_cast<void*>(open_original), 0, MEM_RELEASE);
+    create_original = nullptr;
+    open_original = nullptr;
+    active = false;
+    return true;
+  }
+  ~NativeOpenHooks() { uninstall(); }
+};
+
+NativeOpenHooks g_native_open_hooks;
+
+NTSTATUS NTAPI shim_nt_create_file(PHANDLE file, ACCESS_MASK desired_access,
+                                   POBJECT_ATTRIBUTES object_attributes, PIO_STATUS_BLOCK io_status,
+                                   PLARGE_INTEGER allocation_size, ULONG file_attributes, ULONG sharing,
+                                   ULONG disposition, ULONG options, PVOID ea_buffer, ULONG ea_length) {
+  const NTSTATUS status = g_native_open_hooks.create_original(file, desired_access, object_attributes,
+      io_status, allocation_size, file_attributes, sharing, disposition, options, ea_buffer, ea_length);
+  if (status != kStatusAccessDenied || !native_name_matches_brokered_dll(object_attributes)) return status;
+  ++g_create_broker_calls;
+  return duplicate_brokered_dll(file, io_status);
+}
+
+NTSTATUS NTAPI shim_nt_open_file(PHANDLE file, ACCESS_MASK desired_access,
+                                 POBJECT_ATTRIBUTES object_attributes, PIO_STATUS_BLOCK io_status,
+                                 ULONG sharing, ULONG options) {
+  const NTSTATUS status = g_native_open_hooks.open_original(file, desired_access, object_attributes,
+      io_status, sharing, options);
+  if (status != kStatusAccessDenied || !native_name_matches_brokered_dll(object_attributes)) return status;
+  ++g_open_broker_calls;
+  return duplicate_brokered_dll(file, io_status);
+}
+
+bool NativeOpenHooks::install() {
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  create_target = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtCreateFile"));
+  open_target = reinterpret_cast<void*>(GetProcAddress(ntdll, "NtOpenFile"));
+  void* create_trampoline = nullptr;
+  void* open_trampoline = nullptr;
+  if (!create_target || !open_target ||
+      !patch(create_target, reinterpret_cast<const void*>(shim_nt_create_file), create_saved, &create_trampoline) ||
+      !patch(open_target, reinterpret_cast<const void*>(shim_nt_open_file), open_saved, &open_trampoline)) {
+    if (create_trampoline) VirtualFree(create_trampoline, 0, MEM_RELEASE);
+    if (open_trampoline) VirtualFree(open_trampoline, 0, MEM_RELEASE);
+    restore(create_target, create_saved);
+    return false;
+  }
+  create_original = reinterpret_cast<NtCreateFileFn>(create_trampoline);
+  open_original = reinterpret_cast<NtOpenFileFn>(open_trampoline);
+  active = true;
+  return true;
+}
 
 std::wstring join(const std::wstring& left, const wchar_t* right) { return left + L"\\" + right; }
 std::wstring sibling(const std::wstring& path, const wchar_t* name) {
@@ -239,6 +374,28 @@ bool child(const std::wstring& root, const std::wstring& image_exe, const std::w
   std::printf("TRANSFERRED_FUTURE_WRITE=OK bytes=%lu\n", written);
   if (!image_section_from_file(api, exe_file.value, L"EXE_FILE_SEC_IMAGE") || !image_section_from_file(api, dll_file.value, L"DLL_FILE_SEC_IMAGE") ||
       !map_image(api, exe_section.value, L"EXE_SECTION_MAP") || !map_image(api, dll_section.value, L"DLL_SECTION_MAP")) return false;
+  g_brokered_dll_path = image_dll;
+  g_brokered_dll = dll_file.value;
+  if (!g_native_open_hooks.install()) {
+    std::printf("DLL_OPEN_SHIM=FAIL error=%lu\n", GetLastError());
+    return false;
+  }
+  HMODULE brokered_module = LoadLibraryW(image_dll.c_str());
+  const DWORD brokered_load_error = brokered_module ? ERROR_SUCCESS : GetLastError();
+  auto brokered_value = brokered_module ? reinterpret_cast<int(*)()>(GetProcAddress(brokered_module, "image_fixture_value")) : nullptr;
+  auto brokered_dllmain_calls = brokered_module ? reinterpret_cast<int(*)()>(GetProcAddress(brokered_module, "image_fixture_dllmain_calls")) : nullptr;
+  const bool brokered_dll_ok = brokered_module && brokered_value && brokered_dllmain_calls &&
+      brokered_value() == 0x472 && brokered_dllmain_calls() == 1 &&
+      (g_create_broker_calls + g_open_broker_calls) > 0;
+  std::printf("SHIM_DLL_LOAD=%s error=%lu create_calls=%lu open_calls=%lu dllmain_calls=%d export=%d\n",
+              brokered_dll_ok ? "OK" : "FAIL", brokered_load_error, g_create_broker_calls,
+              g_open_broker_calls, brokered_dllmain_calls ? brokered_dllmain_calls() : -1,
+              brokered_value ? brokered_value() : -1);
+  if (brokered_module) FreeLibrary(brokered_module);
+  const bool shim_restored = g_native_open_hooks.uninstall();
+  g_brokered_dll = nullptr;
+  g_brokered_dll_path.clear();
+  if (!brokered_dll_ok || !shim_restored) return false;
   const bool rename_denied = !MoveFileExW(future.c_str(), join(join(root, L"outside"), L"moved.json").c_str(), 0) && GetLastError() == ERROR_ACCESS_DENIED;
   const bool hardlink_denied = !CreateHardLinkW(join(join(root, L"output"), L"hardlink.json").c_str(), future.c_str(), nullptr) && GetLastError() == ERROR_ACCESS_DENIED;
   std::printf("DIRECT_RENAME=%s DIRECT_HARDLINK=%s\n", rename_denied ? "DENIED" : "UNEXPECTED", hardlink_denied ? "DENIED" : "UNEXPECTED");

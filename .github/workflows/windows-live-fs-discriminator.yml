@@ -1,4 +1,4 @@
-name: Windows live image capability discriminator
+name: Windows live loader capability discriminator
 
 on:
   push:
@@ -43,6 +43,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Get-Content reports\build.log; exit $LASTEXITCODE }
           Get-FileHash out\live-fs-probe.exe -Algorithm SHA256 | ConvertTo-Json | Set-Content reports\executable-hash.json
           Get-FileHash out\image-fixture.exe,out\image-fixture.dll -Algorithm SHA256 | ConvertTo-Json | Set-Content reports\image-hashes.json
+          New-Item -ItemType Directory -Force reports\binaries | Out-Null
+          Copy-Item out\live-fs-probe.exe,out\image-fixture.exe,out\image-fixture.dll reports\binaries
+          Get-FileHash reports\binaries\live-fs-probe.exe,reports\binaries\image-fixture.exe,reports\binaries\image-fixture.dll -Algorithm SHA256 | ConvertTo-Json | Set-Content reports\retained-binary-hashes.json
       - name: Running the ordinary-user AppContainer control
         shell: pwsh
         run: |
@@ -52,5 +55,5 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: windows-live-fs-discriminator
+          name: windows-live-loader-discriminator
           path: reports
