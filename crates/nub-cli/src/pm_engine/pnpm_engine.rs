@@ -14,6 +14,7 @@ use super::host_settings;
 use super::project_identity::{self, ProjectIdentity};
 use anyhow::Result;
 use pnpm_config::Embedder;
+use std::path::{Path, PathBuf};
 
 /// nub's naming for the files and directories the engine owns.
 const NUB: Embedder = Embedder {
@@ -201,13 +202,12 @@ pub(crate) fn selected() -> bool {
 /// This is also where a configuration that cannot be honoured is refused,
 /// because it is the first point at which both the identity and nub's own
 /// config file are in hand.
-fn profile(selection: Selection) -> Result<Embedder> {
-    let cwd = std::env::current_dir()?;
+fn profile(selection: Selection, cwd: &Path) -> Result<Embedder> {
     let identity = match selection {
         Selection::Forced(identity) => identity,
-        Selection::Auto => project_identity::detect(&cwd),
+        Selection::Auto => project_identity::detect(cwd),
     };
-    let loaded = crate::project_config::load_project_config(&cwd)?;
+    let loaded = crate::project_config::load_project_config(cwd)?;
     if let Some(loaded) = &loaded
         && let Some(path) = loaded.source.path.as_deref()
     {
@@ -230,7 +230,7 @@ fn profile(selection: Selection) -> Result<Embedder> {
                 }
                 _ => Vec::new(),
             });
-            publish_host_settings(host_settings::resolve(&cwd, &install)?);
+            publish_host_settings(host_settings::resolve(cwd, &install)?);
             Embedder {
                 workspace_settings: Some(host_workspace_settings),
                 compat_package_extensions: Some(host_compat_rules()),
@@ -314,12 +314,12 @@ fn rewrite_suggestions(rendered: &str, program: &str) -> String {
 /// no snapshot and answers with the built-in defaults, so a project's own
 /// runtime settings would never reach a lifecycle script — and nothing
 /// would report it, because the augmentation still looks applied.
-fn session_prologue() -> Result<()> {
-    crate::cli::initialize_config_snapshot(false, false)?;
+fn session_prologue(cwd: &Path) -> Result<()> {
+    crate::cli::initialize_config_snapshot_at(cwd, false, false)?;
     // macOS leaves the soft descriptor limit at 256, which a large
     // concurrent install exhausts with `Too many open files`.
     nub_core::resource_limits::raise_nofile_limit();
-    apply_lifecycle_augmentation()
+    apply_lifecycle_augmentation(cwd)
 }
 
 /// Put nub's runtime augmentation on THIS process's environment, so every
@@ -339,9 +339,8 @@ fn session_prologue() -> Result<()> {
 /// Silent when augmentation cannot be computed — no nub binary to point
 /// at, no runtime config — which leaves the engine's own behaviour
 /// exactly as it was.
-fn apply_lifecycle_augmentation() -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let discovered = nub_core::node::discovery::discover_node(&super::lifecycle_node_anchor(&cwd));
+fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
+    let discovered = nub_core::node::discovery::discover_node(&super::lifecycle_node_anchor(cwd));
     let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
         return Ok(());
     };
@@ -349,7 +348,7 @@ fn apply_lifecycle_augmentation() -> Result<()> {
     let mut runtime = crate::project_config::runtime_config()?;
     let runtime_node_options = crate::cli::lifecycle_node_options(&mut runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
-    let pnp_ctx = nub_core::pnp::detect(&cwd);
+    let pnp_ctx = nub_core::pnp::detect(cwd);
     // Lifecycle scripts are never compat: PM verbs run augmented, and there
     // is no `--node` lifecycle path.
     let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
@@ -393,6 +392,28 @@ fn apply_lifecycle_augmentation() -> Result<()> {
     Ok(())
 }
 
+/// The directory this command line makes the project's.
+///
+/// `--dir` (and `-C`, and `--prefix`) names a project other than the one
+/// the process sits in, and the engine applies it without moving the
+/// process — it carries the directory as data and resolves every path
+/// against the process directory. Everything nub reads for itself before
+/// handing the command over is anchored here for the same reason: the
+/// project's identity, its `nub.jsonc`, its install settings, and the
+/// runtime a lifecycle script is augmented with are all the NAMED
+/// project's, and reading them where the process happens to sit answers
+/// with a different project's — silently, since a wrong answer here still
+/// looks like a working install.
+///
+/// The engine's own grammar says which token carries the directory, so
+/// the two cannot disagree about what the command line named.
+fn host_base_dir(argv: &[std::ffi::OsString]) -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    // Joining is what the engine does: an absolute answer replaces the
+    // process directory, a relative one extends it.
+    Ok(pnpm_cli::working_dir(argv).map_or(cwd.clone(), |dir| cwd.join(dir)))
+}
+
 /// Run the engine on `argv` and return its exit status.
 ///
 /// `argv` is the whole command line, program name first, as the host
@@ -400,8 +421,9 @@ fn apply_lifecycle_augmentation() -> Result<()> {
 /// before the verb and acts on them itself, and the engine's grammar has
 /// no spelling for those, so what it runs on is what nub left.
 pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
-    let embedder = profile(selection().unwrap_or(Selection::Auto))?;
-    session_prologue()?;
+    let cwd = host_base_dir(&argv)?;
+    let embedder = profile(selection().unwrap_or(Selection::Auto), &cwd)?;
+    session_prologue(&cwd)?;
     // The engine's own entry point installs this before it can print. It
     // drops each cause the level above already states in full, so a host
     // that leaves miette at its default renders chains the engine collapses
@@ -410,7 +432,7 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     pnpm_diagnostics::install_report_handler();
     // Asked BEFORE the run, because a successful install answers it: it
     // writes nub's own lockfile, and the project then looks migrated.
-    let pending = pending_migration(embedder, pnpm_cli::command_name(&argv).as_deref());
+    let pending = pending_migration(embedder, pnpm_cli::command_name(&argv).as_deref(), &cwd);
     match pnpm_cli::run(argv, embedder) {
         Ok(()) => {
             if let Some(foreign) = pending {
@@ -450,14 +472,17 @@ const RESOLVING_COMMANDS: [&str; 6] = ["install", "add", "remove", "update", "ci
 /// Only under nub's own identity: a pnpm project must see what pnpm prints,
 /// and pnpm says nothing here. The condition clears itself once the install
 /// has run, which is the whole reason it is asked first.
-fn pending_migration(embedder: Embedder, command: Option<&str>) -> Option<std::path::PathBuf> {
+fn pending_migration(
+    embedder: Embedder,
+    command: Option<&str>,
+    cwd: &Path,
+) -> Option<std::path::PathBuf> {
     if embedder.program_name == Embedder::PNPM.program_name
         || !command.is_some_and(|name| RESOLVING_COMMANDS.contains(&name))
     {
         return None;
     }
-    let cwd = std::env::current_dir().ok()?;
-    let project = nub_core::workspace::detect::detect_project(&cwd)?;
+    let project = nub_core::workspace::detect::detect_project(cwd)?;
     super::migrate::pending_migration(&project.workspace_root.unwrap_or(project.root))
 }
 

@@ -3876,8 +3876,23 @@ fn publish_node_executable_best_effort(cwd: &Path) {
 
 pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
     let cwd = env::current_dir()?;
+    initialize_config_snapshot_at(&cwd, cli_node, cli_no_check)
+}
+
+/// The same, anchored where the CALLER says the project is.
+///
+/// One package manager moves the process to the directory `--dir` names
+/// and reads the project from there; the other carries that directory as
+/// data and never moves, so on its path the process still sits wherever
+/// the user typed the command. The snapshot is a process-wide OnceLock
+/// either way, so it has to be told.
+pub(crate) fn initialize_config_snapshot_at(
+    cwd: &Path,
+    cli_node: bool,
+    cli_no_check: bool,
+) -> Result<()> {
     let effective = crate::project_config::initialize_effective_config(
-        &cwd,
+        cwd,
         config_overlays(cli_node, cli_no_check),
     )?;
     crate::project_config::publish_node_executable(effective);

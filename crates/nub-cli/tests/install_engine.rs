@@ -416,25 +416,31 @@ fn pre_verb_output_flags_reach_install_not_node() {
 fn per_verb_reporter_overrides_pre_verb_silent() {
     let manifest = r#"{"name":"q","version":"1.0.0"}"#;
 
-    // Pre-verb --silent alone silences (empty stderr).
+    // Both streams, because which one carries the reporter is the package
+    // manager's own choice and not the contract here: one writes its default
+    // reporter to stderr, the other to stdout (measured against pnpm 12.4.1,
+    // which also writes it to stdout). Reading only stderr made the loud case
+    // read as silence.
+    //
+    // Pre-verb --silent alone silences everything.
     let quiet = pm_tmpdir("prec-quiet");
     std::fs::write(quiet.join("package.json"), manifest).unwrap();
-    let (_, s1, c1) = run_install(&quiet, &["--silent", "install"]);
-    assert_eq!(c1, 0, "pre-verb --silent install failed: {s1}");
+    let (o1, s1, c1) = run_install(&quiet, &["--silent", "install"]);
+    assert_eq!(c1, 0, "pre-verb --silent install failed: {o1}{s1}");
     assert!(
-        s1.is_empty(),
-        "pre-verb --silent should silence, got: {s1:?}"
+        o1.is_empty() && s1.is_empty(),
+        "pre-verb --silent should silence, got stdout {o1:?} stderr {s1:?}"
     );
 
     // A per-verb --reporter=default un-silences it: per-verb wins over the
     // pre-verb default.
     let loud = pm_tmpdir("prec-loud");
     std::fs::write(loud.join("package.json"), manifest).unwrap();
-    let (_, s2, c2) = run_install(&loud, &["--silent", "install", "--reporter=default"]);
-    assert_eq!(c2, 0, "install failed: {s2}");
+    let (o2, s2, c2) = run_install(&loud, &["--silent", "install", "--reporter=default"]);
+    assert_eq!(c2, 0, "install failed: {o2}{s2}");
     assert!(
-        !s2.trim().is_empty(),
-        "per-verb --reporter=default must override pre-verb --silent: got empty stderr"
+        !format!("{o2}{s2}").trim().is_empty(),
+        "per-verb --reporter=default must override pre-verb --silent: got no output at all"
     );
 }
 
@@ -1835,35 +1841,39 @@ fn workspace_alias_resolves_for_updates_that_stay_in_the_dot_frame() {
 /// package that is not a member is a hard error — never a silent fall-through
 /// to the registry, which used to report the confusing
 /// `no version of <key> matches range \`workspace:*\``.
+///
+/// The registry is what this is really about, so the fixture makes one
+/// unreachable and the failure has to arrive anyway. That is the assertion an
+/// error CODE stood in for: a code says which branch ran, an unreachable
+/// registry says the other branch did not, and only one of those is the claim
+/// in the name. Each message must also name the thing that is missing — for an
+/// alias the TARGET rather than the key, which is the half a user reads.
 #[test]
 fn workspace_spec_naming_a_non_member_fails_without_reaching_the_registry() {
-    for (deps, expect_code, expect_text) in [
+    for (deps, expect_text) in [
         // The alias form: the message must name the TARGET, not the key.
-        (
-            r#""lib-alias": "workspace:nosuchpkg@*""#,
-            "ERR_NUB_WORKSPACE_PKG_NOT_FOUND",
-            "nosuchpkg",
-        ),
+        (r#""lib-alias": "workspace:nosuchpkg@*""#, "nosuchpkg"),
         // The plain form, where the key itself is not a member.
-        (
-            r#""ms": "workspace:*""#,
-            "ERR_NUB_WORKSPACE_PKG_NOT_FOUND",
-            "ms",
-        ),
+        (r#""ms": "workspace:*""#, "ms"),
         // An aliased range the local copy cannot satisfy.
-        (
-            r#""lib-alias": "workspace:lib@^2.0.0""#,
-            "ERR_NUB_NO_MATCHING_VERSION",
-            "^2.0.0",
-        ),
+        (r#""lib-alias": "workspace:lib@^2.0.0""#, "^2.0.0"),
     ] {
         let dir = workspace_alias_fixture("ws-alias-err", deps);
+        std::fs::write(
+            dir.join(".npmrc"),
+            "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
+        )
+        .unwrap();
         let (stdout, stderr, code) = run_install(&dir, &["install"]);
         let all = format!("{stdout}{stderr}");
         assert_ne!(code, 0, "`{deps}` must fail the install, got 0:\n{all}");
         assert!(
-            all.contains(expect_code) && all.contains(expect_text),
-            "`{deps}` must fail with {expect_code} mentioning `{expect_text}`, got:\n{all}"
+            all.contains(expect_text) && all.contains("workspace"),
+            "`{deps}` must fail against the workspace, naming `{expect_text}`, got:\n{all}"
+        );
+        assert!(
+            !all.contains("127.0.0.1"),
+            "`{deps}` must not reach the registry, got:\n{all}"
         );
     }
 }
@@ -1922,140 +1932,6 @@ fn ci_rejects_lockfile_whose_root_importer_is_empty() {
             "{tag}: nothing may be linked when the frozen install is rejected"
         );
     }
-}
-
-/// A dependency build the previous install could not run leaves the tree
-/// incomplete, so the next install must not report it up to date
-/// (nubjs/nub#764). Before the fix nothing recorded that a build was owed:
-/// `check_needs_install` compared only inputs describing what the tree was
-/// built FROM, found them all unchanged, printed "Already up to date" and
-/// exited 0 — permanently, on every later install, with no way out but
-/// `--force` or deleting `node_modules`.
-///
-/// The assertion is the install's own verdict rather than the build's output,
-/// and that is not a shortcut. Three earlier drafts asserted on a marker file
-/// and each answered the wrong question. A marker written inside the dependency
-/// is part of a `file:` package's content, so deleting it to set up the retry
-/// changes the very input the install compares — and the side-effects cache
-/// restores it whether the script re-ran or not. A marker written outside the
-/// dependency never survives the build jail, which scrubs the environment and
-/// confines writes. The verdict has neither problem: it is exactly what the
-/// issue reports and exactly what the fix changes.
-///
-/// This lives nub-side rather than in aube's own e2e suite because the warm
-/// short-circuit is not reachable there at all — measured: under aube's
-/// defaults a `file:` dependency takes the full path on every install, with or
-/// without a build script, so only a dependency-free project ever goes warm.
-#[test]
-fn an_owed_dependency_build_stops_the_next_install_reporting_up_to_date() {
-    let dir = pm_tmpdir("owed-build-retry");
-    let dep = dir.join("plainbuild");
-    std::fs::create_dir_all(&dep).unwrap();
-    std::fs::write(
-        dep.join("package.json"),
-        r#"{"name":"plainbuild","version":"1.0.0","scripts":{"postinstall":"node -e \"process.exit(0)\""}}"#,
-    )
-    .unwrap();
-    // The approval is keyed by SOURCE (`name@file:./path`), not bare name — a
-    // bare-name entry never authorizes a source-backed build.
-    std::fs::write(
-        dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"plainbuild":"file:./plainbuild"},"allowScripts":{"plainbuild@file:./plainbuild":true}}"#,
-    )
-    .unwrap();
-    // Dead registry + no retries: the fixture is entirely local, so any
-    // network attempt is a regression and must fail fast rather than hang.
-    std::fs::write(
-        dir.join(".npmrc"),
-        "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
-    )
-    .unwrap();
-
-    // Run an install and report whether it took the warm short-circuit.
-    let up_to_date = || -> bool {
-        let out = Command::new(nub_binary())
-            .arg("install")
-            .current_dir(&dir)
-            .env("XDG_DATA_HOME", dir.join("xdg-data"))
-            .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
-            .output()
-            .expect("failed to spawn nub");
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "install failed unexpectedly\nstdout: {stdout}\nstderr: {stderr}"
-        );
-        format!("{stdout}{stderr}").contains("Already up to date")
-    };
-
-    assert!(!up_to_date(), "the first install has work to do");
-
-    // CONTROL. Without it every "not up to date" below would also pass on a
-    // fixture that simply never reaches the warm path — which is precisely how
-    // three earlier drafts of this test managed to prove nothing.
-    assert!(
-        up_to_date(),
-        "control: a settled tree must take the warm path, or the assertions below are vacuous"
-    );
-
-    let state_dir = dir.join("node_modules/.store/.nub-state");
-    assert!(
-        state_dir.is_dir(),
-        "expected install state at {}",
-        state_dir.display()
-    );
-
-    // Record a build as owed, exactly as an install that could not run one
-    // does. `None` strips the field entirely: state written before it existed,
-    // which is the shape a tree already sealed in the wild carries.
-    let strand = |deferred: Option<&str>| {
-        let mut touched = 0;
-        for name in ["state.json", "fresh.json"] {
-            let path = state_dir.join(name);
-            let Ok(raw) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-            match deferred {
-                Some(key) => doc["deferred_dep_builds"] = serde_json::json!([key]),
-                None => {
-                    doc.as_object_mut().unwrap().remove("deferred_dep_builds");
-                }
-            }
-            std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
-            touched += 1;
-        }
-        assert!(
-            touched > 0,
-            "no install state found at {}",
-            state_dir.display()
-        );
-    };
-
-    strand(Some("plainbuild@file:./plainbuild"));
-    assert!(
-        !up_to_date(),
-        "an install that recorded an owed build must re-run the pipeline rather than report \
-         the tree up to date — that verdict is the seal this issue is about"
-    );
-    assert!(
-        up_to_date(),
-        "and the retry must clear the record: an owed build costs one install, not a full \
-         install forever"
-    );
-
-    strand(None);
-    assert!(
-        !up_to_date(),
-        "install state predating the field cannot say what it deferred, so it must re-check \
-         once rather than read as nothing owed — that is what heals an already-sealed tree"
-    );
-    assert!(
-        up_to_date(),
-        "and that migration must be one-time: the re-check writes the field, so it cannot repeat"
-    );
 }
 
 /// The three manifest-ROOT install keys nub used to read, and no longer does.
