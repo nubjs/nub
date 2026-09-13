@@ -69,6 +69,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item reports/msvc-fixture.log reports/native-full-network-pe-headers.txt
           if (!(Select-String -Path reports/msvc-fixture.log -Pattern 'machine \(${{ matrix.machine }}\)' -CaseSensitive:$false)) { throw "Fixture is not a native ${{ matrix.machine }} PE" }
+      - name: Compiling MSVC native file-broker fixture
+        if: ${{ hashFiles('crates/nub-sandbox/native/file_broker_fixture.c') != '' }}
+        shell: pwsh
+        run: |
+          $source = 'crates/nub-sandbox/native/file_broker_fixture.c'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (!(Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere is missing: $vswhere" }
+          $install = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if (!$install) { throw 'No Visual Studio installation with MSVC x64 tools was found' }
+          $vcvars = Join-Path $install 'VC\Auxiliary\Build\vcvarsall.bat'
+          if (!(Test-Path -LiteralPath $vcvars -PathType Leaf)) { throw "vcvarsall is missing: $vcvars" }
+          @"
+          @echo off
+          call "$vcvars" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b %errorlevel%
+          cl.exe /Bv /nologo /MT /W4 /WX /LD crates\nub-sandbox\native\file_broker_fixture.c /link /OUT:reports\binaries\file-broker-fixture.dll
+          if errorlevel 1 exit /b %errorlevel%
+          dumpbin.exe /headers reports\binaries\file-broker-fixture.dll
+          exit /b %errorlevel%
+          "@ | Set-Content -Encoding ascii reports/compile-file-broker-fixture.cmd
+          & cmd.exe /d /s /c reports\compile-file-broker-fixture.cmd *> reports/msvc-file-broker-fixture.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item $source reports/file-broker-fixture.c
+          Get-FileHash -Algorithm SHA256 $source | ConvertTo-Json | Set-Content -Encoding utf8 reports/file-broker-fixture-source-sha256.json
+          Get-FileHash -Algorithm SHA256 reports/binaries/file-broker-fixture.dll | ConvertTo-Json | Set-Content -Encoding utf8 reports/file-broker-fixture-dll-sha256.json
+          Copy-Item reports/msvc-file-broker-fixture.log reports/file-broker-fixture-pe-headers.txt
+          if (!(Select-String -Path reports/msvc-file-broker-fixture.log -Pattern 'machine \(${{ matrix.machine }}\)' -CaseSensitive:$false)) { throw "File-broker fixture is not a native ${{ matrix.machine }} PE" }
       - name: Building exact ordinary-user test artifacts
         id: build_tests
         shell: pwsh
@@ -90,12 +117,19 @@ jobs:
           Copy-Item $tmp[0].executable reports/binaries/windows_tmp_policy.exe
           Copy-Item $lifecycle[0].executable reports/binaries/production_readiness_windows.exe
           Copy-Item $driver[0].executable reports/binaries/windows_native_full_network.exe
-          Get-FileHash -Algorithm SHA256 reports/binaries/*.exe | Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content -Encoding utf8 reports/binary-sha256.json
+          Get-FileHash -Algorithm SHA256 reports/binaries/* | Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content -Encoding utf8 reports/binary-sha256.json
       - name: Running focused full-network gate as an ordinary user
         if: ${{ steps.build_tests.outcome == 'success' }}
         shell: pwsh
         run: |
-          & ./tests/sandbox-native-adapter/run-full-network-standard-user.ps1 -FixtureBinary (Join-Path $PWD 'reports/binaries/native-full-network.exe') -LibraryBinary (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe') -TmpBinary (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe') -NetworkBinary (Join-Path $PWD 'reports/binaries/windows_native_full_network.exe') -BinaryManifest (Join-Path $PWD 'reports/binary-sha256.json') -ReportDirectory reports/full-network-standard-user
+          $parameters = @{ FixtureBinary = (Join-Path $PWD 'reports/binaries/native-full-network.exe'); LibraryBinary = (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe'); TmpBinary = (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe'); NetworkBinary = (Join-Path $PWD 'reports/binaries/windows_native_full_network.exe'); BinaryManifest = (Join-Path $PWD 'reports/binary-sha256.json'); ReportDirectory = 'reports/full-network-standard-user' }
+          $fileBrokerSource = 'crates/nub-sandbox/native/file_broker_fixture.c'
+          $fileBrokerFixture = Join-Path $PWD 'reports/binaries/file-broker-fixture.dll'
+          if (Test-Path -LiteralPath $fileBrokerSource -PathType Leaf) {
+            if (!(Test-Path -LiteralPath $fileBrokerFixture -PathType Leaf)) { throw 'File-broker source is present but its matching-architecture fixture DLL is missing' }
+            $parameters.FileBrokerFixtureBinary = $fileBrokerFixture
+          }
+          & ./tests/sandbox-native-adapter/run-full-network-standard-user.ps1 @parameters
           exit $LASTEXITCODE
       - name: Running existing lifecycle control as an ordinary user
         if: ${{ always() && steps.build_tests.outcome == 'success' }}

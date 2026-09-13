@@ -19,10 +19,13 @@ $cases = @(
     @('', $false, $false, '--nocapture|--test-threads=1'),
     @('group', $false, $false, 'group|--nocapture|--test-threads=1'),
     @('single', $true, $false, '--exact|single|--nocapture|--test-threads=1'),
-    @('single', $true, $true, '--ignored|--exact|single|--nocapture|--test-threads=1')
+    @('single', $true, $true, '--ignored|--exact|single|--nocapture|--test-threads=1'),
+    @('backend::windows_file_broker::tests::', $false, $false, 'backend::windows_file_broker::tests::|--nocapture|--test-threads=1'),
+    @('backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control', $true, $true, '--ignored|--exact|backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control|--nocapture|--test-threads=1'),
+    @('backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control', $true, $true, '--ignored|--exact|backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control|--nocapture|--test-threads=1')
 )
 foreach ($case in $cases) {
     $actual = Test-Arguments $case[0] $case[1] $case[2]
     if (($actual -join '|') -ne $case[3]) { throw "Arguments differed: $($actual -join '|')" }
 }
-Write-Host 'FULL_NETWORK_ARGUMENT_CASES=4'
+Write-Host 'FULL_NETWORK_ARGUMENT_CASES=7'

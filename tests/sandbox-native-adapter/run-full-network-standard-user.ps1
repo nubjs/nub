@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory=$true)][string]$TmpBinary,
     [Parameter(Mandatory=$true)][string]$NetworkBinary,
     [Parameter(Mandatory=$true)][string]$BinaryManifest,
+    [string]$FileBrokerFixtureBinary,
     [Parameter(Mandatory=$true)][string]$ReportDirectory
 )
 
@@ -14,6 +15,7 @@ foreach ($path in @($FixtureBinary, $LibraryBinary, $TmpBinary, $NetworkBinary))
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required artifact is missing: $path" }
 }
 if (!(Test-Path -LiteralPath $BinaryManifest -PathType Leaf)) { throw "Binary manifest is missing: $BinaryManifest" }
+if ($FileBrokerFixtureBinary -and !(Test-Path -LiteralPath $FileBrokerFixtureBinary -PathType Leaf)) { throw "File-broker fixture is missing: $FileBrokerFixtureBinary" }
 New-Item -ItemType Directory -Force $ReportDirectory | Out-Null
 $ReportDirectory = (Resolve-Path $ReportDirectory).Path
 $name = 'sbx' + [guid]::NewGuid().ToString('N').Substring(0, 10)
@@ -29,6 +31,7 @@ try {
     Copy-Item $LibraryBinary (Join-Path $stage 'nub_sandbox_lib.exe')
     Copy-Item $TmpBinary (Join-Path $stage 'windows_tmp_policy.exe')
     Copy-Item $NetworkBinary (Join-Path $stage 'windows_native_full_network.exe')
+    if ($FileBrokerFixtureBinary) { Copy-Item $FileBrokerFixtureBinary (Join-Path $stage 'file-broker-fixture.dll') }
     Copy-Item $BinaryManifest (Join-Path $stage 'binary-sha256.json')
 @'
 param([string]$Stage)
@@ -44,6 +47,13 @@ New-Item -ItemType Directory -Force $owned | Out-Null
 foreach ($file in @('native-full-network.exe', 'nub_sandbox_lib.exe', 'windows_tmp_policy.exe', 'windows_native_full_network.exe')) {
     Copy-Item (Join-Path $Stage $file) (Join-Path $owned $file) -Force
 }
+$fileBrokerFixture = Join-Path $Stage 'file-broker-fixture.dll'
+if (Test-Path -LiteralPath $fileBrokerFixture -PathType Leaf) {
+    Copy-Item $fileBrokerFixture (Join-Path $owned 'file-broker-fixture.dll') -Force
+    $fileBrokerFixture = Join-Path $owned 'file-broker-fixture.dll'
+} else {
+    $fileBrokerFixture = $null
+}
 function Sha256([string]$Path) {
     $sha = [Security.Cryptography.SHA256]::Create(); $stream = [IO.File]::OpenRead($Path)
     try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
@@ -56,9 +66,15 @@ foreach ($file in @('native-full-network.exe', 'nub_sandbox_lib.exe', 'windows_t
     if (!$expected.ContainsKey($file) -or $actual -ne $expected[$file]) { throw "Staged binary hash mismatch: $file" }
     Write-Host "STANDARD_USER_FULL_NETWORK_SHA256=${file}:$actual"
 }
+if ($fileBrokerFixture) {
+    $actual = Sha256 $fileBrokerFixture
+    if (!$expected.ContainsKey('file-broker-fixture.dll') -or $actual -ne $expected['file-broker-fixture.dll']) { throw "Staged binary hash mismatch: file-broker-fixture.dll" }
+    Write-Host "STANDARD_USER_FULL_NETWORK_SHA256=file-broker-fixture.dll:$actual"
+}
 Set-Location $owned
 whoami /all
 $env:NUB_WINDOWS_NATIVE_FULL_NETWORK_FIXTURE = Join-Path $owned 'native-full-network.exe'
+if ($fileBrokerFixture) { $env:NUB_FILE_BROKER_TEST_DLL = $fileBrokerFixture }
 $env:NUB_JAIL_DUMP_POLICY = '1'
 Write-Host "STANDARD_USER_FULL_NETWORK_PROFILE=$profileRoot"
 Write-Host "STANDARD_USER_FULL_NETWORK_FIXTURE=$env:NUB_WINDOWS_NATIVE_FULL_NETWORK_FIXTURE"
@@ -73,7 +89,7 @@ function Test-Arguments([string]$filter, [bool]$exact, [bool]$ignored) {
     $arguments += '--test-threads=1'
     return $arguments
 }
-function Run-Filtered([string]$file, [string]$label, [string[]]$arguments, [string]$summary, [bool]$nativeAdapter = $false, [bool]$dnsOptIn = $false) {
+function Run-Filtered([string]$file, [string]$label, [string[]]$arguments, [string]$summary, [bool]$nativeAdapter = $false, [bool]$dnsOptIn = $false, [string[]]$requiredMarkers = @()) {
     $out = Join-Path $owned "$label.stdout.log"; $err = Join-Path $owned "$label.stderr.log"
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = Join-Path $owned $file; $info.WorkingDirectory = $owned; $info.UseShellExecute = $false
@@ -97,7 +113,8 @@ function Run-Filtered([string]$file, [string]$label, [string[]]$arguments, [stri
         Write-Host "STANDARD_USER_FULL_NETWORK_FILTER_EXIT=${label}:$($proc.ExitCode)"
         Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDOUT_BEGIN"; Write-Host $outTask.Result; Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDOUT_END"
         Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDERR_BEGIN"; Write-Host $errTask.Result; Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDERR_END"
-        if ($timedOut -or $proc.ExitCode -ne 0 -or !$text.Contains($summary) -or $text -notmatch 'running [1-9][0-9]* test(s)?') { $script:failed = $true; Write-Host "STANDARD_USER_FULL_NETWORK_FILTER_FAILURE=${label}:timeout=$timedOut;required-summary-or-exit" }
+        $missingMarkers = @($requiredMarkers | Where-Object { !$text.Contains($_) })
+        if ($timedOut -or $proc.ExitCode -ne 0 -or !$text.Contains($summary) -or $text -notmatch 'running [1-9][0-9]* test(s)?' -or $missingMarkers.Count -ne 0) { $script:failed = $true; Write-Host "STANDARD_USER_FULL_NETWORK_FILTER_FAILURE=${label}:timeout=$timedOut;required-summary-markers-or-exit;missing=$($missingMarkers -join ',')" }
     } catch {
         $script:failed = $true
         [IO.File]::WriteAllText($err, $_.Exception.ToString())
@@ -124,9 +141,16 @@ $runs = @(
     @{ file='windows_native_full_network.exe'; label='native-full-network-peer-driver'; filter='native_adapter_full_network_has_peer_oracles_and_retained_policy_separation'; summary=$one; ignored=$true; exact=$true },
     @{ file='windows_native_full_network.exe'; label='native-full-network-dns-opt-in'; filter='native_adapter_full_network_dns_opt_in'; summary=$one; dnsOptIn=$true; ignored=$true; exact=$true }
 )
+if ($fileBrokerFixture) {
+    $runs += @(
+        @{ file='nub_sandbox_lib.exe'; label='file-broker-core'; filter='backend::windows_file_broker::tests::'; summary='test result: ok. 4 passed; 0 failed; 2 ignored;' },
+        @{ file='nub_sandbox_lib.exe'; label='file-broker-native-open'; filter='backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control'; summary=$one; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_CHILD_OK') },
+        @{ file='nub_sandbox_lib.exe'; label='file-broker-native-loader'; filter='backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control'; summary=$one; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_LOADER_OK', 'FILE_BROKER_NATIVE_CHILD_OK') }
+    )
+}
 foreach ($run in $runs) {
     $arguments = Test-Arguments $run.filter ([bool]$run.exact) ([bool]$run.ignored)
-    Run-Filtered $run.file $run.label $arguments $run.summary ([bool]$run.nativeAdapter) ([bool]$run.dnsOptIn)
+    Run-Filtered $run.file $run.label $arguments $run.summary ([bool]$run.nativeAdapter) ([bool]$run.dnsOptIn) ([string[]]$run.requiredMarkers)
 }
 if ($script:failed) { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=failed'; exit 1 }
 Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=ok'
