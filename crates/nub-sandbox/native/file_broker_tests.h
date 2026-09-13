@@ -1,5 +1,49 @@
 #pragma once
 
+// `short_path` has kPath elements. An empty result means this volume did not
+// assign a distinct short leaf; failed queries and opens are test failures.
+extern "C" DWORD sandbox_file_broker_test_short_name(const wchar_t* path, wchar_t* short_path) {
+    using namespace nub_sandbox::file_broker;
+    short_path[0] = 0;
+    wchar_t shortened[kPath] = {};
+    DWORD length = GetShortPathNameW(path, shortened, kPath);
+    if (!length || length >= kPath) return 1;
+    auto long_leaf = wcsrchr(path, L'\\');
+    auto short_leaf = wcsrchr(shortened, L'\\');
+    if (!long_leaf || !short_leaf) return 2;
+    if (!_wcsicmp(long_leaf, short_leaf)) return 0;
+    // Keep the original parent spelling, so this tests a real leaf alias and
+    // cannot pass solely because an ancestor acquired an 8.3 spelling.
+    size_t prefix = size_t(long_leaf + 1 - path);
+    size_t leaf_length = wcslen(short_leaf + 1);
+    if (prefix + leaf_length >= kPath) return 3;
+    memcpy(short_path, path, prefix * sizeof(wchar_t));
+    memcpy(short_path + prefix, short_leaf + 1, (leaf_length + 1) * sizeof(wchar_t));
+    Request request = {};
+    memcpy(request.path, short_path, (prefix + leaf_length + 1) * sizeof(wchar_t));
+    request.length = DWORD(prefix + leaf_length);
+    Api api;
+    ParentPath parent;
+    IO_STATUS_BLOCK io = {};
+    if (resolve_parent(api, request, parent, io)) return 4;
+    Handle file;
+    if (open_relative(api, parent.handle(), parent.path + parent.leaf,
+        request.length - parent.leaf, FILE_GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, 0, file, io)) return 5;
+    wchar_t canonical[kPath] = {};
+    DWORD canonical_length = 0;
+    if (requested_name(file.value, parent, canonical, canonical_length)) return 6;
+    Request original = {};
+    if (wcslen(path) >= kPath) return 7;
+    wcscpy_s(original.path, path);
+    original.length = DWORD(wcslen(path));
+    ParentPath long_parent;
+    if (resolve_parent(api, original, long_parent, io) ||
+        !requested_name(file.value, long_parent, canonical, canonical_length)) return 8;
+    return 0;
+}
+
 extern "C" NTSTATUS sandbox_file_broker_test_rename_handle(HANDLE file, const wchar_t* destination) {
     using namespace nub_sandbox::file_broker;
     auto set = reinterpret_cast<NtSetInformation>(
