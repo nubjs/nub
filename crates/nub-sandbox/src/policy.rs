@@ -106,12 +106,13 @@ impl SelfProcFile {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TmpMode {
-    /// The host tmp is visible (default until a backend tightens it).
+    /// No managed temporary directory; access follows the filesystem grants and runtime floor.
     #[default]
     Shared,
-    /// A private per-run tmp is mounted; the host tmp is hidden.
+    /// Add a managed session temporary directory and redirect temporary-directory variables.
+    /// Explicit positive filesystem grants may also expose host temporary storage.
     Private,
-    /// No tmp access at all.
+    /// Add no implicit temporary-storage grant. Explicit positive grants still apply.
     Deny,
 }
 
