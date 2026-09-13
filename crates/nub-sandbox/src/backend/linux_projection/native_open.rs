@@ -668,6 +668,24 @@ impl NativeOpenService {
     }
 
     fn stop(&mut self) -> io::Result<()> {
+        let sender_poisoned = self.request_stop();
+        self.join_stopped(sender_poisoned)
+    }
+
+    /// Stop accepting work without relinquishing the worker's join ownership.
+    pub(super) fn try_shutdown(&mut self) -> Option<io::Result<()>> {
+        let sender_poisoned = self.request_stop();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return None;
+        }
+        Some(self.join_stopped(sender_poisoned))
+    }
+
+    fn request_stop(&mut self) -> bool {
         let sender_poisoned = match self.client.sender.lock() {
             Ok(mut sender) => {
                 sender.take();
@@ -681,6 +699,10 @@ impl NativeOpenService {
         if let Some(mut terminator) = self.terminator.take() {
             terminator.terminate();
         }
+        sender_poisoned
+    }
+
+    fn join_stopped(&mut self, sender_poisoned: bool) -> io::Result<()> {
         let joined: io::Result<()> = self
             .worker
             .take()

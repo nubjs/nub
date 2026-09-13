@@ -159,6 +159,13 @@ struct LandlockPreflight {
 #[derive(Debug)]
 pub(crate) struct RetainedLinuxGrants(super::linux_landlock::RetainedPolicyGrants);
 
+#[cfg(test)]
+impl RetainedLinuxGrants {
+    pub(super) fn empty() -> Self {
+        Self(super::linux_landlock::RetainedPolicyGrants::empty())
+    }
+}
+
 /// Capture the policy-controlled filesystem identities for a sandbox session.
 pub(crate) fn capture_retained_grants(
     policy: &SandboxPolicy,
@@ -174,11 +181,23 @@ pub(crate) fn capture_retained_grants(
 pub(crate) fn preflight(
     policy: &SandboxPolicy,
     spec: &CommandSpec,
+    #[cfg(test)] projected: bool,
 ) -> Result<LinuxPreflight, Degradation> {
     validate_process_inputs(spec).map_err(|reason| Degradation {
         lost: vec!["process-input".to_string()],
         reason: Some(reason),
     })?;
+    // The private projected-session fixture supplies its own filesystem
+    // enforcement. It still takes the ordinary supervised route for env,
+    // network, proxy, CA, stdio, ready-barrier, and guardian behavior, but it
+    // must not require a Landlock ruleset in addition to the projection.
+    #[cfg(test)]
+    if projected {
+        return Ok(LinuxPreflight {
+            confine_without_landlock: true,
+            landlock: None,
+        });
+    }
     let confine_fs = fs_confines(&policy.fs);
     if !policy.fs.self_proc.is_empty() {
         if std::env::var("NUB_SANDBOX_MECHANISM").as_deref() == Ok("landlock") {
@@ -255,11 +274,20 @@ pub(super) fn apply(
     retained: &RetainedLinuxGrants,
     preflight: LinuxPreflight,
     proxy: ProxyLaunch<'_>,
+    #[cfg(test)] projected: Option<&super::linux_projection::ProjectedSession>,
 ) -> Result<Prepared, Degradation> {
     if let Some(landlock) = preflight.landlock {
+        #[cfg(not(test))]
         return apply_landlock(policy, spec, landlock, tmp_dir, retained);
+        #[cfg(test)]
+        if projected.is_none() {
+            return apply_landlock(policy, spec, landlock, tmp_dir, retained);
+        }
     }
-    if preflight.confine_without_landlock {
+    let supervised = preflight.confine_without_landlock;
+    #[cfg(test)]
+    let supervised = supervised || projected.is_some();
+    if supervised {
         // The supervised (seccomp USER_NOTIF) launch — a policy that needs confinement but is not
         // a build-jail Landlock policy. NET is transparent per-host egress through the in-process
         // supervisor;
@@ -269,7 +297,15 @@ pub(super) fn apply(
         // pointed at it; Deny tmp grants nothing, so the shared `/tmp` is simply never in the
         // allow-set. The managed tmp root is stable for one explicit session (Env is enforced
         // by construction — `base_command`/`envp` — always.)
-        let plan = build_supervised_plan(policy, &spec, tmp_dir, retained, proxy)?;
+        let plan = build_supervised_plan(
+            policy,
+            &spec,
+            tmp_dir,
+            retained,
+            proxy,
+            #[cfg(test)]
+            projected,
+        )?;
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
@@ -313,6 +349,7 @@ fn build_supervised_plan(
     tmp_dir: Option<&Path>,
     retained: &RetainedLinuxGrants,
     proxy: ProxyLaunch<'_>,
+    #[cfg(test)] projected: Option<&super::linux_projection::ProjectedSession>,
 ) -> Result<super::SupervisedPlan, Degradation> {
     let ProxyLaunch {
         port: proxy_port,
@@ -404,7 +441,25 @@ fn build_supervised_plan(
     // policy does not confine the filesystem (a pure net/env policy) — the child then skips
     // `restrict_self`. Landlock cannot subtract a deny inside a granted subtree;
     // legacy deny policies are carried below and refused at supervised admission.
-    let ruleset = if fs_confines(&policy.fs) {
+    #[cfg(test)]
+    let projected = projected
+        .map(|session| {
+            session.launch().map_err(|error| Degradation {
+                lost: vec!["fs".into()],
+                reason: Some(format!("launching projected test session: {error}")),
+            })
+        })
+        .transpose()?;
+    let ruleset = if fs_confines(&policy.fs) && {
+        #[cfg(test)]
+        {
+            projected.is_none()
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    } {
         Some(
             super::linux_landlock::build(policy, tmp_dir, Some(&program_abs), &retained.0)
                 .map_err(|reason| Degradation {
@@ -464,7 +519,7 @@ fn build_supervised_plan(
             reason: Some(reason),
         })?,
         #[cfg(test)]
-        projected: None,
+        projected,
     })
 }
 

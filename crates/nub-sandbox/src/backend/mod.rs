@@ -24,6 +24,8 @@ use crate::proxy::{EgressProxy, StaticDecider};
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::ffi::OsString;
+#[cfg(all(target_os = "linux", test))]
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -567,6 +569,10 @@ pub(crate) struct SessionResources {
     private_tmp: Option<PrivateTemp>,
     #[cfg(target_os = "linux")]
     retained_grants: linux::RetainedLinuxGrants,
+    /// A private integration-test-only projection. Production acquisition never
+    /// creates one and policy admission never selects this launch path.
+    #[cfg(all(target_os = "linux", test))]
+    projected: Option<linux_projection::ProjectedSession>,
     #[cfg(windows)]
     windows_leases: std::sync::Mutex<std::collections::BTreeMap<String, windows::WindowsLease>>,
     #[cfg(windows)]
@@ -599,6 +605,19 @@ impl Sandbox {
     }
 
     fn new_impl(policy: &SandboxPolicy, native_compat: bool) -> Result<Self, Degradation> {
+        Self::new_impl_with_projection(
+            policy,
+            native_compat,
+            #[cfg(all(target_os = "linux", test))]
+            false,
+        )
+    }
+
+    fn new_impl_with_projection(
+        policy: &SandboxPolicy,
+        native_compat: bool,
+        #[cfg(all(target_os = "linux", test))] projected: bool,
+    ) -> Result<Self, Degradation> {
         if native_compat && !cfg!(target_env = "msvc") {
             return Err(Degradation {
                 lost: vec!["native-compat".into()],
@@ -630,7 +649,16 @@ impl Sandbox {
         let proxy = start_session_proxy(&runtime_policy, runtime_brokers)?;
         let private_tmp = make_private_tmp(&runtime_policy)?;
         #[cfg(target_os = "linux")]
-        let retained_grants = linux::capture_retained_grants(&runtime_policy)?;
+        let retained_grants = {
+            #[cfg(test)]
+            if projected {
+                linux::RetainedLinuxGrants::empty()
+            } else {
+                linux::capture_retained_grants(&runtime_policy)?
+            }
+            #[cfg(not(test))]
+            linux::capture_retained_grants(&runtime_policy)?
+        };
         Ok(Self {
             resources: Arc::new(SessionResources {
                 policy: runtime_policy,
@@ -638,6 +666,8 @@ impl Sandbox {
                 private_tmp,
                 #[cfg(target_os = "linux")]
                 retained_grants,
+                #[cfg(all(target_os = "linux", test))]
+                projected: None,
                 #[cfg(windows)]
                 windows_leases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 #[cfg(windows)]
@@ -650,6 +680,42 @@ impl Sandbox {
     /// maintain a registry/cache of reusable sandboxes.
     pub fn acquire(policy: &SandboxPolicy) -> Result<Self, Degradation> {
         Self::new(policy)
+    }
+
+    /// Acquire the existing session resources plus a mounted projection for a
+    /// bounded Linux integration test. This remains private to the backend
+    /// test tree: public policy admission still selects only the production
+    /// Landlock/supervisor routes.
+    #[cfg(all(target_os = "linux", test))]
+    fn test_projected(policy: &SandboxPolicy, source: &Path) -> Result<Self, Degradation> {
+        let mut sandbox = Self::new_impl_with_projection(policy, false, true)?;
+        let projected = linux_projection::ProjectedSession::acquire(&policy.fs.rules, source)
+            .map_err(|error| Degradation {
+                lost: vec!["fs".into()],
+                reason: Some(format!("acquiring projected test session: {error}")),
+            })?;
+        Arc::get_mut(&mut sandbox.resources)
+            .expect("new sandbox owns its only session lease")
+            .projected = Some(projected);
+        Ok(sandbox)
+    }
+
+    #[cfg(all(target_os = "linux", test))]
+    fn test_projected_cleanup_observer(&self) -> Arc<std::sync::Mutex<Option<Result<(), String>>>> {
+        self.resources
+            .projected
+            .as_ref()
+            .expect("projected test session")
+            .cleanup_observer()
+    }
+
+    #[cfg(all(target_os = "linux", test))]
+    fn test_projected_staging_path(&self) -> &Path {
+        self.resources
+            .projected
+            .as_ref()
+            .expect("projected test session")
+            .staging_path()
     }
 
     /// Prepare one command under this session's immutable policy and retained resources.
@@ -1511,7 +1577,12 @@ fn prepare_with_resources(
     let redact_stdout = spec.redact_stdout;
     let redact_stderr = spec.redact_stderr;
     #[cfg(target_os = "linux")]
-    let linux_preflight = linux::preflight(policy, &spec)?;
+    let linux_preflight = linux::preflight(
+        policy,
+        &spec,
+        #[cfg(test)]
+        resources.projected.is_some(),
+    )?;
     // Linux raw host rules use the supervisor's parent proxy; catalog coarse
     // networking starts none. Windows retains TLS state at acquisition and binds
     // a separate parent proxy per command so cancellation cannot stop a sibling.
@@ -1562,6 +1633,8 @@ fn prepare_with_resources(
             token: proxy_token,
             ca_bundle,
         },
+        #[cfg(test)]
+        resources.projected.as_ref(),
     )?;
     #[cfg(target_os = "windows")]
     let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;

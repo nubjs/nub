@@ -20,12 +20,32 @@ fn rules(grants: &[(&str, FsAccess)]) -> FsRuleSet {
 }
 
 fn projection(root: &Path, grants: &[(&str, FsAccess)]) -> Projection {
+    projection_with_identity(root, grants, ProjectionIdentity::InNamespace)
+}
+
+fn projection_with_identity(
+    root: &Path,
+    grants: &[(&str, FsAccess)],
+    identity: ProjectionIdentity,
+) -> Projection {
     let root = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
         .open(root)
         .unwrap();
-    Projection::acquire(&rules(grants), root).unwrap()
+    Projection::new_with_identity(
+        Rules::compile(&rules(grants)).unwrap(),
+        Backing::new(root).unwrap(),
+        identity,
+    )
+    .unwrap()
+}
+
+fn parent_identity() -> ProjectionIdentity {
+    ProjectionIdentity::Parent {
+        host_uid: unsafe { libc::getuid() },
+        host_gid: unsafe { libc::getgid() },
+    }
 }
 
 #[test]
@@ -677,6 +697,173 @@ fn setattr_timestamp_conversion_preserves_pre_epoch_values() {
     .unwrap();
     assert_eq!((atime.tv_sec, atime.tv_nsec), (-1, 500_000_000));
     assert_eq!(mtime.tv_nsec, libc::UTIME_NOW);
+}
+
+#[test]
+fn parent_identity_maps_every_attribute_producer_to_protocol_zero() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("existing"), b"existing").unwrap();
+    let fs = projection_with_identity(
+        root.path(),
+        &[("/**", FsAccess::ReadWrite)],
+        parent_identity(),
+    );
+    let mut state = fs.state().unwrap();
+
+    let existing = state.lookup(ROOT, OsStr::new("existing")).unwrap();
+    assert_eq!((existing.uid, existing.gid), (0, 0));
+    let existing_ino = existing.ino.0;
+    assert_eq!(state.attr(existing_ino, None).unwrap().uid, 0);
+    let existing_handle = state.open(existing_ino, libc::O_RDONLY).unwrap();
+    assert_eq!(
+        state.attr(existing_ino, Some(existing_handle)).unwrap().gid,
+        0
+    );
+
+    let (created, _) = state
+        .create(ROOT, OsStr::new("created"), 0o600, 0, libc::O_RDWR)
+        .unwrap();
+    assert_eq!((created.uid, created.gid), (0, 0));
+    let directory = state
+        .mkdir(ROOT, OsStr::new("directory"), 0o700, 0)
+        .unwrap();
+    assert_eq!((directory.uid, directory.gid), (0, 0));
+    let link = state
+        .symlink(ROOT, OsStr::new("link"), Path::new("existing"))
+        .unwrap();
+    assert_eq!((link.uid, link.gid), (0, 0));
+    let hardlink = state
+        .link(existing_ino, ROOT, OsStr::new("hardlink"))
+        .unwrap();
+    assert_eq!((hardlink.uid, hardlink.gid), (0, 0));
+}
+
+#[test]
+fn parent_identity_returns_an_unmapped_protocol_identity_for_system_files() {
+    // This deliberately uses an identity different from the process so a
+    // normal host-owned system file exercises the one-ID-map overflow path.
+    // FUSE accepts the reply; Linux's `make_kuid` makes it invalid in the
+    // direct map and stat-like callers subsequently receive their configured
+    // overflow identity rather than an EOVERFLOW response.
+    let fs = projection_with_identity(
+        Path::new("/"),
+        &[("/usr/bin/env", FsAccess::Read)],
+        ProjectionIdentity::Parent {
+            host_uid: u32::MAX - 1,
+            host_gid: u32::MAX - 1,
+        },
+    );
+    let mut state = fs.state().unwrap();
+    let usr = lookup(&mut state, ROOT, "usr");
+    let bin = lookup(&mut state, usr, "bin");
+    let env = state.lookup(bin, OsStr::new("env")).unwrap();
+    assert_eq!(
+        (env.uid, env.gid),
+        (
+            ProjectionIdentity::UNMAPPED_ID,
+            ProjectionIdentity::UNMAPPED_ID
+        )
+    );
+    let handle = state.open(env.ino.0, libc::O_RDONLY).unwrap();
+    assert!(!state.read(env.ino.0, handle, 0, 1).unwrap().is_empty());
+}
+
+#[test]
+fn parent_identity_translates_only_zero_owner_requests_before_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("file");
+    std::fs::write(&file, b"data").unwrap();
+    let fs = projection_with_identity(
+        root.path(),
+        &[("/file", FsAccess::ReadWrite)],
+        parent_identity(),
+    );
+    let mut state = fs.state().unwrap();
+    let ino = lookup(&mut state, ROOT, "file");
+    let host_uid = unsafe { libc::getuid() };
+    let host_gid = unsafe { libc::getgid() };
+
+    state
+        .setattr(ino, None, Some(0), None, None, None, None, None)
+        .unwrap();
+    assert_eq!(std::fs::metadata(&file).unwrap().uid(), host_uid);
+    state
+        .setattr(ino, None, None, Some(0), None, None, None, None)
+        .unwrap();
+    assert_eq!(std::fs::metadata(&file).unwrap().gid(), host_gid);
+
+    let before = std::fs::metadata(&file).unwrap();
+    assert_errno(
+        state.setattr(
+            ino,
+            Some(0o600),
+            Some(1),
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+        ),
+        libc::EINVAL,
+    );
+    let after_uid = std::fs::metadata(&file).unwrap();
+    assert_eq!(after_uid.mode(), before.mode());
+    assert_eq!(
+        (after_uid.uid(), after_uid.gid()),
+        (before.uid(), before.gid())
+    );
+
+    assert_errno(
+        state.setattr(
+            ino,
+            Some(0o640),
+            Some(0),
+            Some(1),
+            None,
+            None,
+            None,
+            None,
+        ),
+        libc::EINVAL,
+    );
+    let after_gid = std::fs::metadata(&file).unwrap();
+    assert_eq!(after_gid.mode(), before.mode());
+    assert_eq!(
+        (after_gid.uid(), after_gid.gid()),
+        (before.uid(), before.gid())
+    );
+}
+
+#[test]
+fn in_namespace_identity_preserves_legacy_raw_owner_behavior() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("file");
+    std::fs::write(&file, b"data").unwrap();
+    let fs = projection(root.path(), &[("/file", FsAccess::ReadWrite)]);
+    let mut state = fs.state().unwrap();
+    let ino = state.lookup(ROOT, OsStr::new("file")).unwrap().ino.0;
+    let metadata = std::fs::metadata(&file).unwrap();
+    let attr = state.attr(ino, None).unwrap();
+    assert_eq!((attr.uid, attr.gid), (metadata.uid(), metadata.gid()));
+
+    state
+        .setattr(
+            ino,
+            None,
+            Some(metadata.uid()),
+            Some(metadata.gid()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        ProjectionIdentity::InNamespace
+            .incoming_owner(Some(42), Some(43))
+            .unwrap(),
+        (Some(42), Some(43))
+    );
 }
 
 #[test]

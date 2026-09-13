@@ -1,6 +1,9 @@
 //! Focused tests for the retained namespace-pair bootstrap contract.
 
-use super::namespace::{BootstrapFault, NamespacePair, Reply, decode_packet, receive_reply};
+use super::namespace::{
+    BootstrapFault, NamespacePair, Reply, UnmountResult, decode_packet, decode_packet_expected,
+    decode_unmount_packet, receive_reply,
+};
 use std::io;
 use std::os::fd::RawFd;
 use std::sync::mpsc;
@@ -46,6 +49,48 @@ fn namespace_packet_rejects_unknown_or_malformed_reply() {
     );
     assert_errno(
         decode_packet(&[b'X', b'P', 1, 0, 0, 0, 0, 0], 2),
+        libc::EPROTO,
+    );
+}
+
+#[test]
+fn projected_mount_packet_requires_all_six_descriptors() {
+    let packet = [b'N', b'P', 1, 0, 0, 0, 0, 0];
+    assert_eq!(
+        decode_packet_expected(&packet, 6, 6).unwrap(),
+        Reply::Success
+    );
+    assert_errno(decode_packet_expected(&packet, 5, 6), libc::EPROTO);
+    assert_errno(decode_packet_expected(&packet, 7, 6), libc::EPROTO);
+}
+
+#[test]
+fn namespace_cleanup_packet_requires_a_rights_free_success() {
+    let packet = [b'N', b'P', 1, 0, 0, 0, 0, 0];
+    assert_eq!(
+        decode_packet_expected(&packet, 0, 0).unwrap(),
+        Reply::Success
+    );
+    assert_errno(decode_packet_expected(&packet, 1, 0), libc::EPROTO);
+}
+
+#[test]
+fn forced_view_abort_distinguishes_vfs_busy_after_abort_from_pre_unmount_errors() {
+    assert_eq!(
+        decode_unmount_packet(&[b'N', b'P', 1, 0, 0, 0, 0, 0]).unwrap(),
+        UnmountResult::Unmounted
+    );
+    let busy = libc::EBUSY.to_ne_bytes();
+    assert_eq!(
+        decode_unmount_packet(&[b'N', b'P', 2, 1, busy[0], busy[1], busy[2], busy[3],]).unwrap(),
+        UnmountResult::ForceIssuedBusy
+    );
+    assert_errno(
+        decode_unmount_packet(&[b'N', b'P', 2, 0, busy[0], busy[1], busy[2], busy[3]]),
+        libc::EBUSY,
+    );
+    assert_errno(
+        decode_unmount_packet(&[b'N', b'P', 2, 1, 0, 0, 0, 0]),
         libc::EPROTO,
     );
 }

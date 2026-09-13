@@ -12,6 +12,8 @@ FILTER=backend::linux_projection_mount_tests::namespace_tests::mounted_projectio
 grep -Fx "$FILTER: test" "$EVIDENCE/tests.list"
 PAIR_FILTER=backend::linux_projection::namespace_tests::namespace_pair_reenters_after_bootstrap_exit_from_multithreaded_parent
 grep -Fx "$PAIR_FILTER: test" "$EVIDENCE/tests.list"
+SESSION_FILTER=backend::linux_projection::session_tests::projected_session_real_lifecycle_and_cleanup
+grep -Fx "$SESSION_FILTER: test" "$EVIDENCE/tests.list"
 sha256sum "$0" "$BASE_RUNNER" > "$EVIDENCE/namespace-instrument.txt"
 pair_rc=0
 timeout --kill-after=10s 30s "$BIN" "$PAIR_FILTER" --exact --ignored --nocapture --test-threads=1 > "$EVIDENCE/namespace-pair.log" 2>&1 || pair_rc=$?
@@ -21,10 +23,17 @@ rc=0
 timeout --kill-after=10s 180s "$BIN" "$FILTER" --exact --ignored --nocapture --test-threads=1 > "$EVIDENCE/namespace-mounted.log" 2>&1 || rc=$?
 cat "$EVIDENCE/namespace-mounted.log"
 printf 'namespace-mounted\t%s\t0\n' "$rc" >> "$EVIDENCE/results.tsv"
+session_rc=0
+timeout --kill-after=10s 120s "$BIN" "$SESSION_FILTER" --exact --ignored --nocapture --test-threads=1 > "$EVIDENCE/session-mounted.log" 2>&1 || session_rc=$?
+cat "$EVIDENCE/session-mounted.log"
+printf 'session-mounted\t%s\t0\n' "$session_rc" >> "$EVIDENCE/results.tsv"
 result=0
-if [ "$base_rc" -ne 0 ] || [ "$rc" -ne 0 ] || [ "$pair_rc" -ne 0 ]; then result=1; fi
+if [ "$base_rc" -ne 0 ] || [ "$rc" -ne 0 ] || [ "$pair_rc" -ne 0 ] || [ "$session_rc" -ne 0 ]; then result=1; fi
 for marker in PROJECTED_PREPARED_READY_STDIO_REAP_OK NAMESPACE_NATIVE_PROVIDER_NORMAL_UNMOUNT_OK 'NAMESPACE_CASE directory_exchange projected=true' 'NAMESPACE_CASE metadata projected=true'; do
   if ! grep -Fq "$marker" "$EVIDENCE/namespace-mounted.log"; then result=1; fi
 done
-printf 'NAMESPACE_VERTICAL_GATE_EXIT=%s BASE_EXIT=%s NAMESPACE_EXIT=%s PAIR_EXIT=%s\n' "$result" "$base_rc" "$rc" "$pair_rc"
+for marker in PROJECTED_SESSION_STARTUP_FAULT_CLEANUP_OK PROJECTED_SESSION_FAILED_CLEANUP_RETRY_OK PROJECTED_SESSION_PARENT_NETWORK_CONTROL_OK PROJECTED_SESSION_PREPARED_LEASE_STDIO_READY_REAP_OK; do
+  if ! grep -Fq "$marker" "$EVIDENCE/session-mounted.log"; then result=1; fi
+done
+printf 'NAMESPACE_VERTICAL_GATE_EXIT=%s BASE_EXIT=%s NAMESPACE_EXIT=%s PAIR_EXIT=%s SESSION_EXIT=%s\n' "$result" "$base_rc" "$rc" "$pair_rc" "$session_rc"
 exit "$result"

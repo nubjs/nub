@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  focused:
+  source-check:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -31,8 +31,10 @@ jobs:
           ls -l /dev/fuse >> projection-evidence/runner-prerequisites.txt 2>&1 || true
       - name: Installing the Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal
-      - name: Running the focused native and namespace gates
-        run: bash scripts/sandbox-linux-namespace-gate.sh "$PWD" "$PWD/projection-evidence" "$GITHUB_SHA" "$PWD/scripts/sandbox-linux-native-gate.sh"
+      # This runner refuses direct unprivileged UID maps. Compile and provider
+      # checks remain useful; mounted enforcement runs on a capable test host.
+      - name: Checking source without mounted enforcement
+        run: bash scripts/sandbox-linux-native-gate.sh "$PWD" "$PWD/projection-evidence" "$GITHUB_SHA" source-only
       - name: Preserving source and runtime evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

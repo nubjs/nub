@@ -28,6 +28,66 @@ const MAX_DIRECTORY_ENTRIES: usize = 65_536;
 const MAX_IO: usize = 1024 * 1024;
 const TTL: Duration = Duration::ZERO;
 
+/// The user-ID domain carried by this projection's FUSE protocol.
+///
+/// A fixture that serves inside its private user namespace keeps the historical
+/// identity-preserving behavior.  A parent-owned server, by contrast, runs in
+/// the host namespace while its FUSE connection belongs to a one-ID child user
+/// namespace.  Its protocol ID zero is therefore the captured host launcher,
+/// not host root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ProjectionIdentity {
+    /// FUSE protocol IDs already name the backing filesystem's IDs.
+    InNamespace,
+    /// The connection's namespace maps only protocol ID zero to these backing
+    /// IDs.  Every other backing identity is deliberately unrepresentable.
+    Parent { host_uid: u32, host_gid: u32 },
+}
+
+impl ProjectionIdentity {
+    // FUSE_INVALID_UIDGID.  This value is intentionally not a mapped protocol
+    // identity: the kernel turns its invalid one-ID-map translation into the
+    // user namespace's configured overflow identity for stat-like results.
+    const UNMAPPED_ID: u32 = u32::MAX;
+
+    fn outgoing_uid(self, uid: u32) -> u32 {
+        match self {
+            Self::InNamespace => uid,
+            Self::Parent { host_uid, .. } if uid == host_uid => 0,
+            Self::Parent { .. } => Self::UNMAPPED_ID,
+        }
+    }
+
+    fn outgoing_gid(self, gid: u32) -> u32 {
+        match self {
+            Self::InNamespace => gid,
+            Self::Parent { host_gid, .. } if gid == host_gid => 0,
+            Self::Parent { .. } => Self::UNMAPPED_ID,
+        }
+    }
+
+    fn incoming_owner(
+        self,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> io::Result<(Option<u32>, Option<u32>)> {
+        let map_uid = |uid| match self {
+            Self::InNamespace => Ok(uid),
+            Self::Parent { host_uid, .. } if uid == 0 => Ok(host_uid),
+            Self::Parent { .. } => Err(error(libc::EINVAL)),
+        };
+        let map_gid = |gid| match self {
+            Self::InNamespace => Ok(gid),
+            Self::Parent { host_gid, .. } if gid == 0 => Ok(host_gid),
+            Self::Parent { .. } => Err(error(libc::EINVAL)),
+        };
+
+        // Translate both fields before opening the target so an unmapped
+        // counterpart can never leave a partial chown behind.
+        Ok((uid.map(map_uid).transpose()?, gid.map(map_gid).transpose()?))
+    }
+}
+
 // FUSE forwards kernel flags, not libc's user API values. On 64-bit glibc,
 // O_LARGEFILE is zero even though the kernel sends its architecture-specific bit.
 #[cfg(target_arch = "x86_64")]
@@ -93,6 +153,7 @@ enum HandleKind {
 struct State {
     backing: Backing,
     rules: Rules,
+    identity: ProjectionIdentity,
     nodes: HashMap<u64, Inode>,
     paths: BTreeMap<PathBuf, u64>,
     handles: HashMap<u64, Handle>,
@@ -114,6 +175,17 @@ pub(crate) struct Projection(Arc<Mutex<State>>);
 
 impl Projection {
     pub(super) fn new(rules: Rules, backing: Backing) -> io::Result<Self> {
+        Self::new_with_identity(rules, backing, ProjectionIdentity::InNamespace)
+    }
+
+    /// Create a projection with an explicit FUSE protocol identity domain.
+    /// Parent-owned service acquisition must pass `ProjectionIdentity::Parent`;
+    /// retaining `new` preserves the old in-namespace fixture behavior.
+    pub(super) fn new_with_identity(
+        rules: Rules,
+        backing: Backing,
+        identity: ProjectionIdentity,
+    ) -> io::Result<Self> {
         require_metadata_support()?;
         let root = Arc::new(Node {
             path: PathBuf::from("/"),
@@ -122,6 +194,7 @@ impl Projection {
         Ok(Self(Arc::new(Mutex::new(State {
             backing,
             rules,
+            identity,
             nodes: HashMap::from([(
                 ROOT,
                 Inode {
@@ -270,7 +343,7 @@ impl State {
         file_kind(&meta)?;
         let access = self.rules.access(&path);
         let ino = self.intern(path, pin)?;
-        attributes(ino, &meta, access)
+        attributes(ino, &meta, access, self.identity)
     }
 
     fn attr(&self, ino: u64, handle: Option<u64>) -> io::Result<FileAttr> {
@@ -286,7 +359,7 @@ impl State {
             let meta = self.current(&node)?.metadata()?;
             (node, meta)
         };
-        attributes(ino, &meta, self.rules.access(&node.path))
+        attributes(ino, &meta, self.rules.access(&node.path), self.identity)
     }
 
     fn insert_handle(&mut self, handle: Handle) -> io::Result<u64> {
@@ -344,7 +417,7 @@ impl State {
             .access(&path)
             .ok_or_else(|| error(libc::EACCES))?;
         let ino = self.intern(path, pin)?;
-        attributes(ino, &meta, Some(access))
+        attributes(ino, &meta, Some(access), self.identity)
     }
 
     fn open(&mut self, ino: u64, flags: i32) -> io::Result<u64> {
@@ -664,6 +737,7 @@ impl State {
         mtime: Option<TimeOrNow>,
         handle: Option<u64>,
     ) -> io::Result<FileAttr> {
+        let (uid, gid) = self.identity.incoming_owner(uid, gid)?;
         if mode.is_some() || uid.is_some() || gid.is_some() || atime.is_some() || mtime.is_some() {
             let target = self.metadata_target(ino, handle)?;
             // chown can clear set-id bits, so apply the requested mode after it.
@@ -828,7 +902,12 @@ fn requested_times(
     ])
 }
 
-fn attributes(ino: u64, meta: &Metadata, access: Option<FsAccess>) -> io::Result<FileAttr> {
+fn attributes(
+    ino: u64,
+    meta: &Metadata,
+    access: Option<FsAccess>,
+    identity: ProjectionIdentity,
+) -> io::Result<FileAttr> {
     let kind = file_kind(meta)?;
     let mask = match access {
         Some(FsAccess::ReadWrite) => 0o777,
@@ -846,8 +925,8 @@ fn attributes(ino: u64, meta: &Metadata, access: Option<FsAccess>) -> io::Result
         kind,
         perm: (meta.mode() & mask) as u16,
         nlink: meta.nlink().min(u64::from(u32::MAX)) as u32,
-        uid: meta.uid(),
-        gid: meta.gid(),
+        uid: identity.outgoing_uid(meta.uid()),
+        gid: identity.outgoing_gid(meta.gid()),
         rdev: 0,
         blksize: meta.blksize().min(u64::from(u32::MAX)) as u32,
         flags: 0,

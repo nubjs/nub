@@ -10,6 +10,10 @@ mod filesystem;
 mod namespace;
 mod native_open;
 mod rules;
+mod session;
+
+#[cfg(test)]
+mod session_tests;
 
 #[cfg(test)]
 #[path = "linux_projection/namespace_tests.rs"]
@@ -27,6 +31,7 @@ pub(crate) use namespace::NamespacePair;
 pub(crate) use native_open::{
     NativeOpenClient, NativeOpenLiveness, NativeOpenRequest, NativeOpenService,
 };
+pub(crate) use session::ProjectedSession;
 
 impl Projection {
     /// Acquire a fixed resolved policy and a backing root owned by the provider.

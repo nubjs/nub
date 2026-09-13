@@ -362,6 +362,13 @@ pub(crate) struct LandlockGrant {
 #[derive(Debug)]
 pub(crate) struct RetainedPolicyGrants(Vec<RetainedPolicyGrant>);
 
+#[cfg(test)]
+impl RetainedPolicyGrants {
+    pub(super) fn empty() -> Self {
+        Self(Vec::new())
+    }
+}
+
 #[derive(Debug)]
 struct RetainedPolicyGrant {
     grant: LandlockGrant,
