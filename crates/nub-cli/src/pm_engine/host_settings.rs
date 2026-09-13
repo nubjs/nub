@@ -6,8 +6,8 @@
 //! Its sources are the ones a nub project has always had, lowest precedence
 //! first, in the order the previous engine resolved them:
 //!
-//! 1. nub's defaults: the global virtual store outside CI, and the store and
-//!    cache under nub's own cache directory;
+//! 1. nub's defaults: the global virtual store outside CI, a strict maturity
+//!    floor, and the store and cache under nub's own cache directory;
 //! 2. `.npmrc`, the user's file before the project's;
 //! 3. `nub.jsonc`'s `install` block, the curated keys before `install.settings`;
 //! 4. `npm_config_*` variables, then `NUB_CACHE_DIR`.
@@ -265,6 +265,28 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     {
         merged.insert("enableGlobalVirtualStore".to_owned(), Value::Bool(true));
     }
+    // The engine already applies a 24-hour maturity cutoff of its own, so the
+    // minutes need no default here — but it applies that built-in one
+    // NON-strictly, falling back to an immature version whenever no mature one
+    // satisfies a range. It tells the two apart by whether `minimumReleaseAge`
+    // was explicitly configured, which for a project that has configured
+    // nothing it was not. Nub documents a real floor rather than an advisory
+    // one, so the strict half is pinned here and the minutes are left to the
+    // engine. A project that sets either half keeps what it set, and
+    // `minimumReleaseAge: 0` still disables both.
+    merged
+        .entry("minimumReleaseAgeStrict")
+        .or_insert(Value::Bool(true));
+    // The other half of the same floor: a version the registry publishes no
+    // date for. The engine admits it with a warning, so that a registry which
+    // strips `time` cannot lock a user out. Nub documents the opposite —
+    // "Blocked", under its own error — and documents the two ways out
+    // (`minimumReleaseAgeExclude`, or turning the window off), so a package
+    // nothing can date must not pass a gate that exists to date it. Also
+    // `or_insert`: a project that wants the engine's answer says so.
+    merged
+        .entry("minimumReleaseAgeIgnoreMissingTime")
+        .or_insert(Value::Bool(false));
     // The engine's update notifier checks the registry for a newer pnpm and
     // tells the user how to install it. nub ships the engine and updates it
     // through `nub upgrade`, so the advice would name a release nub does not
@@ -866,6 +888,53 @@ mod tests {
             merge(&opted_out).unwrap()["enableGlobalVirtualStore"],
             json!(false)
         );
+    }
+
+    /// A project that configures nothing still gets the maturity cutoff applied
+    /// STRICTLY, which is the half the engine's own built-in default does not
+    /// give.
+    ///
+    /// The engine defaults the cutoff to 24 hours and nub agrees with the
+    /// number, so this pins only the strictness. Left alone the engine treats
+    /// its own built-in cutoff as advisory — no mature version in range means
+    /// an immature one is installed rather than the install stopping — and it
+    /// decides that by whether the cutoff was configured explicitly, which here
+    /// it was not. The minutes are deliberately NOT asserted: they are the
+    /// engine's to choose, and pinning them here would turn a change in its
+    /// default into a failure of nub's.
+    #[test]
+    fn an_unconfigured_project_gets_a_strict_release_age_floor() {
+        let plain = InstallConfig::default();
+        assert_eq!(
+            merge(&sources(&plain)).unwrap()["minimumReleaseAgeStrict"],
+            json!(true)
+        );
+        assert!(
+            !merge(&sources(&plain))
+                .unwrap()
+                .contains_key("minimumReleaseAge"),
+            "the cutoff itself stays the engine's own default"
+        );
+
+        // The other half: a version the registry publishes no date for is
+        // blocked rather than admitted with a warning, which is what nub's
+        // own error for that case is for.
+        assert_eq!(
+            merge(&sources(&plain)).unwrap()["minimumReleaseAgeIgnoreMissingTime"],
+            json!(false)
+        );
+
+        // Saying so explicitly is what a project does to get the engine's
+        // advisory behaviour back, so neither default may outrank it.
+        let mut relaxed = sources(&plain);
+        relaxed.npmrc = vec![(
+            PathBuf::from("/app/.npmrc"),
+            "minimum-release-age-strict=false\nminimum-release-age-ignore-missing-time=true\n"
+                .to_owned(),
+        )];
+        let relaxed = merge(&relaxed).unwrap();
+        assert_eq!(relaxed["minimumReleaseAgeStrict"], json!(false));
+        assert_eq!(relaxed["minimumReleaseAgeIgnoreMissingTime"], json!(true));
     }
 
     #[test]
