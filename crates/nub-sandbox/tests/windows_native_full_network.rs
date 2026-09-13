@@ -112,16 +112,17 @@ fn policy(
     result
 }
 
-fn command(fixture: &Path, case: &str) -> CommandSpec {
+fn command(root: &Path, fixture: &Path, case: &str) -> CommandSpec {
     CommandSpec::new(fixture)
+        .cwd(root.join("project"))
         .args([case])
         .redact_stdout(true)
         .redact_stderr(true)
 }
 
-fn output(session: &Sandbox, fixture: &Path, case: &str) -> std::process::Output {
+fn output(session: &Sandbox, root: &Path, fixture: &Path, case: &str) -> std::process::Output {
     let prepared = session
-        .prepare(command(fixture, case))
+        .prepare(command(root, fixture, case))
         .expect("fixture prepares");
     assert!(prepared.degradation.is_full(), "{:?}", prepared.degradation);
     tool_output::output(prepared)
@@ -324,7 +325,7 @@ fn positive_client(root: &Path, fixture: &Path, case: &str, udp: bool, connectio
         let policy = policy(root, fixture, json!(true), Some(&address), None);
         let session = Sandbox::with_windows_native_compat(&policy).unwrap();
         let peer = udp_peer(peer);
-        let result = output(&session, fixture, case);
+        let result = output(&session, root, fixture, case);
         peer.join();
         assert_positive_client(&result, case);
     } else {
@@ -340,7 +341,7 @@ fn positive_client(root: &Path, fixture: &Path, case: &str, udp: bool, connectio
         let policy = policy(root, fixture, json!(true), Some(&address), None);
         let session = Sandbox::with_windows_native_compat(&policy).unwrap();
         let peer = tcp_peer(peer, connections);
-        let result = output(&session, fixture, case);
+        let result = output(&session, root, fixture, case);
         peer.join();
         assert_positive_client(&result, case);
         if case == "descendant4" {
@@ -366,10 +367,10 @@ fn negative_client(
         Sandbox::new(&policy)
     }
     .expect("negative session");
-    let fs = output(&session, fixture, "fs-canary");
+    let fs = output(&session, root, fixture, "fs-canary");
     assert!(fs.status.success(), "{net_label} filesystem canary: {fs:?}");
     assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5");
-    let result = output(&session, fixture, "tcp4");
+    let result = output(&session, root, fixture, "tcp4");
     assert!(
         !result.status.success(),
         "{net_label} unexpectedly succeeded: {result:?}"
@@ -590,7 +591,7 @@ fn listener_case(root: &Path, fixture: &Path, case: &str) {
     let policy = policy(root, fixture, json!(true), None, None);
     let session = Sandbox::with_windows_native_compat(&policy).unwrap();
     let prepared = session
-        .prepare(command(fixture, case))
+        .prepare(command(root, fixture, case))
         .expect("listener prepares");
     let native = listener_output(ListenerChild::Confined(
         prepared.spawn().expect("listener launches"),
@@ -654,7 +655,7 @@ fn native_adapter_full_network_dns_opt_in() {
         let native_policy = policy(root.path(), &fixture, json!(true), None, Some(&native_name));
         let native = Sandbox::with_windows_native_compat(&native_policy)
             .expect("native full-network DNS session");
-        let adapted = output(&native, &fixture, api);
+        let adapted = output(&native, root.path(), &fixture, api);
         assert!(
             adapted.status.success(),
             "adapter {api} failed for {native_name}: {adapted:?}"
@@ -669,7 +670,7 @@ fn native_adapter_full_network_dns_opt_in() {
             Some(&fresh_dns_name(api, "raw")),
         );
         let raw = Sandbox::new(&raw_policy).expect("raw DNS session");
-        let observed = output(&raw, &fixture, api);
+        let observed = output(&raw, root.path(), &fixture, api);
         eprintln!(
             "native-full-network raw DNS api={api} status={:?} stdout={} stderr={}",
             observed.status,
@@ -709,7 +710,7 @@ fn owner_drop_case(net: serde_json::Value, label: &str) {
     let policy = policy(root.path(), &fixture, net, None, None);
     let session = Sandbox::with_windows_native_compat(&policy).unwrap();
     let child = session
-        .prepare(command(&fixture, "owner-hold4"))
+        .prepare(command(root.path(), &fixture, "owner-hold4"))
         .unwrap()
         .spawn()
         .unwrap();
@@ -748,7 +749,7 @@ fn native_adapter_full_network_has_peer_oracles_and_retained_policy_separation()
 
     let token_policy = policy(root.path(), &fixture, json!(true), None, None);
     let token = Sandbox::with_windows_native_compat(&token_policy).unwrap();
-    let token = output(&token, &fixture, "token-attest");
+    let token = output(&token, root.path(), &fixture, "token-attest");
     assert!(
         token.status.success(),
         "native root token attestation failed: {token:?}"
@@ -767,7 +768,7 @@ fn native_adapter_full_network_has_peer_oracles_and_retained_policy_separation()
     listener_case(root.path(), &fixture, "acceptex4");
     let fs_policy = policy(root.path(), &fixture, json!(true), None, None);
     let native = Sandbox::with_windows_native_compat(&fs_policy).unwrap();
-    let fs = output(&native, &fixture, "fs-canary");
+    let fs = output(&native, root.path(), &fixture, "fs-canary");
     assert!(fs.status.success());
     assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5");
     drop(native);
