@@ -585,7 +585,7 @@ fn npmrc_files(root: &Path) -> Vec<(PathBuf, String)> {
 
 /// The directory whose `package.json` declares the workspace containing
 /// `start_dir`, found the way the engine finds it, or `start_dir` itself.
-fn workspace_root(start_dir: &Path) -> PathBuf {
+pub(crate) fn workspace_root(start_dir: &Path) -> PathBuf {
     start_dir
         .ancestors()
         .find(|dir| declares_workspace(&read_manifest(dir)))

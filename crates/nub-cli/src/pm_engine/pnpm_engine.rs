@@ -231,6 +231,7 @@ fn profile(selection: Selection, cwd: &Path) -> Result<Embedder> {
                 _ => Vec::new(),
             });
             publish_host_settings(host_settings::resolve(cwd, &install)?);
+            warn_about_a_stray_workspace_yaml(cwd);
             Embedder {
                 workspace_settings: Some(host_workspace_settings),
                 compat_package_extensions: Some(host_compat_rules()),
@@ -238,6 +239,31 @@ fn profile(selection: Selection, cwd: &Path) -> Result<Embedder> {
             }
         }
     })
+}
+
+/// Say so when a nub project still carries a `pnpm-workspace.yaml`.
+///
+/// Never read and never silent. The file gets there by a branch merge or a
+/// copied tutorial, and under nub's own identity the settings come from
+/// `nub.jsonc` instead — so a project whose author believes that file is
+/// configuring the install would otherwise get no sign that it is inert.
+/// Both ways out are named, because which one is right is the project's
+/// call and not nub's.
+///
+/// Anchored at the root the settings themselves resolve against, so a
+/// command run in a workspace member reports the file once, in the same
+/// words, rather than missing it. Once per process, which is once per
+/// command: this runs where the identity is decided.
+fn warn_about_a_stray_workspace_yaml(cwd: &Path) {
+    if host_settings::workspace_root(cwd)
+        .join("pnpm-workspace.yaml")
+        .is_file()
+    {
+        eprintln!(
+            "nub: pnpm-workspace.yaml is not read under nub identity — migrate it \
+             (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`)."
+        );
+    }
 }
 
 /// Rebrand a rendered engine report for nub's users.

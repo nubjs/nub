@@ -54,17 +54,33 @@ pub(crate) fn detect(start_dir: &Path) -> ProjectIdentity {
 /// `pnpm-lock.yaml` and a `nub.lock` is a project mid-migration, and until
 /// the migration finishes the incumbent is still pnpm.
 fn identity_of_dir(dir: &Path) -> Option<ProjectIdentity> {
+    let declared = declared_package_manager(dir);
+    // A project that names NUB as its owner is nub's, whatever pnpm-named
+    // file is lying beside it. That file is an artifact — `pm use nub`
+    // leaves one behind, and so does adding the declaration by hand — and
+    // nub already answers it with a warning naming the file unread and the
+    // two ways to resolve it. Reading the artifact instead refused the
+    // project outright, in the engine's own words: `This project is
+    // configured to use nub. pnpm cannot provide nub.`
+    //
+    // Only that way round. A declaration naming anything ELSE keeps the
+    // files ahead of it: npm, yarn and bun confer no identity at all now,
+    // so a foreign name is no statement of ownership, while a real
+    // `pnpm-lock.yaml` beside it still is.
+    if declared.as_deref() == Some("nub") {
+        return Some(ProjectIdentity::Nub);
+    }
     if dir.join("pnpm-lock.yaml").exists() || dir.join("pnpm-workspace.yaml").exists() {
         return Some(ProjectIdentity::Pnpm);
     }
-    match declared_package_manager(dir) {
-        Some(name) if name == "pnpm" => return Some(ProjectIdentity::Pnpm),
-        Some(_) => return Some(ProjectIdentity::Nub),
-        None => {}
+    match declared {
+        Some(name) if name == "pnpm" => Some(ProjectIdentity::Pnpm),
+        Some(_) => Some(ProjectIdentity::Nub),
+        None => dir
+            .join("nub.lock")
+            .exists()
+            .then_some(ProjectIdentity::Nub),
     }
-    dir.join("nub.lock")
-        .exists()
-        .then_some(ProjectIdentity::Nub)
 }
 
 /// The package manager `dir`'s manifest names, from `packageManager` or
