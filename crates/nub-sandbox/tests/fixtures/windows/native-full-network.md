@@ -29,10 +29,10 @@ compatibility, or an adapter diagnostic failure is a failure, never success.
 | `acceptex4` | Child posts `AcceptEx`, announces its listener, and waits through an IOCP completion. |
 | `concurrent4` | Twelve simultaneous TCP round trips; each completion is required. |
 | `descendant4` | Root starts a normal descendant; the descendant attests its own AppContainer token then performs an owned TCP round trip. |
-| `token-attest` | Root attests its own AppContainer token, one internetClient capability, and no Administrators membership. |
+| `token-attest` | Root attests its own AppContainer token, zero capabilities, and no Administrators membership. |
 | `fs-canary` | The ungranted parent-created file cannot be opened for either read or write. |
 
-The fixture never asks about a helper's token or rights. `FULL_NETWORK_TOKEN` is read only from the running fixture process's primary token. The root and normal-descendant native paths must report `appcontainer=1:capabilities=1:admin=0`. The DNS gate uses a fresh, fixed-width nonce label per API and mode, checks that the returned A records actually include `1.1.1.1`, and logs raw zero-capability observations without turning them into a denial assertion.
+The fixture never asks about a helper's token or rights. `FULL_NETWORK_TOKEN` reads the running fixture process's primary token and checks Administrators membership through its current effective token. The root and normal-descendant native paths must report `appcontainer=1:capabilities=0:admin=0`. The DNS gate uses a fresh, fixed-width nonce label per API and mode, checks that the returned A records actually include `1.1.1.1`, and logs raw zero-capability observations without turning them into a denial assertion.
 
 ## Deliberate boundary
 
