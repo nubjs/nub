@@ -30,6 +30,9 @@ struct Payload {
     DWORD package_sid[SECURITY_MAX_SID_SIZE / sizeof(DWORD)];
     BOOL identities_captured;
     wchar_t socket_broker[128];
+    // CreateFile resolves the AppContainer's LOCAL alias, but the saturated
+    // WaitNamedPipe path must name the host-created session/package instance.
+    wchar_t socket_wait_name[256];
     DWORD socket_broker_pid;
     BOOL socket_diagnostics;
     uint64_t socket_name_fingerprint;
@@ -110,6 +113,11 @@ extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory,
     Payload state = {};
     if (socket_broker) {
         if (wcscpy_s(state.socket_broker, socket_broker)) return ERROR_INVALID_NAME;
+        DWORD session = 0;
+        if (!capture_identities(process, state, &session)) return GetLastError();
+        DWORD error = nub_sandbox::socket_broker::server_name(
+            socket_broker, session, state.package_sid, state.socket_wait_name);
+        if (error) return error;
         state.socket_broker_pid = GetCurrentProcessId();
         state.socket_diagnostics = nub_sandbox::socket_broker::diagnostics_enabled();
         state.socket_name_fingerprint = nub_sandbox::socket_broker::name_fingerprint(socket_broker);
@@ -236,7 +244,7 @@ static SOCKET broker_socket(int family, int type, int protocol, DWORD flags) {
         if (pipe != INVALID_HANDLE_VALUE || pipe_error != ERROR_PIPE_BUSY) break;
         ULONGLONG now = GetTickCount64();
         if (now >= deadline) { stage = Stage::PipeWait; pipe_error = ERROR_TIMEOUT; break; }
-        if (!WaitNamedPipeW(state.socket_broker, DWORD(deadline - now))) {
+        if (!WaitNamedPipeW(state.socket_wait_name, DWORD(deadline - now))) {
             stage = Stage::PipeWait;
             pipe_error = GetLastError();
             break;
