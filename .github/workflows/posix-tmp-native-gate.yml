@@ -1,0 +1,79 @@
+name: POSIX tmp-grant native gate
+
+on:
+  push:
+    branches: [posix-tmp-native-gate-a190]
+    paths:
+      - crates/nub-sandbox/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/posix-tmp-native-gate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            expected_arch: x86_64
+          - os: macos-14
+            expected_arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      SOURCE_COMMIT: a19062ef57acab0d4366bdfd422e5d8856ea5c74
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+          
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: posix-tmp-native-gate
+      - name: Binding source and runner identity
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          test "$(git rev-parse "$SOURCE_COMMIT")" = "$SOURCE_COMMIT"
+          git diff --exit-code "$SOURCE_COMMIT" -- crates/nub-sandbox Cargo.toml Cargo.lock
+          actual_arch="$(uname -m)"
+          case "$actual_arch" in arm64|aarch64) normalized_arch=arm64 ;; x86_64|amd64) normalized_arch=x86_64 ;; *) normalized_arch="$actual_arch" ;; esac
+          test "$normalized_arch" = "${{ matrix.expected_arch }}"
+          {
+            printf 'source_commit=%s\n' "$SOURCE_COMMIT"
+            printf 'probe_head=%s\n' "$(git rev-parse HEAD)"
+            git status --short
+            uname -a
+            rustc -Vv
+            cargo -V
+            printf 'actual_arch=%s\nnormalized_arch=%s\nexpected_arch=%s\n' "$actual_arch" "$normalized_arch" "${{ matrix.expected_arch }}"
+          } > reports/environment.txt
+      - name: Compiling nub-sandbox library
+        run: |
+          set -euo pipefail
+          cargo check --locked -p nub-sandbox --lib > reports/library-compile.log 2>&1
+      - name: Running tmp-grant composition fixture
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          cargo test --locked -p nub-sandbox --test tmp_grant_composition -- --nocapture --test-threads=1 2>&1 | tee reports/tmp-grant-composition.log
+          test -x "$(find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f -name 'tmp_grant_composition-*' -perm -111 -print -quit)"
+          binary="$(find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f -name 'tmp_grant_composition-*' -perm -111 -print -quit)"
+          {
+            printf 'test_binary=%s\n' "$binary"
+            sha256sum "$binary" 2>/dev/null || shasum -a 256 "$binary"
+            grep -E 'running [0-9]+ tests|test result:' reports/tmp-grant-composition.log
+          } > reports/test-binary-and-count.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: posix-tmp-native-${{ matrix.os }}
+          path: reports
+          retention-days: 14
