@@ -490,10 +490,7 @@ fn pnpmfile_honored_under_pnpm_incumbent_without_warning() {
             // than a label — it says to fetch that pnpm and hand the command
             // to it — so the pin made this fixture measure delegation and
             // never reach the pnpmfile it is named for.
-            (
-                "package.json",
-                r#"{"name":"app","version":"1.0.0"}"#,
-            ),
+            ("package.json", r#"{"name":"app","version":"1.0.0"}"#),
             ("pnpm-lock.yaml", EMPTY_LOCK),
             (".pnpmfile.cjs", hook),
         ],
