@@ -1,8 +1,9 @@
 //! Test-only native-file delivery through the actual projected kernel namespace.
-use super::super::linux_projection::{NativeOpenClient, NativeOpenRequest};
+use super::super::linux_projection::{NativeOpenClient, NativeOpenLiveness, NativeOpenRequest};
 use super::*;
 use std::fs::File;
 use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 pub(crate) struct ProjectedLaunch {
     pub root: CString,
@@ -112,6 +113,20 @@ fn is_open(nr: libc::c_long) -> bool {
             false
         }
     }
+}
+
+/// The resolver outlives this supervisor turn while a native-open job is queued. Retain a
+/// separate listener descriptor so the worker never observes a reused caller fd after the
+/// supervisor starts closing down.
+fn worker_liveness(nfd: RawFd, id: u64) -> io::Result<NativeOpenLiveness> {
+    let copy = unsafe { libc::fcntl(nfd, libc::F_DUPFD_CLOEXEC, 3) };
+    if copy < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let listener = unsafe { OwnedFd::from_raw_fd(copy) };
+    Ok(Box::new(move || {
+        notification_is_live(listener.as_raw_fd(), id)
+    }))
 }
 
 fn scalar_path_only(req: &SeccompNotif) -> bool {
@@ -312,8 +327,10 @@ pub(super) fn handle(
         if !notification_is_live(nfd, req.id) {
             return Err(io::Error::from_raw_os_error(libc::ECANCELED));
         }
+        let liveness = worker_liveness(nfd, req.id)?;
         let pending = client.submit_cancellable(
             request,
+            liveness,
             || control.cancelled() || !notification_is_live(nfd, req.id),
             |capacity| control.wait(capacity, libc::POLLIN, None),
         )?;

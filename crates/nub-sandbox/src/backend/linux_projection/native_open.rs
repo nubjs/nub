@@ -41,6 +41,9 @@ pub(crate) struct NativeOpenRequest {
     pub umask: u32,
 }
 
+/// A one-shot check made by the resolver immediately before it opens a queued request.
+pub(crate) type NativeOpenLiveness = Box<dyn FnOnce() -> bool + Send>;
+
 #[derive(Default)]
 struct Counters {
     tid: AtomicU32,
@@ -279,6 +282,7 @@ struct Job {
     result: mpsc::SyncSender<io::Result<File>>,
     ready: File,
     cancelled: Arc<AtomicBool>,
+    liveness: NativeOpenLiveness,
     permit: QueuePermit,
 }
 
@@ -343,7 +347,7 @@ impl NativeOpenClient {
             .capacity
             .try_acquire()?
             .ok_or_else(|| error(libc::EAGAIN))?;
-        self.submit_permitted(request, permit)
+        self.submit_permitted(request, Box::new(|| true), permit)
     }
 
     /// Submit after bounded queue admission. `wait` must wait for the returned descriptor and
@@ -351,6 +355,7 @@ impl NativeOpenClient {
     pub(crate) fn submit_cancellable<C, W>(
         &self,
         request: NativeOpenRequest,
+        liveness: NativeOpenLiveness,
         mut cancelled: C,
         mut wait: W,
     ) -> io::Result<NativePending>
@@ -379,7 +384,7 @@ impl NativeOpenClient {
         if cancelled() {
             return Err(error(libc::ECANCELED));
         }
-        self.submit_permitted(request, permit)
+        self.submit_permitted(request, liveness, permit)
     }
 
     fn validate_request(&self, request: &NativeOpenRequest) -> io::Result<()> {
@@ -392,6 +397,7 @@ impl NativeOpenClient {
     fn submit_permitted(
         &self,
         request: NativeOpenRequest,
+        liveness: NativeOpenLiveness,
         permit: QueuePermit,
     ) -> io::Result<NativePending> {
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
@@ -408,6 +414,7 @@ impl NativeOpenClient {
             result: send,
             ready: ready.try_clone()?,
             cancelled: Arc::clone(&cancelled),
+            liveness,
             permit,
         };
         self.sender
@@ -551,6 +558,7 @@ impl NativeOpenService {
                         result,
                         ready,
                         cancelled,
+                        liveness,
                         permit,
                     } = job;
                     // The receiver has removed this job from the one-slot channel. Return its
@@ -558,7 +566,9 @@ impl NativeOpenService {
                     drop(permit);
                     #[cfg(test)]
                     wait_for_gate(&worker_gate, request.path.as_c_str());
-                    let opened = if cancelled.load(Ordering::Acquire) {
+                    // This rejects a notification invalidated while queued; the following
+                    // openat cannot be made atomic with the kernel validity query.
+                    let opened = if !worker_may_open(&cancelled, liveness) {
                         Err(error(libc::ECANCELED))
                     } else {
                         open_projected(&projection, &request, &worker_counters)
@@ -722,6 +732,10 @@ fn open_projected(
     Ok(exported)
 }
 
+fn worker_may_open(cancelled: &AtomicBool, liveness: NativeOpenLiveness) -> bool {
+    !cancelled.load(Ordering::Acquire) && liveness()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,6 +777,7 @@ mod tests {
         let mut checks = 0;
         let error = match client.submit_cancellable(
             request(),
+            Box::new(|| true),
             || {
                 checks += 1;
                 checks == 2
@@ -774,6 +789,12 @@ mod tests {
         };
         assert_eq!(error.raw_os_error(), Some(libc::ECANCELED));
         assert!(capacity.try_acquire().unwrap().is_some());
+    }
+
+    #[test]
+    fn stale_queued_job_is_not_eligible_to_open() {
+        let cancelled = AtomicBool::new(false);
+        assert!(!worker_may_open(&cancelled, Box::new(|| false)));
     }
 
     #[test]
