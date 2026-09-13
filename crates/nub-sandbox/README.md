@@ -25,6 +25,13 @@ The filesystem boolean `false` grants no authored paths; `true` requests unrestr
 {"fs": {"./": "r", "./output": "rw", "$tmp": "rw"}, "net": false}
 ```
 
+Preparation currently rejects these policies rather than dropping the requested grants:
+
+| Policy | Backend limitation |
+| --- | --- |
+| `{"fs":true,"net":false}` | Windows cannot combine unrestricted filesystem access with restricted networking. `{"fs":true}` has the same limitation because an omitted `net` axis is denied. |
+| `{"fs":{"./*.txt":"r"}}` | Linux and Windows cannot enforce embedded read-glob grants. A literal directory grant covers the whole directory and is a different policy. |
+
 | Convenience | Meaning | Example |
 | --- | --- | --- |
 | `$home`, `~` | Home root supplied in `CompileCtx`. | `"$home/.config/tool": "r"` |

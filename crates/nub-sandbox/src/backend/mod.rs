@@ -1999,6 +1999,33 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn public_preparation_rejects_unrestricted_filesystem_with_restricted_network() {
+        let mut policy = SandboxPolicy::default();
+        policy.env = crate::policy::EnvPolicy::resolved(Default::default());
+        policy.fs.rules.default_effect = crate::policy::Effect::Allow;
+        policy.fs.rules.entries.clear();
+        policy.net.enforce = true;
+        let command = || CommandSpec::new(std::env::current_exe().unwrap());
+        let sandbox = Sandbox::new(&policy).expect("resolved policy acquires");
+
+        for prepared in [apply(&policy, command()), sandbox.prepare(command())] {
+            let error = match prepared {
+                Ok(_) => panic!("an over-confined filesystem plan reached a public launch handle"),
+                Err(error) => error,
+            };
+            assert_eq!(error.lost, ["net"]);
+            assert!(
+                error
+                    .reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("unrestricted filesystem access")
+            );
+        }
+    }
+
     #[test]
     fn proxy_activation_needs_an_explicit_mode_or_a_broker() {
         use crate::policy::{CredentialBroker, NetRule, NetTarget};

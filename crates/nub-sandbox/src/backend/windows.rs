@@ -766,6 +766,17 @@ pub(crate) fn apply(
     let mut spec = spec;
 
     let confine_fs = fs_confines(&policy.fs);
+    if !confine_fs && policy.net.enforce {
+        return Err(Degradation {
+            lost: vec!["net".to_string()],
+            reason: Some(
+                "Windows cannot combine unrestricted filesystem access with restricted \
+                 networking: a plain process has no AppContainer network boundary, while \
+                 an AppContainer confines filesystem access"
+                    .to_string(),
+            ),
+        });
+    }
     let sandboxing = confine_fs || policy.net.enforce;
     // Deny means that this backend adds no profile-storage grant.  It needs no AppContainer
     // when the command is otherwise plain, whereas Private does need one to supply its managed
@@ -824,18 +835,6 @@ pub(crate) fn apply(
         spec.cwd = Some(strip_verbatim_prefix(effective_cwd));
     }
     if policy.build_jail && !confine_fs {
-        if policy.net.enforce {
-            return Err(Degradation {
-                lost: vec!["net".to_string()],
-                reason: Some(
-                    "Windows cannot enforce restricted network access for a full-disk \
-                     build-jail grant: the plain-process compatibility path has no \
-                     AppContainer network boundary. Use positive filesystem grants so the \
-                     AppContainer can enforce the network policy"
-                        .to_string(),
-                ),
-            });
-        }
         let mut deg = Degradation::full();
         let command = plain_command(
             policy,
@@ -5790,7 +5789,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn apply_windows_full_disk_build_jail_rejects_restricted_network() {
+    fn apply_windows_full_disk_rejects_restricted_network() {
         use crate::policy::{CredentialBroker, NetPolicy, NetRule, NetTarget};
         let full_disk = |net: NetPolicy| SandboxPolicy {
             // An allow-base with no entries is the full-disk compatibility tier: it
@@ -5802,29 +5801,32 @@ mod tests {
             ..Default::default()
         };
         let assert_rejected = |net: NetPolicy| {
-            let result = apply(
-                &full_disk(net),
-                crate::CommandSpec::new("cmd.exe"),
-                None,
-                None,
-                None,
-                None,
-            );
-            let Err(error) = result else {
-                panic!("a full-disk build-jail launch must fail closed when net is restricted");
-            };
-            assert_eq!(error.lost, vec!["net".to_string()]);
-            assert!(
-                error
-                    .reason
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("AppContainer network boundary")
-            );
+            for build_jail in [false, true] {
+                let mut policy = full_disk(net.clone());
+                policy.build_jail = build_jail;
+                let result = apply(
+                    &policy,
+                    crate::CommandSpec::new("cmd.exe"),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+                let Err(error) = result else {
+                    panic!("a full-disk launch must fail closed when net is restricted");
+                };
+                assert_eq!(error.lost, vec!["net".to_string()]);
+                assert!(
+                    error
+                        .reason
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("AppContainer network boundary")
+                );
+            }
         };
 
-        // All enforcement forms share the unsafe plain-process path: deny-all,
-        // a finite allowlist, and the broker-derived TLS-inspection tier.
+        // Both entrypoints must reject deny-all, finite allowlists and brokered TLS.
         assert_rejected(NetPolicy {
             enforce: true,
             ..Default::default()
@@ -5849,17 +5851,20 @@ mod tests {
 
         let mut unrestricted = full_disk(NetPolicy::default());
         unrestricted.fs.tmp = crate::policy::TmpMode::Shared;
-        let prepared = apply(
-            &unrestricted,
-            crate::CommandSpec::new("cmd.exe"),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("unrestricted network remains supported by the full-disk compatibility tier");
-        assert_eq!(prepared.degradation, crate::Degradation::full());
-        assert!(prepared.launch.is_some());
+        for build_jail in [false, true] {
+            unrestricted.build_jail = build_jail;
+            let prepared = apply(
+                &unrestricted,
+                crate::CommandSpec::new("cmd.exe"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("unrestricted filesystem and networking remain supported together");
+            assert_eq!(prepared.degradation, crate::Degradation::full());
+            assert!(matches!(prepared.launch, Some(WindowsLaunch::Plain(_))));
+        }
     }
 }
 
