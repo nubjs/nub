@@ -137,6 +137,8 @@ pub(crate) struct Pipe {
     handle: OwnedHandle,
     event: OwnedHandle,
     stop: Arc<AtomicBool>,
+    #[cfg(test)]
+    pending: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl Pipe {
@@ -151,6 +153,8 @@ impl Pipe {
             handle,
             event: event()?,
             stop,
+            #[cfg(test)]
+            pending: None,
         })
     }
 
@@ -173,6 +177,10 @@ impl Pipe {
         let error = io::Error::last_os_error();
         if error.raw_os_error().map(|code| code as u32) != Some(ERROR_IO_PENDING) {
             return Err(error);
+        }
+        #[cfg(test)]
+        if let Some(pending) = self.pending.take() {
+            let _ = pending.send(());
         }
         loop {
             if self.stop.load(Ordering::Acquire) {
@@ -258,9 +266,9 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let mut pipe = Pipe::new(parent, stop.clone()).unwrap();
             let (started, ready) = mpsc::channel();
+            pipe.pending = Some(started);
             let (finished, done) = mpsc::channel();
             let worker = std::thread::spawn(move || {
-                started.send(()).unwrap();
                 let result = if reading {
                     pipe.read(&mut [0; 1]).map(|_| ())
                 } else {
@@ -268,9 +276,9 @@ mod tests {
                 };
                 finished.send(result).unwrap();
             });
-            ready.recv_timeout(Duration::from_secs(10)).unwrap();
-            // Either cancellation wins before submission, or it must drain the overlapped
-            // operation. Both races are valid; no peer ever supplies data or drains writes.
+            let pending = ready.recv_timeout(Duration::from_secs(10));
+            // No peer supplies data or drains writes. Cancellation must observe a submitted
+            // pending operation, not merely the pre-submission stop check.
             stop.store(true, Ordering::Release);
             assert_eq!(
                 done.recv_timeout(Duration::from_secs(10))
@@ -280,7 +288,22 @@ mod tests {
                 io::ErrorKind::ConnectionAborted
             );
             worker.join().unwrap();
+            pending.expect("operation reached ERROR_IO_PENDING before cancellation");
         }
+    }
+
+    #[test]
+    fn pre_cancelled_transfer_does_not_submit_io() {
+        let (parent, _peer) = pair(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(true));
+        let mut pipe = Pipe::new(parent, stop).unwrap();
+        let (submitted, pending) = mpsc::channel();
+        pipe.pending = Some(submitted);
+        assert_eq!(
+            pipe.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert!(pending.try_recv().is_err());
     }
 
     #[test]
