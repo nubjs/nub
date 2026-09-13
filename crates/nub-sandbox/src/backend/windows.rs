@@ -438,10 +438,10 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
                 if rule.origin == FsOrigin::NubOwnedPublic && !publishable.contains(&dir) {
                     publishable.push(dir.clone());
                 }
-                if rule.access == FsAccess::ReadWrite
-                    && !is_dangerous_write_root(&dir)
-                    && !write.contains(&dir)
-                {
+                // Every write capability originates in an explicit ReadWrite allow. Do not
+                // narrow an authored root here: the policy is positive-only and its matching
+                // grants compose by union on every backend.
+                if rule.access == FsAccess::ReadWrite && !write.contains(&dir) {
                     write.push(dir);
                 }
             }
@@ -617,36 +617,6 @@ pub(super) fn literal_subtree(glob: &str) -> Option<PathBuf> {
         return Some(PathBuf::from(prefix));
     }
     None
-}
-
-/// Top-level roots a WRITE grant must never cover — a `..`-collapsed surface path can
-/// resolve to a system root, and an inheritable modify ACE there would be a
-/// filesystem-wide write hole. The Windows twin of the macOS `is_dangerous_write_root`
-/// (reads are exempt; a generous read is a legitimate posture, and read is separately
-/// allowlist-confined here anyway). Matches on the forward-slashed canonical form.
-pub(super) fn is_dangerous_write_root(dir: &Path) -> bool {
-    let Some(s) = dir.to_str() else { return false };
-    let s = s.trim_end_matches('/');
-    // Drive root (`C:`), the Windows dir, and Program Files are the roots a stray `..`
-    // could land on. Case-insensitive: Windows paths are case-insensitive.
-    let low = s.to_ascii_lowercase();
-    if low.is_empty() || low == "/" {
-        return true;
-    }
-    // `C:` / `C:/` — a bare drive root (2 chars + optional slash).
-    let bytes = low.as_bytes();
-    if bytes.len() <= 3 && bytes.get(1) == Some(&b':') {
-        return true;
-    }
-    matches!(
-        low.as_str(),
-        "c:/windows"
-            | "c:/windows/system32"
-            | "c:/program files"
-            | "c:/program files (x86)"
-            | "c:/programdata"
-            | "c:/users"
-    )
 }
 
 /// Whether the fs axis confines anything (mirrors the mac/linux `fs_confines`). A
@@ -5736,31 +5706,33 @@ mod tests {
     }
 
     #[test]
-    fn dangerous_write_roots_never_get_a_write_grant() {
-        // A rw allow that resolves to a system root must not open an inheritable modify
-        // ACE there (filesystem-wide write hole). Read of it is still fine.
+    fn explicit_broad_write_roots_are_granted() {
+        // Object-form public grammar maps `{"fs":{"C:/":"rw"}}` to authored
+        // ReadWrite rules. A root is broad only because it was explicitly requested;
+        // dropping its write half would return a launch plan that silently loses authority.
         for root in ["C:", "C:/", "C:/Windows", "C:/Program Files", "C:/Users"] {
-            let p = fs(
+            let grants = derive_grants(&fs(
                 Effect::Deny,
                 vec![rule(root, Effect::Allow, FsAccess::ReadWrite)],
-            );
-            let __g = derive_grants(&p);
-            let _read = __g.read;
-            let write = __g.write;
-            assert!(
-                write.is_empty(),
-                "{root} must not receive a write grant (dangerous root)"
+            ));
+            assert_eq!(
+                grants.write,
+                vec![PathBuf::from(root)],
+                "{root} must retain its explicitly requested write grant"
             );
         }
-        // A real project dir under Users is NOT over-blocked.
-        let p = fs(
+
+        // A literal broad read and a narrower rw grant compose: folding may remove the
+        // redundant nested READ, but it must never fold the only WRITE into read-only C:/.
+        let grants = derive_grants(&fs(
             Effect::Deny,
-            vec![rule("C:/Users/me/proj", Effect::Allow, FsAccess::ReadWrite)],
-        );
-        let __g = derive_grants(&p);
-        let _r = __g.read;
-        let write = __g.write;
-        assert_eq!(write, vec![PathBuf::from("C:/Users/me/proj")]);
+            vec![
+                rule("C:/", Effect::Allow, FsAccess::Read),
+                rule("C:/workspace", Effect::Allow, FsAccess::ReadWrite),
+            ],
+        ));
+        assert_eq!(grants.read, vec![PathBuf::from("C:/")]);
+        assert_eq!(grants.write, vec![PathBuf::from("C:/workspace")]);
     }
 
     #[test]
