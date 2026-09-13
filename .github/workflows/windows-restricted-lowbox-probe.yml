@@ -12,32 +12,47 @@ permissions:
 
 jobs:
   probe:
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            arch: x64
+            vcvars: amd64
+          - os: windows-11-arm
+            arch: arm64
+            vcvars: amd64_arm64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
-      - name: Building disposable x64 fixtures
+      - name: Building disposable native fixtures
         shell: pwsh
         run: |
+          $head = git rev-parse HEAD
+          $dirty = git status --porcelain
+          if ($dirty) { throw "Source checkout is dirty: $dirty" }
           New-Item -ItemType Directory -Force reports, .restricted-lowbox | Out-Null
-          git rev-parse HEAD > reports/source.txt
-          git status --porcelain >> reports/source.txt
+          $head > reports/source.txt
           Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber, OsArchitecture | Format-List > reports/host.txt
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -property installationPath
           $root = $env:GITHUB_WORKSPACE
           @"
           @echo off
-          call "$vs\VC\Auxiliary\Build\vcvarsall.bat" amd64
+          call "$vs\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
           if errorlevel 1 exit /b 1
           cd /d "$root\.restricted-lowbox"
           cl /nologo /W4 /WX /EHsc /std:c++17 /MT /D_WIN32_WINNT=0x0A00 "$root\tests\sandbox-restricted-lowbox\launcher.cpp" /Fe:launcher.exe /link advapi32.lib userenv.lib
           if errorlevel 1 exit /b 1
           cl /nologo /W4 /WX /EHsc /std:c++17 /MT /D_WIN32_WINNT=0x0A00 "$root\tests\sandbox-restricted-lowbox\child.cpp" /Fe:child.exe /link advapi32.lib
           if errorlevel 1 exit /b 1
+          cl /nologo /W4 /WX /GS- /Oi /std:c++17 /D_WIN32_WINNT=0x0A00 "$root\tests\sandbox-restricted-lowbox\native-child.cpp" /Fe:native-child.exe /link /NODEFAULTLIB /ENTRY:entry /SUBSYSTEM:CONSOLE ntdll.lib
+          if errorlevel 1 exit /b 1
           dumpbin /headers /imports child.exe > "$root\reports\child-pe.txt"
           dumpbin /headers /imports launcher.exe > "$root\reports\launcher-pe.txt"
+          dumpbin /headers /imports native-child.exe > "$root\reports\native-child-pe.txt"
           "@ | Set-Content .restricted-lowbox/build.cmd
           cmd /c .\.restricted-lowbox\build.cmd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -48,7 +63,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: restricted-lowbox-x64
+          name: restricted-lowbox-${{ matrix.arch }}
           path: |
             reports/
             .restricted-lowbox/*.exe

@@ -12,7 +12,7 @@ try {
     $user = New-LocalUser -Name $name -Password $password -AccountNeverExpires -PasswordNeverExpires
     Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
     New-Item -ItemType Directory $stage | Out-Null
-    Copy-Item "$BinaryDirectory\launcher.exe", "$BinaryDirectory\child.exe", "$PSScriptRoot\ordinary-user.ps1" $stage
+    Copy-Item "$BinaryDirectory\launcher.exe", "$BinaryDirectory\child.exe", "$BinaryDirectory\native-child.exe", "$PSScriptRoot\ordinary-user.ps1" $stage
     icacls $stage /grant "${name}:(OI)(CI)RX" /T | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Fixture artifact read grant failed' }
     $credential = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $password)
@@ -39,11 +39,12 @@ try {
         try {
             $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'"
             if ($profile) {
-                $fixture = Join-Path $profile.LocalPath 'restricted-lowbox-fixture'
+                $fixture = Join-Path $profile.LocalPath 'restricted-lowbox-evidence'
                 if (Test-Path $fixture) { Copy-Item $fixture "$ReportDirectory\fixture" -Recurse }
-                $profile | Remove-CimInstance
             }
         } catch { $cleanup.errors += "profile: $_"; $exitCode = 1 }
+        try { Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'" | Remove-CimInstance }
+        catch { $cleanup.errors += "profile removal: $_"; $exitCode = 1 }
         try { Remove-LocalUser -Name $name }
         catch { $cleanup.errors += "account: $_"; $exitCode = 1 }
     }

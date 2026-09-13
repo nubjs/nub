@@ -55,9 +55,8 @@ inline void token_facts(HANDLE token, const wchar_t* label) {
     auto privileges = info(token, TokenPrivileges);
     auto list = reinterpret_cast<TOKEN_PRIVILEGES*>(privileges.data());
     for (DWORD i = 0; i < list->PrivilegeCount; ++i) {
-        wchar_t name[128]; DWORD size = 128;
-        require(LookupPrivilegeNameW(nullptr, &list->Privileges[i].Luid, name, &size), L"LookupPrivilegeNameW");
-        wprintf(L"PRIVILEGE label=%ls name=%ls attributes=%08lx\n", label, name, list->Privileges[i].Attributes);
+        wprintf(L"PRIVILEGE label=%ls luid=%08lx:%08lx attributes=%08lx\n", label,
+                list->Privileges[i].Luid.HighPart, list->Privileges[i].Luid.LowPart, list->Privileges[i].Attributes);
     }
     if (*reinterpret_cast<DWORD*>(ac.data())) {
         auto package = info(token, TokenAppContainerSid);
@@ -72,14 +71,18 @@ inline void token_facts(HANDLE token, const wchar_t* label) {
 
 inline const wchar_t* files[] = {L"normal.txt", L"aap.txt", L"arap.txt", L"cap.txt", L"package.txt",
     L"r.txt", L"aap-r.txt", L"arap-r.txt", L"cap-r.txt", L"package-r.txt", L"null.txt",
-    L"allowed-looking.txt", L"child.exe", L"bootstrap-alias.exe"};
+    L"allowed-looking.txt", L"child.exe", L"bootstrap-alias.exe", L"native-child.exe"};
 
 using NtOpenFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG, ULONG);
 
-inline void native_opens(const std::wstring& root, const wchar_t* label) {
+inline void native_opens(const std::wstring& root, const wchar_t* label, bool system = false) {
     auto open = reinterpret_cast<NtOpenFileFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtOpenFile"));
     require(open != nullptr, L"NtOpenFile export");
-    for (auto file : files) {
+    const wchar_t* dlls[] = {L"ntdll.dll", L"kernel32.dll", L"KernelBase.dll", L"advapi32.dll"};
+    std::vector<const wchar_t*> targets;
+    if (system) targets.assign(std::begin(dlls), std::end(dlls));
+    else targets.assign(std::begin(files), std::end(files));
+    for (auto file : targets) {
         std::wstring name = L"\\??\\" + root + L"\\" + file;
         UNICODE_STRING path{};
         path.Buffer = name.data();

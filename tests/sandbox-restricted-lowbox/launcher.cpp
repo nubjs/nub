@@ -35,8 +35,29 @@ void check_sd(HANDLE token, const std::wstring& path, const wchar_t* label) {
     LocalFree(sd);
 }
 
-void launch(HANDLE token, const std::wstring& root, const wchar_t* label) {
-    std::wstring exe = root + L"\\child.exe";
+void object_facts(const std::wstring& path) {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    SECURITY_INFORMATION flags = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+        DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    require(GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, flags,
+        nullptr, nullptr, nullptr, nullptr, &sd) == ERROR_SUCCESS, L"object descriptor");
+    LPWSTR sddl = nullptr;
+    require(ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, flags, &sddl, nullptr), L"object SDDL");
+    HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, 7, nullptr, OPEN_EXISTING, 0, nullptr);
+    require(handle != INVALID_HANDLE_VALUE, L"object identity open");
+    BY_HANDLE_FILE_INFORMATION identity{};
+    require(GetFileInformationByHandle(handle, &identity), L"object identity");
+    wprintf(L"OBJECT path=%ls volume=%08lx id=%08lx%08lx links=%lu attributes=%08lx sddl=%ls\n",
+        path.c_str(), identity.dwVolumeSerialNumber, identity.nFileIndexHigh, identity.nFileIndexLow,
+        identity.nNumberOfLinks, identity.dwFileAttributes, sddl);
+    CloseHandle(handle); LocalFree(sddl); LocalFree(sd);
+}
+
+void launch(HANDLE token, const std::wstring& root, const wchar_t* label, bool minimal) {
+    bool ordinary = wcscmp(label, L"ordinary") == 0;
+    std::wstring run_label = std::wstring(label) + (minimal ? L"-native" : L"");
+    label = run_label.c_str();
+    std::wstring exe = root + (minimal ? L"\\native-child.exe" : L"\\child.exe");
     std::wstring args = L"\"" + exe + L"\" \"" + root + L"\" " + label;
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     std::wstring log_path = root + L"\\" + label + L".log";
@@ -55,7 +76,6 @@ void launch(HANDLE token, const std::wstring& root, const wchar_t* label) {
     PROCESS_INFORMATION pi{};
     wprintf(L"LAUNCH_BEGIN label=%ls impersonation=none\n", label); fflush(stdout);
     DWORD flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
-    bool ordinary = wcscmp(label, L"ordinary") == 0;
     BOOL ok = ordinary
         ? CreateProcessW(exe.c_str(), args.data(), nullptr, nullptr, TRUE, flags, nullptr, root.c_str(), &si.StartupInfo, &pi)
         : CreateProcessAsUserW(token, exe.c_str(), args.data(), nullptr, nullptr, TRUE, flags, nullptr, root.c_str(), &si.StartupInfo, &pi);
@@ -94,10 +114,13 @@ void measure(HANDLE token, const std::wstring& root, const wchar_t* label) {
     if (impersonated) {
         // Filesystem checks only; no other process, helper, or broker is accessed.
         native_opens(root, (std::wstring(label) + L"-thread").c_str());
+        wchar_t system[MAX_PATH]; require(GetSystemDirectoryW(system, MAX_PATH) != 0, L"system directory");
+        native_opens(system, (std::wstring(label) + L"-system").c_str(), true);
         require(RevertToSelf(), L"revert measurement token");
     }
     CloseHandle(imp);
-    launch(token, root, label);
+    launch(token, root, label, false);
+    launch(token, root, label, true);
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -141,8 +164,10 @@ int wmain(int argc, wchar_t** argv) {
         acl(path, i == 10 ? L"D:NO_ACCESS_CONTROL" + low : base + grants[i] + low);
     }
     acl(root + L"\\child.exe", base + grant(pkg) + grant(r) + low);
+    acl(root + L"\\native-child.exe", base + grant(pkg) + grant(r) + low);
     require(CreateHardLinkW((root + L"\\allowed-looking.txt").c_str(), (root + L"\\normal.txt").c_str(), nullptr), L"data alias");
     require(CreateHardLinkW((root + L"\\bootstrap-alias.exe").c_str(), (root + L"\\child.exe").c_str(), nullptr), L"bootstrap alias");
+    for (auto file : files) object_facts(root + L"\\" + file);
     SID_AND_ATTRIBUTES restriction{restricting, 0}, capability_group{cap, SE_GROUP_ENABLED};
     SECURITY_CAPABILITIES caps{}; caps.AppContainerSid = package;
     caps.Capabilities = &capability_group; caps.CapabilityCount = 1;
