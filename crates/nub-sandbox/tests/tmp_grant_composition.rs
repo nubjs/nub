@@ -7,7 +7,7 @@
 #[path = "common/tool_output.rs"]
 mod tool_output;
 
-use nub_sandbox::{compile, CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities};
+use nub_sandbox::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 const CASE: &str = "NUB_TMP_GRANT_COMPOSITION_CASE";
 const HOST_CANARY: &str = "NUB_TMP_GRANT_COMPOSITION_HOST_CANARY";
+const HOST_TMP_ROOT: &str = "NUB_TMP_GRANT_COMPOSITION_HOST_TMP_ROOT";
+const HOST_VISIBLE: &str = "NUB_TMP_GRANT_COMPOSITION_HOST_VISIBLE";
 const PROJECT_CANARY: &str = "NUB_TMP_GRANT_COMPOSITION_PROJECT_CANARY";
 
 #[test]
@@ -26,41 +28,63 @@ fn tmp_grant_composition_child() {
 
     let host_canary = PathBuf::from(std::env::var_os(HOST_CANARY).expect("host tmp canary"));
     let project_canary =
-        PathBuf::from(std::env::var_os(PROJECT_CANARY).expect("explicitly granted project canary"));
+        PathBuf::from(std::env::var_os(PROJECT_CANARY).expect("policy-readable project canary"));
     assert_eq!(
         fs::read_to_string(&project_canary).unwrap(),
         "project-grant-is-still-live"
     );
-    assert!(
-        fs::read_to_string(&host_canary).is_err(),
-        "${tmp} mode exposed host temporary canary {}",
-        host_canary.display(),
-        tmp = "tmp"
-    );
+    let host_visible = std::env::var(HOST_VISIBLE).expect("host-canary access expectation");
+    if host_visible == "true" {
+        assert_eq!(
+            fs::read_to_string(&host_canary).unwrap(),
+            "host-temp-grant-canary"
+        );
+    } else {
+        assert!(
+            fs::read_to_string(&host_canary).is_err(),
+            "a policy without a host-temp grant exposed {}",
+            host_canary.display(),
+        );
+    }
 
     if case == "private" {
         let private = std::env::temp_dir();
+        let host_tmp_root =
+            PathBuf::from(std::env::var_os(HOST_TMP_ROOT).expect("parent host temp root"));
+        assert_ne!(
+            private, host_tmp_root,
+            "private mode must redirect the child to a session-owned subdirectory"
+        );
         let write = private.join(format!("nub-private-tmp-{}", std::process::id()));
         fs::write(&write, b"private-temp-write").expect("private temp is writable");
         assert_eq!(fs::read(&write).unwrap(), b"private-temp-write");
         fs::remove_file(write).unwrap();
+        assert!(
+            fs::write(
+                project_canary.with_file_name("outside-private-tmp"),
+                b"must-fail"
+            )
+            .is_err(),
+            "a broad read grant must not make the fixture project writable"
+        );
     } else {
         assert_eq!(case, "deny", "unknown composition fixture case");
     }
 }
 
 #[test]
-fn tmp_false_and_private_hide_host_temp_below_a_broad_read_grant() {
+fn tmp_modes_preserve_explicit_positive_grants_and_private_writes() {
     let root = fixture();
     let host_canary = tempfile::NamedTempFile::new().expect("host temporary canary");
-    fs::write(host_canary.path(), b"host-temp-must-stay-hidden").unwrap();
+    fs::write(host_canary.path(), b"host-temp-grant-canary").unwrap();
 
-    // The narrow arm proves the child/program setup and the negative canary work without a
-    // broad grant. The two broad-root arms are the regression: `$tmp` must remain authoritative
-    // over the host temporary directory, while `$tmp: "rw"` still re-grants only its managed dir.
-    run(&root, host_canary.path(), "deny", false);
-    run(&root, host_canary.path(), "deny", true);
-    run(&root, host_canary.path(), "private", true);
+    // `$tmp` selects managed storage; it does not subtract an authored positive grant. The
+    // narrow controls deny the host canary, while an explicit whole-root read admits it in both
+    // modes. Private mode adds exactly the redirected temp directory as a writable location.
+    run(&root, host_canary.path(), "deny", false, false);
+    run(&root, host_canary.path(), "deny", true, true);
+    run(&root, host_canary.path(), "private", false, false);
+    run(&root, host_canary.path(), "private", true, true);
 }
 
 #[test]
@@ -135,7 +159,13 @@ fn command(root: &Path) -> CommandSpec {
         .redact_stderr(true)
 }
 
-fn run(root: &tempfile::TempDir, host_canary: &Path, case: &str, broad_root: bool) {
+fn run(
+    root: &tempfile::TempDir,
+    host_canary: &Path,
+    case: &str,
+    broad_root: bool,
+    host_visible: bool,
+) {
     let mut policy = policy(root.path(), case, broad_root, "r");
     policy.env.constructed.insert(
         HOST_CANARY.into(),
@@ -148,6 +178,18 @@ fn run(root: &tempfile::TempDir, host_canary: &Path, case: &str, broad_root: boo
             .to_string_lossy()
             .into_owned(),
     );
+    policy.env.constructed.insert(
+        HOST_TMP_ROOT.into(),
+        host_canary
+            .parent()
+            .expect("host temporary canary parent")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    policy
+        .env
+        .constructed
+        .insert(HOST_VISIBLE.into(), host_visible.to_string());
     let sandbox = Sandbox::new(&policy).expect("native sandbox is available");
     let prepared = sandbox
         .prepare(command(root.path()))
@@ -156,7 +198,7 @@ fn run(root: &tempfile::TempDir, host_canary: &Path, case: &str, broad_root: boo
     let output = tool_output::output(prepared);
     assert!(
         output.status.success(),
-        "{case} broad_root={broad_root} failed:\nstdout:\n{}\nstderr:\n{}",
+        "{case} broad_root={broad_root} host_visible={host_visible} failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

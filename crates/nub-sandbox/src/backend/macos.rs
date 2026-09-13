@@ -658,17 +658,15 @@ fn shared_tmp_dirs() -> Vec<String> {
     out
 }
 
-/// Emit the tmp-mode SBPL. `Shared` is a no-op (the confstr write grant that emit_fs
-/// already emitted stands). `Private`/`Deny` DENY read+write on the shared-tmp roots
-/// (last-match-wins over a generous read); `Private` additionally grants the fresh
-/// per-run dir rw via [`regrant_over_tmp_deny`], which is per-operation-node because a
-/// general `file*` allow cannot override those denies. Emitted after emit_fs so the
-/// shared-tmp deny is authoritative even under a `(subpath "/")` generous read.
+/// Emit the tmp-mode SBPL. `Shared` is a no-op. Pure positive policies retain their authored
+/// grants, including an explicit grant under shared tmp; `Private` still provisions and grants
+/// its fresh per-run dir. Legacy policies carrying explicit filesystem denials also receive
+/// shared-tmp deny rules, then re-grant their own positive paths. Those rules are emitted after
+/// `emit_fs` so the legacy subtraction remains authoritative over a generous read.
 ///
-/// COMPILER CARVE-OUT: `$tmp` is a PRIVATE PER-RUN DIR ONLY, plus ONE documented non-private
-/// carve-out on macOS — Apple's fixed toolchain lookup cache. `Private` therefore denies the
-/// WHOLE shared tmp (confstr scratch included) and grants back exactly
-/// [`darwin_compiler_cache_files`].
+/// In the legacy-deny branch, `Private` hides shared tmp (confstr scratch included) except for
+/// its session directory and Apple's fixed toolchain lookup cache. This does not subtract a
+/// pure positive policy's explicit shared-tmp grant.
 ///
 /// The carve-out is ONE FILE, not the enclosing scratch: `$TMPDIR` is a long-lived per-user
 /// directory holding every application's state (~7.5k entries on a dev host), so granting the
