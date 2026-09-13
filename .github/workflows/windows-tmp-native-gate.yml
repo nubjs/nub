@@ -93,7 +93,10 @@ jobs:
           function Run-Fixture([string]$file, [string]$label, [string[]]$arguments, [hashtable]$environment) {
             $exe=[IO.Path]::Combine($owned,$file); $out=[IO.Path]::Combine($owned,"$label.stdout.log"); $err=[IO.Path]::Combine($owned,"$label.stderr.log")
             $info=New-Object Diagnostics.ProcessStartInfo; $info.FileName=$exe; $info.WorkingDirectory=$owned; $info.UseShellExecute=$false; $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
-            foreach ($argument in $arguments) { [void]$info.ArgumentList.Add($argument) }
+            # The elevated runner has PowerShell 7, but the ordinary-user launch deliberately
+            # uses Windows PowerShell 5 where ProcessStartInfo.ArgumentList is unavailable.
+            # These fixed test-harness arguments contain no whitespace or shell metacharacters.
+            $info.Arguments = [string]::Join(' ', $arguments)
             foreach ($entry in $environment.GetEnumerator()) { $info.Environment[$entry.Key] = $entry.Value }
             $proc=New-Object Diagnostics.Process; $proc.StartInfo=$info
             try { if(!$proc.Start()){throw "Could not start $label"}; $outTask=$proc.StandardOutput.ReadToEndAsync(); $errTask=$proc.StandardError.ReadToEndAsync(); if(!$proc.WaitForExit(300000)){ $proc.Kill(); $proc.WaitForExit(30000); throw "$label timed out" }; if(![Threading.Tasks.Task]::WaitAll(@($outTask,$errTask),30000)){throw "$label output drain timed out"}; [IO.File]::WriteAllText($out,$outTask.Result); [IO.File]::WriteAllText($err,$errTask.Result); return @{code=$proc.ExitCode;out=$out;err=$err;text=$outTask.Result+$errTask.Result} } catch { [IO.File]::WriteAllText($err,$_.Exception.ToString()); return @{code=1;out=$out;err=$err;text=$_.Exception.ToString()} } finally { if($proc){$proc.Dispose()} }
