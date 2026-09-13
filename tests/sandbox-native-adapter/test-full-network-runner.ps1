@@ -5,6 +5,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens,
 if ($errors.Count) { throw ($errors | Out-String) }
 $outer = Get-Content $source -Raw
 if (!$outer.Contains('[Parameter(Mandatory=$true)][string]$RelayBinary')) { throw 'Expected a required standalone relay binary' }
+if (!$outer.Contains('[string]$FileOperationShapesBinary') -or !$outer.Contains('[string]$FileOperationShapesManifest')) { throw 'Expected paired optional file-operation-shapes artifacts' }
 $inner = @($ast.FindAll({ param($node)
     $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
     $node.StringConstantType -eq 'SingleQuotedHereString'
@@ -13,6 +14,7 @@ if ($inner.Count -ne 1) { throw 'Expected one generated ordinary-user script' }
 $ast = [Management.Automation.Language.Parser]::ParseInput($inner[0].Value, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
 if (!$inner[0].Value.Contains("`$env:NUB_WINDOWS_RELAY_FIXTURE = Join-Path `$owned 'windows_relay_fixture.exe'")) { throw 'Expected the ordinary-user relay executable binding' }
+if (!$inner[0].Value.Contains('STANDARD_USER_FULL_NETWORK_OPERATION_SHAPES=absent;no-auxiliary-claim')) { throw 'Expected an explicit no-auxiliary claim' }
 $function = @($ast.FindAll({ param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-Arguments'
 }, $true))
@@ -23,6 +25,10 @@ $selector = @($ast.FindAll({ param($node)
 }, $true))
 if ($selector.Count -ne 1) { throw 'Expected the production run selector' }
 Invoke-Expression $selector[0].Extent.Text
+$operationShapes = @($ast.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Run-OperationShapes'
+}, $true))
+if ($operationShapes.Count -ne 1) { throw 'Expected the bounded operation-shapes diagnostic runner' }
 $cases = @(
     @('', $false, $false, '--nocapture|--test-threads=1'),
     @('group', $false, $false, 'group|--nocapture|--test-threads=1'),
@@ -60,3 +66,4 @@ foreach ($run in $repair) {
     }
 }
 Write-Host 'FULL_NETWORK_NATIVE_REPAIR_SELECTOR=root-peer-socket-file'
+Write-Host 'FULL_NETWORK_OPERATION_SHAPES=separate-manifest-private-diagnostic'

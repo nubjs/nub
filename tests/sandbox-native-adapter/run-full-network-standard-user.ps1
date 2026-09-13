@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory=$true)][string]$RelayBinary,
     [Parameter(Mandatory=$true)][string]$BinaryManifest,
     [string]$FileBrokerFixtureBinary,
+    [string]$FileOperationShapesBinary,
+    [string]$FileOperationShapesManifest,
     [ValidateSet('full', 'owner-pipe-diagnostic', 'native-repair-diagnostic')][string]$Mode = 'full',
     [Parameter(Mandatory=$true)][string]$ReportDirectory
 )
@@ -18,6 +20,10 @@ foreach ($path in @($FixtureBinary, $LibraryBinary, $TmpBinary, $NetworkBinary, 
 }
 if (!(Test-Path -LiteralPath $BinaryManifest -PathType Leaf)) { throw "Binary manifest is missing: $BinaryManifest" }
 if ($FileBrokerFixtureBinary -and !(Test-Path -LiteralPath $FileBrokerFixtureBinary -PathType Leaf)) { throw "File-broker fixture is missing: $FileBrokerFixtureBinary" }
+if ([bool]$FileOperationShapesBinary -ne [bool]$FileOperationShapesManifest) { throw 'File-operation-shapes binary and manifest must be supplied together' }
+foreach ($path in @($FileOperationShapesBinary, $FileOperationShapesManifest)) {
+    if ($path -and !(Test-Path -LiteralPath $path -PathType Leaf)) { throw "File-operation-shapes artifact is missing: $path" }
+}
 New-Item -ItemType Directory -Force $ReportDirectory | Out-Null
 $ReportDirectory = (Resolve-Path $ReportDirectory).Path
 $name = 'sbx' + [guid]::NewGuid().ToString('N').Substring(0, 10)
@@ -35,6 +41,10 @@ try {
     Copy-Item $NetworkBinary (Join-Path $stage 'windows_native_full_network.exe')
     Copy-Item $RelayBinary (Join-Path $stage 'windows_relay_fixture.exe')
     if ($FileBrokerFixtureBinary) { Copy-Item $FileBrokerFixtureBinary (Join-Path $stage 'file-broker-fixture.dll') }
+    if ($FileOperationShapesBinary) {
+        Copy-Item $FileOperationShapesBinary (Join-Path $stage 'file-operation-shapes.exe')
+        Copy-Item $FileOperationShapesManifest (Join-Path $stage 'file-operation-shapes-sha256.json')
+    }
     Copy-Item $BinaryManifest (Join-Path $stage 'binary-sha256.json')
 @'
 param([string]$Stage, [ValidateSet('full', 'owner-pipe-diagnostic', 'native-repair-diagnostic')][string]$Mode)
@@ -57,6 +67,16 @@ if (Test-Path -LiteralPath $fileBrokerFixture -PathType Leaf) {
 } else {
     $fileBrokerFixture = $null
 }
+$operationShapes = Join-Path $Stage 'file-operation-shapes.exe'
+$operationShapesManifest = Join-Path $Stage 'file-operation-shapes-sha256.json'
+if (Test-Path -LiteralPath $operationShapes -PathType Leaf) {
+    if (!(Test-Path -LiteralPath $operationShapesManifest -PathType Leaf)) { throw 'File-operation-shapes manifest is missing from staged artifacts' }
+    Copy-Item $operationShapes (Join-Path $owned 'file-operation-shapes.exe') -Force
+    $operationShapes = Join-Path $owned 'file-operation-shapes.exe'
+} else {
+    if (Test-Path -LiteralPath $operationShapesManifest -PathType Leaf) { throw 'File-operation-shapes manifest was staged without its binary' }
+    $operationShapes = $null
+}
 function Sha256([string]$Path) {
     $sha = [Security.Cryptography.SHA256]::Create(); $stream = [IO.File]::OpenRead($Path)
     try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
@@ -73,6 +93,15 @@ if ($fileBrokerFixture) {
     $actual = Sha256 $fileBrokerFixture
     if (!$expected.ContainsKey('file-broker-fixture.dll') -or $actual -ne $expected['file-broker-fixture.dll']) { throw "Staged binary hash mismatch: file-broker-fixture.dll" }
     Write-Host "STANDARD_USER_FULL_NETWORK_SHA256=file-broker-fixture.dll:$actual"
+}
+if ($operationShapes) {
+    $operationExpected = @{}
+    @((Get-Content $operationShapesManifest -Raw | ConvertFrom-Json)) | ForEach-Object { $operationExpected[[IO.Path]::GetFileName($_.Path)] = $_.Hash.ToLowerInvariant() }
+    $actual = Sha256 $operationShapes
+    if (!$operationExpected.ContainsKey('file-operation-shapes.exe') -or $actual -ne $operationExpected['file-operation-shapes.exe']) { throw 'Staged file-operation-shapes hash mismatch' }
+    Write-Host "STANDARD_USER_FULL_NETWORK_OPERATION_SHAPES_SHA256=$actual"
+} else {
+    Write-Host 'STANDARD_USER_FULL_NETWORK_OPERATION_SHAPES=absent;no-auxiliary-claim'
 }
 Set-Location $owned
 whoami /all
@@ -124,6 +153,35 @@ function Run-Filtered([string]$file, [string]$label, [string[]]$arguments, [stri
         $script:failed = $true
         [IO.File]::WriteAllText($err, $_.Exception.ToString())
         Write-Host "STANDARD_USER_FULL_NETWORK_FILTER_FAILURE=${label}:$($_.Exception.Message)"
+    } finally { if ($proc) { $proc.Dispose() } }
+}
+function Run-OperationShapes([string]$file) {
+    $label = 'file-operation-shapes'; $out = Join-Path $owned "$label.stdout.log"; $err = Join-Path $owned "$label.stderr.log"
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $file; $info.WorkingDirectory = $owned; $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    $proc = New-Object Diagnostics.Process; $proc.StartInfo = $info
+    try {
+        if (!$proc.Start()) { throw 'Could not start file-operation-shapes diagnostic' }
+        $outTask = $proc.StandardOutput.ReadToEndAsync(); $errTask = $proc.StandardError.ReadToEndAsync()
+        $timedOut = !$proc.WaitForExit(120000)
+        if ($timedOut) {
+            taskkill /PID $proc.Id /T /F | Out-Null
+            if (!$proc.WaitForExit(30000)) { throw 'file-operation-shapes did not exit after timeout termination' }
+        }
+        if (![Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 30000)) { throw 'file-operation-shapes output drain timed out' }
+        [IO.File]::WriteAllText($out, $outTask.Result); [IO.File]::WriteAllText($err, $errTask.Result)
+        $text = $outTask.Result + $errTask.Result
+        $resultCount = ([regex]::Matches($text, '(?m)^OPERATION_RESULT ')).Count
+        $cleanup = if ($text -match '(?m)^CLEANUP_RESULT result=pass') { 'observed-pass' } else { 'not-observed-pass' }
+        Write-Host "STANDARD_USER_FULL_NETWORK_OPERATION_SHAPES_EXIT=$($proc.ExitCode);timeout=$timedOut"
+        Write-Host "STANDARD_USER_FULL_NETWORK_OPERATION_SHAPES_RESULTS=$resultCount;cleanup=$cleanup"
+        Write-Host 'STANDARD_USER_FULL_NETWORK_OPERATION_SHAPES_OBSERVATION=private-diagnostic;zero-nt-events-is-not-native-coverage'
+        Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDOUT_BEGIN"; Write-Host $outTask.Result; Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDOUT_END"
+        Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDERR_BEGIN"; Write-Host $errTask.Result; Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDERR_END"
+    } catch {
+        [IO.File]::WriteAllText($err, $_.Exception.ToString())
+        Write-Host "STANDARD_USER_FULL_NETWORK_OPERATION_SHAPES_INSTRUMENT_ERROR=$($_.Exception.Message)"
     } finally { if ($proc) { $proc.Dispose() } }
 }
 $one = 'test result: ok. 1 passed; 0 failed; 0 ignored;'
@@ -188,6 +246,7 @@ foreach ($run in $runs) {
     $arguments = Test-Arguments $run.filter ([bool]$run.exact) ([bool]$run.ignored)
     Run-Filtered $run.file $run.label $arguments $run.summary ([bool]$run.nativeAdapter) ([bool]$run.dnsOptIn) ([string[]]$run.requiredMarkers)
 }
+if ($operationShapes) { Run-OperationShapes $operationShapes }
 if ($script:failed) {
     if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=failed' } elseif ($Mode -eq 'native-repair-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_NATIVE_REPAIR_DIAGNOSTIC=failed' } else { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=failed' }
     exit 1

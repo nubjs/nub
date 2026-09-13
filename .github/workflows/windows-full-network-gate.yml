@@ -97,6 +97,18 @@ jobs:
           Get-FileHash -Algorithm SHA256 reports/binaries/file-broker-fixture.dll | ConvertTo-Json | Set-Content -Encoding utf8 reports/file-broker-fixture-dll-sha256.json
           Copy-Item reports/msvc-file-broker-fixture.log reports/file-broker-fixture-pe-headers.txt
           if (!(Select-String -Path reports/msvc-file-broker-fixture.log -Pattern 'machine \(${{ matrix.machine }}\)' -CaseSensitive:$false)) { throw "File-broker fixture is not a native ${{ matrix.machine }} PE" }
+      - name: Compiling file-operation-shapes diagnostic fixture
+        shell: pwsh
+        run: |
+          & ./tests/sandbox-native-adapter/run-file-operation-shapes.ps1 -Architecture '${{ matrix.machine }}' -CompileOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $PWD ".native-adapter/file-operation-shapes-${{ matrix.machine }}.exe"
+          if (!(Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Operation-shapes binary is missing: $binary" }
+          New-Item -ItemType Directory -Force reports/operation-shapes | Out-Null
+          Copy-Item tests/sandbox-native-adapter/file-operation-shapes.cpp reports/operation-shapes/file-operation-shapes.cpp
+          Copy-Item tests/sandbox-native-adapter/run-file-operation-shapes.ps1 reports/operation-shapes/run-file-operation-shapes.ps1
+          Copy-Item $binary reports/operation-shapes/file-operation-shapes.exe
+          Get-FileHash -Algorithm SHA256 reports/operation-shapes/file-operation-shapes.cpp, reports/operation-shapes/file-operation-shapes.exe | Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content -Encoding utf8 reports/operation-shapes/file-operation-shapes-sha256.json
       - name: Building exact ordinary-user test artifacts
         id: build_tests
         shell: pwsh
@@ -127,7 +139,7 @@ jobs:
         if: ${{ steps.build_tests.outcome == 'success' }}
         shell: pwsh
         run: |
-          $parameters = @{ FixtureBinary = (Join-Path $PWD 'reports/binaries/native-full-network.exe'); LibraryBinary = (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe'); TmpBinary = (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe'); NetworkBinary = (Join-Path $PWD 'reports/binaries/windows_native_full_network.exe'); RelayBinary = (Join-Path $PWD 'reports/binaries/windows_relay_fixture.exe'); BinaryManifest = (Join-Path $PWD 'reports/binary-sha256.json'); ReportDirectory = 'reports/full-network-standard-user' }
+          $parameters = @{ FixtureBinary = (Join-Path $PWD 'reports/binaries/native-full-network.exe'); LibraryBinary = (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe'); TmpBinary = (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe'); NetworkBinary = (Join-Path $PWD 'reports/binaries/windows_native_full_network.exe'); RelayBinary = (Join-Path $PWD 'reports/binaries/windows_relay_fixture.exe'); BinaryManifest = (Join-Path $PWD 'reports/binary-sha256.json'); FileOperationShapesBinary = (Join-Path $PWD 'reports/operation-shapes/file-operation-shapes.exe'); FileOperationShapesManifest = (Join-Path $PWD 'reports/operation-shapes/file-operation-shapes-sha256.json'); ReportDirectory = 'reports/full-network-standard-user' }
           $fileBrokerSource = 'crates/nub-sandbox/native/file_broker_fixture.c'
           $fileBrokerFixture = Join-Path $PWD 'reports/binaries/file-broker-fixture.dll'
           if (Test-Path -LiteralPath $fileBrokerSource -PathType Leaf) {
