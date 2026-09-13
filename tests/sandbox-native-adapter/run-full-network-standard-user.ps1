@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory=$true)][string]$RelayBinary,
     [Parameter(Mandatory=$true)][string]$BinaryManifest,
     [string]$FileBrokerFixtureBinary,
-    [ValidateSet('full', 'owner-pipe-diagnostic')][string]$Mode = 'full',
+    [ValidateSet('full', 'owner-pipe-diagnostic', 'native-repair-diagnostic')][string]$Mode = 'full',
     [Parameter(Mandatory=$true)][string]$ReportDirectory
 )
 
@@ -37,7 +37,7 @@ try {
     if ($FileBrokerFixtureBinary) { Copy-Item $FileBrokerFixtureBinary (Join-Path $stage 'file-broker-fixture.dll') }
     Copy-Item $BinaryManifest (Join-Path $stage 'binary-sha256.json')
 @'
-param([string]$Stage, [ValidateSet('full', 'owner-pipe-diagnostic')][string]$Mode)
+param([string]$Stage, [ValidateSet('full', 'owner-pipe-diagnostic', 'native-repair-diagnostic')][string]$Mode)
 $ErrorActionPreference = 'Stop'
 $profileRoot = [Environment]::GetFolderPath('UserProfile')
 if (!$profileRoot -or $profileRoot -like '*systemprofile*') { throw 'A normal user profile is required' }
@@ -127,15 +127,33 @@ function Run-Filtered([string]$file, [string]$label, [string[]]$arguments, [stri
     } finally { if ($proc) { $proc.Dispose() } }
 }
 $one = 'test result: ok. 1 passed; 0 failed; 0 ignored;'
-function Select-RunSet([ValidateSet('full', 'owner-pipe-diagnostic')][string]$Mode) {
+function Select-RunSet([ValidateSet('full', 'owner-pipe-diagnostic', 'native-repair-diagnostic')][string]$Mode, [bool]$FileBrokerCoreKnown = $false) {
     if ($Mode -eq 'owner-pipe-diagnostic') {
         return ,@{ file='windows_native_full_network.exe'; label='owner-pipe-diagnostic-owner-drop'; filter='native_adapter_drop_reaps_pending_listener_and_closes_port'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true }
     }
+    if ($Mode -eq 'native-repair-diagnostic') {
+        $runs = @(
+            @{ file='nub_sandbox_lib.exe'; label='native-repair-root-grant'; filter='backend::windows::tests::dangerous_write_roots_never_get_a_write_grant'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; exact=$true },
+            @{ file='windows_native_full_network.exe'; label='native-repair-peer-driver'; filter='native_adapter_full_network_has_peer_oracles_and_retained_policy_separation'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true },
+            @{ file='nub_sandbox_lib.exe'; label='native-repair-socket-foreign-client'; filter='backend::windows_native_compat::tests::socket_broker_rejects_a_live_client_outside_its_job_and_cancels_idle_workers'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; exact=$true },
+            @{ file='nub_sandbox_lib.exe'; label='native-repair-socket-framing'; filter='backend::windows_native_compat::tests::socket_broker_rejects_wrong_frame_lengths_and_drains_cancelled_read'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; exact=$true }
+        )
+        if ($FileBrokerCoreKnown) {
+            $runs += @(
+                @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-core'; filter='backend::windows_file_broker::tests::'; summary='test result: ok. 5 passed; 0 failed; 3 ignored;' },
+                @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-open'; filter='backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_CHILD_OK') },
+                @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-loader'; filter='backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_LOADER_OK', 'FILE_BROKER_NATIVE_CHILD_OK') },
+                @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-kill-before-join'; filter='backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true; requiredMarkers=@('FILE_BROKER_BLOCKED_WORKER_ENTERED', 'FILE_BROKER_WORKER_OBSERVED_JOB_EXIT=1', 'FILE_BROKER_KILL_BEFORE_JOIN_OK') }
+            )
+        }
+        return $runs
+    }
     return $null
 }
-$selectedRuns = Select-RunSet $Mode
+$selectedRuns = Select-RunSet $Mode ([bool]$fileBrokerFixture)
 if ($null -ne $selectedRuns) {
-    Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC_SCOPE=owner-drop;ordinary-user-identity;artifact-binding;cleanup;skipped=baseline,dns,file-broker,lifecycle'
+    if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC_SCOPE=owner-drop;ordinary-user-identity;artifact-binding;cleanup;skipped=baseline,dns,file-broker,lifecycle' }
+    if ($Mode -eq 'native-repair-diagnostic') { Write-Host "STANDARD_USER_FULL_NETWORK_NATIVE_REPAIR_DIAGNOSTIC_SCOPE=root-grant,peer-driver,socket-foreign,socket-framing,file-broker=$([bool]$fileBrokerFixture);skipped=baseline,dns,lifecycle" }
     $runs = @($selectedRuns)
 } else {
 $runs = @(
@@ -171,10 +189,10 @@ foreach ($run in $runs) {
     Run-Filtered $run.file $run.label $arguments $run.summary ([bool]$run.nativeAdapter) ([bool]$run.dnsOptIn) ([string[]]$run.requiredMarkers)
 }
 if ($script:failed) {
-    if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=failed' } else { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=failed' }
+    if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=failed' } elseif ($Mode -eq 'native-repair-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_NATIVE_REPAIR_DIAGNOSTIC=failed' } else { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=failed' }
     exit 1
 }
-if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=ok' } else { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=ok' }
+if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=ok' } elseif ($Mode -eq 'native-repair-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_NATIVE_REPAIR_DIAGNOSTIC=ok' } else { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=ok' }
 '@ | Set-Content -Encoding ascii (Join-Path $stage 'run-full-network.ps1')
     Copy-Item (Join-Path $stage 'run-full-network.ps1') (Join-Path $ReportDirectory 'standard-user-run.ps1')
     icacls $stage /grant "${name}:(OI)(CI)RX" /T | Tee-Object "$ReportDirectory/stage-acl.log"
@@ -192,7 +210,7 @@ if ($Mode -eq 'owner-pipe-diagnostic') { Write-Host 'STANDARD_USER_FULL_NETWORK_
         try { Get-ChildItem -LiteralPath $owned -Filter '*.log' -ErrorAction Stop | Copy-Item -Destination $ReportDirectory -Force }
         catch { $exitCode = 1; Write-Warning "Could not retain ordinary-user logs: $($_.Exception.Message)" }
     } else { $exitCode = 1; Write-Warning 'Ordinary-user owned-path marker is missing' }
-    $successPattern = if ($Mode -eq 'owner-pipe-diagnostic') { '^STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=ok$' } else { '^STANDARD_USER_FULL_NETWORK_GATE=ok$' }
+    $successPattern = if ($Mode -eq 'owner-pipe-diagnostic') { '^STANDARD_USER_FULL_NETWORK_OWNER_PIPE_DIAGNOSTIC=ok$' } elseif ($Mode -eq 'native-repair-diagnostic') { '^STANDARD_USER_FULL_NETWORK_NATIVE_REPAIR_DIAGNOSTIC=ok$' } else { '^STANDARD_USER_FULL_NETWORK_GATE=ok$' }
     if ($exitCode -ne 0 -or !(Select-String -Path "$ReportDirectory/standard-user.log" -Pattern $successPattern)) { $exitCode = 1 }
 } finally {
     $cleanup = @{ user = $name; stage = $stage; errors = @() }
