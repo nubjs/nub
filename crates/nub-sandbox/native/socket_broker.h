@@ -24,6 +24,16 @@ struct Response {
 static_assert(sizeof(Request) == 20);
 static_assert(sizeof(Response) == 636);
 
+constexpr DWORD source_flags(DWORD requested) {
+    // The host descriptor must never enter a concurrent launch's inheritance
+    // set. The child reconstructs with the original requested flags instead.
+    return requested | WSA_FLAG_NO_HANDLE_INHERIT;
+}
+static_assert(source_flags(0) == WSA_FLAG_NO_HANDLE_INHERIT);
+static_assert(source_flags(WSA_FLAG_OVERLAPPED) ==
+              (WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT));
+static_assert(source_flags(kSocketFlags) == kSocketFlags);
+
 inline int validate(const Request& request) {
     if (request.version != kVersion) return WSAEINVAL;
     if (request.family != AF_INET && request.family != AF_INET6) return WSAEAFNOSUPPORT;
@@ -128,7 +138,7 @@ inline void serve(Worker& worker) {
             // No binding or connecting here: the child's normal Winsock calls
             // retain ConnectEx/AcceptEx/IOCP and datagram/listener semantics.
             socket = WSASocketW(request.family, request.type, request.protocol,
-                                nullptr, 0, request.flags);
+                                nullptr, 0, source_flags(request.flags));
             if (socket == INVALID_SOCKET) response.error = WSAGetLastError();
             if (socket != INVALID_SOCKET) {
                 if (!SetHandleInformation(reinterpret_cast<HANDLE>(socket), HANDLE_FLAG_INHERIT, 0))
