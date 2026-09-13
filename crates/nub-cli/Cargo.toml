@@ -209,12 +209,12 @@ aube-store = { path = "../../vendor/aube/crates/aube-store" }
 # branch (v12.4.1 plus the embedder patches). Move `rev` to re-pin.
 # The engine takes its compatibility rules as an `IndexMap`, so the host names the type.
 indexmap = { version = "2" }
-pnpm-cli = { git = "https://github.com/nubjs/pnpm", rev = "560c281d19b992fef177d98f04cc0dc64c32babd" }
-pnpm-config = { git = "https://github.com/nubjs/pnpm", rev = "560c281d19b992fef177d98f04cc0dc64c32babd" }
-pnpm-diagnostics = { git = "https://github.com/nubjs/pnpm", rev = "560c281d19b992fef177d98f04cc0dc64c32babd" }
-pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "560c281d19b992fef177d98f04cc0dc64c32babd" }
-pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "560c281d19b992fef177d98f04cc0dc64c32babd" }
-pnpm-store-dir = { git = "https://github.com/nubjs/pnpm", rev = "560c281d19b992fef177d98f04cc0dc64c32babd" }
+pnpm-cli = { git = "https://github.com/nubjs/pnpm", rev = "c10ac849dd4c8067933bfc8d5f1c6f1a317b8ae6" }
+pnpm-config = { git = "https://github.com/nubjs/pnpm", rev = "c10ac849dd4c8067933bfc8d5f1c6f1a317b8ae6" }
+pnpm-diagnostics = { git = "https://github.com/nubjs/pnpm", rev = "c10ac849dd4c8067933bfc8d5f1c6f1a317b8ae6" }
+pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "c10ac849dd4c8067933bfc8d5f1c6f1a317b8ae6" }
+pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "c10ac849dd4c8067933bfc8d5f1c6f1a317b8ae6" }
+pnpm-store-dir = { git = "https://github.com/nubjs/pnpm", rev = "c10ac849dd4c8067933bfc8d5f1c6f1a317b8ae6" }
 # Same major + `fancy` as vendor/aube — present.rs renders the engine's
 # miette::Report exactly as aube's own cli_main would, then rewrites it.
 miette = { version = "7", features = ["fancy"] }

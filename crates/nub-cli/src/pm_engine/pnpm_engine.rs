@@ -28,8 +28,9 @@ const NUB: Embedder = Embedder {
     manage_package_manager_versions: false,
     manage_runtimes: false,
     // nub-incumbent projects declare their members in `package.json`, the
-    // neutral spelling every package manager reads; nub writes no
-    // `pnpm-workspace.yaml`.
+    // neutral spelling every package manager reads. `writes_settings_file`
+    // below is what keeps the engine from writing the pnpm file this opts
+    // out of reading.
     workspaces_from_package_manifest: true,
     lockfile_basename: "nub.lock",
     // Read-only, and paired with the retirement below: a project last
@@ -45,6 +46,15 @@ const NUB: Embedder = Embedder {
     // A nub project's configuration is `nub.jsonc`, `package.json` and
     // `.npmrc`, never pnpm's files; `profile` supplies what nub resolved.
     reads_pnpm_config: false,
+    // The write-side twin. Several engine paths record a decision by merging
+    // it into `pnpm-workspace.yaml` — the `minimumReleaseAgeExclude` entries
+    // an approved install persists, resolved catalog entries, the
+    // `allowBuilds` lines an install scaffolds, `add --config`'s
+    // `configDependencies`. nub reads none of them back, so each one would
+    // leave a file nub does not own recording a decision nothing applies.
+    // Where the entry is what lets the run proceed the engine now refuses and
+    // names `nub.jsonc`; the advisory writes are simply not made.
+    writes_settings_file: false,
     workspace_settings: None,
     compat_package_extensions: None,
     allow_builds_writer: Some(record_allow_scripts),
