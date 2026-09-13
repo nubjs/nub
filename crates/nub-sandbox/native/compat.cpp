@@ -13,10 +13,13 @@
 #include <cstdint>
 #include <initializer_list>
 #include <new>
+#include <iterator>
+#include <cwctype>
 #include "detours.h"
 #include "mount_query.h"
 #include "null_device.h"
 #include "socket_broker.h"
+#include "file_broker.h"
 
 static const GUID payload_id = {0x19c47458, 0xe2ad, 0x421d, {0x81, 0x37, 0x52, 0xa1, 0x85, 0xf7, 0xb8, 0x15}};
 struct Payload {
@@ -29,6 +32,9 @@ struct Payload {
     wchar_t socket_broker[128];
     DWORD socket_broker_pid;
     BOOL socket_diagnostics;
+    uint64_t socket_name_fingerprint;
+    wchar_t file_broker[128];
+    DWORD file_broker_pid;
 };
 static Payload state = {};
 
@@ -97,13 +103,19 @@ static BOOL inject(HANDLE process, const Payload& source) {
 
 #ifdef SANDBOX_COMPAT_HOST
 #include "socket_broker_tests.h"
+#include "file_broker_tests.h"
 extern "C" DWORD sandbox_native_inject(HANDLE process, const wchar_t* directory,
-                                       const wchar_t* socket_broker) {
+                                       const wchar_t* socket_broker, const wchar_t* file_broker) {
     Payload state = {};
     if (socket_broker) {
         if (wcscpy_s(state.socket_broker, socket_broker)) return ERROR_INVALID_NAME;
         state.socket_broker_pid = GetCurrentProcessId();
         state.socket_diagnostics = nub_sandbox::socket_broker::diagnostics_enabled();
+        state.socket_name_fingerprint = nub_sandbox::socket_broker::name_fingerprint(socket_broker);
+    }
+    if (file_broker) {
+        if (wcscpy_s(state.file_broker, file_broker)) return ERROR_INVALID_NAME;
+        state.file_broker_pid = GetCurrentProcessId();
     }
     state.null_device = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -138,6 +150,19 @@ extern "C" void sandbox_socket_broker_stop(nub_sandbox::socket_broker::Broker* b
 extern "C" int sandbox_socket_broker_validate(const nub_sandbox::socket_broker::Request* request) {
     return nub_sandbox::socket_broker::validate(*request);
 }
+extern "C" DWORD sandbox_file_broker_start(HANDLE process, HANDLE job, const wchar_t* name,
+    nub_sandbox::file_broker::Authorize authorize, const void* context,
+    nub_sandbox::file_broker::Broker** broker) {
+    Payload identities = {};
+    if (!capture_identities(process, identities)) return GetLastError();
+    return nub_sandbox::file_broker::start(job, name, identities.user_sid,
+        identities.package_sid, authorize, context, broker);
+}
+extern "C" void sandbox_file_broker_stop(nub_sandbox::file_broker::Broker* broker) { delete broker; }
+extern "C" void sandbox_file_broker_cancel(nub_sandbox::file_broker::Broker* broker) { broker->cancel(); }
+extern "C" NTSTATUS sandbox_file_broker_validate(const nub_sandbox::file_broker::Request* request) {
+    return nub_sandbox::file_broker::validate(*request);
+}
 #else
 static auto true_create_file = CreateFileW;
 static auto true_create_file_a = CreateFileA;
@@ -147,6 +172,24 @@ static auto true_anonymous_pipe = CreatePipe;
 static auto true_socket = socket;
 static auto true_wsa_socket_w = WSASocketW;
 static auto true_wsa_socket_a = WSASocketA;
+#include "file_broker_client.h"
+
+static thread_local bool socket_pipe_open_active = false;
+
+static void diagnose_socket_open(POBJECT_ATTRIBUTES attrs, bool mapped, NTSTATUS status,
+                                 bool create) {
+    using namespace nub_sandbox::socket_broker;
+    if (!socket_pipe_open_active) return;
+    DWORD shape = create ? 1 : 0;
+    if (attrs) {
+        if (attrs->RootDirectory) shape |= 2;
+        if (native_name_matches(attrs->ObjectName, state.socket_broker, L"\\??\\pipe\\")) shape |= 4;
+        if (native_name_matches(attrs->ObjectName, state.socket_broker, L"\\Device\\NamedPipe\\")) shape |= 8;
+    }
+    if (mapped) shape |= 16;
+    diagnose(true, Stage::NativePath, shape);
+    diagnose(true, Stage::NativeStatus, DWORD(status));
+}
 
 static SOCKET broker_socket(int family, int type, int protocol, DWORD flags) {
     using namespace nub_sandbox::socket_broker;
@@ -162,12 +205,25 @@ static SOCKET broker_socket(int family, int type, int protocol, DWORD flags) {
     HANDLE pipe = INVALID_HANDLE_VALUE;
     Stage stage = Stage::PipeOpen;
     DWORD pipe_error = ERROR_SUCCESS;
+    if (state.socket_diagnostics) {
+        diagnose(true, Stage::PayloadName,
+            name_fingerprint(state.socket_broker) == state.socket_name_fingerprint ?
+                ERROR_SUCCESS : ERROR_INVALID_DATA);
+        // Query only this calling thread, without impersonating or changing it.
+        HANDLE token = nullptr;
+        BOOL present = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+        DWORD token_error = present ? ERROR_SUCCESS : GetLastError();
+        if (token) CloseHandle(token);
+        diagnose(true, Stage::ThreadToken, token_error);
+    }
     ULONGLONG deadline = GetTickCount64() + kTimeout;
     do {
+        socket_pipe_open_active = state.socket_diagnostics != FALSE;
         pipe = true_create_file(state.socket_broker, kClientAccess,
             0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
                 SECURITY_IDENTIFICATION, nullptr);
         pipe_error = pipe == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+        socket_pipe_open_active = false;
         if (pipe != INVALID_HANDLE_VALUE || pipe_error != ERROR_PIPE_BUSY) break;
         ULONGLONG now = GetTickCount64();
         if (now >= deadline) { stage = Stage::PipeWait; pipe_error = ERROR_TIMEOUT; break; }
@@ -514,6 +570,7 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     wchar_t path[1024];
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
+    diagnose_socket_open(attrs, mapped, status, false);
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         nub_sandbox::null_device::duplicate_after_access_denied(
             state.null_device, handle, access, attrs, io, share, options)) return 0;
@@ -525,6 +582,9 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         (options & FILE_DIRECTORY_FILE) && !(options & FILE_DELETE_ON_CLOSE) && access == 0x001200a9)
         return true_open_file(handle, 0x001000a1, mapped ? &redirected : attrs, io, share, options);
+    if (status == nub_sandbox::file_broker::kDenied && state.file_broker[0])
+        return broker_file_open(nub_sandbox::file_broker::Open, handle, access, attrs, io,
+                                share, FILE_OPEN, options, 0);
     return status;
 }
 
@@ -537,6 +597,7 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_nt_create_file(handle, access, mapped ? &redirected : attrs, io, allocation,
         attributes, share, disposition, options, ea, ea_length);
+    diagnose_socket_open(attrs, mapped, status, true);
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         (disposition == FILE_OPEN || disposition == FILE_OPEN_IF) && !allocation && !ea && !ea_length &&
         (attributes == 0 || attributes == FILE_ATTRIBUTE_NORMAL) &&
@@ -551,6 +612,10 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
         disposition == FILE_OPEN && !allocation && !ea && !ea_length && access == 0x001200a9)
         return true_nt_create_file(handle, 0x001000a1, mapped ? &redirected : attrs, io, allocation,
             attributes, share, disposition, options, ea, ea_length);
+    if (status == nub_sandbox::file_broker::kDenied && state.file_broker[0] &&
+        !allocation && !ea && !ea_length)
+        return broker_file_open(nub_sandbox::file_broker::Create, handle, access, attrs, io,
+                                share, disposition, options, attributes);
     return status;
 }
 
@@ -881,6 +946,8 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_create_pipe, "NtCreateNamedPipeFile") ||
         !resolve_nt(true_open_file, "NtOpenFile") ||
         !resolve_nt(true_nt_create_file, "NtCreateFile") ||
+        !resolve_nt(true_query_attributes, "NtQueryAttributesFile") ||
+        !resolve_nt(true_query_full_attributes, "NtQueryFullAttributesFile") ||
         !resolve_nt(true_create_section, "NtCreateSection") ||
         !resolve_nt(true_create_mutant, "NtCreateMutant") ||
         !resolve_nt(true_create_event, "NtCreateEvent") ||
@@ -894,6 +961,10 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (!mount_query.initialize(mount_api, state.devices)) return FALSE;
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
+    if (state.file_broker[0]) {
+        DetourAttach(reinterpret_cast<PVOID*>(&true_query_attributes), query_file_attributes);
+        DetourAttach(reinterpret_cast<PVOID*>(&true_query_full_attributes), query_full_file_attributes);
+    }
     DetourAttach(reinterpret_cast<PVOID*>(&true_set_token), set_token);
     DetourAttach(reinterpret_cast<PVOID*>(&true_set_security), set_security);
     DetourAttach(reinterpret_cast<PVOID*>(&true_create_file), create_file);

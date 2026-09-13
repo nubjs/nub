@@ -301,6 +301,13 @@ impl PathMatcher {
         self.decide_normalized(&norm, None)
     }
 
+    /// Match an OS-resolved, held-handle name without reopening the namespace.
+    /// The caller must keep the verified object and its parents pinned.
+    #[cfg(all(windows, test))]
+    pub(crate) fn decide_verified_name(&self, candidate: &str) -> FsDecision {
+        self.decide_normalized(&normalize_slashes(candidate), None)
+    }
+
     /// Last matching effect among entries AT OR AFTER `start`, i.e. does anything the
     /// policy says LATER override this one. The Linux mount-plan compiler asks this of
     /// each allow before turning it into a bind.

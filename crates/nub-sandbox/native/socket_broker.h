@@ -33,8 +33,28 @@ enum class Stage : LONG {
     ClientEvent, RequestWrite, ResponseRead, ResponseVersion, BrokerError,
     Reconstruct, AcknowledgementWrite, HostIdentity, HostCreate, HostFlags,
     HostDuplicate, HostRequestRead, HostResponseWrite, HostAcknowledgementRead,
+    HostReady, HostStop, PayloadName, NativePath, NativeStatus, ThreadToken, HostName,
 };
-static_assert(static_cast<LONG>(Stage::HostAcknowledgementRead) < 31);
+static_assert(static_cast<LONG>(Stage::HostName) < 31);
+
+inline uint64_t name_fingerprint(const wchar_t* name) {
+    uint64_t value = 14695981039346656037ull;
+    for (size_t i = 0; i < 128 && name[i]; ++i) {
+        value = (value ^ static_cast<uint16_t>(name[i])) * 1099511628211ull;
+    }
+    return value;
+}
+
+// Compare only; the endpoint and its fingerprint never enter diagnostics.
+inline bool native_name_matches(const UNICODE_STRING* name, const wchar_t* endpoint,
+                                const wchar_t* prefix) {
+    if (!name || !name->Buffer || name->Length % sizeof(wchar_t) ||
+        wcsncmp(endpoint, L"\\\\.\\pipe\\", 9)) return false;
+    size_t head = wcslen(prefix), tail = wcslen(endpoint + 9);
+    return name->Length / sizeof(wchar_t) == head + tail &&
+        !_wcsnicmp(name->Buffer, prefix, head) &&
+        !_wcsnicmp(name->Buffer + head, endpoint + 9, tail);
+}
 
 inline bool diagnostics_enabled() {
     wchar_t value[2];
@@ -144,6 +164,7 @@ struct Broker {
     Worker workers[kWorkers];
 
     ~Broker() {
+        diagnose(diagnostics, Stage::HostStop, ERROR_SUCCESS);
         if (stop) SetEvent(stop);
         for (auto& worker : workers) {
             if (worker.thread) {
@@ -287,6 +308,21 @@ inline DWORD start(HANDLE job, const wchar_t* name, PSID user, PSID package, Bro
     if (descriptor) LocalFree(descriptor);
     if (user_text) LocalFree(user_text);
     if (package_text) LocalFree(package_text);
+    if (!error && broker->diagnostics) {
+        using QueryObject = NTSTATUS (NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+        auto address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryObject");
+        QueryObject query = nullptr;
+        memcpy(&query, &address, sizeof(query));
+        alignas(void*) BYTE information[4096] = {};
+        ULONG needed = 0;
+        NTSTATUS status = query ? query(broker->workers[0].pipe, 1, information,
+            sizeof(information), &needed) : NTSTATUS(0xc0000002);
+        DWORD result = status < 0 ? DWORD(status) :
+            native_name_matches(reinterpret_cast<UNICODE_STRING*>(information), name,
+                                L"\\Device\\NamedPipe\\") ? ERROR_SUCCESS : ERROR_INVALID_NAME;
+        diagnose(true, Stage::HostName, result);
+        diagnose(true, Stage::HostReady, kWorkers);
+    }
     if (error) delete broker;
     else *output = broker;
     return error;
