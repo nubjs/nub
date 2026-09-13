@@ -8,7 +8,7 @@
 #[path = "common/tool_output.rs"]
 mod tool_output;
 
-use nub_sandbox::{compile, CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities};
+use nub_sandbox::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -16,7 +16,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
 const FIXTURE: &str = "NUB_WINDOWS_NATIVE_FULL_NETWORK_FIXTURE";
@@ -647,9 +647,9 @@ fn native_adapter_full_network_dns_opt_in() {
         );
         assert_marker(&plain, "FULL_NETWORK_DNS", &format!("{api}:0:1.1.1.1"));
         let native_name = fresh_dns_name(api, "native");
-        let policy = policy(root.path(), &fixture, json!(true), None, Some(&native_name));
-        let native =
-            Sandbox::with_windows_native_compat(&policy).expect("native full-network DNS session");
+        let native_policy = policy(root.path(), &fixture, json!(true), None, Some(&native_name));
+        let native = Sandbox::with_windows_native_compat(&native_policy)
+            .expect("native full-network DNS session");
         let adapted = output(&native, &fixture, api);
         assert!(
             adapted.status.success(),
