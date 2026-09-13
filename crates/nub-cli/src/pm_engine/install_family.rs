@@ -139,7 +139,7 @@ use aube_lockfile::LockfileKind;
 use aube_workspace::selector::EffectiveFilter;
 use miette::{IntoDiagnostic as _, WrapErr as _, miette};
 
-use super::publish_family::{Parsed, separate_value_flags, verb_cli};
+use super::verb_parse::{Parsed, separate_value_flags, verb_cli};
 use super::{EngineSession, VerbSpec, present, stub_error};
 
 /// Dispatcher for the family's registry verbs. `install`/`ci` never arrive
@@ -311,7 +311,7 @@ impl EngineGlobals {
 /// the nub globals, matching the augment order the clap build used.
 macro_rules! install_cli {
     ($name:ident, $spec:tt, $engine:ty) => {
-        crate::pm_engine::publish_family::verb_cli! {
+        crate::pm_engine::verb_parse::verb_cli! {
             $name, $spec, {
                 #[usage(flatten)]
                 args: $engine,

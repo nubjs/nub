@@ -75,6 +75,7 @@ pub(crate) use verb_routing::engine_takes;
 pub mod present;
 pub mod publish_family;
 mod remix_compat;
+pub mod verb_parse;
 use nub_core::resource_limits;
 pub mod migrate;
 pub mod phantom_hooks;

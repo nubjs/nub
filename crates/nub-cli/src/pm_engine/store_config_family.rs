@@ -106,7 +106,8 @@ use super::config_read::{ConfigArgs, ConfigCommand};
 use anyhow::{Context, Result};
 use nub_settings::meta::SettingMeta;
 
-use super::publish_family::{Parsed, plain_verb_cli, run_wired, verb_cli};
+use super::publish_family::run_wired;
+use super::verb_parse::{Parsed, plain_verb_cli, verb_cli};
 use super::{VerbSpec, stub_error};
 
 /// Dispatcher for the family's verbs (see [`super::publish_family::run_verb`]
@@ -967,7 +968,7 @@ fn unwired_config_sub(sub: &str) -> anyhow::Error {
 #[cfg(test)]
 mod help_tests {
     use super::ConfigCli;
-    use crate::pm_engine::publish_family::set_display_name;
+    use crate::pm_engine::verb_parse::set_display_name;
 
     /// A `nub config <sub>` long-help page, rendered from the same tables the
     /// parse walks and put through the brand rewrite.

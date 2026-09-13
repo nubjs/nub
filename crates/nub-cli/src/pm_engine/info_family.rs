@@ -95,7 +95,7 @@ use aube::commands::audit::FixMode;
 use aube_lockfile::LockfileKind;
 use aube_workspace::selector::EffectiveFilter;
 
-use super::publish_family::{Parsed, separate_value_flags, verb_cli};
+use super::verb_parse::{Parsed, separate_value_flags, verb_cli};
 use super::{VerbSpec, present, stub_error};
 
 /// Family dispatcher. Wired verbs run the engine; the rest stub-error (see
@@ -197,7 +197,7 @@ fn effective_filter(flags: &FilterFlags) -> EffectiveFilter {
 /// args, optionally the selector flags, and `-C/--dir`.
 macro_rules! info_cli {
     ($name:ident, $spec:tt, $engine:ty) => {
-        crate::pm_engine::publish_family::verb_cli! {
+        crate::pm_engine::verb_parse::verb_cli! {
             $name, $spec, {
                 #[usage(flatten)]
                 args: $engine,
@@ -208,7 +208,7 @@ macro_rules! info_cli {
         }
     };
     ($name:ident, $spec:tt, $engine:ty, filter) => {
-        crate::pm_engine::publish_family::verb_cli! {
+        crate::pm_engine::verb_parse::verb_cli! {
             $name, $spec, {
                 #[usage(flatten)]
                 args: $engine,
