@@ -555,8 +555,9 @@ impl Sandbox {
     /// Acquire an AppContainer session with the embedded native compatibility adapter.
     ///
     /// The adapter supplies null-device access, DOS path translation and private
-    /// runtime coordination objects. It follows child processes; it does not add
-    /// filesystem grants or permit unconfined fallback. [`Self::new`] remains raw.
+    /// runtime coordination objects, plus parent-created sockets for unrestricted
+    /// networking. It follows child processes; it does not add filesystem grants
+    /// or permit unconfined fallback. [`Self::new`] remains raw.
     #[cfg(windows)]
     pub fn with_windows_native_compat(policy: &SandboxPolicy) -> Result<Self, Degradation> {
         Self::new_impl(policy, true)
@@ -1518,7 +1519,14 @@ fn prepare_with_resources(
     #[cfg(windows)]
     if resources.native_compat {
         match prepared.launch.as_mut() {
-            Some(windows::WindowsLaunch::AppContainer(plan)) => plan.native_compat = true,
+            Some(windows::WindowsLaunch::AppContainer(plan)) => {
+                if plan.enable_native_compat(&policy.net) {
+                    prepared.degradation.lost.retain(|axis| axis != "net-full");
+                    if prepared.degradation.is_full() {
+                        prepared.degradation.reason = None;
+                    }
+                }
+            }
             _ => {
                 return Err(Degradation {
                     lost: vec!["native-compat".into()],

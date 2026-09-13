@@ -122,11 +122,11 @@ The [explicit startup adapter](README.md#python-private-directories-on-windows) 
 
 The Python helper alone does not repair uv's native launcher. The [combined native/Python adapter run](https://github.com/nubjs/nub/actions/runs/34551785167) passes uv's interpreter query and installed native entrypoint on both hosts. The two helpers address different requirements: protected directory creation and native device/path operations.
 
-### Windows Gradle network qualification
+### Windows Gradle networking
 
-The strict matrix refuses Windows' `net-full` degradation before launching Gradle. A [separate execution probe](https://github.com/nubjs/nub/actions/runs/34403539949) explicitly acknowledges that limitation and passes on Server 2022 and Windows 11 arm64: Gradle 8.14 with Temurin 21.0.8 runs an offline task twice and performs daemon cleanup through one retained session. Its plain controls also pass. The [diagnostic test](tests/native_tool_functionality.rs) asserts the exact degradation rather than ignoring all unsupported permissions.
+Gradle's file-lock service uses sockets even for offline tasks. The [native adapter test](tests/native_tool_functionality.rs) explicitly selects the adapter and requires the full requested network capability before running an offline task twice and performing daemon cleanup through one retained session. Raw execution does not receive the adapter's socket broker.
 
-This establishes that the tested Gradle workflow works with the narrower capability. It does not establish full host networking, access to arbitrary host-loopback services, or an unqualified strict-policy pass. No network grants or backend behavior were changed for this probe.
+A [historical execution probe](https://github.com/nubjs/nub/actions/runs/34403539949) passed this Gradle 8.14/Temurin 21.0.8 sequence on Server 2022 and Windows 11 arm64 with a narrower network capability. That result does not verify the current adapter or full networking; native-adapter Gradle acceptance remains unverified.
 
 ### OS restrictions
 

@@ -57,12 +57,12 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p nub-sandbox --profile fast --test native_tool_functionality gradle_unconfined -- --ignored --nocapture --test-threads=1 2>&1 | tee reports/plain.log
-      - name: Diagnosing acknowledged network limitation
+      - name: Checking native adapter networking
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
-          cargo test -p nub-sandbox --profile fast --test native_tool_functionality windows_gradle_with_limited_network -- --ignored --nocapture --test-threads=1 2>&1 | tee reports/limited-network.log
+          cargo test -p nub-sandbox --profile fast --test native_tool_functionality windows_gradle_with_native_network -- --ignored --nocapture --test-threads=1 2>&1 | tee reports/native-network.log
       - name: Preserving diagnostic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
