@@ -120,9 +120,10 @@ pub(crate) fn run_pm_migrate(cwd: &Path) -> Result<i32> {
 /// Write the target's lockfile from the versions `from` pins. Returns the
 /// path written; the caller removes the source only once it has.
 ///
-/// The engine reads yarn's and npm's lockfiles, so those take its own
-/// `import`. It reads none of bun's, so a `bun.lock` is transcoded here
-/// instead — the one format this tree still parses itself.
+/// The engine reads yarn's, npm's and bun's lockfiles, so every text
+/// lockfile takes its own `import`, which re-resolves with the source's
+/// versions as preferences rather than transcribing its graph. Transcoding
+/// is what a build without the engine falls back to.
 ///
 /// The brand preflight must already be registered, as it must for any engine
 /// call that reads project state.
@@ -136,7 +137,7 @@ pub(crate) fn migrate_lockfile(root: &Path, from: &Path, target: &str) -> Result
         );
     }
     #[cfg(feature = "pm-pnpm")]
-    if name != "bun.lock" && super::pnpm_engine::selected() {
+    if super::pnpm_engine::selected() {
         return engine_import(root, target);
     }
     use_align::transcode_lockfile(root, from, use_align::source_kind(from), target)
