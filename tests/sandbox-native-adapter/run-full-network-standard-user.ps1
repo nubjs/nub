@@ -63,6 +63,15 @@ Write-Host "STANDARD_USER_FULL_NETWORK_PROFILE=$profileRoot"
 Write-Host "STANDARD_USER_FULL_NETWORK_FIXTURE=$env:NUB_WINDOWS_NATIVE_FULL_NETWORK_FIXTURE"
 Write-Host "STANDARD_USER_FULL_NETWORK_OWNED=$owned"
 $script:failed = $false
+function Test-Arguments([string]$filter, [bool]$exact, [bool]$ignored) {
+    [string[]]$arguments = @()
+    if ($ignored) { $arguments += '--ignored' }
+    if ($exact) { $arguments += '--exact' }
+    if ($filter) { $arguments += $filter }
+    $arguments += '--nocapture'
+    $arguments += '--test-threads=1'
+    return $arguments
+}
 function Run-Filtered([string]$file, [string]$label, [string[]]$arguments, [string]$summary, [bool]$nativeAdapter = $false, [bool]$dnsOptIn = $false) {
     $out = Join-Path $owned "$label.stdout.log"; $err = Join-Path $owned "$label.stderr.log"
     $info = New-Object Diagnostics.ProcessStartInfo
@@ -115,11 +124,7 @@ $runs = @(
     @{ file='windows_native_full_network.exe'; label='native-full-network-dns-opt-in'; filter='native_adapter_full_network_dns_opt_in'; summary=$one; dnsOptIn=$true; ignored=$true; exact=$true }
 )
 foreach ($run in $runs) {
-    $arguments = if ($run.filter) {
-        $prefix = if ([bool]$run.ignored) { @('--ignored') } else { @() }
-        $match = if ([bool]$run.exact) { @('--exact', $run.filter) } else { @($run.filter) }
-        @($prefix + $match + @('--nocapture', '--test-threads=1'))
-    } else { @('--nocapture', '--test-threads=1') }
+    $arguments = Test-Arguments $run.filter ([bool]$run.exact) ([bool]$run.ignored)
     Run-Filtered $run.file $run.label $arguments $run.summary ([bool]$run.nativeAdapter) ([bool]$run.dnsOptIn)
 }
 if ($script:failed) { Write-Host 'STANDARD_USER_FULL_NETWORK_GATE=failed'; exit 1 }
