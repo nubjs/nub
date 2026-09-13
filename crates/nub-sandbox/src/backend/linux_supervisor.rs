@@ -776,7 +776,14 @@ fn snapshot_msghdr(mem: RawFd, hdr: libc::msghdr) -> Result<SendSnapshot, i32> {
     if !hdr.msg_control.is_null() || hdr.msg_controllen != 0 {
         return Err(libc::EPERM);
     }
-    let count = hdr.msg_iovlen;
+    #[cfg_attr(
+        target_env = "gnu",
+        allow(
+            clippy::useless_conversion,
+            reason = "libc::msghdr::msg_iovlen is usize on GNU Linux but i32 on musl"
+        )
+    )]
+    let count = usize::try_from(hdr.msg_iovlen).map_err(|_| libc::EINVAL)?;
     if count > MAX_SEND_IOV {
         return Err(libc::EINVAL);
     }
@@ -2813,7 +2820,7 @@ pub(super) fn mark_inherited_fds_cloexec() -> io::Result<()> {
 }
 
 unsafe fn mark_open_fds_cloexec_from_proc() -> io::Result<()> {
-    const PROC_SUPER_MAGIC: libc::c_long = 0x9fa0;
+    const PROC_SUPER_MAGIC: u64 = 0x9fa0;
     const DIRENT_HEADER: usize = 19;
     let directory = unsafe {
         libc::syscall(
@@ -2829,7 +2836,7 @@ unsafe fn mark_open_fds_cloexec_from_proc() -> io::Result<()> {
     }
     let mut stat = MaybeUninit::<libc::statfs>::uninit();
     if unsafe { libc::fstatfs(directory, stat.as_mut_ptr()) } != 0
-        || unsafe { stat.assume_init() }.f_type != PROC_SUPER_MAGIC
+        || unsafe { stat.assume_init() }.f_type as u64 != PROC_SUPER_MAGIC
     {
         unsafe { libc::close(directory) };
         return Err(io::Error::other(
@@ -3064,6 +3071,21 @@ mod lifecycle_tests {
             snapshot_msghdr(mem.as_raw_fd(), hdr).unwrap_err(),
             libc::EPERM
         );
+    }
+
+    #[test]
+    fn excessive_msghdr_iov_count_is_rejected_before_reading_child_memory() {
+        let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        hdr.msg_iovlen = (MAX_SEND_IOV + 1) as _;
+        assert_eq!(snapshot_msghdr(-1, hdr).unwrap_err(), libc::EINVAL);
+    }
+
+    #[cfg(target_env = "musl")]
+    #[test]
+    fn negative_musl_msghdr_iov_count_is_rejected() {
+        let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        hdr.msg_iovlen = -1;
+        assert_eq!(snapshot_msghdr(-1, hdr).unwrap_err(), libc::EINVAL);
     }
 
     #[test]

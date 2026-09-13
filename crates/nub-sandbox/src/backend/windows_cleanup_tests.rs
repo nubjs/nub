@@ -18,6 +18,7 @@ const FIXTURE: &str = "backend::windows::windows_cleanup_tests::windows_cleanup_
 const MODE: &str = "__NUB_WINDOWS_CLEANUP_FIXTURE";
 const ROOT: &str = "__NUB_WINDOWS_CLEANUP_ROOT";
 const FAULT: &str = "__NUB_WINDOWS_CLEANUP_FAULT";
+const TMP_POSTURE: &str = "__NUB_WINDOWS_CLEANUP_TMP_POSTURE";
 
 const WINSTA_ALL_ACCESS: u32 = 0x000F_037F;
 const DESKTOP_ALL_ACCESS: u32 = 0x000F_01FF;
@@ -149,7 +150,11 @@ fn plan(root: &Path, mode: &str) -> AppContainerLaunch {
         allow_internet: false,
         egress_funnel: None,
         proxy_context: None,
-        private_tmp: true,
+        tmp_mode: if std::env::var(TMP_POSTURE).as_deref() == Ok("deny") {
+            crate::policy::TmpMode::Deny
+        } else {
+            crate::policy::TmpMode::Private
+        },
         native_compat: std::env::var_os("NUB_NATIVE_EMBEDDED_ADAPTER").is_some(),
         stdout: WindowsStdio::Null,
         stderr: WindowsStdio::Null,
@@ -295,7 +300,7 @@ fn windows_cleanup_fixture() {
                 .expect("replacement desktop must not authorize cleanup")
         }
         "station-concurrent-launch" => concurrent_station_launch(&root),
-        "crash-transitions" => crash_transitions(&root),
+        "crash-transitions" | "crash-transitions-deny" => crash_transitions(&root),
         "station-journal-crash" => station_journal_crash(&root),
         "cleanup-retry" => interrupted_cleanup(&root),
         "cleanup-window-retry" => interrupted_window_cleanup(&root),
@@ -335,6 +340,14 @@ fn isolated_scenario(mode: &str) {
             // native tests cannot sweep the abandoned entry before inspection.
             .env("ProgramData", state)
             .env("__NUB_WINDOWS_CLEANUP_ACL_LOCK_ROOT", shared_acl_lock)
+            .env(
+                TMP_POSTURE,
+                if mode == "crash-transitions-deny" {
+                    "deny"
+                } else {
+                    "private"
+                },
+            )
             .spawn()
             .unwrap(),
     );
@@ -393,11 +406,21 @@ fn assert_recovered(profile: &str, private: &Path, caller: &Path, foreign: &Fore
 
 fn crash_transitions(root: &Path) {
     let _cleanup = CleanupAfterTest;
-    let mut stages = vec![
-        "profile-created",
-        "private-root-created",
-        "acl-installed-before-ready",
-    ];
+    let mut stages = if std::env::var(TMP_POSTURE).as_deref() == Ok("deny") {
+        vec![
+            "profile-created",
+            "profile-storage-admitted",
+            "profile-storage-acl-installed",
+            "profile-storage-protected",
+            "acl-installed-before-ready",
+        ]
+    } else {
+        vec![
+            "profile-created",
+            "private-root-created",
+            "acl-installed-before-ready",
+        ]
+    };
     if std::env::var_os("NUB_NATIVE_EMBEDDED_ADAPTER").is_some() {
         stages.extend([
             "native-assets-journaled",
@@ -733,6 +756,11 @@ fn cleanup_junction(root: &Path) {
 #[test]
 fn windows_cleanup_recovers_abrupt_acquisition_transitions() {
     isolated_scenario("crash-transitions");
+}
+
+#[test]
+fn windows_cleanup_recovers_abrupt_tmp_deny_acquisition_transitions() {
+    isolated_scenario("crash-transitions-deny");
 }
 
 #[test]

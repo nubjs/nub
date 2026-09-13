@@ -43,7 +43,7 @@ pub(super) fn plan(root: &Path, mode: &str) -> AppContainerLaunch {
         allow_internet: false,
         egress_funnel: None,
         proxy_context: None,
-        private_tmp: false,
+        tmp_mode: crate::policy::TmpMode::Shared,
         native_compat: std::env::var_os("NUB_NATIVE_EMBEDDED_ADAPTER").is_some(),
         stdout: WindowsStdio::Piped,
         stderr: WindowsStdio::Piped,
@@ -165,7 +165,7 @@ fn windows_native_child_fixture() {
         }
         "owner" => {
             let mut launch = plan(&root, "hold");
-            launch.private_tmp = true;
+            launch.tmp_mode = crate::policy::TmpMode::Private;
             let resource = launch.acquire().unwrap();
             let child = resource
                 .spawn_with_stdio(WindowsStdio::Null, WindowsStdio::Null, WindowsStdio::Null)
@@ -382,7 +382,7 @@ fn windows_native_independent_owner_death_reaps_only_its_command() {
     assert!(b.0.wait().unwrap().success());
     assert!(!is_running(child_b));
     let mut launch = plan(root.path(), "hold");
-    launch.private_tmp = true;
+    launch.tmp_mode = crate::policy::TmpMode::Private;
     let resource = launch.acquire().unwrap();
     assert_eq!(resource.profile_name(), profile_a);
     assert_eq!(resource.private_tmp(), Some(tmp_a.as_path()));
@@ -488,7 +488,7 @@ fn windows_native_retained_resource_refuses_replaced_grant_and_private_root() {
     let grant = root.path().join("grant");
     std::fs::create_dir(&grant).unwrap();
     let mut launch = plan(&grant, "hold");
-    launch.private_tmp = true;
+    launch.tmp_mode = crate::policy::TmpMode::Private;
     let resource = launch.clone().acquire().unwrap();
     let retained = BTreeMap::from([(
         resource.identity().unwrap().to_string(),
@@ -505,6 +505,87 @@ fn windows_native_retained_resource_refuses_replaced_grant_and_private_root() {
         std::fs::rename(&original, &path).unwrap();
         assert!(result.is_err(), "replaced {} was reused", path.display());
     }
+}
+
+#[test]
+fn windows_native_tmp_deny_validator_accepts_exact_read_and_write_unions() {
+    const READ_EXECUTE: u32 = 0x8000_0000 | 0x2000_0000;
+    const READ_WRITE_EXECUTE_DELETE: u32 = READ_EXECUTE | 0x4000_0000 | 0x0001_0000;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = plan(root.path(), "hold");
+    launch.tmp_mode = crate::policy::TmpMode::Deny;
+    let resource = launch.acquire().unwrap();
+    let profile = resource.profile_name().to_string();
+    let temp = super::launch::test_profile_storage_temp(&profile).unwrap();
+
+    assert!(super::launch::test_profile_storage_matches(&profile, &temp, 0).unwrap());
+    super::launch::test_add_profile_storage_ace(&profile, &temp, READ_EXECUTE, false).unwrap();
+    assert!(super::launch::test_profile_storage_matches(&profile, &temp, READ_EXECUTE).unwrap());
+    super::launch::test_add_profile_storage_ace(&profile, &temp, READ_WRITE_EXECUTE_DELETE, false)
+        .unwrap();
+    assert!(
+        !super::launch::test_profile_storage_matches(&profile, &temp, READ_EXECUTE).unwrap(),
+        "read-write storage must not validate a read-only grant"
+    );
+    assert!(
+        super::launch::test_profile_storage_matches(&profile, &temp, READ_WRITE_EXECUTE_DELETE)
+            .unwrap()
+    );
+
+    // Windows may split a generic inheritable grant on a container into an
+    // effective mapped ACE and an inherit-only generic ACE for descendants.
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = plan(root.path(), "hold");
+    launch.tmp_mode = crate::policy::TmpMode::Deny;
+    let resource = launch.acquire().unwrap();
+    let profile = resource.profile_name().to_string();
+    let temp = super::launch::test_profile_storage_temp(&profile).unwrap();
+    super::launch::test_add_profile_storage_ace(&profile, &temp, READ_EXECUTE, true).unwrap();
+    super::launch::test_add_profile_storage_effective_ace(&profile, &temp, READ_EXECUTE).unwrap();
+    assert!(
+        super::launch::test_profile_storage_matches(&profile, &temp, READ_EXECUTE).unwrap(),
+        "equivalent effective and inherit-only split ACEs must validate"
+    );
+}
+
+#[test]
+fn windows_native_tmp_deny_retained_resource_rejects_overgrant_and_inherit_only_ace() {
+    const READ_EXECUTE: u32 = 0x8000_0000 | 0x2000_0000;
+    const READ_WRITE_EXECUTE_DELETE: u32 = READ_EXECUTE | 0x4000_0000 | 0x0001_0000;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = plan(root.path(), "hold");
+    launch.tmp_mode = crate::policy::TmpMode::Deny;
+    let resource = launch.clone().acquire().unwrap();
+    let profile = resource.profile_name().to_string();
+    let temp = super::launch::test_profile_storage_temp(&profile).unwrap();
+    let retained = BTreeMap::from([(
+        resource.identity().unwrap().to_string(),
+        resource.lease().unwrap(),
+    )]);
+    super::launch::test_add_profile_storage_ace(&profile, &temp, READ_WRITE_EXECUTE_DELETE, false)
+        .unwrap();
+    assert!(
+        !super::launch::test_profile_storage_matches(&profile, &temp, 0).unwrap(),
+        "a package SID grant must invalidate tmp:false"
+    );
+    assert!(
+        launch.acquire_reusing(&retained).is_err(),
+        "a retained tmp:false resource reused a widened storage DACL"
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = plan(root.path(), "hold");
+    launch.tmp_mode = crate::policy::TmpMode::Deny;
+    let resource = launch.acquire().unwrap();
+    let profile = resource.profile_name().to_string();
+    let temp = super::launch::test_profile_storage_temp(&profile).unwrap();
+    super::launch::test_add_profile_storage_ace(&profile, &temp, READ_EXECUTE, true).unwrap();
+    assert!(
+        !super::launch::test_profile_storage_matches(&profile, &temp, READ_EXECUTE).unwrap(),
+        "an inherit-only ACE must not validate object-effective profile storage access"
+    );
 }
 
 #[test]
@@ -568,7 +649,7 @@ fn windows_native_retained_resource_owns_independent_command_jobs() {
 fn windows_native_managed_tmp_reuses_slot_without_retaining_command_environment() {
     let root = tempfile::tempdir().unwrap();
     let mut first = plan(root.path(), "tmp");
-    first.private_tmp = true;
+    first.tmp_mode = crate::policy::TmpMode::Private;
     let mut second = first.clone();
     for (launch, value) in [(&mut first, "caller-one"), (&mut second, "caller-two")] {
         launch
@@ -630,7 +711,7 @@ fn windows_native_explicit_grant_changes_never_share_managed_tmp() {
     let root = tempfile::tempdir().unwrap();
     let unique = tempfile::tempdir().unwrap();
     let mut first = plan(root.path(), "hold");
-    first.private_tmp = true;
+    first.tmp_mode = crate::policy::TmpMode::Private;
     let mut second = first.clone();
     second.read_grants.push(unique.path().to_path_buf());
     let first = first.acquire().unwrap();

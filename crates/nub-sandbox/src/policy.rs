@@ -10,12 +10,10 @@
 //! it for debugging. Field/entry order is deterministic (`Vec` preserves order,
 //! `constructed` is a `BTreeMap`) so snapshots are stable across the matrix.
 //!
-//! Evaluation model, uniform across the fs/net axes: an ordered entry list plus a
-//! `default_effect` base. `decide()` walks the entries and the LAST match wins;
-//! nothing matching falls back to `default_effect`. There is no magic floor and
-//! no deny-priority (per .fray/sandbox.md "Pure last-match-wins") — the built-in
-//! secret denies the compiler injects are ordinary entries subject to the same
-//! rule, so a later user allow can override one by ordering.
+//! Positive filesystem grants union: a matching read-write grant is not narrowed
+//! by a read-only grant. Network rules and legacy filesystem IR containing denies
+//! use ordered last-match-wins evaluation over a `default_effect` base. The public
+//! filesystem grammar rejects deny rules and does not inject credential exclusions.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,19 +47,13 @@ pub enum Effect {
 
 // ── filesystem ───────────────────────────────────────────────────────────────
 
-/// Filesystem confinement: ONE ordered last-match-wins ruleset (each Allow
-/// carrying its access) plus the tmp posture.
+/// Filesystem grants and temporary-storage posture.
 ///
-/// Provenance: design.md §2.1 sketches parallel `read`/`write` rulesets, but a
-/// single ruleset with per-Allow access is strictly more faithful to last-match-
-/// wins (one ordered list, no "which list does an entry land in" ambiguity). The
-/// read-generous/write-tight posture falls out naturally: secure defaults are
-/// `[Allow ** access=read, Deny <secrets>]` (everything readable but the secret
-/// set, nothing writable), and a `"./data": "rw"` grant appends
-/// `Allow ./data access=readwrite` — one list, no floor. Backends derive the
-/// read-set (Allow with any access) and write-set (Allow with ReadWrite) from it;
-/// a Deny removes both read and write at that path. "No write-without-read" is
-/// structural — [`FsAccess`] has no write-only variant.
+/// Public compilation produces positive grants that union read/read-write access.
+/// Secure defaults grant project reads and private temporary storage, not broad
+/// reads with credential exclusions. Legacy internal IR may contain ordered deny
+/// rules, which remove both read and write access. Write-without-read is
+/// unrepresentable: [`FsAccess`] has no write-only variant.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FsPolicy {
     pub rules: FsRuleSet,
@@ -116,7 +108,8 @@ pub enum TmpMode {
     Deny,
 }
 
-/// An ordered fs ruleset evaluated last-match-wins over a `default_effect` base.
+/// Filesystem rules over a `default_effect` base. Positive grants union access;
+/// legacy rulesets containing a deny use last-match-wins evaluation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FsRuleSet {
     pub entries: Vec<FsRule>,
