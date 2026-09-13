@@ -153,7 +153,7 @@ impl ProjectedSession {
                     if started.send(()).is_err() {
                         return Err(io::Error::from_raw_os_error(libc::ECANCELED));
                     }
-                    fuse.run()
+                    fuse.spawn()?.join()
                 })?,
         );
         ready

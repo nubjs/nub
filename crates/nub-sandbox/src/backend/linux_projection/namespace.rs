@@ -571,10 +571,10 @@ unsafe fn projected_mount_child(
         // root even if descriptor-isolation details change later.
         fuse = unsafe { libc::open(c"/dev/fuse".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
         if fuse < 0 {
-            error = unsafe { raw_errno() };
+            error = raw_errno();
         } else if fuse != MOUNT_FD {
             if unsafe { libc::dup3(fuse, MOUNT_FD, libc::O_CLOEXEC) } < 0 {
-                error = unsafe { raw_errno() };
+                error = raw_errno();
             } else {
                 unsafe { libc::close(fuse) };
                 fuse = MOUNT_FD;
@@ -584,13 +584,13 @@ unsafe fn projected_mount_child(
     if error == 0 {
         rw_root = unsafe { raw_open_directory(paths.rw.as_ptr()) };
         if rw_root < 0 {
-            error = unsafe { raw_errno() };
+            error = raw_errno();
         }
     }
     if error == 0 {
         read_root = unsafe { raw_open_directory(paths.read.as_ptr()) };
         if read_root < 0 {
-            error = unsafe { raw_errno() };
+            error = raw_errno();
         }
     }
     if error == 0 {
@@ -607,7 +607,7 @@ unsafe fn projected_mount_child(
     if error == 0 {
         root = unsafe { raw_open_directory(paths.view.as_ptr()) };
         if root < 0 {
-            error = unsafe { raw_errno() };
+            error = raw_errno();
         }
     }
     if error == 0 {
@@ -787,7 +787,7 @@ unsafe fn unmount_child(
         };
         let result = unsafe { libc::umount2(target, flags) };
         if result < 0 {
-            let errno = unsafe { raw_errno() };
+            let errno = raw_errno();
             if matches!(phase, UnmountPhase::AbortView) && errno == libc::EBUSY {
                 force_busy = true;
             } else {
