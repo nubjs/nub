@@ -106,8 +106,7 @@ use super::config_read::{ConfigArgs, ConfigCommand};
 use anyhow::{Context, Result};
 use nub_settings::meta::SettingMeta;
 
-use super::publish_family::run_wired;
-use super::verb_parse::{Parsed, plain_verb_cli, verb_cli};
+use super::verb_parse::{Parsed, verb_cli};
 use super::{VerbSpec, stub_error};
 
 /// Dispatcher for the family's verbs (see [`super::publish_family::run_verb`]
@@ -118,75 +117,11 @@ pub(crate) fn run_verb(
     args: &[String],
     pm_hint: &str,
 ) -> Result<i32> {
-    use aube::commands as cmd;
     match spec.canonical {
-        "store" => run_wired!(StoreCli, typed, args, cmd::store::run),
-        "cache" => run_wired!(CacheCli, typed, args, cmd::cache::run),
-        "cat-file" => run_wired!(CatFileCli, typed, args, cmd::cat_file::run),
-        "cat-index" => run_wired!(CatIndexCli, typed, args, cmd::cat_index::run),
-        "find-hash" => run_wired!(FindHashCli, typed, args, cmd::find_hash::run),
         "config" | "get" | "set" => run_config(spec.canonical, typed, args),
-        "pkg" => run_wired!(PkgCli, typed, args, cmd::pkg::run),
-        "set-script" => run_wired!(SetScriptCli, typed, args, cmd::set_script::run),
         // Unreachable while the registry and this match agree; kept so a
         // future registry addition degrades to the stub instead of panicking.
         _ => Err(stub_error(typed, args, pm_hint)),
-    }
-}
-
-plain_verb_cli!(
-    CatFileCli,
-    "nub cat-file",
-    aube::commands::cat_file::CatFileArgs
-);
-plain_verb_cli!(
-    CatIndexCli,
-    "nub cat-index",
-    aube::commands::cat_index::CatIndexArgs
-);
-plain_verb_cli!(
-    FindHashCli,
-    "nub find-hash",
-    aube::commands::find_hash::FindHashArgs
-);
-plain_verb_cli!(PkgCli, "nub pkg", aube::commands::pkg::PkgArgs);
-plain_verb_cli!(
-    SetScriptCli,
-    "nub set-script",
-    aube::commands::set_script::SetScriptArgs
-);
-
-// `store` and `cache` carry an engine subcommand enum, and usage refuses to
-// flatten a group that declares subcommands. Each root re-declares the
-// engine's own enum and rebuilds the args struct, so the surface still comes
-// from upstream.
-verb_cli! {
-    StoreCli, "nub store", {
-        #[usage(subcommand)]
-        command: aube::commands::store::StoreCommand,
-    }
-}
-
-impl StoreCli {
-    fn into_engine(self) -> aube::commands::store::StoreArgs {
-        aube::commands::store::StoreArgs {
-            command: self.command,
-        }
-    }
-}
-
-verb_cli! {
-    CacheCli, "nub cache", {
-        #[usage(subcommand)]
-        command: aube::commands::cache::CacheCommand,
-    }
-}
-
-impl CacheCli {
-    fn into_engine(self) -> aube::commands::cache::CacheArgs {
-        aube::commands::cache::CacheArgs {
-            command: self.command,
-        }
     }
 }
 

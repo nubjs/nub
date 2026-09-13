@@ -77,7 +77,6 @@ macro_rules! run_wired {
         }
     };
 }
-pub(super) use run_wired;
 /// The standard wired-verb epilogue: build the engine session, run the verb's
 /// `async fn run(A)` on the session runtime, route failures through the
 /// presentation layer.
