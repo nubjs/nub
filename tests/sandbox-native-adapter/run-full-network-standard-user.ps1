@@ -59,6 +59,7 @@ foreach ($file in @('native-full-network.exe', 'nub_sandbox_lib.exe', 'windows_t
 Set-Location $owned
 whoami /all
 $env:NUB_WINDOWS_NATIVE_FULL_NETWORK_FIXTURE = Join-Path $owned 'native-full-network.exe'
+$env:NUB_JAIL_DUMP_POLICY = '1'
 Write-Host "STANDARD_USER_FULL_NETWORK_PROFILE=$profileRoot"
 Write-Host "STANDARD_USER_FULL_NETWORK_FIXTURE=$env:NUB_WINDOWS_NATIVE_FULL_NETWORK_FIXTURE"
 Write-Host "STANDARD_USER_FULL_NETWORK_OWNED=$owned"
@@ -110,7 +111,7 @@ $runs = @(
     @{ file='nub_sandbox_lib.exe'; label='windows-native-child'; filter='backend::windows::native_child_tests'; summary='test result: ok. 20 passed; 0 failed; 0 ignored;' },
     @{ file='nub_sandbox_lib.exe'; label='windows-registry'; filter='backend::windows::windows_registry::tests'; summary='test result: ok. 23 passed; 0 failed; 0 ignored;' },
     @{ file='nub_sandbox_lib.exe'; label='native-full-network-authority'; filter='backend::windows::tests::native_socket_authority_requires_unrestricted_network_without_rules_or_brokers'; summary=$one; exact=$true },
-    @{ file='nub_sandbox_lib.exe'; label='native-full-network-preparation'; filter='backend::windows::tests::native_full_network_preparation_keeps_appcontainer_without_capabilities'; summary=$one; exact=$true },
+    @{ file='nub_sandbox_lib.exe'; label='native-full-network-preparation'; filter='backend::windows::tests::native_full_network_preparation_keeps_requested_internet_capability'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='native-full-network-identity'; filter='backend::windows::windows_registry::tests::native_full_network_does_not_share_a_deny_network_identity'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='socket-protocol'; filter='backend::windows_native_compat::tests::socket_protocol_rejects_raw_privileged_unknown_and_malformed_requests'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='socket-foreign-client'; filter='backend::windows_native_compat::tests::socket_broker_rejects_a_live_client_outside_its_job_and_cancels_idle_workers'; summary=$one; exact=$true },
