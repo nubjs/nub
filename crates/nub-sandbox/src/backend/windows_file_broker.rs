@@ -249,8 +249,8 @@ mod tests {
             "create" | "write" => {
                 let _ = std::fs::write(path, b"must not be written after cancellation");
             }
-            "truncate" => unsafe {
-                extern "C" {
+            "truncate" => {
+                unsafe extern "C" {
                     fn sandbox_file_broker_test_exclusive_truncate(path: *const u16) -> i32;
                 }
                 let path: Vec<u16> = std::path::PathBuf::from(path)
@@ -261,8 +261,8 @@ mod tests {
                     .collect();
                 // SAFETY: terminated fixture path; the native helper issues one
                 // actual `FILE_OVERWRITE` with exclusive sharing.
-                let _ = sandbox_file_broker_test_exclusive_truncate(path.as_ptr());
-            },
+                let _ = unsafe { sandbox_file_broker_test_exclusive_truncate(path.as_ptr()) };
+            }
             "mkdir" => {
                 let _ = std::fs::create_dir(path);
             }
@@ -1129,7 +1129,7 @@ mod tests {
                 b"overwrite-if delete share".as_slice()
             }
         );
-        assert_eq!(root.join("missing-overwrite.json").exists(), false);
+        assert!(!root.join("missing-overwrite.json").exists());
         assert_eq!(root.join("missing-overwrite-if.json").exists(), overwritten);
         assert_eq!(
             root.join("missing-overwrite-if-delete-share.json").exists(),
