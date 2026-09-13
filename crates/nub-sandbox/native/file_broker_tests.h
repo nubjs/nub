@@ -93,6 +93,18 @@ extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL al
     if (open(L"new-link.json", GENERIC_READ, FILE_OPEN, false, linked) != 0) return 12;
     if (open(L"readonly.txt", GENERIC_READ, FILE_OPEN, false, readonly) != 0) return 13;
     if (confined && named(readonly.value, L"amplified.json", 11) >= 0) return 14;
+    if (confined) {
+        wchar_t temp[kPath];
+        DWORD length = GetTempPathW(kPath, temp);
+        if (!length || length >= kPath) return 21;
+        NameInformation alias = {};
+        if (swprintf_s(alias.name, L"\\??\\%sbroker-amplification-%lu.json", temp, GetCurrentProcessId()) < 0) return 21;
+        alias.length = DWORD(wcslen(alias.name) * sizeof(wchar_t));
+        // TEMP is directly writable by the child. A raw link there must not
+        // amplify a read-only source, even before the broker sees the request.
+        if (set(readonly.value, &io, &alias, DWORD(offsetof(NameInformation, name) + alias.length),
+                static_cast<FILE_INFORMATION_CLASS>(11)) >= 0) return 22;
+    }
     BOOLEAN deleted = TRUE;
     if (set(remove.value, &io, &deleted, sizeof(deleted), static_cast<FILE_INFORMATION_CLASS>(13)) != 0) return 15;
     if (set(directory.value, &io, &deleted, sizeof(deleted), static_cast<FILE_INFORMATION_CLASS>(13)) != 0) return 16;

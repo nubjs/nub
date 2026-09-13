@@ -246,8 +246,46 @@ inline NTSTATUS resolve(const Request& request, Authorize authorize, const void*
     if (status) return status;
     auto& path = parent.path;
     DWORD leaf = parent.leaf;
+    bool missing_open_if = false;
+    if ((request.operation == Open || request.operation == Create) &&
+        (request.disposition == FILE_OPEN || request.disposition == FILE_OPEN_IF)) {
+        bool directory = (request.options & FILE_DIRECTORY_FILE) != 0;
+        if (!(request.options & (FILE_DIRECTORY_FILE | FILE_NON_DIRECTORY_FILE))) {
+            // This probe decides only the object type, never authority. Drop it
+            // before the actual open so exclusive share modes remain possible.
+            Handle type;
+            status = open_relative(api, parent.handle(), path + leaf, request.length - leaf,
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT, 0, type, io);
+            if (!status) {
+                BY_HANDLE_FILE_INFORMATION info = {};
+                if (!GetFileInformationByHandle(type.value, &info)) return kDenied;
+                directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            }
+        }
+        if (!status) status = open_relative(api, parent.handle(), path + leaf, request.length - leaf,
+            transferred_access(request.access, directory) | SYNCHRONIZE, request.share, FILE_OPEN,
+            (request.options & ~kBackupIntent) | FILE_SYNCHRONOUS_IO_NONALERT |
+                (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE), request.attributes, result, io);
+        if (!status) {
+            wchar_t canonical[kPath] = {};
+            DWORD length = 0;
+            // Opening is nondestructive. Authorize the actual held object,
+            // then transfer that same capability without a second name lookup.
+            if (!regular(result.value, directory) || !final_name(result.value, canonical, length)) return kDenied;
+            DWORD rights = authorize(context, canonical, length);
+            if (!(rights & 1) || ((access_mask(request.access) & (kWrite | DELETE)) && !(rights & 2))) return kDenied;
+            response.information = io.Information;
+            response.attributes = directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+            return 0;
+        }
+        if (request.disposition != FILE_OPEN_IF || status != static_cast<NTSTATUS>(0xc0000034)) return status;
+        // The missing OPEN_IF leaf still needs parent-name authorization and a
+        // collision-rejecting FILE_CREATE below; never change it before auth.
+        missing_open_if = true;
+    }
     Handle pin;
-    DWORD disposition = request.disposition;
+    DWORD disposition = missing_open_if ? FILE_CREATE : request.disposition;
     bool metadata = request.operation == Basic || request.operation == Full;
     DWORD access = metadata ? FILE_READ_ATTRIBUTES : access_mask(request.access);
     bool directory = (request.options & FILE_DIRECTORY_FILE) != 0;

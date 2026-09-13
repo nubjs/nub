@@ -71,6 +71,7 @@ struct TestRules {
 struct TestBlockedAuthorization {
     entered: std::os::windows::io::OwnedHandle,
     result: std::sync::atomic::AtomicU32,
+    skip: std::sync::atomic::AtomicU32,
 }
 
 #[cfg(all(test, target_env = "msvc"))]
@@ -82,6 +83,15 @@ impl TestBlockedAuthorization {
         use windows_sys::Win32::System::Threading::{
             GetExitCodeProcess, SetEvent, WaitForSingleObject,
         };
+        if self
+            .skip
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return;
+        }
         // SAFETY: WindowsChild retains its process handle until this broker's
         // workers have joined. The event is owned by this shared test state.
         let result = unsafe {
@@ -229,7 +239,11 @@ mod tests {
         };
         // A client IPC timeout must not release the synthetic blocked worker by
         // exiting the process. Only Job termination should produce exit code 1.
-        let _ = std::fs::File::open(path);
+        if std::env::var_os("NUB_FILE_BROKER_CANCELLATION_REMOVE").is_some() {
+            let _ = std::fs::remove_file(path);
+        } else {
+            let _ = std::fs::File::open(path);
+        }
         std::thread::sleep(std::time::Duration::from_secs(120));
         panic!("cancellation fixture survived its command Job deadline");
     }
@@ -237,6 +251,16 @@ mod tests {
     #[test]
     #[ignore = "requires an ordinary-user native Windows acceptance run"]
     fn file_broker_kills_job_before_joining_blocked_worker() {
+        cancellation_control(false);
+    }
+
+    #[test]
+    #[ignore = "requires an ordinary-user native Windows acceptance run"]
+    fn file_broker_cancels_namespace_before_mutation() {
+        cancellation_control(true);
+    }
+
+    fn cancellation_control(remove: bool) {
         use super::super::windows::WindowsStdio;
         use crate::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
         use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
@@ -269,6 +293,7 @@ mod tests {
             // SAFETY: successful CreateEventW returned this unique handle.
             entered: unsafe { OwnedHandle::from_raw_handle(entered) },
             result: AtomicU32::new(0),
+            skip: AtomicU32::new(u32::from(remove)),
         });
         let ctx = CompileCtx::new(
             Homes {
@@ -291,6 +316,12 @@ mod tests {
             "NUB_FILE_BROKER_CANCELLATION_FILE".into(),
             file.to_str().unwrap().into(),
         );
+        if remove {
+            policy
+                .env
+                .constructed
+                .insert("NUB_FILE_BROKER_CANCELLATION_REMOVE".into(), "1".into());
+        }
         policy
             .env
             .constructed
@@ -313,7 +344,14 @@ mod tests {
         let rules = TestRules {
             rules: FsRuleSet {
                 default_effect: Effect::Deny,
-                entries: vec![rule(file.to_str().unwrap(), FsAccess::Read)],
+                entries: vec![rule(
+                    file.to_str().unwrap(),
+                    if remove {
+                        FsAccess::ReadWrite
+                    } else {
+                        FsAccess::Read
+                    },
+                )],
             },
             blocking: Some(blocking.clone()),
         };
@@ -348,6 +386,10 @@ mod tests {
         assert_eq!(
             result, 1,
             "worker did not observe Job-killed child before join: 0=not run, 2=deadline, 3=event failure, 4=other exit"
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"ordinary caller open succeeds"
         );
         println!("FILE_BROKER_BLOCKED_WORKER_ENTERED");
         println!("FILE_BROKER_WORKER_OBSERVED_JOB_EXIT=1");
@@ -718,6 +760,30 @@ mod tests {
         let allowed = std::env::var("NUB_FILE_BROKER_TEST_MODE").unwrap() != "raw";
         if std::env::var_os("NUB_FILE_BROKER_TEST_NAMESPACE").is_some() {
             native_namespace(&root, allowed);
+            let directory = root.join("win32.dir");
+            assert_eq!(std::fs::create_dir(&directory).is_ok(), allowed);
+            let listing = std::fs::read_dir(root.join("listing.dir"));
+            assert_eq!(listing.is_ok(), allowed);
+            if allowed {
+                let entries: Vec<_> = listing
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                assert!(entries.contains(&"entry.txt".into()));
+            }
+            let linked = root.join("win32-link.json");
+            assert_eq!(
+                std::fs::hard_link(root.join("win32-source.json"), &linked).is_ok(),
+                allowed
+            );
+            assert_eq!(
+                std::fs::remove_file(root.join("win32-remove.json")).is_ok(),
+                allowed
+            );
+            assert_eq!(std::fs::remove_dir(&directory).is_ok(), allowed);
+            if allowed {
+                assert_eq!(std::fs::read(&linked).unwrap(), b"namespace fixture");
+            }
             println!("FILE_BROKER_NATIVE_NAMESPACE_OK");
             return;
         }
@@ -781,6 +847,14 @@ mod tests {
         assert!(std::fs::rename(root.join("existing.json"), root.join("renamed.txt")).is_err());
         assert!(std::fs::hard_link(root.join("existing.json"), root.join("alias.txt")).is_err());
         if allowed && std::env::var_os("NUB_FILE_BROKER_TEST_LOADER").is_none() {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            let exclusive = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(root.join("existing.json"))
+                .unwrap();
+            drop(exclusive);
             // Closed recipient handles must not consume a cumulative quota.
             for _ in 0..4097 {
                 drop(std::fs::File::open(root.join("existing.json")).unwrap());
@@ -833,7 +907,13 @@ mod tests {
     fn namespace_fixture(root: &std::path::Path) {
         std::fs::create_dir(root.join("listing.dir")).unwrap();
         std::fs::write(root.join("listing.dir").join("entry.txt"), b"entry").unwrap();
-        for name in ["source.json", "remove.json", "readonly.txt"] {
+        for name in [
+            "source.json",
+            "remove.json",
+            "readonly.txt",
+            "win32-source.json",
+            "win32-remove.json",
+        ] {
             std::fs::write(root.join(name), b"namespace fixture").unwrap();
         }
     }
