@@ -833,7 +833,8 @@ mod tests {
             return;
         };
         let root = std::path::PathBuf::from(root);
-        let allowed = std::env::var("NUB_FILE_BROKER_TEST_MODE").unwrap() != "raw";
+        let mode = std::env::var("NUB_FILE_BROKER_TEST_MODE").unwrap();
+        let allowed = mode != "raw";
         if std::env::var_os("NUB_FILE_BROKER_TEST_NAMESPACE").is_some() {
             native_namespace(&root, allowed);
             let directory = root.join("win32.dir");
