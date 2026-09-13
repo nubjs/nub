@@ -594,6 +594,8 @@ static NTSTATUS NTAPI open_file(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTR
     bool mapped = pipe_name(attrs, redirected, name, path);
     NTSTATUS status = true_open_file(handle, access, mapped ? &redirected : attrs, io, share, options);
     diagnose_socket_open(attrs, mapped, status, false);
+    diagnose_file_broker_original_failure(nub_sandbox::file_broker::Open, status, access, share,
+                                          FILE_OPEN, options, 0);
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         nub_sandbox::null_device::duplicate_after_access_denied(
             state.null_device, handle, access, attrs, io, share, options)) return 0;
@@ -621,6 +623,8 @@ static NTSTATUS NTAPI nt_create_file(PHANDLE handle, ACCESS_MASK access, POBJECT
     NTSTATUS status = true_nt_create_file(handle, access, mapped ? &redirected : attrs, io, allocation,
         attributes, share, disposition, options, ea, ea_length);
     diagnose_socket_open(attrs, mapped, status, true);
+    diagnose_file_broker_original_failure(nub_sandbox::file_broker::Create, status, access, share,
+                                          disposition, options, attributes);
     if (status == nub_sandbox::mount_query::kStatusAccessDenied &&
         (disposition == FILE_OPEN || disposition == FILE_OPEN_IF) && !allocation && !ea && !ea_length &&
         (attributes == 0 || attributes == FILE_ATTRIBUTE_NORMAL) &&

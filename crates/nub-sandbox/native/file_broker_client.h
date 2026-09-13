@@ -7,6 +7,9 @@ enum FileBrokerDiagnosticStage : DWORD {
     FileBrokerCapture = 1,
     FileBrokerExchange = 2,
     FileBrokerResponse = 3,
+    // The original native call failed with a status that is not eligible for
+    // forwarding. This distinguishes an unentered broker from a failed broker.
+    FileBrokerOriginal = 4,
 };
 
 enum FileBrokerCaptureStatus : DWORD {
@@ -39,24 +42,39 @@ static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status,
     const nub_sandbox::file_broker::Request& request, const FileBrokerCaptureDetails& capture) {
     wchar_t value[2];
     if (!GetEnvironmentVariableW(L"NUB_JAIL_DUMP_POLICY", value, _countof(value))) return;
-    // One fixed-size numeric record per failing stage; never print a path,
-    // endpoint, handle, policy, credential, or process identity.
-    static volatile LONG seen = 0;
-    LONG bit = 1L << static_cast<LONG>(stage);
-    if (!(InterlockedOr(&seen, bit) & bit)) {
-        char message[208];
+    // Bounded fixed-size numeric records; never print a path, endpoint,
+    // handle, policy, credential, or process identity. Thirty-two records
+    // per stage leave room for the native fixture's canaries before a loader
+    // request without making a noisy or unbounded diagnostic channel.
+    static volatile LONG seen[5] = {};
+    LONG count = InterlockedIncrement(&seen[static_cast<DWORD>(stage)]);
+    if (count <= 32) {
+        char message[240];
         int length = stage == FileBrokerCapture
             ? sprintf_s(message,
-                "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx object=0x%08lx attributes=0x%08lx quality=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
-                static_cast<DWORD>(stage), status, capture.object_fields, capture.object_attributes,
-                capture.quality_fields, request.access, request.options, request.disposition)
+                "NUB_FILE_BROKER_IPC stage=%lu count=%ld status=0x%08lx operation=%lu object=0x%08lx attributes=0x%08lx quality=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
+                static_cast<DWORD>(stage), count, status, request.operation, capture.object_fields,
+                capture.object_attributes, capture.quality_fields, request.access, request.options,
+                request.disposition)
             : sprintf_s(message,
-                "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
-                static_cast<DWORD>(stage), status, request.access, request.options, request.disposition);
+                "NUB_FILE_BROKER_IPC stage=%lu count=%ld status=0x%08lx operation=%lu access=0x%08lx options=0x%08lx disposition=%lu\r\n",
+                static_cast<DWORD>(stage), count, status, request.operation, request.access,
+                request.options, request.disposition);
         DWORD written = 0;
         if (length > 0) WriteFile(GetStdHandle(STD_ERROR_HANDLE), message,
                                   static_cast<DWORD>(length), &written, nullptr);
     }
+}
+
+static void diagnose_file_broker_original_failure(DWORD operation, NTSTATUS status,
+    ACCESS_MASK access, ULONG share, ULONG disposition, ULONG options, ULONG attributes) {
+    using namespace nub_sandbox::file_broker;
+    // Chromium's interception boundary is STATUS_ACCESS_DENIED. Retain every
+    // other failed original status and diagnose it instead of forwarding it.
+    if (status >= 0 || status == kDenied || !state.file_broker[0]) return;
+    Request request = {kVersion, sizeof(Request), operation, access, share, disposition, options, attributes};
+    FileBrokerCaptureDetails details = {};
+    diagnose_file_broker(FileBrokerOriginal, static_cast<DWORD>(status), request, details);
 }
 
 static bool capture_file_request(nub_sandbox::file_broker::Request& request,
@@ -279,11 +297,15 @@ static NTSTATUS broker_file_attributes(DWORD operation, POBJECT_ATTRIBUTES attrs
 
 static NTSTATUS NTAPI query_file_attributes(POBJECT_ATTRIBUTES attrs, PVOID output) {
     NTSTATUS status = true_query_attributes(attrs, output);
-    return status == nub_sandbox::file_broker::kDenied && state.file_broker[0]
-        ? broker_file_attributes(nub_sandbox::file_broker::Basic, attrs, output) : status;
+    if (status == nub_sandbox::file_broker::kDenied && state.file_broker[0])
+        return broker_file_attributes(nub_sandbox::file_broker::Basic, attrs, output);
+    diagnose_file_broker_original_failure(nub_sandbox::file_broker::Basic, status, 0, 0, 0, 0, 0);
+    return status;
 }
 static NTSTATUS NTAPI query_full_file_attributes(POBJECT_ATTRIBUTES attrs, PVOID output) {
     NTSTATUS status = true_query_full_attributes(attrs, output);
-    return status == nub_sandbox::file_broker::kDenied && state.file_broker[0]
-        ? broker_file_attributes(nub_sandbox::file_broker::Full, attrs, output) : status;
+    if (status == nub_sandbox::file_broker::kDenied && state.file_broker[0])
+        return broker_file_attributes(nub_sandbox::file_broker::Full, attrs, output);
+    diagnose_file_broker_original_failure(nub_sandbox::file_broker::Full, status, 0, 0, 0, 0, 0);
+    return status;
 }
