@@ -4,6 +4,15 @@
 #[cfg(target_env = "msvc")]
 use crate::matcher::path::PathMatcher;
 
+#[cfg(target_env = "msvc")]
+struct Authority {
+    _matcher: PathMatcher,
+    #[cfg(test)]
+    blocking: Option<std::sync::Arc<TestBlockedAuthorization>>,
+    #[cfg(test)]
+    process: usize,
+}
+
 pub(super) struct FileBroker {
     #[cfg(target_env = "msvc")]
     native: std::ptr::NonNull<std::ffi::c_void>,
@@ -11,7 +20,7 @@ pub(super) struct FileBroker {
     pub(super) endpoint: Vec<u16>,
     // Stable allocation borrowed by native workers until Drop has joined them.
     #[cfg(target_env = "msvc")]
-    _matcher: Box<PathMatcher>,
+    _authority: Box<Authority>,
 }
 
 // SAFETY: the native owner synchronizes cancellation, and its immutable matcher
@@ -48,12 +57,65 @@ impl Drop for FileBroker {
 
 #[cfg(all(test, target_env = "msvc"))]
 thread_local! {
-    static TEST_RULES: std::cell::RefCell<Option<crate::policy::FsRuleSet>> = const { std::cell::RefCell::new(None) };
+    static TEST_RULES: std::cell::RefCell<Option<TestRules>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, target_env = "msvc"))]
+#[derive(Clone)]
+struct TestRules {
+    rules: crate::policy::FsRuleSet,
+    blocking: Option<std::sync::Arc<TestBlockedAuthorization>>,
+}
+
+#[cfg(all(test, target_env = "msvc"))]
+struct TestBlockedAuthorization {
+    entered: std::os::windows::io::OwnedHandle,
+    result: std::sync::atomic::AtomicU32,
+}
+
+#[cfg(all(test, target_env = "msvc"))]
+impl TestBlockedAuthorization {
+    fn wait_for_child_exit(&self, process: usize) {
+        use std::os::windows::io::AsRawHandle as _;
+        use std::sync::atomic::Ordering;
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, SetEvent, WaitForSingleObject,
+        };
+        // SAFETY: WindowsChild retains its process handle until this broker's
+        // workers have joined. The event is owned by this shared test state.
+        let result = unsafe {
+            if SetEvent(self.entered.as_raw_handle()) == 0 {
+                3
+            } else if WaitForSingleObject(process as _, 30_000) != WAIT_OBJECT_0 {
+                2
+            } else {
+                let mut code = 0;
+                if GetExitCodeProcess(process as _, &mut code) != 0 && code == 1 {
+                    1
+                } else {
+                    4
+                }
+            }
+        };
+        self.result.store(result, Ordering::Release);
+    }
 }
 
 #[cfg(all(test, target_env = "msvc"))]
 pub(super) fn with_test_rules<T>(rules: crate::policy::FsRuleSet, run: impl FnOnce() -> T) -> T {
-    struct Reset(Option<crate::policy::FsRuleSet>);
+    with_test_config(
+        TestRules {
+            rules,
+            blocking: None,
+        },
+        run,
+    )
+}
+
+#[cfg(all(test, target_env = "msvc"))]
+fn with_test_config<T>(rules: TestRules, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<TestRules>);
     impl Drop for Reset {
         fn drop(&mut self) {
             TEST_RULES.set(self.0.take());
@@ -81,16 +143,21 @@ pub(super) fn start_for_test(
         }
         // SAFETY: native resolver supplies its bounded UTF-16 name and the
         // immutable boxed matcher retained until all workers have stopped.
-        let (matcher, name) = unsafe {
+        let (authority, name) = unsafe {
             (
-                &*context.cast::<PathMatcher>(),
+                &*context.cast::<Authority>(),
                 std::slice::from_raw_parts(path, length as usize),
             )
         };
         let Ok(name) = String::from_utf16(name) else {
             return 0;
         };
-        let decision = matcher.decide_verified_name(&name);
+        let decision = authority._matcher.decide_verified_name(&name);
+        if decision.effect == Effect::Allow
+            && let Some(blocking) = &authority.blocking
+        {
+            blocking.wait_for_child_exit(authority.process);
+        }
         match (decision.effect, decision.access) {
             (Effect::Allow, FsAccess::Read) => 1,
             (Effect::Allow, FsAccess::ReadWrite) => 3,
@@ -111,7 +178,11 @@ pub(super) fn start_for_test(
             broker: *mut *mut std::ffi::c_void,
         ) -> u32;
     }
-    let matcher = Box::new(PathMatcher::new(&rules));
+    let authority = Box::new(Authority {
+        _matcher: PathMatcher::new(&rules.rules),
+        blocking: rules.blocking,
+        process: process as usize,
+    });
     let mut nonce = [0u8; 16];
     getrandom::getrandom(&mut nonce).map_err(|error| io::Error::other(error.to_string()))?;
     let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -128,7 +199,7 @@ pub(super) fn start_for_test(
             job,
             endpoint.as_ptr(),
             authorize,
-            (&*matcher as *const PathMatcher).cast(),
+            (&*authority as *const Authority).cast(),
             &mut native,
         )
     };
@@ -140,7 +211,7 @@ pub(super) fn start_for_test(
     Ok(Some(FileBroker {
         native,
         endpoint,
-        _matcher: matcher,
+        _authority: authority,
     }))
 }
 
@@ -150,6 +221,134 @@ mod tests {
     use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, FsRuleSet};
 
     const CHILD: &str = "backend::windows_file_broker::tests::file_broker_native_child";
+
+    #[test]
+    fn file_broker_cancellation_child() {
+        let Some(path) = std::env::var_os("NUB_FILE_BROKER_CANCELLATION_FILE") else {
+            return;
+        };
+        // A client IPC timeout must not release the synthetic blocked worker by
+        // exiting the process. Only Job termination should produce exit code 1.
+        let _ = std::fs::File::open(path);
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        panic!("cancellation fixture survived its command Job deadline");
+    }
+
+    #[test]
+    #[ignore = "requires an ordinary-user native Windows acceptance run"]
+    fn file_broker_kills_job_before_joining_blocked_worker() {
+        use super::super::windows::WindowsStdio;
+        use crate::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        };
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+
+        const CHILD: &str = "backend::windows_file_broker::tests::file_broker_cancellation_child";
+        let binary = std::env::current_exe().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("sandbox-file-cancellation-")
+            .tempdir_in(std::env::var_os("USERPROFILE").unwrap())
+            .unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let file = root.path().join("blocked.json");
+        std::fs::write(&file, b"ordinary caller open succeeds").unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"ordinary caller open succeeds"
+        );
+        // SAFETY: unnamed, noninheritable manual-reset event, uniquely owned
+        // below and retained until the native worker has returned.
+        let entered = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        assert!(!entered.is_null(), "{}", std::io::Error::last_os_error());
+        let blocking = Arc::new(TestBlockedAuthorization {
+            // SAFETY: successful CreateEventW returned this unique handle.
+            entered: unsafe { OwnedHandle::from_raw_handle(entered) },
+            result: AtomicU32::new(0),
+        });
+        let ctx = CompileCtx::new(
+            Homes {
+                home: root.path().join("home"),
+                cache: root.path().join("cache"),
+                tmp: root.path().join("tmp"),
+                project: project.clone(),
+            },
+            project.clone(),
+            ScopeCapabilities::approved(),
+            std::env::vars().collect(),
+        );
+        let mut policy = compile(
+            &serde_json::json!({"fs": {"./": "r", "$tmp": "rw",
+            binary.parent().unwrap().to_str().unwrap(): "r"}, "net": false}),
+            &ctx,
+        )
+        .unwrap();
+        policy.env.constructed.insert(
+            "NUB_FILE_BROKER_CANCELLATION_FILE".into(),
+            file.to_str().unwrap().into(),
+        );
+        let sandbox = Sandbox::with_windows_native_compat(&policy).unwrap();
+        let mut prepared = sandbox
+            .prepare(
+                CommandSpec::new(&binary)
+                    .args(["--exact", CHILD, "--nocapture"])
+                    .cwd(&project),
+            )
+            .unwrap();
+        assert!(
+            prepared.degradation.lost.is_empty(),
+            "{:?}",
+            prepared.degradation
+        );
+        let launch = prepared.launch.take().unwrap();
+        let resource = prepared.acquire_windows_resource(launch).unwrap();
+        let rules = TestRules {
+            rules: FsRuleSet {
+                default_effect: Effect::Deny,
+                entries: vec![rule(file.to_str().unwrap(), FsAccess::Read)],
+            },
+            blocking: Some(blocking.clone()),
+        };
+        let mut child = with_test_config(rules, || {
+            resource.spawn_before_resume(
+                WindowsStdio::Null,
+                WindowsStdio::Inherit,
+                WindowsStdio::Inherit,
+                |_| Ok(()),
+            )
+        })
+        .unwrap();
+        // Entry occurs only after the native client authenticated, the real
+        // resolver pinned the existing file, and the immutable matcher allowed it.
+        // Always terminate/reap before asserting, including a missing-entry failure.
+        let entered = unsafe { WaitForSingleObject(blocking.entered.as_raw_handle(), 30_000) };
+        let live = child.try_wait().unwrap().is_none();
+        let kill = child.kill();
+        let status = child.wait().unwrap();
+        let result = blocking.result.load(Ordering::Acquire);
+        drop(child);
+        drop(resource);
+        drop(prepared);
+        sandbox.close();
+        assert_eq!(entered, WAIT_OBJECT_0, "broker callback was never entered");
+        assert!(
+            live,
+            "target exited before the parent requested Job termination"
+        );
+        kill.unwrap();
+        assert_eq!(status.code(), Some(1), "unexpected target exit: {status}");
+        assert_eq!(
+            result, 1,
+            "worker did not observe Job-killed child before join: 0=not run, 2=deadline, 3=event failure, 4=other exit"
+        );
+        println!("FILE_BROKER_BLOCKED_WORKER_ENTERED");
+        println!("FILE_BROKER_WORKER_OBSERVED_JOB_EXIT=1");
+        println!("FILE_BROKER_KILL_BEFORE_JOIN_OK");
+    }
 
     #[test]
     fn file_broker_exact_frames_and_foreign_job_fail_closed() {
