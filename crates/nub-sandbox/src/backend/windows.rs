@@ -17,15 +17,15 @@
 //! AXES:
 //!   - fs read-confine: inheritable allow-ACE (AC SID, read+execute) on each allowed
 //!     read subtree. Only the *default-deny* (read-confine) posture is expressible;
-//!     a generous-read (`default_effect == Allow`) policy degrades — the allowlist
-//!     cannot say "read everything except secrets" (see [`derive_grants`]).
+//!     a whole-filesystem default-allow policy degrades where the caller cannot
+//!     install the necessary object grants (see [`derive_grants`]).
 //!   - fs write-confine: inheritable allow-ACE (AC SID, modify) on each write subtree.
 //!   - env-scrub: the child env IS the policy's constructed map (`lpEnvironment`),
 //!     built by construction exactly as the mac/linux backends do.
-//!   - coarse egress: no `internetClient` capability ⇒ ALL egress (incl. loopback)
-//!     is blocked. An AppContainer with `internetClient` has public outbound access,
-//!     not full host networking. Per-host policies use an unprivileged co-package
-//!     proxy helper with `internetClient`; the confined child has no direct egress.
+//!   - coarse egress: absent network capabilities block external egress; same-package
+//!     loopback remains available. `internetClient` permits public outbound access,
+//!     not full host networking. Per-host policies use a zero-capability co-package
+//!     byte relay into the parent-owned policy proxy.
 //!   - process-reap: a Job Object with `KILL_ON_JOB_CLOSE`; the whole tree dies when
 //!     the job handle closes (after the child exits, or if nub does).
 //!   - process-count: the same Job carries `ACTIVE_PROCESS` (see
@@ -698,7 +698,7 @@ enum WinNetPlan {
     CoarseDeny,
     /// A co-package proxy helper; the child itself has no internet capability.
     Funnel,
-    /// No unprivileged implementation can enforce the requested policy.
+    /// The current backend cannot enforce the requested policy.
     Unsupported,
 }
 
