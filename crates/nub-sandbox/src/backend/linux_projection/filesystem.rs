@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io;
@@ -39,6 +39,10 @@ const KERNEL_FMODE_EXEC: i32 = 1 << 5;
 
 fn accepted_rename_flags(flags: u32) -> bool {
     matches!(flags, 0 | libc::RENAME_NOREPLACE | libc::RENAME_EXCHANGE)
+}
+
+fn rebase_path(path: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
+    path.strip_prefix(old).ok().map(|suffix| new.join(suffix))
 }
 
 fn normalize_open_flags(flags: i32) -> io::Result<i32> {
@@ -433,7 +437,7 @@ impl State {
     }
 
     fn rename(
-        &self,
+        &mut self,
         parent: u64,
         name: &OsStr,
         newparent: u64,
@@ -447,8 +451,89 @@ impl State {
         let (new_path, new_parent) = self.child_parent(newparent, newname)?;
         self.require_write(&old_path)?;
         self.require_write(&new_path)?;
+        let replacements = if self.same_child_object(&old_parent, name, &new_parent, newname) {
+            Vec::new()
+        } else {
+            self.renamed_node_replacements(&old_path, &new_path, flags == libc::RENAME_EXCHANGE)?
+        };
         self.backing
-            .rename_at(&old_parent, name, &new_parent, newname, flags)
+            .rename_at(&old_parent, name, &new_parent, newname, flags)?;
+        self.install_rebased_nodes(replacements);
+        Ok(())
+    }
+
+    /// `renameat` is a no-op when two ordinary hardlink names already denote
+    /// the same object. Keep their separate path identities in that case: each
+    /// spelling has its own policy ceiling and cached FUSE inode.
+    fn same_child_object(
+        &self,
+        old_parent: &File,
+        old_name: &OsStr,
+        new_parent: &File,
+        new_name: &OsStr,
+    ) -> bool {
+        let Ok(old) = self.backing.pin_child(old_parent, old_name) else {
+            return false;
+        };
+        let Ok(new) = self.backing.pin_child(new_parent, new_name) else {
+            return false;
+        };
+        let Ok(old_meta) = old.metadata() else {
+            return false;
+        };
+        let Ok(new_meta) = new.metadata() else {
+            return false;
+        };
+        same_object(&old_meta, &new_meta)
+    }
+
+    /// Rebind cached FUSE inodes to the names produced by a namespace rename.
+    ///
+    /// The replacement `Arc<Node>` deliberately leaves an already-open handle
+    /// on its original node: descriptor operations retain the authority and
+    /// object acquired at open time. Fresh operations instead resolve through
+    /// the renamed spelling and recheck its policy and backing identity.
+    fn renamed_node_replacements(
+        &self,
+        old_path: &Path,
+        new_path: &Path,
+        exchange: bool,
+    ) -> io::Result<Vec<(u64, Arc<Node>)>> {
+        let mut replacements = Vec::new();
+        for (&ino, entry) in &self.nodes {
+            // Nodes displaced by an earlier replacement have no active path
+            // entry. Do not revive them by moving a stale cached inode again.
+            if self.paths.get(&entry.node.path) != Some(&ino) {
+                continue;
+            }
+            let path = rebase_path(&entry.node.path, old_path, new_path)
+                .or_else(|| exchange.then(|| rebase_path(&entry.node.path, new_path, old_path))?);
+            let Some(path) = path.filter(|path| path != &entry.node.path) else {
+                continue;
+            };
+            replacements.push((
+                ino,
+                Arc::new(Node {
+                    path,
+                    pin: entry.node.pin.try_clone()?,
+                }),
+            ));
+        }
+
+        Ok(replacements)
+    }
+
+    fn install_rebased_nodes(&mut self, replacements: Vec<(u64, Arc<Node>)>) {
+        let moved: HashSet<_> = replacements.iter().map(|(ino, _)| *ino).collect();
+        self.paths.retain(|_, ino| !moved.contains(ino));
+        for (ino, node) in replacements {
+            // The replacement was prepared from `self.nodes` while this state
+            // lock was held, so no entry can disappear before installation.
+            if let Some(entry) = self.nodes.get_mut(&ino) {
+                entry.node = Arc::clone(&node);
+            }
+            self.paths.insert(node.path.clone(), ino);
+        }
     }
 
     fn link(&mut self, ino: u64, newparent: u64, newname: &OsStr) -> io::Result<FileAttr> {
@@ -854,7 +939,7 @@ impl Filesystem for Projection {
         }
         match self
             .state()
-            .and_then(|state| state.rename(parent.0, name, newparent.0, newname, flags))
+            .and_then(|mut state| state.rename(parent.0, name, newparent.0, newname, flags))
         {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(err.into()),

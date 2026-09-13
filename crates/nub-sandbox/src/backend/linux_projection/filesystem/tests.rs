@@ -557,9 +557,13 @@ fn namespace_mutations_keep_handles_but_fresh_names_are_rechecked() {
             0,
         )
         .unwrap();
-    assert_errno(state.open(ino, libc::O_RDONLY), libc::ENOENT);
+    // A FUSE rename changes the name bound to this cached inode. Fresh opens
+    // re-authorize the destination spelling while the original handle keeps
+    // its already-acquired rights.
+    let reopened = state.open(ino, libc::O_RDONLY).unwrap();
     let moved = lookup(&mut state, ROOT, "moved.json");
-    assert_ne!(ino, moved);
+    assert_eq!(ino, moved);
+    assert_eq!(state.read(ino, reopened, 0, 100).unwrap(), b"original");
     state.write(ino, handle, 0, b"retained").unwrap();
     assert_eq!(
         std::fs::read(root.path().join("moved.json")).unwrap(),
@@ -571,6 +575,195 @@ fn namespace_mutations_keep_handles_but_fresh_names_are_rechecked() {
     assert_eq!(state.read(ino, handle, 0, 100).unwrap(), b"retained");
     state.write(ino, handle, 0, b"unlinked").unwrap();
     assert_eq!(state.read(ino, handle, 0, 100).unwrap(), b"unlinked");
+}
+
+#[test]
+fn directory_rename_rebases_cached_descendants_without_reusing_replaced_inodes() {
+    let root = tempfile::tempdir().unwrap();
+    let source_path = root.path().join("directory-source.dir");
+    let destination_path = root.path().join("directory-renamed.dir");
+    std::fs::create_dir(&source_path).unwrap();
+    std::fs::write(source_path.join("fresh.json"), b"fresh").unwrap();
+    std::fs::write(source_path.join("retained.json"), b"retained").unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/directory-source.dir", FsAccess::ReadWrite),
+            ("/directory-source.dir/*.json", FsAccess::ReadWrite),
+            ("/directory-renamed.dir", FsAccess::ReadWrite),
+            ("/directory-renamed.dir/*.json", FsAccess::Read),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let source = lookup(&mut state, ROOT, "directory-source.dir");
+    let fresh = lookup(&mut state, source, "fresh.json");
+    let retained = lookup(&mut state, source, "retained.json");
+    let handle = state.open(retained, libc::O_RDWR).unwrap();
+
+    state
+        .rename(
+            ROOT,
+            OsStr::new("directory-source.dir"),
+            ROOT,
+            OsStr::new("directory-renamed.dir"),
+            0,
+        )
+        .unwrap();
+    assert_errno(
+        state.lookup(ROOT, OsStr::new("directory-source.dir")),
+        libc::ENOENT,
+    );
+    assert_eq!(lookup(&mut state, ROOT, "directory-renamed.dir"), source);
+    let fresh_handle = state.open(fresh, libc::O_RDONLY).unwrap();
+    assert_eq!(state.read(fresh, fresh_handle, 0, 100).unwrap(), b"fresh");
+    assert_errno(state.open(fresh, libc::O_WRONLY), libc::EACCES);
+    state.write(retained, handle, 0, b"retained-held").unwrap();
+    assert_eq!(
+        std::fs::read(destination_path.join("retained.json")).unwrap(),
+        b"retained-held"
+    );
+
+    std::fs::rename(&destination_path, root.path().join("moved-aside")).unwrap();
+    std::fs::create_dir(&destination_path).unwrap();
+    std::fs::write(destination_path.join("fresh.json"), b"replacement").unwrap();
+    assert_errno(state.open(fresh, libc::O_RDONLY), libc::ESTALE);
+}
+
+#[test]
+fn rename_overwrite_keeps_the_displaced_inode_stale() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("source.json"), b"source").unwrap();
+    std::fs::write(root.path().join("destination.json"), b"destination").unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/source.json", FsAccess::ReadWrite),
+            ("/destination.json", FsAccess::ReadWrite),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let source = lookup(&mut state, ROOT, "source.json");
+    let destination = lookup(&mut state, ROOT, "destination.json");
+
+    state
+        .rename(
+            ROOT,
+            OsStr::new("source.json"),
+            ROOT,
+            OsStr::new("destination.json"),
+            0,
+        )
+        .unwrap();
+    assert_errno(state.open(destination, libc::O_RDONLY), libc::ESTALE);
+    assert_eq!(lookup(&mut state, ROOT, "destination.json"), source);
+    let source_handle = state.open(source, libc::O_RDONLY).unwrap();
+    assert_eq!(
+        state.read(source, source_handle, 0, 100).unwrap(),
+        b"source"
+    );
+}
+
+#[test]
+fn hardlink_rename_and_exchange_keep_separate_path_identities() {
+    let root = tempfile::tempdir().unwrap();
+    let left_path = root.path().join("left.json");
+    let right_path = root.path().join("right.json");
+    std::fs::write(&left_path, b"shared").unwrap();
+    std::fs::hard_link(&left_path, &right_path).unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/left.json", FsAccess::ReadWrite),
+            ("/right.json", FsAccess::ReadWrite),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let left = lookup(&mut state, ROOT, "left.json");
+    let right = lookup(&mut state, ROOT, "right.json");
+    assert_ne!(left, right);
+
+    for flags in [0, libc::RENAME_EXCHANGE] {
+        state
+            .rename(
+                ROOT,
+                OsStr::new("left.json"),
+                ROOT,
+                OsStr::new("right.json"),
+                flags,
+            )
+            .unwrap();
+        assert_eq!(lookup(&mut state, ROOT, "left.json"), left);
+        assert_eq!(lookup(&mut state, ROOT, "right.json"), right);
+    }
+}
+
+#[test]
+fn host_replacement_before_rename_cannot_be_rebound_to_the_cached_source_inode() {
+    let root = tempfile::tempdir().unwrap();
+    let source_path = root.path().join("source.json");
+    std::fs::write(&source_path, b"original").unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/source.json", FsAccess::ReadWrite),
+            ("/destination.json", FsAccess::ReadWrite),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let source = lookup(&mut state, ROOT, "source.json");
+    std::fs::rename(&source_path, root.path().join("original-aside")).unwrap();
+    std::fs::write(&source_path, b"replacement").unwrap();
+
+    state
+        .rename(
+            ROOT,
+            OsStr::new("source.json"),
+            ROOT,
+            OsStr::new("destination.json"),
+            0,
+        )
+        .unwrap();
+    assert_errno(state.open(source, libc::O_RDONLY), libc::ESTALE);
+    let destination = lookup(&mut state, ROOT, "destination.json");
+    assert_ne!(destination, source);
+    let handle = state.open(destination, libc::O_RDONLY).unwrap();
+    assert_eq!(
+        state.read(destination, handle, 0, 100).unwrap(),
+        b"replacement"
+    );
+}
+
+#[test]
+fn rename_exchange_rebinds_each_cached_path_and_preserves_handles() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("left.json"), b"left").unwrap();
+    std::fs::write(root.path().join("right.json"), b"right").unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/left.json", FsAccess::ReadWrite),
+            ("/right.json", FsAccess::ReadWrite),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let left = lookup(&mut state, ROOT, "left.json");
+    let right = lookup(&mut state, ROOT, "right.json");
+    let held_left = state.open(left, libc::O_RDONLY).unwrap();
+
+    state
+        .rename(
+            ROOT,
+            OsStr::new("left.json"),
+            ROOT,
+            OsStr::new("right.json"),
+            libc::RENAME_EXCHANGE,
+        )
+        .unwrap();
+    assert_eq!(lookup(&mut state, ROOT, "left.json"), right);
+    assert_eq!(lookup(&mut state, ROOT, "right.json"), left);
+    let reopened_left = state.open(right, libc::O_RDONLY).unwrap();
+    assert_eq!(state.read(right, reopened_left, 0, 100).unwrap(), b"right");
+    assert_eq!(state.read(left, held_left, 0, 100).unwrap(), b"left");
 }
 
 #[test]
