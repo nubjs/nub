@@ -1,0 +1,93 @@
+name: POSIX sandbox aggregate gate
+
+on:
+  push:
+    branches: [posix-sandbox-aggregate-3c3212]
+    paths:
+      - crates/nub-sandbox/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/posix-sandbox-aggregate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            expected_arch: x86_64
+          - os: macos-14
+            expected_arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      SOURCE_COMMIT: 3c3212e6b8bcd8a453cf93f5ca7036a2c59ee26a
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: posix-sandbox-aggregate
+      - name: Binding immutable source and platform
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          test "$(git rev-parse "$SOURCE_COMMIT")" = "$SOURCE_COMMIT"
+          git diff --exit-code "$SOURCE_COMMIT" -- crates/nub-sandbox Cargo.toml Cargo.lock
+          actual_arch="$(uname -m)"
+          case "$actual_arch" in arm64|aarch64) normalized_arch=arm64 ;; x86_64|amd64) normalized_arch=x86_64 ;; *) normalized_arch="$actual_arch" ;; esac
+          test "$normalized_arch" = "${{ matrix.expected_arch }}"
+          {
+            printf 'source_commit=%s\nprobe_head=%s\n' "$SOURCE_COMMIT" "$(git rev-parse HEAD)"
+            uname -a
+            rustc -Vv
+            cargo -V
+            printf 'actual_arch=%s\nnormalized_arch=%s\nexpected_arch=%s\n' "$actual_arch" "$normalized_arch" "${{ matrix.expected_arch }}"
+          } > reports/environment.txt
+      - name: Running focused aggregate
+        run: |
+          set -euo pipefail
+          failures=0
+          : > reports/results.tsv
+          run_case() {
+            name="$1"; shift
+            set +e
+            "$@" > "reports/$name.log" 2>&1
+            rc=$?
+            set -e
+            printf '%s\t%s\n' "$name" "$rc" | tee -a reports/results.tsv
+            if [ "$rc" -ne 0 ]; then failures=1; fi
+          }
+          run_case lib-tests-compile cargo test --locked -p nub-sandbox --lib --no-run
+          run_case examples-compile cargo build --locked -p nub-sandbox --examples
+          run_case tmp-grant-composition cargo test --locked -p nub-sandbox --test tmp_grant_composition -- --nocapture --test-threads=1
+          run_case relay-units cargo test --locked -p nub-sandbox --lib proxy::relay:: -- --nocapture --test-threads=1
+          run_case live-tls-unit cargo test --locked -p nub-sandbox --lib proxy::tests::live_tls_broker_releases_marker_only_to_the_exact_verified_upstream -- --exact --nocapture --test-threads=1
+          run_case broker-session-example cargo run --locked -p nub-sandbox --example broker_session_fixture
+          if [ "$RUNNER_OS" = Linux ]; then
+            run_case supervised-broker-ca-linux cargo test --locked -p nub-sandbox --test supervised_broker_ca_linux -- --nocapture --test-threads=1
+          fi
+          {
+            printf 'target executables\n'
+            find "$CARGO_TARGET_DIR/debug" -type f \( -path '*/deps/nub_sandbox-*' -o -path '*/deps/tmp_grant_composition-*' -o -path '*/deps/supervised_broker_ca_linux-*' -o -path '*/examples/broker_session_fixture' \) -perm -111 -print | sort | while read -r binary; do
+              sha256sum "$binary" 2>/dev/null || shasum -a 256 "$binary"
+            done
+            printf '\ntest summaries\n'
+            grep -hE 'running [0-9]+ tests|test result:|BROKER_NATIVE_SESSION_OK|SUPERVISED_BROKER_CA_OK' reports/*.log || true
+          } > reports/binaries-and-runtime.txt
+          exit "$failures"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: posix-sandbox-aggregate-${{ matrix.os }}
+          path: reports
+          retention-days: 14
