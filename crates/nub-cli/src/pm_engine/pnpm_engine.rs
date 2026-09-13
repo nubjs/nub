@@ -303,6 +303,96 @@ fn rewrite_suggestions(rendered: &str, program: &str) -> String {
     out
 }
 
+/// The process-level setup the engine does not do for itself.
+///
+/// The other engine gets all of this while building the session it runs
+/// in; this one builds no session, so each piece was simply absent rather
+/// than deliberately skipped.
+///
+/// The order is load-bearing. The configuration snapshot comes first
+/// because the augmentation reads it: without it `runtime_config` finds
+/// no snapshot and answers with the built-in defaults, so a project's own
+/// runtime settings would never reach a lifecycle script — and nothing
+/// would report it, because the augmentation still looks applied.
+fn session_prologue() -> Result<()> {
+    crate::cli::initialize_config_snapshot(false, false)?;
+    // macOS leaves the soft descriptor limit at 256, which a large
+    // concurrent install exhausts with `Too many open files`.
+    nub_core::resource_limits::raise_nofile_limit();
+    apply_lifecycle_augmentation()
+}
+
+/// Put nub's runtime augmentation on THIS process's environment, so every
+/// lifecycle script the engine spawns inherits it.
+///
+/// The other engine takes the same overlay through its own context, which
+/// this one never reads — but it needs no seam of its own, because the
+/// engine APPENDS its resolution shim to an inherited `NODE_OPTIONS`
+/// rather than replacing it. Measured with a dependency whose postinstall
+/// writes the variable out: a value set here arrives first and the
+/// engine's shim follows it.
+///
+/// Without this a dependency's build script compiles against whatever
+/// Node happens to be ambient rather than the project's pinned one, which
+/// is the ABI bug the other engine's session prologue exists to close.
+///
+/// Silent when augmentation cannot be computed — no nub binary to point
+/// at, no runtime config — which leaves the engine's own behaviour
+/// exactly as it was.
+fn apply_lifecycle_augmentation() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let discovered = nub_core::node::discovery::discover_node(&super::lifecycle_node_anchor(&cwd));
+    let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
+        return Ok(());
+    };
+    let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    let mut runtime = crate::project_config::runtime_config()?;
+    let runtime_node_options = crate::cli::lifecycle_node_options(&mut runtime, &node)?;
+    let runtime_json = crate::cli::runtime_config_json(&runtime)?;
+    let pnp_ctx = nub_core::pnp::detect(&cwd);
+    // Lifecycle scripts are never compat: PM verbs run augmented, and there
+    // is no `--node` lifecycle path.
+    let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
+        &nub_binary,
+        node.version.clone(),
+        false,
+        pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
+        &runtime_node_options,
+    ) else {
+        return Ok(());
+    };
+    // npm/pnpm parity: `npm_config_node_options` seeds a script's
+    // NODE_OPTIONS only when the ambient environment carries none itself.
+    if std::env::var_os("NODE_OPTIONS").is_none()
+        && let Ok(configured) = std::env::var("NPM_CONFIG_NODE_OPTIONS")
+            .or_else(|_| std::env::var("npm_config_node_options"))
+        && !configured.is_empty()
+    {
+        match &mut aug.node_options {
+            Some(options) => {
+                options.push(' ');
+                options.push_str(&configured);
+            }
+            None => aug.node_options = Some(configured),
+        }
+    }
+    let (overlay, path_prepends) =
+        super::augmentation_to_lifecycle_overlay(&aug, node.path.as_str(), Some(&runtime_json));
+    for (key, value) in overlay {
+        unsafe { std::env::set_var(key, value) };
+    }
+    if !path_prepends.is_empty() {
+        let mut entries = path_prepends;
+        if let Some(existing) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(entries) {
+            unsafe { std::env::set_var("PATH", joined) };
+        }
+    }
+    Ok(())
+}
+
 /// Run the engine on `argv` and return its exit status.
 ///
 /// `argv` is the whole command line, program name first, as the host
@@ -311,6 +401,7 @@ fn rewrite_suggestions(rendered: &str, program: &str) -> String {
 /// no spelling for those, so what it runs on is what nub left.
 pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     let embedder = profile(selection().unwrap_or(Selection::Auto))?;
+    session_prologue()?;
     // The engine's own entry point installs this before it can print. It
     // drops each cause the level above already states in full, so a host
     // that leaves miette at its default renders chains the engine collapses
