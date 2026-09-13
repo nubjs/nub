@@ -886,8 +886,28 @@ fn run_mount_probe(role: &str, marker: &str) {
     }
     if status.is_none() {
         let _ = wait(&mut child);
+        writeln!(
+            OpenOptions::new().append(true).open(&log).unwrap(),
+            "MOUNTED_PROBE_TIMEOUT role={role}"
+        )
+        .unwrap();
     }
     let output = fs::read_to_string(&log).unwrap();
+    if role == "exec-supervisor"
+        && let Some(destination) = std::env::var_os("NUB_PROJECTION_TEST_ARTIFACTS")
+    {
+        let destination = PathBuf::from(destination);
+        fs::create_dir_all(&destination).unwrap();
+        fs::copy(&log, destination.join("probe.log")).unwrap();
+        let payloads = root.path().join("payloads");
+        if payloads.is_dir() {
+            for file in fs::read_dir(payloads).unwrap() {
+                let file = file.unwrap();
+                assert!(file.file_type().unwrap().is_file());
+                fs::copy(file.path(), destination.join(file.file_name())).unwrap();
+            }
+        }
+    }
     println!("{output}");
     assert!(
         status.is_some_and(|status| status.success()),

@@ -38,6 +38,7 @@ struct Payloads {
     dso_sha256: String,
     executable_source_sha256: String,
     dso_source_sha256: String,
+    closure: Vec<PathBuf>,
 }
 
 fn sha256(path: &Path) -> String {
@@ -110,6 +111,34 @@ int main(void) { puts("EXEC_A"); fflush(stdout); if (getenv("NUB_EXEC_HOLD")) { 
             "marker must be unique in {}",
             path.display()
         );
+        assert_eq!(
+            &bytes[..6],
+            b"\x7fELF\x02\x01",
+            "ELF64 little-endian payload"
+        );
+        let u16_at = |offset| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+        let u32_at = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let u64_at = |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        let marker_offset = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap() as u64;
+        let table = u64_at(32) as usize;
+        let stride = u16_at(54) as usize;
+        assert!(stride >= 56);
+        let readonly_load = (0..u16_at(56) as usize).any(|index| {
+            let entry = table + index * stride;
+            let start = u64_at(entry + 8);
+            let size = u64_at(entry + 32);
+            u32_at(entry) == 1
+                && u32_at(entry + 4) & 2 == 0
+                && marker_offset >= start
+                && marker_offset + marker.len() as u64 <= start + size
+        });
+        assert!(
+            readonly_load,
+            "marker must belong to a non-writable PT_LOAD"
+        );
         let headers = Command::new("readelf")
             .args(["-W", "-l"])
             .arg(path)
@@ -120,6 +149,14 @@ int main(void) { puts("EXEC_A"); fflush(stdout); if (getenv("NUB_EXEC_HOLD")) { 
             "ELF PT_LOAD prerequisite {}",
             path.display()
         );
+        fs::write(
+            payload_root.join(format!(
+                "{}.segments.txt",
+                path.file_name().unwrap().to_string_lossy()
+            )),
+            &headers.stdout,
+        )
+        .unwrap();
         let sections = Command::new("readelf")
             .args(["-W", "-S"])
             .arg(path)
@@ -131,7 +168,46 @@ int main(void) { puts("EXEC_A"); fflush(stdout); if (getenv("NUB_EXEC_HOLD")) { 
             "read-only marker section prerequisite {}",
             path.display()
         );
+        fs::write(
+            payload_root.join(format!(
+                "{}.sections.txt",
+                path.file_name().unwrap().to_string_lossy()
+            )),
+            &sections.stdout,
+        )
+        .unwrap();
     }
+    let dynamic = Command::new("readelf")
+        .args(["-W", "-d"])
+        .arg(&library)
+        .output()
+        .unwrap();
+    assert!(dynamic.status.success());
+    assert!(
+        !String::from_utf8_lossy(&dynamic.stdout).contains("(NEEDED)"),
+        "fixture DSO must have no dependencies"
+    );
+    fs::write(payload_root.join("dso-dynamic.txt"), &dynamic.stdout).unwrap();
+    let closure = Command::new("ldd").arg(&executable).output().unwrap();
+    assert!(
+        closure.status.success(),
+        "payload loader closure prerequisite"
+    );
+    fs::write(payload_root.join("exec-r.ldd.txt"), &closure.stdout).unwrap();
+    let closure_text = String::from_utf8(closure.stdout).unwrap();
+    assert!(
+        !closure_text.contains("not found"),
+        "incomplete payload closure"
+    );
+    let closure: Vec<_> = closure_text
+        .split_whitespace()
+        .filter(|word| word.starts_with('/'))
+        .map(PathBuf::from)
+        .collect();
+    assert!(
+        !closure.is_empty(),
+        "dynamic fixture needs its observed loader closure"
+    );
     let payloads = Payloads {
         executable,
         dso: library,
@@ -139,6 +215,7 @@ int main(void) { puts("EXEC_A"); fflush(stdout); if (getenv("NUB_EXEC_HOLD")) { 
         dso_sha256: sha256(&payload_root.join("exec-r.so")),
         executable_source_sha256: sha256(&src),
         dso_source_sha256: sha256(&dso),
+        closure,
     };
     println!(
         "EXEC_PAYLOAD_PROVENANCE exec_source_sha256={} dso_source_sha256={} executable_sha256={} dso_sha256={} retained={}",
@@ -165,12 +242,21 @@ fn exec_fixture(root: &Path, exe: &Path, native: bool, payloads: &Payloads) -> F
         rule("/app/exec-rw.so", FsAccess::ReadWrite),
     ]);
     let app = root.join("raw/app");
+    for path in &payloads.closure {
+        let target = root.join("raw").join(path.strip_prefix("/").unwrap());
+        copy(path, &target);
+        assert_eq!(sha256(&target), sha256(path), "payload closure bytes");
+        rules
+            .entries
+            .push(rule(path.to_str().unwrap(), FsAccess::Read));
+    }
     fs::copy(&payloads.executable, app.join("exec-r")).unwrap();
     fs::copy(&payloads.dso, app.join("exec-r.so")).unwrap();
     assert_eq!(sha256(&app.join("exec-r")), payloads.executable_sha256);
     assert_eq!(sha256(&app.join("exec-r.so")), payloads.dso_sha256);
     fs::hard_link(app.join("exec-r"), app.join("exec-rw")).unwrap();
     fs::hard_link(app.join("exec-r"), app.join("exec-rw-alias")).unwrap();
+    fs::hard_link(app.join("exec-r"), app.join("exec-denied")).unwrap();
     fs::hard_link(app.join("exec-r.so"), app.join("exec-rw.so")).unwrap();
     for names in [["exec-r", "exec-rw", "exec-rw-alias"]] {
         let inode = fs::metadata(app.join(names[0])).unwrap().ino();
@@ -252,11 +338,22 @@ fn replace(path: &Path, from: &[u8], to: &[u8], native: bool) {
             stat.f_type as libc::c_long, FUSE_SUPER_MAGIC,
             "native write remained FUSE-backed"
         );
+        println!(
+            "EXEC_NATIVE_OBJECT name={} dev={} ino={} type={}",
+            path.file_name().unwrap().to_string_lossy(),
+            after.dev(),
+            after.ino(),
+            stat.f_type
+        );
     }
 }
 
 fn child_output(mut cmd: Command, label: &str) -> Result<String, io::Error> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Keep the inherited channel: opening /dev/null here would require an
+    // unrelated path grant inside the already-confined controller.
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let output = cmd.output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
@@ -341,6 +438,21 @@ fn exec_error(path: &Path) -> Option<i32> {
 
 fn row(arm: &str, case: &str, result: impl std::fmt::Display) {
     println!("EXEC_ROW arm={arm} case={case} result={result}");
+}
+
+fn freshness_row(arm: &str, case: &str, kind: &str, result: &io::Result<String>, expected: &[u8]) {
+    let expected = std::str::from_utf8(expected).unwrap();
+    match result {
+        Ok(output) if output.contains(expected) => row(arm, case, "MATCH"),
+        Ok(output) => row(arm, case, format_args!("WRONG_MARKER output={output:?}")),
+        Err(error) if error.raw_os_error().is_some() => row(
+            arm,
+            case,
+            format_args!("EXEC_ERR errno={:?}", error.raw_os_error()),
+        ),
+        Err(error) if kind == "dlopen" => row(arm, case, format_args!("LOADER_ERR {error}")),
+        Err(error) => row(arm, case, format_args!("EXEC_EXIT_ERROR {error}")),
+    }
 }
 
 fn etxtbsy(arm: &str, app: &Path) {
@@ -449,6 +561,14 @@ fn client(arm: &str, root: &Path, mediated: bool) {
             loader_marker(&loader_exe, &loader_root, &app.join(r))
         };
         row(arm, &format!("{kind}_A"), format_args!("{first:?}"));
+        freshness_row(arm, &format!("{kind}_A_DIAGNOSTIC"), kind, &first, a);
+        row(
+            arm,
+            &format!("{kind}_INITIAL_MARKER"),
+            first
+                .as_ref()
+                .is_ok_and(|v| v.contains(std::str::from_utf8(a).unwrap())),
+        );
         replace(&app.join(rw), a, b, arm == "native");
         let second = if kind == "exec" {
             exec_marker(&app.join(r))
@@ -456,6 +576,7 @@ fn client(arm: &str, root: &Path, mediated: bool) {
             loader_marker(&loader_exe, &loader_root, &app.join(r))
         };
         row(arm, &format!("{kind}_B"), format_args!("{second:?}"));
+        freshness_row(arm, &format!("{kind}_B_DIAGNOSTIC"), kind, &second, b);
         let restored = second
             .as_ref()
             .is_ok_and(|v| v.contains(std::str::from_utf8(b).unwrap()));
@@ -475,6 +596,7 @@ fn client(arm: &str, root: &Path, mediated: bool) {
             loader_marker(&loader_exe, &loader_root, &app.join(r))
         };
         row(arm, &format!("{kind}_A_AGAIN"), format_args!("{third:?}"));
+        freshness_row(arm, &format!("{kind}_RESTORE_DIAGNOSTIC"), kind, &third, a);
         row(
             arm,
             &format!("{kind}_A_RESTORED"),
@@ -484,6 +606,24 @@ fn client(arm: &str, root: &Path, mediated: bool) {
         );
     }
     etxtbsy(arm, &app);
+    let denied_exec = exec_marker(&app.join("exec-denied"));
+    if mediated {
+        assert!(
+            matches!(
+                denied_exec.as_ref().err().and_then(io::Error::raw_os_error),
+                Some(libc::EACCES | libc::ENOENT)
+            ),
+            "ungranted executable must be denied: {denied_exec:?}"
+        );
+    } else {
+        assert!(
+            denied_exec
+                .as_ref()
+                .is_ok_and(|output| output.contains("EXEC_A")),
+            "raw executable canary: {denied_exec:?}"
+        );
+    }
+    row(arm, "executable_canary", format_args!("{denied_exec:?}"));
     if mediated {
         denied(
             File::open(app.join("exec-neighbour")),
@@ -691,6 +831,8 @@ fn supervisor(root: &Path) {
         ("fuse", "exec-fuse-provider", false),
         ("native", "exec-native-provider", true),
     ] {
+        println!("EXEC_ARM_START {name}");
+        io::stdout().flush().unwrap();
         let case = root.join(name);
         fs::create_dir(&case).unwrap();
         let rules = exec_fixture(&case, &exe, native, &payloads);
@@ -710,8 +852,32 @@ fn supervisor(root: &Path) {
             String::from_utf8_lossy(&output.stderr)
         );
         if !output.status.success() {
+            if output.status.signal() == Some(libc::SIGALRM) {
+                println!("EXEC_TIMEOUT arm={name}");
+            }
             failures.push(format!("{name}: {:?}", output.status));
         }
+        if name == "native" && output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for name in ["exec-rw-alias", "exec-rw.so"] {
+                let meta = fs::metadata(case.join("raw/app").join(name)).unwrap();
+                let prefix = format!(
+                    "EXEC_NATIVE_OBJECT name={name} dev={} ino={} type=",
+                    meta.dev(),
+                    meta.ino()
+                );
+                assert_eq!(
+                    text.lines().filter(|line| line.contains(&prefix)).count(),
+                    2,
+                    "native payload identity must match backing across both mutations"
+                );
+            }
+        }
+        assert_eq!(
+            fs::read(case.join("raw/app/exec-neighbour")).unwrap(),
+            b"unchanged",
+            "host neighbour snapshot {name}"
+        );
         reports.push((name, String::from_utf8_lossy(&output.stdout).into_owned()));
         fs::remove_dir_all(&case).unwrap();
     }
@@ -726,10 +892,14 @@ fn supervisor(root: &Path) {
                 "LINUX_EXEC_ACCEPTANCE_FAILURE {arm} lacks fresh-byte result for {case}:\\n{report}"
             );
         }
-        for case in ["exec_A", "exec_A_RESTORED", "dlopen_A", "dlopen_A_RESTORED"] {
+        for case in [
+            "exec_INITIAL_MARKER",
+            "exec_A_RESTORED",
+            "dlopen_INITIAL_MARKER",
+            "dlopen_A_RESTORED",
+        ] {
             assert!(
-                report.contains(&format!("arm={arm} case={case} result=true"))
-                    || report.contains(&format!("arm={arm} case={case} result=Ok")),
+                report.contains(&format!("arm={arm} case={case} result=true")),
                 "LINUX_EXEC_ACCEPTANCE_FAILURE {arm} lacks marker control for {case}:\\n{report}"
             );
         }

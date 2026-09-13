@@ -623,6 +623,7 @@ fn ordinary_open_contract(root: &Path, mediated: bool) {
         // raw/FUSE symlink control.
         println!("RAW_ABSOLUTE_SYMLINK_HOST_ROOT_CONTROL");
     }
+    let original_rw = fs::read(app.join("native-rw")).unwrap();
     let trunc = unsafe {
         libc::open(
             CString::new(app.join("native-rw").as_os_str().as_bytes())
@@ -651,6 +652,8 @@ fn ordinary_open_contract(root: &Path, mediated: bool) {
         -1
     );
     assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+    drop(trunc);
+    fs::write(app.join("native-rw"), original_rw).unwrap();
     if mediated {
         let before = fs::read(app.join("native-read")).unwrap();
         let read = CString::new(app.join("native-read").as_os_str().as_bytes()).unwrap();
