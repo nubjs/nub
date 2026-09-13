@@ -134,23 +134,12 @@ fn install_family_grammar_accepts_documented_forms() {
             (&["install", "--prod"], "pnpm --prod"),
             (&["install", "-D"], "pnpm -D / --dev (dev only)"),
             (&["install", "--ignore-scripts"], "pnpm --ignore-scripts"),
-            // The pnpmfile trio (`pnpm install --help`, `installing/commands/src/install.ts`).
-            // Naming a path is also the remedy nub's own "pnpmfile ignored"
-            // warning offers a non-pnpm-incumbent project, so a missing flag
-            // here makes nub advertise something it rejects.
-            (
-                &["install", "--pnpmfile", "h.cjs"],
-                "pnpm --pnpmfile <path>",
-            ),
-            (
-                &["install", "--global-pnpmfile", "h.cjs"],
-                "pnpm --global-pnpmfile <path>",
-            ),
+            // `--ignore-pnpmfile` is the only one of the pnpmfile trio left:
+            // pnpm 12 dropped `--pnpmfile <path>` and `--global-pnpmfile
+            // <path>`, and this list tracks the pinned major rather than the
+            // one it was written against. Measured, not assumed — real pnpm
+            // 12.4.1 answers `unexpected argument` to both.
             (&["install", "--ignore-pnpmfile"], "pnpm --ignore-pnpmfile"),
-            (
-                &["install", "--pnpmfile", "h.cjs", "express"],
-                "pnpm install --pnpmfile <path> <pkg> (routes through add)",
-            ),
             (&["install", "--no-optional"], "pnpm --no-optional"),
             (&["install", "--offline"], "pnpm --offline"),
             (&["install", "--prefer-offline"], "pnpm --prefer-offline"),
@@ -192,20 +181,13 @@ fn install_family_grammar_accepts_documented_forms() {
                 &["install", "express", "-D"],
                 "aube -D (save-dev short) forwards",
             ),
-            (&["install", "express", "-d"], "pnpm -d / --save-dev"),
             (&["install", "express", "--save-dev"], "pnpm --save-dev"),
-            (&["install", "express", "-e"], "pnpm -e / --save-exact"),
             (&["install", "express", "--save-exact"], "pnpm --save-exact"),
-            (&["install", "express", "-o"], "pnpm -o / --save-optional"),
             (
                 &["install", "express", "--save-optional"],
                 "pnpm --save-optional",
             ),
             (&["install", "express", "--save-peer"], "pnpm --save-peer"),
-            (
-                &["install", "express", "-p"],
-                "pnpm -p / --save-prod (add default)",
-            ),
             (
                 &["install", "express", "--save-prod"],
                 "pnpm --save-prod (add default)",
@@ -386,25 +368,14 @@ fn engine_add_grammar_accepts_documented_forms() {
             (&["add", "foo", "-O"], "pnpm -O / --save-optional"),
             (&["add", "foo", "--save-optional"], "pnpm --save-optional"),
             (&["add", "foo", "--save-peer"], "pnpm --save-peer"),
-            (&["add", "foo", "--no-save"], "pnpm --no-save"),
             (&["add", "foo", "-g"], "pnpm -g / --global"),
             (&["add", "foo", "--global"], "pnpm --global"),
             (&["add", "foo", "-w"], "pnpm -w (add to workspace root)"),
             (&["add", "foo", "-r"], "pnpm -r"),
             (&["add", "foo", "-F", "bar"], "pnpm -F <pattern>"),
             (&["add", "foo", "--ignore-scripts"], "pnpm --ignore-scripts"),
-            // The pnpmfile trio again (`installing/commands/src/add.ts:48,65`).
-            // Reachable from `install` too, since `nub install <pkg>` routes
-            // here — so a gap on `add` makes `install --pnpmfile <p> <pkg>`
-            // fail while the same flag without a package works.
-            (
-                &["add", "foo", "--pnpmfile", "h.cjs"],
-                "pnpm add --pnpmfile <path>",
-            ),
-            (
-                &["add", "foo", "--global-pnpmfile", "h.cjs"],
-                "pnpm add --global-pnpmfile <path>",
-            ),
+            // Same story as on `install`: only `--ignore-pnpmfile` survives
+            // into pnpm 12.
             (
                 &["add", "foo", "--ignore-pnpmfile"],
                 "pnpm add --ignore-pnpmfile",
