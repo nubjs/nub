@@ -132,11 +132,20 @@ fn pack_writes_the_tarball_and_reports_it_as_json() {
         ctx.project.join("pmfam-fixture-1.2.3.tgz").is_file(),
         "pack must write the tarball next to package.json: {stdout}"
     );
-    // pnpm-compatible shape: an array of per-package results.
+    // The envelope differs by package manager and the comment that used to
+    // sit here had it backwards: pnpm 12.4.1 emits a BARE OBJECT for a
+    // single-package pack — measured on this fixture — and an array is the
+    // other engine's own shape. So the result is unwrapped rather than
+    // asserted, and the claim rides the filename, which is the same either
+    // way. The unwrap collapses to `json` alone once one of the two leaves.
     let json: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("pack --json stdout must be JSON ({e}): {stdout}"));
+    let packed = json
+        .as_array()
+        .and_then(|results| results.first())
+        .unwrap_or(&json);
     assert_eq!(
-        json[0]["filename"].as_str(),
+        packed["filename"].as_str(),
         Some("pmfam-fixture-1.2.3.tgz"),
         "pack --json must name the tarball: {stdout}"
     );
