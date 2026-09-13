@@ -195,8 +195,18 @@ fn a_pnpm_11_global_config_reports_ignored_layout_but_keeps_resolution() {
     );
 }
 
+/// A yarn incumbent supplies nub with NO config at all, and its layout key is
+/// no more special than the rest of the file.
+///
+/// The registry half of this row used to assert the opposite — that
+/// `npmRegistryServer` from `.yarnrc.yml` was mirrored into nub's own view.
+/// Nub no longer reads yarn configuration for any setting: `nub pm migrate`
+/// converts a yarn lockfile once, and after that the project is nub's. What
+/// survives is the layout claim, which never depended on reading the file:
+/// nub takes `nodeLinker` from `nub.jsonc`, `.npmrc` or the command line
+/// under every incumbent.
 #[test]
-fn a_yarnrc_supplies_registry_config_but_not_layout() {
+fn a_yarnrc_supplies_no_config_and_no_layout() {
     let files = [
         (
             "package.json",
@@ -210,10 +220,10 @@ fn a_yarnrc_supplies_registry_config_but_not_layout() {
     ];
 
     let dir = project("yarn", &files);
-    assert_eq!(
+    assert_ne!(
         config_get(&dir, "registry"),
         "https://registry.yarn.example/",
-        "registry config from .yarnrc.yml must still be mirrored"
+        "yarn config must not reach nub's own view"
     );
     assert_eq!(
         config_get(&dir, "nodeLinker"),
@@ -221,6 +231,8 @@ fn a_yarnrc_supplies_registry_config_but_not_layout() {
         "the file's nodeLinker must not displace nub's default linker"
     );
 
+    // The neutral file still decides layout, which is the point of the axis:
+    // dropping the branded reader must not drop the unbranded one.
     let neutral = project("yarn-npmrc", &files);
     std::fs::write(neutral.join(".npmrc"), "nodeLinker=hoisted\n").unwrap();
     assert_eq!(config_get(&neutral, "nodeLinker"), "hoisted");

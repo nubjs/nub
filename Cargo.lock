@@ -4018,6 +4018,7 @@ dependencies = [
  "nub-json-guard",
  "nub-phantom-core",
  "nub-phantom-scan",
+ "nub-settings",
  "nub-tsconfig",
  "oxc_allocator",
  "oxc_ast",
@@ -4130,6 +4131,14 @@ dependencies = [
  "nub-phantom-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nub-settings"
+version = "0.9.0"
+dependencies = [
+ "serde",
+ "toml",
 ]
 
 [[package]]

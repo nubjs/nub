@@ -53,6 +53,7 @@
 
 mod bun_config;
 mod compat_db;
+mod config_read;
 pub mod config_scope;
 mod duplicate_home;
 mod expo_compat;
@@ -2689,12 +2690,13 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 ///   Corner: this replaces the engine's `<modulesDir>/.aube` derivation, so
 ///   a project that renames `modulesDir` without setting `virtualStoreDir`
 ///   gets the store at `node_modules/.store` rather than `<modulesDir>/.store`.
-/// - `storeDir` = `$XDG_DATA_HOME/nub/store` (else `~/.local/share/nub/store`)
-///   — the global CAS store lives in nub's own XDG namespace, not aube's
-///   (the engine appends its `v1` schema suffix, so content lands at
-///   `…/nub/store/v1`). Skipped when no home directory resolves — the
-///   engine then falls back to its own default, which fails the same way
-///   nub would.
+/// - `storeDir` = `$XDG_CACHE_HOME/nub/store` (else `~/.cache/nub/store`) —
+///   the global CAS store lives in nub's own XDG namespace, not the engine's.
+///   The CACHE namespace rather than data: the store is a rebuildable
+///   artifact cache, and an install can always refill it from the registry.
+///   The engine appends its own schema suffix, so content lands at
+///   `…/nub/store/v11`. Skipped when no home directory resolves — the engine
+///   then falls back to its own default, which fails the same way nub would.
 /// - `cacheDir` is still NOT set here, and does not need to be: the DEFAULT
 ///   location comes from the identity profile's `cache_namespace`
 ///   (`$XDG_CACHE/nub/pm`), which is where the engine's own
@@ -2853,6 +2855,26 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 ///   keeping a pnpm-incumbent / mixed project drop-in interoperable. A
 ///   user-set `defaultLockfileFormat` (env/.npmrc/yaml) still wins on either
 ///   path — this is only the embedder-tier default.
+/// The defaults a config READ reports, for the project containing `cwd`.
+///
+/// The same list the install resolves against, anchored the same way
+/// [`project_supplied_settings`] anchors it. `config get` answers what an
+/// install would USE, so a setting nub defaults reports that default rather
+/// than `undefined` — `minimumReleaseAge` is `1440` in a project that has
+/// never configured it, because that is the quarantine the next install
+/// applies. A setting absent from this list has no nub default and stays
+/// unset, which is what keeps a layout key out of the answer.
+pub(crate) fn nub_config_defaults(cwd: &Path) -> Vec<(String, String)> {
+    let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient).unwrap_or(None);
+    let truly_fresh = is_truly_fresh_project(cwd, detected.as_ref());
+    nub_setting_defaults(
+        detected.as_ref(),
+        truly_fresh,
+        cwd,
+        VirtualStoreLocality::Default,
+    )
+}
+
 fn nub_setting_defaults(
     detected: Option<&DetectedLockfile>,
     truly_fresh: bool,
@@ -4377,15 +4399,19 @@ mod tests {
                 Some("node_modules/.store")
             );
             assert_eq!(get(&defaults, "stateDir"), Some("node_modules/.store"));
-            // The global store lands in nub's XDG data namespace (dev boxes
-            // always resolve a home dir, so the entry is present here).
+            // The global store lands in a nub-owned namespace (dev boxes
+            // always resolve a home dir, so the entry is present here). Which
+            // namespace — cache, not data — is pinned end-to-end by
+            // `store_path_prints_the_nub_namespaced_store`, where the whole
+            // resolved path is compared against a fixture-pinned XDG root;
+            // this asserts only the leaf nub owns on every platform.
             let store = get(&defaults, "storeDir").expect("storeDir default");
             // Normalize separators: on Windows the default resolves with
             // `\` components (and a mixed `/` from the XDG-style fallback).
             let store = store.replace('\\', "/");
             assert!(
                 store.ends_with("nub/store") && !store.contains("aube"),
-                "storeDir must live under nub's data namespace: {store}"
+                "storeDir must live under a nub-owned namespace: {store}"
             );
             // `cacheDir` must NOT be pushed: the engine's cache paths bypass
             // the settings tier at the pinned API, so the entry would be a

@@ -181,6 +181,7 @@ aube-workspace = { path = "../../vendor/aube/crates/aube-workspace" }
 # routing in pm_engine/store_config_family.rs (npmShared flag, alias
 # spellings, scalar-vs-map types).
 aube-settings = { path = "../../vendor/aube/crates/aube-settings" }
+nub-settings = { path = "../nub-settings" }
 # Registry URL normalization helpers for translating incumbent Bun config into
 # the engine's existing `.npmrc`-shaped registry/auth model.
 #

@@ -118,8 +118,8 @@ pub(super) fn shadowing_field(key: &str, supplied: &[String]) -> Option<&'static
     // alone matches the canonical name only, which silently made every aliased
     // key unrecognized — and an unrecognized key is never refused, so the guard
     // failed open rather than loudly.
-    let meta = aube_settings::meta::find_unfiltered(key).or_else(|| {
-        aube_settings::meta::all_unfiltered().iter().find(|meta| {
+    let meta = nub_settings::meta::find_unfiltered(key).or_else(|| {
+        nub_settings::meta::all_unfiltered().iter().find(|meta| {
             meta.npmrc_keys.contains(&key)
                 || meta.workspace_yaml_keys.contains(&key)
                 || meta.cli_flags.contains(&key)
@@ -152,7 +152,7 @@ mod tests {
     fn every_entry_names_a_real_setting_and_a_real_field() {
         for home in HOMES {
             assert!(
-                aube_settings::meta::find_unfiltered(home.setting).is_some(),
+                nub_settings::meta::find_unfiltered(home.setting).is_some(),
                 "`{}` is not an engine setting",
                 home.setting
             );

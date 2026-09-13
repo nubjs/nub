@@ -440,7 +440,7 @@ mod tests {
     fn every_unsupported_setting_names_a_real_one() {
         for (name, advice) in NUB.unsupported_settings {
             assert!(
-                aube_settings::meta::find_unfiltered(name).is_some(),
+                nub_settings::meta::find_unfiltered(name).is_some(),
                 "`{name}` is not in the settings table — the entry hides nothing"
             );
             assert!(
@@ -466,19 +466,19 @@ mod tests {
             "another test registered a different embedder first"
         );
         assert!(
-            aube_settings::meta::find("aubeNoAutoInstall").is_none(),
+            nub_settings::meta::find("aubeNoAutoInstall").is_none(),
             "the embedder filter is not wired into `meta::find`"
         );
         assert!(
-            aube_settings::meta::all().all(|m| m.name != "aubeNoAutoInstall"),
+            nub_settings::meta::all().all(|m| m.name != "aubeNoAutoInstall"),
             "the embedder filter is not wired into `meta::all`"
         );
         assert!(
-            aube_settings::meta::unsupported_for_key("aube-no-auto-install").is_some(),
+            nub_settings::meta::unsupported_for_key("aube-no-auto-install").is_some(),
             "an alias write must still be recognizable so `config set` can refuse it"
         );
         // The positive control: an ordinary setting is untouched, so the two
         // assertions above are reading the filter rather than a broken lookup.
-        assert!(aube_settings::meta::find("autoInstallPeers").is_some());
+        assert!(nub_settings::meta::find("autoInstallPeers").is_some());
     }
 }

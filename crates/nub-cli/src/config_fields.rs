@@ -623,7 +623,7 @@ mod tests {
         let collisions: Vec<_> = FIELDS
             .iter()
             .flat_map(|field| {
-                aube_settings::all()
+                nub_settings::all()
                     .filter(move |engine| {
                         field.address == engine.name || engine.npmrc_keys.contains(&field.address)
                     })

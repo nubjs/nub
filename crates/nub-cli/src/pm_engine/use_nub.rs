@@ -444,7 +444,7 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
     for (key, value) in source {
         // Looked up once, ahead of the match, because a match GUARD cannot bind
         // what it tests and the arm needs the same meta to reach the advice.
-        let unsupported = aube_settings::meta::unsupported_for_key(key);
+        let unsupported = nub_settings::meta::unsupported_for_key(key);
         match key.as_str() {
             // structural / resolution-bearing → package.json
             "packages" => m.packages = Some(value.clone()),
@@ -503,7 +503,7 @@ pub(crate) fn plan_migration(source: &Map<String, Value>) -> Result<YamlMigratio
             // advice line is the note, so the drop names the replacement.
             _ if unsupported.is_some() => {
                 let note = unsupported
-                    .and_then(|meta| aube_settings::meta::unsupported_advice(meta.name))
+                    .and_then(|meta| nub_settings::meta::unsupported_advice(meta.name))
                     .unwrap_or_default();
                 m.dropped.push(format!("{key} — {note}"));
             }

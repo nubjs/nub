@@ -44,19 +44,21 @@ struct Sources<'a> {
 }
 
 /// A `.npmrc` value: `key=value`, or the repeated `key[]=value` list form.
-enum Raw {
+pub(crate) enum Raw {
     Scalar(String),
     List(Vec<String>),
 }
 
-/// The settings for the project containing `start_dir`.
-pub(crate) fn resolve(start_dir: &Path, install: &InstallConfig) -> Result<WorkspaceSettings> {
+/// Read every source once, so the merge itself touches neither the filesystem
+/// nor the environment and can be reasoned about as a pure function of what
+/// was found.
+fn gather<'a>(start_dir: &Path, install: &'a InstallConfig) -> Sources<'a> {
     let root = workspace_root(start_dir);
     let env = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, _)| setting_key_of_var(name).is_some() || name == "NUB_CACHE_DIR")
         .collect();
-    let sources = Sources {
+    Sources {
         npmrc: npmrc_files(&root),
         install,
         env,
@@ -64,12 +66,54 @@ pub(crate) fn resolve(start_dir: &Path, install: &InstallConfig) -> Result<Works
         root,
         cache_root: nub_core::node::discovery::cache_dir(),
         ci: std::env::var_os("CI").is_some(),
-    };
+    }
+}
+
+/// The settings for the project containing `start_dir`.
+pub(crate) fn resolve(start_dir: &Path, install: &InstallConfig) -> Result<WorkspaceSettings> {
+    let sources = gather(start_dir, install);
     refuse_legacy_root_allow_builds(&sources.manifest)?;
     announce_dropped_root_install_fields(&sources.manifest);
     let merged = merge(&sources)?;
     serde_json::from_value(Value::Object(merged))
         .context("nub could not hand its install settings to the package manager")
+}
+
+/// What `nub.jsonc` and the environment SUPPLY, spelled as engine settings.
+///
+/// `nub config get`/`list` report this tier rather than the merged map the
+/// install is handed: that map has nub's own defaults folded in and carries
+/// merge-internal keys the settings table does not name, so reporting it would
+/// list a value nobody set under a name `config set` cannot write. Reading the
+/// two sources directly keeps the reporting surface to what a user actually
+/// put somewhere.
+pub(crate) fn supplied_settings(install: &InstallConfig) -> Map<String, Value> {
+    let mut out = curated(install).unwrap_or_default();
+    for (key, value) in install.settings.iter().flatten() {
+        out.insert(key.clone(), value.clone());
+    }
+    out.extend(env_settings());
+    out
+}
+
+/// The `npm_config_*` variables that name a setting, plus nub's own cache knob.
+///
+/// Highest precedence, which is why it is folded in last here and why omitting
+/// it once made `config get cache-dir` print `undefined` while the install was
+/// already acting on the environment value (nubjs/nub#654).
+fn env_settings() -> Map<String, Value> {
+    let mut out = Map::new();
+    for (name, value) in std::env::vars() {
+        if let Some(key) = setting_key_of_var(&name) {
+            out.insert(key.to_owned(), Value::String(value));
+        }
+    }
+    if let Ok(dir) = std::env::var("NUB_CACHE_DIR")
+        && !dir.is_empty()
+    {
+        out.insert("cacheDir".to_owned(), Value::String(dir));
+    }
+    out
 }
 
 /// Refuse a manifest that still carries the OLD name for the build allowlist.
@@ -556,7 +600,7 @@ fn typed(setting: &str, raw: &str) -> Option<Value> {
     .find(|value| check(setting, value).is_ok())
 }
 
-fn npmrc_entries(text: &str) -> Vec<(String, Raw)> {
+pub(crate) fn npmrc_entries(text: &str) -> Vec<(String, Raw)> {
     let mut entries: Vec<(String, Raw)> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -588,7 +632,7 @@ fn unquote(value: &str) -> &str {
 }
 
 /// The user's `.npmrc`, then the project's, keeping the files that exist.
-fn npmrc_files(root: &Path) -> Vec<(PathBuf, String)> {
+pub(crate) fn npmrc_files(root: &Path) -> Vec<(PathBuf, String)> {
     let user = ["npm_config_userconfig", "NPM_CONFIG_USERCONFIG"]
         .into_iter()
         .find_map(|name| std::env::var_os(name).filter(|value| !value.is_empty()))

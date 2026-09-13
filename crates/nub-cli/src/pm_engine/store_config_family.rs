@@ -102,11 +102,12 @@
 //!   upstream rather than a hand mirror, and help is rendered from the same
 //!   tables that parse — the two cannot disagree.
 
-use anyhow::Result;
-use aube::commands::config::{ConfigArgs, ConfigCommand};
+use super::config_read::{ConfigArgs, ConfigCommand};
+use anyhow::{Context, Result};
+use nub_settings::meta::SettingMeta;
 
 use super::publish_family::{Parsed, plain_verb_cli, run_wired, verb_cli};
-use super::{VerbSpec, present, stub_error};
+use super::{VerbSpec, stub_error};
 
 /// Dispatcher for the family's verbs (see [`super::publish_family::run_verb`]
 /// for the shape).
@@ -260,7 +261,7 @@ fn protect_default_auth_scope(parsed: &mut ConfigArgs) {
     if let Some((key, global, local)) = args
         && !*global
         && !*local
-        && aube::commands::config::is_protected_key(key)
+        && crate::pm_engine::config_read::is_protected_key(key)
     {
         *global = true;
     }
@@ -278,7 +279,7 @@ fn protect_default_auth_scope(parsed: &mut ConfigArgs) {
 verb_cli! {
     ConfigCli, "nub config", {
         #[usage(flatten)]
-        list: aube::commands::config::ListArgs,
+        list: super::config_read::ListArgs,
         #[usage(subcommand)]
         command: Option<NubConfigCommand>,
     }
@@ -289,15 +290,15 @@ verb_cli! {
 #[derive(Debug, usage_rs::Subcommands)]
 enum NubConfigCommand {
     /// Print the effective value of a setting key or `nub.jsonc` field
-    Get(aube::commands::config::GetArgs),
+    Get(super::config_read::GetArgs),
     /// Write a setting key to `.npmrc`, or a field to `nub.jsonc`. Protected credentials use the user `.npmrc` unless `--local` is explicit
-    Set(aube::commands::config::SetArgs),
+    Set(super::config_read::SetArgs),
     /// Remove a setting key from `.npmrc`, or a field from `nub.jsonc`. Protected credentials use the user `.npmrc` unless `--local` is explicit
     #[usage(alias("rm", "remove", "unset"))]
-    Delete(aube::commands::config::KeyArgs),
+    Delete(super::config_read::KeyArgs),
     /// Print every key/value from nub config and selected `.npmrc` file(s)
     #[usage(alias = "ls")]
-    List(aube::commands::config::ListArgs),
+    List(super::config_read::ListArgs),
     /// Explain a known setting, including defaults and supported config sources
     #[usage(hide)]
     Explain(ExplainStubArgs),
@@ -525,6 +526,27 @@ mod config_model {
 /// (the resolved config surface) gates whether a pnpm-branded yaml may be
 /// written at all (brand boundary): when false (non-pnpm / nub identity) the
 /// home is always the neutral `.npmrc`.
+/// Whether a non-shared project scalar belongs in `pnpm-workspace.yaml`:
+/// true only under a pnpm **11+** incumbent, which is the first major that
+/// reads scalars from there rather than from `.npmrc`.
+///
+/// One predicate for the write route and for the config READ of pnpm's global
+/// `config.yaml`, because they turn on the same fact — a v10 incumbent's own
+/// pnpm ignores both files for scalars, so nub writing or reporting one would
+/// name a value that project never acts on.
+pub(super) fn pnpm_v11_scalar_home() -> bool {
+    #[cfg(feature = "pm-pnpm")]
+    let pnpm_incumbent = std::env::current_dir().is_ok_and(|cwd| {
+        matches!(
+            super::project_identity::detect(&cwd),
+            super::project_identity::ProjectIdentity::Pnpm
+        )
+    });
+    #[cfg(not(feature = "pm-pnpm"))]
+    let pnpm_incumbent = false;
+    project_scalar_home(pnpm_incumbent) == config_model::ScalarHome::PnpmWorkspaceYaml
+}
+
 fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
     if !pnpm_incumbent {
         // Non-pnpm incumbent or nub identity: never a pnpm-branded file.
@@ -689,8 +711,11 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                 // `registry` is auth, not the `registries` map — the shared
                 // check must win before the map refusal below).
                 if npmrc_first::is_npm_shared_key(&set.key) {
-                    // Auth/registry → engine's `~/.npmrc` writer at user scope.
-                    // Fall through to the engine's user-scoped writer.
+                    // Auth/registry → the user `~/.npmrc`, which every tool
+                    // reads. Written by nub's own writer rather than delegated:
+                    // it is the same file the shared-key route already writes at
+                    // project scope, and one writer means one alias-sweep rule.
+                    return npmrc_first::set_user_npmrc(&set.key, &set.value);
                 } else if let Some(meta) = npmrc_first::map_setting_meta(&set.key) {
                     // A bare map setting can't be a single scalar; the neutral
                     // home is `.npmrc`, which can't hold a map either.
@@ -705,9 +730,7 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                 // scalars in the neutral project `.npmrc` (v9/v10 read them from
                 // there, and v11 still reads auth from there). Non-pnpm and
                 // nub-identity surfaces also keep `.npmrc` (read_branded off).
-                let pnpm_incumbent = aube_util::engine_context().read_branded_pnpm_config;
-                let scalar_to_yaml = project_scalar_home(pnpm_incumbent)
-                    == config_model::ScalarHome::PnpmWorkspaceYaml;
+                let scalar_to_yaml = pnpm_v11_scalar_home();
                 let route = npmrc_first::classify_set(&set.key, scalar_to_yaml);
                 // `nub.jsonc` outranks every file home for the settings it
                 // supplies, so a write of one is read by nothing. Asked AFTER
@@ -735,7 +758,10 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                     }
                 }
                 match route {
-                    npmrc_first::SetRoute::Engine => {} // fall through to delegate
+                    // npm-shared at project scope: the neutral project `.npmrc`.
+                    npmrc_first::SetRoute::Engine => {
+                        return npmrc_first::set_project_npmrc(&set.key, &set.value);
+                    }
                     npmrc_first::SetRoute::ProjectWorkspaceYaml => {
                         return npmrc_first::set_project_workspace_yaml(&set.key, &set.value);
                     }
@@ -761,45 +787,175 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
     // `config` reads/writes `.npmrc`-class settings; it never reads the project
     // lockfile, so identity resolution is lenient (see `engine_session_global`):
     // a multi-lockfile project must not block a `config get`/`set`/`list`.
-    let session = super::engine_session_global(None)?;
-    match session
-        .runtime
-        .block_on(aube::commands::config::run(parsed))
-    {
-        Ok(()) => Ok(0),
-        Err(report) => Ok(present::emit_report(&report)),
+    super::config_read::run(parsed)
+}
+
+/// `config get registry` with no value in any config file: the lookup itself
+/// reports `undefined`, but an install would still reach npm's registry, so
+/// that one outcome is answered with the default rather than with nothing. Any
+/// configured value passes through unchanged.
+///
+/// The literal mirrors the engine's own default; the two are checked against
+/// each other by `pm_config_defaults`.
+fn run_config_get_registry(parsed: ConfigArgs, json: bool) -> Result<i32> {
+    const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org/";
+    let code = super::config_read::run_captured(parsed, |captured| {
+        if captured.trim() == "undefined" {
+            if json {
+                println!("{}", serde_json::Value::String(DEFAULT_REGISTRY.into()));
+            } else {
+                println!("{DEFAULT_REGISTRY}");
+            }
+        } else {
+            print!("{captured}");
+        }
+    })?;
+    Ok(code)
+}
+
+/// A `pnpm-workspace.yaml` to write `key` into, when the project has one and
+/// the setting has a top-level key there. `None` sends the write to `.npmrc`.
+pub(super) fn workspace_yaml_scalar_path(key: &str) -> Option<std::path::PathBuf> {
+    let meta = npmrc_first::setting_for_key(key)?;
+    // A nested key (`updateConfig.ignoreDependencies`) needs a sub-mapping edit
+    // this writer does not do; the `.npmrc` fallback is the honest answer.
+    meta.workspace_yaml_keys.iter().find(|k| !k.contains('.'))?;
+    // Not gated on the file existing: a project that has never needed one is
+    // exactly the project a first `config set` has to create it for, which is
+    // what the previous writer did through its edit helper.
+    Some(npmrc_first::project_root().join("pnpm-workspace.yaml"))
+}
+
+/// Write `raw` under `key`'s workspace-yaml name, as a LINE edit rather than a
+/// parse-and-reserialize.
+///
+/// The file is the user's, and round-tripping YAML through a parser loses the
+/// comments and the key order they wrote. A top-level key owns one line plus
+/// whatever is indented beneath it, so replacing exactly that span leaves
+/// every other byte alone — the same shape the `.npmrc` writer uses, for the
+/// same reason.
+pub(super) fn set_workspace_yaml_scalar(
+    path: &std::path::Path,
+    meta: &'static SettingMeta,
+    key: &str,
+    raw: &str,
+) -> Result<()> {
+    let yaml_key = meta
+        .workspace_yaml_keys
+        .iter()
+        .find(|k| !k.contains('.'))
+        .ok_or_else(|| anyhow::anyhow!("{key} has no pnpm-workspace.yaml key"))?;
+    let rendered = render_yaml_scalar(meta, yaml_key, raw)?;
+    let original = std::fs::read_to_string(path).unwrap_or_default();
+    let mut out = strip_top_level_key(&original, yaml_key);
+    out.push(rendered);
+    let mut text = out.join("\n");
+    text.push('\n');
+    std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Drop `meta`'s top-level workspace-yaml keys. `true` when one was there.
+pub(super) fn remove_workspace_yaml_scalar(
+    path: &std::path::Path,
+    meta: &'static SettingMeta,
+) -> Result<bool> {
+    let original = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
+    let before = lines.len();
+    for yaml_key in meta.workspace_yaml_keys.iter().filter(|k| !k.contains('.')) {
+        lines = strip_top_level_key(&lines.join("\n"), yaml_key);
+    }
+    if lines.len() == before {
+        return Ok(false);
+    }
+    let mut text = lines.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(true)
+}
+
+/// Every line of `source` except the one introducing top-level `key` and the
+/// block indented under it.
+fn strip_top_level_key(source: &str, key: &str) -> Vec<String> {
+    let head = format!("{key}:");
+    let mut out: Vec<String> = Vec::new();
+    let mut skipping = false;
+    for line in source.lines() {
+        if skipping {
+            // The block ends at the next line that starts in column zero; a
+            // blank line inside a block does not end it.
+            if line.trim().is_empty() || line.starts_with([' ', '\t']) {
+                continue;
+            }
+            skipping = false;
+        }
+        if line.starts_with(&head) && !line.starts_with([' ', '\t']) {
+            skipping = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+/// `key: value`, typed the way the setting's own metadata says. A list becomes
+/// a block sequence, which is how pnpm writes one.
+fn render_yaml_scalar(meta: &SettingMeta, yaml_key: &str, raw: &str) -> Result<String> {
+    match meta.type_ {
+        "bool" => {
+            let value = match raw.trim() {
+                "true" | "yes" | "1" => "true",
+                "false" | "no" | "0" | "" => "false",
+                other => anyhow::bail!("{} expects a boolean value, got `{other}`", meta.name),
+            };
+            Ok(format!("{yaml_key}: {value}"))
+        }
+        "int" => {
+            let value: i64 = raw
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{} expects an integer value", meta.name))?;
+            Ok(format!("{yaml_key}: {value}"))
+        }
+        "list<string>" => {
+            let items: Vec<String> = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("  - {}", yaml_quote(s)))
+                .collect();
+            if items.is_empty() {
+                return Ok(format!("{yaml_key}: []"));
+            }
+            Ok(format!("{yaml_key}:\n{}", items.join("\n")))
+        }
+        _ => Ok(format!("{yaml_key}: {}", yaml_quote(raw))),
     }
 }
 
-/// `config get registry` with no value in any config file: the engine's
-/// lookup prints `undefined`; pnpm prints the default registry it would
-/// actually install from. Run the engine's own lookup with stdout captured
-/// and substitute only that exact outcome — any configured value passes
-/// through byte-identical. The default literal mirrors the engine's
-/// `NpmConfig` default (vendor/aube/crates/aube-registry/src/config/load.rs).
-fn run_config_get_registry(parsed: ConfigArgs, json: bool) -> Result<i32> {
-    const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org/";
-    // Global-scope config read (see the sibling `config` dispatch): lenient.
-    let session = super::engine_session_global(None)?;
-    let (result, captured) = super::with_fd_captured(1, || {
-        session
-            .runtime
-            .block_on(aube::commands::config::run(parsed))
-    });
-    let code = match result {
-        Ok(()) => 0,
-        Err(report) => present::emit_report(&report),
-    };
-    if code == 0 && captured.trim() == "undefined" {
-        if json {
-            println!("{}", serde_json::Value::String(DEFAULT_REGISTRY.into()));
-        } else {
-            println!("{DEFAULT_REGISTRY}");
-        }
+/// Quote a scalar unless it is plainly safe unquoted. Erring toward quoting is
+/// free — YAML reads a quoted scalar as the same string — while erring the
+/// other way turns a value like `yes` or `1.0` into a bool or a float.
+fn yaml_quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | '@'))
+        && !value.parse::<f64>().is_ok()
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~"
+        );
+    if plain {
+        value.to_string()
     } else {
-        print!("{captured}");
+        format!("{:?}", value)
     }
-    Ok(code)
 }
 
 /// The engine prints reference docs for these straight to stdout (no
@@ -898,7 +1054,7 @@ mod npmrc_first {
     use std::path::{Path, PathBuf};
 
     use anyhow::{Context, Result, anyhow};
-    use aube_settings::meta::{self, SettingMeta};
+    use nub_settings::meta::{self, SettingMeta};
 
     use crate::pm_engine::present;
 
@@ -1012,15 +1168,23 @@ mod npmrc_first {
     /// (e.g. a known scalar that only exists as an `.npmrc` alias) — keeping
     /// the value readable rather than dropping it.
     pub(super) fn set_project_workspace_yaml(key: &str, value: &str) -> Result<i32> {
-        match aube::commands::config::set_project_scalar_to_workspace_yaml(key, value) {
-            Ok(Some(path)) => {
-                present::info(&format!("set {key}={value} ({})", path.display()));
-                Ok(0)
-            }
-            // No workspace-yaml mapping for this scalar → neutral `.npmrc`.
-            Ok(None) => set_project_npmrc(key, value),
-            Err(report) => Ok(present::emit_report(&report)),
+        // The same refusal the `.npmrc` route opens with. This is a SECOND
+        // entry to the write path, taken instead of that one under a pnpm
+        // incumbent, so a guard on only one of them leaves the key writable
+        // through the other.
+        if let Some(err) = unsupported_setting_refusal(key) {
+            return Err(err);
         }
+        let Some(path) = super::workspace_yaml_scalar_path(key) else {
+            // No workspace-yaml mapping for this scalar → neutral `.npmrc`.
+            return set_project_npmrc(key, value);
+        };
+        let Some(meta) = setting_for_key(key) else {
+            return set_project_npmrc(key, value);
+        };
+        super::set_workspace_yaml_scalar(&path, meta, key, value)?;
+        present::info(&format!("set {key}={value} ({})", path.display()));
+        Ok(0)
     }
 
     /// Write `key=value` to the project `.npmrc`, sweeping alias spellings
@@ -1063,7 +1227,7 @@ mod npmrc_first {
     }
 
     fn report_set(key: &str, value: &str, path: &Path) {
-        let shown = if aube::commands::config::is_protected_key(key) {
+        let shown = if crate::pm_engine::config_read::is_protected_key(key) {
             "(protected)"
         } else {
             value
@@ -1108,7 +1272,7 @@ mod npmrc_first {
 
     /// Mirror of the engine's `setting_for_key`: canonical name first,
     /// then any alias surface (npmrc/yaml/env/cli spellings).
-    fn setting_for_key(key: &str) -> Option<&'static SettingMeta> {
+    pub(super) fn setting_for_key(key: &str) -> Option<&'static SettingMeta> {
         meta::find(key).or_else(|| {
             meta::all().find(|meta| {
                 meta.npmrc_keys.contains(&key)
@@ -1187,7 +1351,7 @@ mod npmrc_first {
     /// `package.json` or `pnpm-workspace.yaml`, falling back to the cwd
     /// (approximates the engine's `project_root_or_cwd`, which is
     /// crate-private at the pinned API).
-    fn project_root() -> PathBuf {
+    pub(super) fn project_root() -> PathBuf {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let mut dir = cwd.clone();
         for _ in 0..16 {
