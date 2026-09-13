@@ -198,7 +198,7 @@ function Select-RunSet([ValidateSet('full', 'owner-pipe-diagnostic', 'native-rep
         )
         if ($FileBrokerCoreKnown) {
             $runs += @(
-                @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-core'; filter='backend::windows_file_broker::tests::'; summary='test result: ok. 5 passed; 0 failed; 5 ignored;' },
+                @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-core'; filter='backend::windows_file_broker::tests::'; summary='test result: ok. 6 passed; 0 failed; 5 ignored;' },
                 @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-open'; filter='backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_CHILD_OK') },
                 @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-loader'; filter='backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_LOADER_OK', 'FILE_BROKER_NATIVE_CHILD_OK') },
                 @{ file='nub_sandbox_lib.exe'; label='native-repair-file-broker-kill-before-join'; filter='backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker'; summary='test result: ok. 1 passed; 0 failed; 0 ignored;'; ignored=$true; exact=$true; requiredMarkers=@('FILE_BROKER_BLOCKED_WORKER_ENTERED', 'FILE_BROKER_WORKER_OBSERVED_JOB_EXIT=1', 'FILE_BROKER_KILL_BEFORE_JOIN_OK') },
@@ -237,7 +237,7 @@ $runs = @(
 )
 if ($fileBrokerFixture) {
     $runs += @(
-        @{ file='nub_sandbox_lib.exe'; label='file-broker-core'; filter='backend::windows_file_broker::tests::'; summary='test result: ok. 5 passed; 0 failed; 5 ignored;' },
+        @{ file='nub_sandbox_lib.exe'; label='file-broker-core'; filter='backend::windows_file_broker::tests::'; summary='test result: ok. 6 passed; 0 failed; 5 ignored;' },
         @{ file='nub_sandbox_lib.exe'; label='file-broker-native-open'; filter='backend::windows_file_broker::tests::file_broker_native_open_create_metadata_with_raw_control'; summary=$one; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_CHILD_OK') },
         @{ file='nub_sandbox_lib.exe'; label='file-broker-native-loader'; filter='backend::windows_file_broker::tests::file_broker_native_loader_with_raw_control'; summary=$one; ignored=$true; exact=$true; nativeAdapter=$true; requiredMarkers=@('FILE_BROKER_NATIVE_LOADER_OK', 'FILE_BROKER_NATIVE_CHILD_OK') },
         @{ file='nub_sandbox_lib.exe'; label='file-broker-kill-before-join'; filter='backend::windows_file_broker::tests::file_broker_kills_job_before_joining_blocked_worker'; summary=$one; ignored=$true; exact=$true; requiredMarkers=@('FILE_BROKER_BLOCKED_WORKER_ENTERED', 'FILE_BROKER_WORKER_OBSERVED_JOB_EXIT=1', 'FILE_BROKER_KILL_BEFORE_JOIN_OK') },
