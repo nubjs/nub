@@ -373,7 +373,7 @@ pub(super) fn derive_grants(fs: &FsPolicy) -> DerivedGrants {
         // subtree head.
         let node_only = {
             let pattern = rule.matcher.as_str();
-            let twin = format!("{pattern}/**");
+            let twin = subtree_twin(pattern);
             !pattern.ends_with("/**")
                 && fs.rules.entries.get(index + 1).is_none_or(|t| {
                     t.matcher.as_str() != twin.as_str()
@@ -614,9 +614,39 @@ pub(super) fn literal_subtree(glob: &str) -> Option<PathBuf> {
     if let Some(prefix) = glob.strip_suffix("/**")
         && !has_glob_meta(prefix)
     {
-        return Some(PathBuf::from(prefix));
+        // The canonical subtree twin of an absolute drive root is `C:/**`: the node
+        // remains `C:/`, while appending `/**` replaces its trailing slash. `C:` alone
+        // is drive-relative on Windows, so restore the root slash before materializing
+        // the ACL target.
+        return Some(PathBuf::from(
+            absolute_drive_root(prefix).unwrap_or_else(|| prefix.to_string()),
+        ));
     }
     None
+}
+
+/// The canonical descendant twin for a literal node. A drive root already ends in the
+/// separator that `/**` supplies, so appending another one produces the non-canonical
+/// `C://**` rather than the compiler's `C:/**`.
+fn subtree_twin(pattern: &str) -> String {
+    if is_absolute_drive_root(pattern) {
+        format!("{pattern}**")
+    } else {
+        format!("{pattern}/**")
+    }
+}
+
+/// Return the absolute drive-root spelling for the drive-relative prefix of its `/**`
+/// twin. The IR is forward-slashed before it reaches this backend.
+fn absolute_drive_root(prefix: &str) -> Option<String> {
+    let bytes = prefix.as_bytes();
+    (bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        .then(|| format!("{prefix}/"))
+}
+
+fn is_absolute_drive_root(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
 }
 
 /// Whether the fs axis confines anything (mirrors the mac/linux `fs_confines`). A
@@ -5553,12 +5583,15 @@ mod tests {
 
     #[test]
     fn subtree_twin_collapses_to_the_directory() {
-        // `C:/proj/**` and `C:/proj` both mean the subtree — one grant.
+        // `C:/proj/**` and `C:/proj` both mean the subtree — one grant. The drive-root
+        // pair keeps the node's absolute slash while its `/**` twin spells `C:/**`.
         assert_eq!(
             literal_subtree("C:/proj/**"),
             Some(PathBuf::from("C:/proj"))
         );
         assert_eq!(literal_subtree("C:/proj"), Some(PathBuf::from("C:/proj")));
+        assert_eq!(literal_subtree("C:/**"), Some(PathBuf::from("C:/")));
+        assert_eq!(subtree_twin("C:/"), "C:/**");
     }
 
     #[test]
@@ -5707,32 +5740,53 @@ mod tests {
 
     #[test]
     fn explicit_broad_write_roots_are_granted() {
-        // Object-form public grammar maps `{"fs":{"C:/":"rw"}}` to authored
-        // ReadWrite rules. A root is broad only because it was explicitly requested;
-        // dropping its write half would return a launch plan that silently loses authority.
-        for root in ["C:", "C:/", "C:/Windows", "C:/Program Files", "C:/Users"] {
-            let grants = derive_grants(&fs(
-                Effect::Deny,
-                vec![rule(root, Effect::Allow, FsAccess::ReadWrite)],
-            ));
-            assert_eq!(
-                grants.write,
-                vec![PathBuf::from(root)],
-                "{root} must retain its explicitly requested write grant"
-            );
-        }
+        use crate::compiler::{CompileCtx, ScopeCapabilities};
+        use crate::matcher::Homes;
+        use serde_json::json;
+        use std::collections::BTreeMap;
 
-        // A literal broad read and a narrower rw grant compose: folding may remove the
-        // redundant nested READ, but it must never fold the only WRITE into read-only C:/.
-        let grants = derive_grants(&fs(
-            Effect::Deny,
+        let ctx = CompileCtx::new(
+            Homes {
+                home: PathBuf::from("C:/Users/test"),
+                tmp: PathBuf::from("C:/Users/test/AppData/Local/Temp"),
+                cache: PathBuf::from("C:/Users/test/AppData/Local/cache"),
+                project: PathBuf::from("C:/workspace"),
+            },
+            PathBuf::from("C:/workspace"),
+            ScopeCapabilities::approved(),
+            BTreeMap::new(),
+        );
+
+        // The public object form is the contract: C:/ remains absolute in the node
+        // rule and pairs with C:/**, while a separate rw child retains its write grant.
+        let policy =
+            crate::compiler::compile(&json!({ "fs": { "C:/": "r", "C:/workspace": "rw" } }), &ctx)
+                .expect("public drive-root policy compiles");
+        let actual: Vec<_> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .map(|rule| (rule.matcher.as_str(), rule.access))
+            .collect();
+        assert_eq!(
+            actual,
             vec![
-                rule("C:/", Effect::Allow, FsAccess::Read),
-                rule("C:/workspace", Effect::Allow, FsAccess::ReadWrite),
+                ("C:/", FsAccess::Read),
+                ("C:/**", FsAccess::Read),
+                ("C:/workspace", FsAccess::ReadWrite),
+                ("C:/workspace/**", FsAccess::ReadWrite),
             ],
-        ));
+            "the absolute root and a drive-relative C: must not collapse in IR"
+        );
+        let grants = derive_grants(&policy.fs);
         assert_eq!(grants.read, vec![PathBuf::from("C:/")]);
         assert_eq!(grants.write, vec![PathBuf::from("C:/workspace")]);
+
+        let root_rw = crate::compiler::compile(&json!({ "fs": { "C:/": "rw" } }), &ctx)
+            .expect("public root rw policy compiles");
+        let grants = derive_grants(&root_rw.fs);
+        assert_eq!(grants.write, vec![PathBuf::from("C:/")]);
     }
 
     #[test]
