@@ -52,6 +52,10 @@ pub(crate) fn pending_migration(root: &Path) -> Option<PathBuf> {
 /// package manager's lockfile. It is not a warning: installing here is
 /// correct and complete, and the only thing lost is the versions that
 /// lockfile pinned — which is what the migration carries across.
+///
+/// The engine's entry point is what prints it, so a build without the engine
+/// has nobody to say it.
+#[cfg(feature = "pm-pnpm")]
 pub(crate) fn migration_hint(foreign: &Path) -> String {
     format!(
         "nub: {} is another package manager's lockfile and was not read — \
@@ -89,10 +93,16 @@ pub(crate) fn run_pm_migrate(cwd: &Path) -> Result<i32> {
             ),
         }
     };
+    // A pnpm-incumbent project keeps pnpm's lockfile name; everything else
+    // gets nub's. Without the engine there is no pnpm identity to detect and
+    // nub's own is the only lockfile this build writes.
+    #[cfg(feature = "pm-pnpm")]
     let target = match super::project_identity::detect(&root) {
         super::project_identity::ProjectIdentity::Pnpm => "pnpm",
         super::project_identity::ProjectIdentity::Nub => "nub",
     };
+    #[cfg(not(feature = "pm-pnpm"))]
+    let target = "nub";
     let written = migrate_lockfile(&root, &from, target)?;
     std::fs::remove_file(&from).with_context(|| format!("removing {}", from.display()))?;
     println!(

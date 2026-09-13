@@ -37,6 +37,61 @@ const NUB: Embedder = Embedder {
     allow_builds_writer: Some(record_allow_scripts),
 };
 
+/// What this process answers the engine with when it asks for the host's
+/// settings. The engine asks while nub is inside its entry point, so the
+/// lock guards the slot and is never held across an engine call.
+static HOST_SETTINGS: std::sync::Mutex<Option<&'static pnpm_config::WorkspaceSettings>> =
+    std::sync::Mutex::new(None);
+
+/// The settings nub resolved for this project.
+///
+/// pnpm re-reads `pnpm-workspace.yaml` for every configuration it builds, so
+/// a command that writes its own settings and then reloads sees what it
+/// wrote. This slot is nub's equivalent: resolved once at startup, and
+/// replaced by whatever goes on to write the project's configuration.
+///
+/// The directory is ignored because nub resolves ONE project's settings —
+/// [`host_settings::resolve`] walks to the workspace root itself — and every
+/// configuration a run builds belongs to that project.
+fn host_workspace_settings(
+    _dir: &std::path::Path,
+) -> Option<&'static pnpm_config::WorkspaceSettings> {
+    *HOST_SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Answer with `settings` from here on. Leaked because the engine holds its
+/// configuration for as long as the run, and called once per resolve — at
+/// startup, and again when a command writes the project's own settings.
+fn publish_host_settings(settings: pnpm_config::WorkspaceSettings) {
+    *HOST_SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::leak(Box::new(settings)));
+}
+
+/// Fold an approve-builds decision into what this process answers with.
+///
+/// Writing `package.json` settles the question for the NEXT run; the rebuild
+/// `approve-builds` runs straight after is part of THIS one, and it builds a
+/// fresh configuration. Without this it would be answered from the resolve
+/// that ran before the write, report the build as still ignored, and exit
+/// non-zero on the very decision the user just made.
+fn republish_allow_builds(decisions: &[(&str, bool)]) {
+    let mut slot = HOST_SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut settings = slot.map_or_else(Default::default, Clone::clone);
+    let allowed = settings.allow_builds.get_or_insert_with(Default::default);
+    for (package, may_run) in decisions {
+        allowed.insert(
+            (*package).to_owned(),
+            pnpm_config::AllowBuild::Decided(*may_run),
+        );
+    }
+    *slot = Some(Box::leak(Box::new(settings)));
+}
+
 /// Record an `approve-builds` decision where a nub project reads it back:
 /// the `allowScripts` field of its `package.json`.
 ///
@@ -65,8 +120,9 @@ fn record_allow_scripts(dir: &std::path::Path, decisions: &[(&str, bool)]) -> st
             serde_json::Value::Object(allowed),
         );
     })
-    .map(|_| ())
-    .map_err(std::io::Error::other)
+    .map_err(std::io::Error::other)?;
+    republish_allow_builds(decisions);
+    Ok(())
 }
 
 /// Apply each decision, replacing whatever the field said about that package.
@@ -147,11 +203,9 @@ fn profile(selection: Selection) -> Result<Embedder> {
             let install = loaded
                 .map(|loaded| loaded.values.install)
                 .unwrap_or_default();
-            // The engine keeps its configuration for the whole run, so the
-            // settings live as long as the process does.
-            let settings = Box::leak(Box::new(host_settings::resolve(&cwd, &install)?));
+            publish_host_settings(host_settings::resolve(&cwd, &install)?);
             Embedder {
-                workspace_settings: Some(settings),
+                workspace_settings: Some(host_workspace_settings),
                 compat_package_extensions: Some(host_compat_rules()),
                 ..NUB
             }
