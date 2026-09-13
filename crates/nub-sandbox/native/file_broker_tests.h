@@ -1,5 +1,123 @@
 #pragma once
 
+// Real NT calls, also run unconfined before the raw/adapter pair. These do not
+// call the resolver directly and cannot pass by testing only the matcher.
+extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL allowed) {
+    using namespace nub_sandbox::file_broker;
+    Api api;
+    auto set = reinterpret_cast<NtSetInformation>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetInformationFile"));
+    using QueryDirectory = NTSTATUS (NTAPI*)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK,
+        PVOID, ULONG, FILE_INFORMATION_CLASS, BOOLEAN, PUNICODE_STRING, BOOLEAN);
+    auto query = reinterpret_cast<QueryDirectory>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryDirectoryFile"));
+    if (!api.create || !set || !query) return 1;
+    auto open = [&](const wchar_t* leaf, DWORD access, DWORD disposition, bool directory, Handle& handle) {
+        wchar_t path[kPath + 4];
+        if (swprintf_s(path, L"\\??\\%s\\%s", root, leaf) < 0) return kInvalid;
+        UNICODE_STRING name = {USHORT(wcslen(path) * sizeof(wchar_t)), USHORT(wcslen(path) * sizeof(wchar_t)), path};
+        OBJECT_ATTRIBUTES attrs = {};
+        attrs.Length = sizeof(attrs);
+        attrs.Attributes = OBJ_CASE_INSENSITIVE;
+        attrs.ObjectName = &name;
+        IO_STATUS_BLOCK io = {};
+        return api.create(&handle.value, access | SYNCHRONIZE, &attrs, &io, nullptr, 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, disposition,
+            FILE_SYNCHRONOUS_IO_NONALERT | (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE), nullptr, 0);
+    };
+    auto named = [&](HANDLE source, const wchar_t* leaf, DWORD kind) {
+        NameInformation name = {};
+        if (swprintf_s(name.name, L"\\??\\%s\\%s", root, leaf) < 0) return kInvalid;
+        name.length = DWORD(wcslen(name.name) * sizeof(wchar_t));
+        IO_STATUS_BLOCK io = {};
+        return set(source, &io, &name, DWORD(offsetof(NameInformation, name) + name.length),
+                   static_cast<FILE_INFORMATION_CLASS>(kind));
+    };
+    Handle directory, listing, source, remove, readonly;
+    NTSTATUS status = open(L"created.dir", FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | DELETE,
+                           FILE_CREATE, true, directory);
+    if ((status == 0) != bool(allowed)) return 2;
+    status = open(L"listing.dir", FILE_LIST_DIRECTORY, FILE_OPEN, true, listing);
+    if ((status == 0) != bool(allowed)) return 3;
+    status = open(L"source.json", GENERIC_READ | DELETE, FILE_OPEN, false, source);
+    if ((status == 0) != bool(allowed)) return 4;
+    status = open(L"remove.json", DELETE, FILE_OPEN, false, remove);
+    if ((status == 0) != bool(allowed)) return 5;
+    if (!allowed) return 0;
+    // The ordinary kernel path on a broker directory handle must not create a
+    // child. Root-relative opens are not forwarded by the adapter.
+    wchar_t child_name[] = L"unauthorized.txt";
+    UNICODE_STRING child = {sizeof(child_name) - sizeof(wchar_t), sizeof(child_name), child_name};
+    OBJECT_ATTRIBUTES attrs = {};
+    attrs.Length = sizeof(attrs);
+    attrs.RootDirectory = directory.value;
+    attrs.ObjectName = &child;
+    attrs.Attributes = OBJ_CASE_INSENSITIVE;
+    Handle escaped;
+    IO_STATUS_BLOCK io = {};
+    // Only the confined arm lacks raw directory write authority.
+    wchar_t mode[16] = {};
+    bool confined = GetEnvironmentVariableW(L"NUB_FILE_BROKER_TEST_MODE", mode, _countof(mode)) && !wcscmp(mode, L"broker");
+    using QueryInformation = NTSTATUS (NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+    auto query_info = reinterpret_cast<QueryInformation>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationFile"));
+    DWORD granted = 0;
+    if (confined && (!query_info ||
+        query_info(directory.value, &io, &granted, sizeof(granted), static_cast<FILE_INFORMATION_CLASS>(8)) != 0 ||
+        (granted & (DELETE | kWrite)))) return 17;
+    if (confined && (query_info(source.value, &io, &granted, sizeof(granted), static_cast<FILE_INFORMATION_CLASS>(8)) != 0 ||
+        (granted & DELETE))) return 18;
+    if (confined && api.create(&escaped.value, FILE_WRITE_DATA | SYNCHRONIZE, &attrs, &io,
+        nullptr, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_CREATE,
+        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0) >= 0) return 6;
+    alignas(8) BYTE entries[4096] = {};
+    status = query(listing.value, nullptr, nullptr, nullptr, &io, entries, sizeof(entries),
+                   static_cast<FILE_INFORMATION_CLASS>(12), FALSE, nullptr, TRUE);
+    if (status != 0 || !io.Information) return 7;
+    struct Entry { ULONG next, index, length; wchar_t name[1]; };
+    bool found = false;
+    for (ULONG offset = 0; offset < io.Information;) {
+        if (io.Information - offset < offsetof(Entry, name)) return 19;
+        auto entry = reinterpret_cast<const Entry*>(entries + offset);
+        if (entry->length > io.Information - offset - offsetof(Entry, name)) return 19;
+        if (entry->length == 9 * sizeof(wchar_t) && !wmemcmp(entry->name, L"entry.txt", 9)) found = true;
+        if (!entry->next) break;
+        if (entry->next < offsetof(Entry, name) || entry->next > io.Information - offset) return 19;
+        offset += entry->next;
+    }
+    if (!found) return 20;
+    if (confined && named(source.value, L"forbidden.txt", 10) >= 0) return 8;
+    if (confined && named(source.value, L"forbidden.txt", 11) >= 0) return 9;
+    if (named(source.value, L"renamed.json", 10) != 0) return 10;
+    // A native handle remains bound to the source object after its name moves.
+    // The broker must resolve this new name, not retain stale client text.
+    if (named(source.value, L"new-link.json", 11) != 0) return 11;
+    Handle linked;
+    if (open(L"new-link.json", GENERIC_READ, FILE_OPEN, false, linked) != 0) return 12;
+    if (open(L"readonly.txt", GENERIC_READ, FILE_OPEN, false, readonly) != 0) return 13;
+    if (confined && named(readonly.value, L"amplified.json", 11) >= 0) return 14;
+    if (confined) {
+        wchar_t temp[kPath];
+        DWORD length = GetTempPathW(kPath, temp);
+        if (!length || length >= kPath) return 21;
+        NameInformation alias = {};
+        if (swprintf_s(alias.name, L"\\??\\%sbroker-amplification-%lu.json", temp, GetCurrentProcessId()) < 0) return 21;
+        alias.length = DWORD(wcslen(alias.name) * sizeof(wchar_t));
+        {
+            Handle writable;
+            writable.value = CreateFileW(alias.name + 4, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                         nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (writable.value == INVALID_HANDLE_VALUE) return 23;
+        }
+        if (!DeleteFileW(alias.name + 4)) return 23;
+        // TEMP is directly writable by the child. A raw link there must not
+        // amplify a read-only source, even before the broker sees the request.
+        if (set(readonly.value, &io, &alias, DWORD(offsetof(NameInformation, name) + alias.length),
+                static_cast<FILE_INFORMATION_CLASS>(11)) >= 0) return 22;
+    }
+    BOOLEAN deleted = TRUE;
+    if (set(remove.value, &io, &deleted, sizeof(deleted), static_cast<FILE_INFORMATION_CLASS>(13)) != 0) return 15;
+    if (set(directory.value, &io, &deleted, sizeof(deleted), static_cast<FILE_INFORMATION_CLASS>(13)) != 0) return 16;
+    return 0;
+}
+
 extern "C" DWORD sandbox_file_broker_test_frames(const wchar_t* name) {
     using namespace nub_sandbox;
     file_broker::Handle server, client, incoming, outgoing, stop;
@@ -83,6 +201,15 @@ extern "C" DWORD sandbox_file_broker_test_foreign_client(const wchar_t* name) {
 
 extern "C" DWORD sandbox_file_broker_test_quality() {
     using namespace nub_sandbox::file_broker;
+    if (valid_object_flags(0) || valid_object_flags(kIgnoreImpersonatedDeviceMap)) return ERROR_INVALID_DATA;
+    for (DWORD flags : {DWORD(OBJ_CASE_INSENSITIVE), DWORD(OBJ_CASE_INSENSITIVE | kIgnoreImpersonatedDeviceMap)}) {
+        if (!valid_object_flags(flags)) return ERROR_INVALID_DATA;
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            DWORD added = 1u << bit;
+            bool expected = (added & ~(OBJ_CASE_INSENSITIVE | kIgnoreImpersonatedDeviceMap)) == 0;
+            if (valid_object_flags(flags | added) != expected) return ERROR_INVALID_DATA;
+        }
+    }
     SECURITY_QUALITY_OF_SERVICE quality = {};
     quality.Length = sizeof(quality);
     DWORD fields = 0;
@@ -157,6 +284,10 @@ extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL a
     DWORD failures = 0;
     for (DWORD i = 0; i < std::size(results); ++i) {
         if (allowed ? results[i] != 0 : results[i] != kDenied) failures |= 1u << (i + 4);
+    }
+    attrs.Attributes |= kIgnoreImpersonatedDeviceMap;
+    for (NTSTATUS status : {basic(&attrs, metadata), full(&attrs, metadata)}) {
+        if (allowed ? status != 0 : status != kDenied) failures |= 1u << 8;
     }
     return failures;
 }

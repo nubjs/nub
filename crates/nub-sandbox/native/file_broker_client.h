@@ -96,7 +96,7 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
         if (object.RootDirectory) details.object_fields |= FileBrokerObjectRoot;
         if (object.SecurityDescriptor) details.object_fields |= FileBrokerObjectDescriptor;
         if (object.SecurityQualityOfService) details.object_fields |= FileBrokerObjectQualityOfService;
-        if (object.Attributes != OBJ_CASE_INSENSITIVE) details.object_fields |= FileBrokerObjectFlags;
+        if (!valid_object_flags(object.Attributes)) details.object_fields |= FileBrokerObjectFlags;
         if (!object.ObjectName) details.object_fields |= FileBrokerObjectName;
         if (details.object_fields & ~FileBrokerObjectQualityOfService) {
             failure = FileBrokerCaptureObjectAttributes;
@@ -128,7 +128,7 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
         }
         if (request.operation < Basic) {
             DWORD access = access_mask(request.access);
-            if (!access || (access & ~(kRead | kWrite))) failure = FileBrokerCaptureAccess;
+            if (!access || (access & ~(kRead | kWrite | DELETE))) failure = FileBrokerCaptureAccess;
             else if ((request.options & ~kOptions) ||
                      !(request.options & FILE_SYNCHRONOUS_IO_NONALERT) ||
                      ((request.options & FILE_SYNCHRONOUS_IO_NONALERT) && !(access & SYNCHRONIZE))) {
@@ -308,4 +308,59 @@ static NTSTATUS NTAPI query_full_file_attributes(POBJECT_ATTRIBUTES attrs, PVOID
         return broker_file_attributes(nub_sandbox::file_broker::Full, attrs, output);
     diagnose_file_broker_original_failure(nub_sandbox::file_broker::Full, status, 0, 0, 0, 0, 0);
     return status;
+}
+
+using NtSetFileInformation = NTSTATUS (NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+static NtSetFileInformation true_set_file_information = nullptr;
+struct BrokerNameInformation {
+    BOOLEAN replace;
+    HANDLE root;
+    ULONG length;
+    wchar_t name[1];
+};
+
+static NTSTATUS NTAPI set_file_information(HANDLE file, PIO_STATUS_BLOCK io,
+    PVOID information, ULONG size, FILE_INFORMATION_CLASS kind) {
+    using namespace nub_sandbox::file_broker;
+    NTSTATUS original = true_set_file_information(file, io, information, size, kind);
+    if (original != kDenied || !state.file_broker[0] || file_broker_active) return original;
+    Request request = {kVersion, sizeof(Request)};
+    uintptr_t source = reinterpret_cast<uintptr_t>(file);
+    request.source_low = static_cast<DWORD>(source);
+    request.source_high = static_cast<DWORD>(uint64_t(source) >> 32);
+    __try {
+        if (kind == static_cast<FILE_INFORMATION_CLASS>(13)) {
+            // Clearing a disposition requires retained per-open state. Do not
+            // pretend a separately opened broker handle has that state.
+            if (size != sizeof(BOOLEAN) || !*static_cast<BOOLEAN*>(information)) return original;
+            request.operation = Remove;
+        } else if (kind == static_cast<FILE_INFORMATION_CLASS>(64)) {
+            if (size != sizeof(DWORD)) return original;
+            request.operation = Remove;
+            request.attributes = *static_cast<const DWORD*>(information);
+            if (request.attributes != 1 && request.attributes != 3) return original;
+        } else if (kind == static_cast<FILE_INFORMATION_CLASS>(10) ||
+                   kind == static_cast<FILE_INFORMATION_CLASS>(11)) {
+            if (size < offsetof(BrokerNameInformation, name)) return original;
+            const auto& name = *static_cast<const BrokerNameInformation*>(information);
+            if (name.replace || name.root || name.length % sizeof(wchar_t) ||
+                name.length < 8 * sizeof(wchar_t) ||
+                name.length > size - offsetof(BrokerNameInformation, name) ||
+                name.length / sizeof(wchar_t) >= kPath + 4 ||
+                wcsncmp(name.name, L"\\??\\", 4)) return original;
+            request.operation = kind == static_cast<FILE_INFORMATION_CLASS>(10) ? Rename : Link;
+            request.length = name.length / sizeof(wchar_t) - 4;
+            memcpy(request.path, name.name + 4, request.length * sizeof(wchar_t));
+        } else return original;
+        if (validate(request)) return original;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return original; }
+    Response response = {};
+    DWORD failure = 0;
+    if (!exchange_file_request(request, response, failure) || response.handle) return original;
+    if (response.status) return response.status;
+    __try {
+        io->Status = 0;
+        io->Information = static_cast<ULONG_PTR>(response.information);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return kDenied; }
+    return 0;
 }

@@ -71,6 +71,7 @@ struct TestRules {
 struct TestBlockedAuthorization {
     entered: std::os::windows::io::OwnedHandle,
     result: std::sync::atomic::AtomicU32,
+    skip: std::sync::atomic::AtomicU32,
 }
 
 #[cfg(all(test, target_env = "msvc"))]
@@ -82,6 +83,15 @@ impl TestBlockedAuthorization {
         use windows_sys::Win32::System::Threading::{
             GetExitCodeProcess, SetEvent, WaitForSingleObject,
         };
+        if self
+            .skip
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return;
+        }
         // SAFETY: WindowsChild retains its process handle until this broker's
         // workers have joined. The event is owned by this shared test state.
         let result = unsafe {
@@ -229,7 +239,24 @@ mod tests {
         };
         // A client IPC timeout must not release the synthetic blocked worker by
         // exiting the process. Only Job termination should produce exit code 1.
-        let _ = std::fs::File::open(path);
+        match std::env::var("NUB_FILE_BROKER_CANCELLATION_OPERATION")
+            .unwrap()
+            .as_str()
+        {
+            "remove" => {
+                let _ = std::fs::remove_file(path);
+            }
+            "create" | "write" => {
+                let _ = std::fs::write(path, b"must not be written after cancellation");
+            }
+            "mkdir" => {
+                let _ = std::fs::create_dir(path);
+            }
+            "read" => {
+                let _ = std::fs::File::open(path);
+            }
+            operation => panic!("unknown cancellation operation: {operation}"),
+        }
         std::thread::sleep(std::time::Duration::from_secs(120));
         panic!("cancellation fixture survived its command Job deadline");
     }
@@ -237,6 +264,18 @@ mod tests {
     #[test]
     #[ignore = "requires an ordinary-user native Windows acceptance run"]
     fn file_broker_kills_job_before_joining_blocked_worker() {
+        for operation in ["read", "create", "write", "mkdir"] {
+            cancellation_control(operation);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an ordinary-user native Windows acceptance run"]
+    fn file_broker_cancels_namespace_before_mutation() {
+        cancellation_control("remove");
+    }
+
+    fn cancellation_control(operation: &str) {
         use super::super::windows::WindowsStdio;
         use crate::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
         use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
@@ -261,6 +300,10 @@ mod tests {
             std::fs::read(&file).unwrap(),
             b"ordinary caller open succeeds"
         );
+        let initially_absent = matches!(operation, "create" | "mkdir");
+        if initially_absent {
+            std::fs::remove_file(&file).unwrap();
+        }
         // SAFETY: unnamed, noninheritable manual-reset event, uniquely owned
         // below and retained until the native worker has returned.
         let entered = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
@@ -269,6 +312,7 @@ mod tests {
             // SAFETY: successful CreateEventW returned this unique handle.
             entered: unsafe { OwnedHandle::from_raw_handle(entered) },
             result: AtomicU32::new(0),
+            skip: AtomicU32::new(u32::from(operation == "remove")),
         });
         let ctx = CompileCtx::new(
             Homes {
@@ -290,6 +334,10 @@ mod tests {
         policy.env.constructed.insert(
             "NUB_FILE_BROKER_CANCELLATION_FILE".into(),
             file.to_str().unwrap().into(),
+        );
+        policy.env.constructed.insert(
+            "NUB_FILE_BROKER_CANCELLATION_OPERATION".into(),
+            operation.into(),
         );
         policy
             .env
@@ -313,7 +361,14 @@ mod tests {
         let rules = TestRules {
             rules: FsRuleSet {
                 default_effect: Effect::Deny,
-                entries: vec![rule(file.to_str().unwrap(), FsAccess::Read)],
+                entries: vec![rule(
+                    file.to_str().unwrap(),
+                    if operation == "read" {
+                        FsAccess::Read
+                    } else {
+                        FsAccess::ReadWrite
+                    },
+                )],
             },
             blocking: Some(blocking.clone()),
         };
@@ -327,7 +382,7 @@ mod tests {
         })
         .unwrap();
         // Entry occurs only after the native client authenticated, the real
-        // resolver pinned the existing file, and the immutable matcher allowed it.
+        // resolver pinned the file or parent, and the immutable matcher allowed it.
         // Always terminate/reap before asserting, including a missing-entry failure.
         let entered = unsafe { WaitForSingleObject(blocking.entered.as_raw_handle(), 30_000) };
         let live = child.try_wait().unwrap().is_none();
@@ -349,6 +404,16 @@ mod tests {
             result, 1,
             "worker did not observe Job-killed child before join: 0=not run, 2=deadline, 3=event failure, 4=other exit"
         );
+        if initially_absent {
+            assert!(!file.exists(), "cancelled {operation} created the target");
+        } else {
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                b"ordinary caller open succeeds",
+                "cancelled {operation} changed the target"
+            );
+        }
+        println!("FILE_BROKER_CANCELLED_OPERATION={operation}");
         println!("FILE_BROKER_BLOCKED_WORKER_ENTERED");
         println!("FILE_BROKER_WORKER_OBSERVED_JOB_EXIT=1");
         println!("FILE_BROKER_KILL_BEFORE_JOIN_OK");
@@ -472,11 +537,13 @@ mod tests {
         attributes: u32,
         length: u32,
         path: [u16; 1024],
+        source_low: u32,
+        source_high: u32,
     }
     fn request(path: &str) -> Request {
         let mut request = Request {
-            version: 1,
-            size: 2084,
+            version: 2,
+            size: 2092,
             operation: 1,
             access: 0x80000000,
             share: 3,
@@ -485,6 +552,8 @@ mod tests {
             attributes: 0,
             length: 0,
             path: [0; 1024],
+            source_low: 0,
+            source_high: 0,
         };
         let path: Vec<_> = path.encode_utf16().collect();
         request.length = path.len() as u32;
@@ -495,7 +564,7 @@ mod tests {
         unsafe extern "C" {
             fn sandbox_file_broker_validate(request: *const Request) -> i32;
         }
-        assert_eq!(std::mem::size_of::<Request>(), 2084);
+        assert_eq!(std::mem::size_of::<Request>(), 2092);
         // SAFETY: pointer-free fixed-width layout matches the native protocol.
         unsafe { sandbox_file_broker_validate(request) }
     }
@@ -542,13 +611,13 @@ mod tests {
             0,
             "FILE_DISALLOW_EXCLUSIVE is emitted by the ARM Win32 create"
         );
-        assert_ne!(
+        assert_eq!(
             validate(&Request {
                 options: standard_create.options | 0x4000,
                 ..standard_create.clone()
             }),
             0,
-            "ordinary CreateFileW shape must not admit backup-intent opens"
+            "directory operations carry backup intent, which is not forwarded to the host open"
         );
         assert_ne!(
             validate(&Request {
@@ -559,7 +628,7 @@ mod tests {
             "session-aware opens are outside the private broker contract"
         );
         for access in [
-            0x10000000, 0x02000000, 0x00010000, 0x00040000, 0x00080000, 0x01000000, 0x40,
+            0x10000000, 0x02000000, 0x00040000, 0x00080000, 0x01000000, 0x40,
         ] {
             assert_ne!(
                 validate(&Request {
@@ -569,7 +638,7 @@ mod tests {
                 0
             );
         }
-        for options in [0x1, 0x1000, 0x2000, 0x200000, 0x4000, 0x400000] {
+        for options in [0x1, 0x1000, 0x2000, 0x400000] {
             assert_ne!(
                 validate(&Request {
                     options: valid.options | options,
@@ -610,14 +679,14 @@ mod tests {
         );
         assert_ne!(
             validate(&Request {
-                version: 2,
+                version: 1,
                 ..valid.clone()
             }),
             0
         );
         assert_ne!(
             validate(&Request {
-                size: 2083,
+                size: 2091,
                 ..valid.clone()
             }),
             0
@@ -625,6 +694,84 @@ mod tests {
         let mut tail = valid.clone();
         tail.path[1023] = 1;
         assert_ne!(validate(&tail), 0);
+        for (operation, access, disposition, options) in [
+            (2, 0x0010_0001, 2, 0x0020_4021),
+            (1, 0x0011_0080, 1, 0x0020_4021),
+            (1, 0x0010_0001, 1, 0x0000_4021),
+            (1, 0x0011_0080, 1, 0x0020_4020),
+            (1, 0x0001_0080, 1, 0x0020_4040),
+        ] {
+            assert_eq!(
+                validate(&Request {
+                    operation,
+                    access,
+                    disposition,
+                    options,
+                    ..valid.clone()
+                }),
+                0
+            );
+        }
+        for operation in [6, 7] {
+            let mutation = Request {
+                operation,
+                access: 0,
+                share: 0,
+                disposition: 0,
+                options: 0,
+                source_low: 4,
+                ..valid.clone()
+            };
+            assert_eq!(validate(&mutation), 0);
+            assert_ne!(
+                validate(&Request {
+                    source_low: 0,
+                    ..mutation.clone()
+                }),
+                0
+            );
+            assert_ne!(
+                validate(&Request {
+                    attributes: 1,
+                    ..mutation
+                }),
+                0
+            );
+        }
+        let remove = Request {
+            operation: 5,
+            access: 0,
+            share: 0,
+            disposition: 0,
+            options: 0,
+            source_low: 4,
+            length: 0,
+            path: [0; 1024],
+            ..valid.clone()
+        };
+        for attributes in [0, 1, 3] {
+            assert_eq!(
+                validate(&Request {
+                    attributes,
+                    ..remove.clone()
+                }),
+                0
+            );
+        }
+        assert_ne!(
+            validate(&Request {
+                attributes: 2,
+                ..remove
+            }),
+            0
+        );
+        assert_ne!(
+            validate(&Request {
+                source_low: 4,
+                ..valid
+            }),
+            0
+        );
     }
 
     #[test]
@@ -634,6 +781,37 @@ mod tests {
         };
         let root = std::path::PathBuf::from(root);
         let allowed = std::env::var("NUB_FILE_BROKER_TEST_MODE").unwrap() != "raw";
+        if std::env::var_os("NUB_FILE_BROKER_TEST_NAMESPACE").is_some() {
+            native_namespace(&root, allowed);
+            let directory = root.join("win32.dir");
+            assert_eq!(std::fs::create_dir(&directory).is_ok(), allowed);
+            assert!(std::fs::create_dir(root.join("forbidden-folder.txt")).is_err());
+            assert!(std::fs::read_dir(root.join("private-folder.txt")).is_err());
+            let listing = std::fs::read_dir(root.join("listing.dir"));
+            assert_eq!(listing.is_ok(), allowed);
+            if allowed {
+                let entries: Vec<_> = listing
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                assert!(entries.contains(&"entry.txt".into()));
+            }
+            let linked = root.join("win32-link.json");
+            assert_eq!(
+                std::fs::hard_link(root.join("win32-source.json"), &linked).is_ok(),
+                allowed
+            );
+            assert_eq!(
+                std::fs::remove_file(root.join("win32-remove.json")).is_ok(),
+                allowed
+            );
+            assert_eq!(std::fs::remove_dir(&directory).is_ok(), allowed);
+            if allowed {
+                assert_eq!(std::fs::read(&linked).unwrap(), b"namespace fixture");
+            }
+            println!("FILE_BROKER_NATIVE_NAMESPACE_OK");
+            return;
+        }
         unsafe extern "C" {
             fn sandbox_file_broker_test_four_calls(
                 path: *const u16,
@@ -687,11 +865,21 @@ mod tests {
             assert!(std::fs::read(&mutated).is_err());
         }
         assert!(std::fs::write(root.join("future.txt"), b"denied").is_err());
-        assert!(std::fs::read(root.join("linked.json")).is_err());
-        assert!(std::fs::remove_file(root.join("existing.json")).is_err());
+        // Authority belongs to each explicitly matching hardlink spelling.
+        assert_eq!(std::fs::read(root.join("linked.json")).is_ok(), allowed);
+        assert!(std::fs::read(root.join("existing-alias.txt")).is_err());
+        assert!(std::fs::remove_file(root.join("near.txt")).is_err());
         assert!(std::fs::rename(root.join("existing.json"), root.join("renamed.txt")).is_err());
         assert!(std::fs::hard_link(root.join("existing.json"), root.join("alias.txt")).is_err());
         if allowed && std::env::var_os("NUB_FILE_BROKER_TEST_LOADER").is_none() {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            let exclusive = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(0)
+                .open(root.join("existing.json"))
+                .unwrap();
+            drop(exclusive);
             // Closed recipient handles must not consume a cumulative quota.
             for _ in 0..4097 {
                 drop(std::fs::File::open(root.join("existing.json")).unwrap());
@@ -724,7 +912,7 @@ mod tests {
     #[test]
     #[ignore = "requires an ordinary-user native Windows acceptance run"]
     fn file_broker_native_open_create_metadata_with_raw_control() {
-        native_control(None);
+        native_control(None, false);
     }
 
     #[test]
@@ -732,10 +920,42 @@ mod tests {
     fn file_broker_native_loader_with_raw_control() {
         let dll = std::env::var_os("NUB_FILE_BROKER_TEST_DLL")
             .expect("compile native/file_broker_fixture.c and supply its absolute DLL path");
-        native_control(Some(std::path::PathBuf::from(dll)));
+        native_control(Some(std::path::PathBuf::from(dll)), false);
     }
 
-    fn native_control(dll: Option<std::path::PathBuf>) {
+    #[test]
+    #[ignore = "requires an ordinary-user native Windows acceptance run"]
+    fn file_broker_native_namespace_with_raw_control() {
+        native_control(None, true);
+    }
+
+    fn namespace_fixture(root: &std::path::Path) {
+        std::fs::create_dir(root.join("listing.dir")).unwrap();
+        std::fs::create_dir(root.join("private-folder.txt")).unwrap();
+        std::fs::write(root.join("listing.dir").join("entry.txt"), b"entry").unwrap();
+        for name in [
+            "source.json",
+            "remove.json",
+            "readonly.txt",
+            "win32-source.json",
+            "win32-remove.json",
+        ] {
+            std::fs::write(root.join(name), b"namespace fixture").unwrap();
+        }
+    }
+
+    fn native_namespace(root: &std::path::Path, allowed: bool) {
+        unsafe extern "C" {
+            fn sandbox_file_broker_test_namespace(root: *const u16, allowed: i32) -> u32;
+        }
+        let root: Vec<u16> = root.to_str().unwrap().encode_utf16().chain([0]).collect();
+        // SAFETY: terminated fixture path; helper owns and closes its handles.
+        let result =
+            unsafe { sandbox_file_broker_test_namespace(root.as_ptr(), i32::from(allowed)) };
+        assert_eq!(result, 0, "native namespace step failed: {result}");
+    }
+
+    fn native_control(dll: Option<std::path::PathBuf>, namespace: bool) {
         use super::super::windows::WindowsStdio;
         use crate::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
         use std::io::Read as _;
@@ -751,6 +971,23 @@ mod tests {
         std::fs::write(files.join("existing.json"), b"original").unwrap();
         std::fs::write(files.join("near.txt"), b"canary").unwrap();
         std::fs::hard_link(files.join("near.txt"), files.join("linked.json")).unwrap();
+        std::fs::hard_link(
+            files.join("existing.json"),
+            files.join("existing-alias.txt"),
+        )
+        .unwrap();
+        if namespace {
+            namespace_fixture(&files);
+            let control = root.path().join("unconfined-namespace");
+            std::fs::create_dir(&control).unwrap();
+            namespace_fixture(&control);
+            native_namespace(&control, true);
+            assert!(control.join("renamed.json").is_file());
+            assert!(control.join("new-link.json").is_file());
+            assert!(!control.join("source.json").exists());
+            assert!(!control.join("remove.json").exists());
+            assert!(!control.join("created.dir").exists());
+        }
         unsafe extern "C" {
             fn sandbox_file_broker_test_reparse_after_open(path: *const u16) -> u32;
         }
@@ -845,6 +1082,16 @@ mod tests {
                 serde_json::json!("r"),
             );
         }
+        if namespace {
+            authority_fs.insert(
+                format!("{}/*.dir", files.display()),
+                serde_json::json!("rw"),
+            );
+            authority_fs.insert(
+                format!("{}/readonly.txt", files.display()),
+                serde_json::json!("r"),
+            );
+        }
         let authority_policy =
             compile(&serde_json::json!({"fs": authority_fs, "net": false}), &ctx).unwrap();
         let derived = super::super::windows::derive_grants(&authority_policy.fs);
@@ -885,6 +1132,12 @@ mod tests {
                     .env
                     .constructed
                     .insert("NUB_FILE_BROKER_TEST_LOADER".into(), "1".into());
+            }
+            if namespace {
+                policy
+                    .env
+                    .constructed
+                    .insert("NUB_FILE_BROKER_TEST_NAMESPACE".into(), "1".into());
             }
             let sandbox = if mode == "raw" {
                 Sandbox::new(&policy)
@@ -932,7 +1185,11 @@ mod tests {
             let stderr = stderr.join().unwrap();
             assert!(status.success(), "{mode}: {stdout}\n{stderr}");
             assert!(
-                stdout.contains("FILE_BROKER_NATIVE_CHILD_OK"),
+                stdout.contains(if namespace {
+                    "FILE_BROKER_NATIVE_NAMESPACE_OK"
+                } else {
+                    "FILE_BROKER_NATIVE_CHILD_OK"
+                }),
                 "{mode}: {stdout}"
             );
             if dll.is_some() {
@@ -940,7 +1197,7 @@ mod tests {
                     stdout.contains("FILE_BROKER_NATIVE_LOADER_OK"),
                     "{mode}: {stdout}"
                 );
-            } else if mode == "broker" {
+            } else if mode == "broker" && !namespace {
                 assert!(
                     stdout.contains("FILE_BROKER_REPEATED_OPENS=4097"),
                     "{stdout}"
@@ -954,5 +1211,18 @@ mod tests {
         }
         assert_eq!(std::fs::read(files.join("near.txt")).unwrap(), b"canary");
         assert!(!files.join("future.txt").is_file());
+        if namespace {
+            assert!(files.join("renamed.json").is_file());
+            assert!(files.join("new-link.json").is_file());
+            assert!(!files.join("source.json").exists());
+            assert!(!files.join("remove.json").exists());
+            assert!(!files.join("created.dir").exists());
+            assert!(!files.join("forbidden.txt").exists());
+            assert!(!files.join("amplified.json").exists());
+            assert_eq!(
+                std::fs::read(files.join("readonly.txt")).unwrap(),
+                b"namespace fixture"
+            );
+        }
     }
 }
